@@ -42,7 +42,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
-use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{BasicMetadataValueEnum,BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 
 use khora_db::{Db, SourceFile};
@@ -130,6 +130,13 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
         else {
             continue;
         };
+        declare_closures(&mut backend, &instance.symbol(), body, instance_types);
+    }
+    for (instance, instance_types) in &mono.instances {
+        let Some(body) = bodies.iter().find(|(n, _)| n == &instance.function).map(|(_, b)| b)
+        else {
+            continue;
+        };
         let plan = plans.iter().find(|(n, _)| n == &instance.function).map(|(_, p)| p);
         crate::lower::emit_function(
             &mut backend,
@@ -141,13 +148,68 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
         );
     }
 
+    // Lifted lambda bodies come after the functions that build them, because
+    // the closure sites are discovered while walking those bodies.
+    for site in backend.closure_sites() {
+        let Some(owner) = mono.instances.iter().find(|(i, _)| i.symbol() == site.owner) else {
+            continue;
+        };
+        let Some(body) = bodies.iter().find(|(n, _)| n == &owner.0.function).map(|(_, b)| b) else {
+            continue;
+        };
+        let plan = plans.iter().find(|(n, _)| n == &owner.0.function).map(|(_, p)| p);
+        crate::lower::emit_closure(&mut backend, &site, body, plan, &owner.1, mono);
+    }
+
     backend.emit_c_main();
+    backend.emit_pending_thunks();
     backend.emit_pending_drop_glue();
 
     if !backend.errors.is_empty() {
         return Err(backend.errors);
     }
     backend.finish(&machine, out)
+}
+
+/// Declares the lifted function for every lambda in one emitted body.
+///
+/// One pass per *specialisation*, not per source function: a lambda inside a
+/// generic function captures different types in each instantiation, so each
+/// needs a function of its own.
+fn declare_closures(
+    backend: &mut Backend<'_>,
+    symbol: &str,
+    body: &khora_hir::body::Body,
+    types: &khora_types::BodyTypes,
+) {
+    for (id, expr) in body.exprs() {
+        let khora_hir::body::Expr::Lambda { captures, .. } = expr else { continue };
+        let Type::Fn { params, ret } = types.of(id).clone() else { continue };
+        let captured: Vec<(khora_hir::body::LocalId, Type)> =
+            captures.iter().map(|l| (*l, types.local(*l).clone())).collect();
+        // An unsolved variable here means nothing ever pinned the type down —
+        // `let f = fn x => x;` with `f` unused. That is an ambiguity in the
+        // program, not a limit of the backend, and saying which it is decides
+        // whether the reader looks for a missing annotation or a missing
+        // feature.
+        let unsolved = params
+            .iter()
+            .chain(std::iter::once(&*ret))
+            .any(|t| matches!(t, Type::Var(_)));
+        if backend.declare_closure(symbol, id, params, *ret, captured).is_none() {
+            backend.error(
+                if unsolved {
+                    "the type of this closure was never pinned down; use it somewhere that \
+                     decides its argument and result types"
+                        .to_string()
+                } else {
+                    "this closure has a parameter or result the backend cannot represent yet"
+                        .to_string()
+                },
+                body.range(id),
+            );
+        }
+    }
 }
 
 /// A signature with the instance's type arguments substituted in.
@@ -214,6 +276,18 @@ fn target_machine() -> Result<TargetMachine, Vec<HirError>> {
         .ok_or_else(|| vec![backend_error("creating the target machine")])
 }
 
+/// The key the shared closure `drop_fields` is cached under. Not a legal Khora
+/// type name, so it can never collide with an ADT's.
+const CLOSURE_GLUE: &str = "$closure";
+
+/// The tag an adapter closure carries. Far above any real closure site, so the
+/// shared `drop_fields` switch never has a case for it — which is right, since
+/// an adapter captures nothing.
+pub(crate) const CLOSURE_ADAPTER_TAG: u64 = u32::MAX as u64;
+
+/// A closure's field 0 is its function pointer; captures start after it.
+pub(crate) const CLOSURE_CAPTURE_BASE: usize = 1;
+
 /// Everything shared by every function in the module under construction.
 pub(crate) struct Backend<'ctx> {
     pub ctx: &'ctx Context,
@@ -237,7 +311,32 @@ pub(crate) struct Backend<'ctx> {
     /// the caller, so the work is queued instead — see
     /// [`Backend::emit_pending_drop_glue`].
     pending_glue: Vec<String>,
+    /// Every lambda site in the program, in discovery order. A site's index in
+    /// this list is the tag its closure objects carry, which is how the shared
+    /// closure drop routine knows which captures a given closure holds.
+    closures: Vec<ClosureSite>,
+    /// The closure sites belonging to one emitted function, by its symbol.
+    closures_by_owner: HashMap<String, Vec<usize>>,
+    /// Adapters that let a named function be used as a value, by the symbol
+    /// each one forwards to.
+    thunks: HashMap<String, FunctionValue<'ctx>>,
+    /// Adapters declared but not yet given a body, for the same reason
+    /// `pending_glue` exists.
+    pending_thunks: Vec<String>,
     pub errors: Vec<HirError>,
+}
+
+/// One `(x) => ..` in the program, lifted to a function of its own.
+#[derive(Clone)]
+pub(crate) struct ClosureSite {
+    /// The symbol of the emitted function the lambda was written inside. A
+    /// lambda in a generic function appears once per specialisation, because
+    /// its captures have different types in each.
+    pub owner: String,
+    pub expr: khora_hir::body::ExprId,
+    pub symbol: String,
+    pub ret: Type,
+    pub captures: Vec<(khora_hir::body::LocalId, Type)>,
 }
 
 impl<'ctx> Backend<'ctx> {
@@ -267,6 +366,10 @@ impl<'ctx> Backend<'ctx> {
             instance_signatures: HashMap::new(),
             drop_glue: HashMap::new(),
             pending_glue: Vec::new(),
+            closures: Vec::new(),
+            closures_by_owner: HashMap::new(),
+            thunks: HashMap::new(),
+            pending_thunks: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -295,7 +398,11 @@ impl<'ctx> Backend<'ctx> {
         match ty {
             Type::Int | Type::Unit => Some(self.ctx.i64_type().into()),
             Type::Bool => Some(self.ctx.bool_type().into()),
-            Type::Str | Type::Adt { .. } => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
+            // A closure is a heap object holding its function pointer and its
+            // captures, so a value of function type is a pointer to one.
+            Type::Str | Type::Adt { .. } | Type::Fn { .. } => {
+                Some(self.ctx.ptr_type(AddressSpace::default()).into())
+            }
             // A variable or a rigid parameter reaching code generation means
             // inference left something unsolved, or a generic function was not
             // monomorphised. Both are compiler bugs rather than user errors, so
@@ -304,7 +411,7 @@ impl<'ctx> Backend<'ctx> {
             // Tuples type check but have no layout yet; `lower` reports that
             // in the one place it can happen, rather than here.
             Type::Tuple(_) | Type::Const(_) | Type::Applied { .. } => None,
-            Type::Fn { .. } | Type::Never | Type::Unknown => None,
+            Type::Never | Type::Unknown => None,
         }
     }
 
@@ -463,6 +570,235 @@ impl<'ctx> Backend<'ctx> {
     // Drop glue
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Closures
+    // -----------------------------------------------------------------------
+
+    /// Records a lambda site and declares the function it lifts to.
+    ///
+    /// The lifted function takes the closure object as its first argument and
+    /// the lambda's own parameters after it, which is what makes an indirect
+    /// call possible without knowing anything about the captures at the call
+    /// site.
+    pub fn declare_closure(
+        &mut self,
+        owner: &str,
+        expr: khora_hir::body::ExprId,
+        params: Vec<Type>,
+        ret: Type,
+        captures: Vec<(khora_hir::body::LocalId, Type)>,
+    ) -> Option<usize> {
+        let index = self.closures.len();
+        let symbol = format!("{owner}$$lambda{}", self.closures_by_owner.get(owner).map_or(0, Vec::len));
+
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let mut llvm_params: Vec<BasicMetadataTypeEnum<'ctx>> = vec![ptr.into()];
+        for param in &params {
+            llvm_params.push(self.llvm_type(param)?.into());
+        }
+        let fn_type = match &ret {
+            Type::Unit => self.ctx.void_type().fn_type(&llvm_params, false),
+            other => self.llvm_type(other)?.fn_type(&llvm_params, false),
+        };
+
+        let f = self.module.add_function(&mangle(&symbol), fn_type, Some(Linkage::Internal));
+        self.functions.insert(symbol.clone(), f);
+        self.defined.insert(symbol.clone());
+        self.instance_signatures.insert(
+            symbol.clone(),
+            Signature {
+                generics: Vec::new(),
+                bounds: Vec::new(),
+                params: params.clone(),
+                ret: ret.clone(),
+            },
+        );
+
+        self.closures.push(ClosureSite {
+            owner: owner.to_string(),
+            expr,
+            symbol,
+            ret,
+            captures,
+        });
+        self.closures_by_owner.entry(owner.to_string()).or_default().push(index);
+        Some(index)
+    }
+
+    /// The closure site for a lambda expression inside `owner`.
+    pub fn closure_at(&self, owner: &str, expr: khora_hir::body::ExprId) -> Option<&ClosureSite> {
+        self.closures_by_owner
+            .get(owner)?
+            .iter()
+            .map(|i| &self.closures[*i])
+            .find(|c| c.expr == expr)
+    }
+
+    /// The tag a closure site's objects carry.
+    pub fn closure_tag(&self, owner: &str, expr: khora_hir::body::ExprId) -> Option<u32> {
+        self.closures_by_owner
+            .get(owner)?
+            .iter()
+            .find(|i| self.closures[**i].expr == expr)
+            .map(|i| *i as u32)
+    }
+
+    pub fn closure_sites(&self) -> Vec<ClosureSite> {
+        self.closures.clone()
+    }
+
+    /// The adapter that lets `symbol` be used as a closure.
+    ///
+    /// A named function and a closure have different shapes: the closure is
+    /// called through a pointer with its own object as the first argument, and
+    /// the named function has no such argument. Rather than give every function
+    /// in the program that parameter — which would cost every ordinary call to
+    /// pay for a feature it does not use — a one-line adapter is emitted for
+    /// the functions actually used as values, and it forwards.
+    pub fn thunk(&mut self, symbol: &str) -> Option<FunctionValue<'ctx>> {
+        if let Some(f) = self.thunks.get(symbol) {
+            return Some(*f);
+        }
+        let signature = self.signature_of(symbol)?;
+
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = vec![ptr.into()];
+        for param in &signature.params {
+            params.push(self.llvm_type(param)?.into());
+        }
+        let fn_type = match &signature.ret {
+            Type::Unit => self.ctx.void_type().fn_type(&params, false),
+            other => self.llvm_type(other)?.fn_type(&params, false),
+        };
+
+        let f = self.module.add_function(
+            &format!("kh$fnval${symbol}"),
+            fn_type,
+            Some(Linkage::Internal),
+        );
+        self.thunks.insert(symbol.to_string(), f);
+        self.pending_thunks.push(symbol.to_string());
+        Some(f)
+    }
+
+    /// Gives every queued adapter its body: call the real function, return it.
+    fn emit_pending_thunks(&mut self) {
+        while let Some(symbol) = self.pending_thunks.pop() {
+            let Some(f) = self.thunks.get(&symbol).copied() else { continue };
+            let Ok(target) = self.callee(&symbol) else { continue };
+            let Some(signature) = self.signature_of(&symbol) else { continue };
+
+            let entry = self.ctx.append_basic_block(f, "entry");
+            self.builder.position_at_end(entry);
+
+            // Skip the closure argument: the adapter ignores it, because a
+            // named function captures nothing.
+            let args: Vec<BasicMetadataValueEnum<'ctx>> = (0..signature.params.len())
+                .filter_map(|i| f.get_nth_param(i as u32 + 1))
+                .map(|v| v.into())
+                .collect();
+            let call =
+                self.builder.build_call(target, &args, "forward").expect("forwarding a call");
+
+            match signature.ret {
+                Type::Unit => {
+                    self.builder.build_return(None).expect("returning from an adapter");
+                }
+                _ => {
+                    let value = call.try_as_basic_value().basic();
+                    match value {
+                        Some(value) => {
+                            self.builder
+                                .build_return(Some(&value))
+                                .expect("returning from an adapter");
+                        }
+                        None => {
+                            self.builder.build_return(None).expect("returning from an adapter");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The `drop_fields` routine shared by every closure.
+    ///
+    /// One routine switching on the tag, exactly as an ADT's does and for the
+    /// same reason: a drop site knows only that it holds a value of *some*
+    /// function type, and two lambdas with the same signature capture entirely
+    /// different things. The tag is what distinguishes them.
+    fn closure_glue(&mut self) -> PointerValue<'ctx> {
+        if !self.closures.iter().any(|c| c.captures.iter().any(|(_, t)| is_boxed(t))) {
+            return self.null_pointer();
+        }
+        if let Some(Some(f)) = self.drop_glue.get(CLOSURE_GLUE) {
+            return f.as_global_value().as_pointer_value();
+        }
+
+        let void = self.ctx.void_type();
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let f = self.module.add_function(
+            "kh$drop_fields$closure",
+            void.fn_type(&[ptr.into()], false),
+            Some(Linkage::Internal),
+        );
+        self.drop_glue.insert(CLOSURE_GLUE.to_string(), Some(f));
+        self.pending_glue.push(CLOSURE_GLUE.to_string());
+        f.as_global_value().as_pointer_value()
+    }
+
+    /// Emits the shared closure `drop_fields`.
+    fn emit_closure_glue(&mut self) {
+        let f = match self.drop_glue.get(CLOSURE_GLUE) {
+            Some(Some(f)) => *f,
+            _ => return,
+        };
+        let object = f.get_nth_param(0).expect("drop_fields takes an object").into_pointer_value();
+
+        let entry = self.ctx.append_basic_block(f, "entry");
+        let done = self.ctx.append_basic_block(f, "done");
+
+        let mut cases = Vec::new();
+        for (tag, site) in self.closure_sites().into_iter().enumerate() {
+            let owned: Vec<(usize, Type)> = site
+                .captures
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, ty))| is_boxed(ty))
+                // Field 0 holds the function pointer, so capture `i` is field
+                // `i + 1`.
+                .map(|(i, (_, ty))| (i + CLOSURE_CAPTURE_BASE, ty.clone()))
+                .collect();
+            if owned.is_empty() {
+                continue;
+            }
+
+            let block = self.ctx.append_basic_block(f, &format!("drop.{}", site.symbol));
+            cases.push((self.ctx.i32_type().const_int(tag as u64, false), block));
+            self.builder.position_at_end(block);
+
+            for (index, field_ty) in owned {
+                let slot = runtime::field_pointer(self.ctx, &self.builder, object, index as u64);
+                let value = self
+                    .builder
+                    .build_load(self.ctx.ptr_type(AddressSpace::default()), slot, "captured")
+                    .expect("loading a captured field");
+                let glue = self.drop_glue(&field_ty);
+                self.builder
+                    .build_call(self.rt.drop, &[value.into(), glue.into()], "")
+                    .expect("dropping a capture");
+            }
+            self.builder.build_unconditional_branch(done).expect("branch to the return");
+        }
+
+        self.builder.position_at_end(entry);
+        let tag = runtime::load_tag(self.ctx, &self.builder, object);
+        self.builder.build_switch(tag, done, &cases).expect("switching on a closure tag");
+
+        self.builder.position_at_end(done);
+        self.builder.build_return(None).expect("returning from drop_fields");
+    }
+
     /// The `drop_fields` argument for dropping a value of this type.
     ///
     /// Returns a null function pointer for anything that owns no references —
@@ -470,6 +806,9 @@ impl<'ctx> Backend<'ctx> {
     /// The runtime treats null as "nothing to release", so a drop site never
     /// needs to know which case it is in.
     pub fn drop_glue(&mut self, ty: &Type) -> PointerValue<'ctx> {
+        if matches!(ty, Type::Fn { .. }) {
+            return self.closure_glue();
+        }
         let Type::Adt { name, .. } = ty else { return self.null_pointer() };
 
         if let Some(cached) = self.drop_glue.get(name) {
@@ -508,7 +847,11 @@ impl<'ctx> Backend<'ctx> {
     /// instruction to the glue routine instead.
     fn emit_pending_drop_glue(&mut self) {
         while let Some(name) = self.pending_glue.pop() {
-            self.emit_drop_glue(&name);
+            if name == CLOSURE_GLUE {
+                self.emit_closure_glue();
+            } else {
+                self.emit_drop_glue(&name);
+            }
         }
     }
 

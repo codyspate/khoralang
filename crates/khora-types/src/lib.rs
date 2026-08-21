@@ -288,6 +288,23 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
     let Some(ty) = ty else { return Type::Unknown };
     match ty {
         ast::Type::Unit(_) => Type::Unit,
+        // `(Int, Bool) -> Int`. The parameter list parses as whatever shape the
+        // parentheses made of it: a tuple for several, a paren for one, a unit
+        // for none. All three mean the same thing here.
+        ast::Type::Fn(f) => {
+            let params = match f.param_type() {
+                Some(ast::Type::Tuple(t)) => {
+                    t.elements().map(|e| type_of_syntax(Some(&e), generics)).collect()
+                }
+                Some(ast::Type::Unit(_)) | None => Vec::new(),
+                Some(ast::Type::Paren(p)) => {
+                    vec![type_of_syntax(p.inner().as_ref(), generics)]
+                }
+                Some(other) => vec![type_of_syntax(Some(&other), generics)],
+            };
+            let ret = type_of_syntax(f.return_type().as_ref(), generics);
+            Type::Fn { params, ret: Box::new(ret) }
+        }
         // A bare integer in type position is a const-generic argument.
         ast::Type::Literal(l) => l.value().map(Type::Const).unwrap_or(Type::Unknown),
         ast::Type::Tuple(t) => {
@@ -714,6 +731,21 @@ impl<'a> Checker<'a> {
                 if types.is_empty() { Type::Unit } else { Type::Tuple(types) }
             }
             Expr::Match { scrutinee, arms } => self.infer_match(scrutinee, &arms, range),
+            Expr::Lambda { params, body, .. } => {
+                // A parameter with no annotation gets a variable, so the type
+                // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
+                // learns `x: Int` from `map`'s signature, not from the lambda.
+                let types: Vec<Type> = params
+                    .iter()
+                    .map(|p| {
+                        let ty = self.unifier.fresh();
+                        self.bind_pattern(*p, &ty);
+                        ty
+                    })
+                    .collect();
+                let ret = self.infer(body);
+                Type::Fn { params: types, ret: Box::new(ret) }
+            }
         }
     }
 
@@ -817,6 +849,14 @@ impl<'a> Checker<'a> {
         let Type::Fn { params, ret } = callee_ty else {
             for arg in args {
                 self.infer(*arg);
+            }
+            // Silent for a type that is not known yet: `Unknown` is downstream
+            // of an error already reported, and a variable may still turn out
+            // to be a function. Anything else is a real mistake, and one that
+            // became reachable the moment functions became values.
+            if !matches!(callee_ty, Type::Unknown | Type::Var(_) | Type::Never) {
+                let zonked = self.unifier.zonk(&callee_ty);
+                self.error(format!("`{zonked}` is not a function, so it cannot be called"), range);
             }
             return Type::Unknown;
         };

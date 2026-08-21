@@ -632,6 +632,13 @@ impl PathType {
     }
 }
 
+impl ParenType {
+    /// The single type inside the parentheses.
+    pub fn inner(&self) -> Option<Type> {
+        child(&self.0)
+    }
+}
+
 impl TupleType {
     pub fn elements(&self) -> impl Iterator<Item = Type> {
         children(&self.0)

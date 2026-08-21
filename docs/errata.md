@@ -285,3 +285,44 @@ Two consequences worth stating:
   They did not: recording `Self: ThisTrait` as an ordinary bound on a trait's own
   signatures makes a default body's calls resolve through the machinery that was
   already there. The deferral is withdrawn.
+
+## 19. The reference-counting planner was guessing at types
+
+`khora-perceus` decided what to `dup` and what to `drop` from a private
+`type_of` that re-derived an expression's type from its *shape*: a string
+literal is a `String`, a constructor call is its ADT, a call to a named function
+is that function's declared return type, and everything else is `Unknown`.
+`Unknown` is not boxed, so anything it could not recognise was silently treated
+as a machine word — no dup, no drop.
+
+For the phase 2 subset this happened to be right often enough that every test
+passed. Closures broke it immediately and loudly. A lambda's type is not
+derivable from its shape, so a closure-typed local was never counted, and a
+boxed value passed to one was released by the callee and then again by the
+caller: a double free on the first program that captured a list.
+
+The fix is not a better guess. The checker already computes and zonks the type
+of every expression in the body, and `khora_types::checked` publishes it. The
+planner now reads that. Two things fell out:
+
+- `bind` no longer takes a type at all — a pattern's bindings look up their own
+  types — which deleted the branch that gave every tuple-pattern binding
+  `Unknown`.
+- Match-arm bindings and `let` initialisers get real types where they used to
+  get guesses.
+
+The general lesson is worth keeping: a second, weaker implementation of
+something the compiler already knows is not a shortcut, it is a divergence
+waiting for the first input that tells the two apart.
+
+## 20. Closures were listed as out of scope and then never scheduled
+
+Phase 2 named closures under **Out**, correctly — the vertical slice did not
+need them. No later phase picked them up, and phase 3's exit criterion then
+asked for `traverse`, whose signature takes a function argument. The gap was
+invisible because each phase's own list was internally consistent.
+
+Closures are now implemented, and phase 3's text says where they landed and
+why. The process point is that "out of scope for phase N" and "scheduled for
+phase M" are different statements, and only the first was being written down.
+Anything deferred needs a destination, or it is not deferred, it is dropped.

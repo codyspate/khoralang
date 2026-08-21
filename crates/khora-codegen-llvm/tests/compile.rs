@@ -823,3 +823,227 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "42\n");
     assert_eq!(ran.code, Some(0));
 }
+
+// ---------------------------------------------------------------------------
+// Closures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_closure_is_called_directly_and_passed_along() {
+    let ran = run(
+        "closure_basic",
+        "module t;
+fn print(value: Int);
+
+fn apply(f: (Int) -> Int, x: Int) -> Int { f(x) }
+
+fn main() -> Int {
+  let add_one = fn x => x + 1;
+  print(add_one(41));
+  print(apply(add_one, 10));
+  print(apply(fn y => y * 3, 14));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "42\n11\n42\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The whole point of a closure: it reads a binding from where it was written,
+/// not from where it is called.
+#[test]
+fn a_closure_captures_its_environment() {
+    let ran = run(
+        "closure_capture",
+        "module t;
+fn print(value: Int);
+
+fn make(n: Int) -> (Int) -> Int { fn x => x + n }
+
+fn main() -> Int {
+  let add_ten = make(10);
+  let add_hundred = make(100);
+  print(add_ten(5));
+  print(add_hundred(5));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "15\n105\n", "each closure keeps its own captured `n`");
+    assert_eq!(ran.code, Some(0));
+}
+
+#[test]
+fn a_nested_closure_reaches_through_to_the_outer_scope() {
+    let ran = run(
+        "closure_nested",
+        "module t;
+fn print(value: Int);
+
+fn main() -> Int {
+  let base = 1000;
+  let outer = fn x => fn y => x + y + base;
+  let inner = outer(20);
+  print(inner(3));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "1023\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A closure in a generic function is emitted once per specialisation, because
+/// what it captures has a different machine type in each.
+#[test]
+fn a_closure_inside_a_generic_function_is_specialised() {
+    let ran = run(
+        "closure_generic",
+        "module t;
+fn print(value: Int);
+
+fn twice<A>(f: (A) -> A, x: A) -> A { f(f(x)) }
+
+fn main() -> Int {
+  print(twice(fn n => n + 3, 1));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "7\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Closures are heap objects under the same header as everything else, so the
+/// same counting has to account for them — including the references they hold
+/// to what they captured.
+#[test]
+fn closures_and_their_captures_are_freed() {
+    let ran = run(
+        "closure_leaks",
+        "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+pub type List = | Nil | Cons(head: Int, tail: List);
+
+fn build(n: Int) -> List {
+  if n == 0 { List::Nil } else { List::Cons(n, build(n - 1)) }
+}
+
+fn sum(l: List) -> Int {
+  match l { List::Nil => 0, List::Cons(h, t) => h + sum(t) }
+}
+
+fn call_it(f: (Int) -> Int, x: Int) -> Int { f(x) }
+
+/// The closure owns a reference to the captured list.
+fn captures_a_list() -> Int {
+  let l = build(4);
+  let f = fn x => x + sum(l);
+  call_it(f, 1)
+}
+
+/// A boxed argument is owned by the lambda, which releases it.
+fn boxed_parameter() -> Int {
+  let g = fn l => sum(l);
+  g(build(3))
+}
+
+/// Built, never called: the captures still have to be let go.
+fn discarded() {
+  let l = build(2);
+  fn x => x + sum(l);
+}
+
+fn main() -> Int {
+  khora_print_int(captures_a_list());
+  khora_print_int(boxed_parameter());
+  discarded();
+  khora_print_int(khora_live_count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "11\n6\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The positive control for the test above: without it, a live count of zero
+/// could mean the counter is broken rather than the program clean.
+#[test]
+fn a_leaked_closure_is_actually_observable() {
+    let ran = run(
+        "closure_leak_control",
+        "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+fn khora_dup(object: String);
+
+fn main() -> Int {
+  let s = \"held\";
+  khora_dup(s);
+  let f = fn x => x + 0;
+  khora_print_int(khora_live_count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "2\n", "an extra reference and a live closure are both counted");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A named function is a value too: it becomes a closure that captures nothing
+/// and forwards. Without this, every `map(xs, f)` would need a lambda wrapper.
+#[test]
+fn a_named_function_can_be_passed_as_a_value() {
+    let ran = run(
+        "fn_value",
+        "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+fn double(x: Int) -> Int { x * 2 }
+fn apply(f: (Int) -> Int, x: Int) -> Int { f(x) }
+
+/// Holds the adapter in a binding, so the block that declared it is what
+/// releases it. Measured after this returns, or the count would include it.
+fn through_a_binding() -> Int {
+  let g = double;
+  g(4)
+}
+
+fn main() -> Int {
+  khora_print_int(apply(double, 21));
+  khora_print_int(through_a_binding());
+  khora_print_int(khora_live_count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "42\n8\n0\n", "the adapter object has to be freed too");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A generic function used as a value resolves to the specialisation the call
+/// site asked for, exactly as a direct call would.
+#[test]
+fn a_generic_function_as_a_value_picks_its_specialisation() {
+    let ran = run(
+        "fn_value_generic",
+        "module t;
+fn print(value: Int);
+
+fn id<A>(x: A) -> A { x }
+fn apply(f: (Int) -> Int, x: Int) -> Int { f(x) }
+
+fn main() -> Int {
+  print(apply(id, 7));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "7\n");
+    assert_eq!(ran.code, Some(0));
+}

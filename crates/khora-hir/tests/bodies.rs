@@ -212,13 +212,103 @@ fn operators_and_control_flow_lower() {
 #[test]
 fn syntax_outside_the_subset_is_marked_not_dropped() {
     let db = KhoraDatabase::new();
-    let body = only_body(&db, "module m;\nfn f() -> Int { let g = fn x => x; 1 }\n");
+    let body = only_body(&db, "module m;\nfn f() -> Int { let r = { a: 1 }; 1 }\n");
 
     assert!(
         body.exprs().any(|(_, e)| matches!(e, Expr::Unsupported(_))),
-        "closure was dropped instead of marked"
+        "record literal was dropped instead of marked"
     );
-    assert!(errors(&body).iter().any(|e| e.contains("closures")), "{:?}", errors(&body));
+    assert!(errors(&body).iter().any(|e| e.contains("record")), "{:?}", errors(&body));
+}
+
+/// Closures used to be in the list above. They lower for real now.
+#[test]
+fn a_closure_lowers_to_a_lambda() {
+    let db = KhoraDatabase::new();
+    let body = only_body(&db, "module m;\nfn f() -> Int { let g = fn x => x; 1 }\n");
+
+    assert!(errors(&body).is_empty(), "{:?}", errors(&body));
+    assert!(
+        body.exprs().any(|(_, e)| matches!(e, Expr::Lambda { .. })),
+        "no lambda in the body"
+    );
+}
+
+/// A lambda's body sits in the enclosing function's arena, and a local from
+/// outside it is recorded as a capture rather than resolved afresh.
+#[test]
+fn a_lambda_records_what_it_captures() {
+    let db = KhoraDatabase::new();
+    let body = only_body(
+        &db,
+        "module m;\nfn f() -> Int { let n = 1; let g = fn x => x + n; 2 }\n",
+    );
+
+    let captures = body
+        .exprs()
+        .find_map(|(_, e)| match e {
+            Expr::Lambda { captures, .. } => Some(captures.clone()),
+            _ => None,
+        })
+        .expect("no lambda");
+    assert_eq!(captures.len(), 1, "expected exactly `n` to be captured");
+    assert_eq!(body.local(captures[0]).name, "n");
+}
+
+/// A lambda's own parameter is not a capture: it is declared inside.
+#[test]
+fn a_lambda_parameter_is_not_a_capture() {
+    let db = KhoraDatabase::new();
+    let body = only_body(&db, "module m;\nfn f() -> Int { let g = fn x => x + 1; 2 }\n");
+
+    let captures = body
+        .exprs()
+        .find_map(|(_, e)| match e {
+            Expr::Lambda { captures, .. } => Some(captures.clone()),
+            _ => None,
+        })
+        .expect("no lambda");
+    assert!(captures.is_empty(), "{captures:?}");
+}
+
+/// An inner lambda's free variable is still free in the outer one, so both
+/// have to capture it or the inner would have nothing to read.
+#[test]
+fn a_nested_lambda_makes_its_free_variables_captures_of_both() {
+    let db = KhoraDatabase::new();
+    let body = only_body(
+        &db,
+        "module m;\nfn f() -> Int { let n = 1; let g = fn x => fn y => x + y + n; 2 }\n",
+    );
+
+    let all: Vec<Vec<_>> = body
+        .exprs()
+        .filter_map(|(_, e)| match e {
+            Expr::Lambda { captures, .. } => {
+                Some(captures.iter().map(|c| body.local(*c).name.clone()).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(all.len(), 2, "expected two lambdas");
+    // Innermost first: it is completed before the one containing it.
+    assert_eq!(all[0], vec!["x".to_string(), "n".to_string()]);
+    assert_eq!(all[1], vec!["n".to_string()]);
+}
+
+/// A capture is a copy, so writing to it would change nothing outside.
+#[test]
+fn assigning_to_a_capture_is_rejected() {
+    let db = KhoraDatabase::new();
+    let body = only_body(
+        &db,
+        "module m;\nfn f() -> Int { let mut n = 1; let g = fn x => { n = x; n }; 2 }\n",
+    );
+    assert!(
+        errors(&body).iter().any(|e| e.contains("captured by value")),
+        "{:?}",
+        errors(&body)
+    );
 }
 
 #[test]

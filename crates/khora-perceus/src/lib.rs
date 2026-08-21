@@ -78,24 +78,28 @@ impl RcPlan {
 /// `Unknown` counts as unboxed: it only appears downstream of an error, and a
 /// spurious `drop` on a machine word would be a wild free.
 pub fn is_boxed(ty: &Type) -> bool {
-    matches!(ty, Type::Str | Type::Adt { .. })
+    // A closure is an ordinary heap object: a function pointer and whatever it
+    // captured, under the same header as everything else.
+    matches!(ty, Type::Str | Type::Adt { .. } | Type::Fn { .. })
 }
 
 /// Plans reference counting for every function body in a file.
 #[salsa::tracked(returns(ref))]
 pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
-    let types = khora_types::type_map(db, file);
+    let checked = khora_types::checked(db, file);
+    let empty = khora_types::BodyTypes::default();
     khora_hir::body::bodies(db, file)
         .iter()
         .map(|(name, body)| {
-            let signature = types.signatures.get(name);
-            let mut planner = Planner {
-                body,
-                plan: RcPlan::default(),
-                types,
-                local_types: HashMap::new(),
-            };
-            planner.plan_function(signature);
+            // The checker already worked out every type in this body and zonked
+            // them. Re-deriving them here from the shape of the expressions was
+            // wrong in exactly the cases that matter: it had no idea what a
+            // lambda's type was, so a closure was never counted, and a boxed
+            // value passed to one was freed twice.
+            let body_types =
+                checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t).unwrap_or(&empty);
+            let mut planner = Planner { body, plan: RcPlan::default(), types: body_types };
+            planner.plan_function();
             (name.clone(), planner.plan)
         })
         .collect()
@@ -104,18 +108,14 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
 struct Planner<'a> {
     body: &'a Body,
     plan: RcPlan,
-    types: &'a khora_types::TypeMap,
-    local_types: HashMap<LocalId, Type>,
+    types: &'a khora_types::BodyTypes,
 }
 
 impl<'a> Planner<'a> {
-    fn plan_function(&mut self, signature: Option<&khora_types::Signature>) {
+    fn plan_function(&mut self) {
         let mut owned = Vec::new();
-        for (i, pat) in self.body.params.iter().enumerate() {
-            let ty = signature
-                .and_then(|s| s.params.get(i).cloned())
-                .unwrap_or(Type::Unknown);
-            self.bind(*pat, &ty, &mut owned);
+        for pat in self.body.params.clone() {
+            self.bind(pat, &mut owned);
         }
 
         let Some(root) = self.body.root else { return };
@@ -129,33 +129,17 @@ impl<'a> Planner<'a> {
     }
 
     /// Records a pattern's bindings and collects the boxed ones.
-    fn bind(&mut self, pat: PatId, ty: &Type, owned: &mut Vec<LocalId>) {
+    fn bind(&mut self, pat: PatId, owned: &mut Vec<LocalId>) {
         match self.body.pat(pat).clone() {
             Pat::Bind(local) => {
-                self.local_types.insert(local, ty.clone());
-                if is_boxed(ty) {
+                if is_boxed(self.types.local(local)) {
                     self.plan.boxed.insert(local);
                     owned.push(local);
                 }
             }
-            Pat::TupleStruct { resolution, fields } => {
-                let variant = match &resolution {
-                    khora_hir::Resolution::Variant { name, .. } => {
-                        self.types.variants.iter().find(|v| &v.name == name).cloned()
-                    }
-                    _ => None,
-                };
-                for (i, field) in fields.iter().enumerate() {
-                    let field_ty = variant
-                        .as_ref()
-                        .and_then(|v| v.fields.get(i).cloned())
-                        .unwrap_or(Type::Unknown);
-                    self.bind(*field, &field_ty, owned);
-                }
-            }
-            Pat::Tuple(fields) => {
+            Pat::TupleStruct { fields, .. } | Pat::Tuple(fields) => {
                 for field in fields {
-                    self.bind(field, &Type::Unknown, owned);
+                    self.bind(field, owned);
                 }
             }
             Pat::Wildcard | Pat::Literal(_) | Pat::Path(_) | Pat::Missing => {}
@@ -170,6 +154,22 @@ impl<'a> Planner<'a> {
                     self.plan.dups.insert(id);
                 }
             }
+            Expr::Lambda { params, body, .. } => {
+                // The lambda's parameters are owned by the lambda, exactly as a
+                // function's are, and released where its body ends. Captures
+                // are *not* released here: the closure object owns those, and
+                // its drop glue is what lets them go.
+                let mut owned = Vec::new();
+                for pat in &params {
+                    self.bind(*pat, &mut owned);
+                }
+                // Deliberately not recorded as drops here. A lambda body is
+                // not always a block — `(x) => x + 1` is an expression — and
+                // the plan's releases are keyed by block. The lifted function
+                // releases its own parameters instead, on every path out.
+                let _ = owned;
+                self.walk(body);
+            }
             Expr::Block { stmts, tail } => {
                 let mut declared = Vec::new();
                 for stmt in &stmts {
@@ -178,10 +178,7 @@ impl<'a> Planner<'a> {
                             if let Some(init) = init {
                                 self.walk(*init);
                             }
-                            let ty = init
-                                .map(|e| self.type_of(e))
-                                .unwrap_or(Type::Unknown);
-                            self.bind(*pat, &ty, &mut declared);
+                            self.bind(*pat, &mut declared);
                         }
                         Stmt::Expr(e) => self.walk(*e),
                     }
@@ -195,12 +192,11 @@ impl<'a> Planner<'a> {
             }
             Expr::Match { scrutinee, arms } => {
                 self.walk(scrutinee);
-                let scrutinee_ty = self.type_of(scrutinee);
                 for arm in &arms {
                     // Arm bindings borrow out of the scrutinee, which the arm
                     // does not own, so they are recorded but not dropped.
                     let mut ignored = Vec::new();
-                    self.bind(arm.pat, &scrutinee_ty, &mut ignored);
+                    self.bind(arm.pat, &mut ignored);
                     if let Some(guard) = arm.guard {
                         self.walk(guard);
                     }
@@ -253,28 +249,4 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// Enough of the type to decide boxedness. Full inference already ran; this
-    /// only needs to distinguish a pointer from a machine word.
-    fn type_of(&self, id: ExprId) -> Type {
-        match self.body.expr(id) {
-            Expr::Literal(khora_hir::body::Literal::Str(_)) => Type::Str,
-            Expr::Local(local) => self.local_types.get(local).cloned().unwrap_or(Type::Unknown),
-            Expr::Call { callee, .. } => match self.body.expr(*callee) {
-                Expr::Path(khora_hir::Resolution::Variant { type_name, .. }) => {
-                    Type::adt(type_name.clone())
-                }
-                Expr::Path(khora_hir::Resolution::Item { name, .. }) => self
-                    .types
-                    .signatures
-                    .get(name)
-                    .map(|s| s.ret.clone())
-                    .unwrap_or(Type::Unknown),
-                _ => Type::Unknown,
-            },
-            Expr::Path(khora_hir::Resolution::Variant { type_name, .. }) => {
-                Type::adt(type_name.clone())
-            }
-            _ => Type::Unknown,
-        }
-    }
 }

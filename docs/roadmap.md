@@ -257,17 +257,27 @@ could not have been met honestly.
 Remaining: the `std` traits themselves, `Iterator` with generic `for`, and
 `traverse` over `Traversable`.
 
+Closures landed here rather than in a phase of their own: they were listed
+under phase 2's **Out** and no later phase picked them up, yet `traverse` takes
+a function argument and cannot be written without them. A closure is a heap
+object holding its code pointer and its captures, under the same header as
+every other value, so reference counting covers it with no new machinery. A
+named function used as a value becomes a closure that captures nothing and
+forwards.
+
 `Iterator` and `for` need only what is already here: `for x in xs { .. }`
 desugars to `loop` over `next()`, and `loop`, `match` and `break` all landed in
 phase 1.6. `for` becomes a hard keyword at that point, as noted where it is
 declared contextual in `crates/khora-syntax/src/kind.rs`.
 
-**`traverse` is blocked on closures, which no phase currently owns.** Its
-signature takes a function as an argument — `(A) -> F<B>` — and closures parse
-but stop at HIR lowering, which reports them unsupported; the backend says the
-same. Phase 2 listed closures under **Out** and no later phase picked them up.
-They are a prerequisite for this exit criterion, and for `map`, `filter` and
-every combinator after it, so they need scheduling rather than discovering.
+**`traverse` is still blocked, on higher-kinded unification.** Its signature
+reads `(self: Self<A>, f: (A) -> F<B>) -> F<Self<B>>`, where `F` is a type
+*variable* applied to an argument. Declaring that already works — the trait
+above type checks — but calling it does not: solving `F<B>` against `Option<Int>`
+means deciding `F := Option` and `B := Int`, and `Type::Applied` currently holds
+its head as a fixed name rather than something the unifier can solve. This is
+the restricted higher-order unification every language with higher kinds
+implements, and it is the last piece phase 3 needs. See `docs/errata.md`.
 
 **Exit:** `matmul` with a mismatched shared dimension is a compile error naming
 both dimensions **— met**; instance resolution errors name the missing instance

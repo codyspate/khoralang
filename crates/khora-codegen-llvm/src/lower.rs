@@ -29,7 +29,7 @@ use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
 use inkwell::module::Linkage;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 
@@ -40,7 +40,7 @@ use khora_perceus::{is_boxed, RcPlan};
 use khora_types::{BodyTypes, Type, VariantInfo};
 use text_size::TextRange;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, CLOSURE_ADAPTER_TAG, CLOSURE_CAPTURE_BASE};
 use crate::runtime::{self, FIELD_WORD, STRING_BYTES_OFFSET, STRING_LEN_FIELD, STRING_TAG};
 
 /// The result of lowering an expression: `None` when control diverged.
@@ -71,6 +71,7 @@ pub(crate) fn emit_function<'ctx>(
         types,
         mono,
         function,
+        owner: name.to_string(),
         ret: signature.ret.clone(),
         slots: HashMap::new(),
         scopes: Vec::new(),
@@ -85,6 +86,81 @@ pub(crate) fn emit_function<'ctx>(
         Some(root) => lower.expr(root),
         None => Some(lower.be.unit_value()),
     };
+    lower.finish(value);
+}
+
+/// Emits the function one lambda was lifted to.
+///
+/// The lambda's body is an expression in the *enclosing* function's arena, so
+/// this is the same `Body`, the same `BodyTypes` and the same reference-counting
+/// plan — only the entry point differs. Captures are read out of the closure
+/// object into the slots the body already expects them in, which is what makes
+/// the body's own lowering need no notion of a capture at all.
+pub(crate) fn emit_closure<'ctx>(
+    be: &mut Backend<'ctx>,
+    site: &crate::backend::ClosureSite,
+    body: &Body,
+    plan: Option<&RcPlan>,
+    types: &BodyTypes,
+    mono: &khora_types::mono::Instances,
+) {
+    let Some(function) = be.definition(&site.symbol) else { return };
+    let Expr::Lambda { params, body: root, .. } = body.expr(site.expr).clone() else { return };
+    let empty = RcPlan::default();
+
+    let entry = be.ctx.append_basic_block(function, "entry");
+    be.builder.position_at_end(entry);
+
+    let mut lower = Lower {
+        be,
+        body,
+        plan: plan.unwrap_or(&empty),
+        types,
+        mono,
+        function,
+        owner: site.owner.clone(),
+        ret: site.ret.clone(),
+        slots: HashMap::new(),
+        scopes: Vec::new(),
+        loops: Vec::new(),
+        aborted: false,
+    };
+
+    lower.allocate_slots();
+
+    // Captures first: the closure lends them for the duration of the call, so
+    // they are stored without a `dup` and released by the closure's own drop
+    // glue rather than here.
+    let closure = function.get_nth_param(0).expect("a lifted lambda takes its closure");
+    for (index, (local, ty)) in site.captures.iter().enumerate() {
+        let Some(slot) = lower.slots.get(local).copied() else { continue };
+        let value = lower.load_field(
+            closure.into_pointer_value(),
+            index + CLOSURE_CAPTURE_BASE,
+            ty,
+        );
+        lower.be.builder.build_store(slot, value).expect("storing a capture");
+    }
+
+    // The lambda's own parameters are owned by it, exactly as a function's are.
+    // They sit in a scope of their own so that every path out — falling off the
+    // end, or an early `return` — releases them.
+    let mut owned = Vec::new();
+    for (index, pat) in params.iter().enumerate() {
+        let Pat::Bind(local) = body.pat(*pat).clone() else { continue };
+        let Some(slot) = lower.slots.get(&local).copied() else { continue };
+        let Some(value) = function.get_nth_param(index as u32 + 1) else { continue };
+        lower.be.builder.build_store(slot, value).expect("storing a lambda parameter");
+        if is_boxed(types.local(local)) {
+            owned.push(Cleanup::Local(local));
+        }
+    }
+    lower.scopes.push(owned);
+
+    let value = lower.expr(root);
+    if value.is_some() {
+        lower.leave_scope();
+    }
     lower.finish(value);
 }
 
@@ -119,6 +195,10 @@ struct Lower<'a, 'ctx> {
     types: &'a BodyTypes,
     mono: &'a khora_types::mono::Instances,
     function: FunctionValue<'ctx>,
+    /// The symbol being emitted. A lambda site is keyed by this plus the
+    /// expression, because one lambda in a generic body becomes a different
+    /// closure in every specialisation.
+    owner: String,
     ret: Type,
     slots: HashMap<LocalId, PointerValue<'ctx>>,
     scopes: Vec<Vec<Cleanup<'ctx>>>,
@@ -370,7 +450,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Unit => Some(self.be.unit_value()),
             Expr::Literal(lit) => self.literal(lit, range),
             Expr::Local(local) => self.read_local(id, local, range),
-            Expr::Path(resolution) => self.path(&resolution, range),
+            Expr::Path(resolution) => self.path(id, &resolution, range),
             Expr::Call { callee, args } => self.call(callee, &args, range),
             Expr::Binary { op, lhs, rhs } => self.binary(op, lhs, rhs, range),
             Expr::Unary { op, operand } => self.unary(op, operand, range),
@@ -385,6 +465,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Break(value) => self.lower_break(value, range),
             Expr::Continue => self.lower_continue(range),
             Expr::Return(value) => self.lower_return(value),
+            Expr::Lambda { captures, .. } => self.make_closure(id, &captures, range),
             Expr::Field { .. } => {
                 self.fail("field access needs records, which arrive in phase 3", range)
             }
@@ -507,7 +588,12 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(value)
     }
 
-    fn path(&mut self, resolution: &khora_hir::Resolution, range: TextRange) -> Flow<'ctx> {
+    fn path(
+        &mut self,
+        id: ExprId,
+        resolution: &khora_hir::Resolution,
+        range: TextRange,
+    ) -> Flow<'ctx> {
         match resolution {
             // A constructor with no payload is still an allocation: it has a
             // tag, and a tag lives in a header. Interning the nullary cases
@@ -517,8 +603,17 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let name = name.clone();
                 self.construct(&name, &[], range)
             }
+            // A named function used as a value becomes a closure that
+            // captures nothing and forwards to it.
+            khora_hir::Resolution::Item { name, .. }
+                if matches!(self.types.of(id), Type::Fn { .. }) =>
+            {
+                let symbol =
+                    self.mono.callee(self.types, id).unwrap_or_else(|| name.clone());
+                self.function_value(&symbol, range)
+            }
             khora_hir::Resolution::Item { name, .. } => self.fail(
-                format!("`{name}` is a function, and functions are not values until closures land"),
+                format!("`{name}` is not a value; only functions and constructors have one"),
                 range,
             ),
             khora_hir::Resolution::Unsupported(what) => self.fail(what.to_string(), range),
@@ -560,6 +655,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                     range,
                 ),
             },
+            // A value of function type: a closure, called indirectly.
+            _ if matches!(self.types.of(callee), Type::Fn { .. }) => {
+                let Type::Fn { params, ret } = self.types.of(callee).clone() else {
+                    unreachable!("guarded by the match arm")
+                };
+                self.call_closure(callee, &params, &ret, args, range)
+            }
             _ => self.fail(
                 "only a named function or a constructor can be called; there are no function \
                  values until closures land",
@@ -631,6 +733,173 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
         }
         Some(self.be.unit_value())
+    }
+
+    /// Allocates the closure object for a lambda expression.
+    ///
+    /// Field 0 holds the lifted function's address and the captures follow, all
+    /// under the ordinary object header — so a closure is dup'ed, dropped and
+    /// counted by exactly the machinery every other heap value already uses.
+    fn make_closure(
+        &mut self,
+        id: ExprId,
+        captures: &[LocalId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let owner = self.owner.clone();
+        let Some(site) = self.be.closure_at(&owner, id).cloned() else {
+            return self.fail("this closure was never declared, which is a compiler bug", range);
+        };
+        let Some(tag) = self.be.closure_tag(&owner, id) else {
+            return self.fail("this closure has no tag, which is a compiler bug", range);
+        };
+        let Some(function) = self.be.definition(&site.symbol) else {
+            return self.fail("this closure has no lifted function, which is a compiler bug", range);
+        };
+
+        let fields = CLOSURE_CAPTURE_BASE + captures.len();
+        let alloc = self.be.rt.alloc;
+        let object = self
+            .be
+            .builder
+            .build_call(
+                alloc,
+                &[
+                    self.be.ctx.i64_type().const_int(FIELD_WORD * fields as u64, false).into(),
+                    self.be.ctx.i32_type().const_int(tag as u64, false).into(),
+                ],
+                "closure.obj",
+            )
+            .expect("allocating a closure")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_alloc returns a pointer")
+            .into_pointer_value();
+
+        let code = function.as_global_value().as_pointer_value();
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, 0);
+        self.be.builder.build_store(slot, code).expect("storing a closure's code pointer");
+
+        for (index, (local, ty)) in site.captures.iter().enumerate() {
+            let Some(from) = self.slots.get(local).copied() else { continue };
+            let Some(llvm_ty) = self.be.llvm_type(ty) else { continue };
+            let value = self
+                .be
+                .builder
+                .build_load(llvm_ty, from, "capture")
+                .expect("reading a captured local");
+            // The closure outlives this expression and now holds its own
+            // reference. This is the one place a capture is counted; the
+            // closure's drop glue is the matching release.
+            if is_boxed(ty) {
+                self.dup(value);
+            }
+            self.store_field(object, index + CLOSURE_CAPTURE_BASE, value, ty);
+        }
+
+        Some(object.into())
+    }
+
+    /// Wraps a named function in a closure object so it can be passed along.
+    fn function_value(&mut self, symbol: &str, range: TextRange) -> Flow<'ctx> {
+        let Some(thunk) = self.be.thunk(symbol) else {
+            return self.fail(
+                format!("`{symbol}` has a signature the backend cannot represent"),
+                range,
+            );
+        };
+
+        let alloc = self.be.rt.alloc;
+        let object = self
+            .be
+            .builder
+            .build_call(
+                alloc,
+                &[
+                    self.be.ctx.i64_type().const_int(FIELD_WORD, false).into(),
+                    // Any tag: an adapter captures nothing, so the shared
+                    // closure `drop_fields` has no case for it and the default
+                    // arm — which releases nothing — is the correct one.
+                    self.be.ctx.i32_type().const_int(CLOSURE_ADAPTER_TAG, false).into(),
+                ],
+                "fnval.obj",
+            )
+            .expect("allocating a function value")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_alloc returns a pointer")
+            .into_pointer_value();
+
+        let code = thunk.as_global_value().as_pointer_value();
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, 0);
+        self.be.builder.build_store(slot, code).expect("storing an adapter pointer");
+        Some(object.into())
+    }
+
+    /// Calls a closure value: load its code pointer and call through it.
+    fn call_closure(
+        &mut self,
+        callee: ExprId,
+        params: &[Type],
+        ret: &Type,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let closure = self.expr(callee)?.into_pointer_value();
+
+        if args.len() != params.len() {
+            return self.fail(
+                format!("this call takes {} argument(s), but {} were given", params.len(), args.len()),
+                range,
+            );
+        }
+        let mut values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![closure.into()];
+        for arg in args {
+            values.push(self.expr(*arg)?.into());
+        }
+
+        let ptr = self.be.ctx.ptr_type(AddressSpace::default());
+        let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = vec![ptr.into()];
+        for param in params {
+            let Some(ty) = self.be.llvm_type(param) else {
+                return self.fail("a closure parameter has no machine type", range);
+            };
+            param_types.push(ty.into());
+        }
+        let fn_type = match ret {
+            Type::Unit => self.be.ctx.void_type().fn_type(&param_types, false),
+            other => match self.be.llvm_type(other) {
+                Some(ty) => ty.fn_type(&param_types, false),
+                None => return self.fail("a closure's result has no machine type", range),
+            },
+        };
+
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, closure, 0);
+        let code = self
+            .be
+            .builder
+            .build_load(ptr, slot, "closure.code")
+            .expect("loading a closure's code pointer")
+            .into_pointer_value();
+
+        let call = self
+            .be
+            .builder
+            .build_indirect_call(fn_type, code, &values, "closure.call")
+            .expect("calling a closure");
+
+        let result = match ret {
+            Type::Unit => self.be.unit_value(),
+            _ => call.try_as_basic_value().basic().unwrap_or_else(|| self.be.unit_value()),
+        };
+
+        // The call site owns a reference to the closure: reading a local dup'ed
+        // it, and a lambda written in place was born owned. The callee only
+        // borrows it — a lifted body reads its captures without taking a
+        // reference — so the release belongs here, after the call.
+        let callee_ty = self.types.of(callee).clone();
+        self.drop(closure.into(), &callee_ty);
+        Some(result)
     }
 
     fn call_named(&mut self, name: &str, args: &[ExprId], range: TextRange) -> Flow<'ctx> {

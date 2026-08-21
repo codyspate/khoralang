@@ -187,6 +187,20 @@ pub enum Expr {
     Return(Option<ExprId>),
     List(Vec<ExprId>),
     Tuple(Vec<ExprId>),
+    /// `(x) => x + 1`.
+    ///
+    /// The body lives in the *same* arena as the enclosing function, which is
+    /// what lets a captured local keep its identity: `captures` names locals
+    /// declared outside the lambda, and the type map and reference-counting
+    /// plan cover the lambda's expressions without a second pass over a second
+    /// body.
+    Lambda {
+        params: Vec<PatId>,
+        body: ExprId,
+        /// Locals from an enclosing scope that the body reads, in first-use
+        /// order. Captured **by value**: the closure takes its own reference.
+        captures: Vec<LocalId>,
+    },
     Unit,
 }
 
@@ -321,7 +335,13 @@ fn methods(
 }
 
 fn lower_function(map: &crate::ItemMap, decl: &ast::FnDecl, block: &ast::Block) -> Body {
-    let mut ctx = Ctx { body: Body::default(), scopes: vec![Vec::new()], map, loop_depth: 0 };
+    let mut ctx = Ctx {
+        body: Body::default(),
+        scopes: vec![Vec::new()],
+        map,
+        loop_depth: 0,
+        lambdas: Vec::new(),
+    };
 
     if let Some(params) = decl.params() {
         for param in params.params() {
@@ -348,6 +368,10 @@ struct Ctx<'a> {
     scopes: Vec<Vec<(String, LocalId)>>,
     map: &'a crate::ItemMap,
     loop_depth: u32,
+    /// One entry per lambda currently being lowered, holding the number of
+    /// locals that existed when it started. A local below the innermost mark
+    /// belongs to an enclosing scope, which is exactly what "captured" means.
+    lambdas: Vec<usize>,
 }
 
 impl<'a> Ctx<'a> {
@@ -597,7 +621,7 @@ impl<'a> Ctx<'a> {
             }
             // Outside the phase 2 subset. Named individually so a later phase
             // can find every site.
-            ast::Expr::Lambda(_) => self.unsupported("closures", range),
+            ast::Expr::Lambda(e) => self.lower_lambda(e, range),
             ast::Expr::Record(_) => self.unsupported("record literals", range),
             ast::Expr::Raise(_) => self.unsupported("`raise`", range),
             ast::Expr::Try(_) => self.unsupported("`!`", range),
@@ -672,9 +696,87 @@ impl<'a> Ctx<'a> {
         self.add_expr(Expr::Unresolved(segments.join("::")), range)
     }
 
+    /// `(a, b) => body`.
+    ///
+    /// Captures are found by scanning the expressions the body created rather
+    /// than by walking its tree. Lowering is depth-first and the arena is
+    /// append-only, so every expression belonging to this lambda — including
+    /// ones inside a lambda nested in it — sits above the mark taken here. That
+    /// makes nested capture fall out for free: an inner lambda's free variable
+    /// is still free in the outer one, and one scan finds both.
+    fn lower_lambda(&mut self, e: &ast::LambdaExpr, range: TextRange) -> ExprId {
+        let local_mark = self.body.locals.len();
+        let expr_mark = self.body.exprs.len();
+
+        self.scopes.push(Vec::new());
+        self.lambdas.push(local_mark);
+
+        let params: Vec<PatId> = e
+            .params()
+            .map(|list| {
+                list.params()
+                    .map(|p| {
+                        let range = p.syntax().text_range();
+                        match p.name().and_then(|n| n.ident()) {
+                            Some(name) => {
+                                let local = self.declare(name, false, range);
+                                self.add_pat(Pat::Bind(local))
+                            }
+                            None => self.add_pat(Pat::Wildcard),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // A lambda is its own function as far as `return` and `break` are
+        // concerned: `return` leaves the lambda, and a `break` inside one
+        // cannot target a loop outside it.
+        let outer_loops = std::mem::take(&mut self.loop_depth);
+        let body = match e.body() {
+            Some(b) => self.lower_expr(&b),
+            None => self.add_expr(Expr::Missing, range),
+        };
+        self.loop_depth = outer_loops;
+
+        self.lambdas.pop();
+        self.scopes.pop();
+
+        let mut captures: Vec<LocalId> = Vec::new();
+        for expr in &self.body.exprs[expr_mark..] {
+            if let Expr::Local(local) = expr {
+                if local.index() < local_mark && !captures.contains(local) {
+                    captures.push(*local);
+                }
+            }
+        }
+
+        self.add_expr(Expr::Lambda { params, body, captures }, range)
+    }
+
+    /// Whether `local` belongs to a scope outside the lambda being lowered.
+    fn is_captured(&self, local: LocalId) -> bool {
+        self.lambdas.last().is_some_and(|mark| local.index() < *mark)
+    }
+
     fn check_assignable(&mut self, target: ExprId, range: TextRange) {
         match self.body.exprs[target.index()] {
             Expr::Local(local) => {
+                // A capture is a copy, so writing to it would change the
+                // closure's own copy and nothing else — silently, which is the
+                // worst way for it to behave. Saying so is better than either
+                // lying or quietly promoting the capture to a shared cell.
+                if self.is_captured(local) {
+                    let name = self.body.locals[local.index()].name.clone();
+                    self.error(
+                        format!(
+                            "cannot assign to `{name}` inside a closure: it is captured by \
+                             value, so the assignment would not be visible outside"
+                        ),
+                        range,
+                    );
+                    return;
+                }
                 let local = &self.body.locals[local.index()];
                 if !local.is_mut {
                     let name = local.name.clone();
