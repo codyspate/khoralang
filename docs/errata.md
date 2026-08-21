@@ -370,3 +370,49 @@ the corrected rule is meant to catch:
   audiences at once — exactly what the rule protects, and what focusing on
   spelling caused to be missed. Now implemented; see
   `docs/design/keywords.md`.
+
+## 22. Two semantics had been decided by implementation rather than by decision
+
+An outside design review made one central point: the unresolved interactions —
+closures, handlers, cancellation, reference counting, threads and foreign code —
+matter more than any syntax question. That is right, and it converged
+independently on D1, which this roadmap already called its largest unknown.
+
+Roughly a third of the review asked for things already decided and written down:
+effects inferred on private functions and required on exported ones
+(`docs/design/effects.md`), higher kinds with no notation of their own
+(`docs/design/typeclasses.md`), and capabilities as distinct from enforceable
+sandbox permissions (D4). Those needed no change.
+
+What it surfaced that was real is narrower and sharper than the list itself, and
+it is a specific failure mode rather than a set of gaps: **two semantics had
+already been settled by writing code, with no decision recording the choice.**
+
+- **Reference counts are non-atomic.** `khora-rt` says so deliberately, in a
+  module comment. A5 promises fibers across cores. Nothing anywhere reconciled
+  the two, and every `dup` and `drop` already emitted assumes the
+  single-threaded reading. Now D10.
+- **Cycles are impossible, and nobody knew.** ADTs build bottom-up, closures
+  capture by value, assignment rebinds rather than mutates, and a `let`
+  initialiser cannot see itself — so the heap graph is a DAG and Perceus is
+  currently *complete*. That is a real guarantee that had never been stated, and
+  it ends the moment mutable fields or recursive closures land. Now D11, with
+  the invariant written down in `docs/design/memory.md` while it is still true.
+
+Two smaller corrections came out of the same pass. A6's rationale implied that
+sharing LLVM with Rust buys interoperability; it does not, and the rationale now
+says so, deferring the actual cost to D8 where it belongs. And nothing owned
+compatibility guarantees — no editions, no ABI policy, no versioning rules —
+which is exactly the "deferred without a destination" pattern entry 20 named.
+Now D12.
+
+One design answer fell out of writing it up. A recursive closure appears to need
+to capture itself, which is a cycle. It does not: a lifted lambda already
+receives its own closure object as its first argument, so self-recursion can go
+through that parameter with no capture, no refcount traffic and no cycle. The
+DAG invariant survives recursive closures entirely. Mutual recursion between two
+closures still needs a cycle and is a case for named functions.
+
+The general lesson is the same one entry 19 taught in a different key: a choice
+made by an implementation is still a choice, and one nobody wrote down is one
+nobody can revisit.
