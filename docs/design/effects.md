@@ -33,7 +33,7 @@ which is exactly what a capability already was under the monadic design — so t
 dependency-injection model carries over unchanged.
 
 ```
-pub effect Ledger {
+export effect Ledger {
   get_history:  String -> List<Txn> raises DbError,
   flag_account: (String, RiskLevel) -> () raises DbError,
 }
@@ -44,7 +44,7 @@ pub effect Ledger {
 Two optional clauses, in this order, between the return type and the body:
 
 ```
-pub fn analyze(account_id: String) -> Report
+export fn analyze(account_id: String) -> Report
   with { ledger: Ledger, ai: Classifier }
   raises DbError + ModelError
 {
@@ -64,7 +64,7 @@ pub fn analyze(account_id: String) -> Report
   body — there is no `ask`.
 - `raises …` is the error row, an open union.
 
-Both are **required on `pub` functions and inferred on private ones**. Requiring
+Both are **required on `export` functions and inferred on private ones**. Requiring
 them on the public surface stops a `print` buried three calls deep from silently
 changing an API; inferring them privately keeps the ceremony off everyday code.
 §6.5's capability inlay hints show the inferred row without anyone typing it.
@@ -78,7 +78,7 @@ capabilities the caller has.
 appear wherever an expression can.
 
 ```
-pub fn validate(txn: Txn) -> () raises ValidationError {
+export fn validate(txn: Txn) -> () raises ValidationError {
   if txn.amount < 0 {
     raise ValidationError::NegativeAmount(txn.amount);
   }
@@ -123,7 +123,7 @@ where postfix would force parentheses around everything and push the injection
 far from what it feeds.
 
 ```
-pub fn main() {
+export fn main() {
   with { ledger: live_ledger, ai: live_classifier, scope: Scope::root } {
     Router::new()
     |> Router::post("/analyze/:id", handle)
@@ -140,7 +140,7 @@ expression and an `unsafe` block.
 `catch` handles part of the error row and subtracts exactly what it handled:
 
 ```
-pub fn analyze_or_defer(id: String) -> Report
+export fn analyze_or_defer(id: String) -> Report
   with { ledger: Ledger, ai: Classifier }
   raises DbError
 {
@@ -159,7 +159,7 @@ Function types carry effect rows, so higher-order functions are polymorphic in
 their argument's effects:
 
 ```
-pub fn map<A, B, 'e, 'r>(xs: List<A>, f: A -> B with 'e raises 'r) -> List<B>
+export fn map<A, B, 'e, 'r>(xs: List<A>, f: A -> B with 'e raises 'r) -> List<B>
   with 'e
   raises 'r;
 ```
@@ -177,13 +177,13 @@ of Effect's `Layer<RIn, ROut>`: a service built on top of other services.
 `Handler<E>` is the type; `handler for E { … }` constructs one.
 
 ```
-pub effect Db {
+export effect Db {
   query: (String, List<Value>) -> List<Row> raises DbError,
   exec:  (String, List<Value>) -> ()        raises DbError,
 }
 
 // Needs Config to find the connection string and Scope to own the pool.
-pub fn postgres_db() -> Handler<Db>
+export fn postgres_db() -> Handler<Db>
   with { config: Config, scope: Scope }
   raises ConfigError
 {
@@ -200,7 +200,7 @@ pub fn postgres_db() -> Handler<Db>
 }
 
 // Ledger is built on Db, and says so.
-pub fn sql_ledger() -> Handler<Ledger> with { db: Db } {
+export fn sql_ledger() -> Handler<Ledger> with { db: Db } {
   handler for Ledger {
     get_history: fn id =>
       db.query("select * from txn where account = $1", [id])!
@@ -217,7 +217,7 @@ Each binding may use the ones above it, exactly like a `let` chain. This is what
 keeps composition flat instead of nesting one `with` per layer:
 
 ```
-pub fn main() {
+export fn main() {
   with {
     config: env_config(),
     scope:  Scope::root,
@@ -243,7 +243,7 @@ build order is the order you read.
 A context is just a row, so it can be named and reused:
 
 ```
-pub context Production {
+export context Production {
   config: env_config(),
   scope:  Scope::root,
   db:     postgres_db()!,
@@ -251,7 +251,7 @@ pub context Production {
   ai:     openai_classifier()!,
 }
 
-pub fn main() {
+export fn main() {
   with Production {
     Router::new() |> Router::post("/analyze/:id", handle) |> Router::listen(8080)
   }

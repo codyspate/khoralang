@@ -220,10 +220,10 @@ fn collect_decl(decl: &ast::Decl, map: &mut ItemMap) {
                     }
                 }
             }
-            (t.name(), ItemKind::Type, t.is_pub(), t.syntax().text_range())
+            (t.name(), ItemKind::Type, t.is_exported(), t.syntax().text_range())
         }
         ast::Decl::Trait(t) => {
-            (t.name(), ItemKind::Trait, t.is_pub(), t.syntax().text_range())
+            (t.name(), ItemKind::Trait, t.is_exported(), t.syntax().text_range())
         }
         // An impl has no name of its own: it is found through the trait and the
         // type it is written for, never referred to directly. Recording it as
@@ -231,12 +231,12 @@ fn collect_decl(decl: &ast::Decl, map: &mut ItemMap) {
         // spurious duplicate-name error.
         ast::Decl::Impl(_) => return,
         ast::Decl::Effect(e) => {
-            (e.name(), ItemKind::Effect, e.is_pub(), e.syntax().text_range())
+            (e.name(), ItemKind::Effect, e.is_exported(), e.syntax().text_range())
         }
         ast::Decl::Context(c) => {
-            (c.name(), ItemKind::Context, c.is_pub(), c.syntax().text_range())
+            (c.name(), ItemKind::Context, c.is_exported(), c.syntax().text_range())
         }
-        ast::Decl::Fn(f) => (f.name(), ItemKind::Function, f.is_pub(), f.syntax().text_range()),
+        ast::Decl::Fn(f) => (f.name(), ItemKind::Function, f.is_exported(), f.syntax().text_range()),
         ast::Decl::Let(l) => {
             let name = match l.pat() {
                 Some(ast::Pat::Ident(p)) => p.name(),

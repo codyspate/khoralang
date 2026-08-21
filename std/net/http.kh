@@ -6,42 +6,42 @@ import std::core::{Never, Scope};
 // reconstructed from how the reference application uses them, and are marked
 // provisional in `docs/errata.md`.
 
-pub type Method =
+export type Method =
   | Get
   | Post
   | Put
   | Patch
   | Delete;
 
-pub type Params;
-pub type Json;
+export type Params;
+export type Json;
 
-pub type Request = {
+export type Request = {
   method: Method,
   path: String,
   params: Params,
   body: String,
 };
 
-pub type Response;
+export type Response;
 
-pub type HttpError =
+export type HttpError =
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
 
 /// A router carries the capabilities its handlers need, so mounting a route
 /// that talks to the database widens the router's own requirement row.
-pub type Router<- R, + E>;
+export type Router<- R, + E>;
 
-pub fn new() -> Router<{}, Never>;
+export fn new() -> Router<{}, Never>;
 
-pub fn post<'r1, 'r2, 'e1, 'e2>(
+export fn post<'r1, 'r2, 'e1, 'e2>(
   router: Router<'r1, 'e1>,
   route: String,
   handler: Request -> Response with 'r2 raises 'e2
 ) -> Router<{ 'r1 | 'r2 }, 'e1 + 'e2>;
 
-pub fn get<'r1, 'r2, 'e1, 'e2>(
+export fn get<'r1, 'r2, 'e1, 'e2>(
   router: Router<'r1, 'e1>,
   route: String,
   handler: Request -> Response with 'r2 raises 'e2
@@ -49,6 +49,6 @@ pub fn get<'r1, 'r2, 'e1, 'e2>(
 
 /// Binding a socket is a scoped resource: the listener is released when the
 /// enclosing region exits, including under interruption.
-pub fn listen<'r, 'e>(router: Router<'r, 'e>, port: Int) -> ()
+export fn listen<'r, 'e>(router: Router<'r, 'e>, port: Int) -> ()
   with { 'r | scope: Scope }
   raises 'e + HttpError;

@@ -4,13 +4,13 @@ module demo::main;
 // generation recognises `print` by name and lowers it to the runtime.
 fn print(value: Int);
 
-pub type Shape =
+export type Shape =
   | Circle(radius: Int)
   | Square(side: Int)
   | Point;
 
 /// Exercises `match` over every constructor, including payload bindings.
-pub fn area(s: Shape) -> Int {
+export fn area(s: Shape) -> Int {
   match s {
     Shape::Circle(r) => 3 * r * r,
     Shape::Square(side) => side * side,
@@ -19,7 +19,7 @@ pub fn area(s: Shape) -> Int {
 }
 
 /// Exercises mutation, a loop and early return.
-pub fn sum_to(n: Int) -> Int {
+export fn sum_to(n: Int) -> Int {
   if n < 0 {
     return 0;
   }
@@ -33,7 +33,7 @@ pub fn sum_to(n: Int) -> Int {
   total
 }
 
-pub fn main() -> Int {
+export fn main() -> Int {
   let c = Shape::Circle(4);
   print(area(c));
   print(sum_to(10));

@@ -9,7 +9,7 @@ settles how much.
 ## 1. They are spelled `trait` and `impl`
 
 ```khora
-pub trait Eq {
+export trait Eq {
   fn eq(self, other: Self) -> Bool;
 }
 
@@ -54,7 +54,7 @@ bound on the trait: `trait Ord: Eq`.
 A trait implemented for a type *constructor* refers to `Self<A>`:
 
 ```khora
-pub trait Functor {
+export trait Functor {
   fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;
 }
 
@@ -82,7 +82,7 @@ to state something the compiler can work out.
 ## 3. Associated types
 
 ```khora
-pub trait Iterator {
+export trait Iterator {
   type Item;
   fn next(self) -> Option<Self::Item>;
 }

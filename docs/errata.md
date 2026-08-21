@@ -58,8 +58,8 @@ bindings with a `Layer<...>` annotation. `LayerDecl` is dropped; layers are
 ## 5. Opaque type and signature-only declarations have no production
 
 §1.2 requires `TypeDecl` to have `= TypeDef` and `FunctionDecl` to have
-`= BlockExpr`. §3 relies on neither: `pub type Effect<+A, -R, +E>;` declares an
-abstract type, and `pub fn succeed<A>(value: A) -> Effect<A, {}, Never>;`
+`= BlockExpr`. §3 relies on neither: `export type Effect<+A, -R, +E>;` declares an
+abstract type, and `export fn succeed<A>(value: A) -> Effect<A, {}, Never>;`
 declares a signature with no body. Both right-hand sides are optional in the
 implemented grammar.
 

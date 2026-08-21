@@ -140,13 +140,13 @@ fn f() { if ready { 1 } else { 2 } }
 #[test]
 fn function_bodies_take_no_equals_sign() {
     let defined = parse("module m;
-pub fn f() -> Int { 1 }
+export fn f() -> Int { 1 }
 ");
     assert!(defined.errors().is_empty(), "{:?}", defined.errors());
 
     // A signature with no body still ends in a semicolon.
     let declared = parse("module m;
-pub fn f() -> Int;
+export fn f() -> Int;
 ");
     assert!(declared.errors().is_empty(), "{:?}", declared.errors());
 }
@@ -155,7 +155,7 @@ pub fn f() -> Int;
 #[test]
 fn the_old_equals_form_gets_a_pointed_diagnostic() {
     let parse = parse("module m;
-pub fn f() -> Int = { 1 };
+export fn f() -> Int = { 1 };
 ");
     let msgs: Vec<_> = parse.errors().iter().map(|e| e.message.clone()).collect();
     assert!(
@@ -173,7 +173,7 @@ fn match_guard_parses() {
 
 #[test]
 fn variant_declaration_parses() {
-    let src = "module m;\npub type RiskLevel =\n  | Low\n  | Moderate(reason: String);\n";
+    let src = "module m;\nexport type RiskLevel =\n  | Low\n  | Moderate(reason: String);\n";
     let dump = parse(src).debug_tree();
     assert_eq!(dump.matches("VARIANT_CASE").count(), 2, "{dump}");
 }
@@ -195,8 +195,8 @@ fn row_tail_accepts_further_labels() {
 
 #[test]
 fn const_generics_and_forall_parse() {
-    let src = "module m;\npub fn embed<const Dim: Int>(s: String) -> Embedding<Dim, F32>;\n\
-               pub type S = forall <Schema> . (Prompt, Schema::Spec) -> Effect<Schema, {}, E>;\n";
+    let src = "module m;\nexport fn embed<const Dim: Int>(s: String) -> Embedding<Dim, F32>;\n\
+               export type S = forall <Schema> . (Prompt, Schema::Spec) -> Effect<Schema, {}, E>;\n";
     let parse = parse(src);
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
     assert!(parse.debug_tree().contains("FORALL_TYPE"));
@@ -204,7 +204,7 @@ fn const_generics_and_forall_parse() {
 
 #[test]
 fn variance_markers_parse() {
-    let parse = parse("module m;\npub type Effect<+A, -R, +E>;\n");
+    let parse = parse("module m;\nexport type Effect<+A, -R, +E>;\n");
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
 }
 
@@ -217,7 +217,7 @@ fn import_forms_parse() {
 #[test]
 fn effect_declaration_parses() {
     let src = "module m;
-pub effect Ledger {
+export effect Ledger {
   get_history: String -> List<Txn> raises DbError,
 }
 ";
@@ -233,7 +233,7 @@ pub effect Ledger {
 #[test]
 fn signature_and_function_type_clauses_coexist() {
     let src = "module m;
-pub fn map<A, B, 'e>(f: A -> B with 'e) -> List<B>
+export fn map<A, B, 'e>(f: A -> B with 'e) -> List<B>
   with 'e
   raises DbError
 { f }
@@ -247,7 +247,7 @@ pub fn map<A, B, 'e>(f: A -> B with 'e) -> List<B>
 #[test]
 fn return_type_does_not_swallow_the_with_clause() {
     let dump = parse("module m;
-pub fn f() -> Report with { ledger: Ledger } { g() }
+export fn f() -> Report with { ledger: Ledger } { g() }
 ").debug_tree();
     // The `with` is the declaration's, so it must not appear inside a FN_TYPE.
     assert!(dump.contains("WITH_CLAUSE"), "{dump}");
@@ -319,7 +319,7 @@ fn f() { with Mock { g() } }
 #[test]
 fn context_test_and_bench_declarations_parse() {
     let src = "module m;
-pub context Mock { ledger: h }
+export context Mock { ledger: h }
 test \"it works\" { assert(1 == 1); }
 bench \"fast\" { f() }
 ";
@@ -344,8 +344,8 @@ fn contextual_keywords_are_usable_as_identifiers() {
     for word in ["handler", "context", "test", "bench"] {
         let src = format!(
             "module m;
-pub type {word} = {{ {word}: Int }};
-pub fn f({word}: {word}) -> {word} {{
+export type {word} = {{ {word}: Int }};
+export fn f({word}: {word}) -> {word} {{
   let {word} = {word};
   g({word}, {{ {word}: 1 }})
 }}
@@ -388,7 +388,7 @@ fn f(handler: Request -> Response) { let context = 1; test(context) }
 #[test]
 fn contextual_keywords_still_parse_as_keywords() {
     let src = "module m;
-pub context Production { ledger: h }
+export context Production { ledger: h }
 let live = handler for Ledger { get_history: fn id => \"x\" };
 test \"it works\" { assert(1 == 1); }
 bench \"fast\" { f() }
@@ -418,7 +418,7 @@ bench \"fast\" { f() }
 #[test]
 fn a_contextual_keyword_can_be_both_in_one_file() {
     let src = "module m;
-pub context Mock { handler: h }
+export context Mock { handler: h }
 test \"the test names a test\" {
   let test = 1;
   let handler = handler for Ledger { get_history: fn id => test };
@@ -582,7 +582,7 @@ fn f() { while ready { step(); } }
 fn an_imperative_function_parses_end_to_end() {
     let src = "module m;
 
-pub fn import_batch(rows: List<Row>) -> Summary
+export fn import_batch(rows: List<Row>) -> Summary
   with { ledger: Ledger }
   raises DbError
 {
@@ -620,7 +620,7 @@ fn unterminated_string_does_not_lose_text() {
 
 #[test]
 fn recovery_keeps_later_declarations() {
-    let src = "module m;\ntype = ;\npub fn good() = { 1 };\n";
+    let src = "module m;\ntype = ;\nexport fn good() = { 1 };\n";
     let parse = parse(src);
     assert!(!parse.errors().is_empty());
     assert_eq!(parse.syntax().text().to_string(), src);

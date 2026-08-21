@@ -140,7 +140,7 @@ fn a_lambda_parameter_follows_the_ordinary_mutability_rule() {
 fn a_closure_can_be_stored_in_an_adt() {
     assert_clean(
         "module m;\n\
-         pub type Handler = | Of(run: (Int) -> Int);\n\
+         export type Handler = | Of(run: (Int) -> Int);\n\
          fn make() -> Handler { Handler::Of(fn x => x + 1) }\n",
     );
 }

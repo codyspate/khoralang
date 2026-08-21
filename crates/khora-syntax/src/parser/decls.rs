@@ -36,7 +36,7 @@ fn declaration(p: &mut Parser<'_>) {
         LET_KW => let_decl(p),
         IDENT if p.at_contextual(CONTEXT_KW) => context_decl(p),
         IDENT if p.at_contextual(TEST_KW) || p.at_contextual(BENCH_KW) => test_decl(p),
-        PUB_KW => match p.nth(1) {
+        EXPORT_KW => match p.nth(1) {
             TYPE_KW => type_decl(p),
             TRAIT_KW => trait_decl(p),
             EFFECT_KW => effect_decl(p),
@@ -44,7 +44,7 @@ fn declaration(p: &mut Parser<'_>) {
             LET_KW => let_decl(p),
             IDENT if p.nth_at_contextual(1, CONTEXT_KW) => context_decl(p),
             _ => p.err_recover(
-                "expected `type`, `trait`, `effect`, `context`, `fn` or `let` after `pub`",
+                "expected `type`, `trait`, `effect`, `context`, `fn` or `let` after `export`",
                 Parser::at_decl_start,
             ),
         },
@@ -109,7 +109,7 @@ fn import_list(p: &mut Parser<'_>) {
 /// internal.
 fn type_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(PUB_KW);
+    p.eat(EXPORT_KW);
     p.bump(TYPE_KW);
     name(p);
     if p.at(LT) {
@@ -134,7 +134,7 @@ fn type_decl(p: &mut Parser<'_>) {
 /// from.
 fn trait_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(PUB_KW);
+    p.eat(EXPORT_KW);
     p.bump(TRAIT_KW);
     name(p);
     if p.at(LT) {
@@ -183,7 +183,7 @@ fn trait_body(p: &mut Parser<'_>) {
         }
         match p.current() {
             TYPE_KW => assoc_type_decl(p),
-            FN_KW | PUB_KW => fn_decl(p),
+            FN_KW | EXPORT_KW => fn_decl(p),
             _ => {
                 p.err_recover("expected `fn` or `type`", |p| {
                     p.at_any(&[R_BRACE, FN_KW, TYPE_KW]) || p.at_decl_start()
@@ -219,7 +219,7 @@ fn assoc_type_decl(p: &mut Parser<'_>) {
 /// the dependency-injection model survived decision A8 unchanged.
 fn effect_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(PUB_KW);
+    p.eat(EXPORT_KW);
     p.bump(EFFECT_KW);
     name(p);
     if p.at(LT) {
@@ -247,7 +247,7 @@ fn effect_decl(p: &mut Parser<'_>) {
 /// one `with` per layer.
 fn context_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(PUB_KW);
+    p.eat(EXPORT_KW);
     p.bump_contextual(CONTEXT_KW);
     name(p);
     if p.expect(L_BRACE) {
@@ -278,7 +278,7 @@ fn context_decl(p: &mut Parser<'_>) {
 /// `std` describes intrinsics and FFI entry points.
 fn fn_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(PUB_KW);
+    p.eat(EXPORT_KW);
     p.bump(FN_KW);
     name(p);
     if p.at(LT) {
@@ -366,7 +366,7 @@ fn param(p: &mut Parser<'_>) {
 /// `let mut? Pattern (":" Type)? "=" Expr ";"`
 pub(super) fn let_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(PUB_KW);
+    p.eat(EXPORT_KW);
     p.bump(LET_KW);
     p.eat(MUT_KW);
     pattern(p);

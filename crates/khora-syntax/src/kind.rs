@@ -38,7 +38,7 @@ pub enum SyntaxKind {
     MATCH_KW,
     LET_KW,
     MUT_KW,
-    PUB_KW,
+    EXPORT_KW,
     AS_KW,
     IF_KW,
     ELSE_KW,
@@ -241,7 +241,7 @@ impl SyntaxKind {
     pub fn is_decl_start(self) -> bool {
         matches!(
             self,
-            PUB_KW
+            EXPORT_KW
                 | TYPE_KW
                 | TRAIT_KW
                 | IMPL_KW
@@ -320,7 +320,7 @@ keywords! {
     "match" => MATCH_KW,
     "let" => LET_KW,
     "mut" => MUT_KW,
-    "pub" => PUB_KW,
+    "export" => EXPORT_KW,
     "as" => AS_KW,
     "if" => IF_KW,
     "else" => ELSE_KW,

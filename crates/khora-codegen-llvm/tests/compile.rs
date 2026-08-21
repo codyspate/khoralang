@@ -295,12 +295,12 @@ fn an_adt_is_built_and_matched() {
         "module t;
 fn print(value: Int);
 
-pub type Shape =
+export type Shape =
   | Circle(radius: Int)
   | Square(side: Int)
   | Point;
 
-pub fn area(s: Shape) -> Int {
+export fn area(s: Shape) -> Int {
   match s {
     Shape::Circle(r) => 3 * r * r,
     Shape::Square(side) => side * side,
@@ -329,7 +329,7 @@ fn match_guards_fall_through() {
         "module t;
 fn print(value: Int);
 
-pub type Reading = | Sample(value: Int) | Missing;
+export type Reading = | Sample(value: Int) | Missing;
 
 fn describe(r: Reading) -> Int {
   match r {
@@ -401,7 +401,7 @@ fn khora_print_int(value: Int);
 fn khora_live_count() -> Int;
 fn print(value: String);
 
-pub type List = | Nil | Cons(head: Int, tail: List);
+export type List = | Nil | Cons(head: Int, tail: List);
 
 fn build(n: Int) -> List {
   if n == 0 {
@@ -480,7 +480,7 @@ fn the_live_count_is_actually_observable() {
         "module t;
 fn khora_live_count() -> Int;
 
-pub type Box = | Wrap(value: Int);
+export type Box = | Wrap(value: Int);
 
 /// The block releases what it declared *after* its tail is evaluated, so the
 /// count is read while `held` is still alive.
@@ -515,7 +515,7 @@ fn nested_constructor_patterns_match() {
         "module t;
 fn print(value: Int);
 
-pub type List = | Nil | Cons(head: Int, tail: List);
+export type List = | Nil | Cons(head: Int, tail: List);
 
 fn second(l: List) -> Int {
   match l {
@@ -571,7 +571,7 @@ fn a_generic_function_over_a_generic_type_runs() {
         "module t;
 fn print(value: Int);
 
-pub type Option<A> = | Some(value: A) | None;
+export type Option<A> = | Some(value: A) | None;
 
 fn unwrap_or<A>(o: Option<A>, fallback: A) -> A {
   match o {
@@ -778,7 +778,7 @@ fn a_parameterised_impl_is_selected_by_the_receiver() {
         "module t;
 fn print(value: Int);
 
-pub type Box<A> = | Of(value: A);
+export type Box<A> = | Of(value: A);
 
 trait Unwrap { fn get(self) -> Int; }
 
@@ -926,7 +926,7 @@ fn closures_and_their_captures_are_freed() {
 fn khora_print_int(value: Int);
 fn khora_live_count() -> Int;
 
-pub type List = | Nil | Cons(head: Int, tail: List);
+export type List = | Nil | Cons(head: Int, tail: List);
 
 fn build(n: Int) -> List {
   if n == 0 { List::Nil } else { List::Cons(n, build(n - 1)) }

@@ -25,7 +25,7 @@ fn assert_reports(text: &str, needle: &str) {
 }
 
 const SHOW: &str = "module m;\n\
-                    pub trait Show { fn show(self) -> String; }\n\
+                    export trait Show { fn show(self) -> String; }\n\
                     impl Show for Int { fn show(self) -> String { \"i\" } }\n";
 
 // --- resolution -----------------------------------------------------------
@@ -62,8 +62,8 @@ fn an_unbounded_parameter_is_told_to_add_a_bound() {
 fn a_bound_that_does_not_cover_the_method_names_the_bounds_it_has() {
     assert_reports(
         "module m;\n\
-         pub trait Show { fn show(self) -> String; }\n\
-         pub trait Size { fn size(self) -> Int; }\n\
+         export trait Show { fn show(self) -> String; }\n\
+         export trait Size { fn size(self) -> Int; }\n\
          fn f<T: Size>(x: T) -> String { x.show() }\n",
         "no method `show` on `T`, whose bounds are `Size`",
     );
@@ -73,8 +73,8 @@ fn a_bound_that_does_not_cover_the_method_names_the_bounds_it_has() {
 fn a_supertrait_bound_provides_its_parents_methods() {
     assert_clean(
         "module m;\n\
-         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
-         pub trait Ord: Eq { fn cmp(self, other: Self) -> Int; }\n\
+         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         export trait Ord: Eq { fn cmp(self, other: Self) -> Int; }\n\
          fn f<T: Ord>(a: T, b: T) -> Bool { a.eq(b) }\n",
     );
 }
@@ -83,7 +83,7 @@ fn a_supertrait_bound_provides_its_parents_methods() {
 fn a_method_call_checks_its_arguments() {
     assert_reports(
         "module m;\n\
-         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
          impl Eq for Int { fn eq(self, other: Int) -> Bool { true } }\n\
          fn f() -> Bool { 1.eq(true) }\n",
         "this argument",
@@ -138,8 +138,8 @@ fn a_bound_the_caller_does_not_have_is_rejected() {
 fn a_supertrait_discharges_a_bound_on_its_parent() {
     assert_clean(
         "module m;\n\
-         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
-         pub trait Ord: Eq { fn cmp(self, other: Self) -> Int; }\n\
+         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         export trait Ord: Eq { fn cmp(self, other: Self) -> Int; }\n\
          fn needs_eq<T: Eq>(a: T, b: T) -> Bool { a.eq(b) }\n\
          fn has_ord<T: Ord>(a: T, b: T) -> Bool { needs_eq(a, b) }\n",
     );
@@ -159,8 +159,8 @@ fn two_impls_of_one_trait_for_one_type_are_rejected() {
 fn one_type_may_implement_several_traits() {
     assert_clean(
         "module m;\n\
-         pub trait Show { fn show(self) -> String; }\n\
-         pub trait Size { fn size(self) -> Int; }\n\
+         export trait Show { fn show(self) -> String; }\n\
+         export trait Size { fn size(self) -> Int; }\n\
          impl Show for Int { fn show(self) -> String { \"i\" } }\n\
          impl Size for Int { fn size(self) -> Int { 8 } }\n",
     );
@@ -175,7 +175,7 @@ fn an_impl_of_an_unknown_trait_is_rejected() {
 fn an_impl_missing_a_function_is_rejected() {
     assert_reports(
         "module m;\n\
-         pub trait Show { fn show(self) -> String; }\n\
+         export trait Show { fn show(self) -> String; }\n\
          impl Show for Int { }\n",
         "missing `show` from `Show`",
     );
@@ -185,7 +185,7 @@ fn an_impl_missing_a_function_is_rejected() {
 fn an_impl_with_a_function_the_trait_never_declared_is_rejected() {
     assert_reports(
         "module m;\n\
-         pub trait Show { fn show(self) -> String; }\n\
+         export trait Show { fn show(self) -> String; }\n\
          impl Show for Int { fn show(self) -> String { \"i\" } fn extra(self) -> Int { 1 } }\n",
         "`Show` has no function named `extra`",
     );
@@ -196,7 +196,7 @@ fn an_impl_with_a_function_the_trait_never_declared_is_rejected() {
 fn a_default_body_makes_a_function_optional() {
     assert_clean(
         "module m;\n\
-         pub trait Show {\n\
+         export trait Show {\n\
            fn show(self) -> String;\n\
            fn label(self) -> String { \"thing\" }\n\
          }\n\
@@ -210,7 +210,7 @@ fn a_default_body_makes_a_function_optional() {
 fn an_impl_must_supply_every_associated_type() {
     assert_reports(
         "module m;\n\
-         pub trait Iterator { type Item; fn next(self) -> Int; }\n\
+         export trait Iterator { type Item; fn next(self) -> Int; }\n\
          impl Iterator for Int { fn next(self) -> Int { 1 } }\n",
         "missing the associated type `Item`",
     );
@@ -220,7 +220,7 @@ fn an_impl_must_supply_every_associated_type() {
 fn an_associated_type_the_trait_never_declared_is_rejected() {
     assert_reports(
         "module m;\n\
-         pub trait Show { fn show(self) -> String; }\n\
+         export trait Show { fn show(self) -> String; }\n\
          impl Show for Int { type Item = Int; fn show(self) -> String { \"i\" } }\n",
         "`Show` has no associated type named `Item`",
     );
@@ -234,7 +234,7 @@ fn an_associated_type_the_trait_never_declared_is_rejected() {
 fn a_higher_kinded_trait_rejects_a_plain_type() {
     assert_reports(
         "module m;\n\
-         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl Functor for Int { }\n",
         "kind `* -> *`",
     );
@@ -244,8 +244,8 @@ fn a_higher_kinded_trait_rejects_a_plain_type() {
 fn a_plain_trait_rejects_a_constructor() {
     assert_reports(
         "module m;\n\
-         pub type Option<A> = | Some(value: A) | None;\n\
-         pub trait Show { fn show(self) -> String; }\n\
+         export type Option<A> = | Some(value: A) | None;\n\
+         export trait Show { fn show(self) -> String; }\n\
          impl Show for Option { }\n",
         "kind `*`",
     );
@@ -257,8 +257,8 @@ fn a_plain_trait_rejects_a_constructor() {
 fn applying_a_constructor_too_far_suggests_the_bare_name() {
     assert_reports(
         "module m;\n\
-         pub type Option<A> = | Some(value: A) | None;\n\
-         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         export type Option<A> = | Some(value: A) | None;\n\
+         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl<A> Functor for Option<A> { }\n",
         "write `impl Functor for Option`",
     );
@@ -268,8 +268,8 @@ fn applying_a_constructor_too_far_suggests_the_bare_name() {
 fn a_higher_kinded_trait_accepts_a_constructor() {
     let found = errors(
         "module m;\n\
-         pub type Option<A> = | Some(value: A) | None;\n\
-         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         export type Option<A> = | Some(value: A) | None;\n\
+         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl Functor for Option {\n\
            fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> { Option::None }\n\
          }\n",
@@ -283,8 +283,8 @@ fn a_higher_kinded_trait_accepts_a_constructor() {
 fn a_const_parameter_gives_a_different_kind() {
     assert_reports(
         "module m;\n\
-         pub type Vector<const N: Int>;\n\
-         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         export type Vector<const N: Int>;\n\
+         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl Functor for Vector { }\n",
         "kind",
     );

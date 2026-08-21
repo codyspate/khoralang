@@ -1,5 +1,5 @@
 error: a function body is a block: write `fn f() { .. }`, not `fn f() = { .. };`
- --> src/main.kh:2:19
+ --> src/main.kh:2:22
   |
-2 | pub fn f() -> Int = { 1 };
-  |                   ^
+2 | export fn f() -> Int = { 1 };
+  |                      ^

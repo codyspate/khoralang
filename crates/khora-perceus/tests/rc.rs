@@ -18,7 +18,7 @@ fn plan(db: &dyn Db, text: &str, function: &str) -> RcPlan {
         .unwrap_or_else(|| panic!("no function `{function}`"))
 }
 
-const ADT: &str = "module m;\npub type R = | A | B(n: Int);\n";
+const ADT: &str = "module m;\nexport type R = | A | B(n: Int);\n";
 
 #[test]
 fn machine_words_are_not_counted() {

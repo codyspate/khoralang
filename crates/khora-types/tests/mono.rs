@@ -81,7 +81,7 @@ fn generic_types_appear_in_the_symbol() {
     let found = symbols(
         &db,
         "module m;\n\
-         pub type Option<A> = | Some(value: A) | None;\n\
+         export type Option<A> = | Some(value: A) | None;\n\
          fn id<A>(x: A) -> A { x }\n\
          fn f(o: Option<Int>) -> Option<Int> { id(o) }\n",
     );
@@ -106,7 +106,7 @@ fn polymorphic_recursion_is_reported_rather_than_hanging() {
     let found = errors(
         &db,
         "module m;\n\
-         pub type Wrap<A> = | Of(value: A);\n\
+         export type Wrap<A> = | Of(value: A);\n\
          fn grow<A>(x: A) -> Int { grow(Wrap::Of(x)) }\n\
          fn main() -> Int { grow(1) }\n",
     );

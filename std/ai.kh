@@ -2,40 +2,40 @@ module std::ai;
 
 import std::core::{Option};
 
-pub type Device =
+export type Device =
   | Cpu
   | Cuda(device_id: Int)
   | Metal
   | Npu;
 
-pub type Scalar;
-pub type Tuple;
-pub type F32;
+export type Scalar;
+export type Tuple;
+export type F32;
 
 // Shape-safe tensor: device, shape tuple, element type.
-pub type Tensor<D: Device, Shape: Tuple, T: Scalar>;
+export type Tensor<D: Device, Shape: Tuple, T: Scalar>;
 
-pub type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
+export type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
 
 // The shared dimension `K` must unify, so a mismatched product is a type error
 // rather than a runtime assertion.
-pub fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(
+export fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(
   a: Tensor<D, (M, K), T>,
   b: Tensor<D, (K, N), T>
 ) -> Tensor<D, (M, N), T>;
 
-pub type Message = {
+export type Message = {
   role: String,
   content: String,
 };
 
-pub type Prompt = {
+export type Prompt = {
   system_instructions: Option<String>,
   messages: List<Message>,
   temperature: Float,
 };
 
-pub type ModelError =
+export type ModelError =
   | ContextLengthExceeded(max_tokens: Int)
   | RateLimited(retry_after_ms: Int)
   | InferenceEngineFailure(msg: String)
@@ -43,13 +43,13 @@ pub type ModelError =
 
 /// Inference is a capability, not a value: a function that classifies text
 /// declares `with { ai: LLMService }`, and the caller decides what serves it.
-pub effect LLMService {
+export effect LLMService {
   complete: Prompt -> String raises ModelError,
   extract: forall <Schema> . (Prompt, Schema::Spec) -> Schema raises ModelError,
   embed: forall <const Dim: Int> . String -> Embedding<Dim, F32> raises ModelError,
 }
 
-pub fn cosine_similarity<const Dim: Int>(
+export fn cosine_similarity<const Dim: Int>(
   a: Embedding<Dim, F32>,
   b: Embedding<Dim, F32>
 ) -> Float;

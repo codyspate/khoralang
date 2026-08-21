@@ -23,7 +23,7 @@ fn assert_reports(text: &str, needle: &str) {
     );
 }
 
-const ADT: &str = "module m;\npub type R = | A | B(n: Int) | C;\n";
+const ADT: &str = "module m;\nexport type R = | A | B(n: Int) | C;\n";
 
 #[test]
 fn a_well_typed_function_is_accepted() {
@@ -189,8 +189,8 @@ fn a_bool_match_needs_both_cases() {
 #[test]
 fn a_fully_covered_nested_match_needs_no_wildcard() {
     let src = "module m;
-               pub type Inner = | X | Y;
-               pub type Outer = | Wrap(i: Inner) | Empty;
+               export type Inner = | X | Y;
+               export type Outer = | Wrap(i: Inner) | Empty;
                fn f(o: Outer) -> Int {
                  match o {
                    Outer::Wrap(Inner::X) => 1,
@@ -205,8 +205,8 @@ fn a_fully_covered_nested_match_needs_no_wildcard() {
 #[test]
 fn an_incomplete_nested_match_is_still_reported() {
     let src = "module m;
-               pub type Inner = | X | Y;
-               pub type Outer = | Wrap(i: Inner) | Empty;
+               export type Inner = | X | Y;
+               export type Outer = | Wrap(i: Inner) | Empty;
                fn f(o: Outer) -> Int {
                  match o {
                    Outer::Wrap(Inner::X) => 1,
@@ -221,7 +221,7 @@ fn an_incomplete_nested_match_is_still_reported() {
 #[test]
 fn a_recursive_type_terminates() {
     let src = "module m;
-               pub type List = | Nil | Cons(head: Int, tail: List);
+               export type List = | Nil | Cons(head: Int, tail: List);
                fn f(l: List) -> Int {
                  match l {
                    List::Nil => 0,

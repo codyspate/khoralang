@@ -141,7 +141,7 @@
         },
         {
           "name": "keyword.declaration.khora",
-          "match": "\\b(module|import|type|trait|impl|effect|fn|let|pub)\\b"
+          "match": "\\b(module|import|type|trait|impl|effect|fn|let|export)\\b"
         },
         {
           "name": "storage.modifier.khora",

@@ -70,9 +70,9 @@ fn formatting_never_loses_a_token() {
 fn preserves_the_token_sequence() {
     let cases = [
         "module m;\nfn f() { let x = 1; x }\n",
-        "module m;\npub fn g(a: Int, b: Int) -> Int { a + b }\n",
+        "module m;\nexport fn g(a: Int, b: Int) -> Int { a + b }\n",
         "module m;\nfn h() { xs |> map(f) |> filter(g) }\n",
-        "module m;\npub effect E { op: String -> Int raises Err }\n",
+        "module m;\nexport effect E { op: String -> Int raises Err }\n",
         "module m;\nfn k() { if a { b } else { c } }\n",
     ];
     for src in cases {

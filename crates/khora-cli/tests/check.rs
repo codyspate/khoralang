@@ -29,7 +29,7 @@ fn check(name: &str, source: &str) -> (bool, String) {
 fn a_correct_program_passes() {
     let (ok, output) = check(
         "good",
-        "module m;\nfn double(x: Int) -> Int { x + x }\npub fn main() -> Int { double(21) }\n",
+        "module m;\nfn double(x: Int) -> Int { x + x }\nexport fn main() -> Int { double(21) }\n",
     );
     assert!(ok, "expected success, got:\n{output}");
     assert!(output.contains("no errors"), "{output}");

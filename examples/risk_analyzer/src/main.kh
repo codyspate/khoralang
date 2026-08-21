@@ -4,31 +4,31 @@ import std::core::{Option, Scope};
 import std::net::http::{Request, Response, Router};
 import std::ai::{LLMService, ModelError, Prompt};
 
-pub type RiskLevel =
+export type RiskLevel =
   | Low
   | Moderate(reason: String)
   | Critical(action_required: String);
 
-pub type AnalysisReport = {
+export type AnalysisReport = {
   account_id: String,
   risk: RiskLevel,
   confidence: Float,
 };
 
-pub type DbError =
+export type DbError =
   | QueryFailed(detail: String)
   | Unavailable;
 
 /// The ledger is a capability. Nothing here says how it is served — that is
 /// the caller's decision, made when a handler is installed.
-pub effect Ledger {
+export effect Ledger {
   get_history: String -> String raises DbError,
   flag_account: (String, RiskLevel) -> () raises DbError,
 }
 
 /// Straight-line code. The `with` clause says what it needs, `raises` says how
 /// it can fail, and `!` marks the points where control can leave.
-pub fn analyze_transaction_risk(account_id: String) -> AnalysisReport
+export fn analyze_transaction_risk(account_id: String) -> AnalysisReport
   with { ai: LLMService, ledger: Ledger }
   raises DbError + ModelError
 {
@@ -54,7 +54,7 @@ pub fn analyze_transaction_risk(account_id: String) -> AnalysisReport
 
 /// Turns model failures into a report, leaving database failures to the caller.
 /// `ModelError` is discharged here and so is absent from the `raises` clause.
-pub fn handle(req: Request) -> Response
+export fn handle(req: Request) -> Response
   with { ai: LLMService, ledger: Ledger }
   raises DbError
 {
@@ -87,13 +87,13 @@ let mock_ai = handler for LLMService {
 
 /// Bindings are sequential, so a handler may use the ones above it. This is
 /// what keeps composition flat instead of nesting one `with` per service.
-pub context Mock {
+export context Mock {
   scope: Scope::root,
   ledger: mock_ledger,
   ai: mock_ai,
 }
 
-pub fn main() {
+export fn main() {
   with Mock {
     Router::new()
       |> Router::post("/analyze/:account_id", handle)

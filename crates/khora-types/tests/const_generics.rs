@@ -29,7 +29,7 @@ fn assert_reports(text: &str, needle: &str) {
 
 /// Shapes are part of the type, so the compiler can see a bad product.
 const MATRIX: &str = "module m;\n\
-                      pub type Matrix<const R: Int, const C: Int>;\n\
+                      export type Matrix<const R: Int, const C: Int>;\n\
                       fn matmul<const M: Int, const K: Int, const N: Int>(\n\
                         a: Matrix<M, K>, b: Matrix<K, N>\n\
                       ) -> Matrix<M, N>;\n";
@@ -72,7 +72,7 @@ fn the_result_shape_follows_from_the_arguments() {
 fn two_shapes_of_the_same_type_are_distinct() {
     assert_reports(
         "module m;\n\
-         pub type Vector<const N: Int>;\n\
+         export type Vector<const N: Int>;\n\
          fn f(v: Vector<3>) -> Vector<4> { v }\n",
         "returns `Vector<4>`, but its body has type `Vector<3>`",
     );
@@ -83,7 +83,7 @@ fn a_const_parameter_is_rigid_inside_the_body() {
     // `N` is chosen by the caller, so the body cannot assume it is 3.
     assert_reports(
         "module m;\n\
-         pub type Vector<const N: Int>;\n\
+         export type Vector<const N: Int>;\n\
          fn to_three<const N: Int>(v: Vector<N>) -> Vector<3> { v }\n",
         "the caller chooses",
     );
@@ -93,7 +93,7 @@ fn a_const_parameter_is_rigid_inside_the_body() {
 fn a_const_generic_function_serves_several_shapes() {
     assert_clean(
         "module m;\n\
-         pub type Vector<const N: Int>;\n\
+         export type Vector<const N: Int>;\n\
          fn id<const N: Int>(v: Vector<N>) -> Vector<N> { v }\n\
          fn a(v: Vector<3>) -> Vector<3> { id(v) }\n\
          fn b(v: Vector<7>) -> Vector<7> { id(v) }\n",
@@ -104,13 +104,13 @@ fn a_const_generic_function_serves_several_shapes() {
 fn a_shape_and_a_type_argument_coexist() {
     assert_clean(
         "module m;\n\
-         pub type Buffer<const N: Int, T>;\n\
+         export type Buffer<const N: Int, T>;\n\
          fn first<const N: Int, T>(b: Buffer<N, T>) -> Buffer<N, T> { b }\n\
          fn f(b: Buffer<8, Int>) -> Buffer<8, Int> { first(b) }\n",
     );
     assert_reports(
         "module m;\n\
-         pub type Buffer<const N: Int, T>;\n\
+         export type Buffer<const N: Int, T>;\n\
          fn f(b: Buffer<8, Int>) -> Buffer<8, Bool> { b }\n",
         "returns `Buffer<8, Bool>`",
     );
@@ -138,7 +138,7 @@ fn an_unsolved_argument_reads_as_an_underscore() {
     let found = errors(
         &db,
         "module m;
-         pub type Vector<const N: Int>;
+         export type Vector<const N: Int>;
          fn id<const N: Int>(v: Vector<N>) -> Vector<N> { v }
          fn f(v: Vector<3>) -> Int { id(v) }
 ",

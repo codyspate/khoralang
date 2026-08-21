@@ -1,7 +1,8 @@
 //! `trait` and `impl` syntax.
 //!
-//! The spelling is Rust's, decided in `docs/design/typeclasses.md`: the concept
-//! is Rust's trait, so it gets Rust's word rather than Haskell's `class`.
+//! The word is chosen in `docs/design/typeclasses.md` against the behaviour it
+//! has to predict: `interface` is the more familiar candidate and is structural
+//! in both Go and TypeScript, while Khora's resolution is nominal.
 
 use khora_syntax::ast::Decl;
 use khora_syntax::parse;
@@ -23,7 +24,7 @@ fn decls(source: &str) -> Vec<Decl> {
 
 #[test]
 fn a_trait_declares_functions() {
-    let out = tree("module m;\npub trait Eq {\n  fn eq(self, other: Self) -> Bool;\n}\n");
+    let out = tree("module m;\nexport trait Eq {\n  fn eq(self, other: Self) -> Bool;\n}\n");
     assert!(out.contains("TRAIT_DECL"), "{out}");
     assert!(out.contains("TRAIT_KW"), "{out}");
     assert!(out.contains("FN_DECL"), "{out}");

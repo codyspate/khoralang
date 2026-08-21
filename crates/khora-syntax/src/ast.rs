@@ -318,8 +318,8 @@ impl NameRef {
 }
 
 impl TypeDecl {
-    pub fn is_pub(&self) -> bool {
-        token(&self.0, PUB_KW).is_some()
+    pub fn is_exported(&self) -> bool {
+        token(&self.0, EXPORT_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
@@ -334,8 +334,8 @@ impl TypeDecl {
 }
 
 impl EffectDecl {
-    pub fn is_pub(&self) -> bool {
-        token(&self.0, PUB_KW).is_some()
+    pub fn is_exported(&self) -> bool {
+        token(&self.0, EXPORT_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
@@ -350,8 +350,8 @@ impl EffectDecl {
 }
 
 impl ContextDecl {
-    pub fn is_pub(&self) -> bool {
-        token(&self.0, PUB_KW).is_some()
+    pub fn is_exported(&self) -> bool {
+        token(&self.0, EXPORT_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
@@ -383,8 +383,8 @@ impl BenchDecl {
 }
 
 impl FnDecl {
-    pub fn is_pub(&self) -> bool {
-        token(&self.0, PUB_KW).is_some()
+    pub fn is_exported(&self) -> bool {
+        token(&self.0, EXPORT_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
@@ -483,8 +483,8 @@ impl TypeBounds {
 }
 
 impl TraitDecl {
-    pub fn is_pub(&self) -> bool {
-        token(&self.0, PUB_KW).is_some()
+    pub fn is_exported(&self) -> bool {
+        token(&self.0, EXPORT_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)

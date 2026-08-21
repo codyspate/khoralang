@@ -65,7 +65,7 @@ fn type_declaration_without_a_name() {
 /// The old `fn f() = { .. };` spelling should name its own fix.
 #[test]
 fn the_removed_equals_form() {
-    assert_snapshot("equals_function_body", &render("module m;\npub fn f() -> Int = { 1 };\n"));
+    assert_snapshot("equals_function_body", &render("module m;\nexport fn f() -> Int = { 1 };\n"));
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn handler_installation_without_a_row() {
 
 #[test]
 fn effect_declaration_missing_its_body() {
-    assert_snapshot("effect_without_body", &render("module m;\npub effect Ledger\n"));
+    assert_snapshot("effect_without_body", &render("module m;\nexport effect Ledger\n"));
 }
 
 #[test]

@@ -18,9 +18,9 @@ Path           ::= Ident ( "::" Ident )* ;
 
 (* --- types ------------------------------------------------------------- *)
 
-TypeDecl       ::= ( "pub" )? "type" Ident ( TypeParams )? ( "=" TypeDef )? ";" ;
+TypeDecl       ::= ( "export" )? "type" Ident ( TypeParams )? ( "=" TypeDef )? ";" ;
 
-TraitDecl      ::= ( "pub" )? "trait" Ident ( TypeParams )?
+TraitDecl      ::= ( "export" )? "trait" Ident ( TypeParams )?
                    ( ":" TypeBounds )? "{" ( TraitItem )* "}" ;
 ImplDecl       ::= "impl" ( TypeParams )? Type "for" Type "{" ( TraitItem )* "}" ;
 TraitItem      ::= AssocTypeDecl | FunctionDecl ;
@@ -30,7 +30,7 @@ TypeDef        ::= VariantType | Type ;
 
 (* An effect is a named set of operations, shaped like a record of functions —
    which is what a capability already was. docs/design/effects.md. *)
-EffectDecl     ::= ( "pub" )? "effect" Ident ( TypeParams )?
+EffectDecl     ::= ( "export" )? "effect" Ident ( TypeParams )?
                    "{" ( Field ( "," Field )* ( "," )? )? "}" ;
 
 TypeParams     ::= "<" TypeParam ( "," TypeParam )* ( "," )? ">" ;
@@ -72,16 +72,16 @@ VariantPayload ::= Field ( "," Field )* ( "," )?       (* named payload       *)
    No `=` before a body, and no `;` after it. `{` introduces a definition and
    `;` declares a signature only, which is how std describes intrinsics. *)
 
-FunctionDecl   ::= ( "pub" )? "fn" Ident ( TypeParams )? ParamList
+FunctionDecl   ::= ( "export" )? "fn" Ident ( TypeParams )? ParamList
                    ( "->" Type )? ( EffectClause )* ( Block | ";" ) ;
 ParamList      ::= "(" ( Param ( "," Param )* ( "," )? )? ")" ;
 Param          ::= ( Ident | "_" ) ( ":" Type )? ;
 
-LetDecl        ::= ( "pub" )? "let" ( "mut" )? Pattern ( ":" Type )? "=" Expr ";" ;
+LetDecl        ::= ( "export" )? "let" ( "mut" )? Pattern ( ":" Type )? "=" Expr ";" ;
 
 (* A named bundle of handlers. Bindings are sequential: each may use the ones
    above it, which keeps service composition flat. *)
-ContextDecl    ::= ( "pub" )? "context" Ident
+ContextDecl    ::= ( "export" )? "context" Ident
                    "{" ( RecordExprField ( "," RecordExprField )* ( "," )? )? "}" ;
 
 TestDecl       ::= ( "test" | "bench" ) StringLiteral Block ;
@@ -178,7 +178,7 @@ Comment        ::= "//" ~[\r\n]* | "/*" ( Comment | . )* "*/" ;  (* nesting   *)
 
 (* Hard keywords: never usable as an identifier. *)
 Keyword        ::= "module" | "import" | "type" | "fn" | "match" | "let"
-                 | "mut" | "pub" | "as" | "if" | "else" | "forall" | "const"
+                 | "mut" | "export" | "as" | "if" | "else" | "forall" | "const"
                  | "effect" | "with" | "raises" | "raise" | "catch"
                  | "while" | "loop" | "break" | "continue" | "return"
                  | "true" | "false" ;
