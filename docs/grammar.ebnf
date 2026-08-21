@@ -135,6 +135,7 @@ ListExpr       ::= "[" ( Expr ( "," Expr )* ( "," )? )? "]" ;
 LambdaExpr     ::= "fn" ( Ident | "_" | ParamList ) "=>" ( Block | Expr ) ;
 
 IfExpr         ::= "if" Expr Block ( "else" ( IfExpr | Block ) )? ;
+ForExpr        ::= "for" Pattern "in" Expr Block ;
 WhileExpr      ::= "while" Expr Block ;
 LoopExpr       ::= "loop" Block ;
 MatchExpr      ::= "match" Expr "{" ( MatchArm )+ "}" ;
@@ -180,7 +181,7 @@ Comment        ::= "//" ~[\r\n]* | "/*" ( Comment | . )* "*/" ;  (* nesting   *)
 
 (* Hard keywords: never usable as an identifier. *)
 Keyword        ::= "module" | "import" | "type" | "fn" | "match" | "let"
-                 | "mut" | "export" | "as" | "if" | "else" | "forall" | "const"
+                 | "mut" | "export" | "as" | "if" | "else" | "for" | "forall" | "const"
                  | "effect" | "with" | "raises" | "raise" | "catch"
                  | "while" | "loop" | "break" | "continue" | "return"
                  | "true" | "false" ;

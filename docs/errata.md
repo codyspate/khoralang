@@ -451,3 +451,36 @@ The lesson is narrow and specific: a comment explaining why a design leaves a
 door open is not the same as a test that something walks through it. Both of
 the last three entries — 19, 22 and this one — are the same shape, which is
 that an intention recorded in prose is not a property the compiler holds.
+
+## 24. Reference counting was planned once for code compiled many ways
+
+Two bugs, found by writing the first `for` loop over a heap-allocated list and
+noticing it leaked one cell per iteration. Neither had anything to do with
+`for`; the loop was just the first program that walked a generic container.
+
+**Drop glue was emitted per type name, not per instantiation.** A variant's
+field types come from the declaration, so `Boxed<A>`'s field is `A` — a rigid
+parameter, and `is_boxed` says a parameter is never boxed. Asking the
+declaration whether `Boxed` owns anything therefore always answered no, and
+every `Boxed<String>` in every program leaked its contents. Glue is now keyed
+by the instantiated type with the arguments substituted in, so `Boxed<String>`
+gets a routine and `Boxed<Int>` correctly gets none.
+
+**Reference-counting plans were computed once per source function.** Same root
+cause, other side. `khora-perceus` planned a body from the types it was
+*written* at, where `A` is rigid and unboxed — so a generic function never
+duplicated or released anything held in a type parameter. `plan` now takes the
+types as an argument and code generation calls it once per specialisation.
+
+The two hid each other. A generic container never released its payload, which
+exactly compensated for a generic function never retaining what it stored
+there, so programs leaked instead of crashing. Fixing the glue alone turned
+`traverse` from correct-and-leaky into a use-after-free that stopped printing
+halfway. That is worth remembering: in a reference-counting runtime, two
+opposite errors can look like correctness, and fixing one is a regression until
+the other is fixed too.
+
+The general shape is the same as entry 19 — something the compiler already
+knows, recomputed worse somewhere else. Here it is not a second implementation
+but a second *time*: a property was computed at the wrong stage, before
+monomorphisation had said what the types actually were.

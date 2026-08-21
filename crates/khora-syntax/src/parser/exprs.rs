@@ -182,6 +182,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         FN_KW => lambda_expr(p),
         RAISE_KW => raise_expr(p),
         WHILE_KW => while_expr(p),
+        FOR_KW => for_expr(p),
         LOOP_KW => loop_expr(p),
         BREAK_KW => jump_expr(p, BREAK_KW, BREAK_EXPR),
         CONTINUE_KW => jump_expr(p, CONTINUE_KW, CONTINUE_EXPR),
@@ -340,7 +341,10 @@ fn context_row(p: &mut Parser<'_>) {
 /// middle of a block would be read as the block's tail expression and
 /// everything after it would be orphaned.
 fn is_block_like(kind: SyntaxKind) -> bool {
-    matches!(kind, IF_EXPR | MATCH_EXPR | WHILE_EXPR | LOOP_EXPR | WITH_BLOCK | BLOCK)
+    matches!(
+        kind,
+        IF_EXPR | MATCH_EXPR | WHILE_EXPR | FOR_EXPR | LOOP_EXPR | WITH_BLOCK | BLOCK
+    )
 }
 
 /// True where an expression cannot continue, so `break`, `continue` and
@@ -350,6 +354,33 @@ fn at_expr_end(p: &Parser<'_>) -> bool {
 }
 
 /// `while cond { .. }`
+/// `for x in xs { .. }`
+///
+/// The iterable is parsed with record literals suppressed, exactly as a `while`
+/// condition is: otherwise the `{` opening the body would be read as the start
+/// of a record.
+fn for_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(FOR_KW);
+    pattern(p);
+    if p.at_contextual(IN_KW) {
+        p.bump_contextual(IN_KW);
+    } else {
+        p.error("expected `in` after the loop variable, as `for x in xs { .. }`");
+    }
+    p.without_record_literals(|p| {
+        if expr(p).is_none() {
+            p.error("expected something to iterate over");
+        }
+    });
+    if p.at(L_BRACE) {
+        block(p);
+    } else {
+        p.error("expected `{` with the loop body");
+    }
+    m.complete(p, FOR_EXPR)
+}
+
 fn while_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(WHILE_KW);
@@ -410,15 +441,17 @@ fn raise_expr(p: &mut Parser<'_>) -> CompletedMarker {
 /// variable called `handler`, and looking past `for` rather than requiring it
 /// keeps the "expected `for`" diagnostic for `handler Ledger { .. }`.
 fn at_handler_expr(p: &Parser<'_>) -> bool {
-    p.at_contextual(HANDLER_KW) && p.nth_at(1, IDENT)
+    // `for` became a hard keyword when the `for` loop landed, so it is no
+    // longer an IDENT and has to be looked for by name.
+    p.at_contextual(HANDLER_KW) && (p.nth_at(1, IDENT) || p.nth_at(1, FOR_KW))
 }
 
 /// `handler for Ledger { get_history: fn id => .., .. }`
 fn handler_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump_contextual(HANDLER_KW);
-    if p.at_contextual(FOR_KW) {
-        p.bump_contextual(FOR_KW);
+    if p.at(FOR_KW) {
+        p.bump(FOR_KW);
     } else {
         p.error("expected `for` after `handler`");
     }

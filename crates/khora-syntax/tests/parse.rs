@@ -433,20 +433,56 @@ test \"the test names a test\" {
     assert!(dump.contains("HANDLER_EXPR"), "{dump}");
 }
 
-/// `for` is contextual only because `handler for` needs it. When the `for` loop
-/// of phase 3 lands it becomes a hard keyword and this test changes with it.
+/// `for` was contextual only because `handler for` needed it. The `for` loop
+/// promoted it, as the test it replaces predicted.
 #[test]
-fn for_is_a_keyword_only_directly_after_handler() {
+fn for_is_a_hard_keyword() {
     let installed = parse("module m;\nlet h = handler for Ledger { get: fn i => 1 };\n");
     assert!(installed.errors().is_empty(), "{:?}", installed.errors());
     assert!(installed.debug_tree().contains("FOR_KW"), "`for` was not read as a keyword");
 
     let identifier = parse("module m;\nfn f(for: Int) -> Int { for }\n");
+    assert!(!identifier.errors().is_empty(), "`for` is reserved and cannot be a name");
+}
+
+/// `in`, by contrast, is contextual: reserving it would cost every program a
+/// perfectly good name for one position that is never ambiguous.
+#[test]
+fn in_is_a_keyword_only_inside_a_for_loop() {
+    let loop_ = parse("module m;\nfn f(xs: List) { for x in xs { g(x); } }\n");
+    assert!(loop_.errors().is_empty(), "{:?}", loop_.errors());
+    let dump = loop_.debug_tree();
+    assert!(dump.contains("FOR_EXPR"), "{dump}");
+    assert!(dump.contains("IN_KW"), "{dump}");
+
+    let identifier = parse("module m;\nfn f(in: Int) -> Int { in }\n");
     assert!(identifier.errors().is_empty(), "{:?}", identifier.errors());
-    assert!(
-        !identifier.debug_tree().contains("FOR_KW"),
-        "`for` outside `handler for` should be an identifier"
-    );
+    assert!(!identifier.debug_tree().contains("IN_KW"), "`in` outside a `for` is a name");
+}
+
+/// A `for` loop destructures like a `let`, so the pattern is a full one.
+#[test]
+fn a_for_loop_takes_a_pattern() {
+    let out = parse("module m;\nfn f(xs: List) { for Pair::Of(a, b) in xs { g(a); } }\n");
+    assert!(out.errors().is_empty(), "{:?}", out.errors());
+    assert!(out.debug_tree().contains("TUPLE_STRUCT_PAT"), "{}", out.debug_tree());
+}
+
+/// The body's `{` must not be read as a record literal, the same hazard a
+/// `while` condition has.
+#[test]
+fn a_for_loops_iterable_does_not_swallow_the_body() {
+    let out = parse("module m;\nfn f(xs: List) { for x in xs { g(x); } }\n");
+    assert!(out.errors().is_empty(), "{:?}", out.errors());
+    let dump = out.debug_tree();
+    assert!(!dump.contains("RECORD_EXPR"), "the body was read as a record\n{dump}");
+}
+
+#[test]
+fn a_for_loop_without_in_says_so() {
+    let out = parse("module m;\nfn f(xs: List) { for x xs { g(x); } }\n");
+    let found: Vec<String> = out.errors().iter().map(|e| e.message.clone()).collect();
+    assert!(found.iter().any(|e| e.contains("expected `in`")), "{found:?}");
 }
 
 /// Dropping `handler` mid-expression must still say what is missing, rather

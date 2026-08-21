@@ -2,22 +2,50 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Khora",
   "scopeName": "source.khora",
-  "fileTypes": ["kh"],
+  "fileTypes": [
+    "kh"
+  ],
   "comment": "Order matters. #declarations comes before #keywords so `module a::b;` is one rule rather than a keyword plus a loose path, and #paths and #projections come before #types because #types colours any capitalised identifier and would otherwise claim segments that the `::` and `.` rules can classify precisely.",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#numbers" },
-    { "include": "#row-variables" },
-    { "include": "#declarations" },
-    { "include": "#contextual-keywords" },
-    { "include": "#keywords" },
-    { "include": "#paths" },
-    { "include": "#projections" },
-    { "include": "#types" },
-    { "include": "#calls" },
-    { "include": "#operators" },
-    { "include": "#punctuation" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#row-variables"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#contextual-keywords"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#paths"
+    },
+    {
+      "include": "#projections"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#calls"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    }
   ],
   "repository": {
     "comments": {
@@ -35,7 +63,11 @@
       "name": "comment.block.khora",
       "begin": "/\\*",
       "end": "\\*/",
-      "patterns": [{ "include": "#block-comment" }]
+      "patterns": [
+        {
+          "include": "#block-comment"
+        }
+      ]
     },
     "strings": {
       "name": "string.quoted.double.khora",
@@ -70,8 +102,12 @@
           "comment": "Function declarations only: the name is followed by type params or a parameter list, which excludes `fn x => ...` lambdas.",
           "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s*[<(])",
           "captures": {
-            "1": { "name": "keyword.declaration.function.khora" },
-            "2": { "name": "entity.name.function.khora" }
+            "1": {
+              "name": "keyword.declaration.function.khora"
+            },
+            "2": {
+              "name": "entity.name.function.khora"
+            }
           }
         },
         {
@@ -89,18 +125,28 @@
         {
           "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.declaration.type.khora" },
-            "2": { "name": "entity.name.type.khora" }
+            "1": {
+              "name": "keyword.declaration.type.khora"
+            },
+            "2": {
+              "name": "entity.name.type.khora"
+            }
           }
         },
         {
           "comment": "Module and import paths are `::`-separated: `module app::main;`, `import std::core::{Option};`. This is the one position where the grammar knows *every* segment is a module without guessing — elsewhere a `::` qualifier may equally be a type — so the whole path is scoped as a namespace here rather than left to #paths and its heuristics. The path stops at the `::` before `{` or `*`, which #path-separator and #paths take. The nested include keeps the separator itself the same colour it has in every other path.",
           "match": "\\b(module|import)\\s+([a-z_][A-Za-z0-9_]*(?:\\s*::\\s*[a-z_][A-Za-z0-9_]*)*)",
           "captures": {
-            "1": { "name": "keyword.control.import.khora" },
+            "1": {
+              "name": "keyword.control.import.khora"
+            },
             "2": {
               "name": "entity.name.namespace.khora",
-              "patterns": [{ "include": "#path-separator" }]
+              "patterns": [
+                {
+                  "include": "#path-separator"
+                }
+              ]
             }
           }
         }
@@ -109,25 +155,39 @@
     "contextual-keywords": {
       "patterns": [
         {
-          "comment": "Keep in sync with CONTEXTUAL_KEYWORDS in crates/khora-syntax/src/kind.rs. Enforced by the contextual_keywords_match_the_lexer test. These words are ordinary identifiers everywhere except one position each, so every rule reproduces that position instead of matching the bare word — otherwise a parameter named `handler` or a variable named `test` would be coloured as a keyword.",
-          "match": "\\b(handler)\\s+(for)\\b",
+          "comment": "Keep in sync with CONTEXTUAL_KEYWORDS in crates/khora-syntax/src/kind.rs. Enforced by the contextual_keywords_match_the_lexer test. These words are ordinary identifiers everywhere except one position each, so every rule reproduces that position instead of matching the bare word — otherwise a parameter named `handler` or a variable named `in` would be coloured as a keyword.",
+          "match": "\\b(handler)\\b(?=\\s+for\\b)",
           "captures": {
-            "1": { "name": "keyword.declaration.khora" },
-            "2": { "name": "storage.modifier.khora" }
+            "1": {
+              "name": "keyword.declaration.khora"
+            }
+          }
+        },
+        {
+          "comment": "`in` is a keyword only between a `for` loop's pattern and its iterable.",
+          "match": "\\bfor\\b[^\\n]*?\\b(in)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.khora"
+            }
           }
         },
         {
           "comment": "`context Name { .. }` is a keyword only at the start of a declaration.",
           "match": "^\\s*(?:pub\\s+)?(context)\\b(?=\\s)",
           "captures": {
-            "1": { "name": "keyword.declaration.khora" }
+            "1": {
+              "name": "keyword.declaration.khora"
+            }
           }
         },
         {
           "comment": "`test \"name\" { .. }` and `bench \"name\" { .. }`: the name string is what distinguishes the declaration from a call.",
           "match": "\\b(test|bench)\\b(?=\\s*\")",
           "captures": {
-            "1": { "name": "keyword.declaration.khora" }
+            "1": {
+              "name": "keyword.declaration.khora"
+            }
           }
         }
       ]
@@ -137,7 +197,7 @@
         {
           "comment": "Keep in sync with SyntaxKind::from_keyword in crates/khora-syntax/src/kind.rs. Enforced by the keywords_match_the_lexer test. Contextual keywords belong in #contextual-keywords, not here.",
           "name": "keyword.control.khora",
-          "match": "\\b(match|if|else|raise|catch|while|loop|break|continue|return)\\b"
+          "match": "\\b(match|if|else|raise|catch|while|for|loop|break|continue|return)\\b"
         },
         {
           "name": "keyword.declaration.khora",
@@ -165,66 +225,100 @@
           "comment": "`RiskLevel::Critical`, `Device::Cpu` — a capitalised qualifier means the tail is reached *through* a type, so it is a variant constructor rather than a type of its own. An associated type such as `Schema::Spec` lands here too and is coloured as a constructor: the two are indistinguishable to a regex, and constructors are far more common. `variable.other.enummember` is what the `enumMember` semantic token falls back to.",
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "entity.name.type.khora" },
-            "2": { "name": "keyword.operator.path.khora" },
-            "3": { "name": "variable.other.enummember.khora" }
+            "1": {
+              "name": "entity.name.type.khora"
+            },
+            "2": {
+              "name": "keyword.operator.path.khora"
+            },
+            "3": {
+              "name": "variable.other.enummember.khora"
+            }
           }
         },
         {
           "comment": "`Prompt::new()`, `Tensor::zeros(..)` — an associated function. It is a static method, and `entity.name.function.member` is the `method` semantic token's fallback, so it reads like the `.method()` calls in #projections rather than like a free function.",
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(::)\\s*([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
-            "1": { "name": "entity.name.type.khora" },
-            "2": { "name": "keyword.operator.path.khora" },
-            "3": { "name": "entity.name.function.member.khora" }
+            "1": {
+              "name": "entity.name.type.khora"
+            },
+            "2": {
+              "name": "keyword.operator.path.khora"
+            },
+            "3": {
+              "name": "entity.name.function.member.khora"
+            }
           }
         },
         {
           "comment": "`Scope::root`, `AnalysisReport::spec` — an associated item that is read, not called. Nothing here is being applied, so scoping it as a function would be a lie; `variable.other.constant` is where a read-only associated item lands.",
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(::)\\s*([a-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "entity.name.type.khora" },
-            "2": { "name": "keyword.operator.path.khora" },
-            "3": { "name": "variable.other.constant.khora" }
+            "1": {
+              "name": "entity.name.type.khora"
+            },
+            "2": {
+              "name": "keyword.operator.path.khora"
+            },
+            "3": {
+              "name": "variable.other.constant.khora"
+            }
           }
         },
         {
           "comment": "`std::core::Option` — a lowercase qualifier is a module, and that is exactly what makes the capitalised tail a *type* and not a constructor. A three-segment path reaches this rule on its last two segments, after the leading `std` has been taken by the qualifier rule below.",
           "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "entity.name.namespace.khora" },
-            "2": { "name": "keyword.operator.path.khora" },
-            "3": { "name": "entity.name.type.khora" }
+            "1": {
+              "name": "entity.name.namespace.khora"
+            },
+            "2": {
+              "name": "keyword.operator.path.khora"
+            },
+            "3": {
+              "name": "entity.name.type.khora"
+            }
           }
         },
         {
           "comment": "Any segment followed by `::` qualifies whatever comes next, and its own case says what it is: `Prompt::` is a type, `std::` is a module. These two rules are what walk a long path, one segment at a time, until the pair rules above can take the final two.",
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(?=::)",
           "captures": {
-            "1": { "name": "entity.name.type.khora" }
+            "1": {
+              "name": "entity.name.type.khora"
+            }
           }
         },
         {
           "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=::)",
           "captures": {
-            "1": { "name": "entity.name.namespace.khora" }
+            "1": {
+              "name": "entity.name.namespace.khora"
+            }
           }
         },
         {
           "comment": "A capitalised segment whose qualifier was already consumed, as in the tail of `A::B::C`. Reaching here means it follows a `::` that did not come from a module — a module qualifier is handled by the `module::Type` rule above — so it is a constructor or associated item, not a type. A lowercase segment in the same position is deliberately left alone: after a module it is another module and after a type it is a value, and an uncoloured identifier is the honest answer.",
           "match": "(?<=::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "variable.other.enummember.khora" }
+            "1": {
+              "name": "variable.other.enummember.khora"
+            }
           }
         },
         {
           "comment": "`import std::net::http::*;` — the glob is not multiplication, and would otherwise fall through to the arithmetic operator rule. Java's grammar scopes a wildcard import this way.",
           "match": "(?<=::)\\s*(\\*)",
           "captures": {
-            "1": { "name": "variable.language.wildcard.khora" }
+            "1": {
+              "name": "variable.language.wildcard.khora"
+            }
           }
         },
-        { "include": "#path-separator" }
+        {
+          "include": "#path-separator"
+        }
       ]
     },
     "path-separator": {
@@ -239,16 +333,24 @@
           "comment": "A method call. `entity.name.function.member` is the `method` semantic token's fallback, matching what #paths gives an associated function.",
           "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
-            "1": { "name": "punctuation.accessor.khora" },
-            "2": { "name": "entity.name.function.member.khora" }
+            "1": {
+              "name": "punctuation.accessor.khora"
+            },
+            "2": {
+              "name": "entity.name.function.member.khora"
+            }
           }
         },
         {
           "comment": "A record field. The name is matched whatever its case, because after the `::`/`.` split a capitalised name in this position is *not* a type, and letting #types claim it is the specific mistake this rule exists to prevent. The name has to touch the dot: that keeps `forall <A> . Type` out, whose dot is a separator, which is why the formatter writes spaces around it.",
           "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "punctuation.accessor.khora" },
-            "2": { "name": "variable.other.property.khora" }
+            "1": {
+              "name": "punctuation.accessor.khora"
+            },
+            "2": {
+              "name": "variable.other.property.khora"
+            }
           }
         }
       ]
@@ -268,7 +370,9 @@
           "comment": "A free function call. A method or associated call is already gone by now — #projections and #paths run first and start their match at the `.` or at the qualifier, which is earlier in the line and so wins.",
           "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
-            "1": { "name": "entity.name.function.khora" }
+            "1": {
+              "name": "entity.name.function.khora"
+            }
           }
         }
       ]
@@ -310,13 +414,19 @@
     },
     "punctuation": {
       "patterns": [
-        { "name": "punctuation.terminator.khora", "match": ";" },
+        {
+          "name": "punctuation.terminator.khora",
+          "match": ";"
+        },
         {
           "comment": "What survives the rules above: the comma, the `:` of a record field or a type annotation, and the `forall <A> . Type` dot. A `::` belongs to #path-separator and a projection `.` to #projections, both of which run first.",
           "name": "punctuation.separator.khora",
           "match": "[,:.]"
         },
-        { "name": "punctuation.brackets.khora", "match": "[{}()\\[\\]]" }
+        {
+          "name": "punctuation.brackets.khora",
+          "match": "[{}()\\[\\]]"
+        }
       ]
     }
   }

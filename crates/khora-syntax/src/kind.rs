@@ -50,6 +50,7 @@ pub enum SyntaxKind {
     RAISE_KW,
     HANDLER_KW,
     FOR_KW,
+    IN_KW,
     CONTEXT_KW,
     CATCH_KW,
     TEST_KW,
@@ -174,6 +175,7 @@ pub enum SyntaxKind {
     LAMBDA_EXPR,
     IF_EXPR,
     WHILE_EXPR,
+    FOR_EXPR,
     LOOP_EXPR,
     BREAK_EXPR,
     CONTINUE_EXPR,
@@ -335,6 +337,7 @@ keywords! {
     "loop" => LOOP_KW,
     "break" => BREAK_KW,
     "continue" => CONTINUE_KW,
+    "for" => FOR_KW,
     "return" => RETURN_KW,
     "true" => TRUE_KW,
     "false" => FALSE_KW,
@@ -352,7 +355,7 @@ keywords! {
 // hard keyword; do not rely on it as an identifier.
 contextual_keywords! {
     "handler" => HANDLER_KW,
-    "for" => FOR_KW,
+    "in" => IN_KW,
     "context" => CONTEXT_KW,
     "test" => TEST_KW,
     "bench" => BENCH_KW,

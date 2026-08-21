@@ -633,6 +633,7 @@ impl<'a> Ctx<'a> {
             }
             // Outside the phase 2 subset. Named individually so a later phase
             // can find every site.
+            ast::Expr::For(e) => self.lower_for(e, range),
             ast::Expr::Lambda(e) => self.lower_lambda(e, range),
             ast::Expr::Record(_) => self.unsupported("record literals", range),
             ast::Expr::Raise(_) => self.unsupported("`raise`", range),
@@ -724,6 +725,121 @@ impl<'a> Ctx<'a> {
             range,
         );
         self.add_expr(Expr::Unresolved(segments.join("::")), range)
+    }
+
+    /// `for pat in iter { body }`, desugared here rather than carried further.
+    ///
+    /// ```text
+    /// {
+    ///   let mut it = <iter>;
+    ///   loop {
+    ///     match it.next() {
+    ///       Step::Yield(rest, pat) => { it = rest; <body> }
+    ///       Step::Done => break,
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// Desugaring in the front end means the checker, the reference-counting
+    /// plan and the backend need no notion of `for` at all — it is `loop`,
+    /// `match` and assignment, each of which already works and is already
+    /// tested. The cost is that the loop depends on `Step` being in scope, the
+    /// same way Rust's `for` depends on `IntoIterator`.
+    fn lower_for(&mut self, e: &ast::ForExpr, range: TextRange) -> ExprId {
+        let iter = match e.iterable() {
+            Some(i) => self.lower_expr(&i),
+            None => self.add_expr(Expr::Missing, range),
+        };
+
+        // The whole loop lives in a scope of its own so the state variable
+        // cannot collide with anything the body declares.
+        self.scopes.push(Vec::new());
+        let state = self.declare("$iter".to_string(), true, range);
+        let state_pat = self.add_pat(Pat::Bind(state));
+
+        let rest = self.declare("$rest".to_string(), false, range);
+        let rest_pat = self.add_pat(Pat::Bind(rest));
+
+        // The arm binds its own scope: the item pattern belongs to the body.
+        self.scopes.push(Vec::new());
+        let item_pat = match e.pattern() {
+            Some(p) => self.lower_pat(&p, false),
+            None => self.add_pat(Pat::Wildcard),
+        };
+
+        let advance = {
+            let target = self.add_expr(Expr::Local(state), range);
+            let value = self.add_expr(Expr::Local(rest), range);
+            self.add_expr(Expr::Assign { target, value }, range)
+        };
+        // Inside the loop before the body is lowered, or a `break` in it would
+        // be reported as outside a loop.
+        self.loop_depth += 1;
+        let body = match e.body() {
+            Some(b) => self.lower_block(&b),
+            None => self.add_expr(Expr::Missing, range),
+        };
+        self.loop_depth -= 1;
+        self.scopes.pop();
+
+        let arm_body = self.add_expr(
+            Expr::Block { stmts: vec![Stmt::Expr(advance)], tail: Some(body) },
+            range,
+        );
+
+        let yield_pat = self.add_pat(Pat::TupleStruct {
+            resolution: self.step_case("Yield", range),
+            fields: vec![rest_pat, item_pat],
+        });
+        let done_pat = self.add_pat(Pat::Path(self.step_case("Done", range)));
+        let stop = self.add_expr(Expr::Break(None), range);
+
+        let scrutinee = {
+            let receiver = self.add_expr(Expr::Local(state), range);
+            let next = self.add_expr(
+                Expr::Field { base: receiver, name: "next".to_string() },
+                range,
+            );
+            self.add_expr(Expr::Call { callee: next, args: Vec::new() }, range)
+        };
+        let dispatch = self.add_expr(
+            Expr::Match {
+                scrutinee,
+                arms: vec![
+                    MatchArm { pat: yield_pat, guard: None, body: arm_body },
+                    MatchArm { pat: done_pat, guard: None, body: stop },
+                ],
+            },
+            range,
+        );
+
+        let repeat = self.add_expr(Expr::Loop { body: dispatch }, range);
+        self.scopes.pop();
+
+        self.add_expr(
+            Expr::Block {
+                stmts: vec![Stmt::Let { pat: state_pat, init: Some(iter) }],
+                tail: Some(repeat),
+            },
+            range,
+        )
+    }
+
+    /// `Step::Yield` or `Step::Done`, as the desugaring needs them.
+    fn step_case(&self, case: &str, _range: TextRange) -> crate::Resolution {
+        match self.map.variants_of("Step").find(|v| v.name == case) {
+            Some(v) => crate::Resolution::Variant {
+                module: self.map.module.clone().unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                type_name: v.type_name.clone(),
+                name: v.name.clone(),
+            },
+            // `for` needs `Step` the way Rust's needs `IntoIterator`. Saying so
+            // beats an unresolved-name error pointing at code nobody wrote.
+            None => crate::Resolution::Unsupported(
+                "`for` needs the `Step` type in scope; import it from `std::core`",
+            ),
+        }
     }
 
     /// `(a, b) => body`.

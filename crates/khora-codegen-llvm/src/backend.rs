@@ -99,7 +99,6 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
 
     let types = khora_types::type_map(db, file);
     let bodies = khora_hir::body::bodies(db, file);
-    let plans = khora_perceus::rc_plans(db, file);
     let mono = khora_types::mono::instances(db, file);
     if !mono.errors.is_empty() {
         return Err(mono.errors.clone());
@@ -137,12 +136,15 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
         else {
             continue;
         };
-        let plan = plans.iter().find(|(n, _)| n == &instance.function).map(|(_, p)| p);
+        // Planned per *specialisation*: `A` is unboxed in the generic body and
+        // a counted pointer at `A = List<Int>`, so one plan for both is wrong
+        // for whichever it was not made for.
+        let plan = khora_perceus::plan(body, instance_types);
         crate::lower::emit_function(
             &mut backend,
             &instance.symbol(),
             body,
-            plan,
+            Some(&plan),
             instance_types,
             mono,
         );
@@ -157,8 +159,8 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
         let Some(body) = bodies.iter().find(|(n, _)| n == &owner.0.function).map(|(_, b)| b) else {
             continue;
         };
-        let plan = plans.iter().find(|(n, _)| n == &owner.0.function).map(|(_, p)| p);
-        crate::lower::emit_closure(&mut backend, &site, body, plan, &owner.1, mono);
+        let plan = khora_perceus::plan(body, &owner.1);
+        crate::lower::emit_closure(&mut backend, &site, body, Some(&plan), &owner.1, mono);
     }
 
     backend.emit_c_main();
@@ -280,6 +282,11 @@ fn target_machine() -> Result<TargetMachine, Vec<HirError>> {
 /// type name, so it can never collide with an ADT's.
 const CLOSURE_GLUE: &str = "$closure";
 
+/// A type as it appears in a generated symbol name.
+fn mangle_type(ty: &Type) -> String {
+    ty.to_string().replace(['<', '>', ',', ' '], "$").replace("$$", "$")
+}
+
 /// The tag an adapter closure carries. Far above any real closure site, so the
 /// shared `drop_fields` switch never has a case for it — which is right, since
 /// an adapter captures nothing.
@@ -305,12 +312,15 @@ pub(crate) struct Backend<'ctx> {
     /// Per-ADT `drop_fields` routines. `None` records a type that owns no
     /// references, so drop sites pass a null callback rather than calling a
     /// routine that would do nothing.
+    /// Keyed by the *instantiated* type, not the type's name. `Box<String>`
+    /// owns a reference and `Box<Int>` does not, so one routine per name would
+    /// be wrong for whichever of them it was not written for.
     drop_glue: HashMap<String, Option<FunctionValue<'ctx>>>,
     /// Glue routines declared but not yet given a body. Emitting one while a
     /// function body is being lowered would move the builder out from under
     /// the caller, so the work is queued instead — see
     /// [`Backend::emit_pending_drop_glue`].
-    pending_glue: Vec<String>,
+    pending_glue: Vec<Type>,
     /// Every lambda site in the program, in discovery order. A site's index in
     /// this list is the tag its closure objects carry, which is how the shared
     /// closure drop routine knows which captures a given closure holds.
@@ -746,7 +756,9 @@ impl<'ctx> Backend<'ctx> {
             Some(Linkage::Internal),
         );
         self.drop_glue.insert(CLOSURE_GLUE.to_string(), Some(f));
-        self.pending_glue.push(CLOSURE_GLUE.to_string());
+        // The closure routine is shared, so it is queued under a name no
+        // Khora type can have rather than under an instantiation.
+        self.pending_glue.push(Type::adt(CLOSURE_GLUE.to_string()));
         f.as_global_value().as_pointer_value()
     }
 
@@ -813,32 +825,38 @@ impl<'ctx> Backend<'ctx> {
             return self.closure_glue();
         }
         let Type::Adt { name, .. } = ty else { return self.null_pointer() };
+        let key = ty.to_string();
 
-        if let Some(cached) = self.drop_glue.get(name) {
+        if let Some(cached) = self.drop_glue.get(&key) {
             return match cached {
                 Some(f) => f.as_global_value().as_pointer_value(),
                 None => self.null_pointer(),
             };
         }
 
-        let variants = self.variants_of(name);
+        // Read the fields at *this* instantiation. A generic type's declared
+        // field is a parameter, which is never boxed, so asking the declaration
+        // whether `Box<A>` owns anything always answers no — and every
+        // `Box<String>` in the program leaks its contents.
+        let variants = self.instantiated_variants(ty);
         if !variants.iter().any(|v| v.fields.iter().any(is_boxed)) {
-            self.drop_glue.insert(name.clone(), None);
+            self.drop_glue.insert(key, None);
             return self.null_pointer();
         }
 
         let void = self.ctx.void_type();
         let ptr = self.ctx.ptr_type(AddressSpace::default());
         let f = self.module.add_function(
-            &format!("kh$drop_fields${name}"),
+            &format!("kh$drop_fields${}", mangle_type(ty)),
             void.fn_type(&[ptr.into()], false),
             Some(Linkage::Internal),
         );
         // Recorded before the body exists so a recursive type — a list whose
         // tail is a list — reaches this cache instead of declaring itself
         // again forever.
-        self.drop_glue.insert(name.clone(), Some(f));
-        self.pending_glue.push(name.clone());
+        self.drop_glue.insert(key, Some(f));
+        self.pending_glue.push(ty.clone());
+        let _ = name;
         f.as_global_value().as_pointer_value()
     }
 
@@ -849,13 +867,40 @@ impl<'ctx> Backend<'ctx> {
     /// state, so doing this mid-body would silently append a caller's next
     /// instruction to the glue routine instead.
     fn emit_pending_drop_glue(&mut self) {
-        while let Some(name) = self.pending_glue.pop() {
-            if name == CLOSURE_GLUE {
-                self.emit_closure_glue();
-            } else {
-                self.emit_drop_glue(&name);
+        while let Some(ty) = self.pending_glue.pop() {
+            match &ty {
+                Type::Adt { name, .. } if name == CLOSURE_GLUE => self.emit_closure_glue(),
+                _ => self.emit_drop_glue(&ty),
             }
         }
+    }
+
+    /// An ADT's variants with this instantiation's arguments substituted in.
+    ///
+    /// `Box<String>` has a `String` field; the *declaration* only says `A`.
+    fn instantiated_variants(&self, ty: &Type) -> Vec<VariantInfo> {
+        let Type::Adt { name, args } = ty else { return Vec::new() };
+        let declared = self.variants_of(name);
+        let generics = self.types.adts.get(name).cloned().unwrap_or_default();
+        if args.is_empty() || generics.is_empty() {
+            return declared;
+        }
+        let mapping: HashMap<&str, Type> = generics
+            .iter()
+            .map(String::as_str)
+            .zip(args.iter().cloned())
+            .collect();
+        declared
+            .into_iter()
+            .map(|mut v| {
+                v.fields = v
+                    .fields
+                    .iter()
+                    .map(|f| khora_types::unify::substitute(f, &mapping))
+                    .collect();
+                v
+            })
+            .collect()
     }
 
     /// Emits one type's `drop_fields`.
@@ -866,8 +911,8 @@ impl<'ctx> Backend<'ctx> {
     /// smaller sibling: `Nil` has no tail to load, and the byte after it
     /// belongs to the allocator. The runtime documentation says this outright,
     /// and it is the single most expensive mistake available here.
-    fn emit_drop_glue(&mut self, type_name: &str) {
-        let f = match self.drop_glue.get(type_name) {
+    fn emit_drop_glue(&mut self, ty: &Type) {
+        let f = match self.drop_glue.get(&ty.to_string()) {
             Some(Some(f)) => *f,
             _ => return,
         };
@@ -877,7 +922,7 @@ impl<'ctx> Backend<'ctx> {
         let done = self.ctx.append_basic_block(f, "done");
 
         let mut cases = Vec::new();
-        for (tag, variant) in self.variants_of(type_name).into_iter().enumerate() {
+        for (tag, variant) in self.instantiated_variants(ty).into_iter().enumerate() {
             let owned: Vec<(usize, Type)> = variant
                 .fields
                 .iter()

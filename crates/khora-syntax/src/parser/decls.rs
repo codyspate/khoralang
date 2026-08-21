@@ -161,8 +161,8 @@ fn impl_decl(p: &mut Parser<'_>) {
         type_params(p);
     }
     type_(p);
-    if p.at_contextual(FOR_KW) {
-        p.bump_contextual(FOR_KW);
+    if p.at(FOR_KW) {
+        p.bump(FOR_KW);
         type_(p);
     } else if !p.at(L_BRACE) && !p.at(EOF) {
         // Two types with nothing between them: `impl Eq Int { .. }`. The

@@ -83,7 +83,25 @@ pub fn is_boxed(ty: &Type) -> bool {
     matches!(ty, Type::Str | Type::Adt { .. } | Type::Fn { .. })
 }
 
-/// Plans reference counting for every function body in a file.
+/// Plans reference counting for one body at one set of types.
+///
+/// **Takes the types rather than deriving them**, because whether a value is
+/// boxed depends on the *instantiation*: `A` in `fn id<A>` is a rigid parameter
+/// and never boxed, while the same body compiled at `A = List<Int>` holds a
+/// pointer that has to be counted. A plan made once from the generic body is
+/// wrong for every instantiation that fills a parameter with something boxed —
+/// see `docs/errata.md`, entry 24.
+pub fn plan(body: &Body, types: &khora_types::BodyTypes) -> RcPlan {
+    let mut planner = Planner { body, plan: RcPlan::default(), types };
+    planner.plan_function();
+    planner.plan
+}
+
+/// Plans reference counting for every function body in a file, at the types
+/// the body was *written* at.
+///
+/// Good enough for a non-generic function, and what the tests read. Code
+/// generation calls [`plan`] once per specialisation instead.
 #[salsa::tracked(returns(ref))]
 pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
     let checked = khora_types::checked(db, file);
@@ -98,9 +116,7 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
             // value passed to one was freed twice.
             let body_types =
                 checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t).unwrap_or(&empty);
-            let mut planner = Planner { body, plan: RcPlan::default(), types: body_types };
-            planner.plan_function();
-            (name.clone(), planner.plan)
+            (name.clone(), plan(body, body_types))
         })
         .collect()
 }

@@ -180,6 +180,7 @@ ast_node!(ParenExpr, PAREN_EXPR);
 ast_node!(LambdaExpr, LAMBDA_EXPR);
 ast_node!(IfExpr, IF_EXPR);
 ast_node!(WhileExpr, WHILE_EXPR);
+ast_node!(ForExpr, FOR_EXPR);
 ast_node!(LoopExpr, LOOP_EXPR);
 ast_node!(BreakExpr, BREAK_EXPR);
 ast_node!(ContinueExpr, CONTINUE_EXPR);
@@ -207,6 +208,7 @@ ast_enum!(Expr {
     Lambda(LambdaExpr),
     If(IfExpr),
     While(WhileExpr),
+    For(ForExpr),
     Loop(LoopExpr),
     Break(BreakExpr),
     Continue(ContinueExpr),
@@ -758,6 +760,19 @@ impl LambdaExpr {
         child(&self.0)
     }
     pub fn body(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+}
+
+impl ForExpr {
+    /// The binding each item is matched against.
+    pub fn pattern(&self) -> Option<Pat> {
+        child(&self.0)
+    }
+    pub fn iterable(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+    pub fn body(&self) -> Option<Block> {
         child(&self.0)
     }
 }

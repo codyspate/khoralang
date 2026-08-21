@@ -257,7 +257,15 @@ their own schedule because a tensor shape is written `(M, K)`: without them the
 shape argument typed as `Unknown`, which accepts anything, so the exit criterion
 could not have been met honestly.
 
-Remaining: `Iterator` with generic `for`, and the `std` traits themselves.
+`for x in xs { .. }` is desugared in the front end to `loop`, `match` and
+assignment over `Iterator::next`, so the checker, the reference-counting plan
+and the backend need no notion of it. The protocol is
+`fn next(self) -> Step<Self, Self::Item>` rather than Rust's
+`fn next(&mut self) -> Option<Item>`: Khora has no mutable references and no
+mutable fields, so the mutating shape is not available to express. What a
+developer writes is the familiar loop; the protocol underneath is Khora's own.
+
+Remaining: the `std` traits themselves.
 
 `traverse` needed three things beyond ordinary generics, all of which landed
 together: higher-kinded unification (solving `Self<A>` against `Option<Int>` as
@@ -295,7 +303,7 @@ both dimensions **— met**; instance resolution errors name the missing instanc
 **— met**; a `traverse` written once works over `Option`, `List` and a user
 type **— met**, see `traverse_works_over_three_containers` in
 `crates/khora-codegen-llvm/tests/compile.rs`; `for` iterates a user-defined
-type.
+type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
 
 ---
 

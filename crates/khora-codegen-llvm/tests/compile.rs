@@ -1323,3 +1323,175 @@ export fn main() -> Int {
     );
     assert_eq!(ran.code, Some(0));
 }
+
+const ITERATOR: &str = "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export type Step<S, A> = | Yield(state: S, item: A) | Done;
+export type Range = | Of(from: Int, to: Int);
+export type List<A> = | Nil | Cons(head: A, tail: List<A>);
+
+trait Iterator {
+  type Item;
+  fn next(self) -> Step<Self, Self::Item>;
+}
+
+impl Iterator for Range {
+  type Item = Int;
+  fn next(self) -> Step<Range, Int> {
+    match self {
+      Range::Of(from, to) =>
+        if from >= to { Step::Done } else { Step::Yield(Range::Of(from + 1, to), from) },
+    }
+  }
+}
+
+impl<A> Iterator for List<A> {
+  type Item = A;
+  fn next(self) -> Step<List<A>, A> {
+    match self { List::Nil => Step::Done, List::Cons(h, t) => Step::Yield(t, h) }
+  }
+}
+";
+
+/// Phase 3's other exit criterion: `for` iterates a user-defined type. Nothing
+/// about `Range` is built in — it is an ordinary ADT with an `Iterator` impl.
+#[test]
+fn a_for_loop_iterates_a_user_defined_type() {
+    let ran = run(
+        "for_range",
+        &format!(
+            "{ITERATOR}
+fn main() -> Int {{
+  let mut total = 0;
+  for n in Range::Of(1, 6) {{
+    total = total + n;
+  }}
+  khora_print_int(total);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "15\n", "1 + 2 + 3 + 4 + 5");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `break` and `continue` reach the desugared loop like any other.
+#[test]
+fn break_and_continue_work_inside_a_for_loop() {
+    let ran = run(
+        "for_jumps",
+        &format!(
+            "{ITERATOR}
+fn main() -> Int {{
+  let mut total = 0;
+  for n in Range::Of(1, 100) {{
+    if n == 4 {{ break; }}
+    if n == 2 {{ continue; }}
+    total = total + n;
+  }}
+  khora_print_int(total);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "4\n", "1 + 3, skipping 2 and stopping at 4");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Iterating a heap-allocated structure must not leak the cells it walks past.
+#[test]
+fn a_for_loop_over_a_boxed_structure_does_not_leak() {
+    let ran = run(
+        "for_leaks",
+        &format!(
+            "{ITERATOR}
+fn total() -> Int {{
+  let mut sum = 0;
+  for n in List::Cons(10, List::Cons(20, List::Cons(12, List::Nil))) {{
+    sum = sum + n;
+  }}
+  sum
+}}
+
+fn main() -> Int {{
+  khora_print_int(total());
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "42\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A generic container's declared field type is a parameter, and a parameter is
+/// never boxed — so asking the *declaration* whether `Box<A>` owns anything
+/// always answered no, and every `Box<String>` leaked its contents. Drop glue
+/// is emitted per instantiation for this reason.
+#[test]
+fn a_generic_container_releases_what_it_holds() {
+    let ran = run(
+        "generic_glue",
+        "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export type Boxed<A> = | Of(value: A);
+
+fn holds_a_string() { let b = Boxed::Of(\"held\"); }
+fn holds_an_int() { let b = Boxed::Of(1); }
+
+fn main() -> Int {
+  holds_an_int();
+  khora_print_int(khora_live_count());
+  holds_a_string();
+  khora_print_int(khora_live_count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "0\n0\n", "both instantiations must come out clean");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The counterpart: a generic *function* over a boxed type has to dup and drop
+/// it. The plan is made per specialisation because `A` is unboxed in the
+/// generic body and a counted pointer at `A = String`.
+#[test]
+fn a_generic_function_counts_its_boxed_arguments() {
+    let ran = run(
+        "generic_rc",
+        "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+fn print(value: String);
+
+export type Pair<A> = | Of(first: A, second: A);
+
+fn duplicate<A>(x: A) -> Pair<A> { Pair::Of(x, x) }
+
+fn strings() {
+  let p = duplicate(\"held\");
+  match p { Pair::Of(a, b) => print(a) }
+}
+
+fn ints() -> Int {
+  match duplicate(21) { Pair::Of(a, b) => a + b }
+}
+
+fn main() -> Int {
+  khora_print_int(ints());
+  strings();
+  khora_print_int(khora_live_count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "42\nheld\n0\n");
+    assert_eq!(ran.code, Some(0));
+}
