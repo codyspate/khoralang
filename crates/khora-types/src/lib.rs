@@ -623,7 +623,11 @@ impl<'a> Checker<'a> {
                     let head = format!("this function returns `{expected}`,");
                     format!("{head} but its body has type `{actual}`{detail}")
                 }
-                other => format!("this function returns `{expected}`, but its body {other}"),
+                // The other mismatches are whole sentences of their own, so
+                // they are joined rather than folded into "but its body ...",
+                // which produced "but its body `A` is a type the caller
+                // chooses".
+                other => format!("this function returns `{expected}`; {other}"),
             };
             self.error(message, range);
         }

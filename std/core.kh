@@ -3,21 +3,310 @@ module std::core;
 // Khora tracks effects as rows on the signature rather than as a wrapper type,
 // so there is no `Effect<A, R, E>` here. A computation's requirements live in
 // its `with` clause and its failures in its `raises` clause; both are inferred
-// on private functions and written out on public ones.
+// on private functions and written out on exported ones.
 //
 // The module is `std::core` rather than `std::effect` for two reasons: there is
 // no longer an `Effect` type to name it after, and `effect` is now a reserved
-// word, so `std.effect` will not lex as a path.
+// word, so `std::effect` will not lex as a path.
 //
 // See docs/design/effects.md.
 
-export type Option<+ A> =
+// ---------------------------------------------------------------------------
+// Comparison and display
+// ---------------------------------------------------------------------------
+
+/// The result of comparing two values.
+///
+/// A three-way answer rather than two booleans: one comparison decides all six
+/// operators, and a type cannot accidentally disagree with itself about `<` and
+/// `>=`.
+export type Ordering =
+  | Less
+  | Equal
+  | Greater;
+
+export trait Eq {
+  fn eq(self, other: Self) -> Bool;
+}
+
+/// Ordering refines equality: anything orderable can be compared for equality,
+/// so `Ord` requires `Eq` rather than repeating it.
+export trait Ord: Eq {
+  fn cmp(self, other: Self) -> Ordering;
+}
+
+export trait Show {
+  fn show(self) -> String;
+}
+
+impl Eq for Int {
+  fn eq(self, other: Int) -> Bool { self == other }
+}
+
+impl Ord for Int {
+  fn cmp(self, other: Int) -> Ordering {
+    if self < other { Ordering::Less } else if self == other { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Eq for Bool {
+  fn eq(self, other: Bool) -> Bool { self == other }
+}
+
+impl Eq for String {
+  fn eq(self, other: String) -> Bool { self == other }
+}
+
+impl Eq for Ordering {
+  fn eq(self, other: Ordering) -> Bool {
+    match self {
+      Ordering::Less => match other { Ordering::Less => true, Ordering::Equal => false, Ordering::Greater => false },
+      Ordering::Equal => match other { Ordering::Less => false, Ordering::Equal => true, Ordering::Greater => false },
+      Ordering::Greater => match other { Ordering::Less => false, Ordering::Equal => false, Ordering::Greater => true },
+    }
+  }
+}
+
+impl Ordering {
+  fn is_less(self) -> Bool { self.eq(Ordering::Less) }
+  fn is_equal(self) -> Bool { self.eq(Ordering::Equal) }
+  fn is_greater(self) -> Bool { self.eq(Ordering::Greater) }
+  /// `a.cmp(b).reverse()` sorts descending without a second comparison.
+  fn reverse(self) -> Ordering {
+    match self {
+      Ordering::Less => Ordering::Greater,
+      Ordering::Equal => Ordering::Equal,
+      Ordering::Greater => Ordering::Less,
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Optional values and failures
+// ---------------------------------------------------------------------------
+
+export type Option<A> =
   | Some(value: A)
   | None;
 
-export type Result<+ A, + E> =
+export type Result<A, E> =
   | Ok(value: A)
   | Err(error: E);
+
+impl<A> Option<A> {
+  fn is_some(self) -> Bool { match self { Option::Some(v) => true, Option::None => false } }
+  fn is_none(self) -> Bool { match self { Option::Some(v) => false, Option::None => true } }
+
+  /// The value, or `fallback` if there is none.
+  ///
+  /// `fallback` is evaluated either way. `unwrap_or_else` takes a closure for
+  /// when producing it is expensive.
+  fn unwrap_or(self, fallback: A) -> A {
+    match self { Option::Some(v) => v, Option::None => fallback }
+  }
+
+  fn unwrap_or_else(self, fallback: () -> A) -> A {
+    match self { Option::Some(v) => v, Option::None => fallback() }
+  }
+
+  /// Turns absence into a failure, which is how an `Option` joins a `raises`
+  /// chain.
+  fn ok_or<E>(self, error: E) -> Result<A, E> {
+    match self { Option::Some(v) => Result::Ok(v), Option::None => Result::Err(error) }
+  }
+}
+
+impl<A, E> Result<A, E> {
+  fn is_ok(self) -> Bool { match self { Result::Ok(v) => true, Result::Err(e) => false } }
+  fn is_err(self) -> Bool { match self { Result::Ok(v) => false, Result::Err(e) => true } }
+
+  fn unwrap_or(self, fallback: A) -> A {
+    match self { Result::Ok(v) => v, Result::Err(e) => fallback }
+  }
+
+  /// Discards the error, which is the one direction that cannot fail.
+  fn ok(self) -> Option<A> {
+    match self { Result::Ok(v) => Option::Some(v), Result::Err(e) => Option::None }
+  }
+
+  fn map_err<F>(self, f: (E) -> F) -> Result<A, F> {
+    match self { Result::Ok(v) => Result::Ok(v), Result::Err(e) => Result::Err(f(e)) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Containers
+// ---------------------------------------------------------------------------
+
+export type List<A> =
+  | Nil
+  | Cons(head: A, tail: List<A>);
+
+impl<A> List<A> {
+  fn is_empty(self) -> Bool { match self { List::Nil => true, List::Cons(h, t) => false } }
+
+  fn length(self) -> Int {
+    match self { List::Nil => 0, List::Cons(h, t) => 1 + t.length() }
+  }
+
+  fn head(self) -> Option<A> {
+    match self { List::Nil => Option::None, List::Cons(h, t) => Option::Some(h) }
+  }
+
+  /// Prepends, which is the cheap end. Appending walks the whole list, so it
+  /// is spelled `concat` and its cost is visible at the call site.
+  fn push(self, item: A) -> List<A> { List::Cons(item, self) }
+
+  fn concat(self, other: List<A>) -> List<A> {
+    match self {
+      List::Nil => other,
+      List::Cons(h, t) => List::Cons(h, t.concat(other)),
+    }
+  }
+
+  fn reverse(self) -> List<A> { self.reverse_onto(List::Nil) }
+
+  fn reverse_onto(self, acc: List<A>) -> List<A> {
+    match self {
+      List::Nil => acc,
+      List::Cons(h, t) => t.reverse_onto(List::Cons(h, acc)),
+    }
+  }
+
+  fn fold<B>(self, start: B, step: (B, A) -> B) -> B {
+    match self {
+      List::Nil => start,
+      List::Cons(h, t) => t.fold(step(start, h), step),
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Iteration
+// ---------------------------------------------------------------------------
+
+/// One step of an iteration: the next item and the rest, or the end.
+///
+/// Khora has no mutable references and no mutable fields, so Rust's
+/// `fn next(&mut self) -> Option<Item>` is not expressible. An iterator hands
+/// back its successor instead. `for` desugars to this and reads the same.
+export type Step<S, A> =
+  | Yield(state: S, item: A)
+  | Done;
+
+export trait Iterator {
+  type Item;
+  fn next(self) -> Step<Self, Self::Item>;
+}
+
+/// `Range::Of(from, to)` yields `from` up to but not including `to`.
+export type Range = | Of(from: Int, to: Int);
+
+impl Iterator for Range {
+  type Item = Int;
+  fn next(self) -> Step<Range, Int> {
+    match self {
+      Range::Of(from, to) => if from >= to {
+        Step::Done
+      } else {
+        Step::Yield(Range::Of(from + 1, to), from)
+      },
+    }
+  }
+}
+
+impl<A> Iterator for List<A> {
+  type Item = A;
+  fn next(self) -> Step<List<A>, A> {
+    match self {
+      List::Nil => Step::Done,
+      List::Cons(h, t) => Step::Yield(t, h),
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Abstracting over containers
+// ---------------------------------------------------------------------------
+
+export trait Functor {
+  fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;
+}
+
+/// `pure` lifts a value; `map2` combines two containers. `map2` rather than
+/// `ap` because `ap` would need a container of *functions*, and reading a
+/// signature is easier than reading `Self<(A) -> B>`.
+export trait Applicative: Functor {
+  fn pure<A>(value: A) -> Self<A>;
+  fn map2<A, B, C>(self: Self<A>, other: Self<B>, f: (A, B) -> C) -> Self<C>;
+}
+
+/// Walks a structure left to right, collecting the effects of each step.
+///
+/// This is the abstraction Rust cannot express and the reason higher-kinded
+/// types are a non-negotiable in `docs/vision.md`: one `traverse` per
+/// container serves every `Applicative`.
+export trait Traversable: Functor {
+  fn traverse<A, B, F: Applicative>(self: Self<A>, f: (A) -> F<B>) -> F<Self<B>>;
+}
+
+impl Functor for Option {
+  fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> {
+    match self {
+      Option::Some(v) => Option::Some(f(v)),
+      Option::None => Option::None,
+    }
+  }
+}
+
+impl Applicative for Option {
+  fn pure<A>(value: A) -> Option<A> { Option::Some(value) }
+  fn map2<A, B, C>(self: Option<A>, other: Option<B>, f: (A, B) -> C) -> Option<C> {
+    match self {
+      Option::Some(a) => match other {
+        Option::Some(b) => Option::Some(f(a, b)),
+        Option::None => Option::None,
+      },
+      Option::None => Option::None,
+    }
+  }
+}
+
+impl Traversable for Option {
+  fn traverse<A, B, F: Applicative>(self: Option<A>, f: (A) -> F<B>) -> F<Option<B>> {
+    match self {
+      Option::Some(v) => f(v).map(fn b => Option::Some(b)),
+      Option::None => F::pure(Option::None),
+    }
+  }
+}
+
+impl Functor for List {
+  fn map<A, B>(self: List<A>, f: (A) -> B) -> List<B> {
+    match self {
+      List::Nil => List::Nil,
+      List::Cons(h, t) => List::Cons(f(h), t.map(f)),
+    }
+  }
+}
+
+impl Traversable for List {
+  fn traverse<A, B, F: Applicative>(self: List<A>, f: (A) -> F<B>) -> F<List<B>> {
+    match self {
+      List::Nil => F::pure(List::Nil),
+      List::Cons(h, t) => f(h).map2(t.traverse(f), fn (b, rest) => List::Cons(b, rest)),
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Effects — phase 4
+// ---------------------------------------------------------------------------
+//
+// Everything below declares the shape of the effect system. None of it is
+// implemented yet; the signatures are here so that the design is written down
+// where it will live rather than only in a document.
 
 /// The empty type. A function whose return type is `Never` does not return
 /// normally — it raises, diverges, or transfers control to a handler.

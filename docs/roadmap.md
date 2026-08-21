@@ -265,7 +265,18 @@ and the backend need no notion of it. The protocol is
 mutable fields, so the mutating shape is not available to express. What a
 developer writes is the familiar loop; the protocol underneath is Khora's own.
 
-Remaining: the `std` traits themselves.
+`std::core` is written and type checks: `Ordering`, `Eq`/`Ord`/`Show`,
+`Option`, `Result`, `List`, `Step`/`Iterator`/`Range`, and
+`Functor`/`Applicative`/`Traversable` with `traverse` for both `Option` and
+`List`. `the_standard_library_type_checks` runs it as one compilation so
+cross-module imports resolve.
+
+Remaining before `std` is *usable*: code generation is still single-file.
+Linking several modules needs whole-program monomorphisation — a generic
+function's body must be available wherever it is instantiated, which means
+symbols keyed by defining module rather than by bare name. That is a design
+change to how names travel through the middle end, not a mechanical extension,
+and it decides D12's answer about whether generics can ship compiled at all.
 
 `traverse` needed three things beyond ordinary generics, all of which landed
 together: higher-kinded unification (solving `Self<A>` against `Option<Int>` as

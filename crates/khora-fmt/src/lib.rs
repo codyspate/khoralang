@@ -244,7 +244,12 @@ impl Formatter {
             return true;
         }
         if next == LT && matches!(parent, TYPE_ARGS | TYPE_PARAMS) {
-            return matches!(prev, IDENT | NAME_REF | GT);
+            // `impl<A>` hugs even though a keyword precedes it: the parameters
+            // belong to the impl, there is no name for them to attach to, and
+            // `impl <A>` reads as a stray space next to `fn f<A>`. `forall <T>`
+            // keeps its space — it is a binder terminated by `.`, where the gap
+            // separates the bound names from the type that follows.
+            return matches!(prev, IDENT | NAME_REF | GT | IMPL_KW);
         }
         // A call or index hugs what it applies to; `fn (a, b)` and `if (c)` do
         // not, because a keyword precedes the bracket.
