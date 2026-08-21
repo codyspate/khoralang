@@ -54,9 +54,10 @@ impl Eq for Bool {
   fn eq(self, other: Bool) -> Bool { self == other }
 }
 
-impl Eq for String {
-  fn eq(self, other: String) -> Bool { self == other }
-}
+// `impl Eq for String` is missing on purpose: `==` on two strings needs
+// structural comparison, which the backend does not generate yet. Declaring it
+// here would make every program that imports `Eq` fail to compile rather than
+// only the ones that compare strings.
 
 impl Eq for Ordering {
   fn eq(self, other: Ordering) -> Bool {

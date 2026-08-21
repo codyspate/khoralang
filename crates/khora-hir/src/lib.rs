@@ -330,7 +330,16 @@ pub fn module_graph(db: &dyn Db, root: khora_db::SourceRoot) -> ModuleGraph {
 pub struct FileScope {
     /// Imported names, by the spelling this file uses for them — an alias if
     /// one was written, otherwise the item's own name.
+    ///
+    /// The `Resolution` names the item as *this file* spells it, because every
+    /// lookup downstream is keyed that way. Where the defining module spells
+    /// it differently, [`FileScope::origin`] says so.
     pub names: Vec<(String, Resolution)>,
+    /// Where each imported name came from and what its own module calls it.
+    ///
+    /// Only an alias makes the two differ, and only monomorphisation cares:
+    /// it has to find the body, which lives under the original name.
+    pub origins: Vec<Origin>,
     /// Constructors reachable unqualified, from a glob or a named import of
     /// the type. Kept apart from `names` because a case and an item may share
     /// a spelling without conflicting.
@@ -338,7 +347,21 @@ pub struct FileScope {
     pub errors: Vec<HirError>,
 }
 
+/// One imported name, as written here and as written where it is defined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub local: String,
+    pub module: ModulePath,
+    pub name: String,
+    pub kind: ItemKind,
+}
+
 impl FileScope {
+    /// What the defining module calls the thing this file calls `local`.
+    pub fn origin(&self, local: &str) -> Option<&Origin> {
+        self.origins.iter().find(|o| o.local == local)
+    }
+
     pub fn get(&self, name: &str) -> Option<&Resolution> {
         self.names.iter().find(|(n, _)| n == name).map(|(_, r)| r)
     }
@@ -381,6 +404,12 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                             kind: item.kind,
                         },
                     ));
+                    out.origins.push(Origin {
+                        local: item.name.clone(),
+                        module: import.path.clone(),
+                        name: item.name.clone(),
+                        kind: item.kind,
+                    });
                 }
                 out.variants.extend(exported.variants.iter().cloned());
             }
@@ -390,14 +419,25 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                     let local = wanted.alias.clone();
                     match exported.item(&wanted.name) {
                         Some(item) if item.is_public => {
+                            // The resolution carries the *local* spelling:
+                            // signatures, types and every other downstream map
+                            // are keyed by what this file calls the thing, and
+                            // a resolution naming the original would miss them
+                            // all under an alias.
                             out.names.push((
-                                local,
+                                local.clone(),
                                 Resolution::Item {
                                     module: import.path.clone(),
-                                    name: item.name.clone(),
+                                    name: local.clone(),
                                     kind: item.kind,
                                 },
                             ));
+                            out.origins.push(Origin {
+                                local,
+                                module: import.path.clone(),
+                                name: item.name.clone(),
+                                kind: item.kind,
+                            });
                             // Importing a type brings its constructors with it.
                             // Naming each one separately would be ceremony for
                             // no decision: a type without its cases is not

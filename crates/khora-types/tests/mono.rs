@@ -23,7 +23,7 @@ fn errors(db: &dyn Db, text: &str) -> Vec<String> {
 fn concrete_functions_keep_their_names() {
     let db = KhoraDatabase::new();
     let found = symbols(&db, "module m;\nfn a() -> Int { 1 }\nfn b() -> Int { 2 }\n");
-    assert_eq!(found, vec!["a", "b"]);
+    assert_eq!(found, vec!["m$a", "m$b"]);
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn a_generic_function_is_specialised_per_type_used() {
          fn use_int() -> Int { id(1) }\n\
          fn use_bool() -> Bool { id(true) }\n",
     );
-    assert_eq!(found, vec!["id$Bool", "id$Int", "use_bool", "use_int"]);
+    assert_eq!(found, vec!["m$id$Bool", "m$id$Int", "m$use_bool", "m$use_int"]);
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn the_same_instantiation_twice_is_emitted_once() {
          fn f() -> Int { id(1) }\n\
          fn g() -> Int { id(2) }\n",
     );
-    assert_eq!(found, vec!["f", "g", "id$Int"], "one instance should serve both calls");
+    assert_eq!(found, vec!["m$f", "m$g", "m$id$Int"], "one instance should serve both calls");
 }
 
 /// A shape nobody asked for has nothing to emit.
@@ -57,7 +57,7 @@ fn the_same_instantiation_twice_is_emitted_once() {
 fn an_unused_generic_function_produces_no_instance() {
     let db = KhoraDatabase::new();
     let found = symbols(&db, "module m;\nfn id<A>(x: A) -> A { x }\nfn main() -> Int { 0 }\n");
-    assert_eq!(found, vec!["main"]);
+    assert_eq!(found, vec!["m$main"]);
 }
 
 /// Walking a generic body must substitute the instance's own arguments first,
@@ -72,7 +72,7 @@ fn a_generic_calling_a_generic_resolves_through_the_outer_instance() {
          fn twice<B>(x: B) -> B { id(id(x)) }\n\
          fn f() -> Int { twice(1) }\n",
     );
-    assert_eq!(found, vec!["f", "id$Int", "twice$Int"]);
+    assert_eq!(found, vec!["m$f", "m$id$Int", "m$twice$Int"]);
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn generic_types_appear_in_the_symbol() {
          fn id<A>(x: A) -> A { x }\n\
          fn f(o: Option<Int>) -> Option<Int> { id(o) }\n",
     );
-    assert_eq!(found, vec!["f", "id$Option$Int"]);
+    assert_eq!(found, vec!["m$f", "m$id$Option$Int"]);
 }
 
 #[test]
@@ -126,7 +126,11 @@ fn an_instance_carries_types_with_its_arguments_substituted() {
     );
 
     let all = instances(&db, file);
-    let wanted = Instance { function: "id".to_string(), args: vec![Type::Int] };
+    let wanted = Instance {
+        module: khora_hir::ModulePath::new(vec!["m".to_string()]),
+        function: "id".to_string(),
+        args: vec![Type::Int],
+    };
     let types = all.get(&wanted).expect("no id$Int instance");
 
     // Every type in the specialised body must be concrete: a rigid parameter

@@ -280,8 +280,9 @@ fn import_types(
     let Some(root) = khora_db::source_root(db) else { return };
     let graph = khora_hir::module_graph(db, root);
 
-    for (local, resolution) in &scope.names {
-        let khora_hir::Resolution::Item { module, name, kind } = resolution else { continue };
+    for origin in &scope.origins {
+        let (local, module, name, kind) =
+            (&origin.local, &origin.module, &origin.name, &origin.kind);
         let Some(source) = graph.file(module) else { continue };
         if source == file {
             continue;
@@ -307,6 +308,18 @@ fn import_types(
                 map.variants.extend(
                     exported.variants.iter().filter(|v| &v.type_name == name).cloned(),
                 );
+                // A type's own methods are part of the type, exactly as its
+                // constructors are. Requiring a second import for them would
+                // be ceremony for no decision.
+                map.traits
+                    .inherent
+                    .extend(exported.traits.inherent.iter().filter(|i| &i.head == name).cloned());
+                let own = format!("#{name}::");
+                for (key, signature) in &exported.signatures {
+                    if key.starts_with(&own) {
+                        map.signatures.insert(key.clone(), signature.clone());
+                    }
+                }
             }
             khora_hir::ItemKind::Trait => {
                 if let Some(def) = exported.traits.traits.get(name.as_str()) {

@@ -45,7 +45,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionTy
 use inkwell::values::{BasicMetadataValueEnum,BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 
-use khora_db::{Db, SourceFile};
+use khora_db::{Db, SourceFile, SourceRoot};
 use khora_hir::HirError;
 use khora_perceus::is_boxed;
 use khora_types::{Signature, Type, TypeMap, VariantInfo};
@@ -89,22 +89,32 @@ const FEATURES: &str = "";
 /// [`crate::toolchain::runtime_archive`] locates. A missing archive is an error
 /// naming the command that produces it, not a link failure full of undefined
 /// symbols from Rust's `std`.
-pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirError>> {
-    let diagnostics = khora_types::diagnostics(db, file);
+pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
+    let files = root.files(db);
+    let mut diagnostics: Vec<HirError> = Vec::new();
+    for file in files {
+        diagnostics.extend(khora_types::diagnostics(db, *file).iter().cloned());
+    }
     if !diagnostics.is_empty() {
-        return Err(diagnostics.clone());
+        return Err(diagnostics);
     }
 
     let machine = target_machine()?;
 
-    let types = khora_types::type_map(db, file);
-    let bodies = khora_hir::body::bodies(db, file);
-    let mono = khora_types::mono::instances(db, file);
+    // Whole-program: a generic function is compiled by substituting into its
+    // body, so every module's source has to be present at once. There is no
+    // separate compilation to be had until D12 says what a compiled artifact
+    // even is.
+    let mono = khora_types::mono::program_instances(db, root);
     if !mono.errors.is_empty() {
         return Err(mono.errors.clone());
     }
-    let items = khora_hir::item_map(db, file);
-    let name = items.module.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "khora".into());
+
+    let types = merged_types(db, files);
+    let name = files
+        .first()
+        .and_then(|f| khora_hir::item_map(db, *f).module.as_ref().map(|m| m.to_string()))
+        .unwrap_or_else(|| "khora".into());
 
     let context = Context::create();
     let mut backend = Backend::new(&context, &name, types.clone(), &machine);
@@ -113,7 +123,9 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
     // generic body has no machine representation until its type arguments are
     // known, and a generic function nobody calls is not emitted at all.
     for (instance, _) in &mono.instances {
-        if let Some(signature) = specialised_signature(&types, instance) {
+        let home = mono.home(&instance.symbol());
+        let scope = home.map(|h| khora_types::type_map(db, h)).unwrap_or(&types);
+        if let Some(signature) = specialised_signature(scope, instance) {
             backend.register_instance(&instance.symbol(), signature);
         }
     }
@@ -124,18 +136,21 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
     for (instance, _) in &mono.instances {
         backend.declare_definition(&instance.symbol());
     }
+
+    let body_of = |instance: &khora_types::mono::Instance| {
+        let home = mono.home(&instance.symbol())?;
+        khora_hir::body::bodies(db, home)
+            .iter()
+            .find(|(n, _)| n == &instance.function)
+            .map(|(_, b)| b)
+    };
+
     for (instance, instance_types) in &mono.instances {
-        let Some(body) = bodies.iter().find(|(n, _)| n == &instance.function).map(|(_, b)| b)
-        else {
-            continue;
-        };
+        let Some(body) = body_of(instance) else { continue };
         declare_closures(&mut backend, &instance.symbol(), body, instance_types);
     }
     for (instance, instance_types) in &mono.instances {
-        let Some(body) = bodies.iter().find(|(n, _)| n == &instance.function).map(|(_, b)| b)
-        else {
-            continue;
-        };
+        let Some(body) = body_of(instance) else { continue };
         // Planned per *specialisation*: `A` is unboxed in the generic body and
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
@@ -153,17 +168,18 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
     // Lifted lambda bodies come after the functions that build them, because
     // the closure sites are discovered while walking those bodies.
     for site in backend.closure_sites() {
-        let Some(owner) = mono.instances.iter().find(|(i, _)| i.symbol() == site.owner) else {
+        let Some((owner, owner_types)) =
+            mono.instances.iter().find(|(i, _)| i.symbol() == site.owner)
+        else {
             continue;
         };
-        let Some(body) = bodies.iter().find(|(n, _)| n == &owner.0.function).map(|(_, b)| b) else {
-            continue;
-        };
-        let plan = khora_perceus::plan(body, &owner.1);
-        crate::lower::emit_closure(&mut backend, &site, body, Some(&plan), &owner.1, mono);
+        let Some(body) = body_of(owner) else { continue };
+        let plan = khora_perceus::plan(body, owner_types);
+        crate::lower::emit_closure(&mut backend, &site, body, Some(&plan), owner_types, mono);
     }
 
-    backend.emit_c_main();
+    let entry = mono.instances.iter().find(|(i, _)| i.function == "main").map(|(i, _)| i.symbol());
+    backend.emit_c_main(entry.as_deref());
     backend.emit_pending_thunks();
     backend.emit_pending_drop_glue();
 
@@ -171,6 +187,52 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
         return Err(backend.errors);
     }
     backend.finish(&machine, out)
+}
+
+/// One view of every type in the program.
+///
+/// Each file's own map already carries what it imported, so the union repeats
+/// itself. Variants are deduplicated by type and case because a *tag is an
+/// index into its type's variant list* — counting `Option::Some` twice would
+/// renumber `None`.
+fn merged_types(db: &dyn Db, files: &[SourceFile]) -> TypeMap {
+    let mut out = TypeMap::default();
+    for file in files {
+        let map = khora_types::type_map(db, *file);
+        for (name, signature) in &map.signatures {
+            out.signatures.entry(name.clone()).or_insert_with(|| signature.clone());
+        }
+        for variant in &map.variants {
+            if !out
+                .variants
+                .iter()
+                .any(|v| v.type_name == variant.type_name && v.name == variant.name)
+            {
+                out.variants.push(variant.clone());
+            }
+        }
+        for (name, generics) in &map.adts {
+            out.adts.entry(name.clone()).or_insert_with(|| generics.clone());
+        }
+        for (name, kind) in &map.kinds {
+            out.kinds.entry(name.clone()).or_insert_with(|| kind.clone());
+        }
+        for (name, def) in &map.traits.traits {
+            out.traits.traits.entry(name.clone()).or_insert_with(|| def.clone());
+        }
+        for imp in &map.traits.impls {
+            if !out.traits.impls.iter().any(|o| o.trait_name == imp.trait_name && o.head() == imp.head())
+            {
+                out.traits.impls.push(imp.clone());
+            }
+        }
+        for own in &map.traits.inherent {
+            if !out.traits.inherent.iter().any(|o| o.head == own.head && o.methods == own.methods) {
+                out.traits.inherent.push(own.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Declares the lifted function for every lambda in one emitted body.
@@ -975,15 +1037,22 @@ impl<'ctx> Backend<'ctx> {
     /// exit code, truncated to `i32` because that is all a process status
     /// carries — a Khora `main` returning 2^32 exits 0, which is the same thing
     /// C does and worth knowing about.
-    fn emit_c_main(&mut self) {
-        let Some(signature) = self.types.signatures.get("main").cloned() else {
+    fn emit_c_main(&mut self, entry: Option<&str>) {
+        let Some(entry) = entry else {
             self.error(
                 "this program has no `main` function, so there is nothing to run",
                 TextRange::empty(0.into()),
             );
             return;
         };
-        if !self.is_defined("main") {
+        let Some(signature) = self.signature_of(entry) else {
+            self.error(
+                "this program has no `main` function, so there is nothing to run",
+                TextRange::empty(0.into()),
+            );
+            return;
+        };
+        if !self.is_defined(entry) {
             self.error(
                 "`main` is declared without a body, so there is nothing to run",
                 TextRange::empty(0.into()),
@@ -999,7 +1068,7 @@ impl<'ctx> Backend<'ctx> {
             return;
         }
 
-        let khora_main = self.functions["main"];
+        let khora_main = self.functions[entry];
         let i32_type = self.ctx.i32_type();
         let main = self.module.add_function("main", i32_type.fn_type(&[], false), None);
         let entry = self.ctx.append_basic_block(main, "entry");

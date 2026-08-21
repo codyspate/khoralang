@@ -516,3 +516,32 @@ The replacement `variant_of(type_name, case)` requires both halves.
 
 The shape is familiar by now — the same as entries 19, 22 and 24. The
 information was present and correct; a consumer threw half of it away.
+
+## 26. An alias made the type map and the resolver disagree
+
+`import demo::lib::{helper as first}` bound `first` in the file's scope to a
+`Resolution::Item` naming `helper` — correctly, since that is what the defining
+module calls it. `type_map` then copied the imported signature in under
+`first`, because that is what this file calls it.
+
+Both halves were reasonable and together they never met. The checker resolved
+`first()` to a resolution naming `helper`, looked up `helper` in a map keyed by
+`first`, found nothing, and inferred `Unknown` — which unifies with everything,
+so `khora check` reported no errors. Code generation then failed with
+"`print` shows `Int`, `Bool` and `String`; showing a `?` needs a typeclass",
+naming a phase-3 feature that had nothing to do with it.
+
+Two lessons, and the second is the one worth keeping.
+
+The narrow one: a resolution now carries the name *this file* uses, because
+every downstream map is keyed that way. Where the defining module spells it
+differently, `FileScope::origin` says so, and only monomorphisation asks —
+it has to find the body, which lives under the original name.
+
+The general one: **`Unknown` unifying with everything turns a lookup miss into
+a clean bill of health.** It exists to stop one error cascading into ten, which
+is right, but it also means any hole in name resolution shows up as silence
+rather than as a diagnostic. Entry 22 said an intention in prose is not a
+property the compiler holds; this is the same shape one level down — a lookup
+that quietly returns nothing is indistinguishable from one that succeeded,
+unless something downstream happens to need a real answer.

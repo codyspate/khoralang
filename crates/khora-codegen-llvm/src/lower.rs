@@ -609,7 +609,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if matches!(self.types.of(id), Type::Fn { .. }) =>
             {
                 let symbol =
-                    self.mono.callee(self.types, id).unwrap_or_else(|| name.clone());
+                    self.mono.callee(&self.owner.clone(), id).unwrap_or_else(|| name.clone());
                 self.function_value(&symbol, range)
             }
             khora_hir::Resolution::Item { name, .. } => self.fail(
@@ -618,7 +618,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             ),
             // `Applicative::pure(x)` in value position: the same wrapper a
             // named function gets, around whichever impl was selected.
-            khora_hir::Resolution::TraitItem { .. } => match self.mono.callee(self.types, id) {
+            khora_hir::Resolution::TraitItem { .. } => match self.mono.callee(&self.owner.clone(), id) {
                 Some(symbol) => self.function_value(&symbol, range),
                 None => self.fail(
                     "this trait function was not resolved to an impl; that is a compiler bug",
@@ -639,7 +639,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.construct(&type_name, &name, args, range)
             }
             Expr::Path(khora_hir::Resolution::TraitItem { name, .. }) => {
-                match self.mono.callee(self.types, callee) {
+                match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, args, range),
                     None => self.fail(
                         format!("`{name}` was not resolved to an impl; that is a compiler bug"),
@@ -655,14 +655,14 @@ impl<'ctx> Lower<'_, 'ctx> {
                     // site asked for; a concrete one keeps its own name.
                     let symbol = self
                         .mono
-                        .callee(self.types, callee)
+                        .callee(&self.owner.clone(), callee)
                         .unwrap_or_else(|| name.clone());
                     self.call_named(&symbol, args, range)
                 }
             }
             // `a.show()` — the receiver becomes the first argument, and which
             // impl runs was settled by monomorphisation.
-            Expr::Field { base, .. } => match self.mono.callee(self.types, callee) {
+            Expr::Field { base, .. } => match self.mono.callee(&self.owner.clone(), callee) {
                 Some(symbol) => {
                     let mut all = vec![base];
                     all.extend_from_slice(args);

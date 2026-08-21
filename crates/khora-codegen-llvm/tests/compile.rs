@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
-use khora_db::{KhoraDatabase, SourceFile};
+use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
 /// What a compiled program did.
 struct Ran {
@@ -71,7 +71,8 @@ fn run(name: &str, source: &str) -> Ran {
 
     let db = KhoraDatabase::new();
     let file = SourceFile::new(&db, format!("{name}.kh").into(), source.to_string());
-    if let Err(errors) = khora_codegen_llvm::compile(&db, file, &exe) {
+    let root = SourceRoot::new(&db, vec![file]);
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
         panic!("compiling `{name}` failed:\n  {}\n\n{source}", messages.join("\n  "));
     }
@@ -94,7 +95,8 @@ fn errors(name: &str, source: &str) -> Vec<String> {
 
     let db = KhoraDatabase::new();
     let file = SourceFile::new(&db, format!("{name}.kh").into(), source.to_string());
-    match khora_codegen_llvm::compile(&db, file, &exe) {
+    let root = SourceRoot::new(&db, vec![file]);
+    match khora_codegen_llvm::compile(&db, root, &exe) {
         Ok(()) => panic!("`{name}` was expected to be rejected, but it compiled"),
         Err(errors) => {
             assert!(!exe.is_file(), "a rejected program must not leave an executable behind");

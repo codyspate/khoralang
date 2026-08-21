@@ -852,7 +852,15 @@ impl<'a> Ctx<'a> {
 
     /// `Step::Yield` or `Step::Done`, as the desugaring needs them.
     fn step_case(&self, case: &str, _range: TextRange) -> crate::Resolution {
-        match self.map.variants_of("Step").find(|v| v.name == case) {
+        // Through the scope as well as the file: `Step` almost always arrives
+        // by `import std::core::{Step}` rather than being declared next to the
+        // loop that uses it.
+        match self
+            .map
+            .variants_of("Step")
+            .chain(self.scope.variants_of("Step"))
+            .find(|v| v.name == case)
+        {
             Some(v) => crate::Resolution::Variant {
                 module: self.map.module.clone().unwrap_or_else(|| crate::ModulePath::new(vec![])),
                 type_name: v.type_name.clone(),

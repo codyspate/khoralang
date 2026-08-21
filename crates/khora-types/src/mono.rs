@@ -27,8 +27,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use khora_db::{Db, SourceFile};
-use khora_hir::HirError;
+use khora_db::{Db, SourceFile, SourceRoot};
+use khora_hir::{HirError, ModulePath};
 use text_size::TextRange;
 
 use crate::traits::{self, Traits};
@@ -43,21 +43,34 @@ const MAX_DEPTH: usize = 64;
 /// One function, specialised at one set of type arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Instance {
+    /// The module whose source defines this function.
+    ///
+    /// Part of the identity, not decoration: two modules may each declare a
+    /// `helper`, and a whole-program compilation emits both.
+    pub module: ModulePath,
     pub function: String,
     pub args: Vec<Type>,
 }
 
 impl Instance {
-    /// The symbol this instance is emitted under.
+    /// The symbol this instance is emitted under: `std$core$unwrap_or$Int`.
     ///
-    /// A non-generic function keeps its own name, so the common case produces
-    /// exactly what it did before monomorphisation existed.
+    /// Qualified by the *defining* module so that two importers of one
+    /// instantiation agree on a name and it is emitted once, and so that two
+    /// modules may each declare a `helper` without colliding.
     pub fn symbol(&self) -> String {
-        if self.args.is_empty() {
-            return self.function.clone();
+        let mut out = String::new();
+        for segment in self.module.segments() {
+            out.push_str(segment);
+            out.push('$');
         }
-        let args: Vec<String> = self.args.iter().map(mangle).collect();
-        format!("{}${}", self.function, args.join("$"))
+        out.push_str(&self.function);
+        if !self.args.is_empty() {
+            let args: Vec<String> = self.args.iter().map(mangle).collect();
+            out.push('$');
+            out.push_str(&args.join("$"));
+        }
+        out
     }
 }
 
@@ -142,7 +155,13 @@ pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
         .collect();
     args.extend(instance.args.iter().skip(1).cloned());
 
-    Some(Instance { function: traits::method_key(trait_name, &head, method), args })
+    // The module is the mention's; the caller replaces it with whichever
+    // module actually defines the impl.
+    Some(Instance {
+        module: instance.module.clone(),
+        function: traits::method_key(trait_name, &head, method),
+        args,
+    })
 }
 
 /// Whether a name refers to a trait's own function rather than to an impl's.
@@ -164,6 +183,17 @@ pub struct Instances {
     /// what code generation emits and what monomorphisation decided cannot
     /// drift apart.
     pub resolved: HashMap<Instance, String>,
+    /// The file each emitted symbol's body lives in.
+    ///
+    /// Code generation cannot find it otherwise: an instance reached through
+    /// an import is defined in a module the emitting file never parsed.
+    pub home: HashMap<String, SourceFile>,
+    /// What each call site resolves to, by `(emitting symbol, call site)`.
+    ///
+    /// Resolving a mention needs the *scope it was written in* to say which
+    /// module defines it, which only this walk knows. Recording the answer
+    /// keeps code generation from having to reconstruct it.
+    pub calls: HashMap<(String, khora_hir::body::ExprId), String>,
 }
 
 impl Instances {
@@ -171,49 +201,104 @@ impl Instances {
         self.instances.iter().find(|(i, _)| i == instance).map(|(_, t)| t)
     }
 
-    /// The symbol a mention at `site` inside `from` should call.
+    /// The symbol the call at `site` inside `owner` should target.
     ///
-    /// `None` only when the mention was never recorded, which means it is not a
-    /// call through a signature at all.
-    pub fn callee(&self, from: &BodyTypes, site: khora_hir::body::ExprId) -> Option<String> {
-        let (function, args) = from.instantiation(site)?;
-        // No early return for an empty argument list: `Instance::symbol` already
-        // answers the function's own name in that case, and a method call has no
-        // other name to fall back on — the callee is a field access, not a path.
-        let wanted = Instance { function: function.clone(), args: args.clone() };
-        Some(self.resolved.get(&wanted).cloned().unwrap_or_else(|| wanted.symbol()))
+    /// `None` when the site is not a call through a signature at all.
+    pub fn callee(&self, owner: &str, site: khora_hir::body::ExprId) -> Option<String> {
+        self.calls.get(&(owner.to_string(), site)).cloned()
+    }
+
+    /// The file defining the body emitted under `symbol`.
+    pub fn home(&self, symbol: &str) -> Option<SourceFile> {
+        self.home.get(symbol).copied()
     }
 }
 
-/// Computes the specialisations a file needs.
+/// Everything one compilation needs to know about a file while walking it.
+struct Unit<'a> {
+    module: ModulePath,
+    file: SourceFile,
+    types: &'a TypeMap,
+    checked: &'a crate::Checked,
+    scope: &'a khora_hir::FileScope,
+}
+
+impl Unit<'_> {
+    fn body(&self, name: &str) -> Option<&BodyTypes> {
+        self.checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t)
+    }
+}
+
+/// Computes the specialisations a single file needs.
+///
+/// Kept for callers that check one file in isolation. A whole compilation goes
+/// through [`program_instances`], which is the same walk over every module.
 #[salsa::tracked(returns(ref))]
 pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
-    let types = crate::type_map(db, file);
-    let checked = crate::checked(db, file);
-    let traits = &types.traits;
-    let by_name: HashMap<&str, &BodyTypes> =
-        checked.bodies.iter().map(|(n, t)| (n.as_str(), t)).collect();
+    walk(db, &[file])
+}
+
+/// Computes the specialisations a whole program needs.
+///
+/// **Whole-program, not per-file.** A generic function is compiled by
+/// substituting its type arguments into its body, so the body has to be
+/// available wherever it is instantiated — a module importing `Option` gets
+/// `unwrap_or` specialised from `std::core`'s source, not from an object file.
+/// That is the constraint C++ templates and Rust generics have too, and it is
+/// why a symbol carries the module that *defines* it: two importers of one
+/// instantiation must agree on a symbol so it is emitted once.
+#[salsa::tracked(returns(ref))]
+pub fn program_instances(db: &dyn Db, root: SourceRoot) -> Instances {
+    walk(db, root.files(db))
+}
+
+fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
+    let units: Vec<Unit<'_>> = files
+        .iter()
+        .map(|f| Unit {
+            module: khora_hir::item_map(db, *f)
+                .module
+                .clone()
+                .unwrap_or_else(|| ModulePath::new(Vec::new())),
+            file: *f,
+            types: crate::type_map(db, *f),
+            checked: crate::checked(db, *f),
+            scope: khora_hir::file_scope(db, *f),
+        })
+        .collect();
 
     let mut out = Instances::default();
     let mut seen: HashSet<Instance> = HashSet::new();
 
-    // Roots: every function that is already concrete. A generic function with
-    // no use has no instances, which is the right answer — there is nothing to
-    // emit for a shape nobody asked for.
-    let mut queue: Vec<(Instance, usize)> = checked
-        .bodies
-        .iter()
-        .filter(|(name, _)| !is_trait_method(traits, name))
-        .filter(|(name, _)| {
-            types.signatures.get(name.as_str()).is_none_or(|s| s.generics.is_empty())
-        })
-        .map(|(name, _)| (Instance { function: name.clone(), args: Vec::new() }, 0))
-        .collect();
+    // Roots: every function that is already concrete, in every module. A
+    // generic function with no use has no instances, which is the right answer
+    // — there is nothing to emit for a shape nobody asked for.
+    let mut queue: Vec<(Instance, usize, usize)> = Vec::new();
+    for (index, unit) in units.iter().enumerate() {
+        for (name, _) in &unit.checked.bodies {
+            if is_trait_method(&unit.types.traits, name) {
+                continue;
+            }
+            if unit.types.signatures.get(name.as_str()).is_some_and(|s| !s.generics.is_empty()) {
+                continue;
+            }
+            queue.push((
+                Instance {
+                    module: unit.module.clone(),
+                    function: name.clone(),
+                    args: Vec::new(),
+                },
+                index,
+                0,
+            ));
+        }
+    }
 
-    while let Some((instance, depth)) = queue.pop() {
+    while let Some((instance, index, depth)) = queue.pop() {
         if !seen.insert(instance.clone()) {
             continue;
         }
+        let unit = &units[index];
         if depth > MAX_DEPTH {
             out.errors.push(HirError {
                 message: format!(
@@ -226,8 +311,9 @@ pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
             continue;
         }
 
-        let Some(generic) = by_name.get(instance.function.as_str()) else { continue };
-        let generics = types
+        let Some(generic) = unit.body(&instance.function) else { continue };
+        let generics = unit
+            .types
             .signatures
             .get(instance.function.as_str())
             .map(|s| s.generics.clone())
@@ -240,30 +326,77 @@ pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
             .map(|(g, a)| (g.as_str(), a.clone()))
             .collect();
         let specialised = generic.specialised(&mapping);
+        let owner = instance.symbol();
 
-        for (_, (callee, args)) in specialised.instantiations() {
-            if args.is_empty() {
-                continue;
-            }
+        for (site, (callee, args)) in specialised.instantiations() {
             let resolved: Vec<Type> =
                 args.iter().map(|a| unify::substitute(a, &mapping)).collect();
-            let mention = Instance { function: callee.clone(), args: resolved };
 
             // A call written against a trait is emitted as a call to the impl.
-            let target = match select_impl(types, &mention) {
-                Some(chosen) => {
-                    out.resolved.insert(mention, chosen.symbol());
-                    chosen
-                }
-                None => mention,
+            let mention = Instance {
+                module: unit.module.clone(),
+                function: callee.clone(),
+                args: resolved.clone(),
             };
-            queue.push((target, depth + 1));
+            let (name, args) = match select_impl(unit.types, &mention) {
+                Some(chosen) => (chosen.function, chosen.args),
+                None => (callee.clone(), resolved),
+            };
+
+            // Which module defines it decides the symbol, and a name reached
+            // through an import is defined somewhere this file never parsed.
+            match defining(&units, index, &name) {
+                Some((home, original)) => {
+                    let target =
+                        Instance { module: units[home].module.clone(), function: original, args };
+                    out.calls.insert((owner.clone(), *site), target.symbol());
+                    out.resolved.insert(mention, target.symbol());
+                    queue.push((target, home, depth + 1));
+                }
+                // Nothing defines it in Khora, so it is a C symbol the file
+                // declared — the runtime's `print`, say — called by its own
+                // name.
+                None => {
+                    out.calls.insert((owner.clone(), *site), name);
+                }
+            }
         }
 
+        out.home.insert(owner, unit.file);
         out.instances.push((instance, specialised));
     }
 
     // Deterministic order: the same source must produce the same object file.
     out.instances.sort_by_key(|(i, _)| i.symbol());
     out
+}
+
+/// Which unit defines `name`, as seen from the unit at `from`, and what that
+/// module calls it.
+///
+/// The second half matters because of aliases: `import lib::{double as twice}`
+/// records mentions under `twice`, and the body is `double`.
+fn defining(units: &[Unit<'_>], from: usize, name: &str) -> Option<(usize, String)> {
+    if units[from].body(name).is_some() {
+        return Some((from, name.to_string()));
+    }
+
+    // A name the file imported, under whatever it calls it. The body lives
+    // under the *defining* module's spelling, which an alias changes.
+    if let Some(origin) = units[from].scope.origin(name) {
+        if let Some(home) = units.iter().position(|u| u.module == origin.module) {
+            if units[home].body(&origin.name).is_some() {
+                return Some((home, origin.name.clone()));
+            }
+        }
+    }
+
+    // A trait or impl method carries a compound key of its own —
+    // `Show#Int::show` — which no import names. It travelled in with its trait,
+    // so look for the key itself in the other modules.
+    units
+        .iter()
+        .enumerate()
+        .find(|(index, unit)| *index != from && unit.body(name).is_some())
+        .map(|(index, _)| (index, name.to_string()))
 }

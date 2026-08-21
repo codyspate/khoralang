@@ -175,37 +175,58 @@ fn fmt(paths: &[PathBuf], check: bool) -> Result<bool> {
 #[cfg(feature = "llvm")]
 fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
     let files = collect_sources(std::slice::from_ref(&path.to_path_buf()))?;
-    let [source] = files.as_slice() else {
-        anyhow::bail!(
-            "`khora build` takes exactly one `.kh` file; found {}. \
-             Linking several modules into one binary is not wired up yet.",
-            files.len()
-        )
-    };
+    if files.is_empty() {
+        anyhow::bail!("no `.kh` files found");
+    }
 
-    let text = read(source)?;
     let db = KhoraDatabase::new();
-    let input = SourceFile::new(&db, source.clone(), text.clone());
+    let mut inputs = Vec::with_capacity(files.len());
+    for path in &files {
+        let text = read(path)?;
+        inputs.push((path.clone(), text.clone(), SourceFile::new(&db, path.clone(), text)));
+    }
+    // Every module in one compilation. Monomorphisation substitutes into a
+    // generic function's *body*, so every module's source has to be present at
+    // once — the same reason a C++ template lives in a header.
+    let root = SourceRoot::new(&db, inputs.iter().map(|(_, _, f)| *f).collect());
 
-    let parse = khora_db::parse(&db, input);
-    if !parse.errors().is_empty() {
-        eprintln!("{}", render_parse_errors(source, &text, parse.errors()));
-        eprintln!();
+    let mut clean = true;
+    for (path, text, input) in &inputs {
+        let parse = khora_db::parse(&db, *input);
+        if !parse.errors().is_empty() {
+            clean = false;
+            eprintln!("{}", render_parse_errors(path, text, parse.errors()));
+            eprintln!();
+        }
+    }
+    if !clean {
         return Ok(false);
     }
 
+    // The binary is named after the module holding `main`, or after the one
+    // file when there is only one.
+    let entry = inputs
+        .iter()
+        .find(|(_, text, _)| text.contains("fn main("))
+        .or_else(|| inputs.first())
+        .expect("at least one source");
     let target = out.map(Path::to_path_buf).unwrap_or_else(|| {
-        let stem = source.file_stem().unwrap_or_default();
-        source.with_file_name(stem).with_extension(std::env::consts::EXE_EXTENSION)
+        let stem = entry.0.file_stem().unwrap_or_default();
+        entry.0.with_file_name(stem).with_extension(std::env::consts::EXE_EXTENSION)
     });
 
-    match khora_codegen_llvm::compile(&db, input, &target) {
+    match khora_codegen_llvm::compile(&db, root, &target) {
         Ok(()) => {
-            println!("built {}", target.display());
+            println!("built {} from {} module(s)", target.display(), inputs.len());
             Ok(true)
         }
         Err(errors) => {
-            eprintln!("{}", render_hir_errors(source, &text, &errors));
+            // Errors can come from any module, and a span is only meaningful
+            // against the file it came from. Without a file on the error there
+            // is no honest way to place it, so the first source is used and the
+            // count is printed either way.
+            let (path, text, _) = &inputs[0];
+            eprintln!("{}", render_hir_errors(path, text, &errors));
             eprintln!();
             eprintln!("{} error(s)", errors.len());
             Ok(false)
