@@ -1,15 +1,15 @@
 # D9 — Imperative constructs
 
-**Status:** planned, not designed in detail.
+**Status:** implemented, except generic `for`, which waits on typeclasses.
 
 `docs/vision.md` says Khora should contend whenever a team is choosing between
 Rust, Go and TypeScript. Most of those developers are not functional
 programmers. They will not learn to express a loop as a fold in order to try the
 language — they will close the tab.
 
-The grammar in `docs/project.md` §1.2 has no loops, no early `return`, no
-assignment, and no `if`. Everything is recursion and `match`. That is coherent
-for an FP-only language and disqualifying for the stated audience.
+The grammar in `docs/project.md` §1.2 had no loops, no early `return`, no
+assignment, and no `if`. Everything was recursion and `match` — coherent for an
+FP-only language and disqualifying for the stated audience.
 
 ## The principle
 
@@ -32,36 +32,32 @@ Decision A8 (direct-style effects) is the other half of this. Under a monadic
 `Effect.for_each` or a fold. Direct style is what makes an ordinary `for` over a
 database call possible at all.
 
-## What is missing today
+## Status
 
-Confirmed against `crates/khora-syntax` — none of the following parse:
-
-| Construct | Notes |
+| Construct | State |
 | --- | --- |
-| `if` / `else if` / `else` | **Not in the language at all.** `if` currently exists only as a `match` guard. Even ML-family languages have a conditional expression; this is the most glaring gap. |
-| Assignment | `let mut` parses, but there is no way to assign. `mut` is currently meaningless. |
-| `for x in xs { … }` | Needs an iteration protocol. |
-| `while cond { … }` | |
-| `loop { … }` with `break value` | |
-| `break` / `continue` | Labelled forms to be decided. |
-| Early `return` | |
-| Compound assignment (`+=`, `-=`) | Sugar; lowest priority. |
+| `if` / `else if` / `else` | **Done.** Expression form; the condition is parsed with record literals suppressed so `{` opens the branch. |
+| Assignment | **Done.** An expression of type `()`, right-associative and loosest-binding, so `x = a \|> b` assigns the whole pipeline. |
+| `while cond { … }` | **Done.** |
+| `loop { … }` with `break value` | **Done.** |
+| `break` / `continue` | **Done.** Unlabelled. |
+| Early `return` | **Done.** With or without a value. |
+| `for x in xs { … }` | **Phase 3.** Needs the `Iterator` typeclass. |
+| Compound assignment (`+=`, `-=`) | Not done. Sugar; lowest priority. |
 
-## Sequencing
+Implementing these turned up one rule that was missing and is easy to overlook:
+**a block-like expression standing in statement position needs no `;`**, the
+same rule Rust uses. Without it, `if c { .. }` in the middle of a block is read
+as the block's tail expression and every statement after it is orphaned. That
+now applies to `if`, `match`, `while`, `loop`, a bare block, and a `with` block.
 
-Two of these are cheap and unblock everything else; the rest depend on other
-phases.
+## Why `for` waits
 
-**Phase 1, alongside the other front-end work.** `if`/`else`, assignment,
-`while`, `loop`/`break`/`continue`, and early `return` are all self-contained
-grammar and lowering work. `if` in particular should not wait — it is a
-one-evening change that removes a daily papercut.
-
-**Phase 3, after typeclasses.** Generic `for x in xs` needs an iteration
-protocol, which needs typeclasses (decision A4). A concrete `for` over `List`
-could land earlier as a special case, but shipping the special case first risks
-baking in a shape the general protocol then has to match. Prefer waiting, unless
-`for` over `List` proves badly missed in practice.
+Generic `for x in xs` needs an iteration protocol, which needs typeclasses
+(decision A4, Phase 3). A concrete `for` over `List` could land now as a special
+case, but shipping the special case first risks baking in a shape the general
+protocol then has to match. Worth revisiting only if `for` over `List` proves
+badly missed before Phase 3.
 
 ## Interactions to get right
 
@@ -89,4 +85,8 @@ baking in a shape the general protocol then has to match. Prefer waiting, unless
   variable syntax (`'r`), so labels need a different spelling.
 - Does `loop { }` with `break value` earn its place, or does `while` plus
   recursion cover enough?
-- Is assignment an expression (yielding `()`) or a statement?
+- Compound assignment (`+=`, `-=`) — worth the extra grammar, or not?
+
+**Settled while implementing:** assignment is an expression of type `()`, as in
+Rust, which keeps it in the precedence table rather than adding a statement
+form. `break`/`continue` are unlabelled for now.

@@ -173,6 +173,12 @@ ast_node!(UnitExpr, UNIT_EXPR);
 ast_node!(ParenExpr, PAREN_EXPR);
 ast_node!(LambdaExpr, LAMBDA_EXPR);
 ast_node!(IfExpr, IF_EXPR);
+ast_node!(WhileExpr, WHILE_EXPR);
+ast_node!(LoopExpr, LOOP_EXPR);
+ast_node!(BreakExpr, BREAK_EXPR);
+ast_node!(ContinueExpr, CONTINUE_EXPR);
+ast_node!(ReturnExpr, RETURN_EXPR);
+ast_node!(AssignExpr, ASSIGN_EXPR);
 ast_node!(MatchExpr, MATCH_EXPR);
 ast_node!(MatchArm, MATCH_ARM);
 ast_node!(MatchGuard, MATCH_GUARD);
@@ -194,6 +200,12 @@ ast_enum!(Expr {
     Paren(ParenExpr),
     Lambda(LambdaExpr),
     If(IfExpr),
+    While(WhileExpr),
+    Loop(LoopExpr),
+    Break(BreakExpr),
+    Continue(ContinueExpr),
+    Return(ReturnExpr),
+    Assign(AssignExpr),
     Raise(RaiseExpr),
     Try(TryExpr),
     Handler(HandlerExpr),
@@ -606,6 +618,43 @@ impl IfExpr {
             return Some(Expr::Block(b));
         }
         children::<IfExpr>(&self.0).next().map(Expr::If)
+    }
+}
+
+impl WhileExpr {
+    pub fn condition(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+    pub fn body(&self) -> Option<Block> {
+        child(&self.0)
+    }
+}
+
+impl LoopExpr {
+    pub fn body(&self) -> Option<Block> {
+        child(&self.0)
+    }
+}
+
+impl BreakExpr {
+    /// `break expr` carries a value out of a `loop`.
+    pub fn value(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+}
+
+impl ReturnExpr {
+    pub fn value(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+}
+
+impl AssignExpr {
+    pub fn target(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+    pub fn value(&self) -> Option<Expr> {
+        children::<Expr>(&self.0).nth(1)
     }
 }
 

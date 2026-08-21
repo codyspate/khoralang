@@ -47,6 +47,11 @@ pub enum SyntaxKind {
     CATCH_KW,
     TEST_KW,
     BENCH_KW,
+    WHILE_KW,
+    LOOP_KW,
+    BREAK_KW,
+    CONTINUE_KW,
+    RETURN_KW,
     TRUE_KW,
     FALSE_KW,
 
@@ -153,6 +158,13 @@ pub enum SyntaxKind {
     PAREN_EXPR,
     LAMBDA_EXPR,
     IF_EXPR,
+    WHILE_EXPR,
+    LOOP_EXPR,
+    BREAK_EXPR,
+    CONTINUE_EXPR,
+    RETURN_EXPR,
+    /// `x = expr` — an expression of type `()`, as in Rust.
+    ASSIGN_EXPR,
     /// `raise DbError.QueryFailed(e)` — performs an operation of the error row.
     RAISE_EXPR,
     /// `expr!` — marks a call that can abort the enclosing function.
@@ -260,6 +272,11 @@ keywords! {
     "catch" => CATCH_KW,
     "test" => TEST_KW,
     "bench" => BENCH_KW,
+    "while" => WHILE_KW,
+    "loop" => LOOP_KW,
+    "break" => BREAK_KW,
+    "continue" => CONTINUE_KW,
+    "return" => RETURN_KW,
     "true" => TRUE_KW,
     "false" => FALSE_KW,
 }

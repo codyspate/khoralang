@@ -242,8 +242,7 @@ impl Marker {
             other => unreachable!("marker slot already filled with {other:?}"),
         }
         p.events.push(Event::Finish);
-        let _ = kind;
-        CompletedMarker { pos: self.pos }
+        CompletedMarker { pos: self.pos, kind }
     }
 
     pub(crate) fn abandon(mut self, p: &mut Parser) {
@@ -269,12 +268,17 @@ impl Drop for Marker {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CompletedMarker {
     pos: usize,
+    kind: SyntaxKind,
 }
 
 impl CompletedMarker {
     /// Opens a node that becomes the parent of this one. This is how
     /// left-associative operators are built without backtracking: parse the
     /// left operand, then wrap it once the operator is seen.
+    pub(crate) fn kind(self) -> SyntaxKind {
+        self.kind
+    }
+
     pub(crate) fn precede(self, p: &mut Parser) -> Marker {
         let new_marker = p.start();
         match &mut p.events[self.pos] {

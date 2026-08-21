@@ -92,7 +92,7 @@
         {
           "comment": "Keep in sync with SyntaxKind::from_keyword in crates/khora-syntax/src/kind.rs. Enforced by the keywords_match_the_lexer test.",
           "name": "keyword.control.khora",
-          "match": "\\b(match|if|else|raise|catch)\\b"
+          "match": "\\b(match|if|else|raise|catch|while|loop|break|continue|return)\\b"
         },
         {
           "name": "keyword.declaration.khora",

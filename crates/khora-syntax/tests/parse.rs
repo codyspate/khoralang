@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use khora_syntax::ast::{AstNode, Decl, Expr};
 use khora_syntax::{parse, SyntaxNode};
 
 fn workspace_root() -> PathBuf {
@@ -337,6 +338,132 @@ fn f() { let xs = [1, 2, 3]; let empty = []; }
 ");
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
     assert!(parse.debug_tree().contains("LIST_EXPR"));
+}
+
+#[test]
+fn assignment_parses_and_binds_loosest() {
+    let assigned = parse("module m;
+fn f() { let mut x = 1; x = 2; }
+");
+    assert!(assigned.errors().is_empty(), "{:?}", assigned.errors());
+    assert!(assigned.debug_tree().contains("ASSIGN_EXPR"));
+
+    // `x = a |> b` assigns the whole pipeline, not just `a`.
+    let dump = parse("module m;
+fn f() { x = a |> b; }
+").debug_tree();
+    let assign = dump.find("ASSIGN_EXPR").expect("no assignment");
+    let pipe = dump.find("PIPE_EXPR").expect("no pipe");
+    assert!(pipe > assign, "pipe should nest inside the assignment:
+{dump}");
+}
+
+#[test]
+fn loops_and_jumps_parse() {
+    let src = "module m;
+fn f() {
+  let mut i = 0;
+  while i < 10 { i = i + 1; }
+  loop {
+    if i > 5 { break i; }
+    continue;
+  }
+}
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    let dump = parse.debug_tree();
+    for node in ["WHILE_EXPR", "LOOP_EXPR", "BREAK_EXPR", "CONTINUE_EXPR"] {
+        assert!(dump.contains(node), "missing {node}:
+{dump}");
+    }
+}
+
+#[test]
+fn early_return_parses_with_and_without_a_value() {
+    let parse = parse("module m;
+fn f(n: Int) -> Int {
+  if n < 0 { return 0; }
+  n
+}
+fn g() { return; }
+");
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    assert_eq!(parse.debug_tree().matches("RETURN_EXPR").count(), 2);
+}
+
+/// Without this rule an `if` in the middle of a block is read as the block's
+/// tail expression and everything after it is orphaned.
+#[test]
+fn block_like_expressions_are_statements_without_a_semicolon() {
+    let src = "module m;
+fn f(n: Int) -> Int {
+  if n < 0 { print(\"neg\"); }
+  while n > 0 { n = n - 1; }
+  match n { _ => (), }
+  n
+}
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+
+    // Assert on the typed tree rather than counting text: nested blocks contain
+    // statements of their own, so a string count would be misleading.
+    let file = parse.source_file();
+    let body = file
+        .decls()
+        .find_map(|d| match d {
+            Decl::Fn(f) => f.body(),
+            _ => None,
+        })
+        .expect("no function body");
+
+    assert_eq!(body.stmts().count(), 3, "the if, while and match should be statements");
+    assert!(
+        matches!(body.tail_expr(), Some(Expr::Path(_))),
+        "`n` should remain the tail expression"
+    );
+}
+
+/// The condition must not absorb the loop body as a record literal.
+#[test]
+fn while_condition_does_not_swallow_the_body() {
+    let dump = parse("module m;
+fn f() { while ready { step(); } }
+").debug_tree();
+    assert!(dump.contains("WHILE_EXPR"), "{dump}");
+    assert!(!dump.contains("RECORD_EXPR"), "condition read as a record:
+{dump}");
+}
+
+#[test]
+fn an_imperative_function_parses_end_to_end() {
+    let src = "module m;
+
+pub fn import_batch(rows: List<Row>) -> Summary
+  with { ledger: Ledger }
+  raises DbError
+{
+  let mut summary = Summary.empty();
+  let mut i = 0;
+  while i < rows.len() {
+    let row = rows.at(i);
+    i = i + 1;
+    match Txn.parse(row) {
+      Option.None => continue,
+      Option.Some(txn) => {
+        if txn.amount < 0 { return summary; }
+        ledger.record(txn)!;
+        summary = summary.record(txn);
+      }
+    }
+  }
+  summary
+}
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    assert_eq!(parse.syntax().text().to_string(), src);
 }
 
 #[test]
