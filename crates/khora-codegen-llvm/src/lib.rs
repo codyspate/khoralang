@@ -1,10 +1,14 @@
 //! Native backend.
 //!
-//! Not implemented yet, and the `llvm` feature is off by default because
-//! `inkwell` needs a matching LLVM installation that this workspace does not
-//! assume. Planned shape:
+//! Real code generation is not implemented yet — see `docs/roadmap.md` Phase 2.
+//! What exists today is the toolchain plumbing and a spike that proves the
+//! whole emit-link-run path works on this host, so Phase 2 can assume it.
 //!
-//! - Lower reference-counted HIR to LLVM IR via `inkwell`.
-//! - C FFI shims for the BLAS / GGML kernels behind `std.ai`.
-//! - Link with `lld` to a static executable
-//!   (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`).
+//! LLVM is an optional dependency: building without `--features llvm` needs no
+//! LLVM installation at all, which keeps `cargo test` green for anyone working
+//! on the front end. See `docs/llvm-setup.md`.
+
+pub mod toolchain;
+
+#[cfg(feature = "llvm")]
+pub mod spike;

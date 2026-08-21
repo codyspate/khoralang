@@ -1,16 +1,26 @@
 [package]
 name = "khora-codegen-llvm"
-description = "Native backend: HIR -> LLVM IR via inkwell, linked with lld"
+description = "Native backend: HIR -> LLVM IR via inkwell, linked with clang/lld"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [features]
-# Off by default: enabling it requires a matching LLVM installation.
+# Off by default: enabling it requires the pinned LLVM 22.1 toolchain.
+# See docs/llvm-setup.md for the two workarounds it needs.
 default = []
-llvm = []
+llvm = ["dep:inkwell"]
 
 [dependencies]
 khora-hir.workspace = true
 khora-perceus.workspace = true
+# `default-features = false` is required: inkwell's default `target-all`
+# references LLVMInitialize* for 17 architectures, but the prebuilt LLVM has
+# only AArch64, ARM, X86, BPF, WebAssembly, RISCV and NVPTX. Enable exactly the
+# targets Khora emits for (docs/project.md 5.1).
+inkwell = { version = "0.10", default-features = false, features = [
+    "llvm22-1",
+    "target-x86",
+    "target-aarch64",
+], optional = true }

@@ -1,0 +1,24 @@
+# Machine-local LLVM toolchain used by khora-codegen-llvm --features llvm.
+#
+# `force = false` (the default) means an LLVM_SYS_221_PREFIX already present in
+# your environment wins, so other machines do not need to edit this file --
+# just export your own prefix. See docs/llvm-setup.md.
+[env]
+LLVM_SYS_221_PREFIX = { value = 'C:\Users\codys\.llvm\llvm-22.1.8', force = false }
+
+
+# LLVM's official Windows libraries are built /MT (they carry
+# DEFAULTLIB:libcmt and libcpmt), while rustc's msvc target defaults to /MD.
+# The two CRTs have separate heaps, so mixing them makes ordinary LLVM calls
+# fault. Match LLVM by linking the static CRT.
+#
+# `llvm-sys` then emits the Windows system libraries as `static=` (its build.rs
+# switches on cfg!(target_feature = "crt-static")), so rustc must be able to
+# find those import libraries: hence the SDK search path.
+#
+# This also suits shipping `khora` as the single static binary section 6 wants.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-Ctarget-feature=+crt-static",
+    '-Lnative=C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64',
+]
