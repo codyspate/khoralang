@@ -18,6 +18,22 @@
 //! - A block `drop`s every boxed local it declared, on the way out.
 //! - Parameters are owned by the callee, so they are dropped like locals.
 //!
+//! # Known gap: discarded temporaries
+//!
+//! A boxed value produced in statement position and never bound leaks. In
+//! `Shape::Circle(4);` the allocation gets a reference nobody releases.
+//!
+//! The scheme balances everywhere else, and it is worth seeing why, because it
+//! is not obvious: a read `dup`s, and the callee that receives the value drops
+//! it as an owned parameter, so a call is neutral. `let t = s; t` allocates
+//! once, dups twice and drops twice, leaving the single reference the caller
+//! receives. Construction yields one reference, and the block that binds it
+//! releases it.
+//!
+//! Only a value that is never consumed by anything falls outside that, which is
+//! why the demo program does not trip it. Fixing it means dropping the result
+//! of a statement expression whose type is boxed — tracked separately.
+//!
 //! # The interface
 //!
 //! The output is a side table keyed by [`ExprId`] and [`LocalId`] rather than a

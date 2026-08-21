@@ -13,8 +13,18 @@ default = []
 llvm = ["dep:inkwell"]
 
 [dependencies]
+khora-db.workspace = true
 khora-hir.workspace = true
+khora-types.workspace = true
 khora-perceus.workspace = true
+# Depended on for its `pub` layout constants, not for its code: the header
+# offsets the generated GEPs use come from `khora-rt` so the two sides of the
+# heap contract cannot drift. It also makes cargo build the static archive that
+# every generated executable links against.
+khora-rt.workspace = true
+# `HirError` carries a `TextRange`, so the backend needs the same crate the
+# front end builds them from.
+text-size.workspace = true
 # `default-features = false` is required: inkwell's default `target-all`
 # references LLVMInitialize* for 17 architectures, but the prebuilt LLVM has
 # only AArch64, ARM, X86, BPF, WebAssembly, RISCV and NVPTX. Enable exactly the

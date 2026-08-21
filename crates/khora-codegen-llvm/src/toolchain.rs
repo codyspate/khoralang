@@ -1,8 +1,14 @@
-//! Locating the pinned LLVM toolchain.
+//! Locating the pinned LLVM toolchain, and the runtime it links against.
 //!
 //! The backend does not rely on LLVM being on `PATH`. It resolves everything
 //! from the same prefix `llvm-sys` was built against, so the linker and the
 //! codegen library can never drift apart.
+//!
+//! The same problem applies to `khora-rt`: every generated executable links
+//! against its static archive, and the archive that gets linked has to be the
+//! one built from the source this compiler was built against.
+//! [`runtime_archive`] searches for it rather than taking it as an argument,
+//! because `compile` has no other place to put it.
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +37,85 @@ pub fn tool(name: &str) -> Option<PathBuf> {
 /// already knows how to find the platform's CRT and system libraries, and it
 /// is the same driver that will handle the cross-targets in Phase 6.
 pub fn link_executable(objects: &[&Path], out: &Path) -> Result<(), String> {
+    drive_clang(objects, &[], out)
+}
+
+/// File name of the runtime's static archive, as cargo writes it.
+const RUNTIME_ARCHIVE: &str = if cfg!(windows) { "khora_rt.lib" } else { "libkhora_rt.a" };
+
+/// System libraries `khora-rt` needs, because it carries Rust's `std` with it.
+///
+/// Not guessed: it is what
+/// `cargo rustc -p khora-rt --crate-type staticlib -- --print native-static-libs`
+/// reports, which is the only authority on the question. If a future `std`
+/// version adds one, that command says so and this list is where it goes.
+#[cfg(windows)]
+const SYSTEM_LIBS: &[&str] =
+    &["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"];
+#[cfg(target_os = "linux")]
+const SYSTEM_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
+#[cfg(not(any(windows, target_os = "linux")))]
+const SYSTEM_LIBS: &[&str] = &["-lSystem", "-lc", "-lm"];
+
+/// The runtime archive generated executables link against.
+///
+/// Searched rather than configured, in this order:
+///
+/// 1. `KHORA_RT_LIB`, for a packaged toolchain or an unusual layout.
+/// 2. Beside the running executable, and one directory up — which covers both
+///    an installed `khora` and a `cargo test` binary in `target/*/deps`.
+/// 3. This crate's source tree, for a workspace build driven from elsewhere.
+///
+/// Returns `None` if nothing plausible is on disk, so the caller can say which
+/// command produces it rather than failing inside the linker.
+pub fn runtime_archive() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("KHORA_RT_LIB") {
+        let path = PathBuf::from(explicit);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(RUNTIME_ARCHIVE));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join(RUNTIME_ARCHIVE));
+            }
+        }
+    }
+
+    // `CARGO_MANIFEST_DIR` is baked in at build time, so this only helps a
+    // compiler that is still sitting in the tree it was built from — which is
+    // exactly the case where the first two probes can miss.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace) = manifest.parent().and_then(|c| c.parent()) {
+        for profile in ["debug", "release"] {
+            candidates.push(workspace.join("target").join(profile).join(RUNTIME_ARCHIVE));
+        }
+    }
+
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Links objects with the Khora runtime into an executable.
+///
+/// This is what [`crate::compile`] finishes with. The runtime archive goes
+/// *after* the objects and the system libraries after that: a static link
+/// resolves left to right, so an archive listed before its user contributes
+/// nothing.
+pub fn link_with_runtime(objects: &[&Path], out: &Path) -> Result<(), String> {
+    let runtime = runtime_archive().ok_or_else(|| {
+        format!(
+            "the Khora runtime archive ({RUNTIME_ARCHIVE}) was not found. Build it with \
+             `cargo build -p khora-rt`, or point KHORA_RT_LIB at it."
+        )
+    })?;
+    drive_clang(objects, &[runtime.as_path()], out)
+}
+
+fn drive_clang(objects: &[&Path], archives: &[&Path], out: &Path) -> Result<(), String> {
     let clang = tool("clang").ok_or_else(|| {
         "clang not found in the LLVM toolchain; set LLVM_SYS_221_PREFIX \
          (see docs/llvm-setup.md)"
@@ -38,7 +123,11 @@ pub fn link_executable(objects: &[&Path], out: &Path) -> Result<(), String> {
     })?;
 
     let mut cmd = std::process::Command::new(&clang);
-    cmd.args(objects).arg("-o").arg(out);
+    cmd.args(objects).args(archives);
+    if !archives.is_empty() {
+        cmd.args(SYSTEM_LIBS);
+    }
+    cmd.arg("-o").arg(out);
 
     let output = cmd.output().map_err(|e| format!("running {}: {e}", clang.display()))?;
     if !output.status.success() {

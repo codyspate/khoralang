@@ -319,6 +319,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "khora-codegen-llvm",
  "khora-db",
  "khora-diagnostics",
  "khora-fmt",
@@ -332,8 +333,12 @@ name = "khora-codegen-llvm"
 version = "0.1.0"
 dependencies = [
  "inkwell",
+ "khora-db",
  "khora-hir",
  "khora-perceus",
+ "khora-rt",
+ "khora-types",
+ "text-size",
 ]
 
 [[package]]

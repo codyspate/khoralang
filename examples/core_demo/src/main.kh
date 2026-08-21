@@ -1,0 +1,43 @@
+module demo::main;
+
+// A prelude does not exist yet, so the intrinsic is declared here. Code
+// generation recognises `print` by name and lowers it to the runtime.
+fn print(value: Int);
+
+pub type Shape =
+  | Circle(radius: Int)
+  | Square(side: Int)
+  | Point;
+
+/// Exercises `match` over every constructor, including payload bindings.
+pub fn area(s: Shape) -> Int {
+  match s {
+    Shape::Circle(r) => 3 * r * r,
+    Shape::Square(side) => side * side,
+    Shape::Point => 0,
+  }
+}
+
+/// Exercises mutation, a loop and early return.
+pub fn sum_to(n: Int) -> Int {
+  if n < 0 {
+    return 0;
+  }
+
+  let mut total = 0;
+  let mut i = 1;
+  while i <= n {
+    total = total + i;
+    i = i + 1;
+  }
+  total
+}
+
+pub fn main() -> Int {
+  let c = Shape::Circle(4);
+  print(area(c));
+  print(sum_to(10));
+  print(area(Shape::Square(5)));
+
+  sum_to(10) - 55
+}

@@ -44,8 +44,12 @@ enum Command {
     },
     /// Compile to a native executable.
     Build {
+        /// A `.kh` file, or a directory containing one.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Where to write the executable. Defaults to the source file's stem.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -67,13 +71,7 @@ fn run() -> Result<bool> {
         Command::Fmt { paths, check } => fmt(&paths, check),
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
-        Command::Build { path } => {
-            let _ = path;
-            anyhow::bail!(
-                "`khora build` needs the LLVM backend, which is not implemented yet \
-                 (crates/khora-codegen-llvm). `khora check` works today."
-            )
-        }
+        Command::Build { path, out } => build(&path, out.as_deref()),
     }
 }
 
@@ -158,6 +156,59 @@ fn fmt(paths: &[PathBuf], check: bool) -> Result<bool> {
 
     println!("formatted {} of {} file(s)", changed.len(), files.len());
     Ok(failed == 0)
+}
+
+/// Compiles a single file to a native executable.
+///
+/// Semantic errors are reported through the same renderer `check` uses, so a
+/// diagnostic reads identically whichever command surfaced it.
+#[cfg(feature = "llvm")]
+fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
+    let files = collect_sources(std::slice::from_ref(&path.to_path_buf()))?;
+    let [source] = files.as_slice() else {
+        anyhow::bail!(
+            "`khora build` takes exactly one `.kh` file; found {}.              Multi-file programs need the module graph, which is phase 3.",
+            files.len()
+        )
+    };
+
+    let text = read(source)?;
+    let db = KhoraDatabase::new();
+    let input = SourceFile::new(&db, source.clone(), text.clone());
+
+    let parse = khora_db::parse(&db, input);
+    if !parse.errors().is_empty() {
+        eprintln!("{}
+", render_parse_errors(source, &text, parse.errors()));
+        return Ok(false);
+    }
+
+    let target = out.map(Path::to_path_buf).unwrap_or_else(|| {
+        let stem = source.file_stem().unwrap_or_default();
+        source.with_file_name(stem).with_extension(std::env::consts::EXE_EXTENSION)
+    });
+
+    match khora_codegen_llvm::compile(&db, input, &target) {
+        Ok(()) => {
+            println!("built {}", target.display());
+            Ok(true)
+        }
+        Err(errors) => {
+            for err in &errors {
+                eprintln!("error: {}", err.message);
+            }
+            eprintln!("{} error(s)", errors.len());
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(not(feature = "llvm"))]
+fn build(_path: &Path, _out: Option<&Path>) -> Result<bool> {
+    anyhow::bail!(
+        "this `khora` was built without the LLVM backend. \
+         Rebuild with `--features llvm`; see docs/llvm-setup.md."
+    )
 }
 
 fn lex(path: &Path) -> Result<()> {

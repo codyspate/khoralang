@@ -9,7 +9,12 @@ This repository is the compiler, written in Rust.
 
 ## Status
 
-The front end works. Everything after it is scaffolding.
+**A Khora program compiles and runs.** `khora build` takes a `.kh` file through
+parsing, name resolution, type checking with exhaustiveness, reference-count
+planning and LLVM to a linked native executable.
+
+The language it accepts is still the phase 2 subset: no effects, generics,
+closures or records yet.
 
 | Crate | State |
 | --- | --- |
@@ -17,11 +22,12 @@ The front end works. Everything after it is scaffolding.
 | `khora-db` | **Working.** Salsa database, `SourceFile`/`SourceRoot` inputs, the `parse` query. |
 | `khora-manifest` | **Working.** `khora.toml` parsing; unknown keys warn rather than abort. |
 | `khora-fmt` | **Working.** Canonical formatter over the CST. |
-| `khora-hir` | Not implemented. Boundary and lowering plan only. |
-| `khora-types` | Not implemented. |
-| `khora-perceus` | Not implemented. |
-| `khora-codegen-llvm` | Not implemented. `llvm` feature off by default. |
-| `khora-cli` | `check`, `fmt`, `lex`, `parse` work. `build` reports that it cannot. |
+| `khora-hir` | **Working.** Module graph, item collection, name resolution, body lowering. |
+| `khora-types` | **Working.** Monomorphic checking, exhaustiveness and reachability. |
+| `khora-perceus` | **Working.** Conservative `dup`/`drop` placement; reuse analysis is phase 6. |
+| `khora-rt` | **Working.** Reference-counted heap and intrinsics, linked into every executable. |
+| `khora-codegen-llvm` | **Working.** LLVM backend behind the `llvm` feature. |
+| `khora-cli` | `check`, `fmt`, `lex`, `parse`, and `build` with `--features llvm`. |
 
 `khora check` parses the whole corpus in `std/` and `examples/` with no errors.
 
@@ -29,6 +35,10 @@ The front end works. Everything after it is scaffolding.
 
 ```bash
 cargo test
+```
+
+```bash
+cargo build -p khora-rt && cargo run -p khora-cli --features llvm -- build examples/core_demo
 ```
 
 ```bash

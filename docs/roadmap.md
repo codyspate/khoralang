@@ -185,7 +185,12 @@ non-trivia token stream; `std/` reads in direct style.
 
 ---
 
-## Phase 2 — Vertical slice: Khora Core to a native binary
+## Phase 2 — Vertical slice: Khora Core to a native binary — **complete**
+
+`khora build examples/core_demo` produces an executable that prints 48, 55 and
+25 and exits 0. Every allocation is freed, asserted by a test reading the
+runtime's live counter, with a positive control so the check cannot pass
+vacuously.
 
 The milestone. A subset chosen to exercise every stage while excluding
 everything hard.
