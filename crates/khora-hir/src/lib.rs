@@ -337,7 +337,7 @@ pub struct FileScope {
     pub names: Vec<(String, Resolution)>,
     /// Where each imported name came from and what its own module calls it.
     ///
-    /// Only an alias makes the two differ, and only monomorphisation cares:
+    /// Only an alias makes the two differ, and only monomorphization cares:
     /// it has to find the body, which lives under the original name.
     pub origins: Vec<Origin>,
     /// Constructors reachable unqualified, from a glob or a named import of
@@ -485,7 +485,7 @@ pub enum Resolution {
     /// because which one it is depends on the type parameters in scope, and
     /// resolving that is the checker's job rather than the name resolver's.
     TraitItem { owner: String, name: String },
-    /// Recognised, but the vertical slice does not handle it yet.
+    /// Recognized, but the vertical slice does not handle it yet.
     Unsupported(&'static str),
 }
 

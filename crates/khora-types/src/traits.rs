@@ -2,7 +2,7 @@
 //!
 //! `docs/design/typeclasses.md` settles the shape of all of this: Rust's
 //! spelling, Rust's coherence rules, static dispatch through the existing
-//! monomorphisation pass, and higher kinds with no notation of their own.
+//! monomorphization pass, and higher kinds with no notation of their own.
 //!
 //! # Why kinds are here at all
 //!
@@ -173,7 +173,7 @@ impl Traits {
     }
 
     /// Every `type Name = Value` the impls in scope declare, in the shape the
-    /// unifier needs to normalise a projection.
+    /// unifier needs to normalize a projection.
     pub fn assoc_bindings(&self) -> Vec<crate::unify::AssocBinding> {
         self.impls
             .iter()
@@ -414,7 +414,7 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
 
     // A trait's own signatures, keyed `Trait::method`, with `Self` still rigid.
     // These are what a call through a *bound* is checked against, since which
-    // impl runs is not known until monomorphisation.
+    // impl runs is not known until monomorphization.
     for decl in source.decls() {
         let ast::Decl::Trait(t) = decl else { continue };
         let Some(name) = t.name().and_then(|n| n.ident()) else { continue };
@@ -767,7 +767,7 @@ fn check_signatures(
     errors: &mut Vec<HirError>,
 ) {
     let Some(head) = imp.head() else { return };
-    let normaliser = crate::unify::Unifier::new().with_assoc(traits.assoc_bindings());
+    let normalizer = crate::unify::Unifier::new().with_assoc(traits.assoc_bindings());
 
     for method in &imp.methods {
         let Some(declared) = signatures.get(&format!("{}::{}", imp.trait_name, method)) else {
@@ -788,7 +788,7 @@ fn check_signatures(
             mapping.insert(from.as_str(), Type::Param(to.clone()));
         }
 
-        let expect = |ty: &Type| normaliser.zonk(&crate::unify::substitute(ty, &mapping));
+        let expect = |ty: &Type| normalizer.zonk(&crate::unify::substitute(ty, &mapping));
 
         if declared.params.len() != written.params.len() {
             errors.push(HirError {

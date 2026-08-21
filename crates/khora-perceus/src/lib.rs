@@ -4,7 +4,7 @@
 //! *minimal* reference counting. Perceus proper earns its name by removing
 //! pairs that provably cancel and by fusing a `drop` with a following
 //! allocation into an in-place `reuse` — that is phase 6 (FBIP), and it is an
-//! optimisation over exactly this output. Getting the conservative version
+//! optimization over exactly this output. Getting the conservative version
 //! right first means phase 6 has something to prove itself against.
 //!
 //! # The scheme
@@ -101,7 +101,7 @@ pub fn plan(body: &Body, types: &khora_types::BodyTypes) -> RcPlan {
 /// the body was *written* at.
 ///
 /// Good enough for a non-generic function, and what the tests read. Code
-/// generation calls [`plan`] once per specialisation instead.
+/// generation calls [`plan`] once per specialization instead.
 #[salsa::tracked(returns(ref))]
 pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
     let checked = khora_types::checked(db, file);

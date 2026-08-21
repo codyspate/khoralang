@@ -238,7 +238,7 @@ impl SyntaxKind {
     /// recovery.
     ///
     /// `context`, `test` and `bench` also begin declarations but are contextual
-    /// keywords, so they arrive as `IDENT` and cannot be recognised by kind
+    /// keywords, so they arrive as `IDENT` and cannot be recognized by kind
     /// alone — the parser's `at_decl_start` covers those.
     pub fn is_decl_start(self) -> bool {
         matches!(
@@ -288,7 +288,7 @@ macro_rules! keywords {
 }
 
 /// Declares the contextual keywords, generating the spelling lookup the parser
-/// uses to recognise one and the list the editor grammar is checked against.
+/// uses to recognize one and the list the editor grammar is checked against.
 macro_rules! contextual_keywords {
     ($($text:literal => $kind:ident),* $(,)?) => {
         /// Words that are keywords in exactly one position and ordinary
@@ -351,7 +351,7 @@ keywords! {
 // ordinary identifier is not grammatical, so there is nothing to disambiguate.
 //
 // `for` is here only because `handler for E { .. }` needs it, and it is
-// recognised solely in that position. The `for` loop of phase 3 will make it a
+// recognized solely in that position. The `for` loop of phase 3 will make it a
 // hard keyword; do not rely on it as an identifier.
 contextual_keywords! {
     "handler" => HANDLER_KW,

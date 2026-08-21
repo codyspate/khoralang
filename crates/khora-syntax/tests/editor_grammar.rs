@@ -142,7 +142,7 @@ fn scopes_of(rule: &str) -> Vec<String> {
 }
 
 /// The order in which the root includes its repository rules. TextMate takes
-/// the leftmost match and breaks a tie by this order, so it is behaviour.
+/// the leftmost match and breaks a tie by this order, so it is behavior.
 fn root_includes() -> Vec<String> {
     let g = grammar();
     g["patterns"]
@@ -218,7 +218,7 @@ fn contextual_keywords_are_reachable_from_the_root() {
 }
 
 /// No word may be both hard and contextual: the two lists drive different
-/// lexer behaviour, and the grammar would highlight it twice.
+/// lexer behavior, and the grammar would highlight it twice.
 #[test]
 fn the_keyword_lists_are_disjoint() {
     let overlap: Vec<_> = CONTEXTUAL_KEYWORDS.iter().filter(|k| KEYWORDS.contains(k)).collect();
@@ -241,7 +241,7 @@ fn every_extension_json_file_is_valid() {
 }
 
 /// `::` is a token the lexer has (`SyntaxKind::COLON_COLON`) and the grammar
-/// must colour. Without a rule it does not go uncoloured — it falls through to
+/// must color. Without a rule it does not go uncolored — it falls through to
 /// the `:` in the punctuation class and gets read twice as the separator of a
 /// type annotation, which is precisely the wrong reading.
 ///
@@ -285,7 +285,7 @@ fn the_path_separator_has_a_scope_of_its_own() {
 /// Paths are `::`-separated. They used to be dotted, and the grammar spelled
 /// that as character classes like `[A-Za-z0-9_.]` — every one of which is now
 /// wrong in a way no editor will report: the regex still matches, it just stops
-/// at the first `:` and colours half a path.
+/// at the first `:` and colors half a path.
 #[test]
 fn no_rule_spells_a_path_with_dots() {
     let g = grammar();
@@ -312,10 +312,10 @@ fn no_rule_spells_a_path_with_dots() {
 }
 
 /// `#paths` and `#projections` are the rules the split made possible, and both
-/// are dead unless they run *before* `#types` — which colours any capitalised
+/// are dead unless they run *before* `#types` — which colors any capitalized
 /// identifier and would otherwise claim a constructor after `::` and a field
 /// after `.` alike. TextMate breaks a tie between two rules matching at the
-/// same position by the order they are listed, so this ordering is behaviour
+/// same position by the order they are listed, so this ordering is behavior
 /// and not presentation.
 #[test]
 fn the_path_rules_run_before_the_blunt_type_rule() {
@@ -339,7 +339,7 @@ fn the_path_rules_run_before_the_blunt_type_rule() {
 
 /// A name after a `.` is a record field or a method — runtime projection — and
 /// never a type. Under the universal dot the grammar could not know that, so
-/// `RiskLevel.Low` and `report.risk` were coloured the same; this test pins the
+/// `RiskLevel.Low` and `report.risk` were colored the same; this test pins the
 /// half of the distinction a regex can now make.
 #[test]
 fn a_name_after_a_dot_is_never_a_type() {
@@ -348,7 +348,7 @@ fn a_name_after_a_dot_is_never_a_type() {
 
     assert!(
         offenders.is_empty(),
-        "#projections colours the tail of a `.` as a type: {offenders:?}. After \
+        "#projections colors the tail of a `.` as a type: {offenders:?}. After \
          the `::`/`.` split a `.` introduces a field or a method, and a type \
          can only follow `::`."
     );
@@ -364,7 +364,7 @@ fn a_path_distinguishes_modules_from_types() {
         assert!(
             scopes.iter().any(|s| s == expected),
             "#paths never assigns `{expected}`, so a lowercase module qualifier \
-             and a capitalised type qualifier are being coloured the same: \
+             and a capitalized type qualifier are being colored the same: \
              {scopes:?}"
         );
     }

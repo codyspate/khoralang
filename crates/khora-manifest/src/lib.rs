@@ -6,7 +6,7 @@
 //! is specified in `docs/project.md` §4.1.
 //!
 //! Reading a manifest is deliberately hard to fail. A key this toolchain does
-//! not recognise produces a [`Warning`] and the parse continues, because the
+//! not recognize produces a [`Warning`] and the parse continues, because the
 //! format will keep growing and a manifest written against a newer toolchain
 //! has to stay buildable by an older one -- the alternative is a lockstep
 //! upgrade across every consumer of a package. Only TOML that does not parse,

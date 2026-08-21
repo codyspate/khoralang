@@ -67,7 +67,7 @@ before the phase that depends on it starts.
 **Closed:**
 
 - **D6** (typeclasses) is decided and implemented: Rust's `trait`/`impl`
-  spelling, Rust's coherence rules, static dispatch through monomorphisation,
+  spelling, Rust's coherence rules, static dispatch through monomorphization,
   and higher kinds inferred from how a trait applies `Self`. See
   `docs/design/typeclasses.md`. The `std` trait list is decided there; the
   orphan rule is decided but waits on cross-package resolution to enforce.
@@ -164,7 +164,7 @@ Independent of Phase 0; can proceed in parallel.
 - **1.2 Manifest parser — done.** `khora-manifest` covers §4.1 in full. Unknown
   keys warn rather than abort, each with a line and column, so an older
   toolchain degrades instead of refusing a newer manifest.
-- **1.3 `khora fmt` — done.** `khora-fmt` normalises indentation, spacing,
+- **1.3 `khora fmt` — done.** `khora-fmt` normalizes indentation, spacing,
   blank-line runs and import lists, and **preserves the author's line breaks**
   rather than reflowing. That is what makes it idempotent and token-preserving,
   both asserted by property tests. It refuses to touch a file that does not
@@ -242,14 +242,14 @@ allocation is freed; diagnostic snapshots are committed and reviewed.
 
 Algorithm W with occurs check and let-generalisation, extended with a kind
 system. Const generics as `Type::Const`. Typeclasses with instance resolution
-per D6. Monomorphise in HIR before codegen so abstraction costs nothing at
+per D6. Monomorphize in HIR before codegen so abstraction costs nothing at
 runtime.
 
 Also lands the `Iterator` typeclass and generic `for x in xs`, which was held
 back from Phase 1 so the loop form is designed against the real protocol rather
 than a `List` special case.
 
-Done so far: inference and unification (`khora-types::unify`), monomorphisation
+Done so far: inference and unification (`khora-types::unify`), monomorphization
 by reachability (`khora-types::mono`), const generics as `Type::Const`, tuple
 types, and traits with kinds, coherence and static dispatch
 (`khora-types::traits`). Tuples arrived alongside const generics rather than on
@@ -345,14 +345,14 @@ the function that required it.
 Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
 `Schedule` policies. Shares continuation machinery with Phase 4.
 
-**Exit:** a cancelled fiber runs every finalizer in scope, verified by test;
+**Exit:** a canceled fiber runs every finalizer in scope, verified by test;
 `khora test` runs isolated fibers across cores.
 
 ---
 
 ## Phase 6 — Perceus reuse and FBIP
 
-Reuse analysis, drop specialisation, borrowed parameters.
+Reuse analysis, drop specialization, borrowed parameters.
 
 **Exit:** `map` over a uniquely-owned list performs zero allocations, asserted
 by a counting-allocator test.

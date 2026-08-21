@@ -105,7 +105,7 @@ typeclass instance (decision A4, Phase 3) — which is where Rust puts it too, a
 which has coherence rules (D6) instead of whatever happens to be imported.
 
 `|>` is unaffected and becomes the *only* way to chain free functions.
-`xs |> normalise |> summarise` composes functions; `xs.len()` asks a value about
+`xs |> normalize |> summarize` composes functions; `xs.len()` asks a value about
 itself. Two operators, two jobs, no overlap between them.
 
 ## A field and an item with the same name is an error

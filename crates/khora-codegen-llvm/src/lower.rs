@@ -56,7 +56,7 @@ pub(crate) fn emit_function<'ctx>(
     mono: &khora_types::mono::Instances,
 ) {
     let Some(function) = be.definition(name) else { return };
-    // `name` is a specialisation's symbol, so the signature has to come from
+    // `name` is a specialization's symbol, so the signature has to come from
     // the instance table rather than from the source signatures.
     let Some(signature) = be.signature_of(name) else { return };
     let empty = RcPlan::default();
@@ -197,7 +197,7 @@ struct Lower<'a, 'ctx> {
     function: FunctionValue<'ctx>,
     /// The symbol being emitted. A lambda site is keyed by this plus the
     /// expression, because one lambda in a generic body becomes a different
-    /// closure in every specialisation.
+    /// closure in every specialization.
     owner: String,
     ret: Type,
     slots: HashMap<LocalId, PointerValue<'ctx>>,
@@ -651,7 +651,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if name == "print" && args.len() == 1 {
                     self.print(args[0], range)
                 } else {
-                    // A generic callee resolves to the specialisation this call
+                    // A generic callee resolves to the specialization this call
                     // site asked for; a concrete one keeps its own name.
                     let symbol = self
                         .mono
@@ -661,7 +661,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 }
             }
             // `a.show()` — the receiver becomes the first argument, and which
-            // impl runs was settled by monomorphisation.
+            // impl runs was settled by monomorphization.
             Expr::Field { base, .. } => match self.mono.callee(&self.owner.clone(), callee) {
                 Some(symbol) => {
                     let mut all = vec![base];
@@ -1712,7 +1712,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     ///
     /// Exhaustiveness checking says this cannot happen, so `unreachable` alone
     /// would be correct — and would make a bug in that checker into undefined
-    /// behaviour rather than a crash. A trap first costs one instruction on a
+    /// behavior rather than a crash. A trap first costs one instruction on a
     /// path nothing takes.
     fn unmatched_block(&mut self) -> BasicBlock<'ctx> {
         let current = self.here();

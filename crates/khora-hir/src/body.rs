@@ -131,7 +131,7 @@ pub enum Expr {
     /// with anything, so one syntax error does not cascade into ten type
     /// errors.
     Missing,
-    /// Recognised syntax outside the phase 2 subset.
+    /// Recognized syntax outside the phase 2 subset.
     Unsupported(&'static str),
     Literal(Literal),
     /// A resolved local binding.
@@ -435,7 +435,7 @@ impl<'a> Ctx<'a> {
         for stmt in block.stmts() {
             match stmt {
                 ast::Stmt::Let(let_decl) => {
-                    // The initialiser is lowered before the binding is
+                    // The initializer is lowered before the binding is
                     // declared, so `let x = x;` refers to the outer `x`.
                     let init = let_decl.initializer().map(|e| self.lower_expr(&e));
                     let pat = match let_decl.pat() {

@@ -2,7 +2,7 @@
 //!
 //! # Approach
 //!
-//! The formatter **preserves where the author broke lines and normalises
+//! The formatter **preserves where the author broke lines and normalizes
 //! everything else**: indentation, spacing around punctuation and operators,
 //! blank-line runs, and the contents of import lists.
 //!
@@ -274,7 +274,7 @@ impl Formatter {
         let mut items: Vec<String> = node
             .children()
             .filter(|n| n.kind() == IMPORT_ITEM)
-            .map(|n| normalise_import_item(&n))
+            .map(|n| normalize_import_item(&n))
             .collect();
         items.sort();
         items.dedup();
@@ -290,9 +290,9 @@ impl Formatter {
     }
 }
 
-/// `X` or `X as Y`, with internal whitespace normalised so sorting and
+/// `X` or `X as Y`, with internal whitespace normalized so sorting and
 /// deduplication compare like with like.
-fn normalise_import_item(node: &SyntaxNode) -> String {
+fn normalize_import_item(node: &SyntaxNode) -> String {
     let parts: Vec<String> = node
         .children_with_tokens()
         .filter_map(|el| el.into_token())

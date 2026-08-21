@@ -35,7 +35,7 @@ pub enum FieldType {
 }
 
 /// What a pattern tests for. A variant carries the types of its payload so
-/// specialisation knows both how many columns it expands into and what they
+/// specialization knows both how many columns it expands into and what they
 /// hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ctor {
@@ -187,12 +187,12 @@ fn usefulness(
 
     match &q[0] {
         Pattern::Constructor { ctor, fields } => {
-            let specialised = specialise(matrix, ctor);
+            let specialized = specialize(matrix, ctor);
             let mut sub_q = fields.clone();
             sub_q.extend_from_slice(&q[1..]);
-            let sub_types = specialised_types(ctor, types, resolve);
+            let sub_types = specialized_types(ctor, types, resolve);
 
-            match usefulness(&specialised, &sub_q, &sub_types, resolve) {
+            match usefulness(&specialized, &sub_q, &sub_types, resolve) {
                 Usefulness::Useless => Usefulness::Useless,
                 Usefulness::Useful(witnesses) => {
                     Usefulness::Useful(rebuild(witnesses, ctor))
@@ -212,12 +212,12 @@ fn usefulness(
                 };
                 let mut witnesses = Vec::new();
                 for ctor in &all {
-                    let specialised = specialise(matrix, ctor);
+                    let specialized = specialize(matrix, ctor);
                     let mut sub_q = vec![Pattern::Wildcard; ctor.arity()];
                     sub_q.extend_from_slice(&q[1..]);
-                    let sub_types = specialised_types(ctor, types, resolve);
+                    let sub_types = specialized_types(ctor, types, resolve);
                     if let Usefulness::Useful(found) =
-                        usefulness(&specialised, &sub_q, &sub_types, resolve)
+                        usefulness(&specialized, &sub_q, &sub_types, resolve)
                     {
                         witnesses.extend(rebuild(found, ctor));
                     }
@@ -253,7 +253,7 @@ fn usefulness(
 
 /// Rows whose first pattern matches `ctor`, with that pattern replaced by its
 /// fields.
-fn specialise(matrix: &Matrix, ctor: &Ctor) -> Matrix {
+fn specialize(matrix: &Matrix, ctor: &Ctor) -> Matrix {
     let mut out = Matrix::new();
     for row in matrix {
         let Some(first) = row.first() else { continue };
@@ -329,10 +329,10 @@ fn missing_constructors(column: &ColumnType, present: &[Ctor]) -> Vec<Pattern> {
 /// Column types after expanding `ctor`'s payload.
 ///
 /// Getting this right is what lets a fully spelled-out nested `match` be
-/// recognised as exhaustive: a sub-column typed `Unknown` can never be
+/// recognized as exhaustive: a sub-column typed `Unknown` can never be
 /// complete, so returning `Unknown` here made the checker demand a wildcard
 /// that the program did not need.
-fn specialised_types(ctor: &Ctor, types: &Types, resolve: Resolver<'_>) -> Vec<ColumnType> {
+fn specialized_types(ctor: &Ctor, types: &Types, resolve: Resolver<'_>) -> Vec<ColumnType> {
     let mut out: Vec<ColumnType> = match ctor {
         Ctor::Variant { fields, .. } => fields
             .iter()

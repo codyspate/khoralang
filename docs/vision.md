@@ -103,28 +103,28 @@ else.
 
 Those three are the competitive set named at the top of this document, and most
 of that audience are not functional programmers. The thing being protected is
-what a construct **does**, not what it is called. A developer who recognises a
-construct will predict its behaviour, and a wrong prediction is a bug they write
+what a construct **does**, not what it is called. A developer who recognizes a
+construct will predict its behavior, and a wrong prediction is a bug they write
 today and debug next week. That cost is paid at every use site by every reader,
 forever; "I prefer the other one" costs nothing and buys nothing.
 
-### Behaviour first, spelling second
+### Behavior first, spelling second
 
 The two are not equally important, and conflating them produces bad decisions in
 both directions.
 
-**Novel syntax for familiar behaviour is cheap.** It is learned once, on the
+**Novel syntax for familiar behavior is cheap.** It is learned once, on the
 first encounter, and never surprises anyone again. `fn x => x + 1` is not how
 Rust or TypeScript spells a lambda, and that is fine: it *behaves* like the
 lambda both of them have, so a reader who learns the spelling once is never
 wrong about it again.
 
-**Familiar syntax for novel behaviour is expensive.** It mispredicts every time,
+**Familiar syntax for novel behavior is expensive.** It mispredicts every time,
 and the reader has no reason to doubt themselves — the whole point of a familiar
 word is that it stops you looking things up. This is the failure the rule exists
 to prevent.
 
-So spelling is chosen to *serve* the behavioural promise: pick the word that most
+So spelling is chosen to *serve* the behavioral promise: pick the word that most
 accurately predicts what the thing does. Usually that is the familiar word.
 Sometimes the familiar word carries semantics Khora deliberately does not have,
 and then it is the **wrong** word precisely because it is familiar.
@@ -133,7 +133,7 @@ The worked example is `trait` (`docs/design/typeclasses.md`). `interface` is far
 more familiar to this audience — it is in Go, TypeScript, Java and C#. It is also
 **structural** in both of the languages that matter most here: a Go or TypeScript
 type satisfies an interface by having the right methods, with nothing declared.
-Khora's resolution is nominal, so `interface` would promise a behaviour Khora
+Khora's resolution is nominal, so `interface` would promise a behavior Khora
 does not have. `trait` is less familiar and more accurate, and accuracy wins.
 
 ### What the rule is not
@@ -163,6 +163,14 @@ It has already settled several calls:
   `interface` reads as structural to most of this audience
   (`docs/design/typeclasses.md`).
 
+## Conventions
+
+**US English**, in source, comments, diagnostics and documentation alike —
+`initialize`, `specialization`, `finalizer`, `color`. It is what the rest of
+the programming world writes, and a compiler that spells a word two ways
+across two files looks careless in a way that erodes trust in everything else
+it says.
+
 ## Non-goals
 
 - **Not a systems-programming replacement for Rust.** Reference counting has a
@@ -182,7 +190,7 @@ Concrete, falsifiable checks, in rough order of when they become answerable:
   (Rust cannot express this; Effect needs `@effect/typeclass` to fake it.)
 - The reference risk-analysis function reads as straight-line code with a `with`
   clause, with no `flat_map` and no nested closures.
-- A cancelled fiber runs every finalizer in scope, verified by test.
+- A canceled fiber runs every finalizer in scope, verified by test.
 - Cold `khora build` on the reference application beats `cargo build` on an
   equivalent Rust program.
 - LSP hover and completion respond in under 15 ms on a real workspace.

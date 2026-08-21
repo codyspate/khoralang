@@ -45,7 +45,7 @@ Syntax support is three separate layers, and this file is only the first:
 
 **Semantic tokens over LSP is the real answer** (roadmap phase 8.4). It is
 editor-agnostic by construction and reuses the compiler instead of duplicating
-it, which is the only way `Type.member` can be coloured correctly — see the
+it, which is the only way `Type.member` can be colored correctly — see the
 limits section below.
 
 A tree-sitter grammar would mean maintaining a *second* parser alongside the
@@ -77,9 +77,9 @@ scopes or types.
 It used to be much worse. Under the old "universal dot" rule, `Effect.map`,
 `report.risk` and `RiskLevel.Low` were syntactically identical, and no regex
 could tell a module path from a field access from a constructor — the grammar
-could only approximate by capitalisation. Splitting `::` from `.` (errata 13)
+could only approximate by capitalization. Splitting `::` from `.` (errata 13)
 removed that limit: a path is now visibly a path, so modules, types,
-constructors and associated items colour correctly, and a name after `.` is
+constructors and associated items color correctly, and a name after `.` is
 never mistaken for a type.
 
 What a regex still cannot do is anything needing resolution — telling a local
@@ -100,9 +100,9 @@ There are two lists, and they live in separate repository rules:
 - `#keywords` mirrors `KEYWORDS` — the hard keywords, matched as bare words.
 - `#contextual-keywords` mirrors `CONTEXTUAL_KEYWORDS` — `handler`, `for`,
   `context`, `test` and `bench`, which are ordinary identifiers everywhere
-  except one position each. Matching them as bare words would colour a
+  except one position each. Matching them as bare words would color a
   parameter named `handler` or a variable named `test`, so each rule instead
-  reproduces the position the parser recognises: `handler` before `for`,
+  reproduces the position the parser recognizes: `handler` before `for`,
   `context` at the start of a declaration, `test`/`bench` before a name string.
   These approximations are exactly the kind of thing semantic tokens will
   replace.

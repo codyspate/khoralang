@@ -100,7 +100,7 @@ fn main() -> Int { print(double(21)); 0 }
     assert_eq!(ran.code, Some(0));
 }
 
-/// The case separate compilation cannot serve: the body has to be specialised
+/// The case separate compilation cannot serve: the body has to be specialized
 /// at the *use* site, in a module that never declared it.
 #[test]
 fn a_generic_method_is_instantiated_across_modules() {

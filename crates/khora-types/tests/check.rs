@@ -295,7 +295,7 @@ fn a_constructor_of_another_type_is_not_reachable() {
         &db,
         "a.kh".into(),
         "module m;\n\
-         export type Colour = | Red | Green;\n\
+         export type Color = | Red | Green;\n\
          export type Fruit = | Apple;\n\
          fn f() -> Fruit { Fruit::Red }\n"
             .to_string(),

@@ -1,4 +1,4 @@
-//! Which specialisations a program needs.
+//! Which specializations a program needs.
 
 use khora_db::{Db, KhoraDatabase, SourceFile};
 use khora_types::mono::{instances, Instance};
@@ -18,7 +18,7 @@ fn errors(db: &dyn Db, text: &str) -> Vec<String> {
 }
 
 /// A non-generic function keeps its own name, so nothing about the common case
-/// changes because monomorphisation exists.
+/// changes because monomorphization exists.
 #[test]
 fn concrete_functions_keep_their_names() {
     let db = KhoraDatabase::new();
@@ -27,7 +27,7 @@ fn concrete_functions_keep_their_names() {
 }
 
 #[test]
-fn a_generic_function_is_specialised_per_type_used() {
+fn a_generic_function_is_specialized_per_type_used() {
     let db = KhoraDatabase::new();
     let found = symbols(
         &db,
@@ -111,7 +111,7 @@ fn polymorphic_recursion_is_reported_rather_than_hanging() {
          fn main() -> Int { grow(1) }\n",
     );
     assert!(
-        found.iter().any(|e| e.contains("endlessly many specialisations")),
+        found.iter().any(|e| e.contains("endlessly many specializations")),
         "expected a diagnostic, got {found:?}"
     );
 }
@@ -133,7 +133,7 @@ fn an_instance_carries_types_with_its_arguments_substituted() {
     };
     let types = all.get(&wanted).expect("no id$Int instance");
 
-    // Every type in the specialised body must be concrete: a rigid parameter
+    // Every type in the specialized body must be concrete: a rigid parameter
     // surviving to here is exactly what code generation cannot represent.
     let body = khora_hir::body::bodies(&db, file)
         .iter()
@@ -144,7 +144,7 @@ fn an_instance_carries_types_with_its_arguments_substituted() {
     for (id, _) in body.exprs() {
         assert!(
             !matches!(types.of(id), Type::Param(_)),
-            "a rigid parameter survived specialisation: {:?}",
+            "a rigid parameter survived specialization: {:?}",
             types.of(id)
         );
     }

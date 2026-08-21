@@ -591,7 +591,7 @@ const ITER: &str = "module m;\n\
                       fn next(self) -> Step<Range, Int> { Step::Done }\n\
                     }\n";
 
-/// The projection has to normalise, or every use of `Self::Item` is an opaque
+/// The projection has to normalize, or every use of `Self::Item` is an opaque
 /// name that unifies with nothing and reports itself in diagnostics.
 #[test]
 fn an_associated_type_projects_to_the_impls_binding() {

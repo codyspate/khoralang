@@ -66,7 +66,7 @@ pub struct Unifier {
     /// What each flexible variable has been solved to, if anything.
     solved: Vec<Option<Type>>,
     /// Every `type Item = ..` an impl in scope declares, so a projection can be
-    /// normalised the moment its owner becomes concrete. Carried by value
+    /// normalized the moment its owner becomes concrete. Carried by value
     /// rather than borrowed: there are a handful per program, and a lifetime
     /// here would spread to everything that holds a `Unifier`.
     assoc: Vec<AssocBinding>,
@@ -89,7 +89,7 @@ impl Unifier {
         Unifier::default()
     }
 
-    /// Supplies the associated-type bindings projections normalise through.
+    /// Supplies the associated-type bindings projections normalize through.
     pub fn with_assoc(mut self, assoc: Vec<AssocBinding>) -> Unifier {
         self.assoc = assoc;
         self
@@ -100,7 +100,7 @@ impl Unifier {
     /// The impl's parameters are matched against the concrete owner first, so
     /// `List<Int>::Item` under `impl<A> Iterator for List<A> { type Item = A; }`
     /// projects to `Int` rather than to a rigid `A`.
-    fn normalise_assoc(&self, owner: &Type, name: &str) -> Option<Type> {
+    fn normalize_assoc(&self, owner: &Type, name: &str) -> Option<Type> {
         let head = head_name(owner)?;
         let binding = self.assoc.iter().find(|b| b.head == head && b.name == name)?;
 
@@ -141,7 +141,7 @@ impl Unifier {
         // any of them having to know projections exist.
         if let Type::Assoc { owner, name } = &current {
             let owner = self.shallow(owner);
-            if let Some(value) = self.normalise_assoc(&owner, name) {
+            if let Some(value) = self.normalize_assoc(&owner, name) {
                 return self.shallow(&value);
             }
             return Type::Assoc { owner: Box::new(owner), name: name.clone() };
@@ -196,7 +196,7 @@ impl Unifier {
             (Type::Var(v), other) | (other, Type::Var(v)) => self.bind(*v, other),
 
             // Two projections of the same name off the same owner are the same
-            // type. One that has not normalised is rigid — its owner is still a
+            // type. One that has not normalized is rigid — its owner is still a
             // parameter, so nothing here may assume what it will become.
             (Type::Assoc { owner: o1, name: n1 }, Type::Assoc { owner: o2, name: n2 })
                 if n1 == n2 =>
@@ -334,7 +334,7 @@ impl Unifier {
     /// As [`Unifier::instantiate`], also returning the fresh variables in the
     /// order the parameters were declared.
     ///
-    /// Monomorphisation needs those: once solved, they are the type arguments
+    /// Monomorphization needs those: once solved, they are the type arguments
     /// this particular mention chose.
     pub fn instantiate_with(&mut self, generics: &[String], ty: &Type) -> (Type, Vec<Type>) {
         if generics.is_empty() {

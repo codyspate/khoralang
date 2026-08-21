@@ -6,7 +6,7 @@
 //! process-global, so a test asserting "nothing is live" would otherwise be
 //! reading another test's objects — cargo runs the tests in a binary on several
 //! threads at once. One binary means one owner for that state, and [`isolated`]
-//! serialises access to it. New tests belong inside `isolated` even when they
+//! serializes access to it. New tests belong inside `isolated` even when they
 //! do not look at the counters, because allocating at all perturbs them.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,12 +18,12 @@ use khora_rt::{
     KHORA_HEADER_ALIGN, KHORA_HEADER_SIZE,
 };
 
-/// Serialises tests, since the runtime's counters are shared by all of them.
+/// Serializes tests, since the runtime's counters are shared by all of them.
 static RUNTIME: Mutex<()> = Mutex::new(());
 
 /// Counts `drop_fields` calls, so a test can see the exact point at which an
 /// object is torn down. Freeing is otherwise unobservable — reading the memory
-/// afterwards to check would itself be undefined behaviour.
+/// afterwards to check would itself be undefined behavior.
 static FIELD_DROPS: AtomicUsize = AtomicUsize::new(0);
 
 /// Runs `body` with the runtime's global state reset and exclusively held.
@@ -82,7 +82,7 @@ unsafe fn write_word_field(object: *mut u8, index: usize, value: u64) {
 ///
 /// # Safety
 ///
-/// `object` must be a live object whose field `index` holds an initialised word.
+/// `object` must be a live object whose field `index` holds an initialized word.
 unsafe fn read_word_field(object: *const u8, index: usize) -> u64 {
     // SAFETY: as `write_word_field`.
     unsafe { object.add(KHORA_FIELD_OFFSET).cast::<u64>().add(index).read() }
@@ -466,7 +466,7 @@ fn printing_accepts_the_edges_of_every_type_it_supports() {
         khora_print_bool(false);
 
         let text = "khora — unicode is written through unvalidated";
-        // SAFETY: the slice's bytes are initialised and live for the call, and
+        // SAFETY: the slice's bytes are initialized and live for the call, and
         // a zero length makes the null pointer unread.
         unsafe {
             khora_print_str(text.as_ptr(), text.len());

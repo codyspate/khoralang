@@ -185,7 +185,7 @@ fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
         let text = read(path)?;
         inputs.push((path.clone(), text.clone(), SourceFile::new(&db, path.clone(), text)));
     }
-    // Every module in one compilation. Monomorphisation substitutes into a
+    // Every module in one compilation. Monomorphization substitutes into a
     // generic function's *body*, so every module's source has to be present at
     // once — the same reason a C++ template lives in a header.
     let root = SourceRoot::new(&db, inputs.iter().map(|(_, _, f)| *f).collect());

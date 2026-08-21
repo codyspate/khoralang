@@ -10,7 +10,7 @@ use crate::kind::SyntaxKind::*;
 
 pub(super) fn source_file_contents(p: &mut Parser<'_>) {
     // `module` must come first, but accepting it out of order here and
-    // diagnosing it later gives better editor behaviour than bailing out.
+    // diagnosing it later gives better editor behavior than bailing out.
     while !p.at(EOF) {
         if !p.tick() {
             break;
@@ -21,7 +21,7 @@ pub(super) fn source_file_contents(p: &mut Parser<'_>) {
 
 /// Declaration position is where `context`, `test` and `bench` are keywords.
 ///
-/// Nothing is given up by recognising them here: no declaration may begin with
+/// Nothing is given up by recognizing them here: no declaration may begin with
 /// a bare identifier, so an `IDENT` in this position is either one of these
 /// three words or a syntax error either way.
 fn declaration(p: &mut Parser<'_>) {
@@ -152,7 +152,7 @@ fn trait_decl(p: &mut Parser<'_>) {
 ///
 /// Without `for` the block declares the type's *own* methods, needing no trait.
 /// That is the ordinary first thing a developer does in Go, TypeScript and Rust
-/// alike, and requiring an abstraction for it was a behavioural surprise on a
+/// alike, and requiring an abstraction for it was a behavioral surprise on a
 /// daily action — see `docs/design/keywords.md`.
 fn impl_decl(p: &mut Parser<'_>) {
     let m = p.start();
@@ -383,7 +383,7 @@ pub(super) fn let_decl(p: &mut Parser<'_>) {
         type_(p);
     }
     if p.expect(EQ) && expr(p).is_none() {
-        p.error("expected an initialiser expression");
+        p.error("expected an initializer expression");
     }
     p.expect(SEMICOLON);
     m.complete(p, LET_DECL);

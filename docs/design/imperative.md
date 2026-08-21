@@ -40,7 +40,7 @@ database call possible at all.
 | Assignment | **Done.** An expression of type `()`, right-associative and loosest-binding, so `x = a \|> b` assigns the whole pipeline. |
 | `while cond { … }` | **Done.** |
 | `loop { … }` with `break value` | **Done.** |
-| `break` / `continue` | **Done.** Unlabelled. |
+| `break` / `continue` | **Done.** Unlabeled. |
 | Early `return` | **Done.** With or without a value. |
 | `for x in xs { … }` | **Phase 3.** Needs the `Iterator` typeclass. |
 | Compound assignment (`+=`, `-=`) | Not done. Sugar; lowest priority. |
@@ -81,7 +81,7 @@ badly missed before Phase 3.
 
 - Is `for` sugar over an `Iterator` typeclass, or a language primitive with a
   desugaring to `next`?
-- Are `break`/`continue` labelled? Rust's `'label: loop` conflicts with row
+- Are `break`/`continue` labeled? Rust's `'label: loop` conflicts with row
   variable syntax (`'r`), so labels need a different spelling.
 - Does `loop { }` with `break value` earn its place, or does `while` plus
   recursion cover enough?
@@ -89,4 +89,4 @@ badly missed before Phase 3.
 
 **Settled while implementing:** assignment is an expression of type `()`, as in
 Rust, which keeps it in the precedence table rather than adding a statement
-form. `break`/`continue` are unlabelled for now.
+form. `break`/`continue` are unlabeled for now.

@@ -97,7 +97,7 @@ impl<'ctx> Runtime<'ctx> {
             print_int: declare("khora_print_int", void.fn_type(&[i64t.into()], false)),
             // C `_Bool`, so exactly one byte holding 0 or 1. Generated code
             // zero-extends its `i1`; any other bit pattern in that byte is
-            // undefined behaviour rather than a merely surprising result.
+            // undefined behavior rather than a merely surprising result.
             print_bool: declare("khora_print_bool", void.fn_type(&[i8t.into()], false)),
             print_str: declare("khora_print_str", void.fn_type(&[ptr.into(), i64t.into()], false)),
             trap: declare("llvm.trap", void.fn_type(&[], false)),

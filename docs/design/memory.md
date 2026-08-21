@@ -23,7 +23,7 @@ Four facts produce this, none of them coincidental:
   and stored into the closure object at the moment the closure is built.
 - **Assignment rebinds a name, it does not mutate an object.** `a = b` changes
   what `a` refers to; it does not reach into an object and change a field.
-- **A `let` initialiser cannot see its own binding.** `let x = f(x)` does not
+- **A `let` initializer cannot see its own binding.** `let x = f(x)` does not
   resolve the inner `x` to the one being declared.
 
 The heap reference graph is therefore a **DAG**, and a cycle cannot be
@@ -52,7 +52,7 @@ is propped open for whenever they land.
 is the closure being built, so the closure holds a counted reference to itself.
 That is a cycle on the first program anybody writes, and it leaks. Today it is
 rejected — "cannot find `go` in this scope" — for the unrelated reason that a
-`let` initialiser cannot see its own binding.
+`let` initializer cannot see its own binding.
 
 An outside review listed these as two separate open questions. They are one.
 

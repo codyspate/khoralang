@@ -54,7 +54,7 @@ pub enum Type {
     Tuple(Vec<Type>),
     /// An associated type projected off another type: `Self::Item`.
     ///
-    /// Normalises to whatever the owner's impl bound the name to as soon as the
+    /// Normalizes to whatever the owner's impl bound the name to as soon as the
     /// owner is known — `Range::Item` becomes `Int` given
     /// `impl Iterator for Range { type Item = Int; }`. Until then it stands for
     /// itself, and unifies only with the same projection.
@@ -389,7 +389,7 @@ fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
 ///
 /// `generics` are the names in scope as rigid parameters — a bare `A` inside
 /// `fn f<A>(..)` is [`Type::Param`], not an undeclared ADT. Anything else
-/// unrecognised becomes [`Type::Unknown`], which suppresses follow-on errors.
+/// unrecognized becomes [`Type::Unknown`], which suppresses follow-on errors.
 fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
     let Some(ty) = ty else { return Type::Unknown };
     match ty {
@@ -470,8 +470,8 @@ pub struct BodyTypes {
     /// Which instantiation each mention of a generic function chose.
     ///
     /// Recorded here because the checker is the only place that knows: it
-    /// created the variables and solved them. Monomorphisation reads it to
-    /// find out which specialisations a body needs.
+    /// created the variables and solved them. Monomorphization reads it to
+    /// find out which specializations a body needs.
     instantiations: HashMap<ExprId, (String, Vec<Type>)>,
 }
 
@@ -495,8 +495,8 @@ impl BodyTypes {
         self.instantiations.iter()
     }
 
-    /// This body's types with `mapping` applied, which is one specialisation.
-    pub fn specialised(&self, mapping: &HashMap<&str, Type>) -> BodyTypes {
+    /// This body's types with `mapping` applied, which is one specialization.
+    pub fn specialized(&self, mapping: &HashMap<&str, Type>) -> BodyTypes {
         BodyTypes {
             exprs: self
                 .exprs
@@ -1089,7 +1089,7 @@ impl<'a> Checker<'a> {
     ///
     /// `fn f<T: Eq>(a: T, b: T) { a.eq(b) }` has no impl to select — `T` is
     /// whatever the caller passes — so the *trait's* signature is used, and
-    /// which impl runs is settled by monomorphisation.
+    /// which impl runs is settled by monomorphization.
     fn infer_bounded_method(
         &mut self,
         callee: ExprId,
@@ -1149,7 +1149,7 @@ impl<'a> Checker<'a> {
 
         // `Self` is the method's first type argument, so a call through a
         // trait carries the one fact that decides which impl runs. It reaches
-        // monomorphisation the same way every other type argument does.
+        // monomorphization the same way every other type argument does.
         let (ty, type_args) =
             self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
         self.instantiations.insert(callee, (key.to_string(), type_args));
@@ -1419,7 +1419,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A constructor carrying the types of its payload, so specialisation can
+    /// A constructor carrying the types of its payload, so specialization can
     fn to_pattern(&self, pat: PatId) -> Pattern {
         match self.body.pat(pat) {
             // A binding matches everything, exactly like `_`.

@@ -1,7 +1,7 @@
 module demo::main;
 
 // A prelude does not exist yet, so the intrinsic is declared here. Code
-// generation recognises `print` by name and lowers it to the runtime.
+// generation recognizes `print` by name and lowers it to the runtime.
 fn print(value: Int);
 
 export type Shape =

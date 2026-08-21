@@ -170,7 +170,7 @@ Four consequences, all improvements:
 - **Imports and module declarations get an honest separator.** `import a.b.{X};`
   needed the final `.` before `{` special-cased in the grammar because it was
   not a projection at all; `import a::b::{X};` needs no such exception.
-- **A regex can colour paths.** The VS Code TextMate grammar could not
+- **A regex can color paths.** The VS Code TextMate grammar could not
   distinguish `Effect.map` from `report.risk` from `RiskLevel.Low`, and the
   precise answer was deferred to LSP semantic tokens in phase 8.4. It no longer
   has to be: an identifier followed by `::` is a path segment and can be nothing
@@ -281,7 +281,7 @@ Two consequences worth stating:
   applies the constructor one step too far. The diagnostic says so and names the
   correct spelling, because the compiler knows both kinds.
 - **Default method bodies came free.** They were listed as deliberately deferred
-  in the design doc, on the assumption they would complicate monomorphisation.
+  in the design doc, on the assumption they would complicate monomorphization.
   They did not: recording `Self: ThisTrait` as an ordinary bound on a trait's own
   signatures makes a default body's calls resolve through the machinery that was
   already there. The deferral is withdrawn.
@@ -292,7 +292,7 @@ Two consequences worth stating:
 `type_of` that re-derived an expression's type from its *shape*: a string
 literal is a `String`, a constructor call is its ADT, a call to a named function
 is that function's declared return type, and everything else is `Unknown`.
-`Unknown` is not boxed, so anything it could not recognise was silently treated
+`Unknown` is not boxed, so anything it could not recognize was silently treated
 as a machine word — no dup, no drop.
 
 For the phase 2 subset this happened to be right often enough that every test
@@ -308,7 +308,7 @@ planner now reads that. Two things fell out:
 - `bind` no longer takes a type at all — a pattern's bindings look up their own
   types — which deleted the branch that gave every tuple-pattern binding
   `Unknown`.
-- Match-arm bindings and `let` initialisers get real types where they used to
+- Match-arm bindings and `let` initializers get real types where they used to
   get guesses.
 
 The general lesson is worth keeping: a second, weaker implementation of
@@ -327,36 +327,36 @@ why. The process point is that "out of scope for phase N" and "scheduled for
 phase M" are different statements, and only the first was being written down.
 Anything deferred needs a destination, or it is not deferred, it is dropped.
 
-## 21. The tie-breaker was applied to spelling instead of behaviour
+## 21. The tie-breaker was applied to spelling instead of behavior
 
 `docs/vision.md` said to prefer "the option more familiar to a developer who
 uses Go, Rust or TypeScript", and listed "two spellings" among the things it
 settles. Read literally that licenses reaching for whichever of the three
-languages spells a thing most recognisably — and in practice it meant reaching
+languages spells a thing most recognizably — and in practice it meant reaching
 for Rust, because Rust is the one of the three with the closest feature set.
 
 That is not what the rule is for. What a construct **does** is what a developer
 predicts and what a wrong prediction costs; what it is *called* is learned once.
 The two are not the same weight:
 
-- **Novel syntax for familiar behaviour is cheap.** `fn x => x + 1` is nobody
+- **Novel syntax for familiar behavior is cheap.** `fn x => x + 1` is nobody
   else's lambda spelling, and it does not matter: it behaves like the lambda
   every one of the three languages has.
-- **Familiar syntax for novel behaviour is expensive.** It mispredicts every
+- **Familiar syntax for novel behavior is expensive.** It mispredicts every
   time, and a familiar word is precisely the thing that stops a reader checking.
 
 The rule is now stated that way, with an explicit note that it is *not* an
 instruction to copy Rust.
 
 The conclusions it had already produced mostly survive, because they were
-behaviourally motivated even where the stated reason was not:
+behaviorally motivated even where the stated reason was not:
 
 - **`trait` stands**, but the argument changes completely. It was justified as
   "the concept is Rust's trait, so it gets Rust's word". The real argument is
   that `interface` — much the more familiar word, from Go and TypeScript — is
   **structural** in both, and Khora's resolution is nominal. The familiar word
-  would promise the wrong behaviour, so it loses to the accurate one.
-- **`fn x => body` stands** and needed no defence. It is not Rust's `|x|` or
+  would promise the wrong behavior, so it loses to the accurate one.
+- **`fn x => body` stands** and needed no defense. It is not Rust's `|x|` or
   TypeScript's `(x) =>`, and that was never a problem.
 
 One thing it does *not* survive, recorded here because it is the kind of defect
@@ -366,7 +366,7 @@ the corrected rule is meant to catch:
   Rust alike, adding a method to your own type is the ordinary first thing you
   do and needs no abstraction. In Khora `impl User { fn birthday(self) .. }` was
   a syntax error: the only route to `user.birthday()` was to declare a trait and
-  implement it. That is a behavioural surprise, on a daily action, for all three
+  implement it. That is a behavioral surprise, on a daily action, for all three
   audiences at once — exactly what the rule protects, and what focusing on
   spelling caused to be missed. Now implemented; see
   `docs/design/keywords.md`.
@@ -394,7 +394,7 @@ already been settled by writing code, with no decision recording the choice.**
   single-threaded reading. Now D10.
 - **Cycles are impossible, and nobody knew.** ADTs build bottom-up, closures
   capture by value, assignment rebinds rather than mutates, and a `let`
-  initialiser cannot see itself — so the heap graph is a DAG and Perceus is
+  initializer cannot see itself — so the heap graph is a DAG and Perceus is
   currently *complete*. That is a real guarantee that had never been stated, and
   it ends the moment mutable fields or recursive closures land. Now D11, with
   the invariant written down in `docs/design/memory.md` while it is still true.
@@ -470,7 +470,7 @@ gets a routine and `Boxed<Int>` correctly gets none.
 cause, other side. `khora-perceus` planned a body from the types it was
 *written* at, where `A` is rigid and unboxed — so a generic function never
 duplicated or released anything held in a type parameter. `plan` now takes the
-types as an argument and code generation calls it once per specialisation.
+types as an argument and code generation calls it once per specialization.
 
 The two hid each other. A generic container never released its payload, which
 exactly compensated for a generic function never retaining what it stored
@@ -483,7 +483,7 @@ the other is fixed too.
 The general shape is the same as entry 19 — something the compiler already
 knows, recomputed worse somewhere else. Here it is not a second implementation
 but a second *time*: a property was computed at the wrong stage, before
-monomorphisation had said what the types actually were.
+monomorphization had said what the types actually were.
 
 ## 25. A constructor was found by its bare name
 
@@ -535,7 +535,7 @@ Two lessons, and the second is the one worth keeping.
 
 The narrow one: a resolution now carries the name *this file* uses, because
 every downstream map is keyed that way. Where the defining module spells it
-differently, `FileScope::origin` says so, and only monomorphisation asks —
+differently, `FileScope::origin` says so, and only monomorphization asks —
 it has to find the body, which lives under the original name.
 
 The general one: **`Unknown` unifying with everything turns a lookup miss into

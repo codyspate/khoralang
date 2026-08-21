@@ -119,13 +119,13 @@ pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirE
     let context = Context::create();
     let mut backend = Backend::new(&context, &name, types.clone(), &machine);
 
-    // One emitted function per *specialisation*, not per source function: a
+    // One emitted function per *specialization*, not per source function: a
     // generic body has no machine representation until its type arguments are
     // known, and a generic function nobody calls is not emitted at all.
     for (instance, _) in &mono.instances {
         let home = mono.home(&instance.symbol());
         let scope = home.map(|h| khora_types::type_map(db, h)).unwrap_or(&types);
-        if let Some(signature) = specialised_signature(scope, instance) {
+        if let Some(signature) = specialized_signature(scope, instance) {
             backend.register_instance(&instance.symbol(), signature);
         }
     }
@@ -151,7 +151,7 @@ pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirE
     }
     for (instance, instance_types) in &mono.instances {
         let Some(body) = body_of(instance) else { continue };
-        // Planned per *specialisation*: `A` is unboxed in the generic body and
+        // Planned per *specialization*: `A` is unboxed in the generic body and
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
         let plan = khora_perceus::plan(body, instance_types);
@@ -237,7 +237,7 @@ fn merged_types(db: &dyn Db, files: &[SourceFile]) -> TypeMap {
 
 /// Declares the lifted function for every lambda in one emitted body.
 ///
-/// One pass per *specialisation*, not per source function: a lambda inside a
+/// One pass per *specialization*, not per source function: a lambda inside a
 /// generic function captures different types in each instantiation, so each
 /// needs a function of its own.
 fn declare_closures(
@@ -278,9 +278,9 @@ fn declare_closures(
 
 /// A signature with the instance's type arguments substituted in.
 ///
-/// This is what makes a specialisation compilable: the declared signature still
+/// This is what makes a specialization compilable: the declared signature still
 /// mentions rigid parameters, which have no machine representation.
-fn specialised_signature(
+fn specialized_signature(
     types: &TypeMap,
     instance: &khora_types::mono::Instance,
 ) -> Option<Signature> {
@@ -296,7 +296,7 @@ fn specialised_signature(
         .collect();
     Some(Signature {
         generics: Vec::new(),
-        // A specialised signature has no parameters left, so it can carry no
+        // A specialized signature has no parameters left, so it can carry no
         // bounds either: whatever they required was settled before this ran.
         bounds: Vec::new(),
         params: signature
@@ -319,7 +319,7 @@ fn specialised_signature(
 /// on x86, which is exactly what makes it easy to ship.
 fn target_machine() -> Result<TargetMachine, Vec<HirError>> {
     Target::initialize_native(&InitializationConfig::default())
-        .map_err(|e| vec![backend_error(format!("initialising the native target: {e}"))])?;
+        .map_err(|e| vec![backend_error(format!("initializing the native target: {e}"))])?;
 
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple).map_err(|e| {
@@ -369,7 +369,7 @@ pub(crate) struct Backend<'ctx> {
     /// Which names the file actually defines. Anything else it declares is an
     /// extern.
     defined: HashSet<String>,
-    /// Specialised signatures, by mangled symbol. See `signature_of`.
+    /// Specialized signatures, by mangled symbol. See `signature_of`.
     instance_signatures: HashMap<String, Signature>,
     /// Per-ADT `drop_fields` routines. `None` records a type that owns no
     /// references, so drop sites pass a null callback rather than calling a
@@ -402,7 +402,7 @@ pub(crate) struct Backend<'ctx> {
 #[derive(Clone)]
 pub(crate) struct ClosureSite {
     /// The symbol of the emitted function the lambda was written inside. A
-    /// lambda in a generic function appears once per specialisation, because
+    /// lambda in a generic function appears once per specialization, because
     /// its captures have different types in each.
     pub owner: String,
     pub expr: khora_hir::body::ExprId,
@@ -463,7 +463,7 @@ impl<'ctx> Backend<'ctx> {
     /// `Unit` is a word rather than nothing at all. Making it void would mean
     /// every expression's lowering returns an optional value and every consumer
     /// handles the absent case, to represent something no program can observe;
-    /// an ignored `i64` costs one register the optimiser deletes. Functions
+    /// an ignored `i64` costs one register the optimizer deletes. Functions
     /// returning `Unit` still return `void`, because that is a real ABI
     /// difference rather than an internal convenience.
     pub fn llvm_type(&self, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
@@ -477,12 +477,12 @@ impl<'ctx> Backend<'ctx> {
             }
             // A variable or a rigid parameter reaching code generation means
             // inference left something unsolved, or a generic function was not
-            // monomorphised. Both are compiler bugs rather than user errors, so
+            // monomorphized. Both are compiler bugs rather than user errors, so
             // there is no representation to pick here.
             Type::Var(_) | Type::Param(_) => None,
             // Tuples type check but have no layout yet; `lower` reports that
             // in the one place it can happen, rather than here.
-            // A projection reaching here never normalised, which means the
+            // A projection reaching here never normalized, which means the
             // owner was never pinned down. That is a type error reported
             // elsewhere, not a shape the backend could pick.
             Type::Tuple(_) | Type::Const(_) | Type::Applied { .. } | Type::Assoc { .. } => None,
@@ -558,7 +558,7 @@ impl<'ctx> Backend<'ctx> {
     /// Declares a function the file defines, under its mangled name.
     /// The signature to compile `name` against.
     ///
-    /// A specialisation is registered under its mangled symbol with its type
+    /// A specialization is registered under its mangled symbol with its type
     /// arguments already substituted, so the backend never sees a rigid
     /// parameter. Anything not registered is a plain function under its own
     /// name.

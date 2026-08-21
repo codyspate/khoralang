@@ -3,7 +3,7 @@
 //! Every test here compiles a program, runs it, and asserts on what it printed
 //! and the code it exited with. Nothing inspects the generated IR — the IR is
 //! an implementation detail, and a test that pins it would fail every time the
-//! backend got better at its job. What must not change is the behaviour of the
+//! backend got better at its job. What must not change is the behavior of the
 //! program.
 //!
 //! Requires `--features llvm` and a configured LLVM 22.1 prefix; without them
@@ -51,7 +51,7 @@ fn ensure_runtime() {
     });
 }
 
-/// A private directory for one test's artefacts.
+/// A private directory for one test's artifacts.
 ///
 /// Per test, because tests run in parallel and `compile` writes an object file
 /// and an executable next to each other under names it derives from `out`.
@@ -81,7 +81,7 @@ fn run(name: &str, source: &str) -> Ran {
     let output = Command::new(&exe).output().expect("running the compiled program");
     Ran {
         code: output.status.code(),
-        // The runtime writes bare `\n`; normalise anyway so a failure message
+        // The runtime writes bare `\n`; normalize anyway so a failure message
         // is readable rather than full of escapes.
         stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
     }
@@ -542,7 +542,7 @@ fn main() -> Int {
 /// A generic function has no machine representation until its type arguments
 /// are known, so each one is emitted once per set of arguments it is used at.
 #[test]
-fn generic_functions_are_specialised_and_run() {
+fn generic_functions_are_specialized_and_run() {
     let ran = run(
         "generics",
         "module t;
@@ -716,7 +716,7 @@ fn main() -> Int {
     assert_eq!(ran.code, Some(0));
 }
 
-/// A call through a bound picks the impl at monomorphisation, so the generic
+/// A call through a bound picks the impl at monomorphization, so the generic
 /// function costs nothing the concrete one would not have.
 #[test]
 fn a_bounded_generic_resolves_per_instantiation() {
@@ -896,10 +896,10 @@ fn main() -> Int {
     assert_eq!(ran.code, Some(0));
 }
 
-/// A closure in a generic function is emitted once per specialisation, because
+/// A closure in a generic function is emitted once per specialization, because
 /// what it captures has a different machine type in each.
 #[test]
-fn a_closure_inside_a_generic_function_is_specialised() {
+fn a_closure_inside_a_generic_function_is_specialized() {
     let ran = run(
         "closure_generic",
         "module t;
@@ -1028,10 +1028,10 @@ fn main() -> Int {
     assert_eq!(ran.code, Some(0));
 }
 
-/// A generic function used as a value resolves to the specialisation the call
+/// A generic function used as a value resolves to the specialization the call
 /// site asked for, exactly as a direct call would.
 #[test]
-fn a_generic_function_as_a_value_picks_its_specialisation() {
+fn a_generic_function_as_a_value_picks_its_specialization() {
     let ran = run(
         "fn_value_generic",
         "module t;
@@ -1462,7 +1462,7 @@ fn main() -> Int {
 }
 
 /// The counterpart: a generic *function* over a boxed type has to dup and drop
-/// it. The plan is made per specialisation because `A` is unboxed in the
+/// it. The plan is made per specialization because `A` is unboxed in the
 /// generic body and a counted pointer at `A = String`.
 #[test]
 fn a_generic_function_counts_its_boxed_arguments() {

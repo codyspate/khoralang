@@ -341,9 +341,9 @@ export fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) 
 export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
   with 'e;
 
-/// Runs every finaliser registered in the current scope, then re-raises.
+/// Runs every finalizer registered in the current scope, then re-raises.
 ///
-/// Exposed for handler authors; ordinary code gets this behaviour from
+/// Exposed for handler authors; ordinary code gets this behavior from
 /// `scoped` without asking.
-export fn on_exit<'e>(finaliser: () -> () with 'e) -> ()
+export fn on_exit<'e>(finalizer: () -> () with 'e) -> ()
   with { 'e | scope: Scope };

@@ -33,7 +33,7 @@ fn the_reference_manifest_parses_with_no_warnings() {
     assert_eq!(
         warning_keys(&parsed),
         Vec::<&str>::new(),
-        "every key in the reference manifest should be recognised"
+        "every key in the reference manifest should be recognized"
     );
 
     let manifest = parsed.manifest;
@@ -85,7 +85,7 @@ fn the_reference_manifest_parses_with_no_warnings() {
 }
 
 #[test]
-fn every_key_the_schema_documents_is_recognised() {
+fn every_key_the_schema_documents_is_recognized() {
     // Guards the duplication between the typed model and the audit's key list:
     // a key added to one but not the other shows up here as a warning.
     let parsed = parse(
@@ -247,7 +247,7 @@ fn unknown_keys_warn_but_the_manifest_still_parses() {
 [package]
 name = \"p\"
 version = \"0.1.0\"
-licence = \"MIT\"
+license = \"MIT\"
 
 [permissions]
 gpu = [\"allow-gpu\"]
@@ -264,12 +264,12 @@ retries = 3
     assert_eq!(
         warning_keys(&parsed),
         [
-            "package.licence",
+            "package.license",
             "permissions.gpu",
             "dependencies.\"std.effect\".registry",
             "tasks.ci.retries",
         ],
-        "each unrecognised key should be reported at its own path"
+        "each unrecognized key should be reported at its own path"
     );
     assert!(
         parsed.warnings.iter().all(|w| w.kind() == WarningKind::UnknownKey),
@@ -277,23 +277,23 @@ retries = 3
     );
     assert_eq!(
         parsed.manifest.package.name, "p",
-        "the recognised part of the manifest must survive intact"
+        "the recognized part of the manifest must survive intact"
     );
     assert_eq!(parsed.manifest.dependencies["std.effect"].version, "1.0.0");
     assert_eq!(parsed.manifest.tasks["ci"].description.as_deref(), Some("CI"));
 
-    let licence = &parsed.warnings[0];
+    let license = &parsed.warnings[0];
     assert_eq!(
-        licence.location().map(|at| (at.line, at.column)),
+        license.location().map(|at| (at.line, at.column)),
         Some((4, 1)),
         "a warning should point at the key that caused it"
     );
     assert_eq!(
-        &text[licence.span().expect("a span for a key read from the document")],
-        "licence",
+        &text[license.span().expect("a span for a key read from the document")],
+        "license",
         "the span should cover exactly the key"
     );
-    assert_eq!(licence.to_string(), "4:1: unrecognised key `package.licence`");
+    assert_eq!(license.to_string(), "4:1: unrecognized key `package.license`");
 }
 
 #[test]

@@ -18,7 +18,7 @@ pub enum WarningKind {
 impl fmt::Display for WarningKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WarningKind::UnknownKey => f.write_str("unrecognised key"),
+            WarningKind::UnknownKey => f.write_str("unrecognized key"),
         }
     }
 }

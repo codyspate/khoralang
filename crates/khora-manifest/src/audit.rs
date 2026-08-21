@@ -1,13 +1,13 @@
 //! The unknown-key audit.
 //!
 //! The typed deserialize in [`crate::model`] drops keys it does not know, which
-//! is the behaviour we want -- a manifest written for a newer toolchain must
+//! is the behavior we want -- a manifest written for a newer toolchain must
 //! still build with an older one -- but it leaves nothing to report. So the
 //! document is read a second time as a plain tree of keys and compared against
 //! [`ROOT`], and every key the schema does not mention becomes a [`Warning`].
 //!
 //! [`ROOT`] duplicates the field names in [`crate::model`]. Keeping the two in
-//! step is what the "every documented key is recognised" test is for.
+//! step is what the "every documented key is recognized" test is for.
 
 use crate::error::ManifestError;
 use crate::warning::Warning;
@@ -84,7 +84,7 @@ pub(crate) fn unknown_keys(text: &str) -> Result<Vec<Warning>, ManifestError> {
 fn document(text: &str) -> Result<Node, ManifestError> {
     // The spanned read fails on any value `toml` models as a private one-key
     // table -- a date or time -- because those synthetic keys carry no span.
-    // That can only happen under a key we do not recognise, which is precisely
+    // That can only happen under a key we do not recognize, which is precisely
     // the forward-compatible manifest this audit exists to accept, so drop to a
     // position-free read rather than turn a warning into a hard error.
     if let Ok(node) = toml::from_str::<Node>(text) {

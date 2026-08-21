@@ -7,13 +7,13 @@
 //!
 //! # Why the parser holds the source text
 //!
-//! It borrows the source for one purpose: recognising **contextual keywords**.
+//! It borrows the source for one purpose: recognizing **contextual keywords**.
 //! `handler`, `for`, `context`, `test` and `bench` are lexed as `IDENT` so they
 //! remain usable as parameter names, fields, locals and types; the parser reads
 //! their spelling in the one position where each is a keyword and remaps the
 //! token with [`Parser::bump_contextual`].
 //!
-//! The alternative — keeping the parser text-free and recognising these words
+//! The alternative — keeping the parser text-free and recognizing these words
 //! positionally by kind and lookahead — cannot work: every one of them arrives
 //! as `IDENT`, so lookahead alone can never say *which* identifier it is. Any
 //! scheme that avoids the borrow ends up smuggling the text in anyway (a

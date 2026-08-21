@@ -22,7 +22,7 @@ fn all_same<T: Eq>(a: T, b: T, c: T) -> Bool {
 }
 ```
 
-The word was chosen against the behaviour it has to predict, per the tie-breaker
+The word was chosen against the behavior it has to predict, per the tie-breaker
 in `docs/vision.md`, not by copying whichever language spells it shortest.
 
 **`interface` is the most familiar candidate, and it is the wrong one.** Go and
@@ -30,13 +30,13 @@ TypeScript both have it, and in both it is *structural*: a type satisfies an
 interface by having the right methods, with nothing declared anywhere. Khora's
 resolution is nominal — an impl exists or it does not — so a developer reading
 `interface Eq` would expect their type to satisfy it automatically and be wrong
-every time. Familiar syntax for different behaviour is the expensive mistake.
+every time. Familiar syntax for different behavior is the expensive mistake.
 
 **`class` is worse.** In TypeScript and most of the languages this audience
 passes through, a class is a nominal record with inheritance and instances. This
 is none of those things. Haskell's usage would mislead almost everyone.
 
-**`protocol`** (Swift) is behaviourally exact — nominal, explicitly conformed to
+**`protocol`** (Swift) is behaviorally exact — nominal, explicitly conformed to
 — but Swift is not in the competitive set, so it buys the accuracy without the
 recognition.
 
@@ -99,7 +99,7 @@ Three rules, all Rust's, all chosen because a resolution failure has to be
 explainable in one sentence:
 
 - **One impl per trait per type.** Overlapping impls are rejected at the point
-  the second one is declared, naming the first. No specialisation, no
+  the second one is declared, naming the first. No specialization, no
   most-specific-match. If two impls could apply, the program is wrong, not
   ambiguous.
 - **The orphan rule.** `impl Trait for Type` is allowed only where the trait or
@@ -116,7 +116,7 @@ explainable in one sentence:
 
 ## 5. Dispatch is static
 
-Monomorphisation already exists (`crates/khora-types/src/mono.rs`), and it runs
+Monomorphization already exists (`crates/khora-types/src/mono.rs`), and it runs
 after inference has solved every type argument. A bound `T: Eq` at an
 instantiation where `T = Int` therefore resolves to `impl Eq for Int` at compile
 time, and the call becomes a direct call to that impl's function. No dictionary
@@ -179,7 +179,7 @@ impl User {
 
 This is not part of the typeclass system and is documented here only because it
 shares the `impl` construct. It exists because requiring a trait for every
-method was a behavioural surprise for all three of the audiences in
+method was a behavioral surprise for all three of the audiences in
 `docs/vision.md`; see `docs/design/keywords.md`.
 
 Resolution checks a type's own methods **before** any trait's, so adding a trait
@@ -208,7 +208,7 @@ Without this a `traverse` cannot be written: its empty case has to produce an
 Everything above except the standard library itself and the two items in §7.
 `crates/khora-types/src/traits.rs` holds the kinds, the coherence checks and
 instance selection; `crates/khora-types/tests/traits.rs` and
-`crates/khora-codegen-llvm/tests/compile.rs` pin the behaviour.
+`crates/khora-codegen-llvm/tests/compile.rs` pin the behavior.
 
 Working end to end, compiled to native code: method calls on a concrete type,
 method calls through a bound, supertraits, parameterised impls

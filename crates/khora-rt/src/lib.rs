@@ -41,7 +41,7 @@
 //! has to be 8-aligned for `refcount`. [`khora_drop`] needs that space: it is
 //! handed nothing but a pointer, and `std::alloc::dealloc` requires the
 //! *identical* `Layout` that allocated the block — a mismatch is undefined
-//! behaviour, not a leak. Alignment is a constant, so the only unknown is the
+//! behavior, not a leak. Alignment is a constant, so the only unknown is the
 //! size, and storing it in padding makes the layout reconstructible for free.
 //!
 //! The cost is that one object's fields cannot exceed [`MAX_FIELD_BYTES`]
@@ -82,7 +82,7 @@
 //!   calling a different entry point.
 //! - `khora_print_bool` takes a C `_Bool`: one byte holding exactly 0 or 1.
 //!   Generated code must zero-extend its `i1` to `i8`; any other bit pattern in
-//!   that byte is undefined behaviour rather than a merely surprising result.
+//!   that byte is undefined behavior rather than a merely surprising result.
 //!
 //! # Linking
 //!
@@ -236,7 +236,7 @@ pub extern "C" fn khora_reset_counters() {
 ///
 /// Zeroing is not decoration. Generated code stores fields one at a time after
 /// this returns, and a `drop_fields` callback that ran over a half-built object
-/// would otherwise interpret uninitialised bytes as pointers. Zero plus
+/// would otherwise interpret uninitialized bytes as pointers. Zero plus
 /// [`khora_drop`]'s null tolerance makes that case a no-op instead of a wild
 /// free. Generated code must still store a field before *reading* it; a zeroed
 /// field is droppable, not meaningful.
@@ -260,7 +260,7 @@ pub extern "C" fn khora_alloc(size: usize, tag: u32) -> *mut u8 {
     // SAFETY: `ptr` is a fresh allocation of `KHORA_HEADER_SIZE + size` bytes
     // aligned to `KHORA_HEADER_ALIGN`, so it is valid and correctly aligned for
     // writing one `KhoraHeader`. Nothing else refers to it yet, so the write
-    // cannot race and cannot clobber an initialised field.
+    // cannot race and cannot clobber an initialized field.
     unsafe {
         ptr.cast::<KhoraHeader>().write(KhoraHeader { refcount: 1, tag, field_bytes });
     }
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn khora_dup(ptr: *mut u8) {
         return;
     }
     // SAFETY: by the contract above `ptr` points at a live object, so its
-    // header is initialised and uniquely reachable by this thread (refcounts
+    // header is initialized and uniquely reachable by this thread (refcounts
     // are non-atomic, see the module documentation).
     unsafe {
         let header = ptr.cast::<KhoraHeader>();
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn khora_dup(ptr: *mut u8) {
 /// belongs to the allocator.
 ///
 /// Null tolerance exists so the code generator can emit a drop for a slot that
-/// is only conditionally initialised without guarding every site, and so the
+/// is only conditionally initialized without guarding every site, and so the
 /// most common code generation slip fails safe.
 ///
 /// Aborts on a refcount that is already zero, which means a double free or a
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     let header = ptr.cast::<KhoraHeader>();
 
     // SAFETY: `ptr` points at a live object per the contract above, so its
-    // header is initialised and valid to read and write.
+    // header is initialized and valid to read and write.
     let refcount = unsafe { (*header).refcount };
     if refcount == 0 {
         fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn khora_refcount(ptr: *const u8) -> usize {
         return 0;
     }
     // SAFETY: `ptr` points at a live object per the contract above, so its
-    // header is initialised and valid to read.
+    // header is initialized and valid to read.
     unsafe { (*ptr.cast::<KhoraHeader>()).refcount }
 }
 
@@ -422,7 +422,7 @@ pub extern "C" fn khora_print_bool(value: bool) {
 ///
 /// # Safety
 ///
-/// If `len` is non-zero, `ptr` must point at `len` initialised bytes that stay
+/// If `len` is non-zero, `ptr` must point at `len` initialized bytes that stay
 /// valid and unmodified for the duration of the call. A zero `len` ignores
 /// `ptr` entirely, so the empty string may be passed as null.
 #[unsafe(no_mangle)]
@@ -432,7 +432,7 @@ pub unsafe extern "C" fn khora_print_str(ptr: *const u8, len: usize) {
         if ptr.is_null() {
             fatal("print of a null string with a non-zero length");
         }
-        // SAFETY: the caller guarantees `len` initialised bytes at `ptr`, live
+        // SAFETY: the caller guarantees `len` initialized bytes at `ptr`, live
         // and unmodified for this call, and `len` is far below `isize::MAX`
         // because it came from an allocation.
         let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };

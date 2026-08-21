@@ -100,21 +100,21 @@ fn parameters_and_lets_resolve_to_locals() {
     assert_eq!(names, vec!["a", "b"]);
 }
 
-/// `let x = x;` must read the outer `x`, so the initialiser is lowered before
+/// `let x = x;` must read the outer `x`, so the initializer is lowered before
 /// the binding exists.
 #[test]
-fn a_let_initialiser_cannot_see_its_own_binding() {
+fn a_let_initializer_cannot_see_its_own_binding() {
     let db = KhoraDatabase::new();
     let body = only_body(&db, "module m;\nfn f(x: Int) -> Int { let x = x; x }\n");
 
     assert!(errors(&body).is_empty(), "{:?}", errors(&body));
     let Expr::Block { stmts, .. } = body.expr(body.root.unwrap()) else { panic!() };
     let Stmt::Let { init: Some(init), .. } = &stmts[0] else { panic!("expected a let") };
-    let Expr::Local(referenced) = body.expr(*init) else { panic!("initialiser is not a local") };
+    let Expr::Local(referenced) = body.expr(*init) else { panic!("initializer is not a local") };
     assert_eq!(body.local(*referenced).name, "x");
-    // Two distinct locals share the name; the initialiser must use the first.
+    // Two distinct locals share the name; the initializer must use the first.
     assert_eq!(body.locals().count(), 2, "shadowing should create a second local");
-    assert_eq!(referenced.index(), 0, "initialiser bound to the shadowing local");
+    assert_eq!(referenced.index(), 0, "initializer bound to the shadowing local");
 }
 
 #[test]

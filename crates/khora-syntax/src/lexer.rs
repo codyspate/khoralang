@@ -2,7 +2,7 @@
 //!
 //! The lexer is lossless: whitespace and comments are emitted as ordinary
 //! tokens so the parser can build a CST whose text is byte-identical to the
-//! input. Unrecognised bytes become [`SyntaxKind::LEX_ERROR`] tokens rather
+//! input. Unrecognized bytes become [`SyntaxKind::LEX_ERROR`] tokens rather
 //! than aborting the lex, which keeps the LSP useful inside broken files.
 
 use logos::{Lexer, Logos};

@@ -106,7 +106,7 @@ fn imports_are_sorted_and_deduplicated() {
 }
 
 #[test]
-fn indentation_is_normalised_to_two_spaces() {
+fn indentation_is_normalized_to_two_spaces() {
     let src = "module m;\nfn f() {\n        let x = 1;\n\tlet y = 2;\n}\n";
     let out = format(src).unwrap();
     assert!(out.contains("\n  let x = 1;"), "{out}");

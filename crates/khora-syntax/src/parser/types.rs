@@ -112,7 +112,7 @@ fn path_type(p: &mut Parser<'_>) -> CompletedMarker {
 /// items and enum constructors. `.` is reserved for runtime projection: record
 /// fields and method calls. Splitting them is what lets the parser build a real
 /// path here rather than deferring every dotted name to name resolution, and it
-/// is why a regex can colour `Foo::bar` differently from `foo.bar`.
+/// is why a regex can color `Foo::bar` differently from `foo.bar`.
 pub(super) fn path(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     name_ref(p);
@@ -262,7 +262,7 @@ fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
 }
 
 /// Everything after the first `|` in a record type: row variables, whole rows
-/// being merged in, and further labelled fields — `{ R1 | R2 | scope: Scope }`
+/// being merged in, and further labeled fields — `{ R1 | R2 | scope: Scope }`
 /// is all three at once.
 fn row_tail(p: &mut Parser<'_>) {
     let m = p.start();

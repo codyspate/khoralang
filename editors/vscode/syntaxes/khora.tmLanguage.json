@@ -5,7 +5,7 @@
   "fileTypes": [
     "kh"
   ],
-  "comment": "Order matters. #declarations comes before #keywords so `module a::b;` is one rule rather than a keyword plus a loose path, and #paths and #projections come before #types because #types colours any capitalised identifier and would otherwise claim segments that the `::` and `.` rules can classify precisely.",
+  "comment": "Order matters. #declarations comes before #keywords so `module a::b;` is one rule rather than a keyword plus a loose path, and #paths and #projections come before #types because #types colors any capitalized identifier and would otherwise claim segments that the `::` and `.` rules can classify precisely.",
   "patterns": [
     {
       "include": "#comments"
@@ -111,7 +111,7 @@
           }
         },
         {
-          "comment": "A trait declaration names a type-level entity, so its name is coloured like the one after `type`.",
+          "comment": "A trait declaration names a type-level entity, so its name is colored like the one after `type`.",
           "match": "\\b(trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -134,7 +134,7 @@
           }
         },
         {
-          "comment": "Module and import paths are `::`-separated: `module app::main;`, `import std::core::{Option};`. This is the one position where the grammar knows *every* segment is a module without guessing — elsewhere a `::` qualifier may equally be a type — so the whole path is scoped as a namespace here rather than left to #paths and its heuristics. The path stops at the `::` before `{` or `*`, which #path-separator and #paths take. The nested include keeps the separator itself the same colour it has in every other path.",
+          "comment": "Module and import paths are `::`-separated: `module app::main;`, `import std::core::{Option};`. This is the one position where the grammar knows *every* segment is a module without guessing — elsewhere a `::` qualifier may equally be a type — so the whole path is scoped as a namespace here rather than left to #paths and its heuristics. The path stops at the `::` before `{` or `*`, which #path-separator and #paths take. The nested include keeps the separator itself the same color it has in every other path.",
           "match": "\\b(module|import)\\s+([a-z_][A-Za-z0-9_]*(?:\\s*::\\s*[a-z_][A-Za-z0-9_]*)*)",
           "captures": {
             "1": {
@@ -155,7 +155,7 @@
     "contextual-keywords": {
       "patterns": [
         {
-          "comment": "Keep in sync with CONTEXTUAL_KEYWORDS in crates/khora-syntax/src/kind.rs. Enforced by the contextual_keywords_match_the_lexer test. These words are ordinary identifiers everywhere except one position each, so every rule reproduces that position instead of matching the bare word — otherwise a parameter named `handler` or a variable named `in` would be coloured as a keyword.",
+          "comment": "Keep in sync with CONTEXTUAL_KEYWORDS in crates/khora-syntax/src/kind.rs. Enforced by the contextual_keywords_match_the_lexer test. These words are ordinary identifiers everywhere except one position each, so every rule reproduces that position instead of matching the bare word — otherwise a parameter named `handler` or a variable named `in` would be colored as a keyword.",
           "match": "\\b(handler)\\b(?=\\s+for\\b)",
           "captures": {
             "1": {
@@ -219,10 +219,10 @@
       ]
     },
     "paths": {
-      "comment": "`::` is the compile-time path: module paths, types, associated items and enum constructors. Splitting it from the runtime `.` is what makes these rules possible at all — under the universal dot, `Effect.map`, `report.risk` and `RiskLevel.Low` were the same three characters of regex and nothing could tell them apart. Now the *case of the qualifier* decides: a lowercase qualifier is a module, so what follows it is a type; a capitalised qualifier is a type, so what follows it is an associated item or a constructor. Scope names are the default TextMate fallbacks VS Code maps the matching LSP semantic tokens onto, so colours will not jump when the language server takes this over (roadmap phase 8.4). The pair rules come first: a longer match starting at the same position only wins if it is listed earlier.",
+      "comment": "`::` is the compile-time path: module paths, types, associated items and enum constructors. Splitting it from the runtime `.` is what makes these rules possible at all — under the universal dot, `Effect.map`, `report.risk` and `RiskLevel.Low` were the same three characters of regex and nothing could tell them apart. Now the *case of the qualifier* decides: a lowercase qualifier is a module, so what follows it is a type; a capitalized qualifier is a type, so what follows it is an associated item or a constructor. Scope names are the default TextMate fallbacks VS Code maps the matching LSP semantic tokens onto, so colors will not jump when the language server takes this over (roadmap phase 8.4). The pair rules come first: a longer match starting at the same position only wins if it is listed earlier.",
       "patterns": [
         {
-          "comment": "`RiskLevel::Critical`, `Device::Cpu` — a capitalised qualifier means the tail is reached *through* a type, so it is a variant constructor rather than a type of its own. An associated type such as `Schema::Spec` lands here too and is coloured as a constructor: the two are indistinguishable to a regex, and constructors are far more common. `variable.other.enummember` is what the `enumMember` semantic token falls back to.",
+          "comment": "`RiskLevel::Critical`, `Device::Cpu` — a capitalized qualifier means the tail is reached *through* a type, so it is a variant constructor rather than a type of its own. An associated type such as `Schema::Spec` lands here too and is colored as a constructor: the two are indistinguishable to a regex, and constructors are far more common. `variable.other.enummember` is what the `enumMember` semantic token falls back to.",
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -267,7 +267,7 @@
           }
         },
         {
-          "comment": "`std::core::Option` — a lowercase qualifier is a module, and that is exactly what makes the capitalised tail a *type* and not a constructor. A three-segment path reaches this rule on its last two segments, after the leading `std` has been taken by the qualifier rule below.",
+          "comment": "`std::core::Option` — a lowercase qualifier is a module, and that is exactly what makes the capitalized tail a *type* and not a constructor. A three-segment path reaches this rule on its last two segments, after the leading `std` has been taken by the qualifier rule below.",
           "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -299,7 +299,7 @@
           }
         },
         {
-          "comment": "A capitalised segment whose qualifier was already consumed, as in the tail of `A::B::C`. Reaching here means it follows a `::` that did not come from a module — a module qualifier is handled by the `module::Type` rule above — so it is a constructor or associated item, not a type. A lowercase segment in the same position is deliberately left alone: after a module it is another module and after a type it is a value, and an uncoloured identifier is the honest answer.",
+          "comment": "A capitalized segment whose qualifier was already consumed, as in the tail of `A::B::C`. Reaching here means it follows a `::` that did not come from a module — a module qualifier is handled by the `module::Type` rule above — so it is a constructor or associated item, not a type. A lowercase segment in the same position is deliberately left alone: after a module it is another module and after a type it is a value, and an uncolored identifier is the honest answer.",
           "match": "(?<=::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -327,7 +327,7 @@
       "match": "::"
     },
     "projections": {
-      "comment": "`.` is now runtime projection only: a record field or a method call. It must be tried before #types, which would otherwise colour the tail of a projection as a type.",
+      "comment": "`.` is now runtime projection only: a record field or a method call. It must be tried before #types, which would otherwise color the tail of a projection as a type.",
       "patterns": [
         {
           "comment": "A method call. `entity.name.function.member` is the `method` semantic token's fallback, matching what #paths gives an associated function.",
@@ -342,7 +342,7 @@
           }
         },
         {
-          "comment": "A record field. The name is matched whatever its case, because after the `::`/`.` split a capitalised name in this position is *not* a type, and letting #types claim it is the specific mistake this rule exists to prevent. The name has to touch the dot: that keeps `forall <A> . Type` out, whose dot is a separator, which is why the formatter writes spaces around it.",
+          "comment": "A record field. The name is matched whatever its case, because after the `::`/`.` split a capitalized name in this position is *not* a type, and letting #types claim it is the specific mistake this rule exists to prevent. The name has to touch the dot: that keeps `forall <A> . Type` out, whose dot is a separator, which is why the formatter writes spaces around it.",
           "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -358,7 +358,7 @@
     "types": {
       "patterns": [
         {
-          "comment": "What is left once #paths and #projections have run: a capitalised identifier that is neither part of a `::` path nor the tail of a `.`. That is a type name — an annotation, a type argument, a declaration's right-hand side — or a constructor imported bare through `import a::b::{Some}`, and `type` is the right default for both. Constructors reached through their type no longer come here, which is what the `::` split bought; the remaining ambiguity is a name-resolution question the LSP will answer via semantic tokens.",
+          "comment": "What is left once #paths and #projections have run: a capitalized identifier that is neither part of a `::` path nor the tail of a `.`. That is a type name — an annotation, a type argument, a declaration's right-hand side — or a constructor imported bare through `import a::b::{Some}`, and `type` is the right default for both. Constructors reached through their type no longer come here, which is what the `::` split bought; the remaining ambiguity is a name-resolution question the LSP will answer via semantic tokens.",
           "name": "entity.name.type.khora",
           "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
         }

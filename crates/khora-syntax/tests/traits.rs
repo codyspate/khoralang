@@ -1,6 +1,6 @@
 //! `trait` and `impl` syntax.
 //!
-//! The word is chosen in `docs/design/typeclasses.md` against the behaviour it
+//! The word is chosen in `docs/design/typeclasses.md` against the behavior it
 //! has to predict: `interface` is the more familiar candidate and is structural
 //! in both Go and TypeScript, while Khora's resolution is nominal.
 

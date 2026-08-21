@@ -1,4 +1,4 @@
-//! Monomorphisation: turning generic functions into concrete ones.
+//! Monomorphization: turning generic functions into concrete ones.
 //!
 //! Code generation has no representation for a type variable — `llvm_type`
 //! returns nothing for one, and rightly so, since there is no machine type that
@@ -40,7 +40,7 @@ use crate::{unify, BodyTypes, Type, TypeMap};
 /// recursion, which has no finite set of instances.
 const MAX_DEPTH: usize = 64;
 
-/// One function, specialised at one set of type arguments.
+/// One function, specialized at one set of type arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Instance {
     /// The module whose source defines this function.
@@ -172,7 +172,7 @@ fn is_trait_method(traits: &Traits, name: &str) -> bool {
     }
 }
 
-/// Every specialisation a file needs, with the types each one is compiled at.
+/// Every specialization a file needs, with the types each one is compiled at.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Instances {
     pub instances: Vec<(Instance, BodyTypes)>,
@@ -180,7 +180,7 @@ pub struct Instances {
     /// The symbol each trait-method mention was resolved to.
     ///
     /// Recorded during the walk rather than recomputed at each use, so that
-    /// what code generation emits and what monomorphisation decided cannot
+    /// what code generation emits and what monomorphization decided cannot
     /// drift apart.
     pub resolved: HashMap<Instance, String>,
     /// The file each emitted symbol's body lives in.
@@ -229,7 +229,7 @@ impl Unit<'_> {
     }
 }
 
-/// Computes the specialisations a single file needs.
+/// Computes the specializations a single file needs.
 ///
 /// Kept for callers that check one file in isolation. A whole compilation goes
 /// through [`program_instances`], which is the same walk over every module.
@@ -238,12 +238,12 @@ pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
     walk(db, &[file])
 }
 
-/// Computes the specialisations a whole program needs.
+/// Computes the specializations a whole program needs.
 ///
 /// **Whole-program, not per-file.** A generic function is compiled by
 /// substituting its type arguments into its body, so the body has to be
 /// available wherever it is instantiated — a module importing `Option` gets
-/// `unwrap_or` specialised from `std::core`'s source, not from an object file.
+/// `unwrap_or` specialized from `std::core`'s source, not from an object file.
 /// That is the constraint C++ templates and Rust generics have too, and it is
 /// why a symbol carries the module that *defines* it: two importers of one
 /// instantiation must agree on a symbol so it is emitted once.
@@ -302,7 +302,7 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
         if depth > MAX_DEPTH {
             out.errors.push(HirError {
                 message: format!(
-                    "`{}` needs endlessly many specialisations; a generic function \
+                    "`{}` needs endlessly many specializations; a generic function \
                      that calls itself at a larger type cannot be compiled",
                     instance.function
                 ),
@@ -325,10 +325,10 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
             .zip(&instance.args)
             .map(|(g, a)| (g.as_str(), a.clone()))
             .collect();
-        let specialised = generic.specialised(&mapping);
+        let specialized = generic.specialized(&mapping);
         let owner = instance.symbol();
 
-        for (site, (callee, args)) in specialised.instantiations() {
+        for (site, (callee, args)) in specialized.instantiations() {
             let resolved: Vec<Type> =
                 args.iter().map(|a| unify::substitute(a, &mapping)).collect();
 
@@ -363,7 +363,7 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
         }
 
         out.home.insert(owner, unit.file);
-        out.instances.push((instance, specialised));
+        out.instances.push((instance, specialized));
     }
 
     // Deterministic order: the same source must produce the same object file.
@@ -392,7 +392,7 @@ fn defining(units: &[Unit<'_>], from: usize, name: &str) -> Option<(usize, Strin
     }
 
     // A trait or impl method carries a compound key of its own —
-    // `Show#Int::show` — which no import names. It travelled in with its trait,
+    // `Show#Int::show` — which no import names. It traveled in with its trait,
     // so look for the key itself in the other modules.
     units
         .iter()

@@ -412,7 +412,7 @@ fn loop_expr(p: &mut Parser<'_>) -> CompletedMarker {
 /// `break`, `break expr`, `continue`, `return`, `return expr`.
 ///
 /// These transfer control non-locally, so crossing a handler boundary has to
-/// unwind and run finalisers exactly as a raise does — see D1.
+/// unwind and run finalizers exactly as a raise does — see D1.
 fn jump_expr(p: &mut Parser, keyword: SyntaxKind, kind: SyntaxKind) -> CompletedMarker {
     let m = p.start();
     p.bump(keyword);
