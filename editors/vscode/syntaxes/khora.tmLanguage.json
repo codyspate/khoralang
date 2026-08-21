@@ -9,6 +9,7 @@
     { "include": "#numbers" },
     { "include": "#row-variables" },
     { "include": "#declarations" },
+    { "include": "#contextual-keywords" },
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#calls" },
@@ -87,20 +88,46 @@
         }
       ]
     },
+    "contextual-keywords": {
+      "patterns": [
+        {
+          "comment": "Keep in sync with CONTEXTUAL_KEYWORDS in crates/khora-syntax/src/kind.rs. Enforced by the contextual_keywords_match_the_lexer test. These words are ordinary identifiers everywhere except one position each, so every rule reproduces that position instead of matching the bare word — otherwise a parameter named `handler` or a variable named `test` would be coloured as a keyword.",
+          "match": "\\b(handler)\\s+(for)\\b",
+          "captures": {
+            "1": { "name": "keyword.declaration.khora" },
+            "2": { "name": "storage.modifier.khora" }
+          }
+        },
+        {
+          "comment": "`context Name { .. }` is a keyword only at the start of a declaration.",
+          "match": "^\\s*(?:pub\\s+)?(context)\\b(?=\\s)",
+          "captures": {
+            "1": { "name": "keyword.declaration.khora" }
+          }
+        },
+        {
+          "comment": "`test \"name\" { .. }` and `bench \"name\" { .. }`: the name string is what distinguishes the declaration from a call.",
+          "match": "\\b(test|bench)\\b(?=\\s*\")",
+          "captures": {
+            "1": { "name": "keyword.declaration.khora" }
+          }
+        }
+      ]
+    },
     "keywords": {
       "patterns": [
         {
-          "comment": "Keep in sync with SyntaxKind::from_keyword in crates/khora-syntax/src/kind.rs. Enforced by the keywords_match_the_lexer test.",
+          "comment": "Keep in sync with SyntaxKind::from_keyword in crates/khora-syntax/src/kind.rs. Enforced by the keywords_match_the_lexer test. Contextual keywords belong in #contextual-keywords, not here.",
           "name": "keyword.control.khora",
           "match": "\\b(match|if|else|raise|catch|while|loop|break|continue|return)\\b"
         },
         {
           "name": "keyword.declaration.khora",
-          "match": "\\b(module|import|type|effect|context|fn|let|pub|handler|test|bench)\\b"
+          "match": "\\b(module|import|type|effect|fn|let|pub)\\b"
         },
         {
           "name": "storage.modifier.khora",
-          "match": "\\b(mut|const|forall|as|with|raises|for)\\b"
+          "match": "\\b(mut|const|forall|as|with|raises)\\b"
         },
         {
           "name": "constant.language.boolean.khora",

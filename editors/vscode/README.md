@@ -90,3 +90,15 @@ The keyword list here is a copy of what the lexer accepts, which is exactly the
 kind of duplication that rots. `crates/khora-syntax/tests/editor_grammar.rs`
 fails the build if the two disagree, so adding a keyword to the compiler without
 updating this grammar is caught by `cargo test`.
+
+There are two lists, and they live in separate repository rules:
+
+- `#keywords` mirrors `KEYWORDS` — the hard keywords, matched as bare words.
+- `#contextual-keywords` mirrors `CONTEXTUAL_KEYWORDS` — `handler`, `for`,
+  `context`, `test` and `bench`, which are ordinary identifiers everywhere
+  except one position each. Matching them as bare words would colour a
+  parameter named `handler` or a variable named `test`, so each rule instead
+  reproduces the position the parser recognises: `handler` before `for`,
+  `context` at the start of a declaration, `test`/`bench` before a name string.
+  These approximations are exactly the kind of thing semantic tokens will
+  replace.

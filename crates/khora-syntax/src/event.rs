@@ -99,7 +99,16 @@ pub(crate) fn build_tree(lexed: &LexedStr<'_>, mut events: Vec<Event>) -> GreenN
             }
             Event::Token { kind } => {
                 flush_trivia(&mut builder, &mut next_tok);
-                debug_assert_eq!(lexed.kind(next_tok), kind, "token stream desynchronised");
+                // A contextual keyword is lexed as `IDENT` and remapped by the
+                // parser, so the two kinds legitimately differ there — and only
+                // there.
+                debug_assert!(
+                    lexed.kind(next_tok) == kind
+                        || (lexed.kind(next_tok) == SyntaxKind::IDENT
+                            && kind.is_contextual_keyword()),
+                    "token stream desynchronised at token {next_tok}: lexer said {:?}, parser said {kind:?}",
+                    lexed.kind(next_tok)
+                );
                 builder.token(rowan_kind(kind), lexed.text(next_tok));
                 next_tok += 1;
             }

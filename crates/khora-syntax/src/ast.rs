@@ -327,6 +327,55 @@ impl TypeDecl {
     }
 }
 
+impl EffectDecl {
+    pub fn is_pub(&self) -> bool {
+        token(&self.0, PUB_KW).is_some()
+    }
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    pub fn type_params(&self) -> Option<TypeParams> {
+        child(&self.0)
+    }
+    /// The effect's operations, each a named function type.
+    pub fn operations(&self) -> impl Iterator<Item = Field> {
+        children(&self.0)
+    }
+}
+
+impl ContextDecl {
+    pub fn is_pub(&self) -> bool {
+        token(&self.0, PUB_KW).is_some()
+    }
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    /// Handler bindings, in order. They are sequential: each may use the ones
+    /// above it, which is what keeps service composition flat.
+    pub fn bindings(&self) -> impl Iterator<Item = RecordExprField> {
+        children(&self.0)
+    }
+}
+
+impl TestDecl {
+    /// The quoted name, with its surrounding quotes removed.
+    pub fn name(&self) -> Option<String> {
+        token(&self.0, STRING_LIT).map(|t| t.text().trim_matches('"').to_string())
+    }
+    pub fn body(&self) -> Option<Block> {
+        child(&self.0)
+    }
+}
+
+impl BenchDecl {
+    pub fn name(&self) -> Option<String> {
+        token(&self.0, STRING_LIT).map(|t| t.text().trim_matches('"').to_string())
+    }
+    pub fn body(&self) -> Option<Block> {
+        child(&self.0)
+    }
+}
+
 impl FnDecl {
     pub fn is_pub(&self) -> bool {
         token(&self.0, PUB_KW).is_some()

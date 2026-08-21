@@ -34,7 +34,7 @@ fn bin_power(kind: SyntaxKind) -> Option<(u8, u8)> {
     Some(bp)
 }
 
-pub(super) fn expr(p: &mut Parser) -> Option<CompletedMarker> {
+pub(super) fn expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     expr_bp(p, 0)
 }
 
@@ -64,7 +64,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
     Some(lhs)
 }
 
-fn unary_expr(p: &mut Parser) -> Option<CompletedMarker> {
+fn unary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     if p.at(MINUS) || p.at(BANG) {
         let m = p.start();
         p.bump_any();
@@ -76,7 +76,7 @@ fn unary_expr(p: &mut Parser) -> Option<CompletedMarker> {
     postfix_expr(p)
 }
 
-fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
+fn postfix_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     let mut lhs = primary_expr(p)?;
     loop {
         if !p.tick() {
@@ -128,7 +128,7 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
     Some(lhs)
 }
 
-fn arg_list(p: &mut Parser) {
+fn arg_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
     // Record literals are always fine inside parentheses; the suppression
@@ -150,7 +150,7 @@ fn arg_list(p: &mut Parser) {
     m.complete(p, ARG_LIST);
 }
 
-fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
+fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     let cm = match p.current() {
         INT_LIT | FLOAT_LIT | STRING_LIT | TRUE_KW | FALSE_KW => {
             let m = p.start();
@@ -162,6 +162,7 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             p.bump(UNDERSCORE);
             m.complete(p, PLACEHOLDER_EXPR)
         }
+        IDENT if at_handler_expr(p) => handler_expr(p),
         IDENT => {
             let m = p.start();
             name_ref(p);
@@ -183,7 +184,6 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         BREAK_KW => jump_expr(p, BREAK_KW, BREAK_EXPR),
         CONTINUE_KW => jump_expr(p, CONTINUE_KW, CONTINUE_EXPR),
         RETURN_KW => jump_expr(p, RETURN_KW, RETURN_EXPR),
-        HANDLER_KW => handler_expr(p),
         WITH_KW => with_block(p),
         IF_KW => if_expr(p),
         MATCH_KW => match_expr(p),
@@ -194,13 +194,13 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
 
 /// `{` is a record literal when it is empty or starts with `name:`; otherwise
 /// it opens a block. Inside a `match` scrutinee it always opens the arm list.
-fn at_record_literal(p: &mut Parser) -> bool {
+fn at_record_literal(p: &mut Parser<'_>) -> bool {
     p.record_literals_allowed()
         && p.at(L_BRACE)
         && (p.nth_at(1, R_BRACE) || (p.nth_at(1, IDENT) && p.nth_at(2, COLON)))
 }
 
-fn record_expr(p: &mut Parser) -> CompletedMarker {
+fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(L_BRACE);
     while !p.at(R_BRACE) && !p.at(EOF) {
@@ -222,7 +222,7 @@ fn record_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, RECORD_EXPR)
 }
 
-fn list_expr(p: &mut Parser) -> CompletedMarker {
+fn list_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(L_BRACK);
     p.with_record_literals(|p| {
@@ -242,7 +242,7 @@ fn list_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, LIST_EXPR)
 }
 
-fn paren_or_tuple_expr(p: &mut Parser) -> CompletedMarker {
+fn paren_or_tuple_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(L_PAREN);
     if p.eat(R_PAREN) {
@@ -275,7 +275,7 @@ fn paren_or_tuple_expr(p: &mut Parser) -> CompletedMarker {
 }
 
 /// `fn x => e`, `fn _ => e`, `fn (a, b) => e`
-fn lambda_expr(p: &mut Parser) -> CompletedMarker {
+fn lambda_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(FN_KW);
     if p.at(L_PAREN) {
@@ -297,7 +297,7 @@ fn lambda_expr(p: &mut Parser) -> CompletedMarker {
 }
 
 /// After `=>` a `{` means a block unless it looks like a record literal.
-fn lambda_or_arm_body(p: &mut Parser) {
+fn lambda_or_arm_body(p: &mut Parser<'_>) {
     p.with_record_literals(|p| {
         if p.at(L_BRACE) && !at_record_literal(p) {
             block(p);
@@ -312,7 +312,7 @@ fn lambda_or_arm_body(p: &mut Parser) {
 ///
 /// Because contexts are rows, `Production { ai: stub }` is row update — the
 /// same operation the type system already performs on capability rows.
-fn context_row(p: &mut Parser) {
+fn context_row(p: &mut Parser<'_>) {
     p.with_record_literals(|p| {
         let mut found = false;
         if p.at(IDENT) {
@@ -343,12 +343,12 @@ fn is_block_like(kind: SyntaxKind) -> bool {
 
 /// True where an expression cannot continue, so `break`, `continue` and
 /// `return` know whether a value follows them.
-fn at_expr_end(p: &Parser) -> bool {
+fn at_expr_end(p: &Parser<'_>) -> bool {
     p.at_any(&[SEMICOLON, R_BRACE, R_PAREN, R_BRACK, COMMA, EOF])
 }
 
 /// `while cond { .. }`
-fn while_expr(p: &mut Parser) -> CompletedMarker {
+fn while_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(WHILE_KW);
     p.without_record_literals(|p| {
@@ -365,7 +365,7 @@ fn while_expr(p: &mut Parser) -> CompletedMarker {
 }
 
 /// `loop { .. }` — exited with `break`, which may carry the loop's value.
-fn loop_expr(p: &mut Parser) -> CompletedMarker {
+fn loop_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(LOOP_KW);
     if p.at(L_BRACE) {
@@ -393,7 +393,7 @@ fn jump_expr(p: &mut Parser, keyword: SyntaxKind, kind: SyntaxKind) -> Completed
 
 /// `raise expr` — performs an operation of the error row. Its type is `Never`,
 /// so it may appear wherever an expression may.
-fn raise_expr(p: &mut Parser) -> CompletedMarker {
+fn raise_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(RAISE_KW);
     if expr(p).is_none() {
@@ -402,11 +402,26 @@ fn raise_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, RAISE_EXPR)
 }
 
+/// True at the `handler` of `handler for E { .. }`.
+///
+/// Both words are contextual, so the test is "the identifier `handler`,
+/// followed by another identifier". Two adjacent identifiers are never an
+/// expression otherwise — Khora has no juxtaposition — so this cannot capture a
+/// variable called `handler`, and looking past `for` rather than requiring it
+/// keeps the "expected `for`" diagnostic for `handler Ledger { .. }`.
+fn at_handler_expr(p: &Parser<'_>) -> bool {
+    p.at_contextual(HANDLER_KW) && p.nth_at(1, IDENT)
+}
+
 /// `handler for Ledger { get_history: fn id => .., .. }`
-fn handler_expr(p: &mut Parser) -> CompletedMarker {
+fn handler_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
-    p.bump(HANDLER_KW);
-    p.expect(FOR_KW);
+    p.bump_contextual(HANDLER_KW);
+    if p.at_contextual(FOR_KW) {
+        p.bump_contextual(FOR_KW);
+    } else {
+        p.error("expected `for` after `handler`");
+    }
     path(p);
     if at_record_literal(p) || p.at(L_BRACE) {
         record_expr(p);
@@ -420,7 +435,7 @@ fn handler_expr(p: &mut Parser) -> CompletedMarker {
 ///
 /// Handlers must lexically enclose the computation they serve: in direct style
 /// a call evaluates immediately, so a `|> provide(h)` pipeline cannot work.
-fn with_block(p: &mut Parser) -> CompletedMarker {
+fn with_block(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(WITH_KW);
     context_row(p);
@@ -436,7 +451,7 @@ fn with_block(p: &mut Parser) -> CompletedMarker {
 ///
 /// The condition is parsed with record literals suppressed, for the same reason
 /// as a `match` scrutinee: the `{` that follows opens the branch, not a record.
-fn if_expr(p: &mut Parser) -> CompletedMarker {
+fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(IF_KW);
     p.without_record_literals(|p| {
@@ -465,7 +480,7 @@ fn if_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, IF_EXPR)
 }
 
-fn match_expr(p: &mut Parser) -> CompletedMarker {
+fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(MATCH_KW);
     p.without_record_literals(|p| {
@@ -486,7 +501,7 @@ fn match_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, MATCH_EXPR)
 }
 
-pub(super) fn match_arm(p: &mut Parser) {
+pub(super) fn match_arm(p: &mut Parser<'_>) {
     let m = p.start();
     pattern(p);
     if p.at(IF_KW) {
@@ -507,7 +522,7 @@ pub(super) fn match_arm(p: &mut Parser) {
 
 /// `BlockExpr ::= "{" Statement* Expr? "}"` — the trailing expression, if any,
 /// is the block's value.
-pub(super) fn block(p: &mut Parser) -> CompletedMarker {
+pub(super) fn block(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.expect(L_BRACE);
     p.with_record_literals(|p| {

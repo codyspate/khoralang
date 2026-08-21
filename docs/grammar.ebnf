@@ -120,6 +120,20 @@ FloatLiteral   ::= IntLiteral "." IntLiteral ( ( "e" | "E" ) ( "+" | "-" )? [0-9
 StringLiteral  ::= '"' ( ~["\] | "\" . )* '"' ;
 Comment        ::= "//" ~[\r\n]* | "/*" ( Comment | . )* "*/" ;  (* nesting   *)
 
+(* Hard keywords: never usable as an identifier. *)
 Keyword        ::= "module" | "import" | "type" | "fn" | "match" | "let"
-                 | "mut" | "pub" | "as" | "if" | "forall" | "const"
+                 | "mut" | "pub" | "as" | "if" | "else" | "forall" | "const"
+                 | "effect" | "with" | "raises" | "raise" | "catch"
+                 | "while" | "loop" | "break" | "continue" | "return"
                  | "true" | "false" ;
+
+(* Contextual keywords: keywords in one position each, ordinary identifiers
+   everywhere else, so `fn post(handler: Request -> Response)` is legal.
+   `for` is reserved only by `handler for E`; the `for` loop will make it
+   hard. *)
+ContextualKeyword
+               ::= "handler"  (* only before "for"                        *)
+                 | "for"      (* only directly after "handler"            *)
+                 | "context"  (* only at the start of a declaration       *)
+                 | "test"     (* only at the start of a declaration       *)
+                 | "bench" ;  (* only at the start of a declaration       *)

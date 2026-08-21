@@ -9,7 +9,7 @@ use crate::kind::SyntaxKind::*;
 /// only to an arrow: in `fn f() -> Report with { .. }` the return type is just
 /// `Report`, and the `with` belongs to the declaration, not to the type. That
 /// distinction is what lets both spellings coexist unambiguously.
-pub(super) fn type_(p: &mut Parser) {
+pub(super) fn type_(p: &mut Parser<'_>) {
     let m = union_type(p);
     if p.at(THIN_ARROW) {
         let fn_m = m.precede(p);
@@ -24,7 +24,7 @@ pub(super) fn type_(p: &mut Parser) {
 ///
 /// Shared by function types and function declarations so the two can never
 /// drift apart.
-pub(super) fn effect_clauses(p: &mut Parser) {
+pub(super) fn effect_clauses(p: &mut Parser<'_>) {
     while p.at(WITH_KW) || p.at(RAISES_KW) {
         if !p.tick() {
             break;
@@ -43,7 +43,7 @@ pub(super) fn effect_clauses(p: &mut Parser) {
 
 /// `UnionType ::= PrimaryType ( "+" PrimaryType )*` — the open union used for
 /// the `E` channel of `Effect<A, R, E>`.
-fn union_type(p: &mut Parser) -> CompletedMarker {
+fn union_type(p: &mut Parser<'_>) -> CompletedMarker {
     let mut lhs = primary_type(p);
     while p.at(PLUS) {
         let m = lhs.precede(p);
@@ -54,7 +54,7 @@ fn union_type(p: &mut Parser) -> CompletedMarker {
     lhs
 }
 
-fn primary_type(p: &mut Parser) -> CompletedMarker {
+fn primary_type(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
         IDENT => path_type(p),
         L_BRACE => record_type(p),
@@ -83,7 +83,7 @@ fn primary_type(p: &mut Parser) -> CompletedMarker {
 }
 
 /// `forall <T, const N: Int> . Type`
-fn forall_type(p: &mut Parser) -> CompletedMarker {
+fn forall_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(FORALL_KW);
     if p.at(LT) {
@@ -97,7 +97,7 @@ fn forall_type(p: &mut Parser) -> CompletedMarker {
 }
 
 /// `PathType ::= Path TypeArgs?`
-fn path_type(p: &mut Parser) -> CompletedMarker {
+fn path_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     path(p);
     if p.at(LT) {
@@ -108,7 +108,7 @@ fn path_type(p: &mut Parser) -> CompletedMarker {
 
 /// `Path ::= Ident ( "." Ident )*` — the universal dot covers namespaces,
 /// enum constructors and associated items alike.
-pub(super) fn path(p: &mut Parser) -> CompletedMarker {
+pub(super) fn path(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     name_ref(p);
     while p.at(DOT) && p.nth_at(1, IDENT) {
@@ -118,7 +118,7 @@ pub(super) fn path(p: &mut Parser) -> CompletedMarker {
     m.complete(p, PATH)
 }
 
-pub(super) fn name_ref(p: &mut Parser) {
+pub(super) fn name_ref(p: &mut Parser<'_>) {
     let m = p.start();
     if !p.expect(IDENT) {
         m.abandon(p);
@@ -127,7 +127,7 @@ pub(super) fn name_ref(p: &mut Parser) {
     m.complete(p, NAME_REF);
 }
 
-pub(super) fn name(p: &mut Parser) {
+pub(super) fn name(p: &mut Parser<'_>) {
     let m = p.start();
     if !p.expect(IDENT) {
         m.abandon(p);
@@ -140,7 +140,7 @@ pub(super) fn name(p: &mut Parser) {
 ///
 /// `<` is unambiguous here: Khora has no comparison operators in type position,
 /// so no turbofish is required.
-pub(super) fn type_args(p: &mut Parser) {
+pub(super) fn type_args(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(LT);
     while !p.at(GT) && !p.at(EOF) {
@@ -160,7 +160,7 @@ pub(super) fn type_args(p: &mut Parser) {
 ///
 /// A parameter may carry a variance marker (`+A`, `-R`), a kind/trait bound
 /// (`D: Device`) or be a const generic (`const Dim: Int`).
-pub(super) fn type_params(p: &mut Parser) {
+pub(super) fn type_params(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(LT);
     while !p.at(GT) && !p.at(EOF) {
@@ -176,7 +176,7 @@ pub(super) fn type_params(p: &mut Parser) {
     m.complete(p, TYPE_PARAMS);
 }
 
-fn type_param(p: &mut Parser) {
+fn type_param(p: &mut Parser<'_>) {
     let m = p.start();
     if p.at(CONST_KW) {
         p.bump(CONST_KW);
@@ -208,7 +208,7 @@ fn type_param(p: &mut Parser) {
 /// The same production covers records (`{ role: String }`), capability rows
 /// (`{ ledger: Ledger | 'r }`), row merges (`{ 'r1 | 'r2 }`) and the closed
 /// empty row `{}`.
-fn record_type(p: &mut Parser) -> CompletedMarker {
+fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(L_BRACE);
     loop {
@@ -242,7 +242,7 @@ fn record_type(p: &mut Parser) -> CompletedMarker {
 /// Everything after the first `|` in a record type: row variables, whole rows
 /// being merged in, and further labelled fields — `{ R1 | R2 | scope: Scope }`
 /// is all three at once.
-fn row_tail(p: &mut Parser) {
+fn row_tail(p: &mut Parser<'_>) {
     let m = p.start();
     loop {
         if !p.tick() {
@@ -260,7 +260,7 @@ fn row_tail(p: &mut Parser) {
     m.complete(p, ROW_TAIL);
 }
 
-pub(super) fn field(p: &mut Parser) {
+pub(super) fn field(p: &mut Parser<'_>) {
     let m = p.start();
     name(p);
     p.expect(COLON);
@@ -268,7 +268,7 @@ pub(super) fn field(p: &mut Parser) {
     m.complete(p, FIELD);
 }
 
-fn paren_or_tuple_type(p: &mut Parser) -> CompletedMarker {
+fn paren_or_tuple_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(L_PAREN);
     if p.eat(R_PAREN) {
@@ -301,7 +301,7 @@ fn paren_or_tuple_type(p: &mut Parser) -> CompletedMarker {
 }
 
 /// `VariantType ::= ( "|" Ident ( "(" Fields ")" )? )+`
-pub(super) fn variant_type(p: &mut Parser) -> CompletedMarker {
+pub(super) fn variant_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     while p.at(PIPE) {
         if !p.tick() {
@@ -312,7 +312,7 @@ pub(super) fn variant_type(p: &mut Parser) -> CompletedMarker {
     m.complete(p, VARIANT_TYPE)
 }
 
-fn variant_case(p: &mut Parser) {
+fn variant_case(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(PIPE);
     name(p);

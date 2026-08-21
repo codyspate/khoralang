@@ -362,8 +362,10 @@ dependencies = [
 name = "khora-hir"
 version = "0.1.0"
 dependencies = [
+ "khora-db",
  "khora-syntax",
- "rustc-hash 2.1.3",
+ "salsa",
+ "text-size",
 ]
 
 [[package]]

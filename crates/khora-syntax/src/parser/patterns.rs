@@ -4,7 +4,7 @@ use super::types::{name, path};
 use super::Parser;
 use crate::kind::SyntaxKind::*;
 
-pub(super) fn pattern(p: &mut Parser) {
+pub(super) fn pattern(p: &mut Parser<'_>) {
     match p.current() {
         UNDERSCORE => {
             let m = p.start();
@@ -18,14 +18,16 @@ pub(super) fn pattern(p: &mut Parser) {
         }
         L_PAREN => tuple_pattern(p),
         IDENT => path_like_pattern(p),
-        _ => p.err_recover("expected a pattern", &[FAT_ARROW, EQ, COMMA, R_PAREN, SEMICOLON]),
+        _ => p.err_recover("expected a pattern", |p| {
+            p.at_any(&[FAT_ARROW, EQ, COMMA, R_PAREN, SEMICOLON])
+        }),
     }
 }
 
 /// A bare identifier binds; a dotted path or a payload makes it a constructor.
 /// Which one a single uppercase identifier is (binding vs nullary constructor)
 /// is a name-resolution question, settled in HIR lowering rather than here.
-fn path_like_pattern(p: &mut Parser) {
+fn path_like_pattern(p: &mut Parser<'_>) {
     if !p.nth_at(1, DOT) && !p.nth_at(1, L_PAREN) && !p.nth_at(1, L_BRACE) {
         let m = p.start();
         name(p);
@@ -71,7 +73,7 @@ fn path_like_pattern(p: &mut Parser) {
 }
 
 /// `name` (shorthand) or `name: Pattern`.
-fn record_pat_field(p: &mut Parser) {
+fn record_pat_field(p: &mut Parser<'_>) {
     let m = p.start();
     name(p);
     if p.eat(COLON) {
@@ -80,7 +82,7 @@ fn record_pat_field(p: &mut Parser) {
     m.complete(p, RECORD_PAT_FIELD);
 }
 
-fn tuple_pattern(p: &mut Parser) {
+fn tuple_pattern(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
     while !p.at(R_PAREN) && !p.at(EOF) {

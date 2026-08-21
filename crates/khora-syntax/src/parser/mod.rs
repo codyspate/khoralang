@@ -1,9 +1,26 @@
 //! Hand-written recursive-descent parser with Pratt-style expression parsing.
 //!
-//! The parser sees a *trivia-free* token stream and never touches text; it only
-//! emits [`Event`]s. Error recovery is token-set based: when a construct fails
-//! we record a diagnostic and skip tokens until we reach something plausible,
-//! so a single typo does not cascade.
+//! The parser sees a *trivia-free* token stream and emits [`Event`]s. Error
+//! recovery is predicate-based: when a construct fails we record a diagnostic
+//! and skip tokens until we reach something plausible, so a single typo does
+//! not cascade.
+//!
+//! # Why the parser holds the source text
+//!
+//! It borrows the source for one purpose: recognising **contextual keywords**.
+//! `handler`, `for`, `context`, `test` and `bench` are lexed as `IDENT` so they
+//! remain usable as parameter names, fields, locals and types; the parser reads
+//! their spelling in the one position where each is a keyword and remaps the
+//! token with [`Parser::bump_contextual`].
+//!
+//! The alternative — keeping the parser text-free and recognising these words
+//! positionally by kind and lookahead — cannot work: every one of them arrives
+//! as `IDENT`, so lookahead alone can never say *which* identifier it is. Any
+//! scheme that avoids the borrow ends up smuggling the text in anyway (a
+//! side table of interned spellings, a pre-pass that rewrites kinds), which is
+//! the same coupling with more moving parts. rust-analyzer settled here for the
+//! same reason, and the cost is one lifetime on a type that already borrows the
+//! [`LexedStr`] it was built from.
 
 mod decls;
 mod exprs;
@@ -20,7 +37,9 @@ use crate::lexer::LexedStr;
 /// grammar bug. Keeps a malformed file from hanging the LSP.
 const STEP_LIMIT: u32 = 10_000;
 
-pub(crate) struct Parser {
+pub(crate) struct Parser<'a> {
+    /// The whole source, read only through [`Parser::nth_text`].
+    text: &'a str,
     kinds: Vec<SyntaxKind>,
     ranges: Vec<TextRange>,
     pos: usize,
@@ -32,8 +51,8 @@ pub(crate) struct Parser {
     record_literals_allowed: bool,
 }
 
-impl Parser {
-    pub(crate) fn new(lexed: &LexedStr<'_>) -> Parser {
+impl<'a> Parser<'a> {
+    pub(crate) fn new(lexed: &LexedStr<'a>) -> Parser<'a> {
         let mut kinds = Vec::with_capacity(lexed.len());
         let mut ranges = Vec::with_capacity(lexed.len());
         for i in 0..lexed.len() {
@@ -47,6 +66,7 @@ impl Parser {
         ranges.push(TextRange::empty(end));
 
         Parser {
+            text: lexed.source(),
             kinds,
             ranges,
             pos: 0,
@@ -58,7 +78,7 @@ impl Parser {
     }
 
     /// Runs `f` with record literals disabled, restoring the previous setting.
-    pub(crate) fn without_record_literals<T>(&mut self, f: impl FnOnce(&mut Parser) -> T) -> T {
+    pub(crate) fn without_record_literals<T>(&mut self, f: impl FnOnce(&mut Parser<'a>) -> T) -> T {
         let saved = std::mem::replace(&mut self.record_literals_allowed, false);
         let out = f(self);
         self.record_literals_allowed = saved;
@@ -67,7 +87,7 @@ impl Parser {
 
     /// Runs `f` with record literals permitted again (inside parentheses,
     /// argument lists and arm bodies).
-    pub(crate) fn with_record_literals<T>(&mut self, f: impl FnOnce(&mut Parser) -> T) -> T {
+    pub(crate) fn with_record_literals<T>(&mut self, f: impl FnOnce(&mut Parser<'a>) -> T) -> T {
         let saved = std::mem::replace(&mut self.record_literals_allowed, true);
         let out = f(self);
         self.record_literals_allowed = saved;
@@ -106,6 +126,47 @@ impl Parser {
 
     pub(crate) fn current_range(&self) -> TextRange {
         self.ranges[self.pos.min(self.ranges.len() - 1)]
+    }
+
+    /// True at a token that can begin a declaration, including the contextual
+    /// declaration keywords. The recovery point after a broken declaration.
+    pub(crate) fn at_decl_start(&self) -> bool {
+        self.current().is_decl_start()
+            || self.at_contextual(CONTEXT_KW)
+            || self.at_contextual(TEST_KW)
+            || self.at_contextual(BENCH_KW)
+    }
+
+    // --- contextual keywords ----------------------------------------------
+
+    /// The source text of the token `n` ahead. Empty at EOF.
+    fn nth_text(&self, n: usize) -> &'a str {
+        match self.ranges.get(self.pos + n) {
+            Some(range) => &self.text[*range],
+            None => "",
+        }
+    }
+
+    /// True when the current token is the `IDENT` spelling the contextual
+    /// keyword `kind`.
+    pub(crate) fn at_contextual(&self, kind: SyntaxKind) -> bool {
+        self.nth_at_contextual(0, kind)
+    }
+
+    /// [`Parser::at_contextual`] with lookahead.
+    pub(crate) fn nth_at_contextual(&self, n: usize, kind: SyntaxKind) -> bool {
+        debug_assert!(kind.is_contextual_keyword(), "{kind:?} is not a contextual keyword");
+        self.nth(n) == IDENT && kind.contextual_keyword_text() == Some(self.nth_text(n))
+    }
+
+    /// Consumes the current `IDENT` and records it in the tree as `kind`.
+    ///
+    /// Remapping rather than leaving the token an `IDENT` keeps the CST — and
+    /// so every consumer of it, from `debug_tree` to the formatter — identical
+    /// to what a hard keyword would have produced.
+    pub(crate) fn bump_contextual(&mut self, kind: SyntaxKind) {
+        assert!(self.at_contextual(kind), "expected the contextual keyword {kind:?}");
+        self.do_bump(kind);
     }
 
     // --- token consumption -----------------------------------------------
@@ -168,15 +229,25 @@ impl Parser {
         m.complete(self, ERROR);
     }
 
-    /// Records an error and skips tokens until one in `recovery` (or EOF).
-    pub(crate) fn err_recover(&mut self, message: impl Into<String>, recovery: &[SyntaxKind]) {
-        if self.at_any(recovery) || self.at(EOF) {
+    /// Records an error and skips tokens until `at_recovery` accepts one (or
+    /// EOF).
+    ///
+    /// The recovery point is a predicate rather than a token set because a
+    /// contextual keyword is not identifiable by kind: `context` and `test`
+    /// both arrive as `IDENT`, so "the next declaration starts here" can only
+    /// be answered by [`Parser::at_decl_start`].
+    pub(crate) fn err_recover(
+        &mut self,
+        message: impl Into<String>,
+        at_recovery: impl Fn(&Parser<'a>) -> bool,
+    ) {
+        if at_recovery(self) || self.at(EOF) {
             self.error(message);
             return;
         }
         let m = self.start();
         self.error(message);
-        while !self.at(EOF) && !self.at_any(recovery) {
+        while !self.at(EOF) && !at_recovery(self) {
             self.bump_any();
         }
         m.complete(self, ERROR);
@@ -235,7 +306,7 @@ pub(crate) struct Marker {
 }
 
 impl Marker {
-    pub(crate) fn complete(mut self, p: &mut Parser, kind: SyntaxKind) -> CompletedMarker {
+    pub(crate) fn complete(mut self, p: &mut Parser<'_>, kind: SyntaxKind) -> CompletedMarker {
         self.completed = true;
         match &mut p.events[self.pos] {
             slot @ Event::Tombstone => *slot = Event::Start { kind, forward_parent: None },
@@ -245,7 +316,7 @@ impl Marker {
         CompletedMarker { pos: self.pos, kind }
     }
 
-    pub(crate) fn abandon(mut self, p: &mut Parser) {
+    pub(crate) fn abandon(mut self, p: &mut Parser<'_>) {
         self.completed = true;
         if self.pos == p.events.len() - 1 {
             // Nothing was emitted after this marker: drop the slot entirely.
@@ -279,7 +350,7 @@ impl CompletedMarker {
         self.kind
     }
 
-    pub(crate) fn precede(self, p: &mut Parser) -> Marker {
+    pub(crate) fn precede(self, p: &mut Parser<'_>) -> Marker {
         let new_marker = p.start();
         match &mut p.events[self.pos] {
             Event::Start { forward_parent, .. } => {
@@ -292,7 +363,7 @@ impl CompletedMarker {
 }
 
 /// Grammar entry point.
-pub(crate) fn source_file(p: &mut Parser) {
+pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
     decls::source_file_contents(p);
     m.complete(p, SOURCE_FILE);

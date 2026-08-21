@@ -19,7 +19,9 @@ mod parser;
 use rowan::GreenNode;
 
 pub use event::ParseError;
-pub use kind::{Khora, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, KEYWORDS};
+pub use kind::{
+    Khora, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, CONTEXTUAL_KEYWORDS, KEYWORDS,
+};
 pub use lexer::LexedStr;
 
 /// The result of parsing one source file.

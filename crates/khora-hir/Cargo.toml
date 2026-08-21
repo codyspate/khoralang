@@ -1,6 +1,6 @@
 [package]
 name = "khora-hir"
-description = "AST -> HIR lowering: pipe desugaring, placeholder resolution, name binding"
+description = "Module graph, item collection and name resolution"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,4 +8,6 @@ license.workspace = true
 
 [dependencies]
 khora-syntax.workspace = true
-rustc-hash.workspace = true
+khora-db.workspace = true
+salsa.workspace = true
+text-size.workspace = true

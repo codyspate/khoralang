@@ -28,7 +28,7 @@ pub use salsa::Setter;
 /// Salsa inputs are `Copy` handles into the database, so this doubles as the
 /// `FileId` the rest of the compiler passes around. The text lives in the
 /// database, not in the handle.
-#[salsa::input]
+#[salsa::input(debug)]
 pub struct SourceFile {
     #[returns(ref)]
     pub path: PathBuf,
@@ -41,7 +41,7 @@ pub struct SourceFile {
 /// Module and import resolution will read this rather than touching the
 /// filesystem, so that adding or removing a file is an ordinary input change
 /// and invalidates exactly the queries that depended on the file set.
-#[salsa::input]
+#[salsa::input(debug)]
 pub struct SourceRoot {
     #[returns(deref)]
     pub files: Vec<SourceFile>,

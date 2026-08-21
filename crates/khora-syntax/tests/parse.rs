@@ -331,6 +331,148 @@ bench \"fast\" { f() }
     assert!(dump.contains("BENCH_DECL"), "{dump}");
 }
 
+// --- contextual keywords -------------------------------------------------
+//
+// `handler`, `context`, `test` and `bench` are keywords in one position each
+// and ordinary identifiers everywhere else. Both directions need proving: a
+// regression in either one is silent until somebody's parameter stops
+// compiling, or `test "name" { .. }` starts parsing as a call.
+
+/// Every position a user is likely to want one of these words in.
+#[test]
+fn contextual_keywords_are_usable_as_identifiers() {
+    for word in ["handler", "context", "test", "bench"] {
+        let src = format!(
+            "module m;
+pub type {word} = {{ {word}: Int }};
+pub fn f({word}: {word}) -> {word} {{
+  let {word} = {word};
+  g({word}, {{ {word}: 1 }})
+}}
+"
+        );
+        let parse = parse(&src);
+        assert!(
+            parse.errors().is_empty(),
+            "`{word}` should be usable as an identifier: {:?}",
+            parse.errors()
+        );
+        assert_eq!(parse.syntax().text().to_string(), src, "`{word}` lost source text");
+    }
+}
+
+/// The case that motivated the change: `std/net/http.kh` had to rename a
+/// parameter called `handler` to work around the reservation.
+#[test]
+fn a_parameter_named_handler_parses() {
+    let src = "module m;
+fn f(handler: Request -> Response) { let context = 1; test(context) }
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+
+    let dump = parse.debug_tree();
+    assert!(
+        !dump.contains("HANDLER_EXPR") && !dump.contains("HANDLER_KW"),
+        "a parameter named `handler` was read as a handler expression:\n{dump}"
+    );
+    assert!(
+        !dump.contains("CONTEXT_KW") && !dump.contains("TEST_KW"),
+        "`context` or `test` was read as a keyword:\n{dump}"
+    );
+    assert_eq!(dump.matches("CALL_EXPR").count(), 1, "`test(context)` should be a call:\n{dump}");
+}
+
+/// Each word still parses as its keyword in the position that defines it, and
+/// the token is recorded in the tree as the keyword rather than as an `IDENT`.
+#[test]
+fn contextual_keywords_still_parse_as_keywords() {
+    let src = "module m;
+pub context Production { ledger: h }
+let live = handler for Ledger { get_history: fn id => \"x\" };
+test \"it works\" { assert(1 == 1); }
+bench \"fast\" { f() }
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    assert_eq!(parse.syntax().text().to_string(), src, "lost source text");
+
+    let dump = parse.debug_tree();
+    for expected in [
+        "CONTEXT_DECL",
+        "CONTEXT_KW",
+        "HANDLER_EXPR",
+        "HANDLER_KW",
+        "FOR_KW",
+        "TEST_DECL",
+        "TEST_KW",
+        "BENCH_DECL",
+        "BENCH_KW",
+    ] {
+        assert!(dump.contains(expected), "missing {expected}:\n{dump}");
+    }
+}
+
+/// A record field, a local and a declaration keyword can all be the same word
+/// in one file without interfering.
+#[test]
+fn a_contextual_keyword_can_be_both_in_one_file() {
+    let src = "module m;
+pub context Mock { handler: h }
+test \"the test names a test\" {
+  let test = 1;
+  let handler = handler for Ledger { get_history: fn id => test };
+  assert(handler == handler);
+}
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    let dump = parse.debug_tree();
+    assert!(dump.contains("CONTEXT_DECL"), "{dump}");
+    assert!(dump.contains("TEST_DECL"), "{dump}");
+    assert!(dump.contains("HANDLER_EXPR"), "{dump}");
+}
+
+/// `for` is contextual only because `handler for` needs it. When the `for` loop
+/// of phase 3 lands it becomes a hard keyword and this test changes with it.
+#[test]
+fn for_is_a_keyword_only_directly_after_handler() {
+    let installed = parse("module m;\nlet h = handler for Ledger { get: fn i => 1 };\n");
+    assert!(installed.errors().is_empty(), "{:?}", installed.errors());
+    assert!(installed.debug_tree().contains("FOR_KW"), "`for` was not read as a keyword");
+
+    let identifier = parse("module m;\nfn f(for: Int) -> Int { for }\n");
+    assert!(identifier.errors().is_empty(), "{:?}", identifier.errors());
+    assert!(
+        !identifier.debug_tree().contains("FOR_KW"),
+        "`for` outside `handler for` should be an identifier"
+    );
+}
+
+/// Dropping `handler` mid-expression must still say what is missing, rather
+/// than silently reading `handler` as a variable and failing somewhere else.
+#[test]
+fn handler_without_for_still_gets_a_pointed_diagnostic() {
+    let parse = parse("module m;\nlet h = handler Ledger { get: fn i => 1 };\n");
+    let msgs: Vec<_> = parse.errors().iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("expected `for` after `handler`")),
+        "unhelpful diagnostics: {msgs:?}"
+    );
+}
+
+/// Recovery has to resynchronise on a contextual declaration keyword too,
+/// otherwise a broken declaration swallows the `context` that follows it.
+#[test]
+fn recovery_stops_at_a_contextual_declaration_keyword() {
+    let src = "module m;\ntype = ;\ncontext Mock { ledger: h }\ntest \"t\" { f() }\n";
+    let parse = parse(src);
+    assert_eq!(parse.syntax().text().to_string(), src, "lost source text");
+    let dump = parse.debug_tree();
+    assert!(dump.contains("CONTEXT_DECL"), "recovery ate the context declaration:\n{dump}");
+    assert!(dump.contains("TEST_DECL"), "recovery ate the test declaration:\n{dump}");
+}
+
 #[test]
 fn list_literals_parse() {
     let parse = parse("module m;

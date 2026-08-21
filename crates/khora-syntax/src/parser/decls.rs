@@ -6,11 +6,7 @@ use super::types::{effect_clauses, field, name, path, type_, type_params, varian
 use super::Parser;
 use crate::kind::SyntaxKind::*;
 
-/// Tokens we resynchronise to after a broken declaration.
-const DECL_RECOVERY: &[crate::kind::SyntaxKind] =
-    &[MODULE_KW, IMPORT_KW, TYPE_KW, EFFECT_KW, CONTEXT_KW, FN_KW, LET_KW, PUB_KW, TEST_KW, BENCH_KW];
-
-pub(super) fn source_file_contents(p: &mut Parser) {
+pub(super) fn source_file_contents(p: &mut Parser<'_>) {
     // `module` must come first, but accepting it out of order here and
     // diagnosing it later gives better editor behaviour than bailing out.
     while !p.at(EOF) {
@@ -21,33 +17,38 @@ pub(super) fn source_file_contents(p: &mut Parser) {
     }
 }
 
-fn declaration(p: &mut Parser) {
+/// Declaration position is where `context`, `test` and `bench` are keywords.
+///
+/// Nothing is given up by recognising them here: no declaration may begin with
+/// a bare identifier, so an `IDENT` in this position is either one of these
+/// three words or a syntax error either way.
+fn declaration(p: &mut Parser<'_>) {
     match p.current() {
         MODULE_KW => module_decl(p),
         IMPORT_KW => import_decl(p),
         TYPE_KW => type_decl(p),
         EFFECT_KW => effect_decl(p),
-        CONTEXT_KW => context_decl(p),
         FN_KW => fn_decl(p),
         LET_KW => let_decl(p),
-        TEST_KW | BENCH_KW => test_decl(p),
+        IDENT if p.at_contextual(CONTEXT_KW) => context_decl(p),
+        IDENT if p.at_contextual(TEST_KW) || p.at_contextual(BENCH_KW) => test_decl(p),
         PUB_KW => match p.nth(1) {
             TYPE_KW => type_decl(p),
             EFFECT_KW => effect_decl(p),
-            CONTEXT_KW => context_decl(p),
             FN_KW => fn_decl(p),
             LET_KW => let_decl(p),
+            IDENT if p.nth_at_contextual(1, CONTEXT_KW) => context_decl(p),
             _ => p.err_recover(
                 "expected `type`, `effect`, `context`, `fn` or `let` after `pub`",
-                DECL_RECOVERY,
+                Parser::at_decl_start,
             ),
         },
         SEMICOLON => p.err_and_bump("stray `;`"),
-        _ => p.err_recover("expected a declaration", DECL_RECOVERY),
+        _ => p.err_recover("expected a declaration", Parser::at_decl_start),
     }
 }
 
-fn module_decl(p: &mut Parser) {
+fn module_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(MODULE_KW);
     path(p);
@@ -56,7 +57,7 @@ fn module_decl(p: &mut Parser) {
 }
 
 /// `import a.b.{X, Y as Z};` or `import a.b.*;`
-fn import_decl(p: &mut Parser) {
+fn import_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(IMPORT_KW);
     path(p);
@@ -75,7 +76,7 @@ fn import_decl(p: &mut Parser) {
     m.complete(p, IMPORT_DECL);
 }
 
-fn import_list(p: &mut Parser) {
+fn import_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_BRACE);
     while !p.at(R_BRACE) && !p.at(EOF) {
@@ -101,7 +102,7 @@ fn import_list(p: &mut Parser) {
 /// The right-hand side is optional: the standard library declares opaque types
 /// such as `pub type Effect<+A, -R, +E>;` whose representation is compiler
 /// internal.
-fn type_decl(p: &mut Parser) {
+fn type_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(PUB_KW);
     p.bump(TYPE_KW);
@@ -125,7 +126,7 @@ fn type_decl(p: &mut Parser) {
 /// An effect is a named set of operations, shaped exactly like the record of
 /// functions a capability already was under the monadic design — which is why
 /// the dependency-injection model survived decision A8 unchanged.
-fn effect_decl(p: &mut Parser) {
+fn effect_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(PUB_KW);
     p.bump(EFFECT_KW);
@@ -153,10 +154,10 @@ fn effect_decl(p: &mut Parser) {
 /// A named bundle of handlers. Bindings are sequential: each may use the ones
 /// above it, which is what keeps service composition flat instead of nesting
 /// one `with` per layer.
-fn context_decl(p: &mut Parser) {
+fn context_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(PUB_KW);
-    p.bump(CONTEXT_KW);
+    p.bump_contextual(CONTEXT_KW);
     name(p);
     if p.expect(L_BRACE) {
         while !p.at(R_BRACE) && !p.at(EOF) {
@@ -184,7 +185,7 @@ fn context_decl(p: &mut Parser) {
 /// No `=` before the body, and no semicolon after it. The rule is simply:
 /// `{` introduces a definition, `;` declares a signature only — which is how
 /// `std` describes intrinsics and FFI entry points.
-fn fn_decl(p: &mut Parser) {
+fn fn_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(PUB_KW);
     p.bump(FN_KW);
@@ -222,10 +223,11 @@ fn fn_decl(p: &mut Parser) {
 ///
 /// Tests are declarations rather than a convention over function names, per
 /// section 6.4, so the runner does not have to guess what is a test.
-fn test_decl(p: &mut Parser) {
+fn test_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    let kind = if p.at(TEST_KW) { TEST_DECL } else { BENCH_DECL };
-    p.bump_any();
+    let (keyword, kind) =
+        if p.at_contextual(TEST_KW) { (TEST_KW, TEST_DECL) } else { (BENCH_KW, BENCH_DECL) };
+    p.bump_contextual(keyword);
     if !p.eat(STRING_LIT) {
         p.error("expected a name string");
     }
@@ -237,7 +239,7 @@ fn test_decl(p: &mut Parser) {
     m.complete(p, kind);
 }
 
-pub(super) fn param_list(p: &mut Parser) {
+pub(super) fn param_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.expect(L_PAREN);
     while !p.at(R_PAREN) && !p.at(EOF) {
@@ -253,14 +255,14 @@ pub(super) fn param_list(p: &mut Parser) {
     m.complete(p, PARAM_LIST);
 }
 
-fn param(p: &mut Parser) {
+fn param(p: &mut Parser<'_>) {
     let m = p.start();
     match p.current() {
         IDENT => name(p),
         UNDERSCORE => p.bump(UNDERSCORE),
         _ => {
             m.abandon(p);
-            p.err_recover("expected a parameter name", &[COMMA, R_PAREN]);
+            p.err_recover("expected a parameter name", |p| p.at_any(&[COMMA, R_PAREN]));
             return;
         }
     }
@@ -271,7 +273,7 @@ fn param(p: &mut Parser) {
 }
 
 /// `let mut? Pattern (":" Type)? "=" Expr ";"`
-pub(super) fn let_decl(p: &mut Parser) {
+pub(super) fn let_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(PUB_KW);
     p.bump(LET_KW);
