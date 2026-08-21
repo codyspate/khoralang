@@ -14,7 +14,7 @@ use khora_hir::body::{BinOp, Body, Expr, ExprId, Literal, LocalId, Pat, PatId, S
 use khora_hir::HirError;
 use khora_syntax::ast::{self};
 use text_size::TextRange;
-use usefulness::{ColumnType, Ctor, Pattern};
+use usefulness::{ColumnType, Ctor, FieldType, Pattern};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -545,12 +545,24 @@ impl<'a> Checker<'a> {
         let patterns: Vec<Pattern> =
             unguarded.iter().map(|a| self.to_pattern(a.pat)).collect();
 
-        let column = self.column_type(scrutinee_ty);
+        let column = column_type(self.types, scrutinee_ty);
         if matches!(column, ColumnType::Unknown) {
             return;
         }
 
-        let missing = usefulness::missing_patterns(&patterns, &column);
+        // Named types are expanded lazily: an ADT may contain itself, so
+        // resolving eagerly would not terminate.
+        // Named types expand lazily: an ADT may contain itself, so resolving
+        // eagerly would not terminate. Captures the map, not the checker, so
+        // reporting can still borrow `self` mutably.
+        let types = self.types;
+        let resolve = move |name: &str| -> ColumnType {
+            let ty =
+                if name == BOOL_TYPE { Type::Bool } else { Type::Adt(name.to_string()) };
+            column_type(types, &ty)
+        };
+
+        let missing = usefulness::missing_patterns(&patterns, &column, &resolve);
         if !missing.is_empty() {
             let names: Vec<String> = missing.iter().map(|p| p.to_string()).collect();
             self.error(
@@ -559,34 +571,14 @@ impl<'a> Checker<'a> {
             );
         }
 
-        for index in usefulness::unreachable_arms(&patterns, &column) {
+        for index in usefulness::unreachable_arms(&patterns, &column, &resolve) {
             if let Some(arm) = unguarded.get(index) {
                 self.error("this arm is unreachable", self.body.range(arm.body));
             }
         }
     }
 
-    fn column_type(&self, ty: &Type) -> ColumnType {
-        match ty {
-            Type::Bool => ColumnType::Finite(vec![Ctor::Bool(true), Ctor::Bool(false)]),
-            Type::Int | Type::Str => ColumnType::Unbounded,
-            Type::Adt(name) => {
-                let variants = self.types.variants_of(name);
-                if variants.is_empty() {
-                    ColumnType::Unknown
-                } else {
-                    ColumnType::Finite(
-                        variants
-                            .iter()
-                            .map(|v| Ctor::Variant { name: v.name.clone(), arity: v.fields.len() })
-                            .collect(),
-                    )
-                }
-            }
-            _ => ColumnType::Unknown,
-        }
-    }
-
+    /// A constructor carrying the types of its payload, so specialisation can
     fn to_pattern(&self, pat: PatId) -> Pattern {
         match self.body.pat(pat) {
             // A binding matches everything, exactly like `_`.
@@ -600,20 +592,18 @@ impl<'a> Checker<'a> {
                 },
                 fields: Vec::new(),
             },
-            Pat::Path(resolution) => match variant_name(resolution) {
-                Some(name) => Pattern::Constructor {
-                    ctor: Ctor::Variant { name, arity: 0 },
-                    fields: Vec::new(),
-                },
-                None => Pattern::Wildcard,
-            },
-            Pat::TupleStruct { resolution, fields } => match variant_name(resolution) {
-                Some(name) => Pattern::Constructor {
-                    ctor: Ctor::Variant { name, arity: fields.len() },
-                    fields: fields.iter().map(|f| self.to_pattern(*f)).collect(),
-                },
-                None => Pattern::Wildcard,
-            },
+            Pat::Path(resolution) | Pat::TupleStruct { resolution, .. } => {
+                let sub = match self.body.pat(pat) {
+                    Pat::TupleStruct { fields, .. } => {
+                        fields.iter().map(|f| self.to_pattern(*f)).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                match variant_name(resolution).and_then(|n| self.types.variant(&n)) {
+                    Some(v) => Pattern::Constructor { ctor: ctor_for(self.types, v), fields: sub },
+                    None => Pattern::Wildcard,
+                }
+            }
             Pat::Tuple(fields) => Pattern::Constructor {
                 ctor: Ctor::Tuple(fields.len()),
                 fields: fields.iter().map(|f| self.to_pattern(*f)).collect(),
@@ -621,6 +611,46 @@ impl<'a> Checker<'a> {
         }
     }
 }
+
+/// expand nested patterns to the right column types.
+fn ctor_for(types: &TypeMap, variant: &VariantInfo) -> Ctor {
+    Ctor::Variant {
+        name: variant.name.clone(),
+        fields: variant.fields.iter().map(field_type).collect(),
+    }
+}
+
+fn field_type(ty: &Type) -> FieldType {
+    match ty {
+        Type::Adt(name) => FieldType::Named(name.clone()),
+        Type::Bool => FieldType::Named(BOOL_TYPE.to_string()),
+        Type::Int | Type::Str => FieldType::Unbounded,
+        _ => FieldType::Opaque,
+    }
+}
+
+fn column_type(types: &TypeMap, ty: &Type) -> ColumnType {
+    match ty {
+        Type::Bool => ColumnType::Finite(vec![Ctor::Bool(true), Ctor::Bool(false)]),
+        Type::Int | Type::Str => ColumnType::Unbounded,
+        Type::Adt(name) => {
+            let variants = types.variants_of(name);
+            if variants.is_empty() {
+                ColumnType::Unknown
+            } else {
+                ColumnType::Finite(
+                    variants.iter().map(|v| ctor_for(types, v)).collect(),
+                )
+            }
+        }
+        _ => ColumnType::Unknown,
+    }
+}
+
+
+/// `Bool` has constructors but is not an ADT, so the resolver needs a name for
+/// it. Lowercase, which no declared type can be.
+const BOOL_TYPE: &str = "bool";
 
 fn variant_name(resolution: &khora_hir::Resolution) -> Option<String> {
     match resolution {

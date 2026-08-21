@@ -505,9 +505,9 @@ fn main() -> Int { while_alive() }
 /// the tests have to be a chain rather than a conjunction — a `Nil` has no
 /// field to look inside.
 ///
-/// The trailing `_` is not decoration: `khora-types`' usefulness check does not
-/// see through a nested constructor yet, so it reports the fully spelled-out
-/// version as inexhaustive. That is a front-end gap, not a backend one.
+/// Every case is spelled out, with no trailing wildcard. That only became
+/// possible once the usefulness check learned to thread payload types into
+/// nested columns; before, it reported this as inexhaustive.
 #[test]
 fn nested_constructor_patterns_match() {
     let ran = run(
@@ -521,7 +521,7 @@ fn second(l: List) -> Int {
   match l {
     List::Cons(_, List::Cons(v, _)) => v,
     List::Cons(_, List::Nil) => -1,
-    _ => -2,
+    List::Nil => -2,
   }
 }
 

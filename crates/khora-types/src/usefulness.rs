@@ -18,12 +18,29 @@
 
 use std::fmt;
 
-/// What a pattern tests for. Payload arity is carried so specialisation knows
-/// how many columns a constructor expands into.
+/// What kind of thing a constructor's payload field holds.
+///
+/// A *name* rather than a resolved [`ColumnType`], because a type may contain
+/// itself: resolving `Cons`'s tail eagerly would not terminate. The resolver
+/// passed to [`missing_patterns`] expands a name only when a pattern actually
+/// reaches that depth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldType {
+    /// A named type whose constructors the resolver can supply.
+    Named(String),
+    /// No finite set of patterns covers it, so a wildcard is always needed.
+    Unbounded,
+    /// Not known — never reported on.
+    Opaque,
+}
+
+/// What a pattern tests for. A variant carries the types of its payload so
+/// specialisation knows both how many columns it expands into and what they
+/// hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ctor {
-    /// A variant of an ADT, with its payload arity.
-    Variant { name: String, arity: usize },
+    /// A variant of an ADT, with the types of its payload fields.
+    Variant { name: String, fields: Vec<FieldType> },
     Bool(bool),
     /// A literal of an effectively unbounded type. Such a column can never be
     /// complete, so a wildcard arm is always required.
@@ -34,7 +51,7 @@ pub enum Ctor {
 impl Ctor {
     fn arity(&self) -> usize {
         match self {
-            Ctor::Variant { arity, .. } => *arity,
+            Ctor::Variant { fields, .. } => fields.len(),
             Ctor::Tuple(n) => *n,
             Ctor::Bool(_) | Ctor::Literal(_) => 0,
         }
@@ -96,13 +113,28 @@ type Types = [ColumnType];
 /// Rows of patterns, all the same width.
 pub type Matrix = Vec<Vec<Pattern>>;
 
+/// Expands a type name to the constructors it admits.
+///
+/// Lazy by design: an ADT may contain itself, and this is only consulted as
+/// deep as the patterns actually go.
+pub type Resolver<'a> = &'a dyn Fn(&str) -> ColumnType;
+
+/// A resolver for callers with no named types to expand.
+pub fn no_types(_: &str) -> ColumnType {
+    ColumnType::Unknown
+}
+
 /// Patterns not covered by `arms`, as witnesses to name in a diagnostic.
 ///
 /// Empty means the match is exhaustive.
-pub fn missing_patterns(arms: &[Pattern], scrutinee: &ColumnType) -> Vec<Pattern> {
+pub fn missing_patterns(
+    arms: &[Pattern],
+    scrutinee: &ColumnType,
+    resolve: Resolver<'_>,
+) -> Vec<Pattern> {
     let matrix: Matrix = arms.iter().map(|p| vec![p.clone()]).collect();
     let types = vec![scrutinee.clone()];
-    match usefulness(&matrix, &[Pattern::Wildcard], &types) {
+    match usefulness(&matrix, &[Pattern::Wildcard], &types, resolve) {
         Usefulness::Useless => Vec::new(),
         Usefulness::Useful(witnesses) => {
             witnesses.into_iter().filter_map(|mut w| w.pop()).collect()
@@ -111,12 +143,19 @@ pub fn missing_patterns(arms: &[Pattern], scrutinee: &ColumnType) -> Vec<Pattern
 }
 
 /// Indices of arms no value can reach, because earlier arms already cover them.
-pub fn unreachable_arms(arms: &[Pattern], scrutinee: &ColumnType) -> Vec<usize> {
+pub fn unreachable_arms(
+    arms: &[Pattern],
+    scrutinee: &ColumnType,
+    resolve: Resolver<'_>,
+) -> Vec<usize> {
     let types = vec![scrutinee.clone()];
     let mut unreachable = Vec::new();
     for (i, arm) in arms.iter().enumerate() {
         let earlier: Matrix = arms[..i].iter().map(|p| vec![p.clone()]).collect();
-        if matches!(usefulness(&earlier, std::slice::from_ref(arm), &types), Usefulness::Useless) {
+        if matches!(
+            usefulness(&earlier, std::slice::from_ref(arm), &types, resolve),
+            Usefulness::Useless
+        ) {
             unreachable.push(i);
         }
     }
@@ -129,7 +168,12 @@ enum Usefulness {
     Useful(Vec<Vec<Pattern>>),
 }
 
-fn usefulness(matrix: &Matrix, q: &[Pattern], types: &Types) -> Usefulness {
+fn usefulness(
+    matrix: &Matrix,
+    q: &[Pattern],
+    types: &Types,
+    resolve: Resolver<'_>,
+) -> Usefulness {
     // No columns left: `q` is useful only if nothing has matched so far.
     if q.is_empty() {
         return if matrix.is_empty() {
@@ -146,9 +190,9 @@ fn usefulness(matrix: &Matrix, q: &[Pattern], types: &Types) -> Usefulness {
             let specialised = specialise(matrix, ctor);
             let mut sub_q = fields.clone();
             sub_q.extend_from_slice(&q[1..]);
-            let sub_types = specialised_types(&column, ctor, types);
+            let sub_types = specialised_types(ctor, types, resolve);
 
-            match usefulness(&specialised, &sub_q, &sub_types) {
+            match usefulness(&specialised, &sub_q, &sub_types, resolve) {
                 Usefulness::Useless => Usefulness::Useless,
                 Usefulness::Useful(witnesses) => {
                     Usefulness::Useful(rebuild(witnesses, ctor))
@@ -171,9 +215,9 @@ fn usefulness(matrix: &Matrix, q: &[Pattern], types: &Types) -> Usefulness {
                     let specialised = specialise(matrix, ctor);
                     let mut sub_q = vec![Pattern::Wildcard; ctor.arity()];
                     sub_q.extend_from_slice(&q[1..]);
-                    let sub_types = specialised_types(&column, ctor, types);
+                    let sub_types = specialised_types(ctor, types, resolve);
                     if let Usefulness::Useful(found) =
-                        usefulness(&specialised, &sub_q, &sub_types)
+                        usefulness(&specialised, &sub_q, &sub_types, resolve)
                     {
                         witnesses.extend(rebuild(found, ctor));
                     }
@@ -187,7 +231,7 @@ fn usefulness(matrix: &Matrix, q: &[Pattern], types: &Types) -> Usefulness {
                 // Some constructor is missing, so a wildcard reaches values no
                 // row does. Recurse on the rows that also had a wildcard here.
                 let defaulted = default_matrix(matrix);
-                match usefulness(&defaulted, &q[1..], &types[1.min(types.len())..]) {
+                match usefulness(&defaulted, &q[1..], &types[1.min(types.len())..], resolve) {
                     Usefulness::Useless => Usefulness::Useless,
                     Usefulness::Useful(witnesses) => {
                         let heads = missing_constructors(&column, &present);
@@ -284,11 +328,22 @@ fn missing_constructors(column: &ColumnType, present: &[Ctor]) -> Vec<Pattern> {
 
 /// Column types after expanding `ctor`'s payload.
 ///
-/// Payload types are not tracked in the phase 2 subset, so sub-columns are
-/// `Unknown` and never produce a nested exhaustiveness complaint. Nested
-/// patterns still specialise correctly; only the *witness* is less specific.
-fn specialised_types(_column: &ColumnType, ctor: &Ctor, types: &Types) -> Vec<ColumnType> {
-    let mut out = vec![ColumnType::Unknown; ctor.arity()];
+/// Getting this right is what lets a fully spelled-out nested `match` be
+/// recognised as exhaustive: a sub-column typed `Unknown` can never be
+/// complete, so returning `Unknown` here made the checker demand a wildcard
+/// that the program did not need.
+fn specialised_types(ctor: &Ctor, types: &Types, resolve: Resolver<'_>) -> Vec<ColumnType> {
+    let mut out: Vec<ColumnType> = match ctor {
+        Ctor::Variant { fields, .. } => fields
+            .iter()
+            .map(|f| match f {
+                FieldType::Named(name) => resolve(name),
+                FieldType::Unbounded => ColumnType::Unbounded,
+                FieldType::Opaque => ColumnType::Unknown,
+            })
+            .collect(),
+        _ => vec![ColumnType::Unknown; ctor.arity()],
+    };
     if types.len() > 1 {
         out.extend_from_slice(&types[1..]);
     }
@@ -314,7 +369,15 @@ mod tests {
     use super::*;
 
     fn variant(name: &str, arity: usize) -> Ctor {
-        Ctor::Variant { name: name.to_string(), arity }
+        Ctor::Variant { name: name.to_string(), fields: vec![FieldType::Opaque; arity] }
+    }
+
+    /// A variant whose payload is itself of type `ty`.
+    fn variant_of(name: &str, ty: &str) -> Ctor {
+        Ctor::Variant {
+            name: name.to_string(),
+            fields: vec![FieldType::Named(ty.to_string())],
+        }
     }
 
     fn pat(ctor: Ctor) -> Pattern {
@@ -329,13 +392,13 @@ mod tests {
     #[test]
     fn all_variants_covered_is_exhaustive() {
         let arms = vec![pat(variant("A", 0)), pat(variant("B", 1)), pat(variant("C", 0))];
-        assert!(missing_patterns(&arms, &three_variants()).is_empty());
+        assert!(missing_patterns(&arms, &three_variants(), &no_types).is_empty());
     }
 
     #[test]
     fn a_missing_variant_is_named() {
         let arms = vec![pat(variant("A", 0)), pat(variant("C", 0))];
-        let missing = missing_patterns(&arms, &three_variants());
+        let missing = missing_patterns(&arms, &three_variants(), &no_types);
         let names: Vec<String> = missing.iter().map(|p| p.to_string()).collect();
         assert_eq!(names, vec!["B(_)"], "the witness should name the uncovered variant");
     }
@@ -343,7 +406,7 @@ mod tests {
     #[test]
     fn several_missing_variants_are_all_named() {
         let arms = vec![pat(variant("A", 0))];
-        let missing = missing_patterns(&arms, &three_variants());
+        let missing = missing_patterns(&arms, &three_variants(), &no_types);
         let mut names: Vec<String> = missing.iter().map(|p| p.to_string()).collect();
         names.sort();
         assert_eq!(names, vec!["B(_)", "C"]);
@@ -352,7 +415,7 @@ mod tests {
     #[test]
     fn a_wildcard_covers_everything() {
         let arms = vec![Pattern::Wildcard];
-        assert!(missing_patterns(&arms, &three_variants()).is_empty());
+        assert!(missing_patterns(&arms, &three_variants(), &no_types).is_empty());
     }
 
     #[test]
@@ -360,12 +423,12 @@ mod tests {
         let bools = ColumnType::Finite(vec![Ctor::Bool(true), Ctor::Bool(false)]);
         let only_true = vec![pat(Ctor::Bool(true))];
         assert_eq!(
-            missing_patterns(&only_true, &bools).iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            missing_patterns(&only_true, &bools, &no_types).iter().map(|p| p.to_string()).collect::<Vec<_>>(),
             vec!["false"]
         );
 
         let both = vec![pat(Ctor::Bool(true)), pat(Ctor::Bool(false))];
-        assert!(missing_patterns(&both, &bools).is_empty());
+        assert!(missing_patterns(&both, &bools, &no_types).is_empty());
     }
 
     /// No finite set of integer literals covers `Int`, so a wildcard is always
@@ -373,28 +436,85 @@ mod tests {
     #[test]
     fn literals_never_exhaust_an_unbounded_type() {
         let arms = vec![pat(Ctor::Literal("1".into())), pat(Ctor::Literal("2".into()))];
-        assert!(!missing_patterns(&arms, &ColumnType::Unbounded).is_empty());
+        assert!(!missing_patterns(&arms, &ColumnType::Unbounded, &no_types).is_empty());
 
         let with_wildcard = vec![pat(Ctor::Literal("1".into())), Pattern::Wildcard];
-        assert!(missing_patterns(&with_wildcard, &ColumnType::Unbounded).is_empty());
+        assert!(missing_patterns(&with_wildcard, &ColumnType::Unbounded, &no_types).is_empty());
     }
 
     #[test]
     fn an_arm_after_a_wildcard_is_unreachable() {
         let arms = vec![Pattern::Wildcard, pat(variant("A", 0))];
-        assert_eq!(unreachable_arms(&arms, &three_variants()), vec![1]);
+        assert_eq!(unreachable_arms(&arms, &three_variants(), &no_types), vec![1]);
     }
 
     #[test]
     fn a_repeated_variant_is_unreachable() {
         let arms = vec![pat(variant("A", 0)), pat(variant("B", 1)), pat(variant("A", 0))];
-        assert_eq!(unreachable_arms(&arms, &three_variants()), vec![2]);
+        assert_eq!(unreachable_arms(&arms, &three_variants(), &no_types), vec![2]);
     }
 
     #[test]
     fn distinct_arms_are_all_reachable() {
         let arms = vec![pat(variant("A", 0)), pat(variant("B", 1)), pat(variant("C", 0))];
-        assert!(unreachable_arms(&arms, &three_variants()).is_empty());
+        assert!(unreachable_arms(&arms, &three_variants(), &no_types).is_empty());
+    }
+
+    /// The bug this file was rewired to fix: a nested `match` that names every
+    /// case must not demand a wildcard on top.
+    #[test]
+    fn a_fully_covered_nested_match_is_exhaustive() {
+        // Inner = | X | Y ;  Outer = | Wrap(Inner) | Empty
+        let inner = ColumnType::Finite(vec![variant("X", 0), variant("Y", 0)]);
+        let outer = ColumnType::Finite(vec![variant_of("Wrap", "Inner"), variant("Empty", 0)]);
+        let resolve = move |name: &str| {
+            if name == "Inner" { inner.clone() } else { ColumnType::Unknown }
+        };
+
+        let nested = |case: &str| Pattern::Constructor {
+            ctor: variant_of("Wrap", "Inner"),
+            fields: vec![pat(variant(case, 0))],
+        };
+        let arms = vec![nested("X"), nested("Y"), pat(variant("Empty", 0))];
+
+        let missing = missing_patterns(&arms, &outer, &resolve);
+        assert!(missing.is_empty(), "every case is named, yet reported missing: {missing:?}");
+    }
+
+    /// The fix must not swing the other way and call an incomplete nested match
+    /// exhaustive.
+    #[test]
+    fn an_incomplete_nested_match_is_still_reported() {
+        let inner = ColumnType::Finite(vec![variant("X", 0), variant("Y", 0)]);
+        let outer = ColumnType::Finite(vec![variant_of("Wrap", "Inner"), variant("Empty", 0)]);
+        let resolve = move |name: &str| {
+            if name == "Inner" { inner.clone() } else { ColumnType::Unknown }
+        };
+
+        let arms = vec![
+            Pattern::Constructor {
+                ctor: variant_of("Wrap", "Inner"),
+                fields: vec![pat(variant("X", 0))],
+            },
+            pat(variant("Empty", 0)),
+        ];
+        let missing = missing_patterns(&arms, &outer, &resolve);
+        assert!(!missing.is_empty(), "Wrap(Y) is uncovered but was not reported");
+    }
+
+    /// A type containing itself must not send the resolver into a loop.
+    #[test]
+    fn a_recursive_type_terminates() {
+        let list = || ColumnType::Finite(vec![variant("Nil", 0), variant_of("Cons", "List")]);
+        let resolve = move |name: &str| {
+            if name == "List" { list() } else { ColumnType::Unknown }
+        };
+
+        let arms = vec![pat(variant("Nil", 0)), pat(variant_of("Cons", "List"))];
+        assert!(missing_patterns(&arms, &list(), &resolve).is_empty());
+
+        let only_nil = vec![pat(variant("Nil", 0))];
+        assert!(!missing_patterns(&only_nil, &list(), &resolve).is_empty());
     }
 
     /// A nested pattern must not be treated as covering its whole constructor.
@@ -407,7 +527,7 @@ mod tests {
         let arms = vec![pat(variant("A", 0)), inner_a, pat(variant("C", 0))];
         // `B(A)` leaves the rest of `B`'s payload uncovered.
         assert!(
-            !missing_patterns(&arms, &three_variants()).is_empty(),
+            !missing_patterns(&arms, &three_variants(), &no_types).is_empty(),
             "B(A) should not exhaust B"
         );
     }

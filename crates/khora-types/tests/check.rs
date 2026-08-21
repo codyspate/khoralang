@@ -183,6 +183,55 @@ fn a_bool_match_needs_both_cases() {
     );
 }
 
+/// Regression: a `match` naming every nested case used to be reported
+/// inexhaustive, because payload sub-columns were typed `Unknown` and could
+/// never be complete. That rejected valid programs.
+#[test]
+fn a_fully_covered_nested_match_needs_no_wildcard() {
+    let src = "module m;
+               pub type Inner = | X | Y;
+               pub type Outer = | Wrap(i: Inner) | Empty;
+               fn f(o: Outer) -> Int {
+                 match o {
+                   Outer::Wrap(Inner::X) => 1,
+                   Outer::Wrap(Inner::Y) => 2,
+                   Outer::Empty => 0,
+                 }
+               }
+";
+    assert_clean(src);
+}
+
+#[test]
+fn an_incomplete_nested_match_is_still_reported() {
+    let src = "module m;
+               pub type Inner = | X | Y;
+               pub type Outer = | Wrap(i: Inner) | Empty;
+               fn f(o: Outer) -> Int {
+                 match o {
+                   Outer::Wrap(Inner::X) => 1,
+                   Outer::Empty => 0,
+                 }
+               }
+";
+    assert_reports(src, "not exhaustive");
+}
+
+/// A type containing itself must not send the checker into a loop.
+#[test]
+fn a_recursive_type_terminates() {
+    let src = "module m;
+               pub type List = | Nil | Cons(head: Int, tail: List);
+               fn f(l: List) -> Int {
+                 match l {
+                   List::Nil => 0,
+                   List::Cons(h, t) => h,
+                 }
+               }
+";
+    assert_clean(src);
+}
+
 #[test]
 fn match_arms_must_agree_on_a_type() {
     assert_reports(
