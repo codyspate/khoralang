@@ -52,11 +52,11 @@ pub fn analyze(account_id: String) -> Report
   let risk = ai.classify(history)!;
 
   match risk {
-    RiskLevel.Low => (),
+    RiskLevel::Low => (),
     _ => ledger.flag_account(account_id, risk)!,
   };
 
-  Report.new(account_id, risk)
+  Report::new(account_id, risk)
 }
 ```
 
@@ -80,7 +80,7 @@ appear wherever an expression can.
 ```
 pub fn validate(txn: Txn) -> () raises ValidationError {
   if txn.amount < 0 {
-    raise ValidationError.NegativeAmount(txn.amount);
+    raise ValidationError::NegativeAmount(txn.amount);
   }
 }
 ```
@@ -91,11 +91,11 @@ originate:
 ```
 let live_ledger = handler for Ledger {
   get_history: fn id =>
-    match Db.query(pool, id) {
-      Db.Rows(rows) => rows |> List.map(Txn.of_row),
-      Db.Refused(e) => raise DbError.QueryFailed(e),
+    match Db::query(pool, id) {
+      Db::Rows(rows) => rows |> List::map(Txn::of_row),
+      Db::Refused(e) => raise DbError::QueryFailed(e),
     },
-  flag_account: fn (id, risk) => Db.exec(pool, Sql.flag(id, risk))!,
+  flag_account: fn (id, risk) => Db::exec(pool, Sql::flag(id, risk))!,
 };
 ```
 
@@ -124,10 +124,10 @@ far from what it feeds.
 
 ```
 pub fn main() {
-  with { ledger: live_ledger, ai: live_classifier, scope: Scope.root } {
-    Router.new()
-    |> Router.post("/analyze/:id", handle)
-    |> Router.listen(8080)
+  with { ledger: live_ledger, ai: live_classifier, scope: Scope::root } {
+    Router::new()
+    |> Router::post("/analyze/:id", handle)
+    |> Router::listen(8080)
   }
 }
 ```
@@ -145,8 +145,8 @@ pub fn analyze_or_defer(id: String) -> Report
   raises DbError
 {
   analyze(id)! catch {
-    ModelError.RateLimited(ms) => Report.deferred(id, ms),
-    ModelError.ContextLengthExceeded(_) => Report.unavailable(id),
+    ModelError::RateLimited(ms) => Report::deferred(id, ms),
+    ModelError::ContextLengthExceeded(_) => Report::unavailable(id),
   }
 }
 ```
@@ -165,7 +165,7 @@ pub fn map<A, B, 'e, 'r>(xs: List<A>, f: A -> B with 'e raises 'r) -> List<B>
 ```
 
 This is the single largest ergonomic difference from the monadic design.
-`List.map(analyze)` simply works on an effectful function — there is no
+`List::map(analyze)` simply works on an effectful function — there is no
 `traverse`, no `Effect.all`, no sequencing step, and no Traversable instance to
 learn. It is also why higher-kinded types (decision A4) are justified by
 containers rather than by the effect system.
@@ -188,14 +188,14 @@ pub fn postgres_db() -> Handler<Db>
   raises ConfigError
 {
   let url = match config.get("DATABASE_URL") {
-    Option.Some(u) => u,
-    Option.None => raise ConfigError.Missing("DATABASE_URL"),
+    Option::Some(u) => u,
+    Option::None => raise ConfigError::Missing("DATABASE_URL"),
   };
-  let pool = scope.acquire(Pg.connect(url)!, Pg.close);
+  let pool = scope.acquire(Pg::connect(url)!, Pg::close);
 
   handler for Db {
-    query: fn (sql, args) => Pg.query(pool, sql, args)!,
-    exec:  fn (sql, args) => Pg.exec(pool, sql, args)!,
+    query: fn (sql, args) => Pg::query(pool, sql, args)!,
+    exec:  fn (sql, args) => Pg::exec(pool, sql, args)!,
   }
 }
 
@@ -204,7 +204,7 @@ pub fn sql_ledger() -> Handler<Ledger> with { db: Db } {
   handler for Ledger {
     get_history: fn id =>
       db.query("select * from txn where account = $1", [id])!
-      |> List.map(Txn.of_row),
+      |> List::map(Txn::of_row),
     flag_account: fn (id, risk) =>
       db.exec("update account set risk = $2 where id = $1", [id, risk])!,
   }
@@ -220,14 +220,14 @@ keeps composition flat instead of nesting one `with` per layer:
 pub fn main() {
   with {
     config: env_config(),
-    scope:  Scope.root,
+    scope:  Scope::root,
     db:     postgres_db()!,      // uses config and scope
     ledger: sql_ledger(),        // uses db
     ai:     openai_classifier()!, // uses config
   } {
-    Router.new()
-    |> Router.post("/analyze/:id", handle)
-    |> Router.listen(8080)
+    Router::new()
+    |> Router::post("/analyze/:id", handle)
+    |> Router::listen(8080)
   }
 }
 ```
@@ -245,7 +245,7 @@ A context is just a row, so it can be named and reused:
 ```
 pub context Production {
   config: env_config(),
-  scope:  Scope.root,
+  scope:  Scope::root,
   db:     postgres_db()!,
   ledger: sql_ledger(),
   ai:     openai_classifier()!,
@@ -253,7 +253,7 @@ pub context Production {
 
 pub fn main() {
   with Production {
-    Router.new() |> Router.post("/analyze/:id", handle) |> Router.listen(8080)
+    Router::new() |> Router::post("/analyze/:id", handle) |> Router::listen(8080)
   }
 }
 ```
@@ -267,10 +267,10 @@ needed for the case that matters most in tests:
 ```
 test "a rate-limited model defers the report" {
   let report = analyze("acc_1") with Production {
-    ai: stub_classifier(ModelError.RateLimited(2000)),
+    ai: stub_classifier(ModelError::RateLimited(2000)),
   };
 
-  assert(report == Report.deferred("acc_1", 2000));
+  assert(report == Report::deferred("acc_1", 2000));
 }
 ```
 

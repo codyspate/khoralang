@@ -293,9 +293,9 @@ impl Path {
     pub fn segments(&self) -> impl Iterator<Item = NameRef> {
         children(&self.0)
     }
-    /// Dotted rendering with trivia stripped, e.g. `std.effect`.
-    pub fn dotted(&self) -> String {
-        self.segments().filter_map(|s| s.ident()).collect::<Vec<_>>().join(".")
+    /// The path as written, with trivia stripped, e.g. `std::core`.
+    pub fn text_path(&self) -> String {
+        self.segments().filter_map(|s| s.ident()).collect::<Vec<_>>().join("::")
     }
 }
 

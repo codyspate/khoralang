@@ -37,6 +37,8 @@ enum Tok {
     Comma,
     #[token(".")]
     Dot,
+    #[token("::")]
+    ColonColon,
     #[token(":")]
     Colon,
     #[token("|>")]
@@ -166,6 +168,7 @@ fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
         Tok::Semicolon => S::SEMICOLON,
         Tok::Comma => S::COMMA,
         Tok::Dot => S::DOT,
+        Tok::ColonColon => S::COLON_COLON,
         Tok::Colon => S::COLON,
         Tok::PipeGt => S::PIPE_GT,
         Tok::PipePipe => S::PIPE_PIPE,

@@ -93,6 +93,40 @@ different language.
    Node regardless of merit. First-class Rust interop is how we refuse that
    fight — crates.io is native, LLVM-based, and the closest ecosystem to reach.
 
+## The tie-breaker
+
+The non-negotiables say what Khora must do. This says how to settle everything
+else.
+
+**Where a design decision could reasonably go either way, choose the option more
+familiar to a developer who uses Go, Rust or TypeScript.**
+
+Those three are the competitive set named at the top of this document, and most
+of that audience are not functional programmers. When two spellings, two
+resolution rules or two defaults are genuinely close on the merits, the one they
+already know wins. This is not deference to fashion. Unfamiliarity is a cost paid
+at every use site by every reader, forever; "I prefer the other one" costs
+nothing and buys nothing. The rule exists so that decisions of this kind are
+settled by argument rather than by taste.
+
+It is a **tie-breaker, not an override.** It applies only where the options are
+close. Where Khora is deliberately doing something none of the three can do —
+effect rows, higher-kinded types, handlers — the non-negotiables decide and this
+rule is silent. Those features are unfamiliar by construction, and that is the
+whole reason for building the language.
+
+It has already settled several calls:
+
+- `::` for compile-time paths and `.` for runtime projection, rather than the
+  specification's universal dot (`docs/errata.md`, entry 13).
+- No uniform function call syntax: `x.f()` finds a field of `x` or an item
+  declared against `x`'s type, and nothing else
+  (`docs/design/associated-items.md`).
+- `if`, `while`, assignment and early `return`, rather than expressing every
+  loop as a fold (`docs/design/imperative.md`).
+- `!` on calls that can abort, because `?` and `try` have taught this audience to
+  expect a mark where control leaves (`docs/design/effects.md`).
+
 ## Non-goals
 
 - **Not a systems-programming replacement for Rust.** Reference counting has a

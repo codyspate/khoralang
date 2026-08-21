@@ -72,17 +72,21 @@ annoying than helpful.
 ## Limits
 
 This is a TextMate grammar: it pattern-matches text and knows nothing about
-scopes or types. Under Khora's "universal dot" rule, `Effect.map`,
-`report.risk` and `RiskLevel.Low` are syntactically identical, so a regex
-cannot tell a module path from a field access from a constructor. The grammar
-approximates by capitalisation — capitalised identifiers are coloured as types.
+scopes or types.
 
-Precise colouring needs semantic tokens from the language server (roadmap phase
-8.4), which will layer over this grammar the same way rust-analyzer layers over
-Rust's. That is the intended end state; this is the base layer.
+It used to be much worse. Under the old "universal dot" rule, `Effect.map`,
+`report.risk` and `RiskLevel.Low` were syntactically identical, and no regex
+could tell a module path from a field access from a constructor — the grammar
+could only approximate by capitalisation. Splitting `::` from `.` (errata 13)
+removed that limit: a path is now visibly a path, so modules, types,
+constructors and associated items colour correctly, and a name after `.` is
+never mistaken for a type.
 
-The `:label.operation` rule is provisional and disappears with decision A8
-(direct-style algebraic effects). See `docs/roadmap.md` D7.
+What a regex still cannot do is anything needing resolution — telling a local
+binding from an imported name, or a field from a method. That wants semantic
+tokens from the language server (roadmap phase 8.4), which will layer over this
+grammar the same way rust-analyzer layers over Rust's. This is the base layer,
+and it now carries more of the load than planned.
 
 ## Keeping it in sync
 

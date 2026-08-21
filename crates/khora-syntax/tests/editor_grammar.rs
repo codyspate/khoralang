@@ -57,6 +57,103 @@ fn alternatives(pattern: &str) -> Vec<String> {
     out
 }
 
+/// Every rule in the grammar that carries a regex, as that regex paired with
+/// every scope name the rule assigns — its own `name` plus the `name` of each
+/// of its captures.
+///
+/// The walk covers the whole document rather than one repository entry: a rule
+/// can sit in the root `patterns`, in a `repository` entry, or nested inside a
+/// capture, and a test that looked in only one of those places would go quiet
+/// the moment a rule moved between them.
+fn rules(value: &serde_json::Value) -> Vec<(String, Vec<String>)> {
+    fn walk(value: &serde_json::Value, out: &mut Vec<(String, Vec<String>)>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let regex = map.get("match").or_else(|| map.get("begin")).and_then(|v| v.as_str());
+                if let Some(regex) = regex {
+                    let mut scopes: Vec<String> =
+                        map.get("name").and_then(|n| n.as_str()).map(str::to_string).into_iter().collect();
+                    for key in ["captures", "beginCaptures", "endCaptures"] {
+                        let Some(captures) = map.get(key).and_then(|c| c.as_object()) else {
+                            continue;
+                        };
+                        scopes.extend(
+                            captures.values().filter_map(|c| c["name"].as_str()).map(str::to_string),
+                        );
+                    }
+                    out.push((regex.to_string(), scopes));
+                }
+                for child in map.values() {
+                    walk(child, out);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, out)),
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(value, &mut out);
+    out
+}
+
+/// True if `pattern` contains a character class admitting both letters and a
+/// literal `.` — the shape of an identifier regex written for the universal
+/// dot, such as `[A-Za-z0-9_.]`.
+///
+/// Escaped pairs are dropped rather than inspected, so `[+\-*/%]` is not read
+/// as containing a range and `[,:.]`, which has a dot but no letters, is left
+/// alone: that dot is the `forall <A> . Type` separator, not a path.
+fn has_dotted_identifier_class(pattern: &str) -> bool {
+    let mut chars = pattern.chars();
+    let mut class: Option<String> = None;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '[' if class.is_none() => class = Some(String::new()),
+            ']' => {
+                if let Some(body) = class.take() {
+                    if body.contains('.') && (body.contains("a-z") || body.contains("A-Z")) {
+                        return true;
+                    }
+                }
+            }
+            _ => {
+                if let Some(body) = class.as_mut() {
+                    body.push(c);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The scopes assigned by every pattern of one repository rule.
+fn scopes_of(rule: &str) -> Vec<String> {
+    let g = grammar();
+    let patterns = g["repository"][rule]["patterns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("repository.{rule}.patterns missing"))
+        .clone();
+    rules(&serde_json::Value::Array(patterns)).into_iter().flat_map(|(_, scopes)| scopes).collect()
+}
+
+/// The order in which the root includes its repository rules. TextMate takes
+/// the leftmost match and breaks a tie by this order, so it is behaviour.
+fn root_includes() -> Vec<String> {
+    let g = grammar();
+    g["patterns"]
+        .as_array()
+        .expect("grammar has no root patterns")
+        .iter()
+        .filter_map(|p| p["include"].as_str())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Compares the words a repository rule matches against the list the lexer owns.
 fn assert_rule_lists(rule: &str, expected: &[&str]) {
     let g = grammar();
@@ -140,6 +237,136 @@ fn every_extension_json_file_is_valid() {
             .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(&text);
         assert!(parsed.is_ok(), "{rel} is not valid JSON: {}", parsed.unwrap_err());
+    }
+}
+
+/// `::` is a token the lexer has (`SyntaxKind::COLON_COLON`) and the grammar
+/// must colour. Without a rule it does not go uncoloured — it falls through to
+/// the `:` in the punctuation class and gets read twice as the separator of a
+/// type annotation, which is precisely the wrong reading.
+///
+/// The scope must also be the separator's alone. Sharing one with the
+/// arithmetic or comparison operators would make a namespace qualification look
+/// like an expression, and telling those two apart is what the `::`/`.` split
+/// was for.
+#[test]
+fn the_path_separator_has_a_scope_of_its_own() {
+    let g = grammar();
+    let all = rules(&g);
+
+    let separator_scopes: Vec<String> = all
+        .iter()
+        .filter(|(regex, _)| regex.contains("::"))
+        .flat_map(|(_, scopes)| scopes.iter().cloned())
+        .filter(|scope| scope.starts_with("keyword.operator."))
+        .collect();
+
+    assert!(
+        !separator_scopes.is_empty(),
+        "no rule in the grammar scopes `::` as an operator. The lexer produces \
+         COLON_COLON for it; editors/vscode/syntaxes/khora.tmLanguage.json must \
+         give it a scope."
+    );
+
+    for scope in &separator_scopes {
+        let also_used_by: Vec<&String> = all
+            .iter()
+            .filter(|(regex, scopes)| !regex.contains("::") && scopes.contains(scope))
+            .map(|(regex, _)| regex)
+            .collect();
+        assert!(
+            also_used_by.is_empty(),
+            "`{scope}` is meant to be the path separator's own scope, but these \
+             rules assign it too: {also_used_by:?}"
+        );
+    }
+}
+
+/// Paths are `::`-separated. They used to be dotted, and the grammar spelled
+/// that as character classes like `[A-Za-z0-9_.]` — every one of which is now
+/// wrong in a way no editor will report: the regex still matches, it just stops
+/// at the first `:` and colours half a path.
+#[test]
+fn no_rule_spells_a_path_with_dots() {
+    let g = grammar();
+
+    for (regex, _) in rules(&g) {
+        assert!(
+            !has_dotted_identifier_class(&regex),
+            "this rule matches an identifier that may contain `.`, which is how \
+             a path was written before `::` split compile-time paths from \
+             runtime projection:\n  {regex}"
+        );
+
+        // The declaration rule, which captures the path after the keyword —
+        // not the bare-word rule in #keywords, whose group lists every hard
+        // declaration keyword and stops there.
+        if regex.contains("(module|import)") {
+            assert!(
+                regex.contains("::"),
+                "the module/import rule does not mention `::`, so it cannot be \
+                 matching a whole path:\n  {regex}"
+            );
+        }
+    }
+}
+
+/// `#paths` and `#projections` are the rules the split made possible, and both
+/// are dead unless they run *before* `#types` — which colours any capitalised
+/// identifier and would otherwise claim a constructor after `::` and a field
+/// after `.` alike. TextMate breaks a tie between two rules matching at the
+/// same position by the order they are listed, so this ordering is behaviour
+/// and not presentation.
+#[test]
+fn the_path_rules_run_before_the_blunt_type_rule() {
+    let includes = root_includes();
+    let position = |name: &str| {
+        includes
+            .iter()
+            .position(|include| include == name)
+            .unwrap_or_else(|| panic!("the root patterns never include {name}: {includes:?}"))
+    };
+
+    let types = position("#types");
+    for rule in ["#paths", "#projections"] {
+        assert!(
+            position(rule) < types,
+            "{rule} is included after #types, so #types claims the names it was \
+             written to classify"
+        );
+    }
+}
+
+/// A name after a `.` is a record field or a method — runtime projection — and
+/// never a type. Under the universal dot the grammar could not know that, so
+/// `RiskLevel.Low` and `report.risk` were coloured the same; this test pins the
+/// half of the distinction a regex can now make.
+#[test]
+fn a_name_after_a_dot_is_never_a_type() {
+    let offenders: Vec<String> =
+        scopes_of("projections").into_iter().filter(|s| s.contains("entity.name.type")).collect();
+
+    assert!(
+        offenders.is_empty(),
+        "#projections colours the tail of a `.` as a type: {offenders:?}. After \
+         the `::`/`.` split a `.` introduces a field or a method, and a type \
+         can only follow `::`."
+    );
+}
+
+/// The other half: a `::` path distinguishes the module segments from the type
+/// they qualify. A grammar that scoped every segment identically would be no
+/// better than the universal dot it replaced.
+#[test]
+fn a_path_distinguishes_modules_from_types() {
+    let scopes = scopes_of("paths");
+    for expected in ["entity.name.namespace.khora", "entity.name.type.khora"] {
+        assert!(
+            scopes.iter().any(|s| s == expected),
+            "#paths never assigns `{expected}`, so a lowercase module qualifier \
+             and a capitalised type qualifier are being coloured the same: \
+             {scopes:?}"
+        );
     }
 }
 

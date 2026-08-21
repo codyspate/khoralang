@@ -17,7 +17,7 @@ fn collects_every_kind_of_declaration() {
     let f = file(
         &db,
         "a.kh",
-        "module app.core;\n\
+        "module app::core;\n\
          pub type Risk = | Low | High(reason: String);\n\
          pub effect Ledger { record: Int -> () }\n\
          pub fn analyze() -> Int { 1 }\n\
@@ -82,8 +82,8 @@ fn a_duplicate_definition_names_both_places() {
 #[test]
 fn the_module_graph_maps_paths_to_files() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std.core;\npub type Option = | Some | None;\n");
-    let app = file(&db, "app.kh", "module app.main;\n");
+    let core = file(&db, "core.kh", "module std::core;\npub type Option = | Some | None;\n");
+    let app = file(&db, "app.kh", "module app::main;\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
     let graph = module_graph(&db, root);
@@ -95,8 +95,8 @@ fn the_module_graph_maps_paths_to_files() {
 #[test]
 fn declaring_one_module_in_two_files_is_an_error() {
     let db = KhoraDatabase::new();
-    let a = file(&db, "a.kh", "module app.main;\n");
-    let b = file(&db, "b.kh", "module app.main;\n");
+    let a = file(&db, "a.kh", "module app::main;\n");
+    let b = file(&db, "b.kh", "module app::main;\n");
     let root = SourceRoot::new(&db, vec![a, b]);
 
     let graph = module_graph(&db, root);
@@ -110,8 +110,8 @@ fn declaring_one_module_in_two_files_is_an_error() {
 #[test]
 fn resolves_a_qualified_path_into_another_module() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std.core;\npub fn identity() -> Int { 1 }\n");
-    let app = file(&db, "app.kh", "module app.main;\n");
+    let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
+    let app = file(&db, "app.kh", "module app::main;\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
     let res = resolve_path(&db, root, app, &path(&["std", "core", "identity"])).unwrap();
@@ -128,8 +128,8 @@ fn resolves_a_qualified_path_into_another_module() {
 #[test]
 fn a_private_item_is_not_reachable_from_another_module() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std.core;\nfn secret() -> Int { 1 }\n");
-    let app = file(&db, "app.kh", "module app.main;\n");
+    let core = file(&db, "core.kh", "module std::core;\nfn secret() -> Int { 1 }\n");
+    let app = file(&db, "app.kh", "module app::main;\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
     let err = resolve_path(&db, root, app, &path(&["std", "core", "secret"])).unwrap_err();
@@ -168,8 +168,8 @@ fn an_associated_item_reports_that_it_is_unsupported() {
 #[test]
 fn a_named_import_brings_a_public_item_into_scope() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std.core;\npub fn identity() -> Int { 1 }\n");
-    let app = file(&db, "app.kh", "module app.main;\nimport std.core.{identity};\n");
+    let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
+    let app = file(&db, "app.kh", "module app::main;\nimport std::core::{identity};\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
     let res = resolve_path(&db, root, app, &path(&["identity"])).unwrap();
@@ -179,8 +179,8 @@ fn a_named_import_brings_a_public_item_into_scope() {
 #[test]
 fn an_aliased_import_resolves_under_its_local_name() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std.core;\npub fn identity() -> Int { 1 }\n");
-    let app = file(&db, "app.kh", "module app.main;\nimport std.core.{identity as id};\n");
+    let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
+    let app = file(&db, "app.kh", "module app::main;\nimport std::core::{identity as id};\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
     assert!(resolve_path(&db, root, app, &path(&["id"])).is_ok(), "alias not honoured");
@@ -193,11 +193,26 @@ fn an_aliased_import_resolves_under_its_local_name() {
 #[test]
 fn a_glob_import_brings_public_items_into_scope() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std.core;\npub fn identity() -> Int { 1 }\n");
-    let app = file(&db, "app.kh", "module app.main;\nimport std.core.*;\n");
+    let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
+    let app = file(&db, "app.kh", "module app::main;\nimport std::core::*;\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
     assert!(resolve_path(&db, root, app, &path(&["identity"])).is_ok());
+}
+
+/// `docs/design/associated-items.md`: locals do not participate in a `::` path,
+/// and the diagnostic should say that rather than report a missing item.
+#[test]
+fn a_local_in_a_path_is_a_category_error() {
+    let db = KhoraDatabase::new();
+    let f = file(&db, "a.kh", "module m;
+let xs = 1;
+");
+    let root = SourceRoot::new(&db, vec![f]);
+
+    let err = resolve_path(&db, root, f, &path(&["xs", "map"])).unwrap_err();
+    assert!(err.message.contains("not a module or a type"), "{}", err.message);
+    assert!(err.message.contains("use `.`"), "should point at the right operator: {}", err.message);
 }
 
 #[test]

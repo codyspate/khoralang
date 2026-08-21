@@ -70,10 +70,10 @@ fn the_reference_manifest_parses_with_no_warnings() {
 
     assert_eq!(
         manifest.dependencies.keys().collect::<Vec<_>>(),
-        ["std.ai", "std.effect", "std.net.http"],
+        ["std.ai", "std.core", "std.net.http"],
         "a quoted dotted name is one dependency, not a tree of tables"
     );
-    assert_eq!(manifest.dependencies["std.effect"].version, "1.0.0");
+    assert_eq!(manifest.dependencies["std.core"].version, "1.0.0");
 
     let build = manifest.build.expect("the reference manifest configures `[build]`");
     assert_eq!(build.target.as_deref(), Some("x86_64-unknown-linux-musl"));

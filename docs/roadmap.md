@@ -10,7 +10,8 @@ Scope comes from `docs/project.md`. Where that document is wrong or silent,
 ## Decisions taken
 
 `docs/vision.md` states the goal these serve. When a call is ambiguous, that
-document breaks the tie.
+document breaks the tie — and where two options are otherwise even, its
+familiarity rule picks the one a Go, Rust or TypeScript developer already knows.
 
 | # | Decision | Rationale |
 | --- | --- | --- |
@@ -57,15 +58,26 @@ before the phase that depends on it starts.
 | # | Question | Blocks |
 | --- | --- | --- |
 | D1 | **How do handlers execute natively?** One-shot versus multi-shot continuations; how handler frames interact with Perceus reference counting and with fibers and interruption. Koka is direct prior art for the whole combination, which narrows this considerably from where it started. Still the largest unknown. | 4.3 |
-| D2 | **What does `Type.member` mean?** Under "universal dot", `Effect.map`, `report.risk` and `RiskLevel.Low` are spelled identically. The parser deliberately refuses to guess. See errata #10. | 2.1 |
-| D3 | **`Schema.Spec` projects an associated type off a type *variable*.** With A4 this is tractable — associated types on typeclasses — but the coherence rules still need deciding. | 4.2 |
+| D3 | **`Schema::Spec` projects an associated type off a type *variable*.** With A4 this is tractable — associated types on typeclasses — but the coherence rules still need deciding. | 4.2 |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
 | D6 | **Which typeclasses ship in `std`, and what are the coherence rules?** Orphan instances, overlapping instances, and whether instance resolution is nominal or structural. A4 settled *whether*; this settles *how much*. | 3 |
 | D8 | **The Rust interop boundary.** How Rust's ownership and traits map onto Khora's reference counting and rows; whether we bind at the C ABI or generate richer shims. | 7 |
-| D9 | **Imperative constructs.** The language has no `if`, no assignment, no loops and no early `return` — everything is recursion and `match`. Disqualifying for the Rust/Go/TypeScript audience in `docs/vision.md`. Planned in `docs/design/imperative.md`; the detailed grammar is still open. | 1.6 |
-
 **Closed:**
 
+- **D9** (imperative constructs) is implemented: `if`/`else`, assignment,
+  `while`, `loop`/`break`/`continue` and early `return` all landed in phase 1.6.
+  Generic `for` waits on the `Iterator` typeclass in phase 3. See
+  `docs/design/imperative.md`.
+
+- **D2** (what `Type.member` means) is decided in
+  `docs/design/associated-items.md`. The premise is gone: "universal dot" is
+  replaced by `::` for compile-time paths (modules, types, associated items,
+  enum constructors) and `.` for runtime projection (fields, method calls), so
+  `Effect::map`, `report.risk` and `RiskLevel::Low` are no longer spelled
+  alike — errata #13. `::` resolves as module-or-type and never sees a local;
+  `.` resolves as field, then item declared against the type. There is no UFCS
+  fallback, and a field colliding with an associated item is an error at the
+  declaration.
 - **D5** (`ask` arity, errata #3) is dissolved by A8 — `ask(:label.op)` does not
   exist in direct style; you call `ledger.get_history(x)`.
 - **D7** (effect and handler syntax) is decided in `docs/design/effects.md`:
@@ -150,11 +162,13 @@ Independent of Phase 0; can proceed in parallel.
   rather than reflowing. That is what makes it idempotent and token-preserving,
   both asserted by property tests. It refuses to touch a file that does not
   parse.
-- **1.4 Decide D2 — proposed** in `docs/design/associated-items.md`, pending
-  sign-off. Resolve the leftmost name first; what it is decides what the dot
-  means. Phase 2 needs only two of the four cases (module paths and variant
-  constructors), so 2.1 is unblocked without settling associated items, which
-  are better decided alongside typeclasses in Phase 3.
+- **1.4 Decide D2 — done.** `docs/design/associated-items.md` is decided: `::`
+  for compile-time paths, `.` for runtime projection, no UFCS, and a field
+  colliding with an associated item is an error at the declaration. Phase 2
+  needs only the two `::` cases (module paths and variant constructors), so 2.1
+  is unblocked without settling how associated items are *declared* — companion
+  namespace or `impl` block — which is better decided alongside typeclasses in
+  Phase 3.
 - **1.5 Implement D7.** `docs/design/effects.md` is written and decided. Extend
   the grammar with `effect`, `with`, `raises`, `raise`, `!`, `handler for`,
   `catch` and `context`, then rewrite `std/` and `examples/risk_analyzer` in

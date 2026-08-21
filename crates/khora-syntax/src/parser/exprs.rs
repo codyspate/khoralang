@@ -164,8 +164,10 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         }
         IDENT if at_handler_expr(p) => handler_expr(p),
         IDENT => {
+            // A `::` chain is part of the path itself; `.` is handled by the
+            // postfix loop as field access, so the two never blur.
             let m = p.start();
-            name_ref(p);
+            path(p);
             m.complete(p, PATH_EXPR)
         }
         L_PAREN => paren_or_tuple_expr(p),

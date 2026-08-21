@@ -1,8 +1,8 @@
-module app.main;
+module app::main;
 
-import std.core.{Option, Scope};
-import std.net.http.{Request, Response, Router};
-import std.ai.{LLMService, ModelError, Prompt};
+import std::core::{Option, Scope};
+import std::net::http::{Request, Response, Router};
+import std::ai::{LLMService, ModelError, Prompt};
 
 pub type RiskLevel =
   | Low
@@ -34,16 +34,16 @@ pub fn analyze_transaction_risk(account_id: String) -> AnalysisReport
 {
   let history = ledger.get_history(account_id)!;
 
-  let prompt = Prompt.new()
-    |> Prompt.system("You are a financial fraud and risk engine. Output structured assessments.")
-    |> Prompt.user("Analyze history: " + history);
+  let prompt = Prompt::new()
+    |> Prompt::system("You are a financial fraud and risk engine. Output structured assessments.")
+    |> Prompt::user("Analyze history: " + history);
 
-  let report = ai.extract(prompt, AnalysisReport.spec)!;
+  let report = ai.extract(prompt, AnalysisReport::spec)!;
 
   match report.risk {
-    RiskLevel.Low => (),
-    RiskLevel.Moderate(reason) => ledger.flag_account(account_id, report.risk)!,
-    RiskLevel.Critical(action) => {
+    RiskLevel::Low => (),
+    RiskLevel::Moderate(reason) => ledger.flag_account(account_id, report.risk)!,
+    RiskLevel::Critical(action) => {
       ledger.flag_account(account_id, report.risk)!;
       print("ALERT: Critical threat detected on " + account_id);
     }
@@ -61,13 +61,13 @@ pub fn handle(req: Request) -> Response
   let id = req.params.get("account_id");
 
   let report = analyze_transaction_risk(id)! catch {
-    ModelError.ContextLengthExceeded(_) => AnalysisReport.unavailable(id),
-    ModelError.RateLimited(_) => AnalysisReport.unavailable(id),
-    ModelError.InferenceEngineFailure(_) => AnalysisReport.unavailable(id),
-    ModelError.SchemaExtractionError(_) => AnalysisReport.unavailable(id),
+    ModelError::ContextLengthExceeded(_) => AnalysisReport::unavailable(id),
+    ModelError::RateLimited(_) => AnalysisReport::unavailable(id),
+    ModelError::InferenceEngineFailure(_) => AnalysisReport::unavailable(id),
+    ModelError::SchemaExtractionError(_) => AnalysisReport::unavailable(id),
   };
 
-  Response.json(200, report)
+  Response::json(200, report)
 }
 
 let mock_ledger = handler for Ledger {
@@ -77,10 +77,10 @@ let mock_ledger = handler for Ledger {
 
 let mock_ai = handler for LLMService {
   complete: fn _ => "",
-  embed: fn _ => Tensor.zeros((1536)),
+  embed: fn _ => Tensor::zeros((1536)),
   extract: fn (_, _) => {
     account_id: "acc_9921",
-    risk: RiskLevel.Critical("Immediate fund freeze"),
+    risk: RiskLevel::Critical("Immediate fund freeze"),
     confidence: 0.98,
   },
 };
@@ -88,29 +88,29 @@ let mock_ai = handler for LLMService {
 /// Bindings are sequential, so a handler may use the ones above it. This is
 /// what keeps composition flat instead of nesting one `with` per service.
 pub context Mock {
-  scope: Scope.root,
+  scope: Scope::root,
   ledger: mock_ledger,
   ai: mock_ai,
 }
 
 pub fn main() {
   with Mock {
-    Router.new()
-      |> Router.post("/analyze/:account_id", handle)
-      |> Router.listen(8080)
+    Router::new()
+      |> Router::post("/analyze/:account_id", handle)
+      |> Router::listen(8080)
   }
 }
 
 test "a critical assessment flags the account" {
   let report = analyze_transaction_risk("acc_9921") with Mock;
 
-  assert(report.risk == RiskLevel.Critical("Immediate fund freeze"));
+  assert(report.risk == RiskLevel::Critical("Immediate fund freeze"));
   assert(report.confidence > 0.9);
 }
 
 test "a rate-limited model yields an unavailable report" {
-  let response = handle(Request.get("/analyze/acc_1")) with Mock {
-    ai: stub_classifier(ModelError.RateLimited(2000)),
+  let response = handle(Request::get("/analyze/acc_1")) with Mock {
+    ai: stub_classifier(ModelError::RateLimited(2000)),
   };
 
   assert(response.status == 200);

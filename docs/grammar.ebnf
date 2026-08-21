@@ -1,22 +1,30 @@
 (* Khora concrete grammar, as implemented by crates/khora-syntax.
-   This is the repaired form of the EBNF in the specification; every
-   divergence is justified in docs/errata.md. *)
+   Where this differs from the EBNF in docs/project.md §1.2, the divergence is
+   justified in docs/errata.md. Cross-checked against parser/*.rs. *)
 
 Program        ::= ( Declaration )* ;
 
-Declaration    ::= ModuleDecl | ImportDecl | TypeDecl | FunctionDecl | LetDecl ;
+Declaration    ::= ModuleDecl | ImportDecl | TypeDecl | EffectDecl
+                 | ContextDecl | FunctionDecl | LetDecl | TestDecl ;
 
 ModuleDecl     ::= "module" Path ";" ;
-ImportDecl     ::= "import" Path "." ( "{" ImportList "}" | "*" ) ";" ;
+ImportDecl     ::= "import" Path "::" ( "{" ImportList "}" | "*" ) ";" ;
 ImportList     ::= ImportItem ( "," ImportItem )* ( "," )? ;
 ImportItem     ::= Ident ( "as" Ident )? ;
 
-Path           ::= Ident ( "." Ident )* ;
+(* `::` is compile-time namespacing: modules, types, associated items and
+   constructors. `.` is runtime projection and never appears here. Errata 13. *)
+Path           ::= Ident ( "::" Ident )* ;
 
 (* --- types ------------------------------------------------------------- *)
 
 TypeDecl       ::= ( "pub" )? "type" Ident ( TypeParams )? ( "=" TypeDef )? ";" ;
 TypeDef        ::= VariantType | Type ;
+
+(* An effect is a named set of operations, shaped like a record of functions —
+   which is what a capability already was. docs/design/effects.md. *)
+EffectDecl     ::= ( "pub" )? "effect" Ident ( TypeParams )?
+                   "{" ( Field ( "," Field )* ( "," )? )? "}" ;
 
 TypeParams     ::= "<" TypeParam ( "," TypeParam )* ( "," )? ">" ;
 TypeParam      ::= "const" Ident ":" Type
@@ -25,18 +33,21 @@ TypeParam      ::= "const" Ident ":" Type
 
 TypeArgs       ::= "<" Type ( "," Type )* ( "," )? ">" ;
 
-Type           ::= UnionType ( "->" Type )? ;          (* "->" is right-assoc *)
+(* Effect clauses bind to an arrow and only to an arrow. In
+   `fn f() -> Report with { .. }` the return type is just `Report` and the
+   clause belongs to the declaration; in `f: A -> B with 'e` it belongs to the
+   function type. That is what lets both spellings coexist. *)
+Type           ::= UnionType ( "->" Type ( EffectClause )* )? ;
 UnionType      ::= PrimaryType ( "+" PrimaryType )* ;  (* open error union    *)
-PrimaryType    ::= PathType
-                 | RecordType
-                 | TupleType
-                 | ForallType
-                 | VariantType
-                 | RowVar
-                 | IntLiteral ;                        (* const generic arg   *)
+EffectClause   ::= WithClause | RaisesClause ;
+WithClause     ::= "with" Type ;                       (* a capability row    *)
+RaisesClause   ::= "raises" Type ;                     (* an error row        *)
+
+PrimaryType    ::= PathType | RecordType | TupleType | ForallType
+                 | VariantType | RowVar | IntLiteral ;
 
 PathType       ::= Path ( TypeArgs )? ;
-ForallType     ::= "forall" TypeParams "." Type ;
+ForallType     ::= "forall" TypeParams "." Type ;      (* `.` is a separator  *)
 TupleType      ::= "(" ")"                             (* unit                *)
                  | "(" Type ")"                        (* grouping            *)
                  | "(" Type ( "," Type )+ ( "," )? ")" ;
@@ -50,54 +61,92 @@ VariantType    ::= ( "|" Ident ( "(" VariantPayload ")" )? )+ ;
 VariantPayload ::= Field ( "," Field )* ( "," )?       (* named payload       *)
                  | Type ( "," Type )* ( "," )? ;       (* positional payload  *)
 
-(* --- functions and bindings -------------------------------------------- *)
+(* --- functions and bindings --------------------------------------------
+   No `=` before a body, and no `;` after it. `{` introduces a definition and
+   `;` declares a signature only, which is how std describes intrinsics. *)
 
 FunctionDecl   ::= ( "pub" )? "fn" Ident ( TypeParams )? ParamList
-                   ( "->" Type )? ( "=" Block )? ";" ;
+                   ( "->" Type )? ( EffectClause )* ( Block | ";" ) ;
 ParamList      ::= "(" ( Param ( "," Param )* ( "," )? )? ")" ;
 Param          ::= ( Ident | "_" ) ( ":" Type )? ;
 
 LetDecl        ::= ( "pub" )? "let" ( "mut" )? Pattern ( ":" Type )? "=" Expr ";" ;
 
+(* A named bundle of handlers. Bindings are sequential: each may use the ones
+   above it, which keeps service composition flat. *)
+ContextDecl    ::= ( "pub" )? "context" Ident
+                   "{" ( RecordExprField ( "," RecordExprField )* ( "," )? )? "}" ;
+
+TestDecl       ::= ( "test" | "bench" ) StringLiteral Block ;
+
+(* A block-like expression standing in statement position needs no `;`, as in
+   Rust. Without that rule `if c { .. }` mid-block parses as the block's tail
+   expression and every statement after it is orphaned. *)
 Block          ::= "{" ( Statement )* ( Expr )? "}" ;
-Statement      ::= LetDecl | Expr ";" ;
+Statement      ::= LetDecl | Expr ";" | BlockLikeExpr ;
+BlockLikeExpr  ::= IfExpr | MatchExpr | WhileExpr | LoopExpr | WithBlock | Block ;
 
 (* --- expressions -------------------------------------------------------
    Binary operators, loosest to tightest:
+     =           right    (assignment; an expression of type unit)
      |>          left
      ||          left
      &&          left
      == != < > <= >=
      + -         left
      * / %       left
-   Prefix "-" and "!" bind tighter than any binary operator; call and field
-   access bind tightest of all. *)
+   Prefix "-" and "!" bind tighter than any binary operator. Postfix — call,
+   `.` field access, `!`, `catch`, `with` — binds tightest of all. *)
 
 Expr           ::= BinaryExpr ;
 BinaryExpr     ::= UnaryExpr ( BinOp UnaryExpr )* ;
 UnaryExpr      ::= ( "-" | "!" )? PostfixExpr ;
-PostfixExpr    ::= PrimaryExpr ( ArgList | "." Ident )* ;
+
+PostfixExpr    ::= PrimaryExpr ( ArgList
+                              | "." Ident                  (* projection      *)
+                              | "!"                        (* may abort here  *)
+                              | "catch" "{" ( MatchArm )+ "}"
+                              | "with" ContextRow )* ;
 ArgList        ::= "(" ( Expr ( "," Expr )* ( "," )? )? ")" ;
 
 PrimaryExpr    ::= Literal
-                 | Ident
-                 | "_"                                 (* pipe placeholder    *)
-                 | CapabilityExpr
-                 | RecordExpr
-                 | TupleExpr
-                 | Block
-                 | LambdaExpr
-                 | MatchExpr ;
+                 | Path                                 (* `::` path or name  *)
+                 | "_"                                   (* pipe placeholder   *)
+                 | RecordExpr | TupleExpr | ListExpr
+                 | Block | LambdaExpr
+                 | IfExpr | MatchExpr | WhileExpr | LoopExpr
+                 | RaiseExpr | HandlerExpr | WithBlock
+                 | "break" ( Expr )? | "continue" | "return" ( Expr )? ;
 
-CapabilityExpr ::= ":" Path ;
 RecordExpr     ::= "{" ( RecordExprField ( "," RecordExprField )* ( "," )? )? "}" ;
 RecordExprField::= Ident ":" Expr ;
 TupleExpr      ::= "(" ")" | "(" Expr ")" | "(" Expr ( "," Expr )+ ( "," )? ")" ;
+ListExpr       ::= "[" ( Expr ( "," Expr )* ( "," )? )? "]" ;
 
 LambdaExpr     ::= "fn" ( Ident | "_" | ParamList ) "=>" ( Block | Expr ) ;
 
+IfExpr         ::= "if" Expr Block ( "else" ( IfExpr | Block ) )? ;
+WhileExpr      ::= "while" Expr Block ;
+LoopExpr       ::= "loop" Block ;
 MatchExpr      ::= "match" Expr "{" ( MatchArm )+ "}" ;
 MatchArm       ::= Pattern ( "if" Expr )? "=>" ( Block | Expr ) ( "," )? ;
+
+(* `raise` performs an operation of the error row; its type is Never, so it may
+   appear wherever an expression may. *)
+RaiseExpr      ::= "raise" Expr ;
+HandlerExpr    ::= "handler" "for" Path RecordExpr ;
+
+(* Handlers must lexically enclose what they serve: in direct style a call
+   evaluates immediately, so `|> provide(h)` cannot work. Postfix serves one
+   expression; the block form serves a region. *)
+WithBlock      ::= "with" ContextRow Block ;
+ContextRow     ::= RecordExpr | Path ( RecordExpr )? ;  (* row, or a named
+                                                           context with
+                                                           overrides *)
+
+(* A `{` opens a record literal when followed by `}` or `Ident :`, and a block
+   otherwise. In a `match`, `if` or `while` scrutinee it always opens the
+   branch or arm list. Errata 9. *)
 
 (* --- patterns ----------------------------------------------------------- *)
 
@@ -129,8 +178,8 @@ Keyword        ::= "module" | "import" | "type" | "fn" | "match" | "let"
 
 (* Contextual keywords: keywords in one position each, ordinary identifiers
    everywhere else, so `fn post(handler: Request -> Response)` is legal.
-   `for` is reserved only by `handler for E`; the `for` loop will make it
-   hard. *)
+   `for` is reserved only by `handler for E`; the `for` loop in phase 3 will
+   make it hard. *)
 ContextualKeyword
                ::= "handler"  (* only before "for"                        *)
                  | "for"      (* only directly after "handler"            *)

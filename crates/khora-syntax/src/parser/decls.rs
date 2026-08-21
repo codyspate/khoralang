@@ -56,21 +56,21 @@ fn module_decl(p: &mut Parser<'_>) {
     m.complete(p, MODULE_DECL);
 }
 
-/// `import a.b.{X, Y as Z};` or `import a.b.*;`
+/// `import a::b::{X, Y as Z};` or `import a::b::*;`
 fn import_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(IMPORT_KW);
     path(p);
-    if p.at(DOT) && p.nth_at(1, L_BRACE) {
-        p.bump(DOT);
+    if p.at(COLON_COLON) && p.nth_at(1, L_BRACE) {
+        p.bump(COLON_COLON);
         import_list(p);
-    } else if p.at(DOT) && p.nth_at(1, STAR) {
+    } else if p.at(COLON_COLON) && p.nth_at(1, STAR) {
         let glob = p.start();
-        p.bump(DOT);
+        p.bump(COLON_COLON);
         p.bump(STAR);
         glob.complete(p, IMPORT_GLOB);
     } else {
-        p.error("expected `.{...}` or `.*` after the module path");
+        p.error("expected `::{...}` or `::*` after the module path");
     }
     p.expect(SEMICOLON);
     m.complete(p, IMPORT_DECL);

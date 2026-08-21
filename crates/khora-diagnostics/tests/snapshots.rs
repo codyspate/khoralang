@@ -54,7 +54,7 @@ fn render(source: &str) -> String {
 
 #[test]
 fn missing_semicolon_after_module() {
-    assert_snapshot("missing_semicolon", &render("module app.main\n\nfn f() { 1 }\n"));
+    assert_snapshot("missing_semicolon", &render("module app::main\n\nfn f() { 1 }\n"));
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn effect_declaration_missing_its_body() {
 
 #[test]
 fn import_without_a_selection() {
-    assert_snapshot("import_without_selection", &render("module m;\nimport std.core;\n"));
+    assert_snapshot("import_without_selection", &render("module m;\nimport std::core;\n"));
 }
 
 /// Column counting is by character, so a caret must still land correctly when

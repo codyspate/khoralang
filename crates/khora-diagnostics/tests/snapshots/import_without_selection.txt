@@ -1,5 +1,5 @@
-error: expected `.{...}` or `.*` after the module path
- --> src/main.kh:2:16
+error: expected `::{...}` or `::*` after the module path
+ --> src/main.kh:2:17
   |
-2 | import std.core;
-  |                ^
+2 | import std::core;
+  |                 ^

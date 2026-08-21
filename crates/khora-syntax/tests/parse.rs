@@ -83,7 +83,7 @@ fn placeholder_argument_is_preserved() {
 
 #[test]
 fn match_scrutinee_does_not_swallow_the_arm_list() {
-    let src = "module m;\nfn f() { match report.risk { RiskLevel.Low => 1, _ => 2, } }\n";
+    let src = "module m;\nfn f() { match report.risk { RiskLevel::Low => 1, _ => 2, } }\n";
     let dump = parse(src).debug_tree();
     assert!(dump.contains("MATCH_EXPR"), "{dump}");
     assert_eq!(dump.matches("MATCH_ARM").count(), 2, "{dump}");
@@ -196,7 +196,7 @@ fn row_tail_accepts_further_labels() {
 #[test]
 fn const_generics_and_forall_parse() {
     let src = "module m;\npub fn embed<const Dim: Int>(s: String) -> Embedding<Dim, F32>;\n\
-               pub type S = forall <Schema> . (Prompt, Schema.Spec) -> Effect<Schema, {}, E>;\n";
+               pub type S = forall <Schema> . (Prompt, Schema::Spec) -> Effect<Schema, {}, E>;\n";
     let parse = parse(src);
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
     assert!(parse.debug_tree().contains("FORALL_TYPE"));
@@ -210,7 +210,7 @@ fn variance_markers_parse() {
 
 #[test]
 fn import_forms_parse() {
-    let parse = parse("module m;\nimport std.core.{Option, Result as R};\nimport std.ai.*;\n");
+    let parse = parse("module m;\nimport std::core::{Option, Result as R};\nimport std::ai::*;\n");
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
 }
 
@@ -258,7 +258,7 @@ pub fn f() -> Report with { ledger: Ledger } { g() }
 #[test]
 fn raise_and_try_parse() {
     let src = "module m;
-fn f() { let x = g()!; raise DbError.Unavailable; }
+fn f() { let x = g()!; raise DbError::Unavailable; }
 ";
     let parse = parse(src);
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
@@ -271,7 +271,7 @@ fn f() { let x = g()!; raise DbError.Unavailable; }
 fn handler_and_catch_parse() {
     let src = "module m;
 let h = handler for Ledger { get_history: fn id => \"x\" };
-fn f() { g()! catch { E.A(_) => 1, } }
+fn f() { g()! catch { E::A(_) => 1, } }
 ";
     let parse = parse(src);
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
@@ -586,14 +586,14 @@ pub fn import_batch(rows: List<Row>) -> Summary
   with { ledger: Ledger }
   raises DbError
 {
-  let mut summary = Summary.empty();
+  let mut summary = Summary::empty();
   let mut i = 0;
   while i < rows.len() {
     let row = rows.at(i);
     i = i + 1;
-    match Txn.parse(row) {
-      Option.None => continue,
-      Option.Some(txn) => {
+    match Txn::parse(row) {
+      Option::None => continue,
+      Option::Some(txn) => {
         if txn.amount < 0 { return summary; }
         ledger.record(txn)!;
         summary = summary.record(txn);

@@ -106,13 +106,18 @@ fn path_type(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, PATH_TYPE)
 }
 
-/// `Path ::= Ident ( "." Ident )*` — the universal dot covers namespaces,
-/// enum constructors and associated items alike.
+/// `Path ::= Ident ( "::" Ident )*`
+///
+/// `::` separates compile-time namespaces — module paths, types, associated
+/// items and enum constructors. `.` is reserved for runtime projection: record
+/// fields and method calls. Splitting them is what lets the parser build a real
+/// path here rather than deferring every dotted name to name resolution, and it
+/// is why a regex can colour `Foo::bar` differently from `foo.bar`.
 pub(super) fn path(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     name_ref(p);
-    while p.at(DOT) && p.nth_at(1, IDENT) {
-        p.bump(DOT);
+    while p.at(COLON_COLON) && p.nth_at(1, IDENT) {
+        p.bump(COLON_COLON);
         name_ref(p);
     }
     m.complete(p, PATH)

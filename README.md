@@ -85,16 +85,20 @@ follows, and both are called out in `docs/errata.md`:
 
 - `{` opens a record literal when followed by `}` or `Ident :`, and a block
   otherwise. In a `match` scrutinee it always opens the arm list.
-- `a.b.c` in expression position stays an unresolved `FIELD_EXPR` chain. Under
-  the "universal dot" rule a module path, an enum constructor and a record
-  projection are spelled identically, so the parser refuses to guess and leaves
-  it to name resolution.
+- `a.b.c` in expression position stays an unresolved `FIELD_EXPR` chain — but
+  only for `.`. The specification's "universal dot" gave a module path, an enum
+  constructor and a record projection the same spelling; Khora splits them,
+  using `::` for compile-time paths and `.` for runtime projection, so
+  `a::b::c` is a `PATH` the parser builds outright and only `.` is left to name
+  resolution. See `docs/errata.md` item 13 and
+  `docs/design/associated-items.md`.
 
 Operator precedence, loosest to tightest: `|>`, `||`, `&&`, comparisons,
 `+ -`, `* / %`, prefix `- !`, then call and field access.
 
 ## Next step
 
-`khora-hir` name resolution. It blocks the type checker, and item 10 of
-`docs/errata.md` explains why it cannot be deferred: until `Type.member` has a
-defined meaning, half the reference program has no denotation.
+`khora-hir` name resolution. It blocks the type checker, and the rules it has to
+implement are decided in `docs/design/associated-items.md`: `::` resolves as a
+module-or-type path, `.` resolves as a field of a value or an item declared
+against its type.

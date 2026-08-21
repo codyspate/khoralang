@@ -24,11 +24,11 @@ pub(super) fn pattern(p: &mut Parser<'_>) {
     }
 }
 
-/// A bare identifier binds; a dotted path or a payload makes it a constructor.
+/// A bare identifier binds; a `::` path or a payload makes it a constructor.
 /// Which one a single uppercase identifier is (binding vs nullary constructor)
 /// is a name-resolution question, settled in HIR lowering rather than here.
 fn path_like_pattern(p: &mut Parser<'_>) {
-    if !p.nth_at(1, DOT) && !p.nth_at(1, L_PAREN) && !p.nth_at(1, L_BRACE) {
+    if !p.nth_at(1, COLON_COLON) && !p.nth_at(1, L_PAREN) && !p.nth_at(1, L_BRACE) {
         let m = p.start();
         name(p);
         m.complete(p, IDENT_PAT);

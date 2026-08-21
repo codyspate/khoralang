@@ -97,10 +97,10 @@ fn the_corpus_is_already_formatted() {
 
 #[test]
 fn imports_are_sorted_and_deduplicated() {
-    let src = "module m;\nimport std.core.{Scope, Option, Scope, Never};\n";
+    let src = "module m;\nimport std::core::{Scope, Option, Scope, Never};\n";
     let out = format(src).unwrap();
     assert!(
-        out.contains("import std.core.{Never, Option, Scope};"),
+        out.contains("import std::core::{Never, Option, Scope};"),
         "imports not sorted and deduplicated:\n{out}"
     );
 }

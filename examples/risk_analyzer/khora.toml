@@ -21,7 +21,7 @@ unused-capabilities = "deny"
 cyclomatic-complexity = { level = "warn", max = 15 }
 
 [dependencies]
-"std.effect" = { version = "1.0.0" }
+"std.core" = { version = "1.0.0" }
 "std.net.http" = { version = "1.0.0" }
 "std.ai" = { version = "1.0.0" }
 

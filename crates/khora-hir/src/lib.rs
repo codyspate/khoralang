@@ -11,12 +11,15 @@
 //!
 //! # What resolution means
 //!
-//! `docs/design/associated-items.md` decides how a dotted name resolves:
-//! resolve the leftmost name first, and what it turns out to be decides what
-//! the dot means. Only two of its four cases matter for phase 2 — module paths
-//! and variant constructors — because the vertical slice excludes records and
-//! typeclasses. The other two are reported as unsupported rather than guessed
-//! at, which keeps the rule intact for when they arrive.
+//! `docs/design/associated-items.md` decides this, and the `::` / `.` split
+//! does most of the work: a `::` path is resolved in the module graph and the
+//! type namespace, with locals deliberately not participating, while `.` is
+//! field-then-method on a value.
+//!
+//! Only the `::` half matters for phase 2 — module paths and variant
+//! constructors — because the vertical slice excludes records and typeclasses.
+//! Associated items report [`Resolution::Unsupported`] rather than being
+//! guessed at, which keeps the rule intact for when they arrive.
 
 use khora_db::{Db, SourceFile};
 use khora_syntax::ast::{self, AstNode};
@@ -317,12 +320,11 @@ pub enum Resolution {
     Unsupported(&'static str),
 }
 
-/// Resolves a dotted path as written in `file`.
+/// Resolves a `::` path as written in `file`.
 ///
-/// Implements cases 2 and 3i of `docs/design/associated-items.md`: a module
-/// path, or a constructor reached through its type. Field projection and
-/// associated items report [`Resolution::Unsupported`] rather than guessing,
-/// so the rule stays whole when they land.
+/// Locals do not participate: `x::foo` where `x` is a binding is an error that
+/// says so, rather than a mysterious failure to find `foo`. Field access goes
+/// through `.` and is a separate question.
 pub fn resolve_path(
     db: &dyn Db,
     root: khora_db::SourceRoot,
@@ -355,8 +357,22 @@ pub fn resolve_path(
         return Err(unresolved(first));
     }
 
-    // `Type.Constructor` — case 3i, checked before module paths because a type
-    // in scope shadows nothing but is the more specific reading.
+    // A local in a `::` path is a category error, and saying so beats
+    // reporting that its last segment could not be found.
+    if let Some(local) = map.item(first) {
+        if matches!(local.kind, ItemKind::Let | ItemKind::Function) {
+            return Err(HirError {
+                message: format!(
+                    "`{first}` is a {}, not a module or a type; use `.` to project from a value",
+                    local.kind.describe()
+                ),
+                range: local.range,
+            });
+        }
+    }
+
+    // `Type::Constructor`, checked before module paths because a type in scope
+    // is the more specific reading.
     if rest.len() == 1 {
         if map.item(first).is_some_and(|i| i.kind == ItemKind::Type) {
             if map.variants_of(first).any(|v| &v.name == &rest[0]) {

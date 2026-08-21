@@ -1,11 +1,11 @@
-module std.core;
+module std::core;
 
 // Khora tracks effects as rows on the signature rather than as a wrapper type,
 // so there is no `Effect<A, R, E>` here. A computation's requirements live in
 // its `with` clause and its failures in its `raises` clause; both are inferred
 // on private functions and written out on public ones.
 //
-// The module is `std.core` rather than `std.effect` for two reasons: there is
+// The module is `std::core` rather than `std::effect` for two reasons: there is
 // no longer an `Effect` type to name it after, and `effect` is now a reserved
 // word, so `std.effect` will not lex as a path.
 //

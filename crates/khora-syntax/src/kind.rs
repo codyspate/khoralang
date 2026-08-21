@@ -65,6 +65,8 @@ pub enum SyntaxKind {
     COMMA,
     DOT,
     COLON,
+    /// `::` — the path separator, for compile-time namespaces.
+    COLON_COLON,
     UNDERSCORE,
     PIPE,
     /// `|>`

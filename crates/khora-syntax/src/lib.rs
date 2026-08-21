@@ -6,7 +6,7 @@
 //! the CST is built with `rowan` rather than a plain AST.
 //!
 //! ```
-//! let parse = khora_syntax::parse("module app.main;");
+//! let parse = khora_syntax::parse("module app::main;");
 //! assert!(parse.errors().is_empty());
 //! ```
 
@@ -127,9 +127,9 @@ mod tests {
 
     #[test]
     fn module_decl_parses() {
-        let parse = parse("module app.main;\n");
+        let parse = parse("module app::main;\n");
         assert!(parse.ok(), "{:?}", parse.errors());
-        assert_lossless("module app.main;\n");
+        assert_lossless("module app::main;\n");
     }
 
     #[test]

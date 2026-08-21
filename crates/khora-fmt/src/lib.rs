@@ -212,7 +212,11 @@ impl Formatter {
         // Order matters: bracket adjacency is tested before the rules about
         // what opens a call, or `f((1))` gains a stray space.
 
-        // `.` is tight in a path or field access, but is a separator in
+        // `::` joins path segments and is always tight.
+        if prev == COLON_COLON || next == COLON_COLON {
+            return true;
+        }
+        // `.` is tight in field access, but is a separator in
         // `forall <T> . Type` and needs its spaces there.
         if next == DOT {
             return parent != FORALL_TYPE;

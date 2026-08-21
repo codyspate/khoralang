@@ -1,8 +1,8 @@
-module std.net.http;
+module std::net::http;
 
-import std.core.{Never, Scope};
+import std::core::{Never, Scope};
 
-// The specification does not define `std.net.http`; these signatures are
+// The specification does not define `std::net::http`; these signatures are
 // reconstructed from how the reference application uses them, and are marked
 // provisional in `docs/errata.md`.
 

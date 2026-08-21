@@ -108,6 +108,11 @@ The parser therefore does not commit: `a.b.c` in expression position is a
 `FIELD_EXPR` chain, and name resolution in `khora-hir` decides what each link
 means. Deciding that is a prerequisite for the type checker.
 
+That last paragraph is superseded by entry 13. With `::` separating compile-time
+paths from runtime projection, `Prompt::new` is a path the parser can build
+outright and only `params.get` is left for name resolution to classify. The
+declarations themselves are still missing from §3.
+
 `std/net/http.kh` is not specified at all; the signatures there are reconstructed
 from usage and should be treated as provisional.
 
@@ -119,11 +124,60 @@ type the module was named after, and `effect` became a reserved word — so
 `Result`, `Never`, `Handler<E>` and the `Scope` effect, and is named
 accordingly.
 
-`examples/risk_analyzer/khora.toml` still lists `"std.effect"` as a dependency
-and needs the same rename.
+`examples/risk_analyzer/khora.toml` was renamed to match. Manifest dependency
+keys stay dotted: they name packages, not source paths, so they are unaffected
+by the `::` split in entry 13.
 
 ## 12. `Never` and `Label` are used but never declared
 
 `std.core` refers to both without defining them; `Float`, `Int`, `String` and
 `List` are likewise assumed. They are declared as opaque types in `std/core.kh`
 so the corpus is self-contained; the real definitions belong in a `std.prelude`.
+
+## 13. Universal dot is replaced by `::` for paths and `.` for projection
+
+§1.1 mandates "Universal Dot Notation (`.`): Consistent `.` symbol for
+namespaces, static enum constructors, record field access, and method
+invocations. No `::` or `->` symbol clutter." That rule is not implemented.
+Khora has two separators, split by *when* the thing on the left exists:
+
+- **`::` — compile-time paths.** Module paths, types, associated items and enum
+  constructors: `std::core::Option`, `RiskLevel::Critical("freeze")`,
+  `Prompt::new()`, `import std::core::{Option};`, `module app::main;`.
+- **`.` — runtime projection.** Record fields and method calls: `report.risk`,
+  `ledger.get_history(id)`, `req.params.get("id")`.
+
+The specification's argument for one dot is symbol economy, and that is the
+wrong thing to economise on. `Foo.bar` is unreadable to a *human*: nothing in it
+says whether `Foo` is a module, a type or a variable, so a reader who does not
+already know the codebase cannot tell a namespace lookup from a field load, and
+neither can a tool. Rust's `::`/`.` split is not clutter — it carries
+information. Everything left of `::` is resolved by the compiler and gone before
+the program runs; everything left of `.` is a value that exists while it runs.
+One character buys that distinction at every use site, and Go, Rust and
+TypeScript all draw the same line in one spelling or another, so it is what the
+audience in `docs/vision.md` already reads for.
+
+Four consequences, all improvements:
+
+- **D2 largely dissolves.** Four meanings of one operator become two
+  syntactically distinct groups, and what is left is one resolution rule per
+  group instead of a four-way ordering. `docs/design/associated-items.md` states
+  them.
+- **The parser builds real paths.** `a::b::c` is a `PATH` node with three
+  segments, decided at parse time, rather than a `FIELD_EXPR` chain handed
+  wholesale to name resolution (entry 10).
+- **Imports and module declarations get an honest separator.** `import a.b.{X};`
+  needed the final `.` before `{` special-cased in the grammar because it was
+  not a projection at all; `import a::b::{X};` needs no such exception.
+- **A regex can colour paths.** The VS Code TextMate grammar could not
+  distinguish `Effect.map` from `report.risk` from `RiskLevel.Low`, and the
+  precise answer was deferred to LSP semantic tokens in phase 8.4. It no longer
+  has to be: an identifier followed by `::` is a path segment and can be nothing
+  else. Semantic tokens remain the right answer for locals and bare type names;
+  they are no longer needed to get paths right.
+
+This is the second override of §1.1's "No `::` or `->` symbol clutter" — `->`
+was the first, in entry 2. The clause is now dead in both halves, and the
+lexical rule it belonged to should be read as describing an early intention
+rather than the language.
