@@ -48,8 +48,7 @@ static PACKAGE: Schema = Schema::Fields(&[
     ("edition", &OPEN),
 ]);
 
-static PERMISSIONS: Schema =
-    Schema::Fields(&[("network", &OPEN), ("fs", &OPEN), ("env", &OPEN)]);
+static PERMISSIONS: Schema = Schema::Fields(&[("network", &OPEN), ("fs", &OPEN), ("env", &OPEN)]);
 
 static FMT: Schema = Schema::Fields(&[
     ("indent-style", &OPEN),

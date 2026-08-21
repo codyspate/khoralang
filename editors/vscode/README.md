@@ -2,7 +2,17 @@
 
 Syntax highlighting and editor configuration for `.kh` files.
 
-## Install
+## Working on it
+
+Open **this folder** (`editors/vscode`) in VS Code and press **F5**. That
+launches an Extension Development Host — a second window with the extension
+loaded live — which is how VS Code extensions are normally developed. No
+packaging, no install, and no npm, because this extension contributes only
+declarative grammar and configuration.
+
+Restart the host window after editing the grammar.
+
+## Installing it for real
 
 ```bash
 powershell -NoProfile -ExecutionPolicy Bypass -File editors/vscode/install.ps1
@@ -10,23 +20,42 @@ powershell -NoProfile -ExecutionPolicy Bypass -File editors/vscode/install.ps1
 
 Then **fully quit and reopen VS Code** — extensions are scanned at startup, so
 reloading the window is not enough. Confirm with `code --list-extensions`, which
-should list `khora-lang.khora`; the status bar should read *Khora* on any `.kh`
-file.
+should list `khora-lang.khora`.
 
-The script packages the extension as a `.vsix` and installs it through the VS
-Code CLI. It needs no npm — a `.vsix` is a zip with an OPC manifest, which
-PowerShell builds directly.
+The script packages a `.vsix` and installs it through the VS Code CLI. It exists
+because this machine has no Node; the standard tool is
+`npm i -g @vscode/vsce` then `vsce package`, and that is what to use for
+publishing. A `.vsix` is a zip with an OPC manifest, which is why PowerShell can
+build one at all.
 
 **Do not just drop the folder into `~/.vscode/extensions`.** That was the first
 approach here and it silently did nothing: the extension never entered VS Code's
-extension index, so nothing loaded and there was no error to see. A junction has
-the same problem.
+extension index, so nothing loaded and no error appeared. A junction fails the
+same way.
 
-Because this is a real install rather than a link, **re-run the script after
-editing the grammar**, then restart.
+## Other editors
 
-On macOS and Linux, install `@vscode/vsce` and run `vsce package`, then
-`code --install-extension khora-lang.khora-0.1.0.vsix`.
+Syntax support is three separate layers, and this file is only the first:
+
+| Layer | Reaches | Nature |
+| --- | --- | --- |
+| TextMate grammar (this) | VS Code, Sublime, TextMate, IntelliJ, GitHub Linguist | Regex; cannot be correct for Khora |
+| Tree-sitter | Neovim, Helix, Zed, Emacs 29+, GitHub code navigation | Incremental parser, grammar in JS compiled to C |
+| LSP semantic tokens | Every editor with an LSP client | Driven by the actual compiler |
+
+**Semantic tokens over LSP is the real answer** (roadmap phase 8.4). It is
+editor-agnostic by construction and reuses the compiler instead of duplicating
+it, which is the only way `Type.member` can be coloured correctly — see the
+limits section below.
+
+A tree-sitter grammar would mean maintaining a *second* parser alongside the
+`rowan` one. The cost of even a single duplicate is visible here: the
+`keywords_match_the_lexer` test exists to stop this grammar drifting from the
+lexer, and it has already caught a real break. Worth doing only if Neovim,
+Helix or Zed users are wanted before the language server ships.
+
+The TextMate grammar earns its place regardless of the LSP, because GitHub
+Linguist uses it to highlight `.kh` in the repository and on the web.
 
 ## What it does
 

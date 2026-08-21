@@ -1,0 +1,18 @@
+{
+  // Open the `editors/vscode` folder in VS Code and press F5. That launches an
+  // Extension Development Host — a second window with the extension loaded
+  // live — which is the normal way to work on an extension. No packaging, no
+  // install, and no npm, because this extension contributes only declarative
+  // grammar and configuration.
+  //
+  // After editing the grammar, restart the host window to pick it up.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Khora extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"]
+    }
+  ]
+}
