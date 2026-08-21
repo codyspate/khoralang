@@ -576,3 +576,144 @@ fn an_unbounded_application_has_no_methods() {
         "add one, as `F: Trait`",
     );
 }
+
+// --- associated types -----------------------------------------------------
+
+const ITER: &str = "module m;\n\
+                    export type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
+                    export type Range = | Of(from: Int, to: Int);\n\
+                    export trait Iterator {\n\
+                      type Item;\n\
+                      fn next(self) -> Step<Self, Self::Item>;\n\
+                    }\n\
+                    impl Iterator for Range {\n\
+                      type Item = Int;\n\
+                      fn next(self) -> Step<Range, Int> { Step::Done }\n\
+                    }\n";
+
+/// The projection has to normalise, or every use of `Self::Item` is an opaque
+/// name that unifies with nothing and reports itself in diagnostics.
+#[test]
+fn an_associated_type_projects_to_the_impls_binding() {
+    assert_clean(&format!(
+        "{ITER}fn first(r: Range) -> Int {{\n\
+           match r.next() {{ Step::Yield(rest, item) => item, Step::Done => 0 }}\n\
+         }}\n"
+    ));
+}
+
+#[test]
+fn a_projection_is_the_bound_type_not_a_fresh_one() {
+    assert_reports(
+        &format!(
+            "{ITER}fn first(r: Range) -> Bool {{\n\
+               match r.next() {{ Step::Yield(rest, item) => item, Step::Done => true }}\n\
+             }}\n"
+        ),
+        "expected `Int`, found `Bool`",
+    );
+}
+
+/// An impl's parameters have to be read off the receiver first, or
+/// `List<Int>::Item` projects to a rigid `A` instead of to `Int`.
+#[test]
+fn a_projection_through_a_parameterised_impl_substitutes_first() {
+    assert_clean(
+        "module m;\n\
+         export type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
+         export type List<A> = | Nil | Cons(head: A, tail: List<A>);\n\
+         export trait Iterator {\n\
+           type Item;\n\
+           fn next(self) -> Step<Self, Self::Item>;\n\
+         }\n\
+         impl<A> Iterator for List<A> {\n\
+           type Item = A;\n\
+           fn next(self) -> Step<List<A>, A> { Step::Done }\n\
+         }\n\
+         fn first(l: List<Int>) -> Int {\n\
+           match l.next() { Step::Yield(rest, item) => item, Step::Done => 0 }\n\
+         }\n",
+    );
+}
+
+/// Inside a generic function the owner is still a parameter, so the projection
+/// stays rigid: the body cannot assume what the caller's `Item` will be.
+#[test]
+fn an_unresolved_projection_is_rigid() {
+    assert_reports(
+        &format!(
+            "{ITER}fn first<I: Iterator>(it: I) -> Int {{\n\
+               match it.next() {{ Step::Yield(rest, item) => item, Step::Done => 0 }}\n\
+             }}\n"
+        ),
+        "I::Item",
+    );
+}
+
+// --- an impl must match what its trait promised ---------------------------
+
+/// Without this an impl could promise `Bool` and return `Int`, and the
+/// mismatch would surface as invalid LLVM IR blamed on the compiler.
+#[test]
+fn an_impl_returning_the_wrong_type_is_rejected() {
+    assert_reports(
+        "module m;\n\
+         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         impl Eq for Int { fn eq(self, other: Int) -> Int { 1 } }\n",
+        "`eq` returns `Int` here, but `Eq` declares `Bool`",
+    );
+}
+
+#[test]
+fn an_impl_taking_the_wrong_parameter_is_rejected() {
+    assert_reports(
+        "module m;\n\
+         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         impl Eq for Int { fn eq(self, other: Bool) -> Bool { true } }\n",
+        "parameter 2 of `eq` is `Bool` here, but `Eq` declares `Int`",
+    );
+}
+
+#[test]
+fn an_impl_with_the_wrong_arity_is_rejected() {
+    assert_reports(
+        "module m;\n\
+         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         impl Eq for Int { fn eq(self) -> Bool { true } }\n",
+        "`eq` takes 2 parameter(s) in `Eq`, but this impl declares 1",
+    );
+}
+
+/// The check compares through the associated type, so an impl whose method
+/// disagrees with its own `type Item` is caught.
+#[test]
+fn an_impl_disagreeing_with_its_own_associated_type_is_rejected() {
+    assert_reports(
+        "module m;\n\
+         export type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
+         export type Range = | Of(from: Int, to: Int);\n\
+         export trait Iterator {\n\
+           type Item;\n\
+           fn next(self) -> Step<Self, Self::Item>;\n\
+         }\n\
+         impl Iterator for Range {\n\
+           type Item = Int;\n\
+           fn next(self) -> Step<Range, Bool> { Step::Done }\n\
+         }\n",
+        "`next` returns `Step<Range, Bool>` here, but `Iterator` declares `Step<Range, Int>`",
+    );
+}
+
+/// Renaming a method's own parameters is allowed: `fn map<X, Y>` implements
+/// `fn map<A, B>`. Comparing by name rather than by position would reject it.
+#[test]
+fn an_impl_may_rename_the_methods_own_parameters() {
+    assert_clean(
+        "module m;\n\
+         export type Option<A> = | Some(value: A) | None;\n\
+         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         impl Functor for Option {\n\
+           fn map<X, Y>(self: Option<X>, f: (X) -> Y) -> Option<Y> { Option::None }\n\
+         }\n",
+    );
+}

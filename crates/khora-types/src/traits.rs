@@ -172,6 +172,24 @@ impl Traits {
             .find(|i| i.trait_name == trait_name && i.head().as_deref() == Some(head.as_str()))
     }
 
+    /// Every `type Name = Value` the impls in scope declare, in the shape the
+    /// unifier needs to normalise a projection.
+    pub fn assoc_bindings(&self) -> Vec<crate::unify::AssocBinding> {
+        self.impls
+            .iter()
+            .filter_map(|imp| Some((imp, imp.head()?)))
+            .flat_map(|(imp, head)| {
+                imp.assoc_types.iter().map(move |(name, value)| crate::unify::AssocBinding {
+                    head: head.clone(),
+                    name: name.clone(),
+                    generics: imp.generics.clone(),
+                    self_type: imp.self_type.clone(),
+                    value: value.clone(),
+                })
+            })
+            .collect()
+    }
+
     /// Whether `ty` implements `trait_name`, following supertraits.
     pub fn satisfies(&self, trait_name: &str, ty: &Type) -> bool {
         self.find(trait_name, ty).is_some()
@@ -577,7 +595,11 @@ pub fn with_supertraits(traits: &Traits, names: &[String]) -> Vec<String> {
 /// function body: a trait is well-formed or it is not, and saying so before
 /// anything is inferred keeps the diagnostics about the declaration rather than
 /// about some call site that happened to touch it.
-pub fn check(traits: &Traits, kinds: &HashMap<String, Kind>) -> Vec<HirError> {
+pub fn check(
+    traits: &Traits,
+    kinds: &HashMap<String, Kind>,
+    signatures: &HashMap<String, Signature>,
+) -> Vec<HirError> {
     let mut errors = Vec::new();
 
     for (i, own) in traits.inherent.iter().enumerate() {
@@ -630,6 +652,7 @@ pub fn check(traits: &Traits, kinds: &HashMap<String, Kind>) -> Vec<HirError> {
         check_kind(imp, def, kinds, &mut errors);
         check_methods(imp, def, &mut errors);
         check_assoc_types(imp, def, &mut errors);
+        check_signatures(imp, traits, signatures, &mut errors);
     }
 
     errors
@@ -723,6 +746,88 @@ fn check_methods(imp: &ImplDef, def: &TraitDef, errors: &mut Vec<HirError>) {
         if def.method(name).is_none() {
             errors.push(HirError {
                 message: format!("`{}` has no function named `{name}`", def.name),
+                range: imp.range,
+            });
+        }
+    }
+}
+
+/// Every method an impl declares must have the signature the trait promised.
+///
+/// `impl_signatures` reads an impl's signature from what the impl *wrote*,
+/// deliberately, so that a disagreement with the trait is a diagnosable
+/// difference rather than something silently papered over. This is the check
+/// that was supposed to read it. Without it a trait could promise `-> Bool`,
+/// an impl return `Int`, and the mismatch surface as invalid LLVM IR blamed on
+/// the compiler.
+fn check_signatures(
+    imp: &ImplDef,
+    traits: &Traits,
+    signatures: &HashMap<String, Signature>,
+    errors: &mut Vec<HirError>,
+) {
+    let Some(head) = imp.head() else { return };
+    let normaliser = crate::unify::Unifier::new().with_assoc(traits.assoc_bindings());
+
+    for method in &imp.methods {
+        let Some(declared) = signatures.get(&format!("{}::{}", imp.trait_name, method)) else {
+            continue;
+        };
+        let Some(written) = signatures.get(&method_key(&imp.trait_name, &head, method)) else {
+            continue;
+        };
+
+        // Put both sides in the same names: `Self` becomes the implementing
+        // type, and the trait's method parameters take the impl's spelling of
+        // them, so `fn map<A, B>` and `fn map<X, Y>` compare equal.
+        let mut mapping: HashMap<&str, Type> = HashMap::new();
+        mapping.insert("Self", imp.self_type.clone());
+        let trait_own = declared.generics.get(1..).unwrap_or(&[]);
+        let impl_own = written.generics.get(imp.generics.len()..).unwrap_or(&[]);
+        for (from, to) in trait_own.iter().zip(impl_own) {
+            mapping.insert(from.as_str(), Type::Param(to.clone()));
+        }
+
+        let expect = |ty: &Type| normaliser.zonk(&crate::unify::substitute(ty, &mapping));
+
+        if declared.params.len() != written.params.len() {
+            errors.push(HirError {
+                message: format!(
+                    "`{method}` takes {} parameter(s) in `{}`, but this impl declares {}",
+                    declared.params.len(),
+                    imp.trait_name,
+                    written.params.len()
+                ),
+                range: imp.range,
+            });
+            continue;
+        }
+
+        for (i, (want, got)) in declared.params.iter().zip(&written.params).enumerate() {
+            let want = expect(want);
+            if &want != got {
+                let which = if i == 0 {
+                    "the receiver of".to_string()
+                } else {
+                    format!("parameter {} of", i + 1)
+                };
+                errors.push(HirError {
+                    message: format!(
+                        "{which} `{method}` is `{got}` here, but `{}` declares `{want}`",
+                        imp.trait_name
+                    ),
+                    range: imp.range,
+                });
+            }
+        }
+
+        let want = expect(&declared.ret);
+        if want != written.ret {
+            errors.push(HirError {
+                message: format!(
+                    "`{method}` returns `{}` here, but `{}` declares `{want}`",
+                    written.ret, imp.trait_name
+                ),
                 range: imp.range,
             });
         }

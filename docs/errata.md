@@ -416,3 +416,38 @@ closures still needs a cycle and is a case for named functions.
 The general lesson is the same one entry 19 taught in a different key: a choice
 made by an implementation is still a choice, and one nobody wrote down is one
 nobody can revisit.
+
+## 23. An impl could contradict its trait, and the compiler blamed itself
+
+`impl_signatures` reads an impl's signature from what the impl *wrote* rather
+than deriving it from the trait, and its doc comment said why: "so that a
+mismatch between the two is a *diagnosable difference* rather than something
+the checker silently papers over."
+
+Nothing ever read it. A trait could promise `-> Bool`, an impl return `Int`,
+and the checker accept both:
+
+```khora
+export trait Eq { fn eq(self, other: Self) -> Bool; }
+impl Eq for Int { fn eq(self, other: Int) -> Int { 1 } }
+```
+
+`khora check` reported no errors. `khora build` then produced:
+
+```text
+error: the generated module is not valid LLVM IR, which is a compiler bug:
+  Branch condition is not 'i1' type!
+```
+
+A user error, presented as a compiler bug, at the wrong phase, with no source
+span. Found while comparing two designs for `Iterator` — neither had anything
+to do with it, which is the usual way.
+
+The check now compares every impl method against the trait's declaration, with
+`Self` substituted, associated types projected, and the method's own parameters
+renamed positionally so `fn map<X, Y>` may implement `fn map<A, B>`.
+
+The lesson is narrow and specific: a comment explaining why a design leaves a
+door open is not the same as a test that something walks through it. Both of
+the last three entries — 19, 22 and this one — are the same shape, which is
+that an intention recorded in prose is not a property the compiler holds.

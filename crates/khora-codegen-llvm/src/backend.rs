@@ -410,7 +410,10 @@ impl<'ctx> Backend<'ctx> {
             Type::Var(_) | Type::Param(_) => None,
             // Tuples type check but have no layout yet; `lower` reports that
             // in the one place it can happen, rather than here.
-            Type::Tuple(_) | Type::Const(_) | Type::Applied { .. } => None,
+            // A projection reaching here never normalised, which means the
+            // owner was never pinned down. That is a type error reported
+            // elsewhere, not a shape the backend could pick.
+            Type::Tuple(_) | Type::Const(_) | Type::Applied { .. } | Type::Assoc { .. } => None,
             Type::Never | Type::Unknown => None,
         }
     }

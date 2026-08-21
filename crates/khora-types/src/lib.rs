@@ -52,6 +52,13 @@ pub enum Type {
     /// The empty tuple is `Unit`, not `Tuple(vec![])`, so there is exactly one
     /// spelling of "no information".
     Tuple(Vec<Type>),
+    /// An associated type projected off another type: `Self::Item`.
+    ///
+    /// Normalises to whatever the owner's impl bound the name to as soon as the
+    /// owner is known — `Range::Item` becomes `Int` given
+    /// `impl Iterator for Range { type Item = Int; }`. Until then it stands for
+    /// itself, and unifies only with the same projection.
+    Assoc { owner: Box<Type>, name: String },
     /// A type-level integer, as in `Matrix<3, 4>`.
     ///
     /// Unifies only with an equal value, which is what turns a shape mismatch
@@ -84,6 +91,7 @@ impl std::fmt::Display for Type {
             // TypeScript developer already reads as "not pinned down yet".
             Type::Var(_) => write!(f, "_"),
             Type::Const(n) => write!(f, "{n}"),
+            Type::Assoc { owner, name } => write!(f, "{owner}::{name}"),
             Type::Applied { head, args } => {
                 let inner: Vec<String> = args.iter().map(Type::to_string).collect();
                 write!(f, "{head}<{}>", inner.join(", "))
@@ -322,6 +330,17 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
                 .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics)).collect())
                 .unwrap_or_default();
 
+            // `T::Item` where `T` is a parameter in scope is a projection, not
+            // a type whose name happens to contain `::`.
+            if let Some((owner, assoc)) = name.split_once("::") {
+                if generics.iter().any(|g| g == owner) {
+                    return Type::Assoc {
+                        owner: Box::new(Type::Param(owner.to_string())),
+                        name: assoc.to_string(),
+                    };
+                }
+            }
+
             match name.as_str() {
                 "Int" => Type::Int,
                 "Bool" => Type::Bool,
@@ -437,7 +456,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             locals: HashMap::new(),
             exprs: HashMap::new(),
             instantiations: HashMap::new(),
-            unifier: Unifier::new(),
+            unifier: Unifier::new().with_assoc(types.traits.assoc_bindings()),
             errors: Vec::new(),
         };
         checker.check_function();
@@ -480,7 +499,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile) -> &Vec<HirError> {
 #[salsa::tracked(returns(ref))]
 pub fn trait_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     let types = type_map(db, file);
-    traits::check(&types.traits, &types.kinds)
+    traits::check(&types.traits, &types.kinds, &types.signatures)
 }
 
 struct Checker<'a> {

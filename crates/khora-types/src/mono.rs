@@ -81,6 +81,7 @@ fn mangle(ty: &Type) -> String {
         Type::Const(n) => n.to_string(),
         // An unsolved argument still has to mangle to something unique, since
         // two different variables both print as `_`.
+        Type::Assoc { owner, name } => format!("_proj{}${name}", mangle(owner)),
         Type::Var(v) => format!("_var{v}"),
         // An application that survived here means `Self` was never chosen,
         // which is a bug in instance selection rather than in the program.

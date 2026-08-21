@@ -65,11 +65,48 @@ impl std::fmt::Display for Mismatch {
 pub struct Unifier {
     /// What each flexible variable has been solved to, if anything.
     solved: Vec<Option<Type>>,
+    /// Every `type Item = ..` an impl in scope declares, so a projection can be
+    /// normalised the moment its owner becomes concrete. Carried by value
+    /// rather than borrowed: there are a handful per program, and a lifetime
+    /// here would spread to everything that holds a `Unifier`.
+    assoc: Vec<AssocBinding>,
+}
+
+/// One `type Name = Value` from one impl.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssocBinding {
+    /// Head constructor of the implementing type: `List` for `impl .. for List<A>`.
+    pub head: String,
+    pub name: String,
+    /// The impl's own parameters, rigid in `self_type` and `value`.
+    pub generics: Vec<String>,
+    pub self_type: Type,
+    pub value: Type,
 }
 
 impl Unifier {
     pub fn new() -> Unifier {
         Unifier::default()
+    }
+
+    /// Supplies the associated-type bindings projections normalise through.
+    pub fn with_assoc(mut self, assoc: Vec<AssocBinding>) -> Unifier {
+        self.assoc = assoc;
+        self
+    }
+
+    /// `Range::Item` given `impl Iterator for Range { type Item = Int; }`.
+    ///
+    /// The impl's parameters are matched against the concrete owner first, so
+    /// `List<Int>::Item` under `impl<A> Iterator for List<A> { type Item = A; }`
+    /// projects to `Int` rather than to a rigid `A`.
+    fn normalise_assoc(&self, owner: &Type, name: &str) -> Option<Type> {
+        let head = head_name(owner)?;
+        let binding = self.assoc.iter().find(|b| b.head == head && b.name == name)?;
+
+        let mut mapping = HashMap::new();
+        match_type(&binding.self_type, owner, &binding.generics, &mut mapping);
+        Some(substitute(&binding.value, &mapping))
     }
 
     /// A new hole for inference to fill.
@@ -98,6 +135,17 @@ impl Unifier {
                 }
             }
         }
+
+        // `Range::Item` *is* `Int` once the owner is known. Doing it here means
+        // unification, zonking and every diagnostic see the real type without
+        // any of them having to know projections exist.
+        if let Type::Assoc { owner, name } = &current {
+            let owner = self.shallow(owner);
+            if let Some(value) = self.normalise_assoc(&owner, name) {
+                return self.shallow(&value);
+            }
+            return Type::Assoc { owner: Box::new(owner), name: name.clone() };
+        }
         current
     }
 
@@ -116,6 +164,9 @@ impl Unifier {
                 args: args.iter().map(|a| self.zonk(a)).collect(),
             },
             Type::Tuple(items) => Type::Tuple(items.iter().map(|i| self.zonk(i)).collect()),
+            Type::Assoc { owner, name } => {
+                Type::Assoc { owner: Box::new(self.zonk(&owner)), name }
+            }
             Type::Applied { head, args } => {
                 let head = self.zonk(&head);
                 let args: Vec<Type> = args.iter().map(|a| self.zonk(a)).collect();
@@ -143,6 +194,21 @@ impl Unifier {
 
             (Type::Var(x), Type::Var(y)) if x == y => Ok(()),
             (Type::Var(v), other) | (other, Type::Var(v)) => self.bind(*v, other),
+
+            // Two projections of the same name off the same owner are the same
+            // type. One that has not normalised is rigid — its owner is still a
+            // parameter, so nothing here may assume what it will become.
+            (Type::Assoc { owner: o1, name: n1 }, Type::Assoc { owner: o2, name: n2 })
+                if n1 == n2 =>
+            {
+                self.unify(o1, o2)
+            }
+            (Type::Assoc { owner, name }, other) | (other, Type::Assoc { owner, name }) => {
+                Err(Mismatch::Rigid {
+                    param: format!("{owner}::{name}"),
+                    ty: other.clone(),
+                })
+            }
 
             (Type::Param(x), Type::Param(y)) if x == y => Ok(()),
             // A rigid parameter only unifies with itself. Anything else is the
@@ -248,6 +314,7 @@ impl Unifier {
             }
             Type::Adt { args, .. } => args.iter().any(|a| self.occurs(var, a)),
             Type::Tuple(items) => items.iter().any(|i| self.occurs(var, i)),
+            Type::Assoc { owner, .. } => self.occurs(var, &owner),
             Type::Applied { head, args } => {
                 self.occurs(var, &head) || args.iter().any(|a| self.occurs(var, a))
             }
@@ -322,6 +389,41 @@ pub fn match_params(
     }
 }
 
+/// The head constructor of a type, when it has one.
+fn head_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Adt { name, .. } => Some(name.clone()),
+        Type::Int => Some("Int".to_string()),
+        Type::Bool => Some("Bool".to_string()),
+        Type::Str => Some("String".to_string()),
+        _ => None,
+    }
+}
+
+/// Reads an impl's parameters off the type it is being used at.
+///
+/// One-directional and forgiving: anything that does not line up is left out of
+/// the mapping rather than reported, because a mismatch here means the impl was
+/// not the right one and that is decided elsewhere.
+fn match_type<'a>(
+    pattern: &'a Type,
+    concrete: &Type,
+    generics: &[String],
+    out: &mut HashMap<&'a str, Type>,
+) {
+    match (pattern, concrete) {
+        (Type::Param(p), _) if generics.iter().any(|g| g == p) => {
+            out.insert(p.as_str(), concrete.clone());
+        }
+        (Type::Adt { args: a, .. }, Type::Adt { args: b, .. }) if a.len() == b.len() => {
+            for (x, y) in a.iter().zip(b) {
+                match_type(x, y, generics, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Rewrites rigid parameters according to `mapping`.
 pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
     match ty {
@@ -335,6 +437,9 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
             args: args.iter().map(|a| substitute(a, mapping)).collect(),
         },
         Type::Tuple(items) => Type::Tuple(items.iter().map(|i| substitute(i, mapping)).collect()),
+        Type::Assoc { owner, name } => {
+            Type::Assoc { owner: Box::new(substitute(owner, mapping)), name: name.clone() }
+        }
         // Substituting the head is what turns `Self<A>` into `Option<A>`. The
         // parameter maps to a bare constructor, so its own arguments are empty
         // and the application supplies them.
