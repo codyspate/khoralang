@@ -22,14 +22,32 @@ fn all_same<T: Eq>(a: T, b: T, c: T) -> Bool {
 }
 ```
 
-Haskell spells this `class`/`instance`. Khora does not, under the tie-breaker in
-`docs/vision.md`: a developer arriving from Rust, Go or TypeScript reads
-`trait`/`impl` immediately, and `class` means something else in two of those
-three languages — a nominal record with inheritance, which is precisely what
-this is not. The concept is Rust's trait. It gets Rust's word.
+The word was chosen against the behaviour it has to predict, per the tie-breaker
+in `docs/vision.md`, not by copying whichever language spells it shortest.
 
-`Self` is the implementing type. Bounds are `+`-separated: `T: Eq + Ord`.
-Supertraits are written as a bound on the trait: `trait Ord: Eq`.
+**`interface` is the most familiar candidate, and it is the wrong one.** Go and
+TypeScript both have it, and in both it is *structural*: a type satisfies an
+interface by having the right methods, with nothing declared anywhere. Khora's
+resolution is nominal — an impl exists or it does not — so a developer reading
+`interface Eq` would expect their type to satisfy it automatically and be wrong
+every time. Familiar syntax for different behaviour is the expensive mistake.
+
+**`class` is worse.** In TypeScript and most of the languages this audience
+passes through, a class is a nominal record with inheritance and instances. This
+is none of those things. Haskell's usage would mislead almost everyone.
+
+**`protocol`** (Swift) is behaviourally exact — nominal, explicitly conformed to
+— but Swift is not in the competitive set, so it buys the accuracy without the
+recognition.
+
+**`trait`** is nominal wherever it appears (Rust, Scala, PHP), carries no
+inheritance baggage, and does not promise structural satisfaction to anyone. It
+is less immediately familiar than `interface` and more accurate about what
+happens, which is the trade the tie-breaker asks for.
+
+`impl Trait for Type` reads as the sentence it is. `Self` is the implementing
+type. Bounds are `+`-separated: `T: Eq + Ord`. Supertraits are written as a
+bound on the trait: `trait Ord: Eq`.
 
 ## 2. Higher kinds fall out of applying `Self`
 

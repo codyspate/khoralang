@@ -98,16 +98,49 @@ different language.
 The non-negotiables say what Khora must do. This says how to settle everything
 else.
 
-**Where a design decision could reasonably go either way, choose the option more
-familiar to a developer who uses Go, Rust or TypeScript.**
+**Where a design decision could reasonably go either way, choose the option that
+*behaves* the way a developer who uses Go, Rust or TypeScript would expect.**
 
 Those three are the competitive set named at the top of this document, and most
-of that audience are not functional programmers. When two spellings, two
-resolution rules or two defaults are genuinely close on the merits, the one they
-already know wins. This is not deference to fashion. Unfamiliarity is a cost paid
-at every use site by every reader, forever; "I prefer the other one" costs
-nothing and buys nothing. The rule exists so that decisions of this kind are
-settled by argument rather than by taste.
+of that audience are not functional programmers. The thing being protected is
+what a construct **does**, not what it is called. A developer who recognises a
+construct will predict its behaviour, and a wrong prediction is a bug they write
+today and debug next week. That cost is paid at every use site by every reader,
+forever; "I prefer the other one" costs nothing and buys nothing.
+
+### Behaviour first, spelling second
+
+The two are not equally important, and conflating them produces bad decisions in
+both directions.
+
+**Novel syntax for familiar behaviour is cheap.** It is learned once, on the
+first encounter, and never surprises anyone again. `fn x => x + 1` is not how
+Rust or TypeScript spells a lambda, and that is fine: it *behaves* like the
+lambda both of them have, so a reader who learns the spelling once is never
+wrong about it again.
+
+**Familiar syntax for novel behaviour is expensive.** It mispredicts every time,
+and the reader has no reason to doubt themselves — the whole point of a familiar
+word is that it stops you looking things up. This is the failure the rule exists
+to prevent.
+
+So spelling is chosen to *serve* the behavioural promise: pick the word that most
+accurately predicts what the thing does. Usually that is the familiar word.
+Sometimes the familiar word carries semantics Khora deliberately does not have,
+and then it is the **wrong** word precisely because it is familiar.
+
+The worked example is `trait` (`docs/design/typeclasses.md`). `interface` is far
+more familiar to this audience — it is in Go, TypeScript, Java and C#. It is also
+**structural** in both of the languages that matter most here: a Go or TypeScript
+type satisfies an interface by having the right methods, with nothing declared.
+Khora's resolution is nominal, so `interface` would promise a behaviour Khora
+does not have. `trait` is less familiar and more accurate, and accuracy wins.
+
+### What the rule is not
+
+It is **not an instruction to copy Rust.** Rust is one of three reference points,
+not the default answer, and reaching for its spelling because it is Rust's is a
+misreading — recorded in `docs/errata.md` as one that has already happened here.
 
 It is a **tie-breaker, not an override.** It applies only where the options are
 close. Where Khora is deliberately doing something none of the three can do —
@@ -126,6 +159,9 @@ It has already settled several calls:
   loop as a fold (`docs/design/imperative.md`).
 - `!` on calls that can abort, because `?` and `try` have taught this audience to
   expect a mark where control leaves (`docs/design/effects.md`).
+- `trait` rather than `interface`, because Khora's resolution is nominal and
+  `interface` reads as structural to most of this audience
+  (`docs/design/typeclasses.md`).
 
 ## Non-goals
 

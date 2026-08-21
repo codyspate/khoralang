@@ -326,3 +326,46 @@ Closures are now implemented, and phase 3's text says where they landed and
 why. The process point is that "out of scope for phase N" and "scheduled for
 phase M" are different statements, and only the first was being written down.
 Anything deferred needs a destination, or it is not deferred, it is dropped.
+
+## 21. The tie-breaker was applied to spelling instead of behaviour
+
+`docs/vision.md` said to prefer "the option more familiar to a developer who
+uses Go, Rust or TypeScript", and listed "two spellings" among the things it
+settles. Read literally that licenses reaching for whichever of the three
+languages spells a thing most recognisably — and in practice it meant reaching
+for Rust, because Rust is the one of the three with the closest feature set.
+
+That is not what the rule is for. What a construct **does** is what a developer
+predicts and what a wrong prediction costs; what it is *called* is learned once.
+The two are not the same weight:
+
+- **Novel syntax for familiar behaviour is cheap.** `fn x => x + 1` is nobody
+  else's lambda spelling, and it does not matter: it behaves like the lambda
+  every one of the three languages has.
+- **Familiar syntax for novel behaviour is expensive.** It mispredicts every
+  time, and a familiar word is precisely the thing that stops a reader checking.
+
+The rule is now stated that way, with an explicit note that it is *not* an
+instruction to copy Rust.
+
+The conclusions it had already produced mostly survive, because they were
+behaviourally motivated even where the stated reason was not:
+
+- **`trait` stands**, but the argument changes completely. It was justified as
+  "the concept is Rust's trait, so it gets Rust's word". The real argument is
+  that `interface` — much the more familiar word, from Go and TypeScript — is
+  **structural** in both, and Khora's resolution is nominal. The familiar word
+  would promise the wrong behaviour, so it loses to the accurate one.
+- **`fn x => body` stands** and needed no defence. It is not Rust's `|x|` or
+  TypeScript's `(x) =>`, and that was never a problem.
+
+One thing it does *not* survive, recorded here because it is the kind of defect
+the corrected rule is meant to catch:
+
+- **A type cannot have a method without a trait.** In Go, TypeScript and Rust
+  alike, adding a method to your own type is the ordinary first thing you do and
+  needs no abstraction. In Khora today `impl User { fn birthday(self) .. }` is a
+  syntax error: the only route to `user.birthday()` is to declare a trait and
+  implement it. That is a behavioural surprise, on a daily action, for all three
+  audiences at once — which is exactly what the rule protects and what focusing
+  on spelling caused to be missed.
