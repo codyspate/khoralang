@@ -56,7 +56,7 @@ rejected — "cannot find `go` in this scope" — for the unrelated reason that 
 
 An outside review listed these as two separate open questions. They are one.
 
-## 3. Recursive closures without cycles — decided
+## 3. Recursive closures without cycles — implemented
 
 A self-reference does not need to be a counted reference, because it does not
 need to be a *reference* at all.
@@ -79,9 +79,19 @@ recursion between two closures is not covered** and genuinely needs a cycle;
 that is a case for named functions, which have no closure object and therefore
 no counting at all.
 
-Not yet implemented. It needs the lambda's own name bound inside its body as a
-distinguished "self" marker, and code generation resolving that marker to
-parameter 0 — small, and off the phase 3 critical path.
+Implemented. A `let` whose initializer is a lambda binds that name inside the
+body as `Expr::LambdaSelf`, which code generation resolves to parameter 0. The
+name reaches only the *innermost* lambda: an inner closure naming an outer one
+would capture it, and a closure holding a closure that holds it is the cycle
+this design avoids, so it is rejected with a message pointing at named
+functions.
+
+One detail is load-bearing. A call through `LambdaSelf` must **not** release
+its callee. Every other closure call does — reading a local duplicates the
+reference, so the call site owns one — but a closure's own name is the argument
+it was handed, which it borrows. Releasing it decrements a count the frame
+never took and frees the closure out from under the caller still running in
+it.
 
 ## 4. Cycles in general — the shape of the answer
 
@@ -153,4 +163,5 @@ For reference, since the rest of this document is about what is not:
 | Representation | A heap object under the ordinary header: field 0 is the code pointer, captures follow. |
 | Nested capture | An inner lambda's free variables are captures of the outer one too, so the chain is complete. |
 | A named function as a value | A closure that captures nothing, forwarding through a one-line adapter. |
+| Calling itself | Through parameter 0, borrowed. Not a capture, not counted, no cycle. Direct self-recursion only. |
 | Cost of calling one | One indirect call. No dictionary, no allocation per call. |

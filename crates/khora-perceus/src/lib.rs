@@ -259,6 +259,10 @@ impl<'a> Planner<'a> {
             | Expr::Literal(_)
             | Expr::Path(_)
             | Expr::Unit
+            // A closure's own name inside its body is the argument it was
+            // called through, borrowed for the call. Counting it would be the
+            // self-reference this design exists to avoid.
+            | Expr::LambdaSelf
             | Expr::Missing
             | Expr::Unsupported(_)
             | Expr::Unresolved(_) => {}

@@ -187,6 +187,15 @@ pub enum Expr {
     Return(Option<ExprId>),
     List(Vec<ExprId>),
     Tuple(Vec<ExprId>),
+    /// The closure currently executing, inside its own body.
+    ///
+    /// `let go = fn n => .. go(n - 1) ..` reads as a capture and would be one:
+    /// the closure would hold a counted reference to itself, which is a cycle,
+    /// and reference counting does not collect cycles. It need not be a
+    /// reference at all — a lifted lambda already receives its own closure
+    /// object as its first argument, so self-recursion goes through that.
+    /// See `docs/design/memory.md` §3.
+    LambdaSelf,
     /// `(x) => x + 1`.
     ///
     /// The body lives in the *same* arena as the enclosing function, which is
@@ -357,6 +366,7 @@ fn lower_function(
         generics,
         loop_depth: 0,
         lambdas: Vec::new(),
+        lambda_names: Vec::new(),
     };
 
     if let Some(params) = decl.params() {
@@ -395,6 +405,10 @@ struct Ctx<'a> {
     /// locals that existed when it started. A local below the innermost mark
     /// belongs to an enclosing scope, which is exactly what "captured" means.
     lambdas: Vec<usize>,
+    /// The name each lambda being lowered was bound to, when it was written as
+    /// the initializer of a `let`. Inside the innermost one, that name is the
+    /// closure itself rather than a capture of it.
+    lambda_names: Vec<Option<String>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -437,7 +451,27 @@ impl<'a> Ctx<'a> {
                 ast::Stmt::Let(let_decl) => {
                     // The initializer is lowered before the binding is
                     // declared, so `let x = x;` refers to the outer `x`.
-                    let init = let_decl.initializer().map(|e| self.lower_expr(&e));
+                    //
+                    // A lambda is the exception: `let go = fn n => .. go(..)`
+                    // has to see its own name, or a recursive closure cannot be
+                    // written at all. The name resolves to the closure itself,
+                    // not to a binding that does not exist yet.
+                    let recursive = match let_decl.initializer() {
+                        Some(ast::Expr::Lambda(_)) => {
+                            let_decl.pat().and_then(|p| match p {
+                                ast::Pat::Ident(i) => i.name().and_then(|n| n.ident()),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    };
+                    let init = let_decl.initializer().map(|e| match (&e, recursive) {
+                        (ast::Expr::Lambda(l), Some(name)) => {
+                            let range = e.syntax().text_range();
+                            self.lower_lambda_named(l, Some(name), range)
+                        }
+                        _ => self.lower_expr(&e),
+                    });
                     let pat = match let_decl.pat() {
                         Some(p) => self.lower_pat(&p, let_decl.is_mut()),
                         None => self.add_pat(Pat::Missing),
@@ -680,6 +714,23 @@ impl<'a> Ctx<'a> {
             if let Some(local) = self.lookup(only) {
                 return self.add_expr(Expr::Local(local), range);
             }
+            if self.is_own_lambda(only) {
+                return self.add_expr(Expr::LambdaSelf, range);
+            }
+            if self.is_enclosing_lambda(only) {
+                // Reaching an *outer* lambda from an inner one would capture
+                // it, and a closure that holds another closure holding it is a
+                // cycle. Named functions have no closure object, so recursion
+                // through one costs nothing.
+                self.error(
+                    format!(
+                        "`{only}` is a closure being defined further out; only a closure's own \
+                         name is in scope inside it. Use a named `fn` for mutual recursion"
+                    ),
+                    range,
+                );
+                return self.add_expr(Expr::Unresolved(only.clone()), range);
+            }
             if let Some(item) = self.map.item(only) {
                 return self.add_expr(
                     Expr::Path(crate::Resolution::Item {
@@ -883,11 +934,22 @@ impl<'a> Ctx<'a> {
     /// makes nested capture fall out for free: an inner lambda's free variable
     /// is still free in the outer one, and one scan finds both.
     fn lower_lambda(&mut self, e: &ast::LambdaExpr, range: TextRange) -> ExprId {
+        self.lower_lambda_named(e, None, range)
+    }
+
+    /// As `lower_lambda`, with the name the lambda was bound to if it has one.
+    fn lower_lambda_named(
+        &mut self,
+        e: &ast::LambdaExpr,
+        name: Option<String>,
+        range: TextRange,
+    ) -> ExprId {
         let local_mark = self.body.locals.len();
         let expr_mark = self.body.exprs.len();
 
         self.scopes.push(Vec::new());
         self.lambdas.push(local_mark);
+        self.lambda_names.push(name);
 
         let params: Vec<PatId> = e
             .params()
@@ -918,6 +980,7 @@ impl<'a> Ctx<'a> {
         self.loop_depth = outer_loops;
 
         self.lambdas.pop();
+        self.lambda_names.pop();
         self.scopes.pop();
 
         let mut captures: Vec<LocalId> = Vec::new();
@@ -930,6 +993,17 @@ impl<'a> Ctx<'a> {
         }
 
         self.add_expr(Expr::Lambda { params, body, captures }, range)
+    }
+
+    /// Whether `name` is the name of the lambda currently being lowered.
+    fn is_own_lambda(&self, name: &str) -> bool {
+        matches!(self.lambda_names.last(), Some(Some(own)) if own == name)
+    }
+
+    /// Whether `name` is the name of a lambda further out than the innermost.
+    fn is_enclosing_lambda(&self, name: &str) -> bool {
+        let outer = self.lambda_names.len().saturating_sub(1);
+        self.lambda_names[..outer].iter().any(|n| n.as_deref() == Some(name))
     }
 
     /// Whether `local` belongs to a scope outside the lambda being lowered.

@@ -466,6 +466,16 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Continue => self.lower_continue(range),
             Expr::Return(value) => self.lower_return(value),
             Expr::Lambda { captures, .. } => self.make_closure(id, &captures, range),
+            // Parameter 0 of a lifted lambda *is* the closure, and it is live
+            // for the duration of the call because the caller holds it. No
+            // capture, no reference count, no cycle.
+            Expr::LambdaSelf => match self.function.get_nth_param(0) {
+                Some(closure) => Some(closure),
+                None => self.fail(
+                    "a closure referred to itself outside a closure, which is a compiler bug",
+                    range,
+                ),
+            },
             Expr::Field { .. } => {
                 self.fail("field access needs records, which arrive in phase 3", range)
             }
@@ -915,8 +925,15 @@ impl<'ctx> Lower<'_, 'ctx> {
         // it, and a lambda written in place was born owned. The callee only
         // borrows it — a lifted body reads its captures without taking a
         // reference — so the release belongs here, after the call.
-        let callee_ty = self.types.of(callee).clone();
-        self.drop(closure.into(), &callee_ty);
+        //
+        // A closure calling *itself* is the exception. Its own name is the
+        // argument it was called through, which it borrows; releasing that
+        // would decrement a count this frame never took, and free the closure
+        // out from under the caller still running in it.
+        if !matches!(self.body.expr(callee), Expr::LambdaSelf) {
+            let callee_ty = self.types.of(callee).clone();
+            self.drop(closure.into(), &callee_ty);
+        }
         Some(result)
     }
 

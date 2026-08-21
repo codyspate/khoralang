@@ -144,3 +144,71 @@ fn a_closure_can_be_stored_in_an_adt() {
          fn make() -> Handler { Handler::Of(fn x => x + 1) }\n",
     );
 }
+
+// --- a closure that calls itself ------------------------------------------
+
+/// A `let` initializer cannot see its own binding, which is why `let x = x`
+/// means the outer `x`. A lambda is the exception, or a recursive closure
+/// could not be written at all.
+#[test]
+fn a_closure_can_call_itself() {
+    assert_clean(
+        "module m;\n\
+         fn f() -> Int {\n\
+           let go = fn n => if n == 0 { 0 } else { n + go(n - 1) };\n\
+           go(3)\n\
+         }\n",
+    );
+}
+
+/// The result type is a variable the body solves, so it flows out to the use
+/// site rather than being assumed.
+#[test]
+fn a_recursive_closures_result_type_is_inferred() {
+    assert_reports(
+        "module m;\n\
+         fn f() -> Int {\n\
+           let go = fn n => if n == 0 { true } else { go(n - 1) };\n\
+           go(3) + 1\n\
+         }\n",
+        "arithmetic: expected `Int`, found `Bool`",
+    );
+}
+
+#[test]
+fn a_recursive_call_is_checked_like_any_other() {
+    assert_reports(
+        "module m;\n\
+         fn f() -> Int { let go = fn n => if n == 0 { 0 } else { go(true) }; go(3) }\n",
+        "this argument: expected `Int`, found `Bool`",
+    );
+    assert_reports(
+        "module m;\n\
+         fn f() -> Int { let go = fn n => if n == 0 { 0 } else { go(n - 1, 2) }; go(3) }\n",
+        "takes 1 argument(s), but 2 were given",
+    );
+}
+
+/// Only the innermost closure's own name is in scope. Reaching an outer one
+/// would capture it, and a closure holding a closure that holds it is a cycle
+/// — which reference counting does not collect. See `docs/design/memory.md`.
+#[test]
+fn an_inner_closure_cannot_name_an_outer_one() {
+    assert_reports(
+        "module m;\n\
+         fn f() -> Int { let outer = fn x => fn y => outer(y); 0 }\n",
+        "only a closure's own name is in scope inside it",
+    );
+}
+
+/// A lambda that is not bound by a `let` has no name to recurse through, so
+/// nothing changes for it.
+#[test]
+fn an_unnamed_lambda_has_no_self_reference() {
+    assert_reports(
+        "module m;\n\
+         fn apply(f: (Int) -> Int, x: Int) -> Int { f(x) }\n\
+         fn g() -> Int { apply(fn n => nope(n), 1) }\n",
+        "cannot find `nope` in this scope",
+    );
+}

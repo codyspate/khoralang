@@ -552,6 +552,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             exprs: HashMap::new(),
             instantiations: HashMap::new(),
             unifier: Unifier::new().with_assoc(types.traits.assoc_bindings()),
+            lambdas: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
@@ -605,6 +606,9 @@ struct Checker<'a> {
     exprs: HashMap<ExprId, Type>,
     instantiations: HashMap<ExprId, (String, Vec<Type>)>,
     unifier: Unifier,
+    /// The type of each lambda currently being inferred, innermost last, so
+    /// that a recursive closure can refer to itself before its body is done.
+    lambdas: Vec<Type>,
     errors: Vec<HirError>,
 }
 
@@ -869,8 +873,23 @@ impl<'a> Checker<'a> {
                         ty
                     })
                     .collect();
+
+                // The whole type exists before the body is checked, because a
+                // recursive closure mentions itself inside it. The result is a
+                // variable the body then solves.
+                let result = self.unifier.fresh();
+                let whole =
+                    Type::Fn { params: types, ret: Box::new(result.clone()) };
+                self.lambdas.push(whole.clone());
                 let ret = self.infer(body);
-                Type::Fn { params: types, ret: Box::new(ret) }
+                self.lambdas.pop();
+
+                self.require(&result, &ret, "this closure's body", range);
+                whole
+            }
+            // Inside its own body, a closure's name is the closure.
+            Expr::LambdaSelf => {
+                self.lambdas.last().cloned().unwrap_or(Type::Unknown)
             }
         }
     }
@@ -971,7 +990,11 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let callee_ty = self.infer(callee);
+        // Resolved first: a callee's type is often a *variable solved to* a
+        // function rather than a function, and matching the shape without
+        // following the variable silently treats it as uncallable.
+        let inferred = self.infer(callee);
+        let callee_ty = self.unifier.shallow(&inferred);
         let Type::Fn { params, ret } = callee_ty else {
             for arg in args {
                 self.infer(*arg);

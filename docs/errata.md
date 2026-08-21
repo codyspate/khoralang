@@ -545,3 +545,24 @@ rather than as a diagnostic. Entry 22 said an intention in prose is not a
 property the compiler holds; this is the same shape one level down — a lookup
 that quietly returns nothing is indistinguishable from one that succeeded,
 unless something downstream happens to need a real answer.
+
+## 27. A callee's type was matched without resolving it
+
+`infer_call` read the callee's type and matched `Type::Fn { .. }` against it
+directly. A type variable *solved to* a function is not a `Type::Fn` until it
+is followed, so a callee whose type arrived that way fell through to "not a
+function" — which, being `Unknown`, unified with everything and reported
+nothing.
+
+Latent until recursive closures landed. A lambda's type used to be built after
+its body, so it was always a concrete `Type::Fn`; a recursive one has to exist
+*before* its body is checked, so its result is a variable the body solves, and
+suddenly `let inner = outer(20)` gave `inner` a variable rather than a
+function. `khora check` stayed silent and code generation failed with a message
+about typeclasses.
+
+The fix is one `shallow` call. The lesson is the same as entry 26, which is now
+the third of its kind: **a lookup or a match that quietly produces nothing is
+indistinguishable from one that succeeded**, because `Unknown` absorbs the
+difference. Anywhere the checker pattern-matches a type's shape, it has to
+follow the variables first.

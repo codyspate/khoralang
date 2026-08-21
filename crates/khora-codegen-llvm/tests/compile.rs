@@ -1574,3 +1574,51 @@ fn main() -> Int { if \"a\" < \"b\" { 0 } else { 1 } }
         "{found:?}"
     );
 }
+
+/// A closure calling itself, compiled and run.
+///
+/// The self-reference is *not* a counted reference: a lifted lambda already
+/// receives its own closure object as parameter 0, so recursion goes through
+/// that. Counting it would make the closure hold itself, which is a cycle, and
+/// reference counting does not collect cycles. The trailing 0 is the live
+/// count — it is the whole point of the design.
+#[test]
+fn a_closure_can_call_itself() {
+    let ran = run(
+        "recursive_closure",
+        "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export type List = | Nil | Cons(head: Int, tail: List);
+
+fn sums() -> Int {
+  let countdown = fn n => if n == 0 { 0 } else { n + countdown(n - 1) };
+  countdown(5)
+}
+
+/// Recursion over a heap structure, so the reference counting is load-bearing.
+fn boxed() -> Int {
+  let total = fn l => match l { List::Nil => 0, List::Cons(h, t) => h + total(t) };
+  total(List::Cons(10, List::Cons(20, List::Cons(12, List::Nil))))
+}
+
+/// Recursive *and* capturing: the capture is counted, the self-reference is not.
+fn captures() -> Int {
+  let bump = 100;
+  let go = fn n => if n == 0 { bump } else { go(n - 1) };
+  go(3)
+}
+
+fn main() -> Int {
+  khora_print_int(sums());
+  khora_print_int(boxed());
+  khora_print_int(captures());
+  khora_print_int(khora_live_count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "15\n42\n100\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}
