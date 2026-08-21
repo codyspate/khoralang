@@ -21,6 +21,8 @@
 //! Associated items report [`Resolution::Unsupported`] rather than being
 //! guessed at, which keeps the rule intact for when they arrive.
 
+pub mod body;
+
 use khora_db::{Db, SourceFile};
 use khora_syntax::ast::{self, AstNode};
 use text_size::TextRange;

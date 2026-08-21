@@ -1,0 +1,772 @@
+//! Function bodies, lowered.
+//!
+//! The second half of roadmap phase 2.1. Item collection answered "what exists
+//! and where"; this answers "what does it do".
+//!
+//! # Why arenas
+//!
+//! Expressions and patterns live in side arenas indexed by [`ExprId`] and
+//! [`PatId`] rather than in a tree of boxes. Every later pass — type inference,
+//! Perceus, codegen — needs to attach its own information to each node, and an
+//! index is a key those passes can use without touching this crate's types or
+//! holding a borrow of the syntax tree.
+//!
+//! # Where the decision tree went
+//!
+//! `docs/roadmap.md` 2.1 says `match` is compiled to a decision tree here. It
+//! is not, deliberately. Exhaustiveness and reachability (2.2) are computed by
+//! Maranget's usefulness algorithm over a *pattern matrix*, and the decision
+//! tree is compiled from that same matrix. Building the tree first would mean
+//! reconstructing the matrix to check it, so HIR keeps the arms as written and
+//! the tree is compiled later, nearer codegen. This is what rustc does, and it
+//! is the reason the two consumers do not fight over one shape.
+//!
+//! # Scope
+//!
+//! The phase 2 subset: no effects, rows, generics, closures or records. Syntax
+//! outside it lowers to [`Expr::Unsupported`] with a diagnostic rather than
+//! being silently dropped, so a later phase can find every site by grepping for
+//! one variant.
+
+use khora_db::{Db, SourceFile};
+use khora_syntax::ast::{self, AstNode};
+use text_size::TextRange;
+
+use crate::{item_map, HirError};
+
+macro_rules! arena_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct $name(u32);
+
+        impl $name {
+            pub fn index(self) -> usize {
+                self.0 as usize
+            }
+        }
+    };
+}
+
+arena_id!(ExprId);
+arena_id!(PatId);
+arena_id!(LocalId);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Literal {
+    Int(String),
+    Float(String),
+    Str(String),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    And,
+    Or,
+}
+
+impl BinOp {
+    fn from_token(text: &str) -> Option<BinOp> {
+        let op = match text {
+            "+" => BinOp::Add,
+            "-" => BinOp::Sub,
+            "*" => BinOp::Mul,
+            "/" => BinOp::Div,
+            "%" => BinOp::Rem,
+            "==" => BinOp::Eq,
+            "!=" => BinOp::Ne,
+            "<" => BinOp::Lt,
+            ">" => BinOp::Gt,
+            "<=" => BinOp::Le,
+            ">=" => BinOp::Ge,
+            "&&" => BinOp::And,
+            "||" => BinOp::Or,
+            _ => return None,
+        };
+        Some(op)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnOp {
+    Neg,
+    Not,
+}
+
+/// A local binding: a parameter, a `let`, or a name bound by a pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Local {
+    pub name: String,
+    pub is_mut: bool,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stmt {
+    Let { pat: PatId, init: Option<ExprId> },
+    Expr(ExprId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArm {
+    pub pat: PatId,
+    pub guard: Option<ExprId>,
+    pub body: ExprId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expr {
+    /// A hole left by a parse error. Type inference treats it as compatible
+    /// with anything, so one syntax error does not cascade into ten type
+    /// errors.
+    Missing,
+    /// Recognised syntax outside the phase 2 subset.
+    Unsupported(&'static str),
+    Literal(Literal),
+    /// A resolved local binding.
+    Local(LocalId),
+    /// A `::` path resolved against the module graph.
+    Path(crate::Resolution),
+    /// A name that did not resolve. The error is already reported; this keeps
+    /// the tree shaped so later passes still see the surrounding structure.
+    Unresolved(String),
+    Field {
+        base: ExprId,
+        name: String,
+    },
+    Call {
+        callee: ExprId,
+        args: Vec<ExprId>,
+    },
+    Binary {
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
+    Unary {
+        op: UnOp,
+        operand: ExprId,
+    },
+    Assign {
+        target: ExprId,
+        value: ExprId,
+    },
+    If {
+        condition: ExprId,
+        then_branch: ExprId,
+        else_branch: Option<ExprId>,
+    },
+    Match {
+        scrutinee: ExprId,
+        arms: Vec<MatchArm>,
+    },
+    Block {
+        stmts: Vec<Stmt>,
+        tail: Option<ExprId>,
+    },
+    While {
+        condition: ExprId,
+        body: ExprId,
+    },
+    Loop {
+        body: ExprId,
+    },
+    Break(Option<ExprId>),
+    Continue,
+    Return(Option<ExprId>),
+    List(Vec<ExprId>),
+    Tuple(Vec<ExprId>),
+    Unit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pat {
+    Missing,
+    Wildcard,
+    Bind(LocalId),
+    Literal(Literal),
+    /// `Type::Case` with no payload.
+    Path(crate::Resolution),
+    /// `Type::Case(a, b)`.
+    TupleStruct {
+        resolution: crate::Resolution,
+        fields: Vec<PatId>,
+    },
+    Tuple(Vec<PatId>),
+}
+
+/// One lowered function body.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Body {
+    exprs: Vec<Expr>,
+    pats: Vec<Pat>,
+    locals: Vec<Local>,
+    /// Source range of each expression, for diagnostics.
+    expr_ranges: Vec<TextRange>,
+    pub params: Vec<PatId>,
+    pub root: Option<ExprId>,
+    pub errors: Vec<HirError>,
+}
+
+impl Body {
+    pub fn expr(&self, id: ExprId) -> &Expr {
+        &self.exprs[id.index()]
+    }
+
+    pub fn pat(&self, id: PatId) -> &Pat {
+        &self.pats[id.index()]
+    }
+
+    pub fn local(&self, id: LocalId) -> &Local {
+        &self.locals[id.index()]
+    }
+
+    pub fn range(&self, id: ExprId) -> TextRange {
+        self.expr_ranges[id.index()]
+    }
+
+    pub fn exprs(&self) -> impl Iterator<Item = (ExprId, &Expr)> {
+        self.exprs.iter().enumerate().map(|(i, e)| (ExprId(i as u32), e))
+    }
+
+    pub fn locals(&self) -> impl Iterator<Item = (LocalId, &Local)> {
+        self.locals.iter().enumerate().map(|(i, l)| (LocalId(i as u32), l))
+    }
+
+    pub fn expr_count(&self) -> usize {
+        self.exprs.len()
+    }
+}
+
+/// Lowers every function body in a file.
+///
+/// Keyed by file rather than by function so that the query reads one file and
+/// no other, the same property `item_map` has.
+#[salsa::tracked(returns(ref))]
+pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
+    let parse = khora_db::parse(db, file);
+    let map = item_map(db, file);
+
+    parse
+        .source_file()
+        .decls()
+        .filter_map(|decl| match decl {
+            ast::Decl::Fn(f) => {
+                let name = f.name()?.ident()?;
+                let body = f.body()?;
+                Some((name, lower_function(map, &f, &body)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn lower_function(map: &crate::ItemMap, decl: &ast::FnDecl, block: &ast::Block) -> Body {
+    let mut ctx = Ctx { body: Body::default(), scopes: vec![Vec::new()], map, loop_depth: 0 };
+
+    if let Some(params) = decl.params() {
+        for param in params.params() {
+            let range = param.syntax().text_range();
+            let pat = match param.name().and_then(|n| n.ident()) {
+                Some(name) => {
+                    let local = ctx.declare(name, false, range);
+                    ctx.add_pat(Pat::Bind(local))
+                }
+                None => ctx.add_pat(Pat::Wildcard),
+            };
+            ctx.body.params.push(pat);
+        }
+    }
+
+    let root = ctx.lower_block(block);
+    ctx.body.root = Some(root);
+    ctx.body
+}
+
+struct Ctx<'a> {
+    body: Body,
+    /// A stack of lexical scopes; each holds the names it introduced.
+    scopes: Vec<Vec<(String, LocalId)>>,
+    map: &'a crate::ItemMap,
+    loop_depth: u32,
+}
+
+impl<'a> Ctx<'a> {
+    fn add_expr(&mut self, expr: Expr, range: TextRange) -> ExprId {
+        self.body.exprs.push(expr);
+        self.body.expr_ranges.push(range);
+        ExprId((self.body.exprs.len() - 1) as u32)
+    }
+
+    fn add_pat(&mut self, pat: Pat) -> PatId {
+        self.body.pats.push(pat);
+        PatId((self.body.pats.len() - 1) as u32)
+    }
+
+    fn declare(&mut self, name: String, is_mut: bool, range: TextRange) -> LocalId {
+        self.body.locals.push(Local { name: name.clone(), is_mut, range });
+        let id = LocalId((self.body.locals.len() - 1) as u32);
+        self.scopes.last_mut().expect("a scope is always open").push((name, id));
+        id
+    }
+
+    /// Innermost binding wins, which is what shadowing means.
+    fn lookup(&self, name: &str) -> Option<LocalId> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.iter().rev().find(|(n, _)| n == name).map(|(_, id)| *id))
+    }
+
+    fn error(&mut self, message: impl Into<String>, range: TextRange) {
+        self.body.errors.push(HirError { message: message.into(), range });
+    }
+
+    fn lower_block(&mut self, block: &ast::Block) -> ExprId {
+        self.scopes.push(Vec::new());
+        let mut stmts = Vec::new();
+
+        for stmt in block.stmts() {
+            match stmt {
+                ast::Stmt::Let(let_decl) => {
+                    // The initialiser is lowered before the binding is
+                    // declared, so `let x = x;` refers to the outer `x`.
+                    let init = let_decl.initializer().map(|e| self.lower_expr(&e));
+                    let pat = match let_decl.pat() {
+                        Some(p) => self.lower_pat(&p, let_decl.is_mut()),
+                        None => self.add_pat(Pat::Missing),
+                    };
+                    stmts.push(Stmt::Let { pat, init });
+                }
+                ast::Stmt::Expr(expr_stmt) => {
+                    if let Some(e) = expr_stmt.expr() {
+                        let id = self.lower_expr(&e);
+                        stmts.push(Stmt::Expr(id));
+                    }
+                }
+            }
+        }
+
+        let tail = block.tail_expr().map(|e| self.lower_expr(&e));
+        self.scopes.pop();
+        self.add_expr(Expr::Block { stmts, tail }, block.syntax().text_range())
+    }
+
+    fn lower_pat(&mut self, pat: &ast::Pat, is_mut: bool) -> PatId {
+        let range = pat.syntax().text_range();
+        match pat {
+            ast::Pat::Wildcard(_) => self.add_pat(Pat::Wildcard),
+            ast::Pat::Ident(p) => match p.name().and_then(|n| n.ident()) {
+                Some(name) => {
+                    let local = self.declare(name, is_mut, range);
+                    self.add_pat(Pat::Bind(local))
+                }
+                None => self.add_pat(Pat::Missing),
+            },
+            ast::Pat::Literal(p) => match literal_of(p.syntax()) {
+                Some(lit) => self.add_pat(Pat::Literal(lit)),
+                None => self.add_pat(Pat::Missing),
+            },
+            ast::Pat::Path(p) => {
+                let resolution = self.resolve_pattern_path(p.path().as_ref(), range);
+                self.add_pat(Pat::Path(resolution))
+            }
+            ast::Pat::TupleStruct(p) => {
+                let resolution = self.resolve_pattern_path(p.path().as_ref(), range);
+                let fields = p.fields().map(|f| self.lower_pat(&f, is_mut)).collect();
+                self.add_pat(Pat::TupleStruct { resolution, fields })
+            }
+            ast::Pat::Tuple(p) => {
+                let fields = p.fields().map(|f| self.lower_pat(&f, is_mut)).collect();
+                self.add_pat(Pat::Tuple(fields))
+            }
+            ast::Pat::Record(_) => {
+                self.error("record patterns are not supported yet", range);
+                self.add_pat(Pat::Missing)
+            }
+        }
+    }
+
+    /// A pattern path names a constructor. Only same-file constructors resolve
+    /// in phase 2, which is enough for the vertical slice.
+    fn resolve_pattern_path(
+        &mut self,
+        path: Option<&ast::Path>,
+        range: TextRange,
+    ) -> crate::Resolution {
+        let segments: Vec<String> = path
+            .map(|p| p.segments().filter_map(|s| s.ident()).collect())
+            .unwrap_or_default();
+
+        if let [type_name, case] = segments.as_slice() {
+            if let Some(v) = self.map.variants_of(type_name).find(|v| &v.name == case) {
+                return crate::Resolution::Variant {
+                    module: self.map.module.clone().unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                    type_name: v.type_name.clone(),
+                    name: v.name.clone(),
+                };
+            }
+        }
+
+        self.error(format!("cannot find constructor `{}`", segments.join("::")), range);
+        crate::Resolution::Unsupported("unresolved constructor")
+    }
+
+    fn lower_expr(&mut self, expr: &ast::Expr) -> ExprId {
+        let range = expr.syntax().text_range();
+        match expr {
+            ast::Expr::Literal(e) => match literal_of(e.syntax()) {
+                Some(lit) => self.add_expr(Expr::Literal(lit), range),
+                None => self.add_expr(Expr::Missing, range),
+            },
+            ast::Expr::Path(e) => self.lower_path_expr(e, range),
+            ast::Expr::Block(b) => self.lower_block(b),
+            ast::Expr::Paren(e) => match e.syntax().children().find_map(ast::Expr::cast) {
+                Some(inner) => self.lower_expr(&inner),
+                None => self.add_expr(Expr::Missing, range),
+            },
+            ast::Expr::Unit(_) => self.add_expr(Expr::Unit, range),
+            ast::Expr::Field(e) => {
+                let base = match e.base() {
+                    Some(b) => self.lower_expr(&b),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                let name = e.field().and_then(|f| f.ident()).unwrap_or_default();
+                self.add_expr(Expr::Field { base, name }, range)
+            }
+            ast::Expr::Call(e) => {
+                let callee = match e.callee() {
+                    Some(c) => self.lower_expr(&c),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                let args = e
+                    .args()
+                    .map(|list| list.args().map(|a| self.lower_expr(&a)).collect())
+                    .unwrap_or_default();
+                self.add_expr(Expr::Call { callee, args }, range)
+            }
+            ast::Expr::Pipe(e) => self.lower_pipe(e, range),
+            ast::Expr::Bin(e) => self.lower_binary(e, range),
+            ast::Expr::Assign(e) => {
+                let target = match e.target() {
+                    Some(t) => self.lower_expr(&t),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.check_assignable(target, range);
+                let value = match e.value() {
+                    Some(v) => self.lower_expr(&v),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.add_expr(Expr::Assign { target, value }, range)
+            }
+            ast::Expr::Prefix(e) => {
+                let op = match e.syntax().first_token().map(|t| t.text().to_string()).as_deref() {
+                    Some("-") => UnOp::Neg,
+                    _ => UnOp::Not,
+                };
+                let operand = match e.operand() {
+                    Some(o) => self.lower_expr(&o),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.add_expr(Expr::Unary { op, operand }, range)
+            }
+            ast::Expr::If(e) => {
+                let condition = match e.condition() {
+                    Some(c) => self.lower_expr(&c),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                let then_branch = match e.then_branch() {
+                    Some(b) => self.lower_block(&b),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                let else_branch = e.else_branch().map(|b| self.lower_expr(&b));
+                self.add_expr(Expr::If { condition, then_branch, else_branch }, range)
+            }
+            ast::Expr::Match(e) => self.lower_match(e, range),
+            ast::Expr::While(e) => {
+                let condition = match e.condition() {
+                    Some(c) => self.lower_expr(&c),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.loop_depth += 1;
+                let body = match e.body() {
+                    Some(b) => self.lower_block(&b),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.loop_depth -= 1;
+                self.add_expr(Expr::While { condition, body }, range)
+            }
+            ast::Expr::Loop(e) => {
+                self.loop_depth += 1;
+                let body = match e.body() {
+                    Some(b) => self.lower_block(&b),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.loop_depth -= 1;
+                self.add_expr(Expr::Loop { body }, range)
+            }
+            ast::Expr::Break(e) => {
+                if self.loop_depth == 0 {
+                    self.error("`break` outside a loop", range);
+                }
+                let value = e.value().map(|v| self.lower_expr(&v));
+                self.add_expr(Expr::Break(value), range)
+            }
+            ast::Expr::Continue(_) => {
+                if self.loop_depth == 0 {
+                    self.error("`continue` outside a loop", range);
+                }
+                self.add_expr(Expr::Continue, range)
+            }
+            ast::Expr::Return(e) => {
+                let value = e.value().map(|v| self.lower_expr(&v));
+                self.add_expr(Expr::Return(value), range)
+            }
+            ast::Expr::List(e) => {
+                let items = e.syntax().children().filter_map(ast::Expr::cast).collect::<Vec<_>>();
+                let ids = items.iter().map(|i| self.lower_expr(i)).collect();
+                self.add_expr(Expr::List(ids), range)
+            }
+            ast::Expr::Tuple(e) => {
+                let items = e.syntax().children().filter_map(ast::Expr::cast).collect::<Vec<_>>();
+                let ids = items.iter().map(|i| self.lower_expr(i)).collect();
+                self.add_expr(Expr::Tuple(ids), range)
+            }
+            ast::Expr::Placeholder(_) => {
+                self.error("`_` is only meaningful in a pipeline stage", range);
+                self.add_expr(Expr::Missing, range)
+            }
+            // Outside the phase 2 subset. Named individually so a later phase
+            // can find every site.
+            ast::Expr::Lambda(_) => self.unsupported("closures", range),
+            ast::Expr::Record(_) => self.unsupported("record literals", range),
+            ast::Expr::Raise(_) => self.unsupported("`raise`", range),
+            ast::Expr::Try(_) => self.unsupported("`!`", range),
+            ast::Expr::Handler(_) => self.unsupported("handlers", range),
+            ast::Expr::Catch(_) => self.unsupported("`catch`", range),
+            ast::Expr::With(_) | ast::Expr::WithBlock(_) => {
+                self.unsupported("handler installation", range)
+            }
+        }
+    }
+
+    fn unsupported(&mut self, what: &'static str, range: TextRange) -> ExprId {
+        self.error(format!("{what} are not supported yet"), range);
+        self.add_expr(Expr::Unsupported(what), range)
+    }
+
+    fn lower_path_expr(&mut self, e: &ast::PathExpr, range: TextRange) -> ExprId {
+        let segments: Vec<String> = e
+            .syntax()
+            .children()
+            .find_map(ast::Path::cast)
+            .map(|p| p.segments().filter_map(|s| s.ident()).collect())
+            .unwrap_or_default();
+
+        // A bare name is a local first — shadowing is what people expect.
+        if let [only] = segments.as_slice() {
+            if let Some(local) = self.lookup(only) {
+                return self.add_expr(Expr::Local(local), range);
+            }
+            if let Some(item) = self.map.item(only) {
+                return self.add_expr(
+                    Expr::Path(crate::Resolution::Item {
+                        module: self
+                            .map
+                            .module
+                            .clone()
+                            .unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                        name: item.name.clone(),
+                        kind: item.kind,
+                    }),
+                    range,
+                );
+            }
+            self.error(format!("cannot find `{only}` in this scope"), range);
+            return self.add_expr(Expr::Unresolved(only.clone()), range);
+        }
+
+        // A `::` path names a constructor or an item in another module.
+        if let [type_name, case] = segments.as_slice() {
+            if let Some(v) = self.map.variants_of(type_name).find(|v| &v.name == case) {
+                return self.add_expr(
+                    Expr::Path(crate::Resolution::Variant {
+                        module: self
+                            .map
+                            .module
+                            .clone()
+                            .unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                        type_name: v.type_name.clone(),
+                        name: v.name.clone(),
+                    }),
+                    range,
+                );
+            }
+        }
+
+        // Cross-module resolution needs the module graph, which is a source
+        // root away; phase 2 programs are single-module.
+        self.error(
+            format!("cannot resolve `{}` in this scope", segments.join("::")),
+            range,
+        );
+        self.add_expr(Expr::Unresolved(segments.join("::")), range)
+    }
+
+    fn check_assignable(&mut self, target: ExprId, range: TextRange) {
+        match self.body.exprs[target.index()] {
+            Expr::Local(local) => {
+                let local = &self.body.locals[local.index()];
+                if !local.is_mut {
+                    let name = local.name.clone();
+                    self.error(
+                        format!("cannot assign to `{name}`, which is not declared `mut`"),
+                        range,
+                    );
+                }
+            }
+            Expr::Field { .. } => {}
+            Expr::Missing => {}
+            _ => self.error("this expression cannot be assigned to", range),
+        }
+    }
+
+    fn lower_binary(&mut self, e: &ast::BinExpr, range: TextRange) -> ExprId {
+        let op = e.op().and_then(|t| BinOp::from_token(t.text()));
+        let lhs = match e.lhs() {
+            Some(l) => self.lower_expr(&l),
+            None => self.add_expr(Expr::Missing, range),
+        };
+        let rhs = match e.rhs() {
+            Some(r) => self.lower_expr(&r),
+            None => self.add_expr(Expr::Missing, range),
+        };
+        match op {
+            Some(op) => self.add_expr(Expr::Binary { op, lhs, rhs }, range),
+            None => self.add_expr(Expr::Missing, range),
+        }
+    }
+
+    /// `x |> f(a)` becomes `f(x, a)`; `x |> f(_, a)` becomes `f(x, a)` with the
+    /// placeholder taking the piped value instead of the leading position.
+    ///
+    /// The pipeline exists only in the syntax; nothing downstream needs to know
+    /// a call was written this way.
+    fn lower_pipe(&mut self, e: &ast::PipeExpr, range: TextRange) -> ExprId {
+        let piped = match e.lhs() {
+            Some(l) => self.lower_expr(&l),
+            None => self.add_expr(Expr::Missing, range),
+        };
+
+        let Some(rhs) = e.rhs() else {
+            return self.add_expr(Expr::Missing, range);
+        };
+
+        match &rhs {
+            ast::Expr::Call(call) => {
+                let callee = match call.callee() {
+                    Some(c) => self.lower_expr(&c),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+
+                let written: Vec<ast::Expr> =
+                    call.args().map(|l| l.args().collect()).unwrap_or_default();
+                let placeholders: Vec<usize> = written
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| matches!(a, ast::Expr::Placeholder(_)))
+                    .map(|(i, _)| i)
+                    .collect();
+
+                if placeholders.len() > 1 {
+                    self.error(
+                        "a pipeline stage may use `_` at most once".to_string(),
+                        rhs.syntax().text_range(),
+                    );
+                }
+
+                let mut args = Vec::with_capacity(written.len() + 1);
+                if placeholders.is_empty() {
+                    args.push(piped);
+                    for a in &written {
+                        let id = self.lower_expr(a);
+                        args.push(id);
+                    }
+                } else {
+                    let first = placeholders[0];
+                    for (i, a) in written.iter().enumerate() {
+                        if i == first {
+                            args.push(piped);
+                        } else {
+                            let id = self.lower_expr(a);
+                            args.push(id);
+                        }
+                    }
+                }
+                self.add_expr(Expr::Call { callee, args }, range)
+            }
+            // `x |> f` is `f(x)`.
+            _ => {
+                let callee = self.lower_expr(&rhs);
+                self.add_expr(Expr::Call { callee, args: vec![piped] }, range)
+            }
+        }
+    }
+
+    fn lower_match(&mut self, e: &ast::MatchExpr, range: TextRange) -> ExprId {
+        let scrutinee = match e.scrutinee() {
+            Some(s) => self.lower_expr(&s),
+            None => self.add_expr(Expr::Missing, range),
+        };
+
+        let arms = e
+            .arms()
+            .map(|arm| {
+                // Each arm's bindings are scoped to that arm.
+                self.scopes.push(Vec::new());
+                let pat = match arm.pat() {
+                    Some(p) => self.lower_pat(&p, false),
+                    None => self.add_pat(Pat::Missing),
+                };
+                let guard = arm.guard().and_then(|g| g.condition()).map(|c| self.lower_expr(&c));
+                let body = match arm.body() {
+                    Some(b) => self.lower_expr(&b),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.scopes.pop();
+                MatchArm { pat, guard, body }
+            })
+            .collect();
+
+        self.add_expr(Expr::Match { scrutinee, arms }, range)
+    }
+}
+
+fn literal_of(node: &khora_syntax::SyntaxNode) -> Option<Literal> {
+    use khora_syntax::SyntaxKind::*;
+    let token = node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind().is_literal())?;
+    let text = token.text().to_string();
+    let lit = match token.kind() {
+        INT_LIT => Literal::Int(text),
+        FLOAT_LIT => Literal::Float(text),
+        STRING_LIT => Literal::Str(text.trim_matches('"').to_string()),
+        TRUE_KW => Literal::Bool(true),
+        FALSE_KW => Literal::Bool(false),
+        _ => return None,
+    };
+    Some(lit)
+}

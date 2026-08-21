@@ -197,9 +197,17 @@ wildcard patterns plus guards; calls; `|>` and `_`.
 **Out:** effects, rows, generics, typeclasses, closures, records, cross-package
 imports.
 
-- **2.1 `khora-hir`.** Module graph, name resolution (per D2), pipe and
-  placeholder desugaring, `match` to a decision tree, body lowering with stable
-  IDs. All as salsa queries.
+- **2.1 `khora-hir` — done.** Module graph, item collection, name resolution
+  (per D2), body lowering with arena-allocated expressions and patterns, pipe
+  and placeholder desugaring, lexical scopes. All salsa queries, each reading
+  one file.
+
+  `match` is *not* compiled to a decision tree here, contrary to what this item
+  originally said. Exhaustiveness and reachability (2.2) are computed by
+  Maranget's usefulness algorithm over a pattern matrix, and the decision tree
+  is compiled from that same matrix — building the tree first would mean
+  reconstructing the matrix in order to check it. HIR keeps the arms as
+  written and the tree is compiled nearer codegen, which is what rustc does.
 - **2.2 `khora-types`.** Monomorphic checking plus exhaustiveness and
   reachability over the decision tree.
 - **2.3 `khora-perceus`.** Uniform boxed representation, `dup`/`drop` at scope
