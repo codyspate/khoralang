@@ -299,11 +299,15 @@ but nothing looks the same on sight.
 - **Error widening.** When a function raising `DbError` is called from one
   raising `DbError + ModelError`, the row subsumes it. Whether user-defined
   conversions may also fire at `!` (as Rust's `?` does via `From`) is undecided.
-- **`raises` versus `with`.** They are separate clauses syntactically. Whether
-  errors are literally an effect in the same row underneath, or a distinct row
-  with its own handling rules, is settled with D1.
+- **`raises` versus `with` — settled.** The same resolution mechanism, both
+  rows settled at compile time, and different control: a capability is called
+  and returns, a failure leaves and does not. They compile to different things,
+  which is why keeping them separate in the syntax was right.
+  `docs/design/effect-runtime.md` §8.
 - **Non-local control flow through handlers.** `break`, `continue` and `return`
   crossing a handler boundary must unwind correctly and run finalizers. See
   `docs/design/imperative.md`.
-- **Continuation capture.** One-shot versus multi-shot, and the interaction with
-  Perceus reference counting, is D1 and remains open.
+- **Continuation capture — settled.** Neither, for now: no syntax names a
+  continuation, so every handler is tail-resumptive and `raise` is the only
+  non-local exit. Adding a form that names one later is a widening rather than
+  a break, and would be one-shot. `docs/design/effect-runtime.md` §3 and §4.

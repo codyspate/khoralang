@@ -57,14 +57,22 @@ before the phase that depends on it starts.
 
 | # | Question | Blocks |
 | --- | --- | --- |
-| D1 | **How do handlers execute natively?** One-shot versus multi-shot continuations; how handler frames interact with Perceus reference counting and with fibers and interruption. Koka is direct prior art for the whole combination, which narrows this considerably from where it started. Still the largest unknown. | 4.3 |
 | D3 | **`Schema::Spec` projects an associated type off a type *variable*.** With A4 this is tractable — associated types on typeclasses — but the coherence rules still need deciding. | 4.2 |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
 | D8 | **The Rust interop boundary.** How Rust's ownership and traits map onto Khora's reference counting and rows; whether we bind at the C ABI or generate richer shims. | 7 |
-| D10 | **Non-atomic reference counts versus threads.** `khora-rt` counts non-atomically, documented there as deliberate; A5 promises fibers running across cores. Both are in the repository and they cannot both hold. Options are a `Send`-like sharing discipline, atomic counts everywhere, or two kinds of allocation. Constrains work happening *now*: every `dup` and `drop` the backend emits assumes the single-threaded answer. `docs/design/memory.md` §5. | 5 |
+| D10 | **Non-atomic reference counts versus threads.** `khora-rt` counts non-atomically; A5 promises fibers running across cores. Not a blocker — code generation never touches a refcount directly, so atomicity is a change inside the runtime. The recommendation is atomic by default with non-atomic where an object provably does not escape its fiber, and no `Rc`/`Arc` split. `docs/design/effect-runtime.md` §9. | 5 |
 | D11 | **What happens to reference cycles.** None can be built today — the heap graph is provably a DAG — and mutable fields end that. A tracing cycle collector is ruled out by non-negotiable 5, which leaves "a cycle leaks, and a weak reference breaks it". Decide alongside records rather than in the abstract. `docs/design/memory.md` §2 and §4. | records |
 | D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Nothing in this roadmap owns this today, which is the failure mode errata entry 20 names. | 8.x |
 **Closed:**
+
+- **D1** (handler execution) is decided in `docs/design/effect-runtime.md`. The
+  deciding argument is reference counting: multi-shot capture must *copy*
+  frames, so every reference in them needs a `dup`, so the runtime needs to
+  know which stack slots hold counted pointers — a stack map, which is
+  precise-GC machinery arriving through the back door of a language whose fifth
+  non-negotiable is that it has no garbage collector. One-shot *moves* frames
+  and needs none of it. Khora needs neither yet, because no syntax names a
+  continuation.
 
 - **D6** (typeclasses) is decided and implemented: Rust's `trait`/`impl`
   spelling, Rust's coherence rules, static dispatch through monomorphization,
@@ -326,8 +334,13 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
 
 ## Phase 4 — Effect rows and handlers
 
-- **4.1 Decide D1** → `docs/design/effect-runtime.md`: one-shot versus
-  multi-shot continuations, and how handler frames interact with Perceus.
+- **4.1 Decide D1 — done**, in `docs/design/effect-runtime.md`. The framing
+  turned out not to fit: the decided syntax has no `resume`, so every handler
+  is tail-resumptive by construction and nothing can name a continuation.
+  Effects therefore split into three mechanisms rather than one runtime —
+  capabilities are evidence passed as parameters, failures are tagged returns
+  checked at `!`, and suspension belongs to fibers in phase 5. None of it needs
+  a stack segment, an unwinder, or a stack map.
 - **4.2 Scoped row polymorphism.** `Type::Row(Fields, TailVar)`, unification
   with field reordering and tail extension, row subtraction for handler
   installation, and the empty-row obligation on the entrypoint. Settle D3.

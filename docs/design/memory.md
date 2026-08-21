@@ -136,9 +136,16 @@ The resolution is not obvious and is not made here. The options, honestly:
 - **Both, chosen per type or per allocation.** What Rust does with `Rc` versus
   `Arc`. Two types where users expected one, and every library must choose.
 
-Logged as **D10**, blocking phase 5. It is listed here rather than only in the
-roadmap because it constrains code being written *now*: every `dup` and `drop`
-the backend emits today assumes the single-threaded answer.
+Logged as **D10**. It was recorded here as constraining code being written now,
+on the grounds that every `dup` and `drop` already emitted assumes the
+single-threaded answer. That was wrong, and `docs/design/effect-runtime.md` §9
+corrects it: code generation never touches a refcount directly — every `dup`
+and `drop` is a call into `khora-rt` — so atomicity is a change inside the
+runtime, invisible to everything already emitted.
+
+The recommendation there is atomic counts once fibers can share values, with
+non-atomic where an object provably does not escape its fiber, and no `Rc`
+versus `Arc` split for users to make.
 
 ## 6. Closures and handlers — open
 
