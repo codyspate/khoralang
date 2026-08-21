@@ -100,6 +100,7 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
     let types = khora_types::type_map(db, file);
     let bodies = khora_hir::body::bodies(db, file);
     let plans = khora_perceus::rc_plans(db, file);
+    let body_types = khora_types::body_types(db, file);
     let items = khora_hir::item_map(db, file);
     let name = items.module.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "khora".into());
 
@@ -114,7 +115,12 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
     }
     for (name, body) in bodies {
         let plan = plans.iter().find(|(n, _)| n == name).map(|(_, p)| p);
-        crate::lower::emit_function(&mut backend, name, body, plan);
+        // The types come from the checker that already worked them out, rather
+        // than from a second walk that would have to mirror its rules exactly.
+        let Some(types) = body_types.iter().find(|(n, _)| n == name).map(|(_, t)| t) else {
+            continue;
+        };
+        crate::lower::emit_function(&mut backend, name, body, plan, types);
     }
 
     backend.emit_c_main();

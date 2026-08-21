@@ -37,12 +37,11 @@ use khora_hir::body::{
     BinOp, Body, Expr, ExprId, Literal, LocalId, MatchArm, Pat, PatId, Stmt, UnOp,
 };
 use khora_perceus::{is_boxed, RcPlan};
-use khora_types::{Type, VariantInfo};
+use khora_types::{BodyTypes, Type, VariantInfo};
 use text_size::TextRange;
 
 use crate::backend::Backend;
 use crate::runtime::{self, FIELD_WORD, STRING_BYTES_OFFSET, STRING_LEN_FIELD, STRING_TAG};
-use crate::typing::BodyTypes;
 
 /// The result of lowering an expression: `None` when control diverged.
 type Flow<'ctx> = Option<BasicValueEnum<'ctx>>;
@@ -53,10 +52,10 @@ pub(crate) fn emit_function<'ctx>(
     name: &str,
     body: &Body,
     plan: Option<&RcPlan>,
+    types: &BodyTypes,
 ) {
     let Some(function) = be.definition(name) else { return };
     let Some(signature) = be.types.signatures.get(name).cloned() else { return };
-    let types = BodyTypes::infer(&be.types, body, &signature);
     let empty = RcPlan::default();
 
     let entry = be.ctx.append_basic_block(function, "entry");
@@ -113,7 +112,7 @@ struct Lower<'a, 'ctx> {
     be: &'a mut Backend<'ctx>,
     body: &'a Body,
     plan: &'a RcPlan,
-    types: BodyTypes,
+    types: &'a BodyTypes,
     function: FunctionValue<'ctx>,
     ret: Type,
     slots: HashMap<LocalId, PointerValue<'ctx>>,

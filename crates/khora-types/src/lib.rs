@@ -169,17 +169,47 @@ fn type_of_syntax(ty: Option<&ast::Type>) -> Type {
     }
 }
 
-/// Type errors for one file, and nothing else.
+/// Every type the checker worked out for one body.
 ///
-/// Kept separate from lowering errors so "does this type-check" stays a
-/// question with its own answer; [`diagnostics`] is what a driver wants.
-#[salsa::tracked(returns(ref))]
-pub fn check_file(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
-    let types = type_map(db, file);
-    let bodies = khora_hir::body::bodies(db, file);
+/// The checker computes these on its way to a verdict, and code generation
+/// cannot work without them. Publishing them here is what stops a second
+/// implementation of the same rules existing downstream and drifting.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BodyTypes {
+    exprs: HashMap<ExprId, Type>,
+    locals: HashMap<LocalId, Type>,
+}
 
-    let mut errors = Vec::new();
-    for (name, body) in bodies {
+impl BodyTypes {
+    /// The type of an expression. `Unknown` for anything the checker could not
+    /// determine, which is also what an id it never visited reports.
+    pub fn of(&self, id: ExprId) -> &Type {
+        self.exprs.get(&id).unwrap_or(&Type::Unknown)
+    }
+
+    pub fn local(&self, id: LocalId) -> &Type {
+        self.locals.get(&id).unwrap_or(&Type::Unknown)
+    }
+}
+
+/// The result of checking one file: the verdict, and the working.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Checked {
+    pub errors: Vec<HirError>,
+    /// Per function, in declaration order.
+    pub bodies: Vec<(String, BodyTypes)>,
+}
+
+/// Checks a file, keeping both the diagnostics and the types.
+///
+/// One query rather than two so the work is done once; the accessors below are
+/// what callers normally want.
+#[salsa::tracked(returns(ref))]
+pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
+    let types = type_map(db, file);
+    let mut out = Checked::default();
+
+    for (name, body) in khora_hir::body::bodies(db, file) {
         let signature = types.signatures.get(name).cloned().unwrap_or(Signature {
             params: Vec::new(),
             ret: Type::Unknown,
@@ -189,12 +219,30 @@ pub fn check_file(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
             body,
             signature: &signature,
             locals: HashMap::new(),
+            exprs: HashMap::new(),
             errors: Vec::new(),
         };
         checker.check_function();
-        errors.extend(checker.errors);
+        out.errors.extend(checker.errors);
+        out.bodies.push((
+            name.clone(),
+            BodyTypes { exprs: checker.exprs, locals: checker.locals },
+        ));
     }
-    errors
+    out
+}
+
+/// The type of every expression and binding, per function.
+pub fn body_types(db: &dyn Db, file: SourceFile) -> &Vec<(String, BodyTypes)> {
+    &checked(db, file).bodies
+}
+
+/// Type errors for one file, and nothing else.
+///
+/// Kept separate from lowering errors so "does this type-check" stays a
+/// question with its own answer; [`diagnostics`] is what a driver wants.
+pub fn check_file(db: &dyn Db, file: SourceFile) -> &Vec<HirError> {
+    &checked(db, file).errors
 }
 
 struct Checker<'a> {
@@ -202,6 +250,7 @@ struct Checker<'a> {
     body: &'a Body,
     signature: &'a Signature,
     locals: HashMap<LocalId, Type>,
+    exprs: HashMap<ExprId, Type>,
     errors: Vec<HirError>,
 }
 
@@ -264,6 +313,12 @@ impl<'a> Checker<'a> {
     }
 
     fn infer(&mut self, id: ExprId) -> Type {
+        let ty = self.infer_uncached(id);
+        self.exprs.insert(id, ty.clone());
+        ty
+    }
+
+    fn infer_uncached(&mut self, id: ExprId) -> Type {
         let range = self.body.range(id);
         match self.body.expr(id).clone() {
             Expr::Missing | Expr::Unsupported(_) | Expr::Unresolved(_) => Type::Unknown,
@@ -613,7 +668,7 @@ impl<'a> Checker<'a> {
 }
 
 /// expand nested patterns to the right column types.
-fn ctor_for(types: &TypeMap, variant: &VariantInfo) -> Ctor {
+fn ctor_for(_types: &TypeMap, variant: &VariantInfo) -> Ctor {
     Ctor::Variant {
         name: variant.name.clone(),
         fields: variant.fields.iter().map(field_type).collect(),

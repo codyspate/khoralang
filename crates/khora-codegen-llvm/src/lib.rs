@@ -33,8 +33,6 @@ mod backend;
 mod lower;
 #[cfg(feature = "llvm")]
 mod runtime;
-#[cfg(feature = "llvm")]
-mod typing;
 
 #[cfg(feature = "llvm")]
 pub use backend::compile;
