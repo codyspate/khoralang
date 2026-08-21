@@ -53,7 +53,7 @@ fn path_like_pattern(p: &mut Parser<'_>) {
             m.complete(p, TUPLE_STRUCT_PAT);
         }
         L_BRACE => {
-            p.bump(L_BRACE);
+            let brace = p.open(L_BRACE);
             while !p.at(R_BRACE) && !p.at(EOF) {
                 if !p.tick() {
                     break;
@@ -63,7 +63,7 @@ fn path_like_pattern(p: &mut Parser<'_>) {
                     break;
                 }
             }
-            p.expect(R_BRACE);
+            p.close(R_BRACE, brace);
             m.complete(p, RECORD_PAT);
         }
         _ => {

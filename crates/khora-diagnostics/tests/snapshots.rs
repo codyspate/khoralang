@@ -68,6 +68,10 @@ fn the_removed_equals_form() {
     assert_snapshot("equals_function_body", &render("module m;\nexport fn f() -> Int = { 1 };\n"));
 }
 
+/// The end of the file is the one place in the program the reader cannot use:
+/// the mistake is wherever the brace was opened, often far above. Reporting the
+/// opener also collapses the cascade — one error rather than every construct
+/// the parser then failed to finish.
 #[test]
 fn unclosed_brace_at_end_of_file() {
     assert_snapshot("unclosed_brace", &render("module m;\nfn f() {\n  let x = 1;\n"));

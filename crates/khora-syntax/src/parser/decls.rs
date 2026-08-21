@@ -83,7 +83,7 @@ fn import_decl(p: &mut Parser<'_>) {
 
 fn import_list(p: &mut Parser<'_>) {
     let m = p.start();
-    p.bump(L_BRACE);
+    let brace = p.open(L_BRACE);
     while !p.at(R_BRACE) && !p.at(EOF) {
         if !p.tick() {
             break;
@@ -98,7 +98,7 @@ fn import_list(p: &mut Parser<'_>) {
             break;
         }
     }
-    p.expect(R_BRACE);
+    p.close(R_BRACE, brace);
     m.complete(p, IMPORT_LIST);
 }
 
@@ -183,7 +183,8 @@ fn impl_decl(p: &mut Parser<'_>) {
 /// (an impl may not leave a function without a body) is a rule the checker
 /// states with a real diagnostic, not one the grammar enforces by shape.
 fn trait_body(p: &mut Parser<'_>) {
-    if !p.expect(L_BRACE) {
+    let brace = p.open(L_BRACE);
+    if brace.is_none() {
         return;
     }
     while !p.at(R_BRACE) && !p.at(EOF) {
@@ -203,7 +204,7 @@ fn trait_body(p: &mut Parser<'_>) {
             }
         }
     }
-    p.expect(R_BRACE);
+    p.close(R_BRACE, brace);
 }
 
 /// `type Item;` in a trait, `type Item = Int;` in an impl.
@@ -234,7 +235,8 @@ fn effect_decl(p: &mut Parser<'_>) {
     if p.at(LT) {
         type_params(p);
     }
-    if p.expect(L_BRACE) {
+    let brace = p.open(L_BRACE);
+    if brace.is_some() {
         while !p.at(R_BRACE) && !p.at(EOF) {
             if !p.tick() {
                 break;
@@ -244,7 +246,7 @@ fn effect_decl(p: &mut Parser<'_>) {
                 break;
             }
         }
-        p.expect(R_BRACE);
+        p.close(R_BRACE, brace);
     }
     m.complete(p, EFFECT_DECL);
 }
@@ -259,7 +261,8 @@ fn context_decl(p: &mut Parser<'_>) {
     p.eat(EXPORT_KW);
     p.bump_contextual(CONTEXT_KW);
     name(p);
-    if p.expect(L_BRACE) {
+    let brace = p.open(L_BRACE);
+    if brace.is_some() {
         while !p.at(R_BRACE) && !p.at(EOF) {
             if !p.tick() {
                 break;
@@ -275,7 +278,7 @@ fn context_decl(p: &mut Parser<'_>) {
                 break;
             }
         }
-        p.expect(R_BRACE);
+        p.close(R_BRACE, brace);
     }
     m.complete(p, CONTEXT_DECL);
 }

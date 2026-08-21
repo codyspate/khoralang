@@ -208,7 +208,53 @@ impl<'a> Parser<'a> {
         false
     }
 
+    // --- delimiters -------------------------------------------------------
+
+    /// Consumes an opening delimiter, remembering where it was.
+    ///
+    /// Paired with [`Parser::close`]. An unclosed brace is usually reported at
+    /// the end of the file, which is the one place in the program the reader
+    /// cannot use: the mistake is wherever the brace was opened, often hundreds
+    /// of lines earlier.
+    pub(crate) fn open(&mut self, kind: SyntaxKind) -> Option<TextRange> {
+        let range = self.current_range();
+        if self.eat(kind) {
+            return Some(range);
+        }
+        self.error(format!("expected {}", describe(kind)));
+        None
+    }
+
+    /// Consumes a closing delimiter, blaming the opener when it is missing.
+    pub(crate) fn close(&mut self, kind: SyntaxKind, opened: Option<TextRange>) {
+        if self.eat(kind) {
+            return;
+        }
+        match opened {
+            Some(at) => {
+                let opener = match kind {
+                    R_BRACE => "{",
+                    R_PAREN => "(",
+                    _ => "[",
+                };
+                self.error_at(at, format!("this `{opener}` is never closed"));
+            }
+            // The opener was missing too, so there is nothing better to point
+            // at than where the closer should have been.
+            None => self.error(format!("expected {}", describe(kind))),
+        }
+    }
+
     // --- diagnostics ------------------------------------------------------
+
+    /// Reports at a range other than the current token.
+    pub(crate) fn error_at(&mut self, range: TextRange, message: impl Into<String>) {
+        let message = message.into();
+        if self.errors.last().is_some_and(|e| e.range == range && e.message == message) {
+            return;
+        }
+        self.errors.push(ParseError { message, range });
+    }
 
     pub(crate) fn error(&mut self, message: impl Into<String>) {
         let range = self.current_range();

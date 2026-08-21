@@ -232,7 +232,7 @@ fn type_param(p: &mut Parser<'_>) {
 /// empty row `{}`.
 fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
-    p.bump(L_BRACE);
+    let brace = p.open(L_BRACE);
     loop {
         if p.at(R_BRACE) || p.at(EOF) || !p.tick() {
             break;
@@ -257,7 +257,7 @@ fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
         row_tail(p);
         break;
     }
-    p.expect(R_BRACE);
+    p.close(R_BRACE, brace);
     m.complete(p, RECORD_TYPE)
 }
 

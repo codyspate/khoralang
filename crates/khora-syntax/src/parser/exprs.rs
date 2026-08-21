@@ -104,7 +104,7 @@ fn postfix_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             CATCH_KW => {
                 let m = lhs.precede(p);
                 p.bump(CATCH_KW);
-                p.expect(L_BRACE);
+                let brace = p.open(L_BRACE);
                 p.with_record_literals(|p| {
                     while !p.at(R_BRACE) && !p.at(EOF) {
                         if !p.tick() {
@@ -113,7 +113,7 @@ fn postfix_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                         match_arm(p);
                     }
                 });
-                p.expect(R_BRACE);
+                p.close(R_BRACE, brace);
                 m.complete(p, CATCH_EXPR)
             }
             WITH_KW => {
@@ -205,7 +205,7 @@ fn at_record_literal(p: &mut Parser<'_>) -> bool {
 
 fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
-    p.bump(L_BRACE);
+    let brace = p.open(L_BRACE);
     while !p.at(R_BRACE) && !p.at(EOF) {
         if !p.tick() {
             break;
@@ -221,7 +221,7 @@ fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
             break;
         }
     }
-    p.expect(R_BRACE);
+    p.close(R_BRACE, brace);
     m.complete(p, RECORD_EXPR)
 }
 
@@ -521,7 +521,7 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
             p.error("expected a scrutinee expression");
         }
     });
-    p.expect(L_BRACE);
+    let brace = p.open(L_BRACE);
     p.with_record_literals(|p| {
         while !p.at(R_BRACE) && !p.at(EOF) {
             if !p.tick() {
@@ -530,7 +530,7 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
             match_arm(p);
         }
     });
-    p.expect(R_BRACE);
+    p.close(R_BRACE, brace);
     m.complete(p, MATCH_EXPR)
 }
 
@@ -557,7 +557,7 @@ pub(super) fn match_arm(p: &mut Parser<'_>) {
 /// is the block's value.
 pub(super) fn block(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
-    p.expect(L_BRACE);
+    let brace = p.open(L_BRACE);
     p.with_record_literals(|p| {
         loop {
             if p.at(R_BRACE) || p.at(EOF) || !p.tick() {
@@ -585,6 +585,6 @@ pub(super) fn block(p: &mut Parser<'_>) -> CompletedMarker {
             }
         }
     });
-    p.expect(R_BRACE);
+    p.close(R_BRACE, brace);
     m.complete(p, BLOCK)
 }

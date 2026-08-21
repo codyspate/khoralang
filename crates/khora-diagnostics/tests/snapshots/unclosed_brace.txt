@@ -1,5 +1,5 @@
-error: expected `}`
- --> src/main.kh:4:1
+error: this `{` is never closed
+ --> src/main.kh:2:8
   |
-4 | 
-  | ^
+2 | fn f() {
+  |        ^
