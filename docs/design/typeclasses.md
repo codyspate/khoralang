@@ -185,6 +185,24 @@ method was a behavioural surprise for all three of the audiences in
 Resolution checks a type's own methods **before** any trait's, so adding a trait
 to a program cannot silently change what an existing call does.
 
+## 7b. Trait functions with no receiver
+
+`pure` has no `self`, so nothing about the call site's *arguments* says which
+impl should run. Two ways to say it, both supported:
+
+```khora
+let a: Option<Int> = Applicative::pure(1);              // the expected type decides
+fn wrap<F: Applicative, A>(v: A) -> F<A> { F::pure(v) } // the caller decides
+```
+
+Through the trait, `Self` is left as a variable and the surrounding expression
+solves it — which is how `Default::default()` reads in the languages that have
+it. Through a bounded parameter, `Self` *is* that parameter and the choice
+belongs to whoever instantiates the function.
+
+Without this a `traverse` cannot be written: its empty case has to produce an
+`F<..>` from nothing, and nothing else in the language can.
+
 ## 8. What has landed
 
 Everything above except the standard library itself and the two items in §7.

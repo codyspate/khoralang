@@ -909,9 +909,21 @@ impl<'a> Checker<'a> {
         }
 
         // Inside a generic function the receiver is rigid, and the only methods
-        // it has are the ones its bounds promise.
-        if let Type::Param(param) = &self_ty {
-            return Some(self.infer_bounded_method(callee, param, method, args, range));
+        // it has are the ones its bounds promise. `F<B>` counts: the methods
+        // available on it are the ones `F`'s bounds promise, which is what makes
+        // `f(v).map(..)` work inside a `traverse`.
+        let rigid = match &self_ty {
+            Type::Param(p) => Some(p.clone()),
+            Type::Applied { head, .. } => match &**head {
+                Type::Param(p) => Some(p.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(param) = rigid {
+            return Some(
+                self.infer_bounded_method(callee, &param, &self_ty, method, args, range),
+            );
         }
 
         let (def, imp) = match traits::method_source(&self.types.traits, &self_ty, method) {
@@ -962,6 +974,7 @@ impl<'a> Checker<'a> {
         &mut self,
         callee: ExprId,
         param: &str,
+        receiver: &Type,
         method: &str,
         args: &[ExprId],
         range: TextRange,
@@ -995,7 +1008,7 @@ impl<'a> Checker<'a> {
         };
 
         let key = format!("{trait_name}::{method}");
-        self.call_signature(callee, &key, &Type::Param(param.to_string()), args, range)
+        self.call_signature(callee, &key, receiver, args, range)
     }
 
     /// Checks a call against `key`'s signature with `Self` bound to `self_ty`.
@@ -1121,8 +1134,66 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The type of `Owner::name`, where `Owner` is a trait or a bounded type
+    /// parameter and `name` is one of the trait's functions.
+    ///
+    /// `Self` is left as a fresh variable when the owner is a trait, so the
+    /// expected type decides which impl runs — `Applicative::pure(x)` in a
+    /// position wanting `Option<Int>` resolves to `Option`'s. When the owner is
+    /// a type parameter, `Self` is that parameter and the choice is the
+    /// caller's.
+    fn type_of_trait_item(&mut self, at: ExprId, owner: &str, name: &str) -> Type {
+        let bounds = self.bounds_on(owner);
+        let candidates: Vec<String> = if bounds.is_empty() {
+            vec![owner.to_string()]
+        } else {
+            traits::with_supertraits(&self.types.traits, &bounds)
+        };
+
+        let found = candidates.iter().find_map(|t| {
+            let def = self.types.traits.traits.get(t)?;
+            def.method(name).map(|_| t.clone())
+        });
+        let Some(trait_name) = found else {
+            let range = self.body.range(at);
+            self.error(
+                if bounds.is_empty() {
+                    format!("`{owner}` is not a trait with a function named `{name}`")
+                } else {
+                    format!(
+                        "no function `{name}` on `{owner}`, whose bounds are `{}`",
+                        bounds.join("` + `")
+                    )
+                },
+                range,
+            );
+            return Type::Unknown;
+        };
+
+        let key = format!("{trait_name}::{name}");
+        let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else {
+            return Type::Unknown;
+        };
+        let (ty, type_args) =
+            self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+
+        // A type parameter names itself as `Self`; a trait leaves it open for
+        // the surrounding expression to decide.
+        if !bounds.is_empty() {
+            if let Some(chosen) = type_args.first() {
+                let _ = self.unifier.unify(chosen, &Type::Param(owner.to_string()));
+            }
+        }
+        self.instantiations.insert(at, (key, type_args));
+        ty
+    }
+
     fn type_of_resolution(&mut self, at: ExprId, resolution: &khora_hir::Resolution) -> Type {
         match resolution {
+            khora_hir::Resolution::TraitItem { owner, name } => {
+                let (owner, name) = (owner.clone(), name.clone());
+                self.type_of_trait_item(at, &owner, &name)
+            }
             khora_hir::Resolution::Item { name, .. } => {
                 // Each mention gets its own copy of the signature, so two calls
                 // to the same generic function do not constrain each other.

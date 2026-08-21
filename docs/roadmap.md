@@ -257,8 +257,16 @@ their own schedule because a tensor shape is written `(M, K)`: without them the
 shape argument typed as `Unknown`, which accepts anything, so the exit criterion
 could not have been met honestly.
 
-Remaining: the `std` traits themselves, `Iterator` with generic `for`, and
-`traverse` over `Traversable`.
+Remaining: `Iterator` with generic `for`, and the `std` traits themselves.
+
+`traverse` needed three things beyond ordinary generics, all of which landed
+together: higher-kinded unification (solving `Self<A>` against `Option<Int>` as
+`Self := Option` and `A := Int`), trait functions with no receiver so `F::pure`
+can produce a container out of nothing, and method dispatch on a value of type
+`F<B>` where `F` is a bounded parameter. The result is the single best
+regression test in the repository — it exercises higher kinds, bounded
+parameters, receiverless trait functions, closures through a recursive generic
+call, and per-instantiation static dispatch, all at once.
 
 Closures landed here rather than in a phase of their own: they were listed
 under phase 2's **Out** and no later phase picked them up, yet `traverse` takes
@@ -285,7 +293,9 @@ implements, and it is the last piece phase 3 needs. See `docs/errata.md`.
 **Exit:** `matmul` with a mismatched shared dimension is a compile error naming
 both dimensions **— met**; instance resolution errors name the missing instance
 **— met**; a `traverse` written once works over `Option`, `List` and a user
-type; `for` iterates a user-defined type.
+type **— met**, see `traverse_works_over_three_containers` in
+`crates/khora-codegen-llvm/tests/compile.rs`; `for` iterates a user-defined
+type.
 
 ---
 

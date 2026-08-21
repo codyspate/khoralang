@@ -337,10 +337,16 @@ fn methods(
 }
 
 fn lower_function(map: &crate::ItemMap, decl: &ast::FnDecl, block: &ast::Block) -> Body {
+    let mut generics: Vec<String> = vec!["Self".to_string()];
+    if let Some(params) = decl.type_params() {
+        generics.extend(params.params().filter_map(|p| p.name().and_then(|n| n.ident())));
+    }
+
     let mut ctx = Ctx {
         body: Body::default(),
         scopes: vec![Vec::new()],
         map,
+        generics,
         loop_depth: 0,
         lambdas: Vec::new(),
     };
@@ -369,6 +375,10 @@ struct Ctx<'a> {
     /// A stack of lexical scopes; each holds the names it introduced.
     scopes: Vec<Vec<(String, LocalId)>>,
     map: &'a crate::ItemMap,
+    /// The type parameters the enclosing function declared, plus `Self` inside
+    /// a trait or impl. A path whose first segment is one of these names a
+    /// trait function reached through that parameter.
+    generics: Vec<String>,
     loop_depth: u32,
     /// One entry per lambda currently being lowered, holding the number of
     /// locals that existed when it started. A local below the innermost mark
@@ -669,6 +679,24 @@ impl<'a> Ctx<'a> {
             }
             self.error(format!("cannot find `{only}` in this scope"), range);
             return self.add_expr(Expr::Unresolved(only.clone()), range);
+        }
+
+        // `F::pure` or `Applicative::pure`. Checked before module paths
+        // because a type parameter in scope, or a trait declared here, is a
+        // more specific reading than a module that happens to share the name.
+        if let [owner, name] = segments.as_slice() {
+            let is_param = self.generics.iter().any(|g| g == owner);
+            let is_trait =
+                self.map.item(owner).is_some_and(|i| i.kind == crate::ItemKind::Trait);
+            if is_param || is_trait {
+                return self.add_expr(
+                    Expr::Path(crate::Resolution::TraitItem {
+                        owner: owner.clone(),
+                        name: name.clone(),
+                    }),
+                    range,
+                );
+            }
         }
 
         // A `::` path names a constructor or an item in another module.

@@ -132,6 +132,9 @@ pub fn head_of(ty: &Type) -> Option<String> {
         Type::Unit => Some("()".to_string()),
         Type::Adt { name, .. } => Some(name.clone()),
         Type::Tuple(items) => Some(format!("({},)", items.len())),
+        // An application whose head is already a constructor names that
+        // constructor; one whose head is still a variable names nothing yet.
+        Type::Applied { head, .. } => head_of(head),
         _ => None,
     }
 }

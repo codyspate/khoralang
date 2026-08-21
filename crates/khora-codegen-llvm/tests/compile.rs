@@ -1202,3 +1202,124 @@ fn main() -> Int {
 ");
     assert_eq!(ran.code, Some(0));
 }
+
+/// Phase 3's exit criterion: a `traverse` written against *any* `Applicative`,
+/// working over `Option`, `List` and a user type, compiled to native code.
+///
+/// Everything the language has is load-bearing here at once — higher-kinded
+/// traits, bounded type parameters, a trait function called with no receiver
+/// (`F::pure`), closures passed through a recursive generic call, and static
+/// dispatch selecting a different impl per instantiation. It is the single
+/// best regression test in the repository for that reason.
+#[test]
+fn traverse_works_over_three_containers() {
+    let ran = run(
+        "traverse",
+        "module t;
+fn print(value: Int);
+
+export type Option<A> = | Some(value: A) | None;
+export type List<A> = | Nil | Cons(head: A, tail: List<A>);
+export type Pair<A> = | Of(first: A, second: A);
+
+export trait Applicative {
+  fn pure<A>(value: A) -> Self<A>;
+  fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;
+  fn map2<A, B, C>(self: Self<A>, other: Self<B>, f: (A, B) -> C) -> Self<C>;
+}
+
+impl Applicative for Option {
+  fn pure<A>(value: A) -> Option<A> { Option::Some(value) }
+  fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> {
+    match self { Option::Some(v) => Option::Some(f(v)), Option::None => Option::None }
+  }
+  fn map2<A, B, C>(self: Option<A>, other: Option<B>, f: (A, B) -> C) -> Option<C> {
+    match self {
+      Option::Some(a) => match other {
+        Option::Some(b) => Option::Some(f(a, b)),
+        Option::None => Option::None,
+      },
+      Option::None => Option::None,
+    }
+  }
+}
+
+// ONE traverse per container, written against any Applicative.
+export trait Traversable {
+  fn traverse<A, B, F: Applicative>(self: Self<A>, f: (A) -> F<B>) -> F<Self<B>>;
+}
+
+impl Traversable for Option {
+  fn traverse<A, B, F: Applicative>(self: Option<A>, f: (A) -> F<B>) -> F<Option<B>> {
+    match self {
+      Option::Some(v) => f(v).map(fn b => Option::Some(b)),
+      Option::None => F::pure(Option::None),
+    }
+  }
+}
+
+impl Traversable for List {
+  fn traverse<A, B, F: Applicative>(self: List<A>, f: (A) -> F<B>) -> F<List<B>> {
+    match self {
+      List::Nil => F::pure(List::Nil),
+      List::Cons(h, t) => f(h).map2(t.traverse(f), fn (b, rest) => List::Cons(b, rest)),
+    }
+  }
+}
+
+impl Traversable for Pair {
+  fn traverse<A, B, F: Applicative>(self: Pair<A>, f: (A) -> F<B>) -> F<Pair<B>> {
+    match self {
+      Pair::Of(x, y) => f(x).map2(f(y), fn (a, b) => Pair::Of(a, b)),
+    }
+  }
+}
+
+fn halve(n: Int) -> Option<Int> {
+  if n % 2 == 0 { Option::Some(n / 2) } else { Option::None }
+}
+
+fn sum(l: List<Int>) -> Int {
+  match l { List::Nil => 0, List::Cons(h, t) => h + sum(t) }
+}
+
+fn or_else(o: Option<Option<Int>>, fallback: Int) -> Int {
+  match o {
+    Option::Some(inner) => match inner {
+      Option::Some(v) => v,
+      Option::None => fallback,
+    },
+    Option::None => fallback,
+  }
+}
+
+fn list_or(o: Option<List<Int>>, fallback: Int) -> Int {
+  match o { Option::Some(l) => sum(l), Option::None => fallback }
+}
+
+fn pair_or(o: Option<Pair<Int>>, fallback: Int) -> Int {
+  match o { Option::Some(p) => match p { Pair::Of(a, b) => a + b }, Option::None => fallback }
+}
+
+export fn main() -> Int {
+  // The same `halve` traversed through three different containers.
+  print(or_else(Option::Some(8).traverse(halve), 0 - 1));
+  print(or_else(Option::Some(7).traverse(halve), 0 - 1));
+
+  let evens = List::Cons(4, List::Cons(6, List::Nil));
+  let odd = List::Cons(4, List::Cons(7, List::Nil));
+  print(list_or(evens.traverse(halve), 0 - 1));
+  print(list_or(odd.traverse(halve), 0 - 1));
+
+  print(pair_or(Pair::Of(10, 20).traverse(halve), 0 - 1));
+  print(pair_or(Pair::Of(10, 21).traverse(halve), 0 - 1));
+  0
+}
+",
+    );
+    assert_eq!(
+        ran.stdout, "4\n-1\n5\n-1\n15\n-1\n",
+        "even inputs halve and survive; one odd input collapses the whole traversal"
+    );
+    assert_eq!(ran.code, Some(0));
+}

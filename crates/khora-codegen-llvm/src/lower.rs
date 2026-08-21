@@ -616,6 +616,15 @@ impl<'ctx> Lower<'_, 'ctx> {
                 format!("`{name}` is not a value; only functions and constructors have one"),
                 range,
             ),
+            // `Applicative::pure(x)` in value position: the same wrapper a
+            // named function gets, around whichever impl was selected.
+            khora_hir::Resolution::TraitItem { .. } => match self.mono.callee(self.types, id) {
+                Some(symbol) => self.function_value(&symbol, range),
+                None => self.fail(
+                    "this trait function was not resolved to an impl; that is a compiler bug",
+                    range,
+                ),
+            },
             khora_hir::Resolution::Unsupported(what) => self.fail(what.to_string(), range),
         }
     }
@@ -628,6 +637,15 @@ impl<'ctx> Lower<'_, 'ctx> {
         match self.body.expr(callee).clone() {
             Expr::Path(khora_hir::Resolution::Variant { name, .. }) => {
                 self.construct(&name, args, range)
+            }
+            Expr::Path(khora_hir::Resolution::TraitItem { name, .. }) => {
+                match self.mono.callee(self.types, callee) {
+                    Some(symbol) => self.call_named(&symbol, args, range),
+                    None => self.fail(
+                        format!("`{name}` was not resolved to an impl; that is a compiler bug"),
+                        range,
+                    ),
+                }
             }
             Expr::Path(khora_hir::Resolution::Item { name, .. }) => {
                 if name == "print" && args.len() == 1 {

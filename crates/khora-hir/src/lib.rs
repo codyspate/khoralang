@@ -328,6 +328,13 @@ pub enum Resolution {
     Item { module: ModulePath, name: String, kind: ItemKind },
     /// A constructor of a variant type.
     Variant { module: ModulePath, type_name: String, name: String },
+    /// A trait's function reached without a receiver: `Applicative::pure(x)`
+    /// or `F::pure(x)` where `F` is a bounded type parameter.
+    ///
+    /// `owner` is written as it appears — a trait name, or a parameter name —
+    /// because which one it is depends on the type parameters in scope, and
+    /// resolving that is the checker's job rather than the name resolver's.
+    TraitItem { owner: String, name: String },
     /// Recognised, but the vertical slice does not handle it yet.
     Unsupported(&'static str),
 }

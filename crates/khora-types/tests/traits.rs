@@ -491,3 +491,88 @@ fn a_constructor_applied_to_a_function_type_unifies() {
          fn f(g: Option<(Int) -> Bool>, v: Option<Int>) -> Option<Bool> { g.ap(v) }\n",
     );
 }
+
+// --- trait functions with no receiver -------------------------------------
+
+const PURE: &str = "module m;\n\
+                    export type Option<A> = | Some(value: A) | None;\n\
+                    export type Box<A> = | Of(value: A);\n\
+                    export trait Applicative {\n\
+                      fn pure<A>(value: A) -> Self<A>;\n\
+                    }\n\
+                    impl Applicative for Option {\n\
+                      fn pure<A>(value: A) -> Option<A> { Option::Some(value) }\n\
+                    }\n\
+                    impl Applicative for Box {\n\
+                      fn pure<A>(value: A) -> Box<A> { Box::Of(value) }\n\
+                    }\n";
+
+/// `Applicative::pure(x)` has no receiver to select an impl from, so the
+/// expected type decides — the same way `Default::default()` reads elsewhere.
+#[test]
+fn a_trait_function_without_a_receiver_is_chosen_by_the_expected_type() {
+    assert_clean(&format!("{PURE}fn f() -> Option<Int> {{ Applicative::pure(1) }}\n"));
+    assert_clean(&format!("{PURE}fn f() -> Box<Int> {{ Applicative::pure(1) }}\n"));
+}
+
+#[test]
+fn a_trait_function_still_checks_its_argument() {
+    assert_reports(
+        &format!("{PURE}fn f() -> Option<Bool> {{ Applicative::pure(1) }}\n"),
+        "returns `Option<Bool>`",
+    );
+}
+
+/// Through a bounded parameter the caller chooses, not the expected type.
+#[test]
+fn a_trait_function_reached_through_a_bound_uses_that_parameter() {
+    assert_clean(&format!(
+        "{PURE}fn wrap<F: Applicative, A>(value: A) -> F<A> {{ F::pure(value) }}\n"
+    ));
+}
+
+#[test]
+fn a_parameter_without_the_bound_cannot_reach_the_function() {
+    assert_reports(
+        &format!("{PURE}fn wrap<F, A>(value: A) -> F<A> {{ F::pure(value) }}\n"),
+        "is not a trait with a function named `pure`",
+    );
+}
+
+#[test]
+fn a_function_the_trait_does_not_have_is_reported() {
+    assert_reports(
+        &format!("{PURE}fn f() -> Option<Int> {{ Applicative::nope(1) }}\n"),
+        "`Applicative` is not a trait with a function named `nope`",
+    );
+}
+
+/// A method on a value of type `F<B>`, where `F` is a bounded parameter, has
+/// only the methods `F`'s bounds promise. This is what makes the body of a
+/// generic `traverse` typecheck at all.
+#[test]
+fn a_method_on_a_bounded_application_resolves_through_the_bound() {
+    assert_clean(
+        "module m;\n\
+         export type Option<A> = | Some(value: A) | None;\n\
+         export trait Applicative {\n\
+           fn pure<A>(value: A) -> Self<A>;\n\
+           fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;\n\
+         }\n\
+         impl Applicative for Option {\n\
+           fn pure<A>(value: A) -> Option<A> { Option::Some(value) }\n\
+           fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> { Option::None }\n\
+         }\n\
+         fn twice<F: Applicative, A>(x: F<A>, f: (A) -> A) -> F<A> { x.map(f).map(f) }\n",
+    );
+}
+
+#[test]
+fn an_unbounded_application_has_no_methods() {
+    assert_reports(
+        "module m;\n\
+         export trait Applicative { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         fn twice<F, A>(x: F<A>, f: (A) -> A) -> F<A> { x.map(f) }\n",
+        "add one, as `F: Trait`",
+    );
+}
