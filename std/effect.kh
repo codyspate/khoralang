@@ -1,0 +1,64 @@
+module std.effect;
+
+// Type argument order follows the variance signature in the specification,
+// `Effect<+A, -R, +E>`: value, capability row, error channel. See
+// `docs/errata.md` for why the published `std.effect` listing needed repair.
+
+pub type Option<+A> =
+  | Some(value: A)
+  | None;
+
+pub type Result<+A, +E> =
+  | Ok(value: A)
+  | Err(error: E);
+
+pub type Effect<+A, -R, +E>;
+pub type Layer<+OutR, -InR, +E>;
+pub type Scope;
+pub type Label;
+pub type Error;
+pub type Never;
+
+pub fn succeed<A>(value: A) -> Effect<A, {}, Never>;
+pub fn fail<E>(error: E) -> Effect<Never, {}, E>;
+pub fn sync<A>(thunk: () -> A) -> Effect<A, {}, Never>;
+pub fn try_catch<A, E>(thunk: () -> A, on_error: Error -> E) -> Effect<A, {}, E>;
+
+// Draws a capability out of the requirement row, widening `R` by `label: T`.
+pub fn ask<T>(label: Label) -> Effect<T, { label: T | 'r }, Never>;
+
+pub fn map<A, B, R, E>(effect: Effect<A, R, E>, f: A -> B) -> Effect<B, R, E>;
+
+pub fn map_error<A, R, E1, E2>(
+  effect: Effect<A, R, E1>,
+  f: E1 -> E2
+) -> Effect<A, R, E2>;
+
+// Composition unions both rows: R = R1 U R2 and E = E1 U E2.
+pub fn flat_map<A, B, R1, R2, E1, E2>(
+  effect: Effect<A, R1, E1>,
+  f: A -> Effect<B, R2, E2>
+) -> Effect<B, { R1 | R2 }, E1 + E2>;
+
+pub fn tap<A, R, E>(effect: Effect<A, R, E>, f: A -> Effect<(), R, E>) -> Effect<A, R, E>;
+
+pub fn catch<A, R, E1, E2>(
+  effect: Effect<A, R, E1>,
+  handler: E1 -> Effect<A, R, E2>
+) -> Effect<A, R, E2>;
+
+pub fn acquire_release<A, R1, R2, E1>(
+  acquire: Effect<A, R1, E1>,
+  release: A -> Effect<(), R2, Never>
+) -> Effect<A, { R1 | R2 | scope: Scope }, E1>;
+
+// Row subtraction: discharges the `scope` capability introduced above.
+pub fn scoped<A, R, E>(effect: Effect<A, { R | scope: Scope }, E>) -> Effect<A, R, E>;
+
+pub fn provide_layer<A, R1, R2, E1, E2>(
+  effect: Effect<A, R1, E1>,
+  layer: Layer<R1, R2, E2>
+) -> Effect<A, R2, E1 + E2>;
+
+// Legal only once the requirement row has been fully discharged to `{}`.
+pub fn run_native<A, E>(effect: Effect<A, {}, E>) -> Result<A, E>;

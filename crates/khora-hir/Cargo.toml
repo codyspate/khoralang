@@ -1,0 +1,11 @@
+[package]
+name = "khora-hir"
+description = "AST -> HIR lowering: pipe desugaring, placeholder resolution, name binding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+khora-syntax.workspace = true
+rustc-hash.workspace = true

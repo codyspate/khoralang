@@ -1,0 +1,10 @@
+[package]
+name = "khora-perceus"
+description = "Perceus reference counting and in-place reuse analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+khora-hir.workspace = true

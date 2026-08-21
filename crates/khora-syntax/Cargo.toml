@@ -1,0 +1,12 @@
+[package]
+name = "khora-syntax"
+description = "Lexer, lossless CST parser and typed AST for the Khora language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+logos.workspace = true
+rowan.workspace = true
+text-size.workspace = true

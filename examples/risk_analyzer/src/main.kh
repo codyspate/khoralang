@@ -1,0 +1,100 @@
+module app.main;
+
+import std.effect.{Effect, Layer, Scope, ask, Option};
+import std.net.http.{Request, Response, Router};
+import std.ai.{LLMService, Prompt, Embedding, ModelError, cosine_similarity};
+
+pub type RiskLevel =
+  | Low
+  | Moderate(reason: String)
+  | Critical(action_required: String);
+
+pub type AnalysisReport = {
+  account_id: String,
+  risk: RiskLevel,
+  confidence: Float,
+};
+
+pub type Ledger = {
+  get_history: String -> Effect<String, {}, String>,
+  flag_account: (String, RiskLevel) -> Effect<(), {}, String>,
+};
+
+pub fn analyze_transaction_risk(account_id: String)
+  -> Effect<AnalysisReport, { ai: LLMService, ledger: Ledger }, String> = {
+
+    account_id
+    |> ask(:ledger.get_history)
+    |> Effect.map_error(fn err => "Failed to fetch account history: " + err)
+    |> Effect.flat_map(fn history =>
+        Prompt.new()
+        |> Prompt.system("You are a financial fraud and risk engine. Output structured assessments.")
+        |> Prompt.user("Analyze history: " + history)
+        |> ask(:ai.extract(_, AnalysisReport.spec))
+        |> Effect.map_error(fn err =>
+            match err {
+              ModelError.ContextLengthExceeded(_) => "Prompt context limit exceeded",
+              ModelError.RateLimited(ms) => "Upstream model rate limited",
+              ModelError.InferenceEngineFailure(msg) => "Inference failure: " + msg,
+              ModelError.SchemaExtractionError(d) => "Invalid extraction schema: " + d,
+            }
+        )
+    )
+    |> Effect.flat_map(fn report =>
+        match report.risk {
+          RiskLevel.Low =>
+            Effect.succeed(report),
+
+          RiskLevel.Moderate(reason) =>
+            account_id
+            |> ask(:ledger.flag_account(_, report.risk))
+            |> Effect.map(fn _ => report),
+
+          RiskLevel.Critical(action) =>
+            account_id
+            |> ask(:ledger.flag_account(_, report.risk))
+            |> Effect.tap(fn _ => Effect.sync(fn _ => print("ALERT: Critical threat detected on " + account_id)))
+            |> Effect.map(fn _ => report),
+        }
+    );
+};
+
+let mock_ledger_layer: Layer<{ ledger: Ledger }, {}, Never> =
+  Layer.succeed({
+    get_history: fn id => Effect.succeed("Transaction: $50000 to offshore entity"),
+    flag_account: fn (id, risk) => Effect.succeed(()),
+  });
+
+let mock_ai_layer: Layer<{ ai: LLMService }, {}, Never> =
+  Layer.succeed({
+    complete: fn _ => Effect.succeed(""),
+    embed: fn _ => Effect.succeed(Tensor.zeros((1536))),
+    extract: fn (_, _) => Effect.succeed({
+      account_id: "acc_9921",
+      risk: RiskLevel.Critical("Immediate fund freeze"),
+      confidence: 0.98,
+    }),
+  });
+
+pub fn main() = {
+  let app_layer =
+    mock_ledger_layer
+    |> Layer.merge(mock_ai_layer);
+
+  let router =
+    Router.new()
+    |> Router.post("/analyze/:account_id", fn req =>
+        req.params.get("account_id")
+        |> analyze_transaction_risk
+        |> Effect.map(fn report => Response.json(200, report))
+        |> Effect.catch(fn err =>
+            Effect.succeed(Response.json(500, { error: err }))
+        )
+    );
+
+  router
+  |> Router.listen(8080)
+  |> Effect.provide_layer(app_layer)
+  |> Effect.scoped
+  |> Effect.run_native();
+};

@@ -1,0 +1,18 @@
+[package]
+name = "khora-cli"
+description = "The `khora` toolchain driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "khora"
+path = "src/main.rs"
+
+[dependencies]
+khora-syntax.workspace = true
+khora-hir.workspace = true
+khora-types.workspace = true
+anyhow.workspace = true
+clap.workspace = true

@@ -1,0 +1,125 @@
+(* Khora concrete grammar, as implemented by crates/khora-syntax.
+   This is the repaired form of the EBNF in the specification; every
+   divergence is justified in docs/errata.md. *)
+
+Program        ::= ( Declaration )* ;
+
+Declaration    ::= ModuleDecl | ImportDecl | TypeDecl | FunctionDecl | LetDecl ;
+
+ModuleDecl     ::= "module" Path ";" ;
+ImportDecl     ::= "import" Path "." ( "{" ImportList "}" | "*" ) ";" ;
+ImportList     ::= ImportItem ( "," ImportItem )* ( "," )? ;
+ImportItem     ::= Ident ( "as" Ident )? ;
+
+Path           ::= Ident ( "." Ident )* ;
+
+(* --- types ------------------------------------------------------------- *)
+
+TypeDecl       ::= ( "pub" )? "type" Ident ( TypeParams )? ( "=" TypeDef )? ";" ;
+TypeDef        ::= VariantType | Type ;
+
+TypeParams     ::= "<" TypeParam ( "," TypeParam )* ( "," )? ">" ;
+TypeParam      ::= "const" Ident ":" Type
+                 | ( "+" | "-" )? Ident ( ":" Type )?
+                 | RowVar ;
+
+TypeArgs       ::= "<" Type ( "," Type )* ( "," )? ">" ;
+
+Type           ::= UnionType ( "->" Type )? ;          (* "->" is right-assoc *)
+UnionType      ::= PrimaryType ( "+" PrimaryType )* ;  (* open error union    *)
+PrimaryType    ::= PathType
+                 | RecordType
+                 | TupleType
+                 | ForallType
+                 | VariantType
+                 | RowVar
+                 | IntLiteral ;                        (* const generic arg   *)
+
+PathType       ::= Path ( TypeArgs )? ;
+ForallType     ::= "forall" TypeParams "." Type ;
+TupleType      ::= "(" ")"                             (* unit                *)
+                 | "(" Type ")"                        (* grouping            *)
+                 | "(" Type ( "," Type )+ ( "," )? ")" ;
+
+RecordType     ::= "{" ( Field ( "," Field )* ( "," )? )? ( "|" RowTail )? "}" ;
+RowTail        ::= RowElem ( ( "|" | "," ) RowElem )* ;
+RowElem        ::= Field | Type ;
+Field          ::= Ident ":" Type ;
+
+VariantType    ::= ( "|" Ident ( "(" VariantPayload ")" )? )+ ;
+VariantPayload ::= Field ( "," Field )* ( "," )?       (* named payload       *)
+                 | Type ( "," Type )* ( "," )? ;       (* positional payload  *)
+
+(* --- functions and bindings -------------------------------------------- *)
+
+FunctionDecl   ::= ( "pub" )? "fn" Ident ( TypeParams )? ParamList
+                   ( "->" Type )? ( "=" Block )? ";" ;
+ParamList      ::= "(" ( Param ( "," Param )* ( "," )? )? ")" ;
+Param          ::= ( Ident | "_" ) ( ":" Type )? ;
+
+LetDecl        ::= ( "pub" )? "let" ( "mut" )? Pattern ( ":" Type )? "=" Expr ";" ;
+
+Block          ::= "{" ( Statement )* ( Expr )? "}" ;
+Statement      ::= LetDecl | Expr ";" ;
+
+(* --- expressions -------------------------------------------------------
+   Binary operators, loosest to tightest:
+     |>          left
+     ||          left
+     &&          left
+     == != < > <= >=
+     + -         left
+     * / %       left
+   Prefix "-" and "!" bind tighter than any binary operator; call and field
+   access bind tightest of all. *)
+
+Expr           ::= BinaryExpr ;
+BinaryExpr     ::= UnaryExpr ( BinOp UnaryExpr )* ;
+UnaryExpr      ::= ( "-" | "!" )? PostfixExpr ;
+PostfixExpr    ::= PrimaryExpr ( ArgList | "." Ident )* ;
+ArgList        ::= "(" ( Expr ( "," Expr )* ( "," )? )? ")" ;
+
+PrimaryExpr    ::= Literal
+                 | Ident
+                 | "_"                                 (* pipe placeholder    *)
+                 | CapabilityExpr
+                 | RecordExpr
+                 | TupleExpr
+                 | Block
+                 | LambdaExpr
+                 | MatchExpr ;
+
+CapabilityExpr ::= ":" Path ;
+RecordExpr     ::= "{" ( RecordExprField ( "," RecordExprField )* ( "," )? )? "}" ;
+RecordExprField::= Ident ":" Expr ;
+TupleExpr      ::= "(" ")" | "(" Expr ")" | "(" Expr ( "," Expr )+ ( "," )? ")" ;
+
+LambdaExpr     ::= "fn" ( Ident | "_" | ParamList ) "=>" ( Block | Expr ) ;
+
+MatchExpr      ::= "match" Expr "{" ( MatchArm )+ "}" ;
+MatchArm       ::= Pattern ( "if" Expr )? "=>" ( Block | Expr ) ( "," )? ;
+
+(* --- patterns ----------------------------------------------------------- *)
+
+Pattern        ::= "_"
+                 | Literal
+                 | Ident                                (* binding            *)
+                 | Path "(" ( Pattern ( "," Pattern )* )? ")"
+                 | Path "{" ( RecordPatField ( "," RecordPatField )* )? "}"
+                 | Path                                 (* nullary ctor       *)
+                 | "(" ( Pattern ( "," Pattern )* )? ")" ;
+RecordPatField ::= Ident ( ":" Pattern )? ;
+
+(* --- lexical ------------------------------------------------------------ *)
+
+Ident          ::= [A-Za-z_] [A-Za-z0-9_]* ;            (* minus keywords     *)
+RowVar         ::= "'" Ident ;
+Literal        ::= IntLiteral | FloatLiteral | StringLiteral | "true" | "false" ;
+IntLiteral     ::= [0-9] [0-9_]* ;
+FloatLiteral   ::= IntLiteral "." IntLiteral ( ( "e" | "E" ) ( "+" | "-" )? [0-9]+ )? ;
+StringLiteral  ::= '"' ( ~["\] | "\" . )* '"' ;
+Comment        ::= "//" ~[\r\n]* | "/*" ( Comment | . )* "*/" ;  (* nesting   *)
+
+Keyword        ::= "module" | "import" | "type" | "fn" | "match" | "let"
+                 | "mut" | "pub" | "as" | "if" | "forall" | "const"
+                 | "true" | "false" ;

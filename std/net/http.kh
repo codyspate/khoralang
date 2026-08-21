@@ -1,0 +1,53 @@
+module std.net.http;
+
+import std.effect.{Effect, Option, Scope};
+
+// The specification does not define `std.net.http`; these signatures are
+// reconstructed from how the reference application uses them, and are marked
+// provisional in `docs/errata.md`.
+
+pub type Method =
+  | Get
+  | Post
+  | Put
+  | Patch
+  | Delete;
+
+pub type Params;
+pub type Json;
+
+pub type Request = {
+  method: Method,
+  path: String,
+  params: Params,
+  body: String,
+};
+
+pub type Response;
+
+pub type HttpError =
+  | BindFailed(port: Int)
+  | MalformedRequest(details: String);
+
+pub type Router<-R, +E>;
+
+pub fn new() -> Router<{}, Never>;
+
+pub fn post<R1, R2, E1, E2>(
+  router: Router<R1, E1>,
+  route: String,
+  handler: Request -> Effect<Response, R2, E2>
+) -> Router<{ R1 | R2 }, E1 + E2>;
+
+pub fn get<R1, R2, E1, E2>(
+  router: Router<R1, E1>,
+  route: String,
+  handler: Request -> Effect<Response, R2, E2>
+) -> Router<{ R1 | R2 }, E1 + E2>;
+
+// Binding a socket is a scoped resource: the listener is released when the
+// enclosing `Effect.scoped` region exits.
+pub fn listen<R, E>(
+  router: Router<R, E>,
+  port: Int
+) -> Effect<(), { R | scope: Scope }, E + HttpError>;
