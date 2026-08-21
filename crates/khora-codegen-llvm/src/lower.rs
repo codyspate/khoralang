@@ -1100,6 +1100,65 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// `a == b` on two strings, by content.
+    ///
+    /// Both operands are owned here — they were evaluated for this comparison —
+    /// so both are released once the answer is in hand.
+    fn compare_strings(
+        &mut self,
+        op: BinOp,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+    ) -> Flow<'ctx> {
+        let mut parts = Vec::with_capacity(4);
+        for value in [left, right] {
+            let object = value.into_pointer_value();
+            let length_slot =
+                runtime::field_pointer(self.be.ctx, &self.be.builder, object, STRING_LEN_FIELD);
+            let length = self
+                .be
+                .builder
+                .build_load(self.be.ctx.i64_type(), length_slot, "str.len")
+                .expect("reading a string length");
+            let bytes = runtime::byte_offset(
+                self.be.ctx,
+                &self.be.builder,
+                object,
+                STRING_BYTES_OFFSET,
+                "str.bytes",
+            );
+            parts.push(bytes.into());
+            parts.push(length.into());
+        }
+
+        let equal = self
+            .be
+            .builder
+            .build_call(self.be.rt.str_eq, &parts, "str.eq")
+            .expect("comparing two strings")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_str_eq returns a _Bool")
+            .into_int_value();
+
+        self.drop(left, &Type::Str);
+        self.drop(right, &Type::Str);
+
+        // The runtime answers in a C `_Bool`, one byte; Khora's `Bool` is an
+        // `i1`, so the answer is narrowed by asking whether the byte is set.
+        let zero = self.be.ctx.i8_type().const_zero();
+        let predicate = match op {
+            BinOp::Eq => IntPredicate::NE,
+            _ => IntPredicate::EQ,
+        };
+        let value = self
+            .be
+            .builder
+            .build_int_compare(predicate, equal, zero, "str.cmp")
+            .expect("narrowing a _Bool");
+        Some(value.into())
+    }
+
     fn compare(
         &mut self,
         op: BinOp,
@@ -1124,13 +1183,20 @@ impl<'ctx> Lower<'_, 'ctx> {
             _ => IntPredicate::UGE,
         };
 
+        // Strings compare by their bytes, not by their address: two `"a"`
+        // literals are separate allocations and a pointer comparison would call
+        // them different.
+        if matches!(operand_ty, Type::Str) && matches!(op, BinOp::Eq | BinOp::Ne) {
+            return self.compare_strings(op, left, right);
+        }
+
         if !matches!(operand_ty, Type::Int | Type::Bool | Type::Unit) {
             self.drop(left, operand_ty);
             self.drop(right, operand_ty);
             return self.fail(
                 format!(
-                    "comparing two `{operand_ty}` values needs structural equality, which the \
-                     backend does not generate yet"
+                    "two `{operand_ty}` values can only be compared with `==` and `!=`, and \
+                     ordering one needs a `Ord` impl the backend does not call yet"
                 ),
                 range,
             );

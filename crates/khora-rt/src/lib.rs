@@ -69,6 +69,8 @@
 //! void  khora_print_int(int64_t value);
 //! void  khora_print_bool(_Bool value);
 //! void  khora_print_str(const uint8_t *bytes, size_t len);
+//! _Bool khora_str_eq(const uint8_t *a, size_t a_len,
+//!                    const uint8_t *b, size_t b_len);
 //! size_t khora_alloc_count(void);
 //! size_t khora_live_count(void);
 //! void  khora_reset_counters(void);
@@ -361,6 +363,41 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     unsafe { dealloc(ptr, layout) };
 
     LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+}
+
+/// Whether two strings hold the same bytes.
+///
+/// Takes bytes and lengths rather than object pointers, matching
+/// [`khora_print_str`]: the header layout is the code generator's business, and
+/// the runtime stays a function of the data it is handed.
+///
+/// A null pointer is only valid with a zero length, which is how an
+/// uninitialized slot compares equal to `""` and to itself.
+///
+/// # Safety
+///
+/// Each pointer must be null or address `len` initialized bytes that stay live
+/// and unmodified for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_str_eq(
+    a: *const u8,
+    a_len: usize,
+    b: *const u8,
+    b_len: usize,
+) -> bool {
+    if a_len != b_len {
+        return false;
+    }
+    if a_len == 0 {
+        return true;
+    }
+    if a.is_null() || b.is_null() {
+        fatal("string comparison of a null pointer with a non-zero length");
+    }
+    // SAFETY: the caller guarantees `len` initialized bytes at each pointer,
+    // live and unmodified for this call, and each length came from an
+    // allocation so is far below `isize::MAX`.
+    unsafe { std::slice::from_raw_parts(a, a_len) == std::slice::from_raw_parts(b, b_len) }
 }
 
 /// Reads an object's refcount. Null reads as zero.

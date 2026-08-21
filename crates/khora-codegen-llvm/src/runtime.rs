@@ -69,6 +69,8 @@ pub struct Runtime<'ctx> {
     pub print_bool: FunctionValue<'ctx>,
     /// `void khora_print_str(const uint8_t *, size_t)`
     pub print_str: FunctionValue<'ctx>,
+    /// `_Bool khora_str_eq(const uint8_t *, size_t, const uint8_t *, size_t)`
+    pub str_eq: FunctionValue<'ctx>,
     /// `llvm.trap`, for a branch that exhaustiveness says cannot be taken.
     pub trap: FunctionValue<'ctx>,
 }
@@ -100,6 +102,10 @@ impl<'ctx> Runtime<'ctx> {
             // undefined behavior rather than a merely surprising result.
             print_bool: declare("khora_print_bool", void.fn_type(&[i8t.into()], false)),
             print_str: declare("khora_print_str", void.fn_type(&[ptr.into(), i64t.into()], false)),
+            str_eq: declare(
+                "khora_str_eq",
+                i8t.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false),
+            ),
             trap: declare("llvm.trap", void.fn_type(&[], false)),
         }
     }

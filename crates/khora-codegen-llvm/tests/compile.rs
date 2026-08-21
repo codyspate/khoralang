@@ -1525,3 +1525,52 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "2\n1\n", "a bare-name lookup would swap these");
     assert_eq!(ran.code, Some(0));
 }
+
+/// Two equal string literals are two separate allocations, so `==` has to
+/// compare bytes. A pointer comparison would call them different.
+#[test]
+fn strings_compare_by_content() {
+    let ran = run(
+        "string_eq",
+        "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+fn yes(b: Bool) -> Int { if b { 1 } else { 0 } }
+
+fn main() -> Int {
+  khora_print_int(yes(\"hello\" == \"hello\"));
+  khora_print_int(yes(\"hello\" == \"world\"));
+  khora_print_int(yes(\"hell\" == \"hello\"));
+  khora_print_int(yes(\"\" == \"\"));
+  khora_print_int(yes(\"a\" != \"b\"));
+  khora_print_int(khora_live_count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "1
+0
+0
+1
+1
+0
+", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `<` on two strings is not equality and has no answer the backend can give,
+/// so it says which operators do work rather than naming an unrelated phase.
+#[test]
+fn ordering_two_strings_is_rejected_clearly() {
+    let found = errors(
+        "string_ord",
+        "module t;
+fn main() -> Int { if \"a\" < \"b\" { 0 } else { 1 } }
+",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("can only be compared with `==` and `!=`")),
+        "{found:?}"
+    );
+}

@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use khora_rt::{
+    khora_str_eq,
     khora_alloc, khora_alloc_count, khora_drop, khora_dup, khora_live_count, khora_print_bool,
     khora_print_int, khora_print_str, khora_refcount, khora_reset_counters, KHORA_FIELD_OFFSET,
     KHORA_HEADER_ALIGN, KHORA_HEADER_SIZE,
@@ -475,4 +476,45 @@ fn printing_accepts_the_edges_of_every_type_it_supports() {
 
         assert_eq!(khora_live_count(), 0, "printing must not allocate a Khora object");
     });
+}
+
+// --- string comparison -----------------------------------------------------
+
+/// Two equal strings are usually two separate allocations, so comparing them
+/// has to look at the bytes.
+#[test]
+fn equal_bytes_compare_equal() {
+    let a = b"hello";
+    let b = b"hello";
+    assert!(unsafe { khora_str_eq(a.as_ptr(), a.len(), b.as_ptr(), b.len()) });
+}
+
+#[test]
+fn different_bytes_compare_unequal() {
+    let a = b"hello";
+    let b = b"world";
+    assert!(!unsafe { khora_str_eq(a.as_ptr(), a.len(), b.as_ptr(), b.len()) });
+}
+
+/// A prefix is not a match, and length is checked before the bytes are read.
+#[test]
+fn a_prefix_is_not_equal() {
+    let a = b"hell";
+    let b = b"hello";
+    assert!(!unsafe { khora_str_eq(a.as_ptr(), a.len(), b.as_ptr(), b.len()) });
+}
+
+/// A zeroed slot has a null pointer and a zero length, which is what makes it
+/// compare equal to the empty string rather than crashing.
+#[test]
+fn empty_strings_are_equal_even_when_null() {
+    assert!(unsafe { khora_str_eq(std::ptr::null(), 0, std::ptr::null(), 0) });
+    let a = b"";
+    assert!(unsafe { khora_str_eq(a.as_ptr(), 0, std::ptr::null(), 0) });
+}
+
+#[test]
+fn an_empty_string_does_not_equal_a_full_one() {
+    let b = b"x";
+    assert!(!unsafe { khora_str_eq(std::ptr::null(), 0, b.as_ptr(), b.len()) });
 }
