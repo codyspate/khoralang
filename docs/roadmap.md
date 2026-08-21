@@ -21,7 +21,7 @@ document breaks the tie.
 | A5 | **Structured concurrency with interruption in v1.** Fibers, cancellation that runs finalizers, `Scope`-bound lifetimes, `Schedule`. | Effect's headline safety property, and §6.4 already assumes it. Retrofitting interruption into a runtime that never had it is close to a rewrite. |
 | A6 | **First-class Rust interop** as the ecosystem strategy. | A new language with no libraries loses to Go and Node on merit-independent grounds. crates.io is native and LLVM-based — the closest ecosystem to reach. |
 | A7 | **Developer experience is a product requirement.** Diagnostic quality, compile speed and LSP latency are tested from Phase 2, not polished in Phase 6. | The thesis is "beats Rust's DX". Rust's advantage is mostly cargo, rustc diagnostics, rust-analyzer and clippy. Deferring all of it means we cannot evaluate our main claim until the end. |
-| A8 | **Direct-style algebraic effects, not a monadic `Effect<A, R, E>`.** Effects are rows on the signature (`with` / `raises`), discharged by handlers. | The spec already specifies Perceus and Leijen/Rémy scoped rows — both Koka, which pairs them with exactly this model. A monadic API fights that substrate. Effect-TS's `Effect.gen`/`yield*` is itself a simulation of direct style, just as `TypeLambda` simulates HKT. |
+| A8 | **Direct-style algebraic effects, not a monadic `Effect<A, R, E>`.** Effects are rows on the signature (`with` / `raises`), discharged by handlers, with fallible calls marked `!` at the call site. Settled in `docs/design/effects.md`. | The spec already specifies Perceus and Leijen/Rémy scoped rows — both Koka, which pairs them with exactly this model. A monadic API fights that substrate. Effect-TS's `Effect.gen`/`yield*` is itself a simulation of direct style, just as `TypeLambda` simulates HKT. Decisively, only direct style lets a non-functional programmer write an effectful `for` loop at all — under a monad it must become a fold. |
 
 ### What A8 preserves, and what it costs
 
@@ -61,11 +61,19 @@ before the phase that depends on it starts.
 | D3 | **`Schema.Spec` projects an associated type off a type *variable*.** With A4 this is tractable — associated types on typeclasses — but the coherence rules still need deciding. | 4.2 |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
 | D6 | **Which typeclasses ship in `std`, and what are the coherence rules?** Orphan instances, overlapping instances, and whether instance resolution is nominal or structural. A4 settled *whether*; this settles *how much*. | 3 |
-| D7 | **Effect and handler syntax.** How an effect is declared, the exact `with`/`raises` clause grammar, handler syntax, and whether `raises` is sugar over `with` or a distinct row. Blocks the `std/` rewrite. | 1.5 |
-| D8 | **The Rust interop boundary.** How Rust's ownership and traits map onto Khora's reference counting and rows; whether we bind at the C ABI or generate richer shims. | 5 |
+| D8 | **The Rust interop boundary.** How Rust's ownership and traits map onto Khora's reference counting and rows; whether we bind at the C ABI or generate richer shims. | 7 |
+| D9 | **Imperative constructs.** The language has no `if`, no assignment, no loops and no early `return` — everything is recursion and `match`. Disqualifying for the Rust/Go/TypeScript audience in `docs/vision.md`. Planned in `docs/design/imperative.md`; the detailed grammar is still open. | 1.6 |
 
-**Closed:** D5 (`ask` arity, errata #3) is dissolved by A8 — `ask(:label.op)`
-does not exist in direct style; you call `ledger.get_history(x)`.
+**Closed:**
+
+- **D5** (`ask` arity, errata #3) is dissolved by A8 — `ask(:label.op)` does not
+  exist in direct style; you call `ledger.get_history(x)`.
+- **D7** (effect and handler syntax) is decided in `docs/design/effects.md`:
+  `effect` declarations, `with`/`raises` signature clauses, `raise`, `!` on
+  fallible calls, `handler for` and `Handler<E>`, both installation forms,
+  `catch`, and effect-row variables in generic signatures. Contexts are rows, so
+  composing and overriding services is row update — and there is no layer
+  memoization to reason about, because sharing is by name.
 
 ---
 
@@ -141,10 +149,15 @@ Independent of Phase 0; can proceed in parallel.
   semicolons, pipeline continuation aligned to the source expression,
   alphabetised and deduplicated imports.
 - **1.4 Decide D2** → `docs/design/associated-items.md`. Blocks 2.1.
-- **1.5 Decide D7** → `docs/design/effects.md`: effect declaration, `with` and
-  `raises` clause grammar, handler syntax. Then extend the grammar and rewrite
-  `std/` and `examples/risk_analyzer` in direct style. This supersedes the
-  monadic API those files currently show.
+- **1.5 Implement D7.** `docs/design/effects.md` is written and decided. Extend
+  the grammar with `effect`, `with`, `raises`, `raise`, `!`, `handler for`,
+  `catch` and `context`, then rewrite `std/` and `examples/risk_analyzer` in
+  direct style. This supersedes the monadic API those files currently show.
+- **1.6 Imperative constructs (D9).** `if`/`else`, assignment to `let mut`,
+  `while`, `loop`/`break`/`continue`, early `return`. All self-contained grammar
+  and lowering work. `if` should go first — it is a one-evening change and its
+  absence is a daily papercut. Generic `for` waits for Phase 3; see
+  `docs/design/imperative.md`.
 
 **Exit:** corpus and manifests parse; `khora fmt --check` clean on the corpus;
 property tests show `fmt(fmt(x)) == fmt(x)` and that formatting preserves the
@@ -192,9 +205,14 @@ system. Const generics as `Type::Const`. Typeclasses with instance resolution
 per D6. Monomorphise in HIR before codegen so abstraction costs nothing at
 runtime.
 
+Also lands the `Iterator` typeclass and generic `for x in xs`, which was held
+back from Phase 1 so the loop form is designed against the real protocol rather
+than a `List` special case.
+
 **Exit:** `matmul` with a mismatched shared dimension is a compile error naming
 both dimensions; a `traverse` written once works over `Option`, `List` and a
-user type; instance resolution errors name the missing instance.
+user type; instance resolution errors name the missing instance; `for` iterates
+a user-defined type.
 
 ---
 
