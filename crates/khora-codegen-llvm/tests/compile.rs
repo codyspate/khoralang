@@ -682,3 +682,144 @@ fn helper() -> Int { 1 }
         "expected a message about the missing entry point, got {found:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Traits
+// ---------------------------------------------------------------------------
+
+/// Dispatch is static: the call becomes a direct call to the impl's function,
+/// with no dictionary and no vtable. See `docs/design/typeclasses.md`.
+#[test]
+fn a_method_calls_the_impl_directly() {
+    let ran = run(
+        "trait_direct",
+        "module t;
+fn print(value: Int);
+
+trait Double {
+  fn double(self) -> Int;
+}
+
+impl Double for Int {
+  fn double(self) -> Int { self * 2 }
+}
+
+fn main() -> Int {
+  print(21.double());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "42\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A call through a bound picks the impl at monomorphisation, so the generic
+/// function costs nothing the concrete one would not have.
+#[test]
+fn a_bounded_generic_resolves_per_instantiation() {
+    let ran = run(
+        "trait_bound",
+        "module t;
+fn print(value: Int);
+
+trait Size {
+  fn size(self) -> Int;
+}
+
+impl Size for Int { fn size(self) -> Int { 8 } }
+impl Size for Bool { fn size(self) -> Int { 1 } }
+
+fn total<T: Size>(a: T, b: T) -> Int { a.size() + b.size() }
+
+fn main() -> Int {
+  print(total(1, 2));
+  print(total(true, false));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "16\n2\n", "each instantiation should reach its own impl");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A supertrait's functions are available through the subtrait's bound.
+#[test]
+fn a_supertrait_method_is_callable_through_the_subtrait() {
+    let ran = run(
+        "trait_super",
+        "module t;
+fn print(value: Int);
+
+trait Base { fn base(self) -> Int; }
+trait Derived: Base { fn derived(self) -> Int; }
+
+impl Base for Int { fn base(self) -> Int { self } }
+impl Derived for Int { fn derived(self) -> Int { self * 10 } }
+
+fn both<T: Derived>(x: T) -> Int { x.base() + x.derived() }
+
+fn main() -> Int {
+  print(both(4));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "44\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// An impl over a constructor is selected by matching the receiver, which is
+/// what tells `impl<A> Holds for Box<A>` what `A` is.
+#[test]
+fn a_parameterised_impl_is_selected_by_the_receiver() {
+    let ran = run(
+        "trait_param_impl",
+        "module t;
+fn print(value: Int);
+
+pub type Box<A> = | Of(value: A);
+
+trait Unwrap { fn get(self) -> Int; }
+
+impl<A> Unwrap for Box<A> {
+  fn get(self) -> Int { 99 }
+}
+
+fn main() -> Int {
+  print(Box::Of(1).get());
+  print(Box::Of(true).get());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "99\n99\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A default body runs when the impl does not supply one.
+#[test]
+fn a_default_body_is_emitted_for_an_impl_that_omits_it() {
+    let ran = run(
+        "trait_default",
+        "module t;
+fn print(value: Int);
+
+trait Describe {
+  fn size(self) -> Int;
+  fn doubled(self) -> Int { self.size() + self.size() }
+}
+
+impl Describe for Int {
+  fn size(self) -> Int { self * 3 }
+}
+
+fn main() -> Int {
+  print(7.doubled());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "42\n");
+    assert_eq!(ran.code, Some(0));
+}

@@ -31,7 +31,8 @@ use khora_db::{Db, SourceFile};
 use khora_hir::HirError;
 use text_size::TextRange;
 
-use crate::{unify, BodyTypes, Type};
+use crate::traits::{self, Traits};
+use crate::{unify, BodyTypes, Type, TypeMap};
 
 /// How deep a chain of generic calls may go before we call it non-terminating.
 ///
@@ -81,10 +82,68 @@ fn mangle(ty: &Type) -> String {
         // An unsolved argument still has to mangle to something unique, since
         // two different variables both print as `_`.
         Type::Var(v) => format!("_var{v}"),
+        // An application that survived here means `Self` was never chosen,
+        // which is a bug in instance selection rather than in the program.
+        Type::Applied { param, args } => {
+            let inner: Vec<String> = args.iter().map(mangle).collect();
+            format!("_app{param}${}", inner.join("$"))
+        }
         // Reaching here means an argument was never solved. The instance is
         // still distinct from every other, so a stable placeholder is enough to
         // keep symbols unique; the diagnostic comes from elsewhere.
         other => format!("_{other}").replace(['<', '>', ',', ' ', '?'], "_"),
+    }
+}
+
+/// Turns a call through a trait into a call to the impl that answers it.
+///
+/// A method mention records the trait's key — `Show::show` — with `Self` as its
+/// first type argument. That argument is what selects the impl, which is the
+/// whole of nominal resolution: a name, never a shape. See
+/// `docs/design/typeclasses.md`.
+///
+/// Returns `None` when the mention is not a trait method, or when `Self` is
+/// still unsolved, in which case the caller has nothing to emit and the
+/// diagnostic has already been raised elsewhere.
+pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
+    let (trait_name, method) = instance.function.split_once("::")?;
+    let def = types.traits.traits.get(trait_name)?;
+    def.method(method)?;
+
+    let self_ty = instance.args.first()?;
+    let imp = types.traits.find(trait_name, self_ty)?;
+    let head = imp.head()?;
+
+    // An impl that leaves a function out is taking the trait's default, and the
+    // default body is what runs. Keeping the trait's own key here is what makes
+    // that work with no further machinery: the body and the signature are both
+    // already recorded under it.
+    if !imp.methods.iter().any(|m| m == method) {
+        return None;
+    }
+
+    // The impl's own parameters are solved from the receiver: matching
+    // `Option<A>` against `Option<Int>` is what tells this instance that
+    // `A = Int`.
+    let mut solved = std::collections::HashMap::new();
+    if !unify::match_params(&imp.self_type, self_ty, &imp.generics, &mut solved) {
+        return None;
+    }
+    let mut args: Vec<Type> = imp
+        .generics
+        .iter()
+        .map(|g| solved.get(g).cloned().unwrap_or(Type::Unknown))
+        .collect();
+    args.extend(instance.args.iter().skip(1).cloned());
+
+    Some(Instance { function: traits::method_key(trait_name, &head, method), args })
+}
+
+/// Whether a name refers to a trait's own function rather than to an impl's.
+fn is_trait_method(traits: &Traits, name: &str) -> bool {
+    match name.split_once("::") {
+        Some((t, m)) => traits.traits.get(t).is_some_and(|d| d.method(m).is_some()),
+        None => false,
     }
 }
 
@@ -93,6 +152,12 @@ fn mangle(ty: &Type) -> String {
 pub struct Instances {
     pub instances: Vec<(Instance, BodyTypes)>,
     pub errors: Vec<HirError>,
+    /// The symbol each trait-method mention was resolved to.
+    ///
+    /// Recorded during the walk rather than recomputed at each use, so that
+    /// what code generation emits and what monomorphisation decided cannot
+    /// drift apart.
+    pub resolved: HashMap<Instance, String>,
 }
 
 impl Instances {
@@ -109,7 +174,8 @@ impl Instances {
         if args.is_empty() {
             return None;
         }
-        Some(Instance { function: function.clone(), args: args.clone() }.symbol())
+        let wanted = Instance { function: function.clone(), args: args.clone() };
+        Some(self.resolved.get(&wanted).cloned().unwrap_or_else(|| wanted.symbol()))
     }
 }
 
@@ -118,6 +184,7 @@ impl Instances {
 pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
     let types = crate::type_map(db, file);
     let checked = crate::checked(db, file);
+    let traits = &types.traits;
     let by_name: HashMap<&str, &BodyTypes> =
         checked.bodies.iter().map(|(n, t)| (n.as_str(), t)).collect();
 
@@ -130,6 +197,7 @@ pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
     let mut queue: Vec<(Instance, usize)> = checked
         .bodies
         .iter()
+        .filter(|(name, _)| !is_trait_method(traits, name))
         .filter(|(name, _)| {
             types.signatures.get(name.as_str()).is_none_or(|s| s.generics.is_empty())
         })
@@ -173,10 +241,17 @@ pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
             }
             let resolved: Vec<Type> =
                 args.iter().map(|a| unify::substitute(a, &mapping)).collect();
-            queue.push((
-                Instance { function: callee.clone(), args: resolved },
-                depth + 1,
-            ));
+            let mention = Instance { function: callee.clone(), args: resolved };
+
+            // A call written against a trait is emitted as a call to the impl.
+            let target = match select_impl(types, &mention) {
+                Some(chosen) => {
+                    out.resolved.insert(mention, chosen.symbol());
+                    chosen
+                }
+                None => mention,
+            };
+            queue.push((target, depth + 1));
         }
 
         out.instances.push((instance, specialised));

@@ -547,6 +547,19 @@ impl<'ctx> Lower<'_, 'ctx> {
                     self.call_named(&symbol, args, range)
                 }
             }
+            // `a.show()` — the receiver becomes the first argument, and which
+            // impl runs was settled by monomorphisation.
+            Expr::Field { base, .. } => match self.mono.callee(self.types, callee) {
+                Some(symbol) => {
+                    let mut all = vec![base];
+                    all.extend_from_slice(args);
+                    self.call_named(&symbol, &all, range)
+                }
+                None => self.fail(
+                    "this method call was not resolved to an impl; that is a compiler bug",
+                    range,
+                ),
+            },
             _ => self.fail(
                 "only a named function or a constructor can be called; there are no function \
                  values until closures land",

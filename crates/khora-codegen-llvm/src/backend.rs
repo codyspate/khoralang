@@ -170,6 +170,9 @@ fn specialised_signature(
         .collect();
     Some(Signature {
         generics: Vec::new(),
+        // A specialised signature has no parameters left, so it can carry no
+        // bounds either: whatever they required was settled before this ran.
+        bounds: Vec::new(),
         params: signature
             .params
             .iter()
@@ -300,7 +303,7 @@ impl<'ctx> Backend<'ctx> {
             Type::Var(_) | Type::Param(_) => None,
             // Tuples type check but have no layout yet; `lower` reports that
             // in the one place it can happen, rather than here.
-            Type::Tuple(_) | Type::Const(_) => None,
+            Type::Tuple(_) | Type::Const(_) | Type::Applied { .. } => None,
             Type::Fn { .. } | Type::Never | Type::Unknown => None,
         }
     }

@@ -142,11 +142,30 @@ traits under this decision, with no change to the signatures that use them.
 
 ## 7. What this leaves open
 
-- **Default method bodies** (`fn ne(self, other: Self) -> Bool { !self.eq(other) }`)
-  are familiar and cheap, but they interact with monomorphisation in a way worth
-  implementing after the base case works, not alongside it.
 - **Blanket impls** (`impl<T: Show> Show for List<T>`) are the natural next step
   and the reason `From`/`Into` is deferred. They need the overlap check to reason
   about impls that are not ground.
 - **Where clauses.** `+`-separated bounds cover phase 3. A `where` clause is
   presentation, and can follow.
+
+## 8. What has landed
+
+Everything above except the standard library itself and the two items in §7.
+`crates/khora-types/src/traits.rs` holds the kinds, the coherence checks and
+instance selection; `crates/khora-types/tests/traits.rs` and
+`crates/khora-codegen-llvm/tests/compile.rs` pin the behaviour.
+
+Working end to end, compiled to native code: method calls on a concrete type,
+method calls through a bound, supertraits, parameterised impls
+(`impl<A> Unwrap for Box<A>`), default method bodies, and higher-kinded traits
+(`impl Functor for Option`). Dispatch is static in every case — a call becomes a
+direct call to the impl's function.
+
+Default method bodies moved from "open" to done during implementation: stating
+`Self: ThisTrait` as an ordinary bound on the trait's own signatures turned out
+to make them fall out of the machinery already there, with no special case
+anywhere.
+
+The **orphan rule** is decided but not yet enforced. It needs traits to resolve
+across packages, and checking it now would reject `impl Show for Int` in a file
+that has no way to say where `Show` came from. Recorded in `docs/errata.md`.

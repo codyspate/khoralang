@@ -9,6 +9,7 @@
 //! it is noted where it will go.
 
 pub mod mono;
+pub mod traits;
 pub mod unify;
 pub mod usefulness;
 
@@ -36,6 +37,13 @@ pub enum Type {
     /// A type parameter the *caller* chose. Rigid: the body of a generic
     /// function cannot decide what it is. See `unify`.
     Param(String),
+    /// A type parameter applied to arguments, as `Self<A>` in a
+    /// higher-kinded trait.
+    ///
+    /// Collapses into an ordinary [`Type::Adt`] the moment the parameter is
+    /// known — `Self := Option` turns `Self<A>` into `Option<A>` — so nothing
+    /// downstream of instance selection ever sees one.
+    Applied { param: String, args: Vec<Type> },
     /// A fixed-length product, as in `(Int, Bool)`.
     ///
     /// The empty tuple is `Unit`, not `Tuple(vec![])`, so there is exactly one
@@ -73,6 +81,10 @@ impl std::fmt::Display for Type {
             // TypeScript developer already reads as "not pinned down yet".
             Type::Var(_) => write!(f, "_"),
             Type::Const(n) => write!(f, "{n}"),
+            Type::Applied { param, args } => {
+                let inner: Vec<String> = args.iter().map(Type::to_string).collect();
+                write!(f, "{param}<{}>", inner.join(", "))
+            }
             // `(Int,)` for the one-element case, so it is not read as a
             // parenthesised `Int` - the same disambiguation Rust and Python use.
             Type::Tuple(items) => {
@@ -105,6 +117,12 @@ impl Type {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     pub generics: Vec<String>,
+    /// The traits each generic parameter requires, in the order declared.
+    ///
+    /// Parallel to `generics` rather than a map, so the parameter a bound
+    /// belongs to is positional — which is how instantiation already matches
+    /// arguments to parameters.
+    pub bounds: Vec<Vec<String>>,
     pub params: Vec<Type>,
     pub ret: Type,
 }
@@ -135,6 +153,11 @@ pub struct TypeMap {
     pub variants: Vec<VariantInfo>,
     /// Generic parameters of each declared type, by name.
     pub adts: HashMap<String, Vec<String>>,
+    /// The traits and impls this file declares.
+    pub traits: traits::Traits,
+    /// The kind of every named type, so an impl can be checked against the
+    /// kind its trait requires.
+    pub kinds: HashMap<String, traits::Kind>,
 }
 
 impl TypeMap {
@@ -151,12 +174,16 @@ impl TypeMap {
 pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     let parse = khora_db::parse(db, file);
     let mut map = TypeMap::default();
+    // Which of each type's parameters are const, so `Matrix<const R, const C>`
+    // gets the kind `Int -> Int -> *` rather than `* -> * -> *`.
+    let mut consts: HashMap<String, Vec<bool>> = HashMap::new();
 
     for decl in parse.source_file().decls() {
         match decl {
             ast::Decl::Fn(f) => {
                 let Some(name) = f.name().and_then(|n| n.ident()) else { continue };
                 let generics = generic_names(f.type_params().as_ref());
+                let bounds = bound_lists(f.type_params().as_ref());
                 let params = f
                     .params()
                     .map(|list| {
@@ -166,11 +193,16 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 let ret = f
                     .return_type()
                     .map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics));
-                map.signatures.insert(name, Signature { generics, params, ret });
+                map.signatures.insert(name, Signature { generics, bounds, params, ret });
             }
             ast::Decl::Type(t) => {
                 let Some(type_name) = t.name().and_then(|n| n.ident()) else { continue };
                 let generics = generic_names(t.type_params().as_ref());
+                let is_const: Vec<bool> = t
+                    .type_params()
+                    .map(|p| p.params().map(|g| g.is_const()).collect())
+                    .unwrap_or_default();
+                consts.insert(type_name.clone(), is_const);
                 map.adts.insert(type_name.clone(), generics.clone());
                 if let Some(ast::Type::Variant(v)) = t.definition() {
                     for case in v.cases() {
@@ -201,6 +233,10 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
             _ => {}
         }
     }
+
+    map.signatures.extend(traits::impl_signatures(&parse.source_file()));
+    map.traits = traits::collect(&parse.source_file());
+    map.kinds = traits::kinds(&map.adts, &consts);
     map
 }
 
@@ -221,6 +257,20 @@ fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> String {
         }
         _ => format!("; `{}` does not match `{}`", inner.0, inner.1),
     }
+}
+
+/// The traits each parameter requires, positionally matched to
+/// [`generic_names`]. A parameter with no bounds contributes an empty list, so
+/// the two are always the same length.
+fn bound_lists(params: Option<&ast::TypeParams>) -> Vec<Vec<String>> {
+    params
+        .map(|p| {
+            p.params()
+                .filter(|g| g.name().and_then(|n| n.ident()).is_some())
+                .map(|g| traits::bound_names(g.bounds().as_ref()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
@@ -257,7 +307,13 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
                 "Bool" => Type::Bool,
                 "String" => Type::Str,
                 "" => Type::Unknown,
-                other if generics.iter().any(|g| g == other) => Type::Param(other.to_string()),
+                other if generics.iter().any(|g| g == other) => {
+                    if args.is_empty() {
+                        Type::Param(other.to_string())
+                    } else {
+                        Type::Applied { param: other.to_string(), args }
+                    }
+                }
                 other => Type::Adt { name: other.to_string(), args },
             }
         }
@@ -347,6 +403,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
     for (name, body) in khora_hir::body::bodies(db, file) {
         let signature = types.signatures.get(name).cloned().unwrap_or(Signature {
             generics: Vec::new(),
+            bounds: Vec::new(),
             params: Vec::new(),
             ret: Type::Unknown,
         });
@@ -361,6 +418,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             errors: Vec::new(),
         };
         checker.check_function();
+        checker.check_bounds();
         out.errors.extend(checker.errors);
         // Published types are zonked: a consumer should never see a variable,
         // and code generation cannot do anything with one.
@@ -390,6 +448,16 @@ pub fn body_types(db: &dyn Db, file: SourceFile) -> &Vec<(String, BodyTypes)> {
 /// question with its own answer; [`diagnostics`] is what a driver wants.
 pub fn check_file(db: &dyn Db, file: SourceFile) -> &Vec<HirError> {
     &checked(db, file).errors
+}
+
+/// Everything wrong with the traits and impls a file declares.
+///
+/// Separate from `check_file` because none of it depends on a function body:
+/// an impl is well-formed or it is not, whatever any caller does with it.
+#[salsa::tracked(returns(ref))]
+pub fn trait_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    let types = type_map(db, file);
+    traits::check(&types.traits, &types.kinds)
 }
 
 struct Checker<'a> {
@@ -739,6 +807,12 @@ impl<'a> Checker<'a> {
             }
         }
 
+        if let Expr::Field { base, name } = self.body.expr(callee).clone() {
+            if let Some(ty) = self.infer_method_call(callee, base, &name, args, range) {
+                return ty;
+            }
+        }
+
         let callee_ty = self.infer(callee);
         let Type::Fn { params, ret } = callee_ty else {
             for arg in args {
@@ -757,6 +831,226 @@ impl<'a> Checker<'a> {
             self.expect(*arg, expected, "this argument");
         }
         *ret
+    }
+
+    /// Resolves `receiver.method(args)` through the traits in scope.
+    ///
+    /// Returns `None` when the receiver has a *field* of that name, so a record
+    /// holding a function keeps working — the field reading is the more
+    /// specific one and wins, exactly as it does in Rust.
+    fn infer_method_call(
+        &mut self,
+        callee: ExprId,
+        receiver: ExprId,
+        method: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Option<Type> {
+        let inferred = self.infer(receiver);
+        let self_ty = self.unifier.zonk(&inferred);
+
+        // A receiver whose type is still open cannot select an impl. Saying so
+        // is better than picking one and being wrong about it later.
+        if matches!(self_ty, Type::Unknown | Type::Var(_) | Type::Never) {
+            return None;
+        }
+
+        // Inside a generic function the receiver is rigid, and the only methods
+        // it has are the ones its bounds promise.
+        if let Type::Param(param) = &self_ty {
+            return Some(self.infer_bounded_method(callee, param, method, args, range));
+        }
+
+        let (def, imp) = match traits::method_source(&self.types.traits, &self_ty, method) {
+            Ok(found) => found,
+            Err(traits::MethodError::Unknown) => return None,
+            Err(traits::MethodError::NotImplemented(owners)) => {
+                self.error(
+                    format!(
+                        "`{self_ty}` does not implement `{}`, which is where `{method}` comes from",
+                        owners.join("` or `")
+                    ),
+                    range,
+                );
+                return Some(Type::Unknown);
+            }
+            Err(traits::MethodError::Ambiguous(names)) => {
+                self.error(
+                    format!(
+                        "`{method}` is declared by `{}`, and `{self_ty}` implements more than one",
+                        names.join("` and `")
+                    ),
+                    range,
+                );
+                return Some(Type::Unknown);
+            }
+        };
+
+        let key = format!("{}::{method}", def.name);
+        let _ = imp;
+        Some(self.call_signature(callee, &key, &self_ty, args, range))
+    }
+
+    /// A method reached through a bound rather than through an impl.
+    ///
+    /// `fn f<T: Eq>(a: T, b: T) { a.eq(b) }` has no impl to select — `T` is
+    /// whatever the caller passes — so the *trait's* signature is used, and
+    /// which impl runs is settled by monomorphisation.
+    fn infer_bounded_method(
+        &mut self,
+        callee: ExprId,
+        param: &str,
+        method: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Type {
+        let declared = self.bounds_on(param);
+        let available = traits::with_supertraits(&self.types.traits, &declared);
+        let found = available.iter().find_map(|name| {
+            let def = self.types.traits.traits.get(name)?;
+            def.method(method).map(|m| (def.name.clone(), m.signature.clone()))
+        });
+
+        let Some((trait_name, _)) = found else {
+            for arg in args {
+                self.infer(*arg);
+            }
+            self.error(
+                if declared.is_empty() {
+                    format!(
+                        "`{param}` is a type the caller chooses and has no bounds, so it has no \
+                         method `{method}`; add one, as `{param}: Trait`"
+                    )
+                } else {
+                    format!(
+                        "no method `{method}` on `{param}`, whose bounds are `{}`",
+                        declared.join("` + `")
+                    )
+                },
+                range,
+            );
+            return Type::Unknown;
+        };
+
+        let key = format!("{trait_name}::{method}");
+        self.call_signature(callee, &key, &Type::Param(param.to_string()), args, range)
+    }
+
+    /// Checks a call against `key`'s signature with `Self` bound to `self_ty`.
+    fn call_signature(
+        &mut self,
+        callee: ExprId,
+        key: &str,
+        self_ty: &Type,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Type {
+        let Some(signature) = self.signature_for(key, self_ty) else {
+            for arg in args {
+                self.infer(*arg);
+            }
+            return Type::Unknown;
+        };
+
+        // `Self` is the method's first type argument, so a call through a
+        // trait carries the one fact that decides which impl runs. It reaches
+        // monomorphisation the same way every other type argument does.
+        let (ty, type_args) =
+            self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+        if let Some(chosen) = type_args.first() {
+            let _ = self.unifier.unify(chosen, self_ty);
+        }
+        self.instantiations.insert(callee, (key.to_string(), type_args));
+        let Type::Fn { params, ret } = ty else { return Type::Unknown };
+
+        // The receiver is the first parameter, and it is already checked: it is
+        // what selected this signature. Only the written arguments remain.
+        let expected = params.get(1..).unwrap_or(&[]);
+        if args.len() != expected.len() {
+            self.error(
+                format!(
+                    "`{key}` takes {} argument(s) after the receiver, but {} were given",
+                    expected.len(),
+                    args.len()
+                ),
+                range,
+            );
+        }
+        for (arg, want) in args.iter().zip(expected) {
+            self.expect(*arg, want, "this argument");
+        }
+        *ret
+    }
+
+    /// The trait's signature for a method key, with `Self` still a parameter.
+    fn signature_for(&self, key: &str, _self_ty: &Type) -> Option<Signature> {
+        self.types.signatures.get(key).cloned()
+    }
+
+    /// The traits the enclosing function requires of `param`.
+    fn bounds_on(&self, param: &str) -> Vec<String> {
+        self.signature
+            .generics
+            .iter()
+            .position(|g| g == param)
+            .and_then(|i| self.signature.bounds.get(i))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Reports every trait bound this body left unsatisfied.
+    ///
+    /// Runs after inference rather than during it: a bound is a question about
+    /// a *solved* type argument, and asking it while the argument is still a
+    /// variable would report whichever call happened to be visited first.
+    fn check_bounds(&mut self) {
+        let mentions: Vec<(ExprId, String, Vec<Type>)> = self
+            .instantiations
+            .iter()
+            .map(|(id, (name, args))| (*id, name.clone(), args.clone()))
+            .collect();
+
+        for (id, name, args) in mentions {
+            let Some(signature) = self.types.signatures.get(name.as_str()) else { continue };
+            let bounds = signature.bounds.clone();
+            let range = self.body.range(id);
+
+            for (arg, required) in args.iter().zip(&bounds) {
+                let arg = self.unifier.zonk(arg);
+                for wanted in required {
+                    // A trait that does not exist is reported where it is
+                    // written, not once per use of the function.
+                    if !self.types.traits.traits.contains_key(wanted) {
+                        continue;
+                    }
+                    if !self.satisfies(wanted, &arg) {
+                        self.error(
+                            format!("`{arg}` does not implement `{wanted}`, which `{name}` requires"),
+                            range,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether `ty` implements `wanted`, here in this body.
+    ///
+    /// A rigid parameter has no impl to find: what it satisfies is whatever the
+    /// enclosing signature promised about it, which is why this is a method on
+    /// the checker rather than on `Traits`.
+    fn satisfies(&self, wanted: &str, ty: &Type) -> bool {
+        match ty {
+            // Not solved, or downstream of an error already reported.
+            Type::Unknown | Type::Var(_) | Type::Never => true,
+            Type::Param(p) => {
+                let declared = self.bounds_on(p);
+                traits::with_supertraits(&self.types.traits, &declared)
+                    .iter()
+                    .any(|t| t == wanted)
+            }
+            other => self.types.traits.satisfies(wanted, other),
+        }
     }
 
     fn type_of_resolution(&mut self, at: ExprId, resolution: &khora_hir::Resolution) -> Type {
@@ -958,6 +1252,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     for (_, body) in khora_hir::body::bodies(db, file) {
         all.extend(body.errors.iter().cloned());
     }
+    all.extend(trait_errors(db, file).iter().cloned());
     all.extend(check_file(db, file).iter().cloned());
     all
 }

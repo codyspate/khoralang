@@ -107,6 +107,10 @@ impl Unifier {
                 args: args.iter().map(|a| self.zonk(a)).collect(),
             },
             Type::Tuple(items) => Type::Tuple(items.iter().map(|i| self.zonk(i)).collect()),
+            Type::Applied { param, args } => Type::Applied {
+                param,
+                args: args.iter().map(|a| self.zonk(a)).collect(),
+            },
             other => other,
         }
     }
@@ -157,6 +161,15 @@ impl Unifier {
             // Componentwise, and only at equal width. Two tuples of different
             // lengths are different types, so the whole pair is reported rather
             // than a component that has no counterpart.
+            (Type::Applied { param: p1, args: a1 }, Type::Applied { param: p2, args: a2 })
+                if p1 == p2 && a1.len() == a2.len() =>
+            {
+                for (x, y) in a1.iter().zip(a2) {
+                    self.unify(x, y)?;
+                }
+                Ok(())
+            }
+
             (Type::Tuple(x), Type::Tuple(y)) => {
                 if x.len() != y.len() {
                     return Err(Mismatch::Types { expected: a.clone(), found: b.clone() });
@@ -201,6 +214,7 @@ impl Unifier {
             }
             Type::Adt { args, .. } => args.iter().any(|a| self.occurs(var, a)),
             Type::Tuple(items) => items.iter().any(|i| self.occurs(var, i)),
+            Type::Applied { args, .. } => args.iter().any(|a| self.occurs(var, a)),
             _ => false,
         }
     }
@@ -233,6 +247,45 @@ impl Unifier {
     }
 }
 
+/// Solves `params` by matching `pattern` against `concrete`.
+///
+/// One-way: `concrete` is fixed and only `pattern`'s parameters are assigned.
+/// This is how `impl<A> Functor for Option<A>` learns that `A = Int` when the
+/// call site's receiver is `Option<Int>` — instance selection, not inference,
+/// so there is nothing to unify and no variables to create.
+pub fn match_params(
+    pattern: &Type,
+    concrete: &Type,
+    params: &[String],
+    out: &mut HashMap<String, Type>,
+) -> bool {
+    match (pattern, concrete) {
+        (Type::Param(p), _) if params.iter().any(|g| g == p) => {
+            match out.get(p) {
+                Some(existing) => existing == concrete,
+                None => {
+                    out.insert(p.clone(), concrete.clone());
+                    true
+                }
+            }
+        }
+        (Type::Adt { name: a, args: x }, Type::Adt { name: b, args: y }) => {
+            a == b
+                && x.len() == y.len()
+                && x.iter().zip(y).all(|(p, c)| match_params(p, c, params, out))
+        }
+        (Type::Tuple(x), Type::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, c)| match_params(p, c, params, out))
+        }
+        (Type::Fn { params: p1, ret: r1 }, Type::Fn { params: p2, ret: r2 }) => {
+            p1.len() == p2.len()
+                && p1.iter().zip(p2).all(|(p, c)| match_params(p, c, params, out))
+                && match_params(r1, r2, params, out)
+        }
+        _ => pattern == concrete,
+    }
+}
+
 /// Rewrites rigid parameters according to `mapping`.
 pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
     match ty {
@@ -246,6 +299,19 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
             args: args.iter().map(|a| substitute(a, mapping)).collect(),
         },
         Type::Tuple(items) => Type::Tuple(items.iter().map(|i| substitute(i, mapping)).collect()),
+        // Substituting the head is what turns `Self<A>` into `Option<A>`. The
+        // parameter maps to a bare constructor, so its own arguments are empty
+        // and the application supplies them.
+        Type::Applied { param, args } => {
+            let args: Vec<Type> = args.iter().map(|a| substitute(a, mapping)).collect();
+            match mapping.get(param.as_str()) {
+                Some(Type::Adt { name, args: none }) if none.is_empty() => {
+                    Type::Adt { name: name.clone(), args }
+                }
+                Some(other) if args.is_empty() => other.clone(),
+                _ => Type::Applied { param: param.clone(), args },
+            }
+        }
         other => other.clone(),
     }
 }

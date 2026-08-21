@@ -238,3 +238,50 @@ and was never rustfmt's output to begin with.
 This is worth knowing before someone reformats the tree inside an unrelated
 commit. Adopting `cargo fmt` is a reasonable decision, but it is its own commit
 and its own decision, not a side effect of touching a file.
+
+## 17. The orphan rule is decided but cannot yet be checked
+
+`docs/design/typeclasses.md` settles coherence as Rust's: one impl per trait per
+type, nominal resolution, and the orphan rule — an impl is allowed only where
+the trait or the type is local. The first two are enforced. The third is not,
+and enforcing it today would be wrong rather than merely incomplete.
+
+The reason is that `type_map` is per file. A trait is known only if the file
+being checked declares it, so `impl Show for Int` in a program that imports
+`Show` from `std` would see neither a local trait nor a local type and be
+rejected — not because it is an orphan, but because the compiler cannot yet
+tell where `Show` came from. The check lands with cross-package trait
+resolution, which is also what makes it meaningful: an orphan impl is only a
+hazard when two packages can supply one.
+
+Nothing about the decision changes. What is recorded here is that the rule is
+currently inert, so that its absence is not mistaken for permission.
+
+## 18. `Self` turned out to be the whole kind system
+
+A4 committed to native higher kinds, and the expectation was a notation for
+them: Scala writes `trait Functor[F[_]]`, Haskell allows an explicit kind
+signature. Both put a second syntax next to the generics a reader already knows.
+
+Neither is needed. A trait says how it uses `Self`, and that is already the
+information a kind would carry:
+
+    trait Eq      { fn eq(self, other: Self) -> Bool; }        // Self : *
+    trait Functor { fn map<A, B>(self: Self<A>, ..) -> Self<B>; }  // Self : * -> *
+
+So `impl Functor for Int` is a kind error and `impl Functor for Option` is not,
+with nothing declared anywhere. The kind of every named type comes from its
+parameter list for free, and const parameters give a different kind than type
+parameters do — `Vector<const N: Int>` is `Int -> *`, not `* -> *`, so it cannot
+stand in for a `Functor`.
+
+Two consequences worth stating:
+
+- **The commonest mistake has an exact fix.** `impl<A> Functor for Option<A>`
+  applies the constructor one step too far. The diagnostic says so and names the
+  correct spelling, because the compiler knows both kinds.
+- **Default method bodies came free.** They were listed as deliberately deferred
+  in the design doc, on the assumption they would complicate monomorphisation.
+  They did not: recording `Self: ThisTrait` as an ordinary bound on a trait's own
+  signatures makes a default body's calls resolve through the machinery that was
+  already there. The deferral is withdrawn.

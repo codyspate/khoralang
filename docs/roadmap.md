@@ -60,10 +60,14 @@ before the phase that depends on it starts.
 | D1 | **How do handlers execute natively?** One-shot versus multi-shot continuations; how handler frames interact with Perceus reference counting and with fibers and interruption. Koka is direct prior art for the whole combination, which narrows this considerably from where it started. Still the largest unknown. | 4.3 |
 | D3 | **`Schema::Spec` projects an associated type off a type *variable*.** With A4 this is tractable — associated types on typeclasses — but the coherence rules still need deciding. | 4.2 |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
-| D6 | **Which typeclasses ship in `std`, and what are the coherence rules?** Orphan instances, overlapping instances, and whether instance resolution is nominal or structural. A4 settled *whether*; this settles *how much*. | 3 |
 | D8 | **The Rust interop boundary.** How Rust's ownership and traits map onto Khora's reference counting and rows; whether we bind at the C ABI or generate richer shims. | 7 |
 **Closed:**
 
+- **D6** (typeclasses) is decided and implemented: Rust's `trait`/`impl`
+  spelling, Rust's coherence rules, static dispatch through monomorphisation,
+  and higher kinds inferred from how a trait applies `Self`. See
+  `docs/design/typeclasses.md`. The `std` trait list is decided there; the
+  orphan rule is decided but waits on cross-package resolution to enforce.
 - **D9** (imperative constructs) is implemented: `if`/`else`, assignment,
   `while`, `loop`/`break`/`continue` and early `return` all landed in phase 1.6.
   Generic `for` waits on the `Iterator` typeclass in phase 3. See
@@ -243,18 +247,21 @@ back from Phase 1 so the loop form is designed against the real protocol rather
 than a `List` special case.
 
 Done so far: inference and unification (`khora-types::unify`), monomorphisation
-by reachability (`khora-types::mono`), const generics as `Type::Const`, and
-tuple types. Tuples arrived alongside const generics rather than on their own
-schedule because a tensor shape is written `(M, K)`: without them the shape
-argument typed as `Unknown`, which accepts anything, so the exit criterion
+by reachability (`khora-types::mono`), const generics as `Type::Const`, tuple
+types, and traits with kinds, coherence and static dispatch
+(`khora-types::traits`). Tuples arrived alongside const generics rather than on
+their own schedule because a tensor shape is written `(M, K)`: without them the
+shape argument typed as `Unknown`, which accepts anything, so the exit criterion
 could not have been met honestly.
 
-Remaining: the kind system, and typeclasses with instance resolution per D6.
+Remaining: the `std` traits themselves, `Iterator` with generic `for`, and
+`traverse` over `Traversable`. The machinery all three need is in place — what
+is left is writing them and the `List` they iterate.
 
 **Exit:** `matmul` with a mismatched shared dimension is a compile error naming
-both dimensions **— met**; a `traverse` written once works over `Option`, `List`
-and a user type; instance resolution errors name the missing instance; `for`
-iterates a user-defined type.
+both dimensions **— met**; instance resolution errors name the missing instance
+**— met**; a `traverse` written once works over `Option`, `List` and a user
+type; `for` iterates a user-defined type.
 
 ---
 
