@@ -255,8 +255,82 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
 
     map.signatures.extend(traits::impl_signatures(&parse.source_file()));
     map.traits = traits::collect(&parse.source_file());
+
+    // What this file imported, under the names it uses for them. Without this
+    // a cross-module call resolves and then type checks against nothing, which
+    // is a *false pass* — strictly worse than the unresolved-name error it
+    // replaced.
+    import_types(db, file, &mut map, &mut consts);
+
     map.kinds = traits::kinds(&map.adts, &consts);
     map
+}
+
+/// Copies the declarations a file imported into its own view.
+///
+/// Reads only the *defining* file's `type_map`, so this stays incremental: a
+/// body edit in one module cannot invalidate another module's types.
+fn import_types(
+    db: &dyn Db,
+    file: SourceFile,
+    map: &mut TypeMap,
+    consts: &mut HashMap<String, Vec<bool>>,
+) {
+    let scope = khora_hir::file_scope(db, file);
+    let Some(root) = khora_db::source_root(db) else { return };
+    let graph = khora_hir::module_graph(db, root);
+
+    for (local, resolution) in &scope.names {
+        let khora_hir::Resolution::Item { module, name, kind } = resolution else { continue };
+        let Some(source) = graph.file(module) else { continue };
+        if source == file {
+            continue;
+        }
+        let exported = type_map(db, source);
+
+        match kind {
+            khora_hir::ItemKind::Function => {
+                // `entry` rather than `insert`: a file's own declaration wins
+                // over an import of the same name, which is what shadowing
+                // means everywhere else in the language.
+                if let Some(signature) = exported.signatures.get(name.as_str()) {
+                    map.signatures.entry(local.clone()).or_insert_with(|| signature.clone());
+                }
+            }
+            khora_hir::ItemKind::Type => {
+                if let Some(generics) = exported.adts.get(name.as_str()) {
+                    if !map.adts.contains_key(local.as_str()) {
+                        map.adts.insert(local.clone(), generics.clone());
+                        consts.insert(local.clone(), vec![false; generics.len()]);
+                    }
+                }
+                map.variants.extend(
+                    exported.variants.iter().filter(|v| &v.type_name == name).cloned(),
+                );
+            }
+            khora_hir::ItemKind::Trait => {
+                if let Some(def) = exported.traits.traits.get(name.as_str()) {
+                    map.traits.traits.insert(local.clone(), def.clone());
+                }
+                // A trait's impls travel with it: an imported `Show` is useless
+                // if the impls that satisfy it stayed behind.
+                map.traits
+                    .impls
+                    .extend(exported.traits.impls.iter().filter(|i| &i.trait_name == name).cloned());
+                for (key, signature) in &exported.signatures {
+                    if key.starts_with(&format!("{name}::"))
+                        || key.starts_with(&format!("{name}#"))
+                    {
+                        map.signatures.insert(key.clone(), signature.clone());
+                    }
+                }
+                if let Some(kind) = exported.kinds.get(name.as_str()) {
+                    map.kinds.insert(local.clone(), kind.clone());
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Points at the part of two large types that actually disagrees.
@@ -1424,6 +1498,9 @@ fn variant_case(resolution: &khora_hir::Resolution) -> Option<(String, String)> 
 #[salsa::tracked(returns(ref))]
 pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     let mut all: Vec<HirError> = khora_hir::item_map(db, file).errors.clone();
+    // An import that resolved to nothing is the most useful thing to say about
+    // a file full of "cannot find" errors downstream of it.
+    all.extend(khora_hir::file_scope(db, file).errors.iter().cloned());
     for (_, body) in khora_hir::body::bodies(db, file) {
         all.extend(body.errors.iter().cloned());
     }

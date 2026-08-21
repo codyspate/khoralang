@@ -11,3 +11,6 @@ khora-syntax.workspace = true
 khora-db.workspace = true
 salsa.workspace = true
 text-size.workspace = true
+
+[dev-dependencies]
+khora-types.workspace = true

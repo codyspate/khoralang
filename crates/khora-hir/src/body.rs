@@ -271,6 +271,7 @@ impl Body {
 pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
     let parse = khora_db::parse(db, file);
     let map = item_map(db, file);
+    let scope = crate::file_scope(db, file);
 
     parse
         .source_file()
@@ -280,7 +281,7 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
                 let lowered = (|| {
                     let name = f.name()?.ident()?;
                     let body = f.body()?;
-                    Some((name, lower_function(map, &f, &body)))
+                    Some((name, lower_function(map, scope, &f, &body)))
                 })();
                 lowered.into_iter().collect::<Vec<_>>()
             }
@@ -288,9 +289,9 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
             // implementation, and it has to be checked like any other.
             ast::Decl::Trait(t) => {
                 let owner = t.name().and_then(|n| n.ident()).unwrap_or_default();
-                methods(map, &owner, t.functions())
+                methods(map, scope, &owner, t.functions())
             }
-            ast::Decl::Impl(i) => methods(map, &impl_key(&i), i.functions()),
+            ast::Decl::Impl(i) => methods(map, scope, &impl_key(&i), i.functions()),
             _ => Vec::new(),
         })
         .collect()
@@ -324,6 +325,7 @@ pub fn type_head(ty: &ast::Type) -> Option<String> {
 /// Lowers the functions of one trait or impl, keyed `owner::method`.
 fn methods(
     map: &crate::ItemMap,
+    scope: &crate::FileScope,
     owner: &str,
     functions: impl Iterator<Item = ast::FnDecl>,
 ) -> Vec<(String, Body)> {
@@ -331,12 +333,17 @@ fn methods(
         .filter_map(|f| {
             let name = f.name()?.ident()?;
             let body = f.body()?;
-            Some((format!("{owner}::{name}"), lower_function(map, &f, &body)))
+            Some((format!("{owner}::{name}"), lower_function(map, scope, &f, &body)))
         })
         .collect()
 }
 
-fn lower_function(map: &crate::ItemMap, decl: &ast::FnDecl, block: &ast::Block) -> Body {
+fn lower_function(
+    map: &crate::ItemMap,
+    scope: &crate::FileScope,
+    decl: &ast::FnDecl,
+    block: &ast::Block,
+) -> Body {
     let mut generics: Vec<String> = vec!["Self".to_string()];
     if let Some(params) = decl.type_params() {
         generics.extend(params.params().filter_map(|p| p.name().and_then(|n| n.ident())));
@@ -346,6 +353,7 @@ fn lower_function(map: &crate::ItemMap, decl: &ast::FnDecl, block: &ast::Block) 
         body: Body::default(),
         scopes: vec![Vec::new()],
         map,
+        scope,
         generics,
         loop_depth: 0,
         lambdas: Vec::new(),
@@ -375,6 +383,9 @@ struct Ctx<'a> {
     /// A stack of lexical scopes; each holds the names it introduced.
     scopes: Vec<Vec<(String, LocalId)>>,
     map: &'a crate::ItemMap,
+    /// Names this file imported. Consulted after the file's own items, so a
+    /// local declaration shadows an import rather than colliding with it.
+    scope: &'a crate::FileScope,
     /// The type parameters the enclosing function declared, plus `Self` inside
     /// a trait or impl. A path whose first segment is one of these names a
     /// trait function reached through that parameter.
@@ -494,7 +505,12 @@ impl<'a> Ctx<'a> {
             .unwrap_or_default();
 
         if let [type_name, case] = segments.as_slice() {
-            if let Some(v) = self.map.variants_of(type_name).find(|v| &v.name == case) {
+            if let Some(v) = self
+                .map
+                .variants_of(type_name)
+                .chain(self.scope.variants_of(type_name))
+                .find(|v| &v.name == case)
+            {
                 return crate::Resolution::Variant {
                     module: self.map.module.clone().unwrap_or_else(|| crate::ModulePath::new(vec![])),
                     type_name: v.type_name.clone(),
@@ -678,6 +694,9 @@ impl<'a> Ctx<'a> {
                     range,
                 );
             }
+            if let Some(resolution) = self.scope.get(only) {
+                return self.add_expr(Expr::Path(resolution.clone()), range);
+            }
             self.error(format!("cannot find `{only}` in this scope"), range);
             return self.add_expr(Expr::Unresolved(only.clone()), range);
         }
@@ -702,7 +721,12 @@ impl<'a> Ctx<'a> {
 
         // A `::` path names a constructor or an item in another module.
         if let [type_name, case] = segments.as_slice() {
-            if let Some(v) = self.map.variants_of(type_name).find(|v| &v.name == case) {
+            if let Some(v) = self
+                .map
+                .variants_of(type_name)
+                .chain(self.scope.variants_of(type_name))
+                .find(|v| &v.name == case)
+            {
                 return self.add_expr(
                     Expr::Path(crate::Resolution::Variant {
                         module: self

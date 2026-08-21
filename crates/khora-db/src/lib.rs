@@ -38,13 +38,26 @@ pub struct SourceFile {
 
 /// The set of files that make up a compilation.
 ///
-/// Module and import resolution will read this rather than touching the
-/// filesystem, so that adding or removing a file is an ordinary input change
-/// and invalidates exactly the queries that depended on the file set.
-#[salsa::input(debug)]
+/// Module and import resolution read this rather than touching the filesystem,
+/// so that adding or removing a file is an ordinary input change and
+/// invalidates exactly the queries that depended on the file set.
+///
+/// A **singleton**: there is one compilation per database, and resolving an
+/// import from inside a per-file query needs the file set without every query
+/// between here and there growing a parameter to carry it. `SourceRoot::get`
+/// answers with the one that was created.
+#[salsa::input(debug, singleton)]
 pub struct SourceRoot {
     #[returns(deref)]
     pub files: Vec<SourceFile>,
+}
+
+/// The compilation's file set, or an empty one if nothing declared it.
+///
+/// Tests that check a single file in isolation never build a root, and asking
+/// them to would be noise; they simply see no other modules.
+pub fn source_root(db: &dyn Db) -> Option<SourceRoot> {
+    SourceRoot::try_get(db)
 }
 
 /// The database interface queries are written against.

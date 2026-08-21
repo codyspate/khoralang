@@ -321,6 +321,116 @@ pub fn module_graph(db: &dyn Db, root: khora_db::SourceRoot) -> ModuleGraph {
     graph
 }
 
+/// Every name a file can use without qualifying it.
+///
+/// One entry per *bare* name: what this file declares, plus what it imported.
+/// Built once per file so that body lowering can answer "what is `double`?"
+/// without walking the module graph at every mention.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileScope {
+    /// Imported names, by the spelling this file uses for them — an alias if
+    /// one was written, otherwise the item's own name.
+    pub names: Vec<(String, Resolution)>,
+    /// Constructors reachable unqualified, from a glob or a named import of
+    /// the type. Kept apart from `names` because a case and an item may share
+    /// a spelling without conflicting.
+    pub variants: Vec<Variant>,
+    pub errors: Vec<HirError>,
+}
+
+impl FileScope {
+    pub fn get(&self, name: &str) -> Option<&Resolution> {
+        self.names.iter().find(|(n, _)| n == name).map(|(_, r)| r)
+    }
+
+    pub fn variants_of<'a>(&'a self, type_name: &'a str) -> impl Iterator<Item = &'a Variant> + 'a {
+        self.variants.iter().filter(move |v| v.type_name == type_name)
+    }
+}
+
+/// Resolves a file's imports into the names its bodies may use.
+///
+/// Reads the *other* modules' item maps, never their bodies, so editing a
+/// function cannot invalidate another file's scope.
+#[salsa::tracked(returns(ref))]
+pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
+    let map = item_map(db, file);
+    let mut out = FileScope::default();
+
+    let Some(root) = khora_db::source_root(db) else { return out };
+    let graph = module_graph(db, root);
+
+    for import in &map.imports {
+        let Some(source) = graph.file(&import.path) else {
+            out.errors.push(HirError {
+                message: format!("cannot find module `{}`", import.path),
+                range: import.range,
+            });
+            continue;
+        };
+        let exported = item_map(db, source);
+
+        match &import.kind {
+            ImportKind::Glob => {
+                for item in exported.items.iter().filter(|i| i.is_public) {
+                    out.names.push((
+                        item.name.clone(),
+                        Resolution::Item {
+                            module: import.path.clone(),
+                            name: item.name.clone(),
+                            kind: item.kind,
+                        },
+                    ));
+                }
+                out.variants.extend(exported.variants.iter().cloned());
+            }
+            ImportKind::Named(names) => {
+                for wanted in names {
+                    // `alias` already holds the local spelling, `as` or not.
+                    let local = wanted.alias.clone();
+                    match exported.item(&wanted.name) {
+                        Some(item) if item.is_public => {
+                            out.names.push((
+                                local,
+                                Resolution::Item {
+                                    module: import.path.clone(),
+                                    name: item.name.clone(),
+                                    kind: item.kind,
+                                },
+                            ));
+                            // Importing a type brings its constructors with it.
+                            // Naming each one separately would be ceremony for
+                            // no decision: a type without its cases is not
+                            // usable.
+                            out.variants.extend(
+                                exported
+                                    .variants_of(&wanted.name)
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                            );
+                        }
+                        Some(_) => out.errors.push(HirError {
+                            message: format!(
+                                "`{}` is not exported from `{}`",
+                                wanted.name, import.path
+                            ),
+                            range: wanted.range,
+                        }),
+                        None => out.errors.push(HirError {
+                            message: format!(
+                                "`{}` does not declare `{}`",
+                                import.path, wanted.name
+                            ),
+                            range: wanted.range,
+                        }),
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// What a name resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
