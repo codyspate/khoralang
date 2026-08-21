@@ -170,6 +170,13 @@ impl<'a> Planner<'a> {
                     self.plan.dups.insert(id);
                 }
             }
+            // A record's fields are moved into it, exactly as a
+            // constructor's arguments are.
+            Expr::Record { fields, .. } => {
+                for (_, value) in &fields {
+                    self.walk(*value);
+                }
+            }
             Expr::Lambda { params, body, .. } => {
                 // The lambda's parameters are owned by the lambda, exactly as a
                 // function's are, and released where its body ends. Captures

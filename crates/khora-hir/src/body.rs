@@ -196,6 +196,15 @@ pub enum Expr {
     /// object as its first argument, so self-recursion goes through that.
     /// See `docs/design/memory.md` §3.
     LambdaSelf,
+    /// `{ x: 1, y: 2 }`, or the operations of a `handler for E { .. }`.
+    ///
+    /// `owner` is the type when the syntax names one — `handler for Ledger`
+    /// does — and `None` for a bare literal, whose type the checker finds from
+    /// the labels.
+    Record {
+        owner: Option<String>,
+        fields: Vec<(String, ExprId)>,
+    },
     /// `(x) => x + 1`.
     ///
     /// The body lives in the *same* arena as the enclosing function, which is
@@ -685,10 +694,23 @@ impl<'a> Ctx<'a> {
             // can find every site.
             ast::Expr::For(e) => self.lower_for(e, range),
             ast::Expr::Lambda(e) => self.lower_lambda(e, range),
-            ast::Expr::Record(_) => self.unsupported("record literals", range),
+            ast::Expr::Record(e) => {
+                let fields = self.lower_record_fields(e);
+                self.add_expr(Expr::Record { owner: None, fields }, range)
+            }
             ast::Expr::Raise(_) => self.unsupported("`raise`", range),
             ast::Expr::Try(_) => self.unsupported("`!`", range),
-            ast::Expr::Handler(_) => self.unsupported("handlers", range),
+            // `handler for Ledger { .. }` is a record literal whose type the
+            // syntax names. Nothing about it is special at runtime: it builds
+            // the same object a bare literal would.
+            ast::Expr::Handler(e) => {
+                let owner = e.effect().map(|p| p.text_path());
+                let fields = e
+                    .operations()
+                    .map(|r| self.lower_record_fields(&r))
+                    .unwrap_or_default();
+                self.add_expr(Expr::Record { owner, fields }, range)
+            }
             ast::Expr::Catch(_) => self.unsupported("`catch`", range),
             ast::Expr::With(_) | ast::Expr::WithBlock(_) => {
                 self.unsupported("handler installation", range)
@@ -923,6 +945,21 @@ impl<'a> Ctx<'a> {
                 "`for` needs the `Step` type in scope; import it from `std::core`",
             ),
         }
+    }
+
+    /// The labelled expressions of a record literal.
+    fn lower_record_fields(&mut self, e: &ast::RecordExpr) -> Vec<(String, ExprId)> {
+        e.fields()
+            .filter_map(|f| {
+                let label = f.name()?.ident()?;
+                let range = f.syntax().text_range();
+                let value = match f.value() {
+                    Some(v) => self.lower_expr(&v),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                Some((label, value))
+            })
+            .collect()
     }
 
     /// `(a, b) => body`.

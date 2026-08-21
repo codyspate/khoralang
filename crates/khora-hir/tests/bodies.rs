@@ -212,16 +212,45 @@ fn operators_and_control_flow_lower() {
 #[test]
 fn syntax_outside_the_subset_is_marked_not_dropped() {
     let db = KhoraDatabase::new();
-    let body = only_body(&db, "module m;\nfn f() -> Int { let r = { a: 1 }; 1 }\n");
+    let body = only_body(&db, "module m;\nfn f() -> Int { g() catch { E::A(_) => 1, } }\n");
 
     assert!(
         body.exprs().any(|(_, e)| matches!(e, Expr::Unsupported(_))),
-        "record literal was dropped instead of marked"
+        "`catch` was dropped instead of marked"
     );
-    assert!(errors(&body).iter().any(|e| e.contains("record")), "{:?}", errors(&body));
+    assert!(errors(&body).iter().any(|e| e.contains("catch")), "{:?}", errors(&body));
 }
 
-/// Closures used to be in the list above. They lower for real now.
+/// Closures and record literals used to be in the list above. Both lower for
+/// real now.
+
+#[test]
+fn a_record_literal_lowers() {
+    let db = KhoraDatabase::new();
+    let body = only_body(&db, "module m;\nfn f() -> Int { let r = { a: 1 }; 1 }\n");
+    assert!(errors(&body).is_empty(), "{:?}", errors(&body));
+    assert!(
+        body.exprs().any(|(_, e)| matches!(e, Expr::Record { .. })),
+        "no record in the body"
+    );
+}
+
+/// `handler for E { .. }` is a record literal whose type the syntax names.
+#[test]
+fn a_handler_is_a_record_that_names_its_type() {
+    let db = KhoraDatabase::new();
+    let body = only_body(
+        &db,
+        "module m;\nfn f() -> Int { let h = handler for Ledger { get: fn i => 1 }; 1 }\n",
+    );
+    assert!(errors(&body).is_empty(), "{:?}", errors(&body));
+    let owner = body.exprs().find_map(|(_, e)| match e {
+        Expr::Record { owner, .. } => Some(owner.clone()),
+        _ => None,
+    });
+    assert_eq!(owner, Some(Some("Ledger".to_string())));
+}
+
 #[test]
 fn a_closure_lowers_to_a_lambda() {
     let db = KhoraDatabase::new();

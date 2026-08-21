@@ -465,6 +465,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Break(value) => self.lower_break(value, range),
             Expr::Continue => self.lower_continue(range),
             Expr::Return(value) => self.lower_return(value),
+            Expr::Record { fields, .. } => self.build_record(id, &fields, range),
             Expr::Lambda { captures, .. } => self.make_closure(id, &captures, range),
             // Parameter 0 of a lifted lambda *is* the closure, and it is live
             // for the duration of the call because the caller holds it. No
@@ -476,9 +477,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     range,
                 ),
             },
-            Expr::Field { .. } => {
-                self.fail("field access needs records, which arrive in phase 3", range)
-            }
+            Expr::Field { base, name } => self.read_field(base, &name, range),
             Expr::List(_) => self.fail("list literals are not supported yet", range),
             Expr::Tuple(_) => self.fail("tuple literals are not supported yet", range),
             Expr::Unsupported(what) => self.fail(format!("{what} are not supported yet"), range),
@@ -763,6 +762,65 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(self.be.unit_value())
     }
 
+    /// Builds a record: the same object a constructor builds, with the fields
+    /// written in whatever order and stored in declaration order.
+    fn build_record(
+        &mut self,
+        id: ExprId,
+        fields: &[(String, ExprId)],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let Type::Adt { name, .. } = self.types.of(id).clone() else {
+            return self.fail("this record has no type, which is a compiler bug", range);
+        };
+        let Some((tag, info)) = self.be.variant_of(&name, &name) else {
+            return self.fail(format!("`{name}` is not a record"), range);
+        };
+
+        // Evaluated in written order, so side effects happen where they read,
+        // and stored by label, so the order written does not matter.
+        let mut values = Vec::with_capacity(fields.len());
+        for (label, value) in fields {
+            values.push((label.clone(), self.expr(*value)?));
+        }
+
+        let object = self.allocate(info.fields.len(), tag, &name);
+        for (label, value) in values {
+            let Some((index, field_ty)) = info.field(&label).map(|(i, t)| (i, t.clone())) else {
+                continue;
+            };
+            // Moved in, as a constructor's arguments are: the record owns it
+            // now and its drop glue is what releases it.
+            self.store_field(object, index, value, &field_ty);
+        }
+        Some(object.into())
+    }
+
+    /// `p.x` — a load from the field's slot.
+    fn read_field(&mut self, base: ExprId, label: &str, range: TextRange) -> Flow<'ctx> {
+        let owner = self.types.of(base).clone();
+        let Type::Adt { name, .. } = &owner else {
+            return self.fail(format!("`{owner}` has no fields"), range);
+        };
+        let Some((_, info)) = self.be.variant_of(name, name) else {
+            return self.fail(format!("`{name}` is not a record"), range);
+        };
+        let Some((index, field_ty)) = info.field(label).map(|(i, t)| (i, t.clone())) else {
+            return self.fail(format!("`{name}` has no field `{label}`"), range);
+        };
+
+        let object = self.expr(base)?.into_pointer_value();
+        let value = self.load_field(object, index, &field_ty);
+        // The field is borrowed out of the record, and the record was owned by
+        // this expression, so reading one keeps the field alive past the
+        // release of what held it.
+        if is_boxed(&field_ty) {
+            self.dup(value);
+        }
+        self.drop(object.into(), &owner);
+        Some(value)
+    }
+
     /// Allocates the closure object for a lambda expression.
     ///
     /// Field 0 holds the lifted function's address and the captures follow, all
@@ -985,24 +1043,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             values.push(self.expr(*arg)?);
         }
 
-        let alloc = self.be.rt.alloc;
-        let field_bytes = FIELD_WORD * info.fields.len() as u64;
-        let object = self
-            .be
-            .builder
-            .build_call(
-                alloc,
-                &[
-                    self.be.ctx.i64_type().const_int(field_bytes, false).into(),
-                    self.be.ctx.i32_type().const_int(tag as u64, false).into(),
-                ],
-                &format!("{case}.obj"),
-            )
-            .expect("allocating an ADT")
-            .try_as_basic_value()
-            .basic()
-            .expect("khora_alloc returns a pointer")
-            .into_pointer_value();
+        let object = self.allocate(info.fields.len(), tag, case);
 
         for (index, (value, field_ty)) in values.into_iter().zip(&info.fields).enumerate() {
             // A boxed argument is *moved* into the object: no dup here, and no
@@ -1016,6 +1057,26 @@ impl<'ctx> Lower<'_, 'ctx> {
     // -----------------------------------------------------------------------
     // Fields
     // -----------------------------------------------------------------------
+
+    /// A fresh heap object with room for `fields` words, under `tag`.
+    fn allocate(&mut self, fields: usize, tag: u32, name: &str) -> PointerValue<'ctx> {
+        let alloc = self.be.rt.alloc;
+        self.be
+            .builder
+            .build_call(
+                alloc,
+                &[
+                    self.be.ctx.i64_type().const_int(FIELD_WORD * fields as u64, false).into(),
+                    self.be.ctx.i32_type().const_int(tag as u64, false).into(),
+                ],
+                &format!("{name}.obj"),
+            )
+            .expect("allocating an object")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_alloc returns a pointer")
+            .into_pointer_value()
+    }
 
     /// Writes a field, widening a `Bool` to a full word.
     ///

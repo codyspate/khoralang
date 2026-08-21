@@ -197,6 +197,19 @@ pub struct VariantInfo {
     pub type_name: String,
     pub name: String,
     pub fields: Vec<Type>,
+    /// What each field is called, where it has a name.
+    ///
+    /// Matching is positional and never needed these; `p.x` does, and so does
+    /// a record literal, which names its fields and nothing else.
+    pub labels: Vec<String>,
+}
+
+impl VariantInfo {
+    /// The position and type of a named field.
+    pub fn field(&self, label: &str) -> Option<(usize, &Type)> {
+        let index = self.labels.iter().position(|l| l == label)?;
+        self.fields.get(index).map(|ty| (index, ty))
+    }
 }
 
 /// Signatures and ADT shapes for one file.
@@ -274,6 +287,18 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     .unwrap_or_default();
                 consts.insert(type_name.clone(), is_const);
                 map.adts.insert(type_name.clone(), generics.clone());
+                // `type Point = { x: Int, y: Int }` is one variant carrying
+                // named fields — the same shape a constructor already has, so
+                // field access, construction and drop glue are all reused.
+                if let Some(ast::Type::Record(r)) = t.definition() {
+                    let (labels, fields) = record_fields(&r, &generics);
+                    map.variants.push(VariantInfo {
+                        type_name: type_name.clone(),
+                        name: type_name.clone(),
+                        fields,
+                        labels,
+                    });
+                }
                 if let Some(ast::Type::Variant(v)) = t.definition() {
                     for case in v.cases() {
                         let Some(name) = case.name().and_then(|n| n.ident()) else { continue };
@@ -292,10 +317,19 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                                 })
                             })
                             .unwrap_or_default();
+                        let labels = case
+                            .fields()
+                            .map(|list| {
+                                list.fields()
+                                    .filter_map(|f| f.name().and_then(|n| n.ident()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         map.variants.push(VariantInfo {
                             type_name: type_name.clone(),
                             name,
                             fields,
+                            labels,
                         });
                     }
                 }
@@ -441,6 +475,23 @@ fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Whether `declared` and `written` name the same set of fields.
+fn covers(declared: &[String], written: &[&str]) -> bool {
+    declared.len() == written.len() && declared.iter().all(|d| written.iter().any(|w| w == d))
+}
+
+/// The labels and types of a record type's fields, in written order.
+fn record_fields(r: &ast::RecordType, generics: &[String]) -> (Vec<String>, Vec<Type>) {
+    let mut labels = Vec::new();
+    let mut fields = Vec::new();
+    for f in r.fields() {
+        let Some(label) = f.name().and_then(|n| n.ident()) else { continue };
+        labels.push(label);
+        fields.push(type_of_syntax(f.ty().as_ref(), generics));
+    }
+    (labels, fields)
 }
 
 /// Reads a `with` or `raises` clause into a row.
@@ -923,9 +974,18 @@ impl<'a> Checker<'a> {
             },
             Expr::Local(local) => self.locals.get(&local).cloned().unwrap_or(Type::Unknown),
             Expr::Path(resolution) => self.type_of_resolution(id, &resolution),
-            Expr::Field { base, .. } => {
-                self.infer(base);
-                Type::Unknown
+            Expr::Field { base, name } => {
+                let owner = self.infer(base);
+                let owner = self.unifier.shallow(&owner);
+                let Some((_, field)) = self.record_field(&owner, &name) else {
+                    // Silent for a type that is not known yet: `Unknown` is
+                    // downstream of an error already reported.
+                    if !matches!(owner, Type::Unknown | Type::Var(_) | Type::Never) {
+                        self.error(format!("`{owner}` has no field `{name}`"), range);
+                    }
+                    return Type::Unknown;
+                };
+                field
             }
             Expr::Unary { op, operand } => match op {
                 UnOp::Neg => self.expect(operand, &Type::Int, "negation"),
@@ -1032,6 +1092,7 @@ impl<'a> Checker<'a> {
                 if types.is_empty() { Type::Unit } else { Type::Tuple(types) }
             }
             Expr::Match { scrutinee, arms } => self.infer_match(scrutinee, &arms, range),
+            Expr::Record { owner, fields } => self.infer_record(owner, &fields, range),
             Expr::Lambda { params, body, .. } => {
                 // A parameter with no annotation gets a variable, so the type
                 // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
@@ -1156,6 +1217,16 @@ impl<'a> Checker<'a> {
         }
 
         if let Expr::Field { base, name } = self.body.expr(callee).clone() {
+            // A *field* holding a function wins over a method of the same
+            // name, which is decision D2 in `docs/design/associated-items.md`:
+            // `x.f()` finds a field of `x`, or an item declared against `x`'s
+            // type, and the field is the more specific of the two.
+            let owner = self.infer(base);
+            let owner = self.unifier.shallow(&owner);
+            if self.record_field(&owner, &name).is_some() {
+                let field = self.infer(callee);
+                return self.apply(field, args, range);
+            }
             if let Some(ty) = self.infer_method_call(callee, base, &name, args, range) {
                 return ty;
             }
@@ -1165,6 +1236,11 @@ impl<'a> Checker<'a> {
         // function rather than a function, and matching the shape without
         // following the variable silently treats it as uncallable.
         let inferred = self.infer(callee);
+        self.apply(inferred, args, range)
+    }
+
+    /// Checks a call whose callee is an ordinary value of function type.
+    fn apply(&mut self, inferred: Type, args: &[ExprId], range: TextRange) -> Type {
         let callee_ty = self.unifier.shallow(&inferred);
         let Type::Fn { params, ret } = callee_ty else {
             for arg in args {
@@ -1446,6 +1522,150 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+    }
+
+    /// `{ x: 1, y: 2 }`, or the operations of a handler.
+    ///
+    /// Nominal, like everything else: the literal is not a type of its own, it
+    /// is *some declared record*. `handler for Ledger` says which; a bare
+    /// literal is found by its labels, and having to say so when that is
+    /// ambiguous is better than inventing a structural type nobody declared.
+    fn infer_record(
+        &mut self,
+        owner: Option<String>,
+        fields: &[(String, ExprId)],
+        range: TextRange,
+    ) -> Type {
+        let written: Vec<&str> = fields.iter().map(|(l, _)| l.as_str()).collect();
+
+        let candidates: Vec<VariantInfo> = match &owner {
+            Some(name) => self
+                .types
+                .variants
+                .iter()
+                .filter(|v| &v.type_name == name && v.name == *name)
+                .cloned()
+                .collect(),
+            None => {
+                let record = |exact: bool| -> Vec<VariantInfo> {
+                    self.types
+                        .variants
+                        .iter()
+                        .filter(|v| v.name == v.type_name)
+                        .filter(|v| {
+                            if exact {
+                                covers(&v.labels, &written)
+                            } else {
+                                // A literal short of a field still names its
+                                // record. Saying which field is missing beats
+                                // saying no type has these fields.
+                                written.iter().all(|w| v.labels.iter().any(|l| l == w))
+                            }
+                        })
+                        .cloned()
+                        .collect()
+                };
+                match record(true) {
+                    found if !found.is_empty() => found,
+                    _ => record(false),
+                }
+            }
+        };
+
+        let record = match candidates.as_slice() {
+            [only] => only.clone(),
+            [] => {
+                for (_, value) in fields {
+                    self.infer(*value);
+                }
+                self.error(
+                    match &owner {
+                        Some(name) => format!("`{name}` is not a record type"),
+                        None => format!(
+                            "no record type has exactly the fields {}",
+                            written
+                                .iter()
+                                .map(|l| format!("`{l}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    },
+                    range,
+                );
+                return Type::Unknown;
+            }
+            several => {
+                for (_, value) in fields {
+                    self.infer(*value);
+                }
+                let names: Vec<String> =
+                    several.iter().map(|v| format!("`{}`", v.type_name)).collect();
+                self.error(
+                    format!(
+                        "these fields fit {} — say which with `handler for ..`, or annotate it",
+                        names.join(" and ")
+                    ),
+                    range,
+                );
+                return Type::Unknown;
+            }
+        };
+
+        // Field types are declared against the record's own parameters, so the
+        // literal decides them: `{ value: 1 }` for `Wrapper<A>` is `Wrapper<Int>`.
+        let (whole, mapping) = self.instantiate_adt(&record.type_name);
+        let borrowed: HashMap<&str, Type> =
+            mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+
+        for (label, value) in fields {
+            match record.field(label) {
+                Some((_, declared)) => {
+                    let declared = unify::substitute(declared, &borrowed);
+                    self.expect(*value, &declared, &format!("field `{label}`"));
+                }
+                None => {
+                    self.infer(*value);
+                    let range = self.body.range(*value);
+                    self.error(
+                        format!("`{}` has no field `{label}`", record.type_name),
+                        range,
+                    );
+                }
+            }
+        }
+        for label in &record.labels {
+            if !written.iter().any(|w| w == label) {
+                self.error(
+                    format!("this `{}` is missing `{label}`", record.type_name),
+                    range,
+                );
+            }
+        }
+        whole
+    }
+
+    /// The position and type of `label` on a record, at this instantiation.
+    ///
+    /// A record's fields are declared against the type's own parameters, so
+    /// they have to be read at the value's arguments: `Pair<Int>.first` is
+    /// `Int`, not `A`.
+    fn record_field(&mut self, owner: &Type, label: &str) -> Option<(usize, Type)> {
+        let Type::Adt { name, .. } = owner else { return None };
+        // A *record* — `type Point = { x: Int }` — whose one variant carries
+        // the type's own name. `type User = | Of(age: Int)` is a sum that
+        // happens to have one case, and its payload is reached by matching:
+        // `Of` is a constructor, not a field, and the two must not blur.
+        let record = self
+            .types
+            .variants
+            .iter()
+            .find(|v| &v.type_name == name && v.name == v.type_name)?;
+        let (index, declared) = record.field(label).map(|(i, t)| (i, t.clone()))?;
+
+        let mapping = self.substitution_for(name, owner);
+        let borrowed: HashMap<&str, Type> =
+            mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        Some((index, unify::substitute(&declared, &borrowed)))
     }
 
     fn signature_for(&self, key: &str, _self_ty: &Type) -> Option<Signature> {

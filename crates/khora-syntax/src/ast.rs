@@ -897,6 +897,17 @@ impl RecordExpr {
     }
 }
 
+impl HandlerExpr {
+    /// The effect being handled: the path after `for`.
+    pub fn effect(&self) -> Option<Path> {
+        child(&self.0)
+    }
+    /// The operations, written as a record literal.
+    pub fn operations(&self) -> Option<RecordExpr> {
+        child(&self.0)
+    }
+}
+
 impl RecordExprField {
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
