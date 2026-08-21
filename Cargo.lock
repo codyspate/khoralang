@@ -320,6 +320,8 @@ dependencies = [
  "anyhow",
  "clap",
  "khora-db",
+ "khora-diagnostics",
+ "khora-fmt",
  "khora-hir",
  "khora-syntax",
  "khora-types",
@@ -340,6 +342,20 @@ version = "0.1.0"
 dependencies = [
  "khora-syntax",
  "salsa",
+]
+
+[[package]]
+name = "khora-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "khora-syntax",
+]
+
+[[package]]
+name = "khora-fmt"
+version = "0.1.0"
+dependencies = [
+ "khora-syntax",
 ]
 
 [[package]]

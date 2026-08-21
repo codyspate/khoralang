@@ -1,0 +1,5 @@
+error: expected `.{...}` or `.*` after the module path
+ --> src/main.kh:2:16
+  |
+2 | import std.core;
+  |                ^

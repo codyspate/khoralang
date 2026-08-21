@@ -140,15 +140,21 @@ backdating, and independence from `SourceRoot` changes.
 
 Independent of Phase 0; can proceed in parallel.
 
-- **1.1 `test` and `bench` declarations.** `test "name" = { ... };` and
-  `bench "name" = { ... };` per §6.4. Currently a parse error — confirmed.
-- **1.2 Manifest parser.** `khora.toml` per §4.1, including `[permissions]`,
-  `[fmt]`, `[lints]`, `[tasks.*]` and `[build] plugin`. Unknown keys warn rather
-  than abort.
-- **1.3 `khora fmt`.** CST to canonical text per §6.2: two-space indent, explicit
-  semicolons, pipeline continuation aligned to the source expression,
-  alphabetised and deduplicated imports.
-- **1.4 Decide D2** → `docs/design/associated-items.md`. Blocks 2.1.
+- **1.1 `test` and `bench` declarations — done.** `test "name" { .. }` and
+  `bench "name" { .. }` per §6.4.
+- **1.2 Manifest parser — done.** `khora-manifest` covers §4.1 in full. Unknown
+  keys warn rather than abort, each with a line and column, so an older
+  toolchain degrades instead of refusing a newer manifest.
+- **1.3 `khora fmt` — done.** `khora-fmt` normalises indentation, spacing,
+  blank-line runs and import lists, and **preserves the author's line breaks**
+  rather than reflowing. That is what makes it idempotent and token-preserving,
+  both asserted by property tests. It refuses to touch a file that does not
+  parse.
+- **1.4 Decide D2 — proposed** in `docs/design/associated-items.md`, pending
+  sign-off. Resolve the leftmost name first; what it is decides what the dot
+  means. Phase 2 needs only two of the four cases (module paths and variant
+  constructors), so 2.1 is unblocked without settling associated items, which
+  are better decided alongside typeclasses in Phase 3.
 - **1.5 Implement D7.** `docs/design/effects.md` is written and decided. Extend
   the grammar with `effect`, `with`, `raises`, `raise`, `!`, `handler for`,
   `catch` and `context`, then rewrite `std/` and `examples/risk_analyzer` in

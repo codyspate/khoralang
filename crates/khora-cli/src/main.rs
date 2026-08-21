@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
-use khora_syntax::ParseError;
+use khora_diagnostics::render_parse_errors;
 
 #[derive(Parser)]
 #[command(name = "khora", version, about = "The Khora language toolchain")]
@@ -34,6 +34,14 @@ enum Command {
         #[arg(long)]
         no_trivia: bool,
     },
+    /// Rewrite files in canonical form.
+    Fmt {
+        /// One or more `.kh` files, or directories to walk.
+        paths: Vec<PathBuf>,
+        /// Report which files would change instead of writing them.
+        #[arg(long)]
+        check: bool,
+    },
     /// Compile to a native executable.
     Build {
         #[arg(default_value = ".")]
@@ -56,6 +64,7 @@ fn run() -> Result<bool> {
     let cli = Cli::parse();
     match cli.command {
         Command::Check { paths } => check(&paths),
+        Command::Fmt { paths, check } => fmt(&paths, check),
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path } => {
@@ -91,10 +100,10 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
         let parse = khora_db::parse(&db, *input);
         let text = input.text(&db);
         debug_assert_eq!(parse.syntax().text().to_string(), text);
-        for err in parse.errors() {
+        if !parse.errors().is_empty() {
             clean = false;
-            total += 1;
-            eprintln!("{}", render(path, text, err));
+            total += parse.errors().len();
+            eprintln!("{}\n", render_parse_errors(path, text, parse.errors()));
         }
     }
 
@@ -104,6 +113,51 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
         eprintln!("{total} error(s) across {} file(s)", files.len());
     }
     Ok(clean)
+}
+
+/// Formats files in place, or reports which would change.
+fn fmt(paths: &[PathBuf], check: bool) -> Result<bool> {
+    let files = collect_sources(paths)?;
+    if files.is_empty() {
+        anyhow::bail!("no `.kh` files found");
+    }
+
+    let mut changed = Vec::new();
+    let mut failed = 0usize;
+    for path in &files {
+        let src = read(path)?;
+        match khora_fmt::format(&src) {
+            Ok(out) if out == src => {}
+            Ok(out) => {
+                changed.push(path.clone());
+                if !check {
+                    std::fs::write(path, out)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                }
+            }
+            Err(errors) => {
+                // A file that does not parse is left exactly as it is.
+                failed += 1;
+                eprintln!("{}\n", render_parse_errors(path, &src, &errors));
+            }
+        }
+    }
+
+    if failed > 0 {
+        eprintln!("{failed} file(s) could not be parsed and were left unchanged");
+    }
+    if check {
+        for path in &changed {
+            println!("would reformat {}", path.display());
+        }
+        if changed.is_empty() && failed == 0 {
+            println!("checked {} file(s): all formatted", files.len());
+        }
+        return Ok(changed.is_empty() && failed == 0);
+    }
+
+    println!("formatted {} of {} file(s)", changed.len(), files.len());
+    Ok(failed == 0)
 }
 
 fn lex(path: &Path) -> Result<()> {
@@ -169,27 +223,4 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Renders a diagnostic as `path:line:col: message` with the offending line.
-fn render(path: &Path, text: &str, err: &ParseError) -> String {
-    let offset = usize::from(err.range.start());
-    let (line_no, line_start) = text[..offset.min(text.len())]
-        .char_indices()
-        .filter(|(_, c)| *c == '\n')
-        .fold((1usize, 0usize), |(n, _), (i, _)| (n + 1, i + 1));
-    let line_end = text[line_start..].find('\n').map_or(text.len(), |i| line_start + i);
-    let col = text[line_start..offset.min(line_end)].chars().count() + 1;
-    let width = usize::from(err.range.len()).max(1);
-
-    format!(
-        "{}:{}:{}: error: {}\n  |\n  | {}\n  | {}{}",
-        path.display(),
-        line_no,
-        col,
-        err.message,
-        &text[line_start..line_end],
-        " ".repeat(col - 1),
-        "^".repeat(width),
-    )
 }

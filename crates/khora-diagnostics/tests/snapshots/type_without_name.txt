@@ -1,0 +1,11 @@
+error: expected an identifier
+ --> src/main.kh:2:6
+  |
+2 | type = ;
+  |      ^
+
+error: expected a type
+ --> src/main.kh:2:8
+  |
+2 | type = ;
+  |        ^

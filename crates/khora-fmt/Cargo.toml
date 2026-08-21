@@ -1,0 +1,10 @@
+[package]
+name = "khora-fmt"
+description = "The canonical Khora formatter, driven by the lossless CST"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+khora-syntax.workspace = true

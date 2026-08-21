@@ -1,0 +1,5 @@
+error: expected a handler row or a named context
+ --> src/main.kh:2:19
+  |
+2 | fn f() { g() with }
+  |                   ^

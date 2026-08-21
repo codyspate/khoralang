@@ -1,0 +1,29 @@
+error: expected an identifier
+ --> src/main.kh:2:6
+  |
+2 | type = ;
+  |      ^
+
+error: expected a type
+ --> src/main.kh:2:8
+  |
+2 | type = ;
+  |        ^
+
+error: expected an identifier
+ --> src/main.kh:3:4
+  |
+3 | fn = ;
+  |    ^
+
+error: expected a parameter list
+ --> src/main.kh:3:4
+  |
+3 | fn = ;
+  |    ^
+
+error: a function body is a block: write `fn f() { .. }`, not `fn f() = { .. };`
+ --> src/main.kh:3:4
+  |
+3 | fn = ;
+  |    ^

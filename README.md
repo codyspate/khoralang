@@ -15,11 +15,13 @@ The front end works. Everything after it is scaffolding.
 | --- | --- |
 | `khora-syntax` | **Working.** Lexer, lossless CST parser, typed AST, error recovery. |
 | `khora-db` | **Working.** Salsa database, `SourceFile`/`SourceRoot` inputs, the `parse` query. |
+| `khora-manifest` | **Working.** `khora.toml` parsing; unknown keys warn rather than abort. |
+| `khora-fmt` | **Working.** Canonical formatter over the CST. |
 | `khora-hir` | Not implemented. Boundary and lowering plan only. |
 | `khora-types` | Not implemented. |
 | `khora-perceus` | Not implemented. |
 | `khora-codegen-llvm` | Not implemented. `llvm` feature off by default. |
-| `khora-cli` | `check`, `lex`, `parse` work. `build` reports that it cannot. |
+| `khora-cli` | `check`, `fmt`, `lex`, `parse` work. `build` reports that it cannot. |
 
 `khora check` parses the whole corpus in `std/` and `examples/` with no errors.
 
@@ -34,6 +36,10 @@ cargo run -p khora-cli -- check std examples
 ```
 
 ```bash
+cargo run -p khora-cli -- fmt std examples --check
+```
+
+```bash
 cargo run -p khora-cli -- parse examples/risk_analyzer/src/main.kh --no-trivia
 ```
 
@@ -43,12 +49,17 @@ cargo run -p khora-cli -- parse examples/risk_analyzer/src/main.kh --no-trivia
 crates/
   khora-syntax/        logos lexer, rowan CST parser, typed AST
   khora-db/            salsa database, source inputs, the parse query
+  khora-manifest/      khora.toml parsing
+  khora-fmt/           the canonical formatter
   khora-hir/           AST -> HIR lowering, pipe and placeholder desugaring
   khora-types/         HM inference, row unification, const generics
   khora-perceus/       reference counting and in-place reuse
   khora-codegen-llvm/  inkwell backend, lld linking
   khora-cli/           the `khora` driver
 docs/
+  vision.md            what Khora is for; breaks ties in the roadmap
+  roadmap.md           decisions, open questions, phases
+  design/              decision records (effects, imperative, associated items)
   grammar.ebnf         the implemented grammar
   errata.md            where the specification is wrong, and what was done
 std/                   standard library sources (.kh)

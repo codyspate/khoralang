@@ -11,11 +11,11 @@ module std.core;
 //
 // See docs/design/effects.md.
 
-pub type Option<+A> =
+pub type Option<+ A> =
   | Some(value: A)
   | None;
 
-pub type Result<+A, +E> =
+pub type Result<+ A, + E> =
   | Ok(value: A)
   | Err(error: E);
 

@@ -1,0 +1,5 @@
+error: expected `}`
+ --> src/main.kh:4:1
+  |
+4 | 
+  | ^

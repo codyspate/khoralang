@@ -22,7 +22,7 @@ pub type DbError =
 /// The ledger is a capability. Nothing here says how it is served — that is
 /// the caller's decision, made when a handler is installed.
 pub effect Ledger {
-  get_history:  String -> String raises DbError,
+  get_history: String -> String raises DbError,
   flag_account: (String, RiskLevel) -> () raises DbError,
 }
 
@@ -88,16 +88,16 @@ let mock_ai = handler for LLMService {
 /// Bindings are sequential, so a handler may use the ones above it. This is
 /// what keeps composition flat instead of nesting one `with` per service.
 pub context Mock {
-  scope:  Scope.root,
+  scope: Scope.root,
   ledger: mock_ledger,
-  ai:     mock_ai,
+  ai: mock_ai,
 }
 
 pub fn main() {
   with Mock {
     Router.new()
-    |> Router.post("/analyze/:account_id", handle)
-    |> Router.listen(8080)
+      |> Router.post("/analyze/:account_id", handle)
+      |> Router.listen(8080)
   }
 }
 

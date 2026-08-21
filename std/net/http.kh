@@ -31,20 +31,20 @@ pub type HttpError =
 
 /// A router carries the capabilities its handlers need, so mounting a route
 /// that talks to the database widens the router's own requirement row.
-pub type Router<-R, +E>;
+pub type Router<- R, + E>;
 
 pub fn new() -> Router<{}, Never>;
 
 pub fn post<'r1, 'r2, 'e1, 'e2>(
   router: Router<'r1, 'e1>,
   route: String,
-  on_request: Request -> Response with 'r2 raises 'e2
+  handler: Request -> Response with 'r2 raises 'e2
 ) -> Router<{ 'r1 | 'r2 }, 'e1 + 'e2>;
 
 pub fn get<'r1, 'r2, 'e1, 'e2>(
   router: Router<'r1, 'e1>,
   route: String,
-  on_request: Request -> Response with 'r2 raises 'e2
+  handler: Request -> Response with 'r2 raises 'e2
 ) -> Router<{ 'r1 | 'r2 }, 'e1 + 'e2>;
 
 /// Binding a socket is a scoped resource: the listener is released when the
