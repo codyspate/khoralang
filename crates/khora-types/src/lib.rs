@@ -47,6 +47,22 @@ pub enum Type {
     /// application collapses into an ordinary [`Type::Adt`] as soon as it does —
     /// so nothing downstream of instance selection ever sees one.
     Applied { head: Box<Type>, args: Vec<Type> },
+    /// A set of labelled requirements: `{ ledger: Ledger | 'e }`.
+    ///
+    /// Serves both effect clauses. A capability row labels each field with the
+    /// name the caller supplies it under; an error row labels each with the
+    /// error's own type name, since two errors of one type cannot be told
+    /// apart and by-name is how they are handled.
+    ///
+    /// `tail` is what else may be present: a variable for an open row, `None`
+    /// for a closed one. `{}` is the closed empty row, which is what an
+    /// entry point must reduce to.
+    Row {
+        /// Sorted by label, so two rows written in different orders are one
+        /// type without unification having to sort them.
+        fields: Vec<(String, Type)>,
+        tail: Option<Box<Type>>,
+    },
     /// A fixed-length product, as in `(Int, Bool)`.
     ///
     /// The empty tuple is `Unit`, not `Tuple(vec![])`, so there is exactly one
@@ -92,6 +108,18 @@ impl std::fmt::Display for Type {
             Type::Var(_) => write!(f, "_"),
             Type::Const(n) => write!(f, "{n}"),
             Type::Assoc { owner, name } => write!(f, "{owner}::{name}"),
+            Type::Row { fields, tail } => {
+                let mut parts: Vec<String> =
+                    fields.iter().map(|(label, ty)| format!("{label}: {ty}")).collect();
+                if let Some(tail) = tail {
+                    parts.push(format!("| {tail}"));
+                }
+                if parts.is_empty() {
+                    write!(f, "{{}}")
+                } else {
+                    write!(f, "{{ {} }}", parts.join(", "))
+                }
+            }
             Type::Applied { head, args } => {
                 let inner: Vec<String> = args.iter().map(Type::to_string).collect();
                 write!(f, "{head}<{}>", inner.join(", "))
@@ -114,6 +142,18 @@ impl std::fmt::Display for Type {
 }
 
 impl Type {
+    /// The closed empty row: requires nothing, raises nothing.
+    pub fn empty_row() -> Type {
+        Type::Row { fields: Vec::new(), tail: None }
+    }
+
+    /// A row from labelled entries, canonically ordered.
+    pub fn row(mut fields: Vec<(String, Type)>, tail: Option<Type>) -> Type {
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        fields.dedup_by(|a, b| a.0 == b.0);
+        Type::Row { fields, tail: tail.map(Box::new) }
+    }
+
     /// A nullary ADT, which is what most of the phase 2 subset used.
     pub fn adt(name: impl Into<String>) -> Type {
         Type::Adt { name: name.into(), args: Vec::new() }
@@ -128,6 +168,12 @@ impl Type {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     pub generics: Vec<String>,
+    /// What the caller must supply: the `with { .. }` row. The closed empty
+    /// row when the clause is absent, so "requires nothing" is the default and
+    /// an entry point needs no annotation to be checked.
+    pub requires: Type,
+    /// How the call can fail: the `raises ..` row, empty when absent.
+    pub raises: Type,
     /// The traits each generic parameter requires, in the order declared.
     ///
     /// Parallel to `generics` rather than a map, so the parameter a bound
@@ -212,7 +258,12 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 let ret = f
                     .return_type()
                     .map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics));
-                map.signatures.insert(name, Signature { generics, bounds, params, ret });
+                let requires =
+                    row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics);
+                let raises =
+                    row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics);
+                map.signatures
+                    .insert(name, Signature { generics, bounds, requires, raises, params, ret });
             }
             ast::Decl::Type(t) => {
                 let Some(type_name) = t.name().and_then(|n| n.ident()) else { continue };
@@ -381,8 +432,75 @@ fn bound_lists(params: Option<&ast::TypeParams>) -> Vec<Vec<String>> {
 
 fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
     params
-        .map(|p| p.params().filter_map(|g| g.name().and_then(|n| n.ident())).collect())
+        .map(|p| {
+            p.params()
+                // A row variable is a parameter like any other, and is rigid
+                // inside the body for the same reason: the caller chooses what
+                // the rest of the row is.
+                .filter_map(|g| g.name().and_then(|n| n.ident()).or_else(|| g.row_var()))
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+/// Reads a `with` or `raises` clause into a row.
+///
+/// Absent means the closed empty row: a function with no clause requires
+/// nothing and raises nothing, which is what makes those the safe defaults and
+/// what an entry point has to reduce to.
+fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String]) -> Type {
+    let Some(clause) = clause else { return Type::empty_row() };
+    match clause {
+        // `with { ledger: Ledger | 'e }`
+        ast::Type::Record(r) => {
+            // With a tail, the labels after the `|` are nested inside it
+            // rather than beside it, so both places have to be read.
+            let after_tail: Vec<ast::Field> =
+                r.row_tail().map(|t| t.fields().collect()).unwrap_or_default();
+            let fields: Vec<(String, Type)> = r
+                .fields()
+                .chain(after_tail)
+                .filter_map(|f| {
+                    let label = f.name()?.ident()?;
+                    Some((label, type_of_syntax(f.ty().as_ref(), generics)))
+                })
+                .collect();
+            let tail = r
+                .row_tail()
+                .and_then(|t| t.types().next())
+                .map(|t| type_of_syntax(Some(&t), generics));
+            Type::row(fields, tail)
+        }
+        // `raises DbError + ModelError`. An error row labels each entry with
+        // the error's own type name: two errors of one type cannot be told
+        // apart, and by name is how they are handled.
+        ast::Type::Union(u) => {
+            Type::row(u.operands().filter_map(|t| error_label(&t, generics)).collect(), None)
+        }
+        // `raises DbError`, or a bare `'r`.
+        other => {
+            let ty = type_of_syntax(Some(other), generics);
+            match &ty {
+                // A bare row variable is the whole row.
+                Type::Param(name) if name.starts_with('\'') => Type::row(Vec::new(), Some(ty)),
+                _ => match error_label(other, generics) {
+                    Some(entry) => Type::row(vec![entry], None),
+                    None => Type::empty_row(),
+                },
+            }
+        }
+    }
+}
+
+/// One entry of an error row, labelled by the error type's own name.
+fn error_label(ty: &ast::Type, generics: &[String]) -> Option<(String, Type)> {
+    let resolved = type_of_syntax(Some(ty), generics);
+    let label = match &resolved {
+        Type::Adt { name, .. } => name.clone(),
+        Type::Param(name) => name.clone(),
+        other => other.to_string(),
+    };
+    Some((label, resolved))
 }
 
 /// Maps written syntax to a type.
@@ -541,6 +659,8 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         let signature = types.signatures.get(name).cloned().unwrap_or(Signature {
             generics: Vec::new(),
             bounds: Vec::new(),
+            requires: Type::empty_row(),
+            raises: Type::empty_row(),
             params: Vec::new(),
             ret: Type::Unknown,
         });
@@ -553,10 +673,12 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             instantiations: HashMap::new(),
             unifier: Unifier::new().with_assoc(types.traits.assoc_bindings()),
             lambdas: Vec::new(),
+            demanded: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
         checker.check_bounds();
+        checker.check_effects();
         out.errors.extend(checker.errors);
         // Published types are zonked: a consumer should never see a variable,
         // and code generation cannot do anything with one.
@@ -598,6 +720,46 @@ pub fn trait_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     traits::check(&types.traits, &types.kinds, &types.signatures)
 }
 
+/// Which clause a requirement came from.
+///
+/// Recorded rather than guessed. The two rows look alike — both are sets of
+/// labels — and the only reliable difference is which clause wrote them, since
+/// a capability's label is a field name and an error's is a type name only by
+/// convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clause {
+    Requires,
+    Raises,
+}
+
+impl Clause {
+    fn verb(self) -> &'static str {
+        match self {
+            Clause::Requires => "require",
+            Clause::Raises => "raise",
+        }
+    }
+
+    /// How to name one entry of this kind of row in a message.
+    fn describe(self, label: &str, ty: &Type) -> String {
+        match self {
+            // A capability is supplied under a label, so both halves matter.
+            Clause::Requires => format!("{label}: {ty}"),
+            // An error is labelled by its own type name, and printing
+            // `DbError: DbError` reads as a mistake.
+            Clause::Raises => format!("{ty}"),
+        }
+    }
+}
+
+/// One effect a body's call sites asked of the function containing them.
+struct Demand {
+    clause: Clause,
+    row: Type,
+    range: TextRange,
+    callee: String,
+}
+
 struct Checker<'a> {
     types: &'a TypeMap,
     body: &'a Body,
@@ -609,6 +771,15 @@ struct Checker<'a> {
     /// The type of each lambda currently being inferred, innermost last, so
     /// that a recursive closure can refer to itself before its body is done.
     lambdas: Vec<Type>,
+    /// What this body has demanded of its caller so far, accumulated as calls
+    /// are checked and compared against the signature at the end.
+    ///
+    /// Requirements flow *upward*: a function that calls something needing
+    /// `ledger` needs `ledger` too, unless a `with` block supplies it. Rows
+    /// are checked against the declaration rather than inferred into it,
+    /// because an exported signature is a promise and inferring one silently
+    /// would let a body widen it. `docs/design/effects.md`.
+    demanded: Vec<Demand>,
     errors: Vec<HirError>,
 }
 
@@ -1175,6 +1346,7 @@ impl<'a> Checker<'a> {
         // monomorphization the same way every other type argument does.
         let (ty, type_args) =
             self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+        self.demand(&signature, &type_args, key, range);
         self.instantiations.insert(callee, (key.to_string(), type_args));
         let Type::Fn { params, ret } = ty else { return Type::Unknown };
 
@@ -1207,6 +1379,75 @@ impl<'a> Checker<'a> {
     }
 
     /// The trait's signature for a method key, with `Self` still a parameter.
+    /// Records what a call requires of the enclosing function.
+    ///
+    /// The rows are instantiated with the same arguments the signature was, so
+    /// a row variable in the callee becomes a fresh variable here and is
+    /// solved by whatever the caller turns out to provide.
+    fn demand(
+        &mut self,
+        signature: &Signature,
+        type_args: &[Type],
+        key: &str,
+        range: TextRange,
+    ) {
+        let mapping: HashMap<&str, Type> = signature
+            .generics
+            .iter()
+            .map(String::as_str)
+            .zip(type_args.iter().cloned())
+            .collect();
+        for (clause, row) in
+            [(Clause::Requires, &signature.requires), (Clause::Raises, &signature.raises)]
+        {
+            let row = unify::substitute(row, &mapping);
+            if matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none()) {
+                continue;
+            }
+            self.demanded.push(Demand { clause, row, range, callee: key.to_string() });
+        }
+    }
+
+    /// Checks everything the body demanded against what the signature promised.
+    ///
+    /// Run once, after the body: a requirement is satisfied by the declaration
+    /// or it is an error, and reporting it at the call that raised it is what
+    /// makes the message actionable.
+    fn check_effects(&mut self) {
+        for Demand { clause, row, range, callee } in std::mem::take(&mut self.demanded) {
+            // Satisfied means *subsumed*, not equal: a caller providing
+            // `{ ledger, ai }` can call something needing only `{ ledger }`.
+            // Opening the demand is that check — its labels must all be
+            // present, and its fresh tail absorbs whatever the promise has
+            // that this call did not ask for.
+            let row = match &row {
+                Type::Row { fields, tail: None } => {
+                    let rest = self.unifier.fresh();
+                    Type::row(fields.clone(), Some(rest))
+                }
+                other => other.clone(),
+            };
+            let promise = match clause {
+                Clause::Requires => self.signature.requires.clone(),
+                Clause::Raises => self.signature.raises.clone(),
+            };
+
+            if let Err(why) = self.unifier.unify(&promise, &row) {
+                self.error(
+                    match why {
+                        unify::Mismatch::Missing { label, ty } => format!(
+                            "`{callee}` needs `{}`, which this function does not {}",
+                            clause.describe(&label, &ty),
+                            clause.verb()
+                        ),
+                        other => format!("`{callee}` cannot be called here: {other}"),
+                    },
+                    range,
+                );
+            }
+        }
+    }
+
     fn signature_for(&self, key: &str, _self_ty: &Type) -> Option<Signature> {
         self.types.signatures.get(key).cloned()
     }
@@ -1344,6 +1585,8 @@ impl<'a> Checker<'a> {
                     Some(sig) => {
                         let (ty, args) =
                             self.unifier.instantiate_with(&sig.generics, &sig.as_fn());
+                        let range = self.body.range(at);
+                        self.demand(&sig, &args, name, range);
                         self.instantiations.insert(at, (name.clone(), args));
                         ty
                     }

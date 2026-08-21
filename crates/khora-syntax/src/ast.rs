@@ -404,6 +404,26 @@ impl FnDecl {
     pub fn body(&self) -> Option<Block> {
         child(&self.0)
     }
+    /// The `with { .. }` clause: what this function requires of its caller.
+    pub fn with_clause(&self) -> Option<WithClause> {
+        child(&self.0)
+    }
+    /// The `raises ..` clause: how this function can fail.
+    pub fn raises_clause(&self) -> Option<RaisesClause> {
+        child(&self.0)
+    }
+}
+
+impl WithClause {
+    pub fn row(&self) -> Option<Type> {
+        child(&self.0)
+    }
+}
+
+impl RaisesClause {
+    pub fn row(&self) -> Option<Type> {
+        child(&self.0)
+    }
 }
 
 impl ParamList {
@@ -448,6 +468,11 @@ impl TypeParams {
 impl TypeParam {
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
+    }
+    /// `'e` in `fn f<'e>(..)`. A row variable has no `Name` of its own — it is
+    /// one token — so it is read separately.
+    pub fn row_var(&self) -> Option<String> {
+        token(&self.0, ROW_VAR).map(|t| t.text().to_string())
     }
     pub fn is_const(&self) -> bool {
         token(&self.0, CONST_KW).is_some()
@@ -620,6 +645,13 @@ impl RecordType {
 
 impl RowTail {
     pub fn types(&self) -> impl Iterator<Item = Type> {
+        children(&self.0)
+    }
+    /// The labels written *after* the `|`.
+    ///
+    /// `{ 'e | ledger: Ledger }` nests them here rather than beside the tail,
+    /// so a reader of `RecordType::fields` alone would see an empty row.
+    pub fn fields(&self) -> impl Iterator<Item = Field> {
         children(&self.0)
     }
 }

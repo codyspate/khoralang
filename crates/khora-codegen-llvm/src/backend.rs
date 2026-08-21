@@ -295,6 +295,11 @@ fn specialized_signature(
         .map(|(g, a)| (g.as_str(), a.clone()))
         .collect();
     Some(Signature {
+        // Effects are erased by the time anything is emitted: a capability is
+        // an ordinary parameter and a failure an ordinary tagged return, so
+        // the rows have no machine meaning of their own.
+        requires: Type::empty_row(),
+        raises: Type::empty_row(),
         generics: Vec::new(),
         // A specialized signature has no parameters left, so it can carry no
         // bounds either: whatever they required was settled before this ran.
@@ -485,7 +490,13 @@ impl<'ctx> Backend<'ctx> {
             // A projection reaching here never normalized, which means the
             // owner was never pinned down. That is a type error reported
             // elsewhere, not a shape the backend could pick.
-            Type::Tuple(_) | Type::Const(_) | Type::Applied { .. } | Type::Assoc { .. } => None,
+            // A row is a compile-time description of what a function needs,
+            // not a value: nothing is ever emitted holding one.
+            Type::Tuple(_)
+            | Type::Const(_)
+            | Type::Applied { .. }
+            | Type::Assoc { .. }
+            | Type::Row { .. } => None,
             Type::Never | Type::Unknown => None,
         }
     }
@@ -686,6 +697,8 @@ impl<'ctx> Backend<'ctx> {
             Signature {
                 generics: Vec::new(),
                 bounds: Vec::new(),
+                requires: Type::empty_row(),
+                raises: Type::empty_row(),
                 params: params.clone(),
                 ret: ret.clone(),
             },

@@ -38,6 +38,9 @@ pub enum Mismatch {
     Rigid { param: String, ty: Type },
     /// Functions of different arity.
     Arity { expected: usize, found: usize },
+    /// A row lacks a label the other requires, and cannot grow one because it
+    /// is closed.
+    Missing { label: String, ty: Type },
 }
 
 impl std::fmt::Display for Mismatch {
@@ -55,6 +58,9 @@ impl std::fmt::Display for Mismatch {
             ),
             Mismatch::Arity { expected, found } => {
                 write!(f, "expected {expected} argument(s), found {found}")
+            }
+            Mismatch::Missing { label, ty } => {
+                write!(f, "`{label}: {ty}` is required here but not provided")
             }
         }
     }
@@ -164,6 +170,20 @@ impl Unifier {
                 args: args.iter().map(|a| self.zonk(a)).collect(),
             },
             Type::Tuple(items) => Type::Tuple(items.iter().map(|i| self.zonk(i)).collect()),
+            Type::Row { fields, tail } => {
+                let tail = tail.map(|t| self.zonk(&t));
+                // Zonking a tail may reveal more labels, which belong in this
+                // row rather than nested inside it.
+                let mut fields: Vec<(String, Type)> =
+                    fields.iter().map(|(l, t)| (l.clone(), self.zonk(t))).collect();
+                match tail {
+                    Some(Type::Row { fields: more, tail }) => {
+                        fields.extend(more);
+                        Type::row(fields, tail.map(|t| *t))
+                    }
+                    other => Type::row(fields, other),
+                }
+            }
             Type::Assoc { owner, name } => {
                 Type::Assoc { owner: Box::new(self.zonk(&owner)), name }
             }
@@ -220,6 +240,11 @@ impl Unifier {
             // A dimension only matches itself. The mismatch carries both
             // values, so the diagnostic can name them.
             (Type::Const(x), Type::Const(y)) if x == y => Ok(()),
+
+            (
+                Type::Row { fields: f1, tail: t1 },
+                Type::Row { fields: f2, tail: t2 },
+            ) => self.unify_rows(f1, t1.as_deref(), f2, t2.as_deref()),
 
             (Type::Int, Type::Int)
             | (Type::Bool, Type::Bool)
@@ -297,6 +322,74 @@ impl Unifier {
         }
     }
 
+    /// Rémy-style row unification: shared labels agree, and whatever one side
+    /// lacks has to fit through its tail.
+    ///
+    /// The whole effect system rests on this. `f() with { ledger: L }` called
+    /// from a context providing `{ ledger: L, ai: A }` works because the
+    /// callee's row is *open* — its tail absorbs `ai`. An entry point works
+    /// because its row is closed and nothing is left to absorb.
+    fn unify_rows(
+        &mut self,
+        f1: &[(String, Type)],
+        t1: Option<&Type>,
+        f2: &[(String, Type)],
+        t2: Option<&Type>,
+    ) -> Result<(), Mismatch> {
+        // Labels both sides carry must agree on what they carry.
+        for (label, left) in f1 {
+            if let Some((_, right)) = f2.iter().find(|(l, _)| l == label) {
+                self.unify(left, right)?;
+            }
+        }
+        let only_in = |a: &[(String, Type)], b: &[(String, Type)]| -> Vec<(String, Type)> {
+            a.iter().filter(|(l, _)| !b.iter().any(|(o, _)| o == l)).cloned().collect()
+        };
+        let missing_from_2 = only_in(f1, f2);
+        let missing_from_1 = only_in(f2, f1);
+
+        match (missing_from_1.is_empty(), missing_from_2.is_empty()) {
+            // The same labels on both sides: the tails describe the same rest.
+            (true, true) => self.unify_tails(t1, t2),
+            // One side is short. Its tail has to be exactly what it is short
+            // by, plus whatever the other side's tail allows.
+            (false, true) => self.grow(t1, missing_from_1, t2),
+            (true, false) => self.grow(t2, missing_from_2, t1),
+            // Both are short. A fresh tail stands for what neither named.
+            (false, false) => {
+                let rest = self.fresh();
+                self.grow(t1, missing_from_1, Some(&rest))?;
+                self.grow(t2, missing_from_2, Some(&rest))
+            }
+        }
+    }
+
+    /// Requires `tail` to cover `missing`, with `rest` beyond it.
+    fn grow(
+        &mut self,
+        tail: Option<&Type>,
+        missing: Vec<(String, Type)>,
+        rest: Option<&Type>,
+    ) -> Result<(), Mismatch> {
+        let Some(tail) = tail else {
+            // A closed row cannot grow, which is the error worth reporting
+            // well: it names the label nobody supplied.
+            let (label, ty) = missing.into_iter().next().expect("non-empty by construction");
+            return Err(Mismatch::Missing { label, ty });
+        };
+        self.unify(tail, &Type::row(missing, rest.cloned()))
+    }
+
+    fn unify_tails(&mut self, t1: Option<&Type>, t2: Option<&Type>) -> Result<(), Mismatch> {
+        match (t1, t2) {
+            (None, None) => Ok(()),
+            (Some(a), Some(b)) => self.unify(a, b),
+            // One side is closed, so the other's tail must turn out to be
+            // empty rather than standing for something unnamed.
+            (Some(open), None) | (None, Some(open)) => self.unify(open, &Type::empty_row()),
+        }
+    }
+
     fn bind(&mut self, var: TypeVar, ty: &Type) -> Result<(), Mismatch> {
         if self.occurs(var, ty) {
             return Err(Mismatch::Infinite { var, ty: self.zonk(ty) });
@@ -314,6 +407,10 @@ impl Unifier {
             }
             Type::Adt { args, .. } => args.iter().any(|a| self.occurs(var, a)),
             Type::Tuple(items) => items.iter().any(|i| self.occurs(var, i)),
+            Type::Row { fields, tail } => {
+                fields.iter().any(|(_, t)| self.occurs(var, t))
+                    || tail.is_some_and(|t| self.occurs(var, &t))
+            }
             Type::Assoc { owner, .. } => self.occurs(var, &owner),
             Type::Applied { head, args } => {
                 self.occurs(var, &head) || args.iter().any(|a| self.occurs(var, a))
@@ -437,6 +534,19 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
             args: args.iter().map(|a| substitute(a, mapping)).collect(),
         },
         Type::Tuple(items) => Type::Tuple(items.iter().map(|i| substitute(i, mapping)).collect()),
+        Type::Row { fields, tail } => {
+            let mut fields: Vec<(String, Type)> =
+                fields.iter().map(|(l, t)| (l.clone(), substitute(t, mapping))).collect();
+            // A row variable standing for more labels is spliced in, not
+            // nested: `{ a | 'e }` with `'e := { b }` is `{ a, b }`.
+            match tail.as_ref().map(|t| substitute(t, mapping)) {
+                Some(Type::Row { fields: more, tail }) => {
+                    fields.extend(more);
+                    Type::row(fields, tail.map(|t| *t))
+                }
+                other => Type::row(fields, other),
+            }
+        }
         Type::Assoc { owner, name } => {
             Type::Assoc { owner: Box::new(substitute(owner, mapping)), name: name.clone() }
         }
@@ -462,6 +572,120 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- rows --------------------------------------------------------------
+
+    fn closed(labels: &[(&str, Type)]) -> Type {
+        Type::row(labels.iter().map(|(l, t)| (l.to_string(), t.clone())).collect(), None)
+    }
+
+    fn open(labels: &[(&str, Type)], tail: Type) -> Type {
+        Type::row(labels.iter().map(|(l, t)| (l.to_string(), t.clone())).collect(), Some(tail))
+    }
+
+    fn ledger() -> Type {
+        Type::adt("Ledger".to_string())
+    }
+
+    fn ai() -> Type {
+        Type::adt("Ai".to_string())
+    }
+
+    /// Order is not part of a row's identity.
+    #[test]
+    fn a_row_is_the_same_written_either_way() {
+        let mut u = Unifier::new();
+        let a = closed(&[("ledger", ledger()), ("ai", ai())]);
+        let b = closed(&[("ai", ai()), ("ledger", ledger())]);
+        assert!(u.unify(&a, &b).is_ok());
+    }
+
+    /// The case the whole effect system rests on: a callee requiring less than
+    /// the caller provides fits, because its tail absorbs the difference.
+    #[test]
+    fn an_open_row_absorbs_what_it_did_not_name() {
+        let mut u = Unifier::new();
+        let rest = u.fresh();
+        let callee = open(&[("ledger", ledger())], rest.clone());
+        let caller = closed(&[("ledger", ledger()), ("ai", ai())]);
+        assert!(u.unify(&callee, &caller).is_ok());
+        assert_eq!(u.zonk(&rest), closed(&[("ai", ai())]), "the tail became the remainder");
+    }
+
+    /// And a closed row cannot, which is what makes a missing capability an
+    /// error rather than an inference that silently succeeds.
+    #[test]
+    fn a_closed_row_cannot_absorb_an_extra_label() {
+        let mut u = Unifier::new();
+        let entry = closed(&[]);
+        let needed = closed(&[("ledger", ledger())]);
+        match u.unify(&entry, &needed) {
+            Err(Mismatch::Missing { label, .. }) => assert_eq!(label, "ledger"),
+            other => panic!("expected a missing label, got {other:?}"),
+        }
+    }
+
+    /// The diagnostic names the label, which is phase 4's exit criterion.
+    #[test]
+    fn a_missing_label_is_named() {
+        let mut u = Unifier::new();
+        let err = u.unify(&closed(&[]), &closed(&[("ledger", ledger())])).unwrap_err();
+        assert!(err.to_string().contains("`ledger: Ledger`"), "{err}");
+    }
+
+    /// Shared labels have to agree on what they carry.
+    #[test]
+    fn one_label_cannot_have_two_types() {
+        let mut u = Unifier::new();
+        let a = closed(&[("ledger", ledger())]);
+        let b = closed(&[("ledger", ai())]);
+        assert!(u.unify(&a, &b).is_err());
+    }
+
+    /// Two open rows, each naming something the other did not: a fresh tail
+    /// stands for what neither named, and each side ends up complete.
+    #[test]
+    fn two_open_rows_meet_in_the_middle() {
+        let mut u = Unifier::new();
+        let (r1, r2) = (u.fresh(), u.fresh());
+        let a = open(&[("ledger", ledger())], r1.clone());
+        let b = open(&[("ai", ai())], r2.clone());
+        assert!(u.unify(&a, &b).is_ok());
+
+        assert_eq!(u.zonk(&a), u.zonk(&b), "the two rows agree once solved");
+
+        // Each tail now stands for the label the other side named, so neither
+        // can be emptied on its own — `r1` has absorbed `ai`.
+        assert!(u.unify(&r1, &Type::empty_row()).is_err());
+
+        // Closing the whole thing closes both at the same set of labels.
+        let both = closed(&[("ledger", ledger()), ("ai", ai())]);
+        assert!(u.unify(&a, &both).is_ok());
+        assert_eq!(u.zonk(&a), both);
+        assert_eq!(u.zonk(&b), both);
+        let _ = r2;
+    }
+
+    /// An open row unified with a closed one is closed too: there is nothing
+    /// left for the tail to stand for.
+    #[test]
+    fn meeting_a_closed_row_closes_the_open_one() {
+        let mut u = Unifier::new();
+        let rest = u.fresh();
+        let open_row = open(&[("ledger", ledger())], rest.clone());
+        assert!(u.unify(&open_row, &closed(&[("ledger", ledger())])).is_ok());
+        assert_eq!(u.zonk(&rest), Type::empty_row());
+    }
+
+    /// Zonking splices a solved tail in rather than leaving a row inside a row.
+    #[test]
+    fn a_solved_tail_flattens() {
+        let mut u = Unifier::new();
+        let rest = u.fresh();
+        let row = open(&[("ledger", ledger())], rest.clone());
+        assert!(u.unify(&rest, &closed(&[("ai", ai())])).is_ok());
+        assert_eq!(u.zonk(&row), closed(&[("ai", ai()), ("ledger", ledger())]));
+    }
 
     fn adt(name: &str, args: Vec<Type>) -> Type {
         Type::Adt { name: name.to_string(), args }

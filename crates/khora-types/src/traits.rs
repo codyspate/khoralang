@@ -334,10 +334,21 @@ fn method_def(f: &ast::FnDecl, scope: &[String]) -> Option<MethodDef> {
         })
         .unwrap_or_default();
     let ret = f.return_type().map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics));
+    let requires =
+        crate::row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics);
+    let raises =
+        crate::row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics);
 
     Some(MethodDef {
         name,
-        signature: Signature { generics: own, bounds: own_bounds, params, ret },
+        signature: Signature {
+            generics: own,
+            bounds: own_bounds,
+            requires,
+            raises,
+            params,
+            ret,
+        },
         has_default: f.body().is_some(),
         range: f.syntax().text_range(),
     })
@@ -462,6 +473,8 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
                 Signature {
                     generics: own,
                     bounds,
+                    requires: crate::unify::substitute(&def.signature.requires, &mapping),
+                    raises: crate::unify::substitute(&def.signature.raises, &mapping),
                     params: def
                         .signature
                         .params
@@ -504,6 +517,8 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
             let signature = Signature {
                 generics: own,
                 bounds,
+                requires: crate::unify::substitute(&def.signature.requires, &mapping),
+                raises: crate::unify::substitute(&def.signature.raises, &mapping),
                 params: def
                     .signature
                     .params

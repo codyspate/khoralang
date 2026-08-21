@@ -341,9 +341,13 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   capabilities are evidence passed as parameters, failures are tagged returns
   checked at `!`, and suspension belongs to fibers in phase 5. None of it needs
   a stack segment, an unwinder, or a stack map.
-- **4.2 Scoped row polymorphism.** `Type::Row(Fields, TailVar)`, unification
-  with field reordering and tail extension, row subtraction for handler
-  installation, and the empty-row obligation on the entrypoint. Settle D3.
+- **4.2 Scoped row polymorphism — done** for signatures. `Type::Row` with
+  Remy-style unification: shared labels agree, and whatever one side lacks has
+  to fit through its tail. A call's row must be *subsumed* by the enclosing
+  function's rather than equal to it, which is what lets a caller providing
+  `{ ledger, ai }` call something needing only `{ ledger }`. No clause means
+  the closed empty row, so an entry point is checked without annotating it.
+  Row subtraction for handler installation lands with 4.3a. D3 still open.
 - **4.3 Handler lowering and runtime**, per D1.
 - **4.4 `Layer` as handler composition**, including merge.
 
