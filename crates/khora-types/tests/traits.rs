@@ -386,3 +386,108 @@ fn a_parameterised_inherent_impl_is_allowed() {
          fn f(b: Box<Int>) -> Int { b.size() }\n",
     );
 }
+
+// --- higher-kinded unification --------------------------------------------
+
+const FUNCTOR: &str = "module m;\n\
+                       export type Option<A> = | Some(value: A) | None;\n\
+                       export type Box<A> = | Of(value: A);\n\
+                       export trait Functor {\n\
+                         fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;\n\
+                       }\n\
+                       impl Functor for Option {\n\
+                         fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> {\n\
+                           match self {\n\
+                             Option::Some(v) => Option::Some(f(v)),\n\
+                             Option::None => Option::None,\n\
+                           }\n\
+                         }\n\
+                       }\n";
+
+/// Calling a higher-kinded method has to solve `Self<A>` against `Option<Int>`,
+/// deciding `Self := Option` and `A := Int` separately. Getting this wrong the
+/// obvious way binds `Self := Option<Int>` and nothing type checks afterwards.
+#[test]
+fn a_higher_kinded_method_solves_the_constructor_and_the_argument() {
+    assert_clean(&format!(
+        "{FUNCTOR}fn f(o: Option<Int>) -> Option<Bool> {{ o.map(fn x => x == 1) }}\n"
+    ));
+}
+
+#[test]
+fn the_result_keeps_the_receivers_constructor() {
+    assert_reports(
+        &format!("{FUNCTOR}fn f(o: Option<Int>) -> Box<Bool> {{ o.map(fn x => x == 1) }}\n"),
+        "returns `Box<Bool>`, but its body has type `Option<Bool>`",
+    );
+}
+
+#[test]
+fn the_result_element_type_comes_from_the_function() {
+    assert_reports(
+        &format!("{FUNCTOR}fn f(o: Option<Int>) -> Option<Int> {{ o.map(fn x => x == 1) }}\n"),
+        "`Int` does not match `Bool`",
+    );
+}
+
+/// The element type flows the other way too: the lambda's parameter is decided
+/// by the receiver, not annotated.
+#[test]
+fn the_lambda_parameter_is_decided_by_the_receiver() {
+    assert_reports(
+        &format!("{FUNCTOR}fn f(o: Option<Int>) -> Option<Bool> {{ o.map(fn x => x && true) }}\n"),
+        "`Bool`",
+    );
+}
+
+/// A trait whose `Self` is applied cannot be reached from a type that is not a
+/// constructor, and the error should say so rather than failing later.
+#[test]
+fn a_higher_kinded_method_is_not_available_on_a_plain_type() {
+    assert_reports(
+        &format!("{FUNCTOR}fn f(n: Int) -> Int {{ n.map(fn x => x) }}\n"),
+        "does not implement `Functor`",
+    );
+}
+
+/// A second constructor implementing the same trait keeps its own identity.
+#[test]
+fn two_constructors_may_implement_one_higher_kinded_trait() {
+    assert_clean(
+        "module m;\n\
+         export type Option<A> = | Some(value: A) | None;\n\
+         export type Box<A> = | Of(value: A);\n\
+         export trait Functor {\n\
+           fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;\n\
+         }\n\
+         impl Functor for Option {\n\
+           fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> { Option::None }\n\
+         }\n\
+         impl Functor for Box {\n\
+           fn map<A, B>(self: Box<A>, f: (A) -> B) -> Box<B> {\n\
+             match self { Box::Of(v) => Box::Of(f(v)) }\n\
+           }\n\
+         }\n\
+         fn a(o: Option<Int>) -> Option<Bool> { o.map(fn x => x == 1) }\n\
+         fn b(x: Box<Int>) -> Box<Bool> { x.map(fn y => y == 1) }\n",
+    );
+}
+
+/// An `Applicative` whose receiver is `Self<(A) -> B>` — a constructor applied
+/// to a function type — is the shape `traverse` needs.
+#[test]
+fn a_constructor_applied_to_a_function_type_unifies() {
+    assert_clean(
+        "module m;\n\
+         export type Option<A> = | Some(value: A) | None;\n\
+         export trait Applicative {\n\
+           fn ap<A, B>(self: Self<(A) -> B>, value: Self<A>) -> Self<B>;\n\
+         }\n\
+         impl Applicative for Option {\n\
+           fn ap<A, B>(self: Option<(A) -> B>, value: Option<A>) -> Option<B> {\n\
+             Option::None\n\
+           }\n\
+         }\n\
+         fn f(g: Option<(Int) -> Bool>, v: Option<Int>) -> Option<Bool> { g.ap(v) }\n",
+    );
+}

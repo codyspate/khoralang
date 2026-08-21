@@ -89,6 +89,15 @@ impl Unifier {
                 None => break,
             }
         }
+        // `?F<A>` with `?F` solved to `Option` *is* `Option<A>`. Collapsing here
+        // means every caller sees the concrete type without asking.
+        if let Type::Applied { head, args } = &current {
+            if let Type::Adt { name, args: none } = self.shallow(head) {
+                if none.is_empty() {
+                    return Type::Adt { name, args: args.clone() };
+                }
+            }
+        }
         current
     }
 
@@ -107,10 +116,16 @@ impl Unifier {
                 args: args.iter().map(|a| self.zonk(a)).collect(),
             },
             Type::Tuple(items) => Type::Tuple(items.iter().map(|i| self.zonk(i)).collect()),
-            Type::Applied { param, args } => Type::Applied {
-                param,
-                args: args.iter().map(|a| self.zonk(a)).collect(),
-            },
+            Type::Applied { head, args } => {
+                let head = self.zonk(&head);
+                let args: Vec<Type> = args.iter().map(|a| self.zonk(a)).collect();
+                match head {
+                    Type::Adt { name, args: none } if none.is_empty() => {
+                        Type::Adt { name, args }
+                    }
+                    head => Type::Applied { head: Box::new(head), args },
+                }
+            }
             other => other,
         }
     }
@@ -161,10 +176,29 @@ impl Unifier {
             // Componentwise, and only at equal width. Two tuples of different
             // lengths are different types, so the whole pair is reported rather
             // than a component that has no counterpart.
-            (Type::Applied { param: p1, args: a1 }, Type::Applied { param: p2, args: a2 })
-                if p1 == p2 && a1.len() == a2.len() =>
+            // Two applications: heads against heads, arguments against
+            // arguments. Widths must agree — `F<A>` and `G<A, B>` describe
+            // constructors of different kinds.
+            (Type::Applied { head: h1, args: a1 }, Type::Applied { head: h2, args: a2 })
+                if a1.len() == a2.len() =>
             {
+                self.unify(h1, h2)?;
                 for (x, y) in a1.iter().zip(a2) {
+                    self.unify(x, y)?;
+                }
+                Ok(())
+            }
+
+            // The case the whole representation exists for: `?F<?B>` against
+            // `Option<Int>` decides `?F := Option` and `?B := Int`. Restricted
+            // higher-order unification, and it has a unique answer because the
+            // head is a variable applied to a fixed number of arguments.
+            (Type::Applied { head, args }, Type::Adt { name, args: concrete })
+            | (Type::Adt { name, args: concrete }, Type::Applied { head, args })
+                if args.len() == concrete.len() =>
+            {
+                self.unify(head, &Type::Adt { name: name.clone(), args: Vec::new() })?;
+                for (x, y) in args.iter().zip(concrete) {
                     self.unify(x, y)?;
                 }
                 Ok(())
@@ -214,7 +248,9 @@ impl Unifier {
             }
             Type::Adt { args, .. } => args.iter().any(|a| self.occurs(var, a)),
             Type::Tuple(items) => items.iter().any(|i| self.occurs(var, i)),
-            Type::Applied { args, .. } => args.iter().any(|a| self.occurs(var, a)),
+            Type::Applied { head, args } => {
+                self.occurs(var, &head) || args.iter().any(|a| self.occurs(var, a))
+            }
             _ => false,
         }
     }
@@ -302,14 +338,16 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
         // Substituting the head is what turns `Self<A>` into `Option<A>`. The
         // parameter maps to a bare constructor, so its own arguments are empty
         // and the application supplies them.
-        Type::Applied { param, args } => {
+        // Substituting the head is what turns `Self<A>` into `Option<A>`: the
+        // parameter maps to a bare constructor, and the application supplies the
+        // arguments it was missing.
+        Type::Applied { head, args } => {
             let args: Vec<Type> = args.iter().map(|a| substitute(a, mapping)).collect();
-            match mapping.get(param.as_str()) {
-                Some(Type::Adt { name, args: none }) if none.is_empty() => {
-                    Type::Adt { name: name.clone(), args }
+            match substitute(head, mapping) {
+                Type::Adt { name, args: none } if none.is_empty() => {
+                    Type::Adt { name, args }
                 }
-                Some(other) if args.is_empty() => other.clone(),
-                _ => Type::Applied { param: param.clone(), args },
+                head => Type::Applied { head: Box::new(head), args },
             }
         }
         other => other.clone(),

@@ -1160,3 +1160,45 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "10\n0\n", "the trailing 0 is the live-object count");
     assert_eq!(ran.code, Some(0));
 }
+
+/// A higher-kinded trait, compiled and run. `Self<A>` against `Option<Int>`
+/// has to decide `Self := Option` and `A := Int` separately, and the result
+/// keeps the receiver's constructor with a new element type.
+#[test]
+fn a_higher_kinded_trait_runs() {
+    let ran = run(
+        "hkt",
+        "module t;
+fn print(value: Int);
+
+export type Option<A> = | Some(value: A) | None;
+
+trait Functor {
+  fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;
+}
+
+impl Functor for Option {
+  fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> {
+    match self {
+      Option::Some(v) => Option::Some(f(v)),
+      Option::None => Option::None,
+    }
+  }
+}
+
+fn unwrap_or<A>(o: Option<A>, fallback: A) -> A {
+  match o { Option::Some(v) => v, Option::None => fallback }
+}
+
+fn main() -> Int {
+  print(unwrap_or(Option::Some(20).map(fn x => x + 22), 0));
+  print(unwrap_or(Option::None.map(fn x => x + 1), 99));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "42
+99
+");
+    assert_eq!(ran.code, Some(0));
+}

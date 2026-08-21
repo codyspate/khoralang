@@ -336,13 +336,17 @@ fn self_kind(methods: &[MethodDef]) -> Kind {
 /// The largest number of arguments `param` is applied to anywhere in `ty`.
 fn applied_arity(ty: &Type, param: &str) -> usize {
     match ty {
-        Type::Applied { param: p, args } if p == param => args
-            .iter()
-            .map(|a| applied_arity(a, param))
-            .max()
-            .unwrap_or(0)
-            .max(args.len()),
-        Type::Applied { args, .. } => args.iter().map(|a| applied_arity(a, param)).max().unwrap_or(0),
+        Type::Applied { head, args } => {
+            let here = match &**head {
+                Type::Param(p) if p == param => args.len(),
+                _ => 0,
+            };
+            args.iter()
+                .map(|a| applied_arity(a, param))
+                .max()
+                .unwrap_or(0)
+                .max(here)
+        }
         Type::Adt { args, .. } => args.iter().map(|a| applied_arity(a, param)).max().unwrap_or(0),
         Type::Tuple(items) => items.iter().map(|a| applied_arity(a, param)).max().unwrap_or(0),
         Type::Fn { params, ret } => params

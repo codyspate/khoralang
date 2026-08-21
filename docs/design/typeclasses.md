@@ -198,6 +198,14 @@ method calls through a bound, supertraits, parameterised impls
 (`impl Functor for Option`). Dispatch is static in every case — a call becomes a
 direct call to the impl's function.
 
+Calling a higher-kinded method solves the constructor and the element type
+*separately*: `Self<A>` against `Option<Int>` decides `Self := Option` and
+`A := Int`. That is restricted higher-order unification, and it has a unique
+answer because the head is a variable applied to a fixed number of arguments.
+`Type::Applied` carries its head as a `Type` rather than a name so the unifier
+can solve it, and the application collapses to an ordinary `Type::Adt` the
+moment it does.
+
 Default method bodies moved from "open" to done during implementation: stating
 `Self: ThisTrait` as an ordinary bound on the trait's own signatures turned out
 to make them fall out of the machinery already there, with no special case

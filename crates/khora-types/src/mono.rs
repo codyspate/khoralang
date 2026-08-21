@@ -84,9 +84,9 @@ fn mangle(ty: &Type) -> String {
         Type::Var(v) => format!("_var{v}"),
         // An application that survived here means `Self` was never chosen,
         // which is a bug in instance selection rather than in the program.
-        Type::Applied { param, args } => {
+        Type::Applied { head, args } => {
             let inner: Vec<String> = args.iter().map(mangle).collect();
-            format!("_app{param}${}", inner.join("$"))
+            format!("_app{}${}", mangle(head), inner.join("$"))
         }
         // Reaching here means an argument was never solved. The instance is
         // still distinct from every other, so a stable placeholder is enough to

@@ -37,13 +37,16 @@ pub enum Type {
     /// A type parameter the *caller* chose. Rigid: the body of a generic
     /// function cannot decide what it is. See `unify`.
     Param(String),
-    /// A type parameter applied to arguments, as `Self<A>` in a
-    /// higher-kinded trait.
+    /// A type applied to arguments where the head is not yet a constructor:
+    /// `Self<A>` in a higher-kinded trait, or `F<B>` at a call site before `F`
+    /// is known.
     ///
-    /// Collapses into an ordinary [`Type::Adt`] the moment the parameter is
-    /// known — `Self := Option` turns `Self<A>` into `Option<A>` — so nothing
-    /// downstream of instance selection ever sees one.
-    Applied { param: String, args: Vec<Type> },
+    /// The head is a [`Type::Param`] when rigid and a [`Type::Var`] when the
+    /// caller still gets to choose it. Solving that variable against a concrete
+    /// `Option<Int>` is what decides `F := Option` and `B := Int`, and the
+    /// application collapses into an ordinary [`Type::Adt`] as soon as it does —
+    /// so nothing downstream of instance selection ever sees one.
+    Applied { head: Box<Type>, args: Vec<Type> },
     /// A fixed-length product, as in `(Int, Bool)`.
     ///
     /// The empty tuple is `Unit`, not `Tuple(vec![])`, so there is exactly one
@@ -81,9 +84,9 @@ impl std::fmt::Display for Type {
             // TypeScript developer already reads as "not pinned down yet".
             Type::Var(_) => write!(f, "_"),
             Type::Const(n) => write!(f, "{n}"),
-            Type::Applied { param, args } => {
+            Type::Applied { head, args } => {
                 let inner: Vec<String> = args.iter().map(Type::to_string).collect();
-                write!(f, "{param}<{}>", inner.join(", "))
+                write!(f, "{head}<{}>", inner.join(", "))
             }
             // `(Int,)` for the one-element case, so it is not read as a
             // parenthesised `Int` - the same disambiguation Rust and Python use.
@@ -328,7 +331,10 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
                     if args.is_empty() {
                         Type::Param(other.to_string())
                     } else {
-                        Type::Applied { param: other.to_string(), args }
+                        Type::Applied {
+                            head: Box::new(Type::Param(other.to_string())),
+                            args,
+                        }
                     }
                 }
                 other => Type::Adt { name: other.to_string(), args },
@@ -1013,11 +1019,17 @@ impl<'a> Checker<'a> {
         // monomorphisation the same way every other type argument does.
         let (ty, type_args) =
             self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
-        if let Some(chosen) = type_args.first() {
-            let _ = self.unifier.unify(chosen, self_ty);
-        }
         self.instantiations.insert(callee, (key.to_string(), type_args));
         let Type::Fn { params, ret } = ty else { return Type::Unknown };
+
+        // Bind `Self` by unifying the *receiver parameter* with the receiver,
+        // not by assigning the receiver's type to `Self` directly. For `Eq` the
+        // parameter is `Self` and the two are the same thing; for `Functor` it
+        // is `Self<A>`, and only unifying through it decides `Self := Option`
+        // and `A := Int` rather than the nonsense `Self := Option<Int>`.
+        if let Some(receiver) = params.first() {
+            let _ = self.unifier.unify(receiver, self_ty);
+        }
 
         // The receiver is the first parameter, and it is already checked: it is
         // what selected this signature. Only the written arguments remain.
