@@ -77,10 +77,22 @@ impl Type {
 }
 
 /// A function's declared signature.
+///
+/// `generics` names the rigid parameters. Inside the body they stay rigid; at
+/// a call site they are instantiated to fresh variables, which is what lets two
+/// calls to the same generic function have unrelated types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
+    pub generics: Vec<String>,
     pub params: Vec<Type>,
     pub ret: Type,
+}
+
+impl Signature {
+    /// The signature as a function type, with its parameters still rigid.
+    pub fn as_fn(&self) -> Type {
+        Type::Fn { params: self.params.clone(), ret: Box::new(self.ret.clone()) }
+    }
 }
 
 /// A variant of an ADT and the types of its payload.
@@ -100,6 +112,8 @@ pub struct VariantInfo {
 pub struct TypeMap {
     pub signatures: HashMap<String, Signature>,
     pub variants: Vec<VariantInfo>,
+    /// Generic parameters of each declared type, by name.
+    pub adts: HashMap<String, Vec<String>>,
 }
 
 impl TypeMap {
@@ -121,26 +135,38 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
         match decl {
             ast::Decl::Fn(f) => {
                 let Some(name) = f.name().and_then(|n| n.ident()) else { continue };
+                let generics = generic_names(f.type_params().as_ref());
                 let params = f
                     .params()
-                    .map(|list| list.params().map(|p| type_of_syntax(p.ty().as_ref())).collect())
+                    .map(|list| {
+                        list.params().map(|p| type_of_syntax(p.ty().as_ref(), &generics)).collect()
+                    })
                     .unwrap_or_default();
-                let ret = f.return_type().map_or(Type::Unit, |t| type_of_syntax(Some(&t)));
-                map.signatures.insert(name, Signature { params, ret });
+                let ret = f
+                    .return_type()
+                    .map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics));
+                map.signatures.insert(name, Signature { generics, params, ret });
             }
             ast::Decl::Type(t) => {
                 let Some(type_name) = t.name().and_then(|n| n.ident()) else { continue };
+                let generics = generic_names(t.type_params().as_ref());
+                map.adts.insert(type_name.clone(), generics.clone());
                 if let Some(ast::Type::Variant(v)) = t.definition() {
                     for case in v.cases() {
                         let Some(name) = case.name().and_then(|n| n.ident()) else { continue };
                         let fields = case
                             .fields()
                             .map(|list| {
-                                list.fields().map(|f| type_of_syntax(f.ty().as_ref())).collect()
+                                list.fields()
+                                    .map(|f| type_of_syntax(f.ty().as_ref(), &generics))
+                                    .collect()
                             })
                             .or_else(|| {
-                                case.tuple_fields()
-                                    .map(|list| list.types().map(|t| type_of_syntax(Some(&t))).collect())
+                                case.tuple_fields().map(|list| {
+                                    list.types()
+                                        .map(|t| type_of_syntax(Some(&t), &generics))
+                                        .collect()
+                                })
                             })
                             .unwrap_or_default();
                         map.variants.push(VariantInfo {
@@ -157,20 +183,35 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     map
 }
 
-/// Maps written syntax to a type. Anything outside the phase 2 subset becomes
-/// [`Type::Unknown`], which suppresses follow-on errors.
-fn type_of_syntax(ty: Option<&ast::Type>) -> Type {
+fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
+    params
+        .map(|p| p.params().filter_map(|g| g.name().and_then(|n| n.ident())).collect())
+        .unwrap_or_default()
+}
+
+/// Maps written syntax to a type.
+///
+/// `generics` are the names in scope as rigid parameters — a bare `A` inside
+/// `fn f<A>(..)` is [`Type::Param`], not an undeclared ADT. Anything else
+/// unrecognised becomes [`Type::Unknown`], which suppresses follow-on errors.
+fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
     let Some(ty) = ty else { return Type::Unknown };
     match ty {
         ast::Type::Unit(_) => Type::Unit,
         ast::Type::Path(p) => {
             let name = p.path().map(|p| p.text_path()).unwrap_or_default();
+            let args: Vec<Type> = p
+                .type_args()
+                .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics)).collect())
+                .unwrap_or_default();
+
             match name.as_str() {
                 "Int" => Type::Int,
                 "Bool" => Type::Bool,
                 "String" => Type::Str,
                 "" => Type::Unknown,
-                other => Type::adt(other),
+                other if generics.iter().any(|g| g == other) => Type::Param(other.to_string()),
+                other => Type::Adt { name: other.to_string(), args },
             }
         }
         _ => Type::Unknown,
@@ -219,6 +260,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
 
     for (name, body) in khora_hir::body::bodies(db, file) {
         let signature = types.signatures.get(name).cloned().unwrap_or(Signature {
+            generics: Vec::new(),
             params: Vec::new(),
             ret: Type::Unknown,
         });
@@ -233,10 +275,11 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         };
         checker.check_function();
         out.errors.extend(checker.errors);
-        out.bodies.push((
-            name.clone(),
-            BodyTypes { exprs: checker.exprs, locals: checker.locals },
-        ));
+        // Published types are zonked: a consumer should never see a variable,
+        // and code generation cannot do anything with one.
+        let exprs = checker.exprs.iter().map(|(k, v)| (*k, checker.unifier.zonk(v))).collect();
+        let locals = checker.locals.iter().map(|(k, v)| (*k, checker.unifier.zonk(v))).collect();
+        out.bodies.push((name.clone(), BodyTypes { exprs, locals }));
     }
     out
 }
@@ -279,6 +322,8 @@ impl<'a> Checker<'a> {
         let actual = self.infer(root);
         let expected = self.signature.ret.clone();
         if let Err(why) = self.unifier.unify(&expected, &actual) {
+            let expected = self.unifier.zonk(&expected);
+            let actual = self.unifier.zonk(&actual);
             let range = self.body.range(root);
             // The plain mismatch would read "expected `Int`, found `Bool`",
             // which repeats what the sentence already said.
@@ -300,11 +345,22 @@ impl<'a> Checker<'a> {
             }
             Pat::TupleStruct { resolution, fields } => {
                 let variant = variant_name(&resolution).and_then(|n| self.types.variant(&n)).cloned();
+                // Field types are declared against the type's own parameters,
+                // so they have to be read at the scrutinee's instantiation:
+                // matching `Option<Int>` binds `v` to `Int`, not to `A`.
+                let mapping = variant
+                    .as_ref()
+                    .map(|v| self.substitution_for(&v.type_name, ty))
+                    .unwrap_or_default();
+                let borrowed: HashMap<&str, Type> =
+                    mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+
                 for (i, field) in fields.iter().enumerate() {
-                    let field_ty = variant
+                    let declared = variant
                         .as_ref()
                         .and_then(|v| v.fields.get(i).cloned())
                         .unwrap_or(Type::Unknown);
+                    let field_ty = unify::substitute(&declared, &borrowed);
                     self.bind_pattern(*field, &field_ty);
                 }
             }
@@ -333,6 +389,16 @@ impl<'a> Checker<'a> {
         match self.unifier.unify(expected, found) {
             Ok(()) => true,
             Err(why) => {
+                // Zonk first: a message naming `?3` instead of `Int` is useless,
+                // and unification may have solved the variable on the way to
+                // discovering the conflict.
+                let why = match why {
+                    Mismatch::Types { expected, found } => Mismatch::Types {
+                        expected: self.unifier.zonk(&expected),
+                        found: self.unifier.zonk(&found),
+                    },
+                    other => other,
+                };
                 self.error(format!("{context}: {why}"), range);
                 false
             }
@@ -500,6 +566,40 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Maps a type's parameters onto the arguments `ty` supplies.
+    ///
+    /// Falls back to fresh variables when the scrutinee is not the expected
+    /// ADT — usually downstream of another error, where inventing a variable
+    /// keeps one mistake from becoming several.
+    fn substitution_for(&mut self, type_name: &str, ty: &Type) -> HashMap<String, Type> {
+        let generics = self.types.adts.get(type_name).cloned().unwrap_or_default();
+        let args = match self.unifier.zonk(ty) {
+            Type::Adt { name, args } if name == type_name => args,
+            _ => Vec::new(),
+        };
+        generics
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let arg = args.get(i).cloned().unwrap_or_else(|| self.unifier.fresh());
+                (g.clone(), arg)
+            })
+            .collect()
+    }
+
+    /// A fresh instance of an ADT, and the substitution that produced it.
+    ///
+    /// The substitution is what lets a constructor's declared field types be
+    /// read at the same instantiation as the result: for `Some(1)` the field is
+    /// `?0` and the result `Option<?0>`, and unifying the argument solves both.
+    fn instantiate_adt(&mut self, name: &str) -> (Type, HashMap<String, Type>) {
+        let generics = self.types.adts.get(name).cloned().unwrap_or_default();
+        let mapping: HashMap<String, Type> =
+            generics.iter().map(|g| (g.clone(), self.unifier.fresh())).collect();
+        let args = generics.iter().map(|g| mapping[g].clone()).collect();
+        (Type::Adt { name: name.to_string(), args }, mapping)
+    }
+
     fn infer_call(&mut self, callee: ExprId, args: &[ExprId], range: TextRange) -> Type {
         // A constructor call builds its ADT.
         if let Expr::Path(resolution) = self.body.expr(callee).clone() {
@@ -516,10 +616,14 @@ impl<'a> Checker<'a> {
                             range,
                         );
                     }
-                    for (arg, expected) in args.iter().zip(&variant.fields) {
-                        self.expect(*arg, expected, "this argument");
+                    let (result, mapping) = self.instantiate_adt(&variant.type_name);
+                    let borrowed: HashMap<&str, Type> =
+                        mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                    for (arg, declared) in args.iter().zip(&variant.fields) {
+                        let expected = unify::substitute(declared, &borrowed);
+                        self.expect(*arg, &expected, "this argument");
                     }
-                    return Type::adt(variant.type_name);
+                    return result;
                 }
             }
         }
@@ -546,18 +650,19 @@ impl<'a> Checker<'a> {
 
     fn type_of_resolution(&mut self, resolution: &khora_hir::Resolution) -> Type {
         match resolution {
-            khora_hir::Resolution::Item { name, .. } => self
-                .types
-                .signatures
-                .get(name)
-                .map(|s| Type::Fn { params: s.params.clone(), ret: Box::new(s.ret.clone()) })
-                .unwrap_or(Type::Unknown),
+            khora_hir::Resolution::Item { name, .. } => {
+                // Each mention gets its own copy of the signature, so two calls
+                // to the same generic function do not constrain each other.
+                match self.types.signatures.get(name).cloned() {
+                    Some(sig) => self.unifier.instantiate(&sig.generics, &sig.as_fn()),
+                    None => Type::Unknown,
+                }
+            }
             khora_hir::Resolution::Variant { type_name, name, .. } => {
+                // A nullary constructor is a value; one with a payload is
+                // reached through a call, handled in `infer_call`.
                 match self.types.variant(name) {
-                    // A nullary constructor is a value; one with a payload is
-                    // reached through a call, handled in `infer_call`.
-                    Some(v) if v.fields.is_empty() => Type::adt(type_name.clone()),
-                    Some(_) => Type::adt(type_name.clone()),
+                    Some(_) => self.instantiate_adt(type_name).0,
                     None => Type::Unknown,
                 }
             }
