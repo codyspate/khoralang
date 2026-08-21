@@ -50,6 +50,7 @@ impl std::fmt::Display for ModulePath {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemKind {
     Type,
+    Trait,
     Effect,
     Function,
     Let,
@@ -60,6 +61,7 @@ impl ItemKind {
     pub fn describe(self) -> &'static str {
         match self {
             ItemKind::Type => "type",
+            ItemKind::Trait => "trait",
             ItemKind::Effect => "effect",
             ItemKind::Function => "function",
             ItemKind::Let => "binding",
@@ -220,6 +222,14 @@ fn collect_decl(decl: &ast::Decl, map: &mut ItemMap) {
             }
             (t.name(), ItemKind::Type, t.is_pub(), t.syntax().text_range())
         }
+        ast::Decl::Trait(t) => {
+            (t.name(), ItemKind::Trait, t.is_pub(), t.syntax().text_range())
+        }
+        // An impl has no name of its own: it is found through the trait and the
+        // type it is written for, never referred to directly. Recording it as
+        // an item would give two impls of different traits for one type a
+        // spurious duplicate-name error.
+        ast::Decl::Impl(_) => return,
         ast::Decl::Effect(e) => {
             (e.name(), ItemKind::Effect, e.is_pub(), e.syntax().text_range())
         }

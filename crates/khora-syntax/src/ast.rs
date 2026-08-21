@@ -91,6 +91,10 @@ ast_node!(ImportList, IMPORT_LIST);
 ast_node!(ImportItem, IMPORT_ITEM);
 ast_node!(ImportGlob, IMPORT_GLOB);
 ast_node!(TypeDecl, TYPE_DECL);
+ast_node!(TraitDecl, TRAIT_DECL);
+ast_node!(ImplDecl, IMPL_DECL);
+ast_node!(AssocTypeDecl, ASSOC_TYPE_DECL);
+ast_node!(TypeBounds, TYPE_BOUNDS);
 ast_node!(EffectDecl, EFFECT_DECL);
 ast_node!(ContextDecl, CONTEXT_DECL);
 ast_node!(TestDecl, TEST_DECL);
@@ -110,6 +114,8 @@ ast_node!(Param, PARAM);
 
 ast_enum!(Decl {
     Type(TypeDecl),
+    Trait(TraitDecl),
+    Impl(ImplDecl),
     Effect(EffectDecl),
     Context(ContextDecl),
     Test(TestDecl),
@@ -454,7 +460,79 @@ impl TypeParam {
             None
         }
     }
-    pub fn bound(&self) -> Option<Type> {
+    /// The traits this parameter requires, or `None` when it is unbounded.
+    ///
+    /// A const parameter has no bounds: what follows its `:` is the type of the
+    /// value, which [`TypeParam::const_type`] returns instead.
+    pub fn bounds(&self) -> Option<TypeBounds> {
+        child(&self.0)
+    }
+    /// The type of a `const N: Int` parameter.
+    pub fn const_type(&self) -> Option<Type> {
+        if !self.is_const() {
+            return None;
+        }
+        child(&self.0)
+    }
+}
+
+impl TypeBounds {
+    pub fn types(&self) -> impl Iterator<Item = Type> {
+        children(&self.0)
+    }
+}
+
+impl TraitDecl {
+    pub fn is_pub(&self) -> bool {
+        token(&self.0, PUB_KW).is_some()
+    }
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    pub fn type_params(&self) -> Option<TypeParams> {
+        child(&self.0)
+    }
+    /// The supertraits after `trait Ord: Eq`.
+    pub fn supertraits(&self) -> Option<TypeBounds> {
+        child(&self.0)
+    }
+    pub fn functions(&self) -> impl Iterator<Item = FnDecl> {
+        children(&self.0)
+    }
+    pub fn assoc_types(&self) -> impl Iterator<Item = AssocTypeDecl> {
+        children(&self.0)
+    }
+}
+
+impl ImplDecl {
+    pub fn type_params(&self) -> Option<TypeParams> {
+        child(&self.0)
+    }
+    /// The trait being implemented: the type before `for`.
+    pub fn trait_(&self) -> Option<Type> {
+        children::<Type>(&self.0).next()
+    }
+    /// The implementing type: the type after `for`.
+    pub fn self_type(&self) -> Option<Type> {
+        children::<Type>(&self.0).nth(1)
+    }
+    pub fn functions(&self) -> impl Iterator<Item = FnDecl> {
+        children(&self.0)
+    }
+    pub fn assoc_types(&self) -> impl Iterator<Item = AssocTypeDecl> {
+        children(&self.0)
+    }
+}
+
+impl AssocTypeDecl {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.0)
+    }
+    pub fn bounds(&self) -> Option<TypeBounds> {
+        child(&self.0)
+    }
+    /// The type an impl assigns, as in `type Item = Int;`.
+    pub fn definition(&self) -> Option<Type> {
         child(&self.0)
     }
 }

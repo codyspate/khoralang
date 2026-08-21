@@ -165,6 +165,23 @@ pub(super) fn type_args(p: &mut Parser<'_>) {
 ///
 /// A parameter may carry a variance marker (`+A`, `-R`), a kind/trait bound
 /// (`D: Device`) or be a const generic (`const Dim: Int`).
+/// `Type ( "+" Type )*` — the traits a parameter, a trait or an impl requires.
+///
+/// One node whatever the count, so a reader of the tree never has to handle
+/// "one bound" and "several bounds" as different shapes.
+pub(super) fn bounds(p: &mut Parser<'_>) {
+    let m = p.start();
+    type_(p);
+    while p.at(PLUS) {
+        p.bump(PLUS);
+        if !p.tick() {
+            break;
+        }
+        type_(p);
+    }
+    m.complete(p, TYPE_BOUNDS);
+}
+
 pub(super) fn type_params(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(LT);
@@ -203,7 +220,7 @@ fn type_param(p: &mut Parser<'_>) {
     }
     name(p);
     if p.eat(COLON) {
-        type_(p);
+        bounds(p);
     }
     m.complete(p, TYPE_PARAM);
 }

@@ -75,6 +75,18 @@
           }
         },
         {
+          "comment": "A trait declaration names a type-level entity, so its name is coloured like the one after `type`.",
+          "match": "\\b(trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.type.khora"
+            },
+            "2": {
+              "name": "entity.name.type.khora"
+            }
+          }
+        },
+        {
           "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "keyword.declaration.type.khora" },
@@ -129,7 +141,7 @@
         },
         {
           "name": "keyword.declaration.khora",
-          "match": "\\b(module|import|type|effect|fn|let|pub)\\b"
+          "match": "\\b(module|import|type|trait|impl|effect|fn|let|pub)\\b"
         },
         {
           "name": "storage.modifier.khora",

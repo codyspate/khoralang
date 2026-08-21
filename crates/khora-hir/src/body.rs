@@ -261,13 +261,61 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
     parse
         .source_file()
         .decls()
-        .filter_map(|decl| match decl {
+        .flat_map(|decl| match decl {
             ast::Decl::Fn(f) => {
-                let name = f.name()?.ident()?;
-                let body = f.body()?;
-                Some((name, lower_function(map, &f, &body)))
+                let lowered = (|| {
+                    let name = f.name()?.ident()?;
+                    let body = f.body()?;
+                    Some((name, lower_function(map, &f, &body)))
+                })();
+                lowered.into_iter().collect::<Vec<_>>()
             }
-            _ => None,
+            // A trait's functions are lowered too: one with a body is a default
+            // implementation, and it has to be checked like any other.
+            ast::Decl::Trait(t) => {
+                let owner = t.name().and_then(|n| n.ident()).unwrap_or_default();
+                methods(map, &owner, t.functions())
+            }
+            ast::Decl::Impl(i) => methods(map, &impl_key(&i), i.functions()),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// The name an impl's bodies are recorded under.
+///
+/// `Eq#Int`, not the trait alone: one type may implement several traits and one
+/// trait many types, so neither half identifies a body on its own. `#` cannot
+/// occur in a Khora identifier, so this can never collide with a name a program
+/// chose.
+pub fn impl_key(decl: &ast::ImplDecl) -> String {
+    let trait_name = decl.trait_().as_ref().and_then(type_head).unwrap_or_default();
+    let self_name = decl.self_type().as_ref().and_then(type_head).unwrap_or_default();
+    format!("{trait_name}#{self_name}")
+}
+
+/// The head constructor of a written type: `Option` for `Option<Int>`.
+///
+/// Instance resolution is nominal, so this is what selects an impl. See
+/// `docs/design/typeclasses.md`.
+pub fn type_head(ty: &ast::Type) -> Option<String> {
+    match ty {
+        ast::Type::Path(p) => p.path().map(|p| p.text_path()),
+        _ => None,
+    }
+}
+
+/// Lowers the functions of one trait or impl, keyed `owner::method`.
+fn methods(
+    map: &crate::ItemMap,
+    owner: &str,
+    functions: impl Iterator<Item = ast::FnDecl>,
+) -> Vec<(String, Body)> {
+    functions
+        .filter_map(|f| {
+            let name = f.name()?.ident()?;
+            let body = f.body()?;
+            Some((format!("{owner}::{name}"), lower_function(map, &f, &body)))
         })
         .collect()
 }

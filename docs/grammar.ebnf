@@ -19,6 +19,13 @@ Path           ::= Ident ( "::" Ident )* ;
 (* --- types ------------------------------------------------------------- *)
 
 TypeDecl       ::= ( "pub" )? "type" Ident ( TypeParams )? ( "=" TypeDef )? ";" ;
+
+TraitDecl      ::= ( "pub" )? "trait" Ident ( TypeParams )?
+                   ( ":" TypeBounds )? "{" ( TraitItem )* "}" ;
+ImplDecl       ::= "impl" ( TypeParams )? Type "for" Type "{" ( TraitItem )* "}" ;
+TraitItem      ::= AssocTypeDecl | FunctionDecl ;
+AssocTypeDecl  ::= "type" Ident ( ":" TypeBounds )? ( "=" Type )? ";" ;
+TypeBounds     ::= Type ( "+" Type )* ;
 TypeDef        ::= VariantType | Type ;
 
 (* An effect is a named set of operations, shaped like a record of functions —
@@ -28,7 +35,7 @@ EffectDecl     ::= ( "pub" )? "effect" Ident ( TypeParams )?
 
 TypeParams     ::= "<" TypeParam ( "," TypeParam )* ( "," )? ">" ;
 TypeParam      ::= "const" Ident ":" Type
-                 | ( "+" | "-" )? Ident ( ":" Type )?
+                 | ( "+" | "-" )? Ident ( ":" TypeBounds )?
                  | RowVar ;
 
 TypeArgs       ::= "<" Type ( "," Type )* ( "," )? ">" ;

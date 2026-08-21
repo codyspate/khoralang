@@ -2,7 +2,9 @@
 
 use super::exprs::{block, expr};
 use super::patterns::pattern;
-use super::types::{effect_clauses, field, name, path, type_, type_params, variant_type};
+use super::types::{
+    bounds, effect_clauses, field, name, path, type_, type_params, variant_type,
+};
 use super::Parser;
 use crate::kind::SyntaxKind::*;
 
@@ -27,6 +29,8 @@ fn declaration(p: &mut Parser<'_>) {
         MODULE_KW => module_decl(p),
         IMPORT_KW => import_decl(p),
         TYPE_KW => type_decl(p),
+        TRAIT_KW => trait_decl(p),
+        IMPL_KW => impl_decl(p),
         EFFECT_KW => effect_decl(p),
         FN_KW => fn_decl(p),
         LET_KW => let_decl(p),
@@ -34,12 +38,13 @@ fn declaration(p: &mut Parser<'_>) {
         IDENT if p.at_contextual(TEST_KW) || p.at_contextual(BENCH_KW) => test_decl(p),
         PUB_KW => match p.nth(1) {
             TYPE_KW => type_decl(p),
+            TRAIT_KW => trait_decl(p),
             EFFECT_KW => effect_decl(p),
             FN_KW => fn_decl(p),
             LET_KW => let_decl(p),
             IDENT if p.nth_at_contextual(1, CONTEXT_KW) => context_decl(p),
             _ => p.err_recover(
-                "expected `type`, `effect`, `context`, `fn` or `let` after `pub`",
+                "expected `type`, `trait`, `effect`, `context`, `fn` or `let` after `pub`",
                 Parser::at_decl_start,
             ),
         },
@@ -119,6 +124,92 @@ fn type_decl(p: &mut Parser<'_>) {
     }
     p.expect(SEMICOLON);
     m.complete(p, TYPE_DECL);
+}
+
+/// `pub? trait Name<Params>? (":" Bounds)? "{" TraitItem* "}"`
+///
+/// Rust's spelling, per `docs/design/typeclasses.md`: the concept is Rust's
+/// trait, so it gets Rust's word rather than Haskell's `class`, which means
+/// something else entirely in two of the three languages the audience arrives
+/// from.
+fn trait_decl(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.eat(PUB_KW);
+    p.bump(TRAIT_KW);
+    name(p);
+    if p.at(LT) {
+        type_params(p);
+    }
+    // Supertraits: `trait Ord: Eq`.
+    if p.eat(COLON) {
+        bounds(p);
+    }
+    trait_body(p);
+    m.complete(p, TRAIT_DECL);
+}
+
+/// `impl Trait for Type "{" ImplItem* "}"`
+fn impl_decl(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(IMPL_KW);
+    if p.at(LT) {
+        type_params(p);
+    }
+    type_(p);
+    if p.at_contextual(FOR_KW) {
+        p.bump_contextual(FOR_KW);
+    } else {
+        p.error("expected `for`: an impl names the trait and then the type, as `impl Eq for Int`");
+    }
+    type_(p);
+    trait_body(p);
+    m.complete(p, IMPL_DECL);
+}
+
+/// The braced item list shared by `trait` and `impl`.
+///
+/// Both hold the same two things — associated types and functions — and a
+/// function with a body is exactly how a trait states a default and how an impl
+/// supplies one, so there is nothing to distinguish here. What is *allowed*
+/// (an impl may not leave a function without a body) is a rule the checker
+/// states with a real diagnostic, not one the grammar enforces by shape.
+fn trait_body(p: &mut Parser<'_>) {
+    if !p.expect(L_BRACE) {
+        return;
+    }
+    while !p.at(R_BRACE) && !p.at(EOF) {
+        if !p.tick() {
+            break;
+        }
+        match p.current() {
+            TYPE_KW => assoc_type_decl(p),
+            FN_KW | PUB_KW => fn_decl(p),
+            _ => {
+                p.err_recover("expected `fn` or `type`", |p| {
+                    p.at_any(&[R_BRACE, FN_KW, TYPE_KW]) || p.at_decl_start()
+                });
+                if !p.at_any(&[R_BRACE, FN_KW, TYPE_KW]) {
+                    break;
+                }
+            }
+        }
+    }
+    p.expect(R_BRACE);
+}
+
+/// `type Item;` in a trait, `type Item = Int;` in an impl.
+fn assoc_type_decl(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(TYPE_KW);
+    name(p);
+    if p.eat(COLON) {
+        bounds(p);
+    }
+    if p.eat(EQ) {
+        type_(p);
+    }
+    p.expect(SEMICOLON);
+    m.complete(p, ASSOC_TYPE_DECL);
 }
 
 /// `pub? effect Name<Params>? "{" ( Field "," )* "}"`

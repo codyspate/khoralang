@@ -32,6 +32,8 @@ pub enum SyntaxKind {
     MODULE_KW,
     IMPORT_KW,
     TYPE_KW,
+    TRAIT_KW,
+    IMPL_KW,
     FN_KW,
     MATCH_KW,
     LET_KW,
@@ -108,6 +110,12 @@ pub enum SyntaxKind {
     IMPORT_ITEM,
     IMPORT_GLOB,
     TYPE_DECL,
+    TRAIT_DECL,
+    IMPL_DECL,
+    /// `type Item;` inside a trait or an impl.
+    ASSOC_TYPE_DECL,
+    /// The `A + B` after `:` on a type parameter, a trait, or an impl.
+    TYPE_BOUNDS,
     EFFECT_DECL,
     CONTEXT_DECL,
     TEST_DECL,
@@ -231,7 +239,18 @@ impl SyntaxKind {
     /// keywords, so they arrive as `IDENT` and cannot be recognised by kind
     /// alone — the parser's `at_decl_start` covers those.
     pub fn is_decl_start(self) -> bool {
-        matches!(self, PUB_KW | TYPE_KW | FN_KW | LET_KW | MODULE_KW | IMPORT_KW | EFFECT_KW)
+        matches!(
+            self,
+            PUB_KW
+                | TYPE_KW
+                | TRAIT_KW
+                | IMPL_KW
+                | FN_KW
+                | LET_KW
+                | MODULE_KW
+                | IMPORT_KW
+                | EFFECT_KW
+        )
     }
 
     /// True for the token kinds the parser produces by remapping an `IDENT`.
@@ -295,6 +314,8 @@ keywords! {
     "module" => MODULE_KW,
     "import" => IMPORT_KW,
     "type" => TYPE_KW,
+    "trait" => TRAIT_KW,
+    "impl" => IMPL_KW,
     "fn" => FN_KW,
     "match" => MATCH_KW,
     "let" => LET_KW,
