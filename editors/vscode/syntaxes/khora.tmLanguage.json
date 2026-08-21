@@ -1,0 +1,187 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Khora",
+  "scopeName": "source.khora",
+  "fileTypes": ["kh"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#row-variables" },
+    { "include": "#capability" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#calls" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.khora",
+          "match": "//.*$"
+        },
+        {
+          "include": "#block-comment"
+        }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.khora",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [{ "include": "#block-comment" }]
+    },
+    "strings": {
+      "name": "string.quoted.double.khora",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.khora",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.khora",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.khora",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "row-variables": {
+      "name": "storage.modifier.lifetime.khora",
+      "match": "'[A-Za-z_][A-Za-z0-9_]*\\b"
+    },
+    "capability": {
+      "comment": "Provisional: `:label.operation` disappears under decision A8. See docs/roadmap.md D7.",
+      "match": "(:)([a-z_][A-Za-z0-9_]*)((\\.)([a-z_][A-Za-z0-9_]*))?",
+      "captures": {
+        "1": { "name": "keyword.operator.capability.khora" },
+        "2": { "name": "variable.other.capability.khora" },
+        "5": { "name": "entity.name.function.khora" }
+      }
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "comment": "Function declarations only: the name is followed by type params or a parameter list, which excludes `fn x => ...` lambdas.",
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s*[<(])",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.khora" },
+            "2": { "name": "entity.name.function.khora" }
+          }
+        },
+        {
+          "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.khora" },
+            "2": { "name": "entity.name.type.khora" }
+          }
+        },
+        {
+          "comment": "Module and import paths are dotted and not type references.",
+          "match": "\\b(module|import)\\s+([a-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "keyword.control.import.khora" },
+            "2": { "name": "entity.name.namespace.khora" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "comment": "Keep in sync with SyntaxKind::from_keyword in crates/khora-syntax/src/kind.rs. Enforced by the keywords_match_the_lexer test.",
+          "name": "keyword.control.khora",
+          "match": "\\b(match|if)\\b"
+        },
+        {
+          "name": "keyword.declaration.khora",
+          "match": "\\b(module|import|type|fn|let|pub)\\b"
+        },
+        {
+          "name": "storage.modifier.khora",
+          "match": "\\b(mut|const|forall|as)\\b"
+        },
+        {
+          "name": "constant.language.boolean.khora",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "comment": "The pipe placeholder.",
+          "name": "variable.language.placeholder.khora",
+          "match": "(?<![A-Za-z0-9_])_(?![A-Za-z0-9_])"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "comment": "Capitalised identifiers are types or variant constructors. Resolution is a name-resolution question the LSP will answer more precisely later via semantic tokens.",
+          "name": "entity.name.type.khora",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.khora" }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "comment": "The pipe operator gets its own scope: it is the language's signature operator and deserves to stand out.",
+          "name": "keyword.operator.pipe.khora",
+          "match": "\\|>"
+        },
+        {
+          "name": "keyword.operator.arrow.khora",
+          "match": "->|=>"
+        },
+        {
+          "name": "keyword.operator.comparison.khora",
+          "match": "==|!=|<=|>="
+        },
+        {
+          "name": "keyword.operator.logical.khora",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.arithmetic.khora",
+          "match": "[+\\-*/%]"
+        },
+        {
+          "comment": "Bare `|` separates variant cases and closes an open row.",
+          "name": "keyword.operator.row.khora",
+          "match": "\\|"
+        },
+        {
+          "name": "keyword.operator.assignment.khora",
+          "match": "="
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.terminator.khora", "match": ";" },
+        { "name": "punctuation.separator.khora", "match": "[,:.]" },
+        { "name": "punctuation.brackets.khora", "match": "[{}()\\[\\]]" }
+      ]
+    }
+  }
+}

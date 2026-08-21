@@ -178,26 +178,44 @@ impl SyntaxKind {
         matches!(self, PUB_KW | TYPE_KW | FN_KW | LET_KW | MODULE_KW | IMPORT_KW)
     }
 
-    pub fn from_keyword(text: &str) -> Option<SyntaxKind> {
-        let kw = match text {
-            "module" => MODULE_KW,
-            "import" => IMPORT_KW,
-            "type" => TYPE_KW,
-            "fn" => FN_KW,
-            "match" => MATCH_KW,
-            "let" => LET_KW,
-            "mut" => MUT_KW,
-            "pub" => PUB_KW,
-            "as" => AS_KW,
-            "if" => IF_KW,
-            "forall" => FORALL_KW,
-            "const" => CONST_KW,
-            "true" => TRUE_KW,
-            "false" => FALSE_KW,
-            _ => return None,
-        };
-        Some(kw)
-    }
+}
+
+/// Declares every reserved word once, generating both the lexer's lookup and
+/// the list the editor grammar is checked against.
+macro_rules! keywords {
+    ($($text:literal => $kind:ident),* $(,)?) => {
+        /// Every reserved word in Khora.
+        ///
+        /// `editors/vscode/syntaxes/khora.tmLanguage.json` must list exactly
+        /// these; the `keywords_match_the_lexer` test enforces it.
+        pub const KEYWORDS: &[&str] = &[$($text),*];
+
+        impl SyntaxKind {
+            pub fn from_keyword(text: &str) -> Option<SyntaxKind> {
+                match text {
+                    $($text => Some($kind),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+keywords! {
+    "module" => MODULE_KW,
+    "import" => IMPORT_KW,
+    "type" => TYPE_KW,
+    "fn" => FN_KW,
+    "match" => MATCH_KW,
+    "let" => LET_KW,
+    "mut" => MUT_KW,
+    "pub" => PUB_KW,
+    "as" => AS_KW,
+    "if" => IF_KW,
+    "forall" => FORALL_KW,
+    "const" => CONST_KW,
+    "true" => TRUE_KW,
+    "false" => FALSE_KW,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {

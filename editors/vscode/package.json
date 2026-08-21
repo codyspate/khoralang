@@ -1,0 +1,27 @@
+{
+  "name": "khora",
+  "displayName": "Khora",
+  "description": "Syntax highlighting for the Khora language (.kh)",
+  "version": "0.1.0",
+  "publisher": "khora-lang",
+  "license": "MIT OR Apache-2.0",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "khora",
+        "aliases": ["Khora", "khora"],
+        "extensions": [".kh"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "khora",
+        "scopeName": "source.khora",
+        "path": "./syntaxes/khora.tmLanguage.json"
+      }
+    ]
+  }
+}
