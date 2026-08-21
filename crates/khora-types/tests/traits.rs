@@ -381,9 +381,9 @@ fn inherent_methods_and_trait_impls_coexist() {
 fn a_parameterised_inherent_impl_is_allowed() {
     assert_clean(
         "module m;\n\
-         export type Box<A> = | Of(value: A);\n\
-         impl<A> Box<A> { fn size(self) -> Int { 1 } }\n\
-         fn f(b: Box<Int>) -> Int { b.size() }\n",
+         export type Wrapper<A> = | Of(value: A);\n\
+         impl<A> Wrapper<A> { fn size(self) -> Int { 1 } }\n\
+         fn f(b: Wrapper<Int>) -> Int { b.size() }\n",
     );
 }
 
@@ -391,7 +391,7 @@ fn a_parameterised_inherent_impl_is_allowed() {
 
 const FUNCTOR: &str = "module m;\n\
                        export type Option<A> = | Some(value: A) | None;\n\
-                       export type Box<A> = | Of(value: A);\n\
+                       export type Wrapper<A> = | Of(value: A);\n\
                        export trait Functor {\n\
                          fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;\n\
                        }\n\
@@ -417,8 +417,8 @@ fn a_higher_kinded_method_solves_the_constructor_and_the_argument() {
 #[test]
 fn the_result_keeps_the_receivers_constructor() {
     assert_reports(
-        &format!("{FUNCTOR}fn f(o: Option<Int>) -> Box<Bool> {{ o.map(fn x => x == 1) }}\n"),
-        "returns `Box<Bool>`, but its body has type `Option<Bool>`",
+        &format!("{FUNCTOR}fn f(o: Option<Int>) -> Wrapper<Bool> {{ o.map(fn x => x == 1) }}\n"),
+        "returns `Wrapper<Bool>`, but its body has type `Option<Bool>`",
     );
 }
 
@@ -456,20 +456,20 @@ fn two_constructors_may_implement_one_higher_kinded_trait() {
     assert_clean(
         "module m;\n\
          export type Option<A> = | Some(value: A) | None;\n\
-         export type Box<A> = | Of(value: A);\n\
+         export type Wrapper<A> = | Of(value: A);\n\
          export trait Functor {\n\
            fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;\n\
          }\n\
          impl Functor for Option {\n\
            fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> { Option::None }\n\
          }\n\
-         impl Functor for Box {\n\
-           fn map<A, B>(self: Box<A>, f: (A) -> B) -> Box<B> {\n\
-             match self { Box::Of(v) => Box::Of(f(v)) }\n\
+         impl Functor for Wrapper {\n\
+           fn map<A, B>(self: Wrapper<A>, f: (A) -> B) -> Wrapper<B> {\n\
+             match self { Wrapper::Of(v) => Wrapper::Of(f(v)) }\n\
            }\n\
          }\n\
          fn a(o: Option<Int>) -> Option<Bool> { o.map(fn x => x == 1) }\n\
-         fn b(x: Box<Int>) -> Box<Bool> { x.map(fn y => y == 1) }\n",
+         fn b(x: Wrapper<Int>) -> Wrapper<Bool> { x.map(fn y => y == 1) }\n",
     );
 }
 
@@ -496,15 +496,15 @@ fn a_constructor_applied_to_a_function_type_unifies() {
 
 const PURE: &str = "module m;\n\
                     export type Option<A> = | Some(value: A) | None;\n\
-                    export type Box<A> = | Of(value: A);\n\
+                    export type Wrapper<A> = | Of(value: A);\n\
                     export trait Applicative {\n\
                       fn pure<A>(value: A) -> Self<A>;\n\
                     }\n\
                     impl Applicative for Option {\n\
                       fn pure<A>(value: A) -> Option<A> { Option::Some(value) }\n\
                     }\n\
-                    impl Applicative for Box {\n\
-                      fn pure<A>(value: A) -> Box<A> { Box::Of(value) }\n\
+                    impl Applicative for Wrapper {\n\
+                      fn pure<A>(value: A) -> Wrapper<A> { Wrapper::Of(value) }\n\
                     }\n";
 
 /// `Applicative::pure(x)` has no receiver to select an impl from, so the
@@ -512,7 +512,7 @@ const PURE: &str = "module m;\n\
 #[test]
 fn a_trait_function_without_a_receiver_is_chosen_by_the_expected_type() {
     assert_clean(&format!("{PURE}fn f() -> Option<Int> {{ Applicative::pure(1) }}\n"));
-    assert_clean(&format!("{PURE}fn f() -> Box<Int> {{ Applicative::pure(1) }}\n"));
+    assert_clean(&format!("{PURE}fn f() -> Wrapper<Int> {{ Applicative::pure(1) }}\n"));
 }
 
 #[test]

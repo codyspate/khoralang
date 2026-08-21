@@ -480,12 +480,12 @@ fn the_live_count_is_actually_observable() {
         "module t;
 fn khora_live_count() -> Int;
 
-export type Box = | Wrap(value: Int);
+export type Wrapper = | Wrap(value: Int);
 
 /// The block releases what it declared *after* its tail is evaluated, so the
 /// count is read while `held` is still alive.
 fn while_alive() -> Int {
-  let held = Box::Wrap(1);
+  let held = Wrapper::Wrap(1);
   khora_live_count()
 }
 
@@ -770,7 +770,7 @@ fn main() -> Int {
 }
 
 /// An impl over a constructor is selected by matching the receiver, which is
-/// what tells `impl<A> Holds for Box<A>` what `A` is.
+/// what tells `impl<A> Holds for Wrapper<A>` what `A` is.
 #[test]
 fn a_parameterised_impl_is_selected_by_the_receiver() {
     let ran = run(
@@ -778,17 +778,17 @@ fn a_parameterised_impl_is_selected_by_the_receiver() {
         "module t;
 fn print(value: Int);
 
-export type Box<A> = | Of(value: A);
+export type Wrapper<A> = | Of(value: A);
 
 trait Unwrap { fn get(self) -> Int; }
 
-impl<A> Unwrap for Box<A> {
+impl<A> Unwrap for Wrapper<A> {
   fn get(self) -> Int { 99 }
 }
 
 fn main() -> Int {
-  print(Box::Of(1).get());
-  print(Box::Of(true).get());
+  print(Wrapper::Of(1).get());
+  print(Wrapper::Of(true).get());
   0
 }
 ",
@@ -1110,15 +1110,15 @@ fn a_parameterised_inherent_impl_runs() {
         "module t;
 fn print(value: Int);
 
-export type Box<A> = | Of(value: A);
+export type Wrapper<A> = | Of(value: A);
 
-impl<A> Box<A> {
+impl<A> Wrapper<A> {
   fn tag(self) -> Int { 7 }
 }
 
 fn main() -> Int {
-  print(Box::Of(1).tag());
-  print(Box::Of(true).tag());
+  print(Wrapper::Of(1).tag());
+  print(Wrapper::Of(true).tag());
   0
 }
 ",
@@ -1430,8 +1430,8 @@ fn main() -> Int {{
 }
 
 /// A generic container's declared field type is a parameter, and a parameter is
-/// never boxed — so asking the *declaration* whether `Box<A>` owns anything
-/// always answered no, and every `Box<String>` leaked its contents. Drop glue
+/// never boxed — so asking the *declaration* whether `Wrapper<A>` owns anything
+/// always answered no, and every `Wrapper<String>` leaked its contents. Drop glue
 /// is emitted per instantiation for this reason.
 #[test]
 fn a_generic_container_releases_what_it_holds() {
@@ -1441,10 +1441,10 @@ fn a_generic_container_releases_what_it_holds() {
 fn khora_print_int(value: Int);
 fn khora_live_count() -> Int;
 
-export type Boxed<A> = | Of(value: A);
+export type Wrapper<A> = | Of(value: A);
 
-fn holds_a_string() { let b = Boxed::Of(\"held\"); }
-fn holds_an_int() { let b = Boxed::Of(1); }
+fn holds_a_string() { let b = Wrapper::Of(\"held\"); }
+fn holds_an_int() { let b = Wrapper::Of(1); }
 
 fn main() -> Int {
   holds_an_int();

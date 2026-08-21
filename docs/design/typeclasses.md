@@ -212,7 +212,7 @@ instance selection; `crates/khora-types/tests/traits.rs` and
 
 Working end to end, compiled to native code: method calls on a concrete type,
 method calls through a bound, supertraits, parameterised impls
-(`impl<A> Unwrap for Box<A>`), default method bodies, and higher-kinded traits
+(`impl<A> Unwrap for Wrapper<A>`), default method bodies, and higher-kinded traits
 (`impl Functor for Option`). Dispatch is static in every case — a call becomes a
 direct call to the impl's function.
 
