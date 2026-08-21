@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 use khora_syntax::ParseError;
 
 #[derive(Parser)]
@@ -73,16 +74,27 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
         anyhow::bail!("no `.kh` files found");
     }
 
+    // Everything goes through the query database, including one-shot CLI runs.
+    // A second code path that parsed files directly would drift from the one
+    // the language server uses, and the drift would be invisible until it bit.
+    let db = KhoraDatabase::new();
+    let mut inputs = Vec::with_capacity(files.len());
+    for path in &files {
+        let text = read(path)?;
+        inputs.push((path, SourceFile::new(&db, path.clone(), text)));
+    }
+    SourceRoot::new(&db, inputs.iter().map(|(_, f)| *f).collect());
+
     let mut clean = true;
     let mut total = 0usize;
-    for file in &files {
-        let text = read(file)?;
-        let parse = khora_syntax::parse(&text);
+    for (path, input) in &inputs {
+        let parse = khora_db::parse(&db, *input);
+        let text = input.text(&db);
         debug_assert_eq!(parse.syntax().text().to_string(), text);
         for err in parse.errors() {
             clean = false;
             total += 1;
-            eprintln!("{}", render(file, &text, err));
+            eprintln!("{}", render(path, text, err));
         }
     }
 

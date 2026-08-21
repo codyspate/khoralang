@@ -69,10 +69,10 @@ does not exist in direct style; you call `ledger.get_history(x)`.
 
 ---
 
-## Phase 0 — De-risk the environment
+## Phase 0 — De-risk the environment — **complete**
 
-Two bounded spikes. Nothing else starts until both land, because both change
-the shape of every crate downstream.
+Two bounded spikes, both landed. Each changed the shape of every crate
+downstream, which is why nothing else started until they did.
 
 ### 0.1 LLVM toolchain spike — **done**
 
@@ -100,14 +100,31 @@ Four Windows-specific obstacles had to be cleared; all are documented in
 Host target `x86_64-pc-windows-msvc` only. The musl and darwin cross-targets in
 §5.1 remain Phase 6.
 
-### 0.2 Salsa spine
+### 0.2 Salsa spine — **done**
 
-Add `khora-db` holding the database, `FileId`, `SourceRoot`, and the first
-query: `parse(FileId) -> Parse`. `khora-syntax` stays salsa-free; the query wraps
-it.
+`khora-db` holds the database, the `SourceFile` and `SourceRoot` inputs, and the
+first query, `parse(SourceFile) -> Parse`. `khora-syntax` stays salsa-free: it
+remains a pure function from text to tree, which keeps it testable and fuzzable
+without a database attached.
 
-**Exit:** a test that edits file B and asserts `parse` did not re-run for file A,
-via a query-execution counter.
+Salsa inputs are `Copy` handles, so `SourceFile` doubles as the `FileId` the
+rest of the compiler will pass around; no separate id type is needed.
+
+`khora check` was rewired to go through the database rather than parsing files
+directly. One code path, not two — a separate CLI path would have drifted from
+the one the language server uses, invisibly.
+
+Two things fell out worth recording:
+
+- `Parse` now derives `PartialEq`, which lets salsa *backdate* a reparse: an
+  edit that produces an identical tree invalidates nothing downstream. Green
+  nodes are hash-consed, so the comparison is cheap.
+- `salsa::SalsaValue` accepts any `'static` value through a fallback, so rowan's
+  `GreenNode` needed no manual implementation.
+
+**Exit criterion met**, and asserted by `crates/khora-db/tests/incremental.rs`:
+editing file B does not reparse file A. Four further tests cover caching,
+backdating, and independence from `SourceRoot` changes.
 
 ---
 

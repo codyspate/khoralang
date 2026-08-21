@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 khora-syntax.workspace = true
+khora-db.workspace = true
 khora-hir.workspace = true
 khora-types.workspace = true
 anyhow.workspace = true

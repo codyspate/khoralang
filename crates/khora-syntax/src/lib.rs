@@ -23,7 +23,12 @@ pub use kind::{Khora, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, KEYWOR
 pub use lexer::LexedStr;
 
 /// The result of parsing one source file.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` matters beyond convenience: it lets the query database backdate
+/// a reparse, so an edit that happens to produce an identical tree does not
+/// invalidate anything downstream. Green nodes are hash-consed, so the
+/// comparison is cheap.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parse {
     green: GreenNode,
     errors: Vec<ParseError>,

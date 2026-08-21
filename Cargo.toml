@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/khora-syntax",
+    "crates/khora-db",
     "crates/khora-hir",
     "crates/khora-types",
     "crates/khora-perceus",
@@ -18,11 +19,13 @@ repository = "https://github.com/khora-lang/khora"
 
 [workspace.dependencies]
 khora-syntax = { path = "crates/khora-syntax" }
+khora-db = { path = "crates/khora-db" }
 khora-hir = { path = "crates/khora-hir" }
 khora-types = { path = "crates/khora-types" }
 khora-perceus = { path = "crates/khora-perceus" }
 khora-codegen-llvm = { path = "crates/khora-codegen-llvm" }
 
+salsa = "0.28"
 logos = "0.15"
 rowan = "0.17"
 text-size = "1.1"

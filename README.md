@@ -14,6 +14,7 @@ The front end works. Everything after it is scaffolding.
 | Crate | State |
 | --- | --- |
 | `khora-syntax` | **Working.** Lexer, lossless CST parser, typed AST, error recovery. |
+| `khora-db` | **Working.** Salsa database, `SourceFile`/`SourceRoot` inputs, the `parse` query. |
 | `khora-hir` | Not implemented. Boundary and lowering plan only. |
 | `khora-types` | Not implemented. |
 | `khora-perceus` | Not implemented. |
@@ -41,6 +42,7 @@ cargo run -p khora-cli -- parse examples/risk_analyzer/src/main.kh --no-trivia
 ```
 crates/
   khora-syntax/        logos lexer, rowan CST parser, typed AST
+  khora-db/            salsa database, source inputs, the parse query
   khora-hir/           AST -> HIR lowering, pipe and placeholder desugaring
   khora-types/         HM inference, row unification, const generics
   khora-perceus/       reference counting and in-place reuse

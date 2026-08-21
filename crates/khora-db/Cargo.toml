@@ -1,0 +1,11 @@
+[package]
+name = "khora-db"
+description = "The incremental query database: salsa inputs and the queries built on them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+khora-syntax.workspace = true
+salsa.workspace = true
