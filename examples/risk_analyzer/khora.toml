@@ -4,12 +4,32 @@ version = "0.1.0"
 authors = ["Engineering Team <dev@khora.internal>"]
 edition = "2026"
 
+# OS-level capability limits enforced at compile time.
+# See docs/roadmap.md D4: only const-known values are statically checkable.
+[permissions]
+network = ["allow-net=0.0.0.0:8080", "allow-net=db.internal:5432"]
+fs = ["allow-read=/etc/config", "allow-write=./tmp"]
+env = ["DB_URL"]
+
+[fmt]
+indent-style = "space"
+indent-width = 2
+explicit-semicolons = true
+
+[lints]
+unused-capabilities = "deny"
+cyclomatic-complexity = { level = "warn", max = 15 }
+
 [dependencies]
 "std.effect" = { version = "1.0.0" }
 "std.net.http" = { version = "1.0.0" }
 "std.ai" = { version = "1.0.0" }
 
+# Sandboxed WASM build plugins replace arbitrary build.rs execution.
 [build]
 target = "x86_64-unknown-linux-musl"
-opt-level = 3
-lto = true
+plugin = "protobuf-compiler@2.1"
+
+[tasks.ci]
+description = "Run the full CI pipeline"
+depends_on = ["lint", "test", "build"]

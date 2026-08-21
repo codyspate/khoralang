@@ -1,5 +1,9 @@
 module std.effect;
 
+// SUPERSEDED: this monadic Effect API is replaced by direct-style algebraic
+// effects (roadmap decision A8). Kept as a parser fixture until D7 settles the
+// `with`/`raises` syntax, then rewritten. Do not build on it.
+
 // Type argument order follows the variance signature in the specification,
 // `Effect<+A, -R, +E>`: value, capability row, error channel. See
 // `docs/errata.md` for why the published `std.effect` listing needed repair.

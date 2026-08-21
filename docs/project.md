@@ -53,32 +53,39 @@ LambdaExpr     ::= "fn" ( Ident | "(" ParamList ")" ) "=>" ( BlockExpr | Expr ) 
 
 ```
 
-2. Type System & Dependency Architecture
-2.1 The `Effect` Monad
+---
+
+## 2. Type System & Dependency Architecture
+
+### 2.1 The `Effect` Monad
+
 The core computational primitive in the compiler is represented as:
 
 $$\text{Effect}\langle +A, -R, +E \rangle$$
 
-* $A$ (Covariant): Successful evaluation value.
+* **$A$ (Covariant):** Successful evaluation value.
+* **$R$ (Contravariant):** Open row of capability requirements (`{ db: Database, ai: LLMService | 'r }`).
+* **$E$ (Covariant):** Open row/union of typed failure channels (`DbError | ModelError`).
 
-* $R$ (Contravariant): Open row of capability requirements (`{ db: Database, ai: LLMService | 'r }`).
+### 2.2 Row Unification & Resolution Rules
 
-* $E$ (Covariant): Open row/union of typed failure channels (`DbError | ModelError`).
-
-2.2 Row Unification & Resolution Rules
 When two operations $f: \text{Effect}\langle A_1, R_1, E_1\rangle$ and $g: A_1 \to \text{Effect}\langle A_2, R_2, E_2\rangle$ compose:
 
 $$R_{\text{combined}} = R_1 \cup R_2 \quad \text{and} \quad E_{\text{combined}} = E_1 \cup E_2$$
+
 Applying `Effect.provide(label, service)` executes row subtraction:
 
 $$R_{\text{out}} = R_{\text{in}} \setminus \{ \text{label}: T \}$$
+
 The entrypoint `Effect.run_native()` is legal to call only when $R = \emptyset$ (`{}`).
 
-3. Standard Library Specification
-3.1 `std.effect` (Runtime & Dependency Injection)
-TypeScript
+---
 
-```
+## 3. Standard Library Specification
+
+### 3.1 `std.effect` (Runtime & Dependency Injection)
+
+```typescript
 module std.effect;
 
 pub type Option<+A> =
@@ -125,10 +132,9 @@ pub fn run_native<A, E>(effect: Effect<A, E {},>) -> Result<A, E>;
 
 ```
 
-3.2 `std.ai` (Native Shape-Safe Tensors & Typed LLMs)
-TypeScript
+### 3.2 `std.ai` (Native Shape-Safe Tensors & Typed LLMs)
 
-```
+```typescript
 module std.ai;
 
 import std.effect.{Effect};
@@ -175,37 +181,62 @@ pub fn cosine_similarity<const Dim: Int>(
 
 ```
 
-4. Reference Implementation
-4.1 Project Manifest (`khora.toml`)
-Ini, TOML
+---
 
-```
+## 4. Reference Implementation
+
+### 4.1 Project Manifest (`khora.toml`)
+
+The manifest features unified toolchain configurations, Deno-style OS capability limitations, and sandboxed WebAssembly build plugins to prevent supply-chain attacks.
+
+```toml
 [package]
 name = "risk_analyzer"
 version = "0.1.0"
 authors = ["Engineering Team <dev@khora.internal>"]
 edition = "2026"
 
+# OS-level capability limits enforced at compile time
+[permissions]
+network = ["allow-net=0.0.0.0:8080", "allow-net=db.internal:5432"]
+fs = ["allow-read=/etc/config", "allow-write=./tmp"]
+env = ["DB_URL"]
+
+# Unified Toolchain Config
+[fmt]
+indent-style = "space"
+indent-width = 2
+explicit-semicolons = true
+
+[lints]
+unused-capabilities = "deny"
+cyclomatic-complexity = { level = "warn", max = 15 }
+
 [dependencies]
 "std.effect" = { version = "1.0.0" }
 "std.net.http" = { version = "1.0.0" }
 "std.ai" = { version = "1.0.0" }
 
+# Sandboxed Build Plugins (WASM) replace arbitrary build.rs execution
 [build]
 target = "x86_64-unknown-linux-musl"
-opt-level = 3
-lto = true
+plugin = "protobuf-compiler@2.1" 
+
+# Native DAG Task Runner
+[tasks.ci]
+description = "Run the full CI pipeline"
+depends_on = ["lint", "test", "build"]
 
 ```
 
-4.2 Application Code (`src/main.kh`)
+### 4.2 Application Code (`src/main.kh`)
 
-```
+```typescript
 module app.main;
 
 import std.effect.{Effect, Layer, Scope, ask, Option};
 import std.net.http.{Request, Response, Router};
-import std.ai.{LLMService, Prompt, Embedding, ModelError, cosine_similarity};
+import std.ai.{LLMService, Prompt, Embedding, ModelError, Tensor, cosine_similarity};
 
 pub type RiskLevel =
   | Low
@@ -304,11 +335,13 @@ pub fn main() = {
 
 ```
 
-1. Compiler Implementation Blueprint for AI Agents
+---
+
+## 5. Compiler Implementation Blueprint for AI Agents
+
 Build the compiler in Rust as a Cargo workspace with strict crate boundaries:
 
-
-```
+```text
 khora/
 ├── Cargo.toml
 ├── crates/
@@ -321,111 +354,47 @@ khora/
 
 ```
 
-5.1 Agent Task Breakdown
+### 5.1 Agent Task Breakdown
 
-* Agent 1 (`khora-syntax`):
+* **Agent 1 (`khora-syntax`):**
+* Implement tokenizer using `logos` containing tokens: `;`, `.`, `|>`, `_`, keywords (`module`, `import`, `type`, `fn`, `match`, `pub`, `let`, `mut`).
+* Implement recursive descent / Pratt parser using `rowan` to support lossless Concrete Syntax Trees for LSP integration and error resilience.
 
-   * Implement tokenizer using `logos` containing tokens: `;`, `.`, `|>`, `_`, keywords (`module`, `import`, `type`, `fn`, `match`, `pub`, `let`, `mut`).
 
-   * Implement recursive descent / Pratt parser using `rowan` to support lossless Concrete Syntax Trees for LSP integration and error resilience.
+* **Agent 2 (`khora-types`):**
+* Implement Algorithm W extended with Leijen/Rémy-style Scoped Row Polymorphism.
+* Represent types as `Type::Constructor(Name, Vec<Type>)`, `Type::Row(Fields, TailVar)`, `Type::Var(Index)`, and `Type::Const(Int)`.
+* Enforce row subtraction rules for `Effect.provide` and exhaustiveness checking for `match` patterns.
 
-* Agent 2 (`khora-types`):
 
-   * Implement Algorithm W extended with Leijen/Rémy-style Scoped Row Polymorphism.
+* **Agent 3 (`khora-perceus`):**
+* Implement Perceus reference counting: insert precise `dup` and `drop` instructions at lexical scope boundaries.
+* Implement static reuse analysis: identify when an ADT variant or tensor is dropped and another allocated within the same branch, replacing `drop` + `alloc` with an in-place `reuse` instruction.
 
-   * Represent types as `Type::Constructor(Name, Vec<Type>)`, `Type::Row(Fields, TailVar)`, `Type::Var(Index)`, and `Type::Const(Int)`.
 
-   * Enforce row subtraction rules for `Effect.provide` and exhaustiveness checking for `match` patterns.
+* **Agent 4 (`khora-codegen-llvm` & `std`):**
+* Lower verified and optimized HIR to LLVM IR using `inkwell`.
+* Expose native bindings in `std.ai` to C BLAS/LibTorch/GGML interfaces.
+* Integrate `lld` to produce fully self-contained static executables (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`).
 
-* Agent 3 (`khora-perceus`):
 
-   * Implement Perceus reference counting: insert precise `dup` and `drop` instructions at lexical scope boundaries.
-
-   * Implement static reuse analysis: identify when an ADT variant or tensor is dropped and another allocated within the same branch, replacing `drop` + `alloc` with an in-place `reuse` instruction.
-
-* Agent 4 (`khora-codegen-llvm` & `std`):
-
-   * Lower verified and optimized HIR to LLVM IR using `inkwell`.
-
-   * Expose native bindings in `std.ai` to C BLAS/LibTorch/GGML interfaces.
-
-   * Integrate `lld` to produce fully self-contained static executables (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`).
-
-No, the previous write-up only mentioned `khora-cli` in passing as a single binary crate without detailing the specifications for the developer toolchain.
-
-To deliver on the standard set by **Cargo, Go, and Biome**, a language cannot leave tooling to third-party fragmentation. It must ship as an integrated, single-binary platform.
-
-Here is the complete **Developer Tooling & Platform Specification** to add to the master architecture document.
 
 ---
 
-# Section 6: Unified Toolchain & Developer Platform (`khora` CLI)
+## 6. Unified Toolchain & Developer Platform (`khora` CLI)
 
 The `khora` executable is a single static binary containing the compiler, package manager, formatter, linter, test runner, monorepo workspace orchestrator, and Language Server Protocol (LSP) daemon.
 
----
+### 6.1 Package & Workspace Management (`khora-pkg`)
 
-## 6.1 Package & Workspace Management (`khora-pkg`)
+* **Deterministic Lockfile (`khora.lock`):** Generated automatically on `khora build` or `khora add <package>`. Contains cryptographic SHA-256 hashes of all resolved package ASTs and artifacts, guaranteeing bit-for-bit reproducible builds.
+* **Monorepo Orchestration (`khora-workspaces`):** The workspace runner includes an integrated, content-addressed DAG (Directed Acyclic Graph) task runner.
+* Zero Configuration Caching: Compiler caches intermediate HIR/LLVM artifacts in `~/.cache/khora/` keyed by source hash and compiler build triple.
+* Hermetic Execution: Workspaces share a single root `khora.lock` to prevent diamond dependency conflicts.
 
-### 6.1.1 Manifest Standard (`khora.toml`)
 
-Dependencies are strictly versioned, content-hashed, and support local paths, Git repositories, and central registry references.
 
-```toml
-[workspace]
-members = [
-  "apps/*",
-  "packages/*"
-]
-default-members = ["apps/api"]
-
-[package]
-name = "api"
-version = "0.1.0"
-edition = "2026"
-license = "MIT OR Apache-2.0"
-
-[dependencies]
-"std.effect" = { version = "1.0.0" }
-"std.net.http" = { version = "1.0.0" }
-"shared.models" = { path = "../../packages/models" }
-"khora.sql" = { git = "[https://github.com/khora-lang/sql](https://github.com/khora-lang/sql)", rev = "v0.4.2" }
-
-[dev-dependencies]
-"std.test" = { version = "1.0.0" }
-
-[lints]
-unused_capabilities = "deny"
-implicit_prelude_override = "warn"
-
-```
-
-### 6.1.2 Deterministic Lockfile (`khora.lock`)
-
-* Generated automatically on `khora build` or `khora add <package>`.
-* Contains cryptographic SHA-256 hashes of all resolved package ASTs and artifacts, guaranteeing bit-for-bit reproducible builds.
-
----
-
-## 6.2 Monorepo Orchestration (`khora-workspaces`)
-
-The workspace runner includes an integrated, content-addressed DAG (Directed Acyclic Graph) task runner:
-
-```bash
-# Runs tests across all workspace packages affected by changes since git HEAD~1
-khora test --changed-since=HEAD~1
-
-# Builds the target graph with incremental remote/local artifact caching
-khora build --workspace --release
-
-```
-
-* **Zero Configuration Caching:** Compiler caches intermediate HIR/LLVM artifacts in `~/.cache/khora/` keyed by source hash and compiler build triple.
-* **Hermetic Execution:** Workspaces share a single root `khora.lock` to prevent diamond dependency conflicts.
-
----
-
-## 6.3 Built-in Zero-Config Formatter (`khora fmt`)
+### 6.2 Built-in Zero-Config Formatter (`khora fmt`)
 
 * **Speed Target:** Sub-millisecond formatting powered by `rowan` lossless CST traversal (similar to Biome / `rustfmt`).
 * **Canonical Rules:**
@@ -435,109 +404,28 @@ khora build --workspace --release
 * Alphabetized, deduplicated prefix imports (`import a.b.{A, B, C};`).
 
 
-* **CLI Interface:**
-```bash
-khora fmt           # Formats all files in workspace in-place
-khora fmt --check   # CI mode: Exits with non-zero code on unformatted files
 
-```
-
-
-
----
-
-## 6.4 Built-in Linter & Diagnostic Engine (`khora lint`)
+### 6.3 Built-in Linter & Diagnostic Engine (`khora lint`)
 
 The linter runs as a pass immediately following type inference, leveraging row-polymorphic tracking:
 
 * **Unused Capability Warning:** Flags when a capability row `{ db: Database | 'r }` is requested via `ask()` but never invoked.
 * **Dangling Pure Expressions:** Flags non-`Effect` expressions whose return values are discarded without being piped or bound.
 * **Redundant Pattern Match Arms:** Identifies unreachable branches in `match` blocks.
-* **Structured Diagnostic Output:**
-```text
-warning[W0102]: Unused capability requirement
-  --> apps/api/src/main.kh:45:12
-   |
-45 | fn handle(req: Request) -> Effect<Response, Database, Error Logger db: log: { },>
-   |                                                             ^^^^^^^^^^^
-   |
-   = note: `Logger` is declared in the capability row but never accessed via `ask(:log)`.
-   = help: Remove `log: Logger` from the type signature to reduce requirements.
 
-```
-
-
-
----
-
-## 6.5 Native Test Framework (`khora test`)
+### 6.4 Native Test Framework (`khora test`)
 
 Unit and integration tests are first-class declarations in the language, written directly in source files or dedicated `tests/` directories.
 
-### 6.5.1 In-Source Test Block Syntax
-
-```
-module app.services.order;
-
-import std.effect.{Effect, Layer};
-import std.test.{test, assert_eq};
-
-// Implementation
-pub fn calculate_tax(amount: Int) -> Int = {
-  (amount * 8) / 100;
-};
-
-// First-class test declaration (compiled only during `khora test`)
-test "calculate_tax calculates standard 8% rate" = {
-  let result = calculate_tax(100);
-  assert_eq(result, 8);
-};
-
-// Effect-aware test execution with mock layers
-test "process_order handles declined cards safely" = {
-  let mock_layer = Layer.succeed({
-    charge: fn (_, _) => Effect.succeed(PaymentResult.Declined("Insufficient funds")),
-  });
-
-  process_order("ord_01", PaymentMethod.Card("0000", "00/00"))
-  |> Effect.provide_layer(mock_layer)
-  |> Effect.scoped
-  |> Effect.run_test; // Automatically asserts that effect completes without uncaught panics
-};
-
-```
-
-### 6.5.2 Test Runner Features
-
+* **In-Source Test Block Syntax:** Uses `test "name" = { ... }` blocks built into the syntax tree.
 * **Parallel Execution:** Runs isolated test fibers across all CPU cores by default.
 * **Snapshot Testing:** Native `assert_snapshot(value)` with interactive `khora test --update-snapshots` CLI.
 * **Benchmark Engine:** Native `bench "name" = { ... }` with statistical throughput analysis ($P_{50}$, $P_{95}$, $P_{99}$).
 
----
-
-## 6.6 Integrated Language Server Protocol (`khora lsp`)
+### 6.5 Integrated Language Server Protocol (`khora lsp`)
 
 Built into the same binary to ensure zero version drift between IDE features and compiler behavior:
 
 * **Instant Diagnostics:** Incremental salsa-based query engine providing sub-15ms auto-complete and type hover info.
 * **Capability Inlay Hints:** Displays inferred open rows (`{ db: Database | 'r }`) inline above function signatures.
 * **Smart Refactoring:** Semantic symbol renaming across whole workspaces, auto-import resolution for prefix imports (`import a.b.{X}`), and match pattern stub generation.
-
-
-
----
-
-### Summary of the Platform Experience
-
-| Capability | Go Standard (`go`) | Rust Standard (`cargo`) | Khora Standard (`khora`) |
-| :--- | :--- | :--- | :--- |
-| **Package Manager** | Built-in | Built-in | **Built-in (`khora add / build`)** |
-| **Formatter** | Built-in (`gofmt`) | Sub-command (`rustfmt`) | **Built-in (`khora fmt`)** |
-| **Linter** | External (`golangci-lint`) | External/Clippy | **Built-in (`khora lint`)** |
-| **Test Runner** | Built-in (`go test`) | Built-in (`cargo test`) | **Built-in (`khora test` + Snapshots)** |
-| **Monorepo / Workspaces** | Workspaces (`go.work`) | Workspaces (`[workspace]`) | **Built-in DAG Caching Runner** |
-| **Language Server (LSP)** | External (`gopls`) | External (`rust-analyzer`) | **Built-in (`khora lsp`)** |
-
-This ensures the development experience is unified, eliminating the need to configure separate linters, formatters, and workspace runners.
-
-

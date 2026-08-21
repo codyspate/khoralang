@@ -1,8 +1,12 @@
 module app.main;
 
+// SUPERSEDED: written against the monadic Effect API, replaced by direct-style
+// algebraic effects (roadmap decision A8). Kept as a parser fixture until D7
+// settles the syntax, then rewritten.
+
 import std.effect.{Effect, Layer, Scope, ask, Option};
 import std.net.http.{Request, Response, Router};
-import std.ai.{LLMService, Prompt, Embedding, ModelError, cosine_similarity};
+import std.ai.{LLMService, Prompt, Embedding, ModelError, Tensor, cosine_similarity};
 
 pub type RiskLevel =
   | Low
