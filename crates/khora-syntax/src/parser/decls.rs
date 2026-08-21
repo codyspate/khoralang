@@ -112,10 +112,11 @@ fn type_decl(p: &mut Parser) {
     m.complete(p, TYPE_DECL);
 }
 
-/// `pub? fn name<Params>?(params) ("->" Type)? ("=" Block)? ";"`
+/// `pub? fn name<Params>?(params) ("->" Type)? ( Block | ";" )`
 ///
-/// A body-less form declares a signature only, which is how `std` describes
-/// intrinsics and FFI entry points.
+/// No `=` before the body, and no semicolon after it. The rule is simply:
+/// `{` introduces a definition, `;` declares a signature only — which is how
+/// `std` describes intrinsics and FFI entry points.
 fn fn_decl(p: &mut Parser) {
     let m = p.start();
     p.eat(PUB_KW);
@@ -132,10 +133,20 @@ fn fn_decl(p: &mut Parser) {
     if p.eat(THIN_ARROW) {
         type_(p);
     }
-    if p.eat(EQ) {
+    if p.at(L_BRACE) {
         block(p);
+    } else if p.at(EQ) {
+        // The published grammar used `= body;`. Point at it specifically rather
+        // than emitting a bare "expected `;`" that hides the real problem.
+        p.error("a function body is a block: write `fn f() { .. }`, not `fn f() = { .. };`");
+        p.bump(EQ);
+        if p.at(L_BRACE) {
+            block(p);
+        }
+        p.eat(SEMICOLON);
+    } else {
+        p.expect(SEMICOLON);
     }
-    p.expect(SEMICOLON);
     m.complete(p, FN_DECL);
 }
 

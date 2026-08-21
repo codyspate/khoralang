@@ -61,9 +61,9 @@ fn assert_clean(src: &str) -> SyntaxNode {
 
 #[test]
 fn pipes_are_left_associative() {
-    let tree = assert_clean("module m;\nfn f() = { a |> b |> c };\n").to_string();
+    let tree = assert_clean("module m;\nfn f() { a |> b |> c }\n").to_string();
     let _ = tree;
-    let dump = parse("module m;\nfn f() = { a |> b |> c };\n").debug_tree();
+    let dump = parse("module m;\nfn f() { a |> b |> c }\n").debug_tree();
     // The outer pipe's left child is itself a pipe: ((a |> b) |> c).
     let first = dump.find("PIPE_EXPR").unwrap();
     let second = dump[first + 1..].find("PIPE_EXPR").unwrap();
@@ -76,19 +76,19 @@ fn pipes_are_left_associative() {
 
 #[test]
 fn placeholder_argument_is_preserved() {
-    let dump = parse("module m;\nfn f() = { x |> g(_, 2) };\n").debug_tree();
+    let dump = parse("module m;\nfn f() { x |> g(_, 2) }\n").debug_tree();
     assert!(dump.contains("PLACEHOLDER_EXPR"), "{dump}");
 }
 
 #[test]
 fn capability_reference_parses() {
-    let dump = parse("module m;\nfn f() = { ask(:ledger.get_history) };\n").debug_tree();
+    let dump = parse("module m;\nfn f() { ask(:ledger.get_history) }\n").debug_tree();
     assert!(dump.contains("CAPABILITY_EXPR"), "{dump}");
 }
 
 #[test]
 fn match_scrutinee_does_not_swallow_the_arm_list() {
-    let src = "module m;\nfn f() = { match report.risk { RiskLevel.Low => 1, _ => 2, } };\n";
+    let src = "module m;\nfn f() { match report.risk { RiskLevel.Low => 1, _ => 2, } }\n";
     let dump = parse(src).debug_tree();
     assert!(dump.contains("MATCH_EXPR"), "{dump}");
     assert_eq!(dump.matches("MATCH_ARM").count(), 2, "{dump}");
@@ -97,17 +97,81 @@ fn match_scrutinee_does_not_swallow_the_arm_list() {
 
 #[test]
 fn record_literal_is_distinguished_from_a_block() {
-    let record = parse("module m;\nfn f() = { { a: 1 } };\n").debug_tree();
+    let record = parse("module m;\nfn f() { { a: 1 } }\n").debug_tree();
     assert!(record.contains("RECORD_EXPR"), "{record}");
 
-    let block = parse("module m;\nfn f() = { { let a = 1; a } };\n").debug_tree();
+    let block = parse("module m;\nfn f() { { let a = 1; a } }\n").debug_tree();
     assert!(!block.contains("RECORD_EXPR"), "{block}");
     assert!(block.contains("LET_DECL"), "{block}");
 }
 
 #[test]
+fn if_else_chain_parses() {
+    let src = "module m;
+fn f(n: Int) -> String {
+  if n < 0 { \"neg\" }
+  else if n == 0 { \"zero\" }
+  else { \"pos\" }
+}
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    let dump = parse.debug_tree();
+    assert_eq!(dump.matches("IF_EXPR").count(), 2, "expected a nested else-if:
+{dump}");
+}
+
+#[test]
+fn if_without_else_parses() {
+    let parse = parse("module m;
+fn f(n: Int) {
+  if n > 0 { print(\"hi\"); }
+}
+");
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+}
+
+/// The `{` after the condition opens the branch, never a record literal.
+#[test]
+fn if_condition_does_not_swallow_the_branch() {
+    let dump = parse("module m;
+fn f() { if ready { 1 } else { 2 } }
+").debug_tree();
+    assert!(dump.contains("IF_EXPR"), "{dump}");
+    assert!(!dump.contains("RECORD_EXPR"), "condition brace read as a record:
+{dump}");
+}
+
+#[test]
+fn function_bodies_take_no_equals_sign() {
+    let defined = parse("module m;
+pub fn f() -> Int { 1 }
+");
+    assert!(defined.errors().is_empty(), "{:?}", defined.errors());
+
+    // A signature with no body still ends in a semicolon.
+    let declared = parse("module m;
+pub fn f() -> Int;
+");
+    assert!(declared.errors().is_empty(), "{:?}", declared.errors());
+}
+
+/// The old `fn f() = { .. };` spelling should say what to do, not just fail.
+#[test]
+fn the_old_equals_form_gets_a_pointed_diagnostic() {
+    let parse = parse("module m;
+pub fn f() -> Int = { 1 };
+");
+    let msgs: Vec<_> = parse.errors().iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("a function body is a block")),
+        "unhelpful diagnostics: {msgs:?}"
+    );
+}
+
+#[test]
 fn match_guard_parses() {
-    let src = "module m;\nfn f() = { match x { n if n > 0 => 1, _ => 0, } };\n";
+    let src = "module m;\nfn f() { match x { n if n > 0 => 1, _ => 0, } }\n";
     let dump = parse(src).debug_tree();
     assert!(dump.contains("MATCH_GUARD"), "{dump}");
 }
@@ -157,12 +221,12 @@ fn import_forms_parse() {
 
 #[test]
 fn nested_block_comments_round_trip() {
-    assert_round_trip("module m; /* outer /* inner */ still outer */ fn f() = { 1 };");
+    assert_round_trip("module m; /* outer /* inner */ still outer */ fn f() { 1 }");
 }
 
 #[test]
 fn unterminated_string_does_not_lose_text() {
-    assert_round_trip("module m;\nfn f() = { \"oops\n };\n");
+    assert_round_trip("module m;\nfn f() { \"oops\n }\n");
 }
 
 #[test]

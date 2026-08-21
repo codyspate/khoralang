@@ -140,6 +140,7 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             }
         }
         FN_KW => lambda_expr(p),
+        IF_KW => if_expr(p),
         MATCH_KW => match_expr(p),
         _ => return None,
     };
@@ -248,6 +249,39 @@ fn lambda_or_arm_body(p: &mut Parser) {
             p.err_and_bump("expected an expression");
         }
     });
+}
+
+/// `if cond { … } else if cond { … } else { … }`
+///
+/// The condition is parsed with record literals suppressed, for the same reason
+/// as a `match` scrutinee: the `{` that follows opens the branch, not a record.
+fn if_expr(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(IF_KW);
+    p.without_record_literals(|p| {
+        if expr(p).is_none() {
+            p.error("expected a condition");
+        }
+    });
+
+    if p.at(L_BRACE) {
+        block(p);
+    } else {
+        p.error("expected `{` after the condition");
+    }
+
+    if p.eat(ELSE_KW) {
+        match p.current() {
+            IF_KW => {
+                if_expr(p);
+            }
+            L_BRACE => {
+                block(p);
+            }
+            _ => p.error("expected `{` or `if` after `else`"),
+        }
+    }
+    m.complete(p, IF_EXPR)
 }
 
 fn match_expr(p: &mut Parser) -> CompletedMarker {

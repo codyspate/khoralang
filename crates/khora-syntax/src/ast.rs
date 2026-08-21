@@ -156,6 +156,7 @@ ast_node!(TupleExpr, TUPLE_EXPR);
 ast_node!(UnitExpr, UNIT_EXPR);
 ast_node!(ParenExpr, PAREN_EXPR);
 ast_node!(LambdaExpr, LAMBDA_EXPR);
+ast_node!(IfExpr, IF_EXPR);
 ast_node!(MatchExpr, MATCH_EXPR);
 ast_node!(MatchArm, MATCH_ARM);
 ast_node!(MatchGuard, MATCH_GUARD);
@@ -176,6 +177,7 @@ ast_enum!(Expr {
     Unit(UnitExpr),
     Paren(ParenExpr),
     Lambda(LambdaExpr),
+    If(IfExpr),
     Match(MatchExpr),
     Call(CallExpr),
     Field(FieldExpr),
@@ -564,6 +566,24 @@ impl LambdaExpr {
     }
     pub fn body(&self) -> Option<Expr> {
         child(&self.0)
+    }
+}
+
+impl IfExpr {
+    pub fn condition(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+    pub fn then_branch(&self) -> Option<Block> {
+        child(&self.0)
+    }
+    /// Either a `Block` or, for `else if`, another `IfExpr`.
+    pub fn else_branch(&self) -> Option<Expr> {
+        let mut blocks = children::<Block>(&self.0);
+        blocks.next();
+        if let Some(b) = blocks.next() {
+            return Some(Expr::Block(b));
+        }
+        children::<IfExpr>(&self.0).next().map(Expr::If)
     }
 }
 

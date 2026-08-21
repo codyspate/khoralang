@@ -25,7 +25,7 @@ pub type Ledger = {
 };
 
 pub fn analyze_transaction_risk(account_id: String)
-  -> Effect<AnalysisReport, { ai: LLMService, ledger: Ledger }, String> = {
+  -> Effect<AnalysisReport, { ai: LLMService, ledger: Ledger }, String> {
 
     account_id
     |> ask(:ledger.get_history)
@@ -61,7 +61,7 @@ pub fn analyze_transaction_risk(account_id: String)
             |> Effect.map(fn _ => report),
         }
     );
-};
+}
 
 let mock_ledger_layer: Layer<{ ledger: Ledger }, {}, Never> =
   Layer.succeed({
@@ -80,7 +80,7 @@ let mock_ai_layer: Layer<{ ai: LLMService }, {}, Never> =
     }),
   });
 
-pub fn main() = {
+pub fn main() {
   let app_layer =
     mock_ledger_layer
     |> Layer.merge(mock_ai_layer);
@@ -101,4 +101,4 @@ pub fn main() = {
   |> Effect.provide_layer(app_layer)
   |> Effect.scoped
   |> Effect.run_native();
-};
+}
