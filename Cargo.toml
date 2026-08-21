@@ -7,6 +7,7 @@ members = [
     "crates/khora-types",
     "crates/khora-perceus",
     "crates/khora-codegen-llvm",
+    "crates/khora-manifest",
     "crates/khora-cli",
 ]
 
@@ -24,6 +25,7 @@ khora-hir = { path = "crates/khora-hir" }
 khora-types = { path = "crates/khora-types" }
 khora-perceus = { path = "crates/khora-perceus" }
 khora-codegen-llvm = { path = "crates/khora-codegen-llvm" }
+khora-manifest = { path = "crates/khora-manifest" }
 
 salsa = "0.28"
 logos = "0.15"
@@ -33,6 +35,8 @@ rustc-hash = "2"
 smol_str = "0.3"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 
 [profile.release]
 opt-level = 3

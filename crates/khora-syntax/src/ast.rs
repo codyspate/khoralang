@@ -91,6 +91,18 @@ ast_node!(ImportList, IMPORT_LIST);
 ast_node!(ImportItem, IMPORT_ITEM);
 ast_node!(ImportGlob, IMPORT_GLOB);
 ast_node!(TypeDecl, TYPE_DECL);
+ast_node!(EffectDecl, EFFECT_DECL);
+ast_node!(ContextDecl, CONTEXT_DECL);
+ast_node!(TestDecl, TEST_DECL);
+ast_node!(BenchDecl, BENCH_DECL);
+ast_node!(WithClause, WITH_CLAUSE);
+ast_node!(RaisesClause, RAISES_CLAUSE);
+ast_node!(RaiseExpr, RAISE_EXPR);
+ast_node!(TryExpr, TRY_EXPR);
+ast_node!(HandlerExpr, HANDLER_EXPR);
+ast_node!(CatchExpr, CATCH_EXPR);
+ast_node!(WithExpr, WITH_EXPR);
+ast_node!(WithBlock, WITH_BLOCK);
 ast_node!(FnDecl, FN_DECL);
 ast_node!(LetDecl, LET_DECL);
 ast_node!(ParamList, PARAM_LIST);
@@ -98,6 +110,10 @@ ast_node!(Param, PARAM);
 
 ast_enum!(Decl {
     Type(TypeDecl),
+    Effect(EffectDecl),
+    Context(ContextDecl),
+    Test(TestDecl),
+    Bench(BenchDecl),
     Fn(FnDecl),
     Let(LetDecl),
 });
@@ -149,10 +165,10 @@ ast_node!(ExprStmt, EXPR_STMT);
 ast_node!(LiteralExpr, LITERAL_EXPR);
 ast_node!(PathExpr, PATH_EXPR);
 ast_node!(PlaceholderExpr, PLACEHOLDER_EXPR);
-ast_node!(CapabilityExpr, CAPABILITY_EXPR);
 ast_node!(RecordExpr, RECORD_EXPR);
 ast_node!(RecordExprField, RECORD_EXPR_FIELD);
 ast_node!(TupleExpr, TUPLE_EXPR);
+ast_node!(ListExpr, LIST_EXPR);
 ast_node!(UnitExpr, UNIT_EXPR);
 ast_node!(ParenExpr, PAREN_EXPR);
 ast_node!(LambdaExpr, LAMBDA_EXPR);
@@ -171,13 +187,19 @@ ast_enum!(Expr {
     Literal(LiteralExpr),
     Path(PathExpr),
     Placeholder(PlaceholderExpr),
-    Capability(CapabilityExpr),
     Record(RecordExpr),
     Tuple(TupleExpr),
+    List(ListExpr),
     Unit(UnitExpr),
     Paren(ParenExpr),
     Lambda(LambdaExpr),
     If(IfExpr),
+    Raise(RaiseExpr),
+    Try(TryExpr),
+    Handler(HandlerExpr),
+    Catch(CatchExpr),
+    With(WithExpr),
+    WithBlock(WithBlock),
     Match(MatchExpr),
     Call(CallExpr),
     Field(FieldExpr),
@@ -626,17 +648,6 @@ impl RecordExprField {
     }
     pub fn value(&self) -> Option<Expr> {
         child(&self.0)
-    }
-}
-
-impl CapabilityExpr {
-    /// The capability label and member, e.g. `ledger.get_history`.
-    pub fn path(&self) -> Option<Path> {
-        child(&self.0)
-    }
-    /// The row label the capability is drawn from, e.g. `ledger`.
-    pub fn label(&self) -> Option<String> {
-        self.path()?.segments().next()?.ident()
     }
 }
 

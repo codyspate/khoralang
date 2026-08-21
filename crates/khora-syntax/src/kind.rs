@@ -37,6 +37,16 @@ pub enum SyntaxKind {
     ELSE_KW,
     FORALL_KW,
     CONST_KW,
+    EFFECT_KW,
+    WITH_KW,
+    RAISES_KW,
+    RAISE_KW,
+    HANDLER_KW,
+    FOR_KW,
+    CONTEXT_KW,
+    CATCH_KW,
+    TEST_KW,
+    BENCH_KW,
     TRUE_KW,
     FALSE_KW,
 
@@ -86,10 +96,18 @@ pub enum SyntaxKind {
     IMPORT_ITEM,
     IMPORT_GLOB,
     TYPE_DECL,
+    EFFECT_DECL,
+    CONTEXT_DECL,
+    TEST_DECL,
+    BENCH_DECL,
     FN_DECL,
     LET_DECL,
     PARAM_LIST,
     PARAM,
+    /// `with { ledger: Ledger }` on a signature or a function type.
+    WITH_CLAUSE,
+    /// `raises DbError + ModelError` on a signature or a function type.
+    RAISES_CLAUSE,
 
     // --- names / paths --------------------------------------------------
     NAME,
@@ -126,15 +144,27 @@ pub enum SyntaxKind {
     LITERAL_EXPR,
     PATH_EXPR,
     PLACEHOLDER_EXPR,
-    /// `:ledger.get_history` — a capability reference resolved from the `R` row.
-    CAPABILITY_EXPR,
     RECORD_EXPR,
     RECORD_EXPR_FIELD,
     TUPLE_EXPR,
+    /// `[a, b, c]`
+    LIST_EXPR,
     UNIT_EXPR,
     PAREN_EXPR,
     LAMBDA_EXPR,
     IF_EXPR,
+    /// `raise DbError.QueryFailed(e)` — performs an operation of the error row.
+    RAISE_EXPR,
+    /// `expr!` — marks a call that can abort the enclosing function.
+    TRY_EXPR,
+    /// `handler for Ledger { .. }`
+    HANDLER_EXPR,
+    /// `expr catch { .. }` — handles part of the error row.
+    CATCH_EXPR,
+    /// `expr with { .. }` — installs handlers over a single expression.
+    WITH_EXPR,
+    /// `with { .. } { .. }` — installs handlers over a region.
+    WITH_BLOCK,
     MATCH_EXPR,
     MATCH_ARM,
     MATCH_GUARD,
@@ -177,7 +207,10 @@ impl SyntaxKind {
 
     /// Keywords that can begin a top-level declaration; used for error recovery.
     pub fn is_decl_start(self) -> bool {
-        matches!(self, PUB_KW | TYPE_KW | FN_KW | LET_KW | MODULE_KW | IMPORT_KW)
+        matches!(
+            self,
+            PUB_KW | TYPE_KW | FN_KW | LET_KW | MODULE_KW | IMPORT_KW | EFFECT_KW | CONTEXT_KW | TEST_KW | BENCH_KW
+        )
     }
 
 }
@@ -217,6 +250,16 @@ keywords! {
     "else" => ELSE_KW,
     "forall" => FORALL_KW,
     "const" => CONST_KW,
+    "effect" => EFFECT_KW,
+    "with" => WITH_KW,
+    "raises" => RAISES_KW,
+    "raise" => RAISE_KW,
+    "handler" => HANDLER_KW,
+    "for" => FOR_KW,
+    "context" => CONTEXT_KW,
+    "catch" => CATCH_KW,
+    "test" => TEST_KW,
+    "bench" => BENCH_KW,
     "true" => TRUE_KW,
     "false" => FALSE_KW,
 }

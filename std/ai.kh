@@ -1,6 +1,6 @@
 module std.ai;
 
-import std.effect.{Effect, Option};
+import std.core.{Option};
 
 pub type Device =
   | Cpu
@@ -41,11 +41,13 @@ pub type ModelError =
   | InferenceEngineFailure(msg: String)
   | SchemaExtractionError(details: String);
 
-pub type LLMService = {
-  complete: Prompt -> Effect<String, {}, ModelError>,
-  extract: forall <Schema> . (Prompt, Schema.Spec) -> Effect<Schema, {}, ModelError>,
-  embed: forall <const Dim: Int> . String -> Effect<Embedding<Dim, F32>, {}, ModelError>,
-};
+/// Inference is a capability, not a value: a function that classifies text
+/// declares `with { ai: LLMService }`, and the caller decides what serves it.
+pub effect LLMService {
+  complete: Prompt -> String raises ModelError,
+  extract: forall <Schema> . (Prompt, Schema.Spec) -> Schema raises ModelError,
+  embed: forall <const Dim: Int> . String -> Embedding<Dim, F32> raises ModelError,
+}
 
 pub fn cosine_similarity<const Dim: Int>(
   a: Embedding<Dim, F32>,

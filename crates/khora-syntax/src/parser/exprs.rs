@@ -85,6 +85,34 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
                 name_ref(p);
                 m.complete(p, FIELD_EXPR)
             }
+            // `expr!` — this call can abort the enclosing function. Marking it
+            // is a deliberate divergence from Koka; see docs/design/effects.md.
+            BANG => {
+                let m = lhs.precede(p);
+                p.bump(BANG);
+                m.complete(p, TRY_EXPR)
+            }
+            CATCH_KW => {
+                let m = lhs.precede(p);
+                p.bump(CATCH_KW);
+                p.expect(L_BRACE);
+                p.with_record_literals(|p| {
+                    while !p.at(R_BRACE) && !p.at(EOF) {
+                        if !p.tick() {
+                            break;
+                        }
+                        match_arm(p);
+                    }
+                });
+                p.expect(R_BRACE);
+                m.complete(p, CATCH_EXPR)
+            }
+            WITH_KW => {
+                let m = lhs.precede(p);
+                p.bump(WITH_KW);
+                context_row(p);
+                m.complete(p, WITH_EXPR)
+            }
             _ => break,
         };
     }
@@ -130,8 +158,8 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             name_ref(p);
             m.complete(p, PATH_EXPR)
         }
-        COLON => capability_expr(p),
         L_PAREN => paren_or_tuple_expr(p),
+        L_BRACK => list_expr(p),
         L_BRACE => {
             if at_record_literal(p) {
                 record_expr(p)
@@ -140,20 +168,14 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             }
         }
         FN_KW => lambda_expr(p),
+        RAISE_KW => raise_expr(p),
+        HANDLER_KW => handler_expr(p),
+        WITH_KW => with_block(p),
         IF_KW => if_expr(p),
         MATCH_KW => match_expr(p),
         _ => return None,
     };
     Some(cm)
-}
-
-/// `:ledger.get_history` — names a capability held in the effect's `R` row.
-/// Not part of the published EBNF; see `docs/errata.md`.
-fn capability_expr(p: &mut Parser) -> CompletedMarker {
-    let m = p.start();
-    p.bump(COLON);
-    path(p);
-    m.complete(p, CAPABILITY_EXPR)
 }
 
 /// `{` is a record literal when it is empty or starts with `name:`; otherwise
@@ -184,6 +206,26 @@ fn record_expr(p: &mut Parser) -> CompletedMarker {
     }
     p.expect(R_BRACE);
     m.complete(p, RECORD_EXPR)
+}
+
+fn list_expr(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(L_BRACK);
+    p.with_record_literals(|p| {
+        while !p.at(R_BRACK) && !p.at(EOF) {
+            if !p.tick() {
+                break;
+            }
+            if expr(p).is_none() {
+                p.err_and_bump("expected a list element");
+            }
+            if !p.eat(COMMA) {
+                break;
+            }
+        }
+    });
+    p.expect(R_BRACK);
+    m.complete(p, LIST_EXPR)
 }
 
 fn paren_or_tuple_expr(p: &mut Parser) -> CompletedMarker {
@@ -251,6 +293,73 @@ fn lambda_or_arm_body(p: &mut Parser) {
     });
 }
 
+/// The row supplied to a handler installation: a record literal, a named
+/// context, or a named context with overrides.
+///
+/// Because contexts are rows, `Production { ai: stub }` is row update — the
+/// same operation the type system already performs on capability rows.
+fn context_row(p: &mut Parser) {
+    p.with_record_literals(|p| {
+        let mut found = false;
+        if p.at(IDENT) {
+            let m = p.start();
+            path(p);
+            m.complete(p, PATH_EXPR);
+            found = true;
+        }
+        // A named context may stand alone (`expr with Mock`), carry overrides
+        // (`expr with Mock { ai: stub }`), or be replaced by a bare row.
+        if at_record_literal(p) {
+            record_expr(p);
+            found = true;
+        }
+        if !found {
+            p.error("expected a handler row or a named context");
+        }
+    });
+}
+
+/// `raise expr` — performs an operation of the error row. Its type is `Never`,
+/// so it may appear wherever an expression may.
+fn raise_expr(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(RAISE_KW);
+    if expr(p).is_none() {
+        p.error("expected an error value to raise");
+    }
+    m.complete(p, RAISE_EXPR)
+}
+
+/// `handler for Ledger { get_history: fn id => .., .. }`
+fn handler_expr(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(HANDLER_KW);
+    p.expect(FOR_KW);
+    path(p);
+    if at_record_literal(p) || p.at(L_BRACE) {
+        record_expr(p);
+    } else {
+        p.error("expected `{` with the effect's operations");
+    }
+    m.complete(p, HANDLER_EXPR)
+}
+
+/// `with { ledger: live_ledger } { .. }` — installs handlers over a region.
+///
+/// Handlers must lexically enclose the computation they serve: in direct style
+/// a call evaluates immediately, so a `|> provide(h)` pipeline cannot work.
+fn with_block(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(WITH_KW);
+    context_row(p);
+    if p.at(L_BRACE) {
+        block(p);
+    } else {
+        p.error("expected a block after the handler row");
+    }
+    m.complete(p, WITH_BLOCK)
+}
+
 /// `if cond { … } else if cond { … } else { … }`
 ///
 /// The condition is parsed with record literals suppressed, for the same reason
@@ -305,7 +414,7 @@ fn match_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, MATCH_EXPR)
 }
 
-fn match_arm(p: &mut Parser) {
+pub(super) fn match_arm(p: &mut Parser) {
     let m = p.start();
     pattern(p);
     if p.at(IF_KW) {

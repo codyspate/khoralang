@@ -111,8 +111,19 @@ means. Deciding that is a prerequisite for the type checker.
 `std/net/http.kh` is not specified at all; the signatures there are reconstructed
 from usage and should be treated as provisional.
 
-## 11. `Never` and `Label` are used but never declared
+## 11. `std.effect` is renamed to `std.core`
 
-`std.effect` refers to both without defining them; `Float`, `Int`, `String` and
-`List` are likewise assumed. They are declared as opaque types in `std/effect.kh`
+Direct-style effects (roadmap A8, `docs/design/effects.md`) removed the `Effect`
+type the module was named after, and `effect` became a reserved word — so
+`module std.effect;` no longer lexes as a path. The module now holds `Option`,
+`Result`, `Never`, `Handler<E>` and the `Scope` effect, and is named
+accordingly.
+
+`examples/risk_analyzer/khora.toml` still lists `"std.effect"` as a dependency
+and needs the same rename.
+
+## 12. `Never` and `Label` are used but never declared
+
+`std.core` refers to both without defining them; `Float`, `Int`, `String` and
+`List` are likewise assumed. They are declared as opaque types in `std/core.kh`
 so the corpus is self-contained; the real definitions belong in a `std.prelude`.

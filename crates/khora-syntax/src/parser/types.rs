@@ -3,14 +3,41 @@
 use super::{CompletedMarker, Parser};
 use crate::kind::SyntaxKind::*;
 
-/// `Type ::= UnionType ( "->" Type )?` — function arrows are right-associative.
+/// `Type ::= UnionType ( "->" Type ( WithClause | RaisesClause )* )?`
+///
+/// Function arrows are right-associative. Effect clauses bind to an arrow, and
+/// only to an arrow: in `fn f() -> Report with { .. }` the return type is just
+/// `Report`, and the `with` belongs to the declaration, not to the type. That
+/// distinction is what lets both spellings coexist unambiguously.
 pub(super) fn type_(p: &mut Parser) {
     let m = union_type(p);
     if p.at(THIN_ARROW) {
         let fn_m = m.precede(p);
         p.bump(THIN_ARROW);
         type_(p);
+        effect_clauses(p);
         fn_m.complete(p, FN_TYPE);
+    }
+}
+
+/// `with <row>` and `raises <type>`, in any order, zero or more times.
+///
+/// Shared by function types and function declarations so the two can never
+/// drift apart.
+pub(super) fn effect_clauses(p: &mut Parser) {
+    while p.at(WITH_KW) || p.at(RAISES_KW) {
+        if !p.tick() {
+            break;
+        }
+        let m = p.start();
+        if p.eat(WITH_KW) {
+            type_(p);
+            m.complete(p, WITH_CLAUSE);
+        } else {
+            p.bump(RAISES_KW);
+            type_(p);
+            m.complete(p, RAISES_CLAUSE);
+        }
     }
 }
 
@@ -233,7 +260,7 @@ fn row_tail(p: &mut Parser) {
     m.complete(p, ROW_TAIL);
 }
 
-fn field(p: &mut Parser) {
+pub(super) fn field(p: &mut Parser) {
     let m = p.start();
     name(p);
     p.expect(COLON);

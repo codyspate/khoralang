@@ -8,7 +8,6 @@
     { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#row-variables" },
-    { "include": "#capability" },
     { "include": "#declarations" },
     { "include": "#keywords" },
     { "include": "#types" },
@@ -61,15 +60,6 @@
       "name": "storage.modifier.lifetime.khora",
       "match": "'[A-Za-z_][A-Za-z0-9_]*\\b"
     },
-    "capability": {
-      "comment": "Provisional: `:label.operation` disappears under decision A8. See docs/roadmap.md D7.",
-      "match": "(:)([a-z_][A-Za-z0-9_]*)((\\.)([a-z_][A-Za-z0-9_]*))?",
-      "captures": {
-        "1": { "name": "keyword.operator.capability.khora" },
-        "2": { "name": "variable.other.capability.khora" },
-        "5": { "name": "entity.name.function.khora" }
-      }
-    },
     "declarations": {
       "patterns": [
         {
@@ -102,15 +92,15 @@
         {
           "comment": "Keep in sync with SyntaxKind::from_keyword in crates/khora-syntax/src/kind.rs. Enforced by the keywords_match_the_lexer test.",
           "name": "keyword.control.khora",
-          "match": "\\b(match|if|else)\\b"
+          "match": "\\b(match|if|else|raise|catch)\\b"
         },
         {
           "name": "keyword.declaration.khora",
-          "match": "\\b(module|import|type|fn|let|pub)\\b"
+          "match": "\\b(module|import|type|effect|context|fn|let|pub|handler|test|bench)\\b"
         },
         {
           "name": "storage.modifier.khora",
-          "match": "\\b(mut|const|forall|as)\\b"
+          "match": "\\b(mut|const|forall|as|with|raises|for)\\b"
         },
         {
           "name": "constant.language.boolean.khora",

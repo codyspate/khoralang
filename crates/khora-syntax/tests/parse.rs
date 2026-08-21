@@ -81,12 +81,6 @@ fn placeholder_argument_is_preserved() {
 }
 
 #[test]
-fn capability_reference_parses() {
-    let dump = parse("module m;\nfn f() { ask(:ledger.get_history) }\n").debug_tree();
-    assert!(dump.contains("CAPABILITY_EXPR"), "{dump}");
-}
-
-#[test]
 fn match_scrutinee_does_not_swallow_the_arm_list() {
     let src = "module m;\nfn f() { match report.risk { RiskLevel.Low => 1, _ => 2, } }\n";
     let dump = parse(src).debug_tree();
@@ -215,8 +209,134 @@ fn variance_markers_parse() {
 
 #[test]
 fn import_forms_parse() {
-    let parse = parse("module m;\nimport std.effect.{Effect, Layer as L};\nimport std.ai.*;\n");
+    let parse = parse("module m;\nimport std.core.{Option, Result as R};\nimport std.ai.*;\n");
     assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+}
+
+#[test]
+fn effect_declaration_parses() {
+    let src = "module m;
+pub effect Ledger {
+  get_history: String -> List<Txn> raises DbError,
+}
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    let dump = parse.debug_tree();
+    assert!(dump.contains("EFFECT_DECL"), "{dump}");
+    assert!(dump.contains("RAISES_CLAUSE"), "{dump}");
+}
+
+/// `with` on a signature belongs to the declaration; `with` after an arrow
+/// belongs to the function type. Both must coexist in one signature.
+#[test]
+fn signature_and_function_type_clauses_coexist() {
+    let src = "module m;
+pub fn map<A, B, 'e>(f: A -> B with 'e) -> List<B>
+  with 'e
+  raises DbError
+{ f }
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    let dump = parse.debug_tree();
+    assert_eq!(dump.matches("WITH_CLAUSE").count(), 2, "{dump}");
+}
+
+#[test]
+fn return_type_does_not_swallow_the_with_clause() {
+    let dump = parse("module m;
+pub fn f() -> Report with { ledger: Ledger } { g() }
+").debug_tree();
+    // The `with` is the declaration's, so it must not appear inside a FN_TYPE.
+    assert!(dump.contains("WITH_CLAUSE"), "{dump}");
+    assert!(!dump.contains("FN_TYPE"), "return type absorbed the clause:
+{dump}");
+}
+
+#[test]
+fn raise_and_try_parse() {
+    let src = "module m;
+fn f() { let x = g()!; raise DbError.Unavailable; }
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    let dump = parse.debug_tree();
+    assert!(dump.contains("TRY_EXPR"), "{dump}");
+    assert!(dump.contains("RAISE_EXPR"), "{dump}");
+}
+
+#[test]
+fn handler_and_catch_parse() {
+    let src = "module m;
+let h = handler for Ledger { get_history: fn id => \"x\" };
+fn f() { g()! catch { E.A(_) => 1, } }
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    let dump = parse.debug_tree();
+    assert!(dump.contains("HANDLER_EXPR"), "{dump}");
+    assert!(dump.contains("CATCH_EXPR"), "{dump}");
+}
+
+/// All three installation spellings, including a bare named context.
+#[test]
+fn handler_installation_forms_parse() {
+    for src in [
+        "module m;
+fn f() { g() with { ledger: h } }
+",
+        "module m;
+fn f() { g() with Mock }
+",
+        "module m;
+fn f() { g() with Mock { ai: stub } }
+",
+        "module m;
+fn f() { with { ledger: h } { g() } }
+",
+        "module m;
+fn f() { with Mock { g() } }
+",
+    ] {
+        let parse = parse(src);
+        assert!(parse.errors().is_empty(), "{src:?} -> {:?}", parse.errors());
+    }
+}
+
+/// A block body after a named context must not be read as an override record.
+#[test]
+fn with_block_body_is_not_mistaken_for_overrides() {
+    let dump = parse("module m;
+fn f() { with Mock { g() } }
+").debug_tree();
+    assert!(dump.contains("WITH_BLOCK"), "{dump}");
+    assert!(!dump.contains("RECORD_EXPR"), "body read as overrides:
+{dump}");
+}
+
+#[test]
+fn context_test_and_bench_declarations_parse() {
+    let src = "module m;
+pub context Mock { ledger: h }
+test \"it works\" { assert(1 == 1); }
+bench \"fast\" { f() }
+";
+    let parse = parse(src);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    let dump = parse.debug_tree();
+    assert!(dump.contains("CONTEXT_DECL"), "{dump}");
+    assert!(dump.contains("TEST_DECL"), "{dump}");
+    assert!(dump.contains("BENCH_DECL"), "{dump}");
+}
+
+#[test]
+fn list_literals_parse() {
+    let parse = parse("module m;
+fn f() { let xs = [1, 2, 3]; let empty = []; }
+");
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    assert!(parse.debug_tree().contains("LIST_EXPR"));
 }
 
 #[test]
