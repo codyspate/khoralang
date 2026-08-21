@@ -136,11 +136,24 @@ pub fn head_of(ty: &Type) -> Option<String> {
     }
 }
 
+/// A type's own methods, declared by `impl Type { .. }` with no trait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InherentImpl {
+    /// The head constructor the methods belong to: `User` for `impl User`.
+    pub head: String,
+    pub self_type: Type,
+    pub generics: Vec<String>,
+    pub methods: Vec<String>,
+    pub range: TextRange,
+}
+
 /// Every trait and impl a file declares.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Traits {
     pub traits: HashMap<String, TraitDef>,
     pub impls: Vec<ImplDef>,
+    /// Methods a type declares for itself, needing no trait.
+    pub inherent: Vec<InherentImpl>,
 }
 
 impl Traits {
@@ -159,6 +172,18 @@ impl Traits {
     /// Whether `ty` implements `trait_name`, following supertraits.
     pub fn satisfies(&self, trait_name: &str, ty: &Type) -> bool {
         self.find(trait_name, ty).is_some()
+    }
+
+    /// A method `ty` declares for itself, if it has one by that name.
+    ///
+    /// Checked *before* traits: a type's own method wins over a trait method of
+    /// the same name, which is the rule that keeps adding a trait from silently
+    /// changing what an existing call does.
+    pub fn inherent_method(&self, ty: &Type, method: &str) -> Option<&InherentImpl> {
+        let head = head_of(ty)?;
+        self.inherent
+            .iter()
+            .find(|i| i.head == head && i.methods.iter().any(|m| m == method))
     }
 }
 
@@ -221,6 +246,21 @@ pub fn collect(source: &ast::SourceFile) -> Traits {
                         range: t.syntax().text_range(),
                     },
                 );
+            }
+            ast::Decl::Impl(i) if i.is_inherent() => {
+                let generics = crate::generic_names(i.type_params().as_ref());
+                let self_type = type_of_syntax(i.self_type().as_ref(), &generics);
+                let Some(head) = head_of(&self_type) else { continue };
+                out.inherent.push(InherentImpl {
+                    head,
+                    self_type,
+                    generics,
+                    methods: i
+                        .functions()
+                        .filter_map(|f| f.name().and_then(|n| n.ident()))
+                        .collect(),
+                    range: i.syntax().text_range(),
+                });
             }
             ast::Decl::Impl(i) => {
                 let generics = crate::generic_names(i.type_params().as_ref());
@@ -373,8 +413,47 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
         }
     }
 
+    // A type's own methods, keyed `#User::birthday`.
     for decl in source.decls() {
         let ast::Decl::Impl(i) = decl else { continue };
+        if !i.is_inherent() {
+            continue;
+        }
+        let generics = crate::generic_names(i.type_params().as_ref());
+        let self_type = type_of_syntax(i.self_type().as_ref(), &generics);
+        let Some(head) = head_of(&self_type) else { continue };
+        let mut scope = vec!["Self".to_string()];
+        scope.extend(generics.iter().cloned());
+        for f in i.functions() {
+            let Some(def) = method_def(&f, &scope) else { continue };
+            let mapping: HashMap<&str, Type> =
+                [("Self", self_type.clone())].into_iter().collect();
+            let mut own = generics.clone();
+            own.extend(def.signature.generics.iter().cloned());
+            let mut bounds = vec![Vec::new(); generics.len()];
+            bounds.extend(def.signature.bounds.iter().cloned());
+            out.insert(
+                method_key("", &head, &def.name),
+                Signature {
+                    generics: own,
+                    bounds,
+                    params: def
+                        .signature
+                        .params
+                        .iter()
+                        .map(|p| crate::unify::substitute(p, &mapping))
+                        .collect(),
+                    ret: crate::unify::substitute(&def.signature.ret, &mapping),
+                },
+            );
+        }
+    }
+
+    for decl in source.decls() {
+        let ast::Decl::Impl(i) = decl else { continue };
+        if i.is_inherent() {
+            continue;
+        }
         let Some(trait_name) = i.trait_().as_ref().and_then(written_head) else { continue };
         let generics = crate::generic_names(i.type_params().as_ref());
         let self_type = type_of_syntax(i.self_type().as_ref(), &generics);
@@ -493,6 +572,25 @@ pub fn with_supertraits(traits: &Traits, names: &[String]) -> Vec<String> {
 /// about some call site that happened to touch it.
 pub fn check(traits: &Traits, kinds: &HashMap<String, Kind>) -> Vec<HirError> {
     let mut errors = Vec::new();
+
+    for (i, own) in traits.inherent.iter().enumerate() {
+        // Two impls may cover one type — splitting methods across blocks is
+        // ordinary — but one name may not be declared twice for it.
+        for method in &own.methods {
+            let declared = traits.inherent[..=i]
+                .iter()
+                .filter(|o| o.head == own.head)
+                .flat_map(|o| o.methods.iter())
+                .filter(|m| *m == method)
+                .count();
+            if declared > 1 {
+                errors.push(HirError {
+                    message: format!("`{}` already has a method named `{method}`", own.head),
+                    range: own.range,
+                });
+            }
+        }
+    }
 
     for (i, imp) in traits.impls.iter().enumerate() {
         let Some(def) = traits.traits.get(&imp.trait_name) else {

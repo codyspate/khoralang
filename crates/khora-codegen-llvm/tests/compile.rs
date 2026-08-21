@@ -1047,3 +1047,116 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "7\n");
     assert_eq!(ran.code, Some(0));
 }
+
+/// A type's own methods, with no trait declared anywhere. This is the first
+/// thing a Go, TypeScript or Rust developer does, and until it worked every
+/// private helper needed a public abstraction invented for it.
+#[test]
+fn a_type_can_have_methods_without_a_trait() {
+    let ran = run(
+        "inherent",
+        "module t;
+fn print(value: Int);
+
+export type User = | Of(age: Int);
+
+impl User {
+  fn age(self) -> Int { match self { User::Of(a) => a } }
+  fn birthday(self) -> User { User::Of(self.age() + 1) }
+}
+
+fn main() -> Int {
+  let u = User::Of(41);
+  print(u.birthday().age());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "42\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A type's own method wins over a trait method of the same name, so adding a
+/// trait to a program cannot silently change what an existing call does.
+#[test]
+fn an_inherent_method_wins_over_a_trait_method() {
+    let ran = run(
+        "inherent_shadow",
+        "module t;
+fn print(value: Int);
+
+export type User = | Of(age: Int);
+
+trait Describe { fn describe(self) -> Int; }
+
+impl Describe for User { fn describe(self) -> Int { 1 } }
+impl User { fn describe(self) -> Int { 2 } }
+
+fn main() -> Int {
+  print(User::Of(0).describe());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "2\n", "the type's own method should be the one that runs");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// An inherent impl over a constructor learns its parameter from the receiver.
+#[test]
+fn a_parameterised_inherent_impl_runs() {
+    let ran = run(
+        "inherent_generic",
+        "module t;
+fn print(value: Int);
+
+export type Box<A> = | Of(value: A);
+
+impl<A> Box<A> {
+  fn tag(self) -> Int { 7 }
+}
+
+fn main() -> Int {
+  print(Box::Of(1).tag());
+  print(Box::Of(true).tag());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "7\n7\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Methods on a type holding a reference count still release it.
+#[test]
+fn an_inherent_method_does_not_leak_its_receiver() {
+    let ran = run(
+        "inherent_leaks",
+        "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export type List = | Nil | Cons(head: Int, tail: List);
+
+impl List {
+  fn sum(self) -> Int {
+    match self { List::Nil => 0, List::Cons(h, t) => h + t.sum() }
+  }
+}
+
+fn build(n: Int) -> List {
+  if n == 0 { List::Nil } else { List::Cons(n, build(n - 1)) }
+}
+
+fn total() -> Int { build(4).sum() }
+
+fn main() -> Int {
+  khora_print_int(total());
+  khora_print_int(khora_live_count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "10\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}

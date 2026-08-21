@@ -43,15 +43,38 @@ fn an_impl_names_the_trait_then_the_type() {
     assert!(out.contains("FOR_KW"), "{out}");
 }
 
-/// The order is `impl Trait for Type`, so omitting `for` has to say which half
-/// is missing rather than reporting a stray type.
+/// `impl Type { .. }` is the inherent form, so two types with nothing between
+/// them parse far enough to give a confusing error unless it is caught.
 #[test]
-fn an_impl_without_for_is_reported_specifically() {
+fn an_impl_missing_for_between_two_types_is_reported_specifically() {
     let found = errors("module m;\nimpl Eq Int {\n}\n");
     assert!(
         found.iter().any(|e| e.contains("impl Eq for Int")),
         "expected the correct form to be shown, got {found:?}"
     );
+}
+
+/// A type's own methods need no trait at all.
+#[test]
+fn an_impl_without_for_declares_the_types_own_methods() {
+    let out = tree("module m;\nimpl User {\n  fn age(self) -> Int { 1 }\n}\n");
+    assert!(out.contains("IMPL_DECL"), "{out}");
+    assert!(!out.contains("FOR_KW"), "an inherent impl has no `for`\n{out}");
+}
+
+#[test]
+fn the_two_impl_forms_are_told_apart() {
+    let inherent = parse("module m;\nimpl User {\n}\n").source_file().decls().next();
+    let Some(Decl::Impl(i)) = inherent else { panic!("not an impl") };
+    assert!(i.is_inherent());
+    assert!(i.trait_().is_none(), "an inherent impl names no trait");
+    assert!(i.self_type().is_some(), "the only type is the implementing one");
+
+    let for_trait = parse("module m;\nimpl Eq for User {\n}\n").source_file().decls().next();
+    let Some(Decl::Impl(t)) = for_trait else { panic!("not an impl") };
+    assert!(!t.is_inherent());
+    assert!(t.trait_().is_some());
+    assert!(t.self_type().is_some());
 }
 
 #[test]

@@ -289,3 +289,100 @@ fn a_const_parameter_gives_a_different_kind() {
         "kind",
     );
 }
+
+// --- a type's own methods -------------------------------------------------
+
+const USER: &str = "module m;\n\
+                    export type User = | Of(age: Int);\n\
+                    impl User {\n\
+                      fn age(self) -> Int { match self { User::Of(a) => a } }\n\
+                    }\n";
+
+/// The point of the whole feature: a method with no trait anywhere.
+#[test]
+fn a_type_can_have_a_method_without_a_trait() {
+    assert_clean(&format!("{USER}fn f(u: User) -> Int {{ u.age() }}\n"));
+}
+
+#[test]
+fn an_inherent_method_checks_its_arguments_and_result() {
+    assert_reports(
+        &format!("{USER}fn f(u: User) -> Bool {{ u.age() }}\n"),
+        "returns `Bool`, but its body has type `Int`",
+    );
+    assert_reports(
+        &format!("{USER}fn f(u: User) -> Int {{ u.age(1) }}\n"),
+        "takes 0 argument(s) after the receiver, but 1 were given",
+    );
+}
+
+#[test]
+fn a_method_the_type_does_not_have_is_still_reported() {
+    assert_reports(
+        &format!("{USER}fn f(u: User) -> Int {{ u.nope() }}\n"),
+        "no method",
+    );
+}
+
+/// Declaring the same name twice for one type is an error wherever the two
+/// blocks are, because a call could not say which it meant.
+#[test]
+fn one_type_cannot_declare_a_method_name_twice() {
+    assert_reports(
+        "module m;\n\
+         export type User = | Of(age: Int);\n\
+         impl User { fn age(self) -> Int { 1 } }\n\
+         impl User { fn age(self) -> Int { 2 } }\n",
+        "`User` already has a method named `age`",
+    );
+}
+
+/// Splitting a type's methods across blocks is ordinary and allowed.
+#[test]
+fn a_type_may_have_several_impl_blocks() {
+    assert_clean(
+        "module m;\n\
+         export type User = | Of(age: Int);\n\
+         impl User { fn age(self) -> Int { 1 } }\n\
+         impl User { fn next(self) -> Int { 2 } }\n",
+    );
+}
+
+/// A type's own method wins over a trait's. Adding a trait to a program must
+/// not silently change what an existing call does.
+#[test]
+fn an_inherent_method_shadows_a_trait_method_of_the_same_name() {
+    assert_clean(
+        "module m;\n\
+         export type User = | Of(age: Int);\n\
+         export trait Show { fn show(self) -> Int; }\n\
+         impl Show for User { fn show(self) -> Int { 1 } }\n\
+         impl User { fn show(self) -> Int { 2 } }\n\
+         fn f(u: User) -> Int { u.show() }\n",
+    );
+}
+
+/// A type can have its own methods and implement traits at the same time.
+#[test]
+fn inherent_methods_and_trait_impls_coexist() {
+    assert_clean(
+        "module m;\n\
+         export type User = | Of(age: Int);\n\
+         export trait Show { fn show(self) -> Int; }\n\
+         impl Show for User { fn show(self) -> Int { 1 } }\n\
+         impl User { fn age(self) -> Int { 2 } }\n\
+         fn f(u: User) -> Int { u.show() + u.age() }\n",
+    );
+}
+
+/// An inherent impl over a constructor learns its parameter from the receiver,
+/// the same way a parameterised trait impl does.
+#[test]
+fn a_parameterised_inherent_impl_is_allowed() {
+    assert_clean(
+        "module m;\n\
+         export type Box<A> = | Of(value: A);\n\
+         impl<A> Box<A> { fn size(self) -> Int { 1 } }\n\
+         fn f(b: Box<Int>) -> Int { b.size() }\n",
+    );
+}

@@ -148,7 +148,12 @@ fn trait_decl(p: &mut Parser<'_>) {
     m.complete(p, TRAIT_DECL);
 }
 
-/// `impl Trait for Type "{" ImplItem* "}"`
+/// `impl Trait for Type "{" .. "}"`, or `impl Type "{" .. "}"`.
+///
+/// Without `for` the block declares the type's *own* methods, needing no trait.
+/// That is the ordinary first thing a developer does in Go, TypeScript and Rust
+/// alike, and requiring an abstraction for it was a behavioural surprise on a
+/// daily action — see `docs/design/keywords.md`.
 fn impl_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(IMPL_KW);
@@ -158,10 +163,14 @@ fn impl_decl(p: &mut Parser<'_>) {
     type_(p);
     if p.at_contextual(FOR_KW) {
         p.bump_contextual(FOR_KW);
-    } else {
-        p.error("expected `for`: an impl names the trait and then the type, as `impl Eq for Int`");
+        type_(p);
+    } else if !p.at(L_BRACE) && !p.at(EOF) {
+        // Two types with nothing between them: `impl Eq Int { .. }`. The
+        // inherent form makes this parse far enough to produce a confusing
+        // "expected `{`", so name the actual mistake instead.
+        p.error("expected `for` between the trait and the type, as `impl Eq for Int`");
+        type_(p);
     }
-    type_(p);
     trait_body(p);
     m.complete(p, IMPL_DECL);
 }

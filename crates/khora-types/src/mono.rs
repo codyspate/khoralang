@@ -107,6 +107,11 @@ fn mangle(ty: &Type) -> String {
 /// diagnostic has already been raised elsewhere.
 pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
     let (trait_name, method) = instance.function.split_once("::")?;
+    // `#User::birthday` is already the thing to call: an inherent method has no
+    // trait to resolve through and no impl to choose between.
+    if trait_name.starts_with('#') {
+        return None;
+    }
     let def = types.traits.traits.get(trait_name)?;
     def.method(method)?;
 
@@ -167,13 +172,13 @@ impl Instances {
 
     /// The symbol a mention at `site` inside `from` should call.
     ///
-    /// Returns `None` when the mention is not of a generic function, in which
-    /// case the callee's own name is the symbol.
+    /// `None` only when the mention was never recorded, which means it is not a
+    /// call through a signature at all.
     pub fn callee(&self, from: &BodyTypes, site: khora_hir::body::ExprId) -> Option<String> {
         let (function, args) = from.instantiation(site)?;
-        if args.is_empty() {
-            return None;
-        }
+        // No early return for an empty argument list: `Instance::symbol` already
+        // answers the function's own name in that case, and a method call has no
+        // other name to fall back on — the callee is a field access, not a path.
         let wanted = Instance { function: function.clone(), args: args.clone() };
         Some(self.resolved.get(&wanted).cloned().unwrap_or_else(|| wanted.symbol()))
     }

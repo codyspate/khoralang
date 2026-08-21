@@ -91,26 +91,38 @@ was examined and kept, which is the expected outcome — the point of the pass w
 to find the places where a word promises the wrong thing, not to relabel the
 language.
 
-### A type can now have a method without a trait
+### A type can now have a method without a trait — done
 
-Not a spelling question. In Go, TypeScript and Rust alike, adding a method to
-your own type is the ordinary first thing a developer does and requires no
-abstraction. In Khora it is currently a syntax error:
+Not a spelling question, and the more important of the two findings. In Go,
+TypeScript and Rust alike, adding a method to your own type is the ordinary
+first thing a developer does and requires no abstraction. In Khora it was a
+syntax error:
 
 ```khora
 impl User {
-  fn birthday(self) -> Int { self.age + 1 }
+  fn age(self) -> Int { match self { User::Of(a) => a } }
+  fn birthday(self) -> User { User::Of(self.age() + 1) }
 }
 ```
 
-The only route to `user.birthday()` today is to declare a trait and implement
-it, which means every private helper method needs a public abstraction invented
-for it. That is a behavioural surprise on a daily action, for all three
-audiences at once — question 1, and the reason the audit exists.
+The only route to `user.birthday()` was to declare a trait and implement it,
+which meant every private helper needed a public abstraction invented for it.
+That is a behavioural surprise on a daily action, for all three audiences at
+once — question 1, and the reason the audit exists.
 
-The fix is `impl Type { .. }` with no `for`, resolved before trait methods.
-Rust's shape, but chosen here because Khora needs `impl Trait for Type` anyway
-and one construct covering both beats two. Go's receiver form
-(`func (u User) Name() string`) is flatter but cannot express "these methods
-implement this trait" nominally, so it would have to coexist with the block form
-rather than replace it.
+`impl Type { .. }` with no `for` now declares a type's own methods. Rust's
+shape, chosen because Khora needs `impl Trait for Type` anyway and one construct
+covering both beats two. Go's receiver form (`func (u User) Name() string`) is
+flatter but cannot express "these methods implement this trait" nominally, so it
+would have had to coexist with the block form rather than replace it.
+
+Three rules, each picked so a reader can predict it:
+
+- **A type's own method wins over a trait method of the same name.** Adding a
+  trait to a program must not silently change what an existing call does.
+- **A type may have several impl blocks**, because splitting methods up is
+  ordinary, but **one name may not be declared twice for it**, because a call
+  could not say which it meant.
+- **`impl Eq Int { .. }`** — the trait form with `for` left out — is caught and
+  named. The inherent form makes it parse far enough that the default error
+  would otherwise be a confusing `expected {`.

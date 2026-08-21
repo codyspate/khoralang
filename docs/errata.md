@@ -362,10 +362,11 @@ behaviourally motivated even where the stated reason was not:
 One thing it does *not* survive, recorded here because it is the kind of defect
 the corrected rule is meant to catch:
 
-- **A type cannot have a method without a trait.** In Go, TypeScript and Rust
-  alike, adding a method to your own type is the ordinary first thing you do and
-  needs no abstraction. In Khora today `impl User { fn birthday(self) .. }` is a
-  syntax error: the only route to `user.birthday()` is to declare a trait and
+- **A type could not have a method without a trait.** In Go, TypeScript and
+  Rust alike, adding a method to your own type is the ordinary first thing you
+  do and needs no abstraction. In Khora `impl User { fn birthday(self) .. }` was
+  a syntax error: the only route to `user.birthday()` was to declare a trait and
   implement it. That is a behavioural surprise, on a daily action, for all three
-  audiences at once — which is exactly what the rule protects and what focusing
-  on spelling caused to be missed.
+  audiences at once — exactly what the rule protects, and what focusing on
+  spelling caused to be missed. Now implemented; see
+  `docs/design/keywords.md`.

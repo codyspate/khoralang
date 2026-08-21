@@ -508,13 +508,25 @@ impl ImplDecl {
     pub fn type_params(&self) -> Option<TypeParams> {
         child(&self.0)
     }
-    /// The trait being implemented: the type before `for`.
+    /// True for `impl Type { .. }`: the type's own methods, no trait involved.
+    pub fn is_inherent(&self) -> bool {
+        token(&self.0, FOR_KW).is_none()
+    }
+    /// The trait being implemented, or `None` for an inherent impl.
     pub fn trait_(&self) -> Option<Type> {
+        if self.is_inherent() {
+            return None;
+        }
         children::<Type>(&self.0).next()
     }
-    /// The implementing type: the type after `for`.
+    /// The implementing type: after `for`, or the only type when inherent.
     pub fn self_type(&self) -> Option<Type> {
-        children::<Type>(&self.0).nth(1)
+        let mut types = children::<Type>(&self.0);
+        if self.is_inherent() {
+            types.next()
+        } else {
+            types.nth(1)
+        }
     }
     pub fn functions(&self) -> impl Iterator<Item = FnDecl> {
         children(&self.0)

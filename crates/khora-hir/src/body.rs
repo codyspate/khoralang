@@ -305,6 +305,8 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
 pub fn impl_key(decl: &ast::ImplDecl) -> String {
     let trait_name = decl.trait_().as_ref().and_then(type_head).unwrap_or_default();
     let self_name = decl.self_type().as_ref().and_then(type_head).unwrap_or_default();
+    // An inherent impl has an empty trait half, so its methods key as `#User`.
+    // Still unambiguous, and still impossible to collide with a Khora name.
     format!("{trait_name}#{self_name}")
 }
 

@@ -895,6 +895,13 @@ impl<'a> Checker<'a> {
             return None;
         }
 
+        // A type's own method wins over a trait's. Adding a trait to a program
+        // must not silently change what an existing call does.
+        if let Some(own) = self.types.traits.inherent_method(&self_ty, method) {
+            let key = traits::method_key("", &own.head, method);
+            return Some(self.call_signature(callee, &key, &self_ty, args, range));
+        }
+
         // Inside a generic function the receiver is rigid, and the only methods
         // it has are the ones its bounds promise.
         if let Type::Param(param) = &self_ty {
@@ -903,7 +910,16 @@ impl<'a> Checker<'a> {
 
         let (def, imp) = match traits::method_source(&self.types.traits, &self_ty, method) {
             Ok(found) => found,
-            Err(traits::MethodError::Unknown) => return None,
+            // Records do not exist yet, so there is no field that could hold a
+            // function and no other reading of `x.f()`. When they land, the
+            // field is checked before this and only reaches here if absent.
+            Err(traits::MethodError::Unknown) => {
+                for arg in args {
+                    self.infer(*arg);
+                }
+                self.error(format!("`{self_ty}` has no method `{method}`"), range);
+                return Some(Type::Unknown);
+            }
             Err(traits::MethodError::NotImplemented(owners)) => {
                 self.error(
                     format!(

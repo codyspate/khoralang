@@ -22,7 +22,9 @@ TypeDecl       ::= ( "export" )? "type" Ident ( TypeParams )? ( "=" TypeDef )? "
 
 TraitDecl      ::= ( "export" )? "trait" Ident ( TypeParams )?
                    ( ":" TypeBounds )? "{" ( TraitItem )* "}" ;
-ImplDecl       ::= "impl" ( TypeParams )? Type "for" Type "{" ( TraitItem )* "}" ;
+ImplDecl       ::= "impl" ( TypeParams )? Type ( "for" Type )?
+                   "{" ( TraitItem )* "}" ;   (* without "for": the type's
+                                                  own methods *)
 TraitItem      ::= AssocTypeDecl | FunctionDecl ;
 AssocTypeDecl  ::= "type" Ident ( ":" TypeBounds )? ( "=" Type )? ";" ;
 TypeBounds     ::= Type ( "+" Type )* ;

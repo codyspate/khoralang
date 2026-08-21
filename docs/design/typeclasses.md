@@ -166,6 +166,25 @@ traits under this decision, with no change to the signatures that use them.
 - **Where clauses.** `+`-separated bounds cover phase 3. A `where` clause is
   presentation, and can follow.
 
+## 7a. A type's own methods
+
+`impl Type { .. }` with no `for` declares methods that belong to the type
+itself, with no trait involved:
+
+```khora
+impl User {
+  fn age(self) -> Int { match self { User::Of(a) => a } }
+}
+```
+
+This is not part of the typeclass system and is documented here only because it
+shares the `impl` construct. It exists because requiring a trait for every
+method was a behavioural surprise for all three of the audiences in
+`docs/vision.md`; see `docs/design/keywords.md`.
+
+Resolution checks a type's own methods **before** any trait's, so adding a trait
+to a program cannot silently change what an existing call does.
+
 ## 8. What has landed
 
 Everything above except the standard library itself and the two items in §7.
