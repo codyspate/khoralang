@@ -255,8 +255,19 @@ shape argument typed as `Unknown`, which accepts anything, so the exit criterion
 could not have been met honestly.
 
 Remaining: the `std` traits themselves, `Iterator` with generic `for`, and
-`traverse` over `Traversable`. The machinery all three need is in place — what
-is left is writing them and the `List` they iterate.
+`traverse` over `Traversable`.
+
+`Iterator` and `for` need only what is already here: `for x in xs { .. }`
+desugars to `loop` over `next()`, and `loop`, `match` and `break` all landed in
+phase 1.6. `for` becomes a hard keyword at that point, as noted where it is
+declared contextual in `crates/khora-syntax/src/kind.rs`.
+
+**`traverse` is blocked on closures, which no phase currently owns.** Its
+signature takes a function as an argument — `(A) -> F<B>` — and closures parse
+but stop at HIR lowering, which reports them unsupported; the backend says the
+same. Phase 2 listed closures under **Out** and no later phase picked them up.
+They are a prerequisite for this exit criterion, and for `map`, `filter` and
+every combinator after it, so they need scheduling rather than discovering.
 
 **Exit:** `matmul` with a mismatched shared dimension is a compile error naming
 both dimensions **— met**; instance resolution errors name the missing instance
