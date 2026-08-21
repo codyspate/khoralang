@@ -192,12 +192,25 @@ impl Unifier {
     /// `?0 -> ?0` at one call site and `?7 -> ?7` at the next, so the two do
     /// not constrain each other.
     pub fn instantiate(&mut self, generics: &[String], ty: &Type) -> Type {
+        self.instantiate_with(generics, ty).0
+    }
+
+    /// As [`Unifier::instantiate`], also returning the fresh variables in the
+    /// order the parameters were declared.
+    ///
+    /// Monomorphisation needs those: once solved, they are the type arguments
+    /// this particular mention chose.
+    pub fn instantiate_with(&mut self, generics: &[String], ty: &Type) -> (Type, Vec<Type>) {
         if generics.is_empty() {
-            return ty.clone();
+            return (ty.clone(), Vec::new());
         }
-        let mapping: HashMap<&str, Type> =
-            generics.iter().map(|g| (g.as_str(), self.fresh())).collect();
-        substitute(ty, &mapping)
+        let args: Vec<Type> = generics.iter().map(|_| self.fresh()).collect();
+        let mapping: HashMap<&str, Type> = generics
+            .iter()
+            .zip(&args)
+            .map(|(g, a)| (g.as_str(), a.clone()))
+            .collect();
+        (substitute(ty, &mapping), args)
     }
 }
 

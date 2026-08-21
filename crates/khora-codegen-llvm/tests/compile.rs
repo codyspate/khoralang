@@ -537,6 +537,85 @@ fn main() -> Int {
     assert_eq!(ran.code, Some(0));
 }
 
+/// A generic function has no machine representation until its type arguments
+/// are known, so each one is emitted once per set of arguments it is used at.
+#[test]
+fn generic_functions_are_specialised_and_run() {
+    let ran = run(
+        "generics",
+        "module t;
+fn print(value: Int);
+
+fn id<A>(x: A) -> A { x }
+fn twice<B>(x: B) -> B { id(id(x)) }
+
+fn main() -> Int {
+  print(id(7));
+  print(twice(9));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "7
+9
+");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A generic function over a generic type, matching on it. This is the shape
+/// most of `std` will be written in.
+#[test]
+fn a_generic_function_over_a_generic_type_runs() {
+    let ran = run(
+        "generic_adt",
+        "module t;
+fn print(value: Int);
+
+pub type Option<A> = | Some(value: A) | None;
+
+fn unwrap_or<A>(o: Option<A>, fallback: A) -> A {
+  match o {
+    Option::Some(v) => v,
+    Option::None => fallback,
+  }
+}
+
+fn main() -> Int {
+  print(unwrap_or(Option::Some(42), 0));
+  print(unwrap_or(Option::None, 5));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "42
+5
+");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Two instantiations of one function must not share code: `Bool` is an `i1`
+/// and `Int` an `i64`, so one body cannot serve both.
+///
+/// Observed through the exit code rather than printing, because `print` is an
+/// intrinsic a program declares once and so cannot cover two types here.
+#[test]
+fn two_instantiations_do_not_interfere() {
+    let ran = run(
+        "two_instances",
+        "module t;
+
+fn id<A>(x: A) -> A { x }
+
+fn main() -> Int {
+  let flag = id(true);
+  let n = id(3);
+  if flag { n } else { 0 }
+}
+",
+    );
+    assert_eq!(ran.code, Some(3), "both instantiations should carry their own value");
+}
+
 /// The program `docs/roadmap.md` names in the phase 2 exit criterion.
 ///
 /// Compiled from the file rather than from a copy, so that the example and the

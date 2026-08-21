@@ -100,27 +100,45 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
     let types = khora_types::type_map(db, file);
     let bodies = khora_hir::body::bodies(db, file);
     let plans = khora_perceus::rc_plans(db, file);
-    let body_types = khora_types::body_types(db, file);
+    let mono = khora_types::mono::instances(db, file);
+    if !mono.errors.is_empty() {
+        return Err(mono.errors.clone());
+    }
     let items = khora_hir::item_map(db, file);
     let name = items.module.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "khora".into());
 
     let context = Context::create();
     let mut backend = Backend::new(&context, &name, types.clone(), &machine);
 
+    // One emitted function per *specialisation*, not per source function: a
+    // generic body has no machine representation until its type arguments are
+    // known, and a generic function nobody calls is not emitted at all.
+    for (instance, _) in &mono.instances {
+        if let Some(signature) = specialised_signature(&types, instance) {
+            backend.register_instance(&instance.symbol(), signature);
+        }
+    }
+
     // Declare every definition before lowering any of them: a call site does
     // not know whether its callee has been emitted yet, and mutual recursion
     // means no ordering exists that would make it know.
-    for (name, _) in bodies {
-        backend.declare_definition(name);
+    for (instance, _) in &mono.instances {
+        backend.declare_definition(&instance.symbol());
     }
-    for (name, body) in bodies {
-        let plan = plans.iter().find(|(n, _)| n == name).map(|(_, p)| p);
-        // The types come from the checker that already worked them out, rather
-        // than from a second walk that would have to mirror its rules exactly.
-        let Some(types) = body_types.iter().find(|(n, _)| n == name).map(|(_, t)| t) else {
+    for (instance, instance_types) in &mono.instances {
+        let Some(body) = bodies.iter().find(|(n, _)| n == &instance.function).map(|(_, b)| b)
+        else {
             continue;
         };
-        crate::lower::emit_function(&mut backend, name, body, plan, types);
+        let plan = plans.iter().find(|(n, _)| n == &instance.function).map(|(_, p)| p);
+        crate::lower::emit_function(
+            &mut backend,
+            &instance.symbol(),
+            body,
+            plan,
+            instance_types,
+            mono,
+        );
     }
 
     backend.emit_c_main();
@@ -130,6 +148,35 @@ pub fn compile(db: &dyn Db, file: SourceFile, out: &Path) -> Result<(), Vec<HirE
         return Err(backend.errors);
     }
     backend.finish(&machine, out)
+}
+
+/// A signature with the instance's type arguments substituted in.
+///
+/// This is what makes a specialisation compilable: the declared signature still
+/// mentions rigid parameters, which have no machine representation.
+fn specialised_signature(
+    types: &TypeMap,
+    instance: &khora_types::mono::Instance,
+) -> Option<Signature> {
+    let signature = types.signatures.get(&instance.function)?;
+    if instance.args.is_empty() {
+        return Some(signature.clone());
+    }
+    let mapping: HashMap<&str, Type> = signature
+        .generics
+        .iter()
+        .zip(&instance.args)
+        .map(|(g, a)| (g.as_str(), a.clone()))
+        .collect();
+    Some(Signature {
+        generics: Vec::new(),
+        params: signature
+            .params
+            .iter()
+            .map(|p| khora_types::unify::substitute(p, &mapping))
+            .collect(),
+        ret: khora_types::unify::substitute(&signature.ret, &mapping),
+    })
 }
 
 /// The machine every module is generated for.
@@ -176,6 +223,8 @@ pub(crate) struct Backend<'ctx> {
     /// Which names the file actually defines. Anything else it declares is an
     /// extern.
     defined: HashSet<String>,
+    /// Specialised signatures, by mangled symbol. See `signature_of`.
+    instance_signatures: HashMap<String, Signature>,
     /// Per-ADT `drop_fields` routines. `None` records a type that owns no
     /// references, so drop sites pass a null callback rather than calling a
     /// routine that would do nothing.
@@ -212,6 +261,7 @@ impl<'ctx> Backend<'ctx> {
             types,
             functions: HashMap::new(),
             defined: HashSet::new(),
+            instance_signatures: HashMap::new(),
             drop_glue: HashMap::new(),
             pending_glue: Vec::new(),
             errors: Vec::new(),
@@ -316,8 +366,25 @@ impl<'ctx> Backend<'ctx> {
     // -----------------------------------------------------------------------
 
     /// Declares a function the file defines, under its mangled name.
+    /// The signature to compile `name` against.
+    ///
+    /// A specialisation is registered under its mangled symbol with its type
+    /// arguments already substituted, so the backend never sees a rigid
+    /// parameter. Anything not registered is a plain function under its own
+    /// name.
+    pub fn signature_of(&self, name: &str) -> Option<khora_types::Signature> {
+        self.instance_signatures
+            .get(name)
+            .cloned()
+            .or_else(|| self.types.signatures.get(name).cloned())
+    }
+
+    pub fn register_instance(&mut self, symbol: &str, signature: khora_types::Signature) {
+        self.instance_signatures.insert(symbol.to_string(), signature);
+    }
+
     fn declare_definition(&mut self, name: &str) {
-        let Some(signature) = self.types.signatures.get(name).cloned() else { return };
+        let Some(signature) = self.signature_of(name) else { return };
         let Some(ty) = self.function_type(&signature) else {
             self.error(
                 format!(
@@ -353,10 +420,7 @@ impl<'ctx> Backend<'ctx> {
             return Ok(*f);
         }
         let signature = self
-            .types
-            .signatures
-            .get(name)
-            .cloned()
+            .signature_of(name)
             .ok_or_else(|| format!("`{name}` has no signature to call through"))?;
         let ty = self.function_type(&signature).ok_or_else(|| {
             format!(

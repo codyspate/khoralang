@@ -8,6 +8,7 @@
 //! Row unification for effects arrives in phase 4; the shape [`Type`] needs for
 //! it is noted where it will go.
 
+pub mod mono;
 pub mod unify;
 pub mod usefulness;
 
@@ -21,7 +22,7 @@ use text_size::TextRange;
 use unify::{Mismatch, Unifier};
 use usefulness::{ColumnType, Ctor, FieldType, Pattern};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
     Bool,
@@ -227,6 +228,12 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
 pub struct BodyTypes {
     exprs: HashMap<ExprId, Type>,
     locals: HashMap<LocalId, Type>,
+    /// Which instantiation each mention of a generic function chose.
+    ///
+    /// Recorded here because the checker is the only place that knows: it
+    /// created the variables and solved them. Monomorphisation reads it to
+    /// find out which specialisations a body needs.
+    instantiations: HashMap<ExprId, (String, Vec<Type>)>,
 }
 
 impl BodyTypes {
@@ -238,6 +245,39 @@ impl BodyTypes {
 
     pub fn local(&self, id: LocalId) -> &Type {
         self.locals.get(&id).unwrap_or(&Type::Unknown)
+    }
+
+    /// The generic function this expression mentions, and at what arguments.
+    pub fn instantiation(&self, id: ExprId) -> Option<&(String, Vec<Type>)> {
+        self.instantiations.get(&id)
+    }
+
+    pub fn instantiations(&self) -> impl Iterator<Item = (&ExprId, &(String, Vec<Type>))> {
+        self.instantiations.iter()
+    }
+
+    /// This body's types with `mapping` applied, which is one specialisation.
+    pub fn specialised(&self, mapping: &HashMap<&str, Type>) -> BodyTypes {
+        BodyTypes {
+            exprs: self
+                .exprs
+                .iter()
+                .map(|(k, v)| (*k, unify::substitute(v, mapping)))
+                .collect(),
+            locals: self
+                .locals
+                .iter()
+                .map(|(k, v)| (*k, unify::substitute(v, mapping)))
+                .collect(),
+            instantiations: self
+                .instantiations
+                .iter()
+                .map(|(k, (name, args))| {
+                    let args = args.iter().map(|a| unify::substitute(a, mapping)).collect();
+                    (*k, (name.clone(), args))
+                })
+                .collect(),
+        }
     }
 }
 
@@ -270,6 +310,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             signature: &signature,
             locals: HashMap::new(),
             exprs: HashMap::new(),
+            instantiations: HashMap::new(),
             unifier: Unifier::new(),
             errors: Vec::new(),
         };
@@ -279,7 +320,15 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         // and code generation cannot do anything with one.
         let exprs = checker.exprs.iter().map(|(k, v)| (*k, checker.unifier.zonk(v))).collect();
         let locals = checker.locals.iter().map(|(k, v)| (*k, checker.unifier.zonk(v))).collect();
-        out.bodies.push((name.clone(), BodyTypes { exprs, locals }));
+        let instantiations = checker
+            .instantiations
+            .iter()
+            .map(|(k, (n, args))| {
+                let args = args.iter().map(|a| checker.unifier.zonk(a)).collect();
+                (*k, (n.clone(), args))
+            })
+            .collect();
+        out.bodies.push((name.clone(), BodyTypes { exprs, locals, instantiations }));
     }
     out
 }
@@ -303,6 +352,7 @@ struct Checker<'a> {
     signature: &'a Signature,
     locals: HashMap<LocalId, Type>,
     exprs: HashMap<ExprId, Type>,
+    instantiations: HashMap<ExprId, (String, Vec<Type>)>,
     unifier: Unifier,
     errors: Vec<HirError>,
 }
@@ -423,7 +473,7 @@ impl<'a> Checker<'a> {
                 Literal::Bool(_) => Type::Bool,
             },
             Expr::Local(local) => self.locals.get(&local).cloned().unwrap_or(Type::Unknown),
-            Expr::Path(resolution) => self.type_of_resolution(&resolution),
+            Expr::Path(resolution) => self.type_of_resolution(id, &resolution),
             Expr::Field { base, .. } => {
                 self.infer(base);
                 Type::Unknown
@@ -648,13 +698,18 @@ impl<'a> Checker<'a> {
         *ret
     }
 
-    fn type_of_resolution(&mut self, resolution: &khora_hir::Resolution) -> Type {
+    fn type_of_resolution(&mut self, at: ExprId, resolution: &khora_hir::Resolution) -> Type {
         match resolution {
             khora_hir::Resolution::Item { name, .. } => {
                 // Each mention gets its own copy of the signature, so two calls
                 // to the same generic function do not constrain each other.
                 match self.types.signatures.get(name).cloned() {
-                    Some(sig) => self.unifier.instantiate(&sig.generics, &sig.as_fn()),
+                    Some(sig) => {
+                        let (ty, args) =
+                            self.unifier.instantiate_with(&sig.generics, &sig.as_fn());
+                        self.instantiations.insert(at, (name.clone(), args));
+                        ty
+                    }
                     None => Type::Unknown,
                 }
             }

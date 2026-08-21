@@ -53,9 +53,12 @@ pub(crate) fn emit_function<'ctx>(
     body: &Body,
     plan: Option<&RcPlan>,
     types: &BodyTypes,
+    mono: &khora_types::mono::Instances,
 ) {
     let Some(function) = be.definition(name) else { return };
-    let Some(signature) = be.types.signatures.get(name).cloned() else { return };
+    // `name` is a specialisation's symbol, so the signature has to come from
+    // the instance table rather than from the source signatures.
+    let Some(signature) = be.signature_of(name) else { return };
     let empty = RcPlan::default();
 
     let entry = be.ctx.append_basic_block(function, "entry");
@@ -66,6 +69,7 @@ pub(crate) fn emit_function<'ctx>(
         body,
         plan: plan.unwrap_or(&empty),
         types,
+        mono,
         function,
         ret: signature.ret.clone(),
         slots: HashMap::new(),
@@ -113,6 +117,7 @@ struct Lower<'a, 'ctx> {
     body: &'a Body,
     plan: &'a RcPlan,
     types: &'a BodyTypes,
+    mono: &'a khora_types::mono::Instances,
     function: FunctionValue<'ctx>,
     ret: Type,
     slots: HashMap<LocalId, PointerValue<'ctx>>,
@@ -533,7 +538,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if name == "print" && args.len() == 1 {
                     self.print(args[0], range)
                 } else {
-                    self.call_named(&name, args, range)
+                    // A generic callee resolves to the specialisation this call
+                    // site asked for; a concrete one keeps its own name.
+                    let symbol = self
+                        .mono
+                        .callee(self.types, callee)
+                        .unwrap_or_else(|| name.clone());
+                    self.call_named(&symbol, args, range)
                 }
             }
             _ => self.fail(
@@ -610,7 +621,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     fn call_named(&mut self, name: &str, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
-        let Some(signature) = self.be.types.signatures.get(name).cloned() else {
+        let Some(signature) = self.be.signature_of(name) else {
             return self.fail(format!("`{name}` has no signature to call through"), range);
         };
         let function = match self.be.callee(name) {
