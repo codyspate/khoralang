@@ -8,4 +8,8 @@ license.workspace = true
 
 [dependencies]
 khora-hir.workspace = true
+text-size.workspace = true
+salsa.workspace = true
+khora-syntax.workspace = true
+khora-db.workspace = true
 rustc-hash.workspace = true

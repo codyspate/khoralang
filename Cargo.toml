@@ -8,6 +8,7 @@ members = [
     "crates/khora-hir",
     "crates/khora-types",
     "crates/khora-perceus",
+    "crates/khora-rt",
     "crates/khora-codegen-llvm",
     "crates/khora-manifest",
     "crates/khora-cli",
@@ -28,6 +29,7 @@ khora-diagnostics = { path = "crates/khora-diagnostics" }
 khora-hir = { path = "crates/khora-hir" }
 khora-types = { path = "crates/khora-types" }
 khora-perceus = { path = "crates/khora-perceus" }
+khora-rt = { path = "crates/khora-rt" }
 khora-codegen-llvm = { path = "crates/khora-codegen-llvm" }
 khora-manifest = { path = "crates/khora-manifest" }
 

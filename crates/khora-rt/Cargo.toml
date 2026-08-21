@@ -1,0 +1,12 @@
+[package]
+name = "khora-rt"
+description = "The Khora runtime: reference-counted allocation and intrinsics, linked into every executable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+# Linked into generated executables by clang, so it must be a static archive
+# exposing a C ABI.
+crate-type = ["staticlib", "rlib"]
