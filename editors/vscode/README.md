@@ -4,27 +4,29 @@ Syntax highlighting and editor configuration for `.kh` files.
 
 ## Install
 
-The extension is a plain folder — link it into VS Code's extensions directory
-and reload the window. No packaging or publishing needed for local development.
-
-Windows (no admin required):
-
 ```bash
-cmd //c mklink //J "%USERPROFILE%\.vscode\extensions\khora-lang.khora-0.1.0" "%CD%\editors\vscode"
+powershell -NoProfile -ExecutionPolicy Bypass -File editors/vscode/install.ps1
 ```
 
-macOS and Linux:
+Then **fully quit and reopen VS Code** — extensions are scanned at startup, so
+reloading the window is not enough. Confirm with `code --list-extensions`, which
+should list `khora-lang.khora`; the status bar should read *Khora* on any `.kh`
+file.
 
-```bash
-ln -s "$PWD/editors/vscode" ~/.vscode/extensions/khora-lang.khora-0.1.0
-```
+The script packages the extension as a `.vsix` and installs it through the VS
+Code CLI. It needs no npm — a `.vsix` is a zip with an OPC manifest, which
+PowerShell builds directly.
 
-Then run **Developer: Reload Window** from the command palette. Open any `.kh`
-file to check it took; the language indicator in the status bar should read
-*Khora*.
+**Do not just drop the folder into `~/.vscode/extensions`.** That was the first
+approach here and it silently did nothing: the extension never entered VS Code's
+extension index, so nothing loaded and there was no error to see. A junction has
+the same problem.
 
-Because it is a link rather than a copy, edits to the grammar take effect on the
-next window reload.
+Because this is a real install rather than a link, **re-run the script after
+editing the grammar**, then restart.
+
+On macOS and Linux, install `@vscode/vsce` and run `vsce package`, then
+`code --install-extension khora-lang.khora-0.1.0.vsix`.
 
 ## What it does
 

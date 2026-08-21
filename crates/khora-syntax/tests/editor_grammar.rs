@@ -69,6 +69,21 @@ fn keywords_match_the_lexer() {
     );
 }
 
+/// Every JSON file the extension ships must parse. This test exists because
+/// it did not: `language-configuration.json` shipped invalid escapes for a
+/// while, and nothing caught it — the grammar test only read the other two.
+#[test]
+fn every_extension_json_file_is_valid() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editors/vscode");
+    for rel in ["package.json", "language-configuration.json", "syntaxes/khora.tmLanguage.json"] {
+        let path = dir.join(rel);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&text);
+        assert!(parsed.is_ok(), "{rel} is not valid JSON: {}", parsed.unwrap_err());
+    }
+}
+
 #[test]
 fn extension_declares_the_kh_file_type() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
