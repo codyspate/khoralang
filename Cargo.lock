@@ -353,6 +353,7 @@ dependencies = [
 name = "khora-diagnostics"
 version = "0.1.0"
 dependencies = [
+ "khora-hir",
  "khora-syntax",
 ]
 

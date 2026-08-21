@@ -554,6 +554,19 @@ impl PathType {
     }
 }
 
+impl TupleType {
+    pub fn elements(&self) -> impl Iterator<Item = Type> {
+        children(&self.0)
+    }
+}
+
+impl LiteralType {
+    /// The integer this const-generic argument names.
+    pub fn value(&self) -> Option<i64> {
+        token(&self.0, INT_LIT)?.text().replace('_', "").parse().ok()
+    }
+}
+
 impl UnionType {
     pub fn operands(&self) -> impl Iterator<Item = Type> {
         children(&self.0)

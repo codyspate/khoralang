@@ -72,6 +72,15 @@ fn mangle(ty: &Type) -> String {
             let inner: Vec<String> = args.iter().map(mangle).collect();
             format!("{name}${}", inner.join("$"))
         }
+        Type::Tuple(items) => {
+            let inner: Vec<String> = items.iter().map(mangle).collect();
+            format!("Tuple{}${}", items.len(), inner.join("$"))
+        }
+        Type::Const(n) if *n < 0 => format!("_neg{}", -n),
+        Type::Const(n) => n.to_string(),
+        // An unsolved argument still has to mangle to something unique, since
+        // two different variables both print as `_`.
+        Type::Var(v) => format!("_var{v}"),
         // Reaching here means an argument was never solved. The instance is
         // still distinct from every other, so a stable placeholder is enough to
         // keep symbols unique; the diagnostic comes from elsewhere.
@@ -174,6 +183,6 @@ pub fn instances(db: &dyn Db, file: SourceFile) -> Instances {
     }
 
     // Deterministic order: the same source must produce the same object file.
-    out.instances.sort_by(|(a, _), (b, _)| a.symbol().cmp(&b.symbol()));
+    out.instances.sort_by_key(|(i, _)| i.symbol());
     out
 }

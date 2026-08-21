@@ -298,6 +298,9 @@ impl<'ctx> Backend<'ctx> {
             // monomorphised. Both are compiler bugs rather than user errors, so
             // there is no representation to pick here.
             Type::Var(_) | Type::Param(_) => None,
+            // Tuples type check but have no layout yet; `lower` reports that
+            // in the one place it can happen, rather than here.
+            Type::Tuple(_) | Type::Const(_) => None,
             Type::Fn { .. } | Type::Never | Type::Unknown => None,
         }
     }

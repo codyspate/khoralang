@@ -242,10 +242,19 @@ Also lands the `Iterator` typeclass and generic `for x in xs`, which was held
 back from Phase 1 so the loop form is designed against the real protocol rather
 than a `List` special case.
 
+Done so far: inference and unification (`khora-types::unify`), monomorphisation
+by reachability (`khora-types::mono`), const generics as `Type::Const`, and
+tuple types. Tuples arrived alongside const generics rather than on their own
+schedule because a tensor shape is written `(M, K)`: without them the shape
+argument typed as `Unknown`, which accepts anything, so the exit criterion
+could not have been met honestly.
+
+Remaining: the kind system, and typeclasses with instance resolution per D6.
+
 **Exit:** `matmul` with a mismatched shared dimension is a compile error naming
-both dimensions; a `traverse` written once works over `Option`, `List` and a
-user type; instance resolution errors name the missing instance; `for` iterates
-a user-defined type.
+both dimensions **— met**; a `traverse` written once works over `Option`, `List`
+and a user type; instance resolution errors name the missing instance; `for`
+iterates a user-defined type.
 
 ---
 

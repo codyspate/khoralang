@@ -181,3 +181,60 @@ This is the second override of §1.1's "No `::` or `->` symbol clutter" — `->`
 was the first, in entry 2. The clause is now dead in both halves, and the
 lexical rule it belonged to should be read as describing an early intention
 rather than the language.
+
+## 14. Tensor shapes need tuple types, which nothing else forced
+
+`docs/project.md` §3 writes the shape of a tensor as a tuple: `Tensor<D, (M, K),
+T>`. Tuples parsed and lowered to HIR from Phase 1, but the checker typed every
+one of them `Unknown`, and `Unknown` unifies with anything so that no error
+cascades from an earlier one. The two facts together meant `matmul(a, b)` type
+checked for *any* pair of tensors — the shape argument was not being compared at
+all, and no test failed, because nothing had ever asked the checker a question
+about a tuple.
+
+Const generics on their own would not have fixed this. `Matrix<M, K>` with the
+dimensions as direct type arguments checks correctly with only `Type::Const`;
+`Tensor<D, (M, K), T>` needs `Type::Tuple` as well, or the const arguments are
+buried inside a type the unifier walks straight past. Phase 3's exit criterion
+is stated against `matmul`, so both had to land together for it to mean
+anything.
+
+Tuples are now real in the type system — width and component types are checked,
+they nest, they carry type parameters, and destructuring binds each name at its
+own component's type. They still have no runtime representation: `khora build`
+reports that tuple literals are not supported yet, which is the same honest
+refusal it already gave for list literals, and is unchanged by this entry.
+
+## 15. `khora check` never type checked
+
+The command printed "checked 1 file(s): no syntax errors" for a program with a
+type error in it, because it only ever ran the parser. The type checker, the
+name resolver and their diagnostics all existed and were tested; nothing wired
+them to the command named after the job. A clean exit on a broken program is
+the worst failure mode available to a checker, and it survived because every
+test for type errors called the library directly.
+
+`check` now reports both, and `build` renders its semantic errors through the
+same renderer instead of printing bare `error: message` lines with no span.
+`crates/khora-cli/tests/check.rs` runs the real binary, which is the only level
+at which the gap was visible.
+
+Two adjacent claims turned out to be false in the same way, and are now
+corrected rather than restated:
+
+- The workspace declared `rust-version = "1.80"`. salsa 0.28 requires 1.85, so
+  the project had never built on the version it advertised.
+- `build`'s doc comment already claimed semantic errors went through `check`'s
+  renderer. They did not, until now.
+
+## 16. The codebase is not `cargo fmt` output
+
+Running `cargo fmt --all` rewrites roughly 2,200 lines across 46 files, and the
+rewrite goes in both directions: it expands struct-variant declarations the
+codebase writes on one line, and collapses signatures the codebase wraps. No
+`rustfmt.toml` setting reconciles the two, because the style is hand-maintained
+and was never rustfmt's output to begin with.
+
+This is worth knowing before someone reformats the tree inside an unrelated
+commit. Adopting `cargo fmt` is a reasonable decision, but it is its own commit
+and its own decision, not a side effect of touching a file.

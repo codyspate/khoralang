@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use khora_syntax::ast::{AstNode, Decl, Expr};
+use khora_syntax::ast::{Decl, Expr};
 use khora_syntax::{parse, SyntaxNode};
 
 fn workspace_root() -> PathBuf {

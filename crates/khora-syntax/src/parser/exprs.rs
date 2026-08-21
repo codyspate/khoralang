@@ -385,10 +385,8 @@ fn loop_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn jump_expr(p: &mut Parser, keyword: SyntaxKind, kind: SyntaxKind) -> CompletedMarker {
     let m = p.start();
     p.bump(keyword);
-    if !at_expr_end(p) && keyword != CONTINUE_KW {
-        if expr(p).is_none() {
-            p.error("expected a value");
-        }
+    if !at_expr_end(p) && keyword != CONTINUE_KW && expr(p).is_none() {
+        p.error("expected a value");
     }
     m.complete(p, kind)
 }

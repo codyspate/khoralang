@@ -106,6 +106,7 @@ impl Unifier {
                 name,
                 args: args.iter().map(|a| self.zonk(a)).collect(),
             },
+            Type::Tuple(items) => Type::Tuple(items.iter().map(|i| self.zonk(i)).collect()),
             other => other,
         }
     }
@@ -131,6 +132,10 @@ impl Unifier {
                 Err(Mismatch::Rigid { param: p.clone(), ty: other.clone() })
             }
 
+            // A dimension only matches itself. The mismatch carries both
+            // values, so the diagnostic can name them.
+            (Type::Const(x), Type::Const(y)) if x == y => Ok(()),
+
             (Type::Int, Type::Int)
             | (Type::Bool, Type::Bool)
             | (Type::Str, Type::Str)
@@ -145,6 +150,19 @@ impl Unifier {
                 }
                 for (x, y) in a1.iter().zip(a2) {
                     self.unify(x, y)?;
+                }
+                Ok(())
+            }
+
+            // Componentwise, and only at equal width. Two tuples of different
+            // lengths are different types, so the whole pair is reported rather
+            // than a component that has no counterpart.
+            (Type::Tuple(x), Type::Tuple(y)) => {
+                if x.len() != y.len() {
+                    return Err(Mismatch::Types { expected: a.clone(), found: b.clone() });
+                }
+                for (p, q) in x.iter().zip(y) {
+                    self.unify(p, q)?;
                 }
                 Ok(())
             }
@@ -182,6 +200,7 @@ impl Unifier {
                 params.iter().any(|p| self.occurs(var, p)) || self.occurs(var, &ret)
             }
             Type::Adt { args, .. } => args.iter().any(|a| self.occurs(var, a)),
+            Type::Tuple(items) => items.iter().any(|i| self.occurs(var, i)),
             _ => false,
         }
     }
@@ -226,6 +245,7 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
             name: name.clone(),
             args: args.iter().map(|a| substitute(a, mapping)).collect(),
         },
+        Type::Tuple(items) => Type::Tuple(items.iter().map(|i| substitute(i, mapping)).collect()),
         other => other.clone(),
     }
 }

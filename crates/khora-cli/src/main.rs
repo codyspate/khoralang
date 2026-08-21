@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
-use khora_diagnostics::render_parse_errors;
+use khora_diagnostics::{render_hir_errors, render_parse_errors};
 
 #[derive(Parser)]
 #[command(name = "khora", version, about = "The Khora language toolchain")]
@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Parse a file and report diagnostics.
+    /// Parse and type check a file, reporting diagnostics.
     Check {
         /// One or more `.kh` files, or directories to walk.
         paths: Vec<PathBuf>,
@@ -92,25 +92,35 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
     }
     SourceRoot::new(&db, inputs.iter().map(|(_, f)| *f).collect());
 
-    let mut clean = true;
     let mut total = 0usize;
     for (path, input) in &inputs {
         let parse = khora_db::parse(&db, *input);
         let text = input.text(&db);
         debug_assert_eq!(parse.syntax().text().to_string(), text);
+
+        // A file that did not parse has no meaningful tree to check, and
+        // type errors invented on top of a syntax error are noise.
         if !parse.errors().is_empty() {
-            clean = false;
             total += parse.errors().len();
-            eprintln!("{}\n", render_parse_errors(path, text, parse.errors()));
+            eprintln!("{}", render_parse_errors(path, text, parse.errors()));
+            eprintln!();
+            continue;
+        }
+
+        let semantic = khora_types::diagnostics(&db, *input);
+        if !semantic.is_empty() {
+            total += semantic.len();
+            eprintln!("{}", render_hir_errors(path, text, semantic));
+            eprintln!();
         }
     }
 
-    if clean {
-        println!("checked {} file(s): no syntax errors", files.len());
+    if total == 0 {
+        println!("checked {} file(s): no errors", files.len());
     } else {
         eprintln!("{total} error(s) across {} file(s)", files.len());
     }
-    Ok(clean)
+    Ok(total == 0)
 }
 
 /// Formats files in place, or reports which would change.
@@ -167,7 +177,8 @@ fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
     let files = collect_sources(std::slice::from_ref(&path.to_path_buf()))?;
     let [source] = files.as_slice() else {
         anyhow::bail!(
-            "`khora build` takes exactly one `.kh` file; found {}.              Multi-file programs need the module graph, which is phase 3.",
+            "`khora build` takes exactly one `.kh` file; found {}. \
+             Linking several modules into one binary is not wired up yet.",
             files.len()
         )
     };
@@ -178,8 +189,8 @@ fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
 
     let parse = khora_db::parse(&db, input);
     if !parse.errors().is_empty() {
-        eprintln!("{}
-", render_parse_errors(source, &text, parse.errors()));
+        eprintln!("{}", render_parse_errors(source, &text, parse.errors()));
+        eprintln!();
         return Ok(false);
     }
 
@@ -194,9 +205,8 @@ fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
             Ok(true)
         }
         Err(errors) => {
-            for err in &errors {
-                eprintln!("error: {}", err.message);
-            }
+            eprintln!("{}", render_hir_errors(source, &text, &errors));
+            eprintln!();
             eprintln!("{} error(s)", errors.len());
             Ok(false)
         }

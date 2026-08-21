@@ -36,6 +36,16 @@ pub enum Type {
     /// A type parameter the *caller* chose. Rigid: the body of a generic
     /// function cannot decide what it is. See `unify`.
     Param(String),
+    /// A fixed-length product, as in `(Int, Bool)`.
+    ///
+    /// The empty tuple is `Unit`, not `Tuple(vec![])`, so there is exactly one
+    /// spelling of "no information".
+    Tuple(Vec<Type>),
+    /// A type-level integer, as in `Matrix<3, 4>`.
+    ///
+    /// Unifies only with an equal value, which is what turns a shape mismatch
+    /// into a compile error instead of a runtime assertion.
+    Const(i64),
     /// The type of `return`, `break` and a diverging branch. Compatible with
     /// everything, because control never reaches the consumer.
     Never,
@@ -43,7 +53,7 @@ pub enum Type {
     /// usually downstream of an error already reported. Compatible with
     /// everything, so one mistake does not cascade.
     Unknown,
-    // Phase 4 adds Row(..); const generics add Const(i64).
+    // Phase 4 adds Row(..).
 }
 
 impl std::fmt::Display for Type {
@@ -59,7 +69,17 @@ impl std::fmt::Display for Type {
                 write!(f, "{name}<{}>", inner.join(", "))
             }
             Type::Param(name) => write!(f, "{name}"),
-            Type::Var(v) => write!(f, "?{v}"),
+            // `_` rather than an internal number: this is what a Rust or
+            // TypeScript developer already reads as "not pinned down yet".
+            Type::Var(_) => write!(f, "_"),
+            Type::Const(n) => write!(f, "{n}"),
+            // `(Int,)` for the one-element case, so it is not read as a
+            // parenthesised `Int` - the same disambiguation Rust and Python use.
+            Type::Tuple(items) => {
+                let inner: Vec<String> = items.iter().map(Type::to_string).collect();
+                let trailing = if items.len() == 1 { "," } else { "" };
+                write!(f, "({}{trailing})", inner.join(", "))
+            }
             Type::Never => write!(f, "Never"),
             Type::Unknown => write!(f, "?"),
             Type::Fn { params, ret } => {
@@ -184,6 +204,25 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     map
 }
 
+/// Points at the part of two large types that actually disagrees.
+///
+/// Unification reports the innermost conflicting pair, which on its own reads
+/// as "expected `3`, found `4`" and leaves the reader hunting for where either
+/// number came from. The caller leads with the whole types; this adds the
+/// detail, and adds nothing when the conflict *is* the whole type, since
+/// repeating it would say the same thing twice.
+fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> String {
+    if outer == inner {
+        return String::new();
+    }
+    match inner {
+        (Type::Const(_), Type::Const(_)) => {
+            format!("; dimension `{}` does not match `{}`", inner.0, inner.1)
+        }
+        _ => format!("; `{}` does not match `{}`", inner.0, inner.1),
+    }
+}
+
 fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
     params
         .map(|p| p.params().filter_map(|g| g.name().and_then(|n| n.ident())).collect())
@@ -199,6 +238,13 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
     let Some(ty) = ty else { return Type::Unknown };
     match ty {
         ast::Type::Unit(_) => Type::Unit,
+        // A bare integer in type position is a const-generic argument.
+        ast::Type::Literal(l) => l.value().map(Type::Const).unwrap_or(Type::Unknown),
+        ast::Type::Tuple(t) => {
+            let items: Vec<Type> =
+                t.elements().map(|e| type_of_syntax(Some(&e), generics)).collect();
+            if items.is_empty() { Type::Unit } else { Type::Tuple(items) }
+        }
         ast::Type::Path(p) => {
             let name = p.path().map(|p| p.text_path()).unwrap_or_default();
             let args: Vec<Type> = p
@@ -378,9 +424,13 @@ impl<'a> Checker<'a> {
             // The plain mismatch would read "expected `Int`, found `Bool`",
             // which repeats what the sentence already said.
             let message = match why {
-                Mismatch::Types { .. } => format!(
-                    "this function returns `{expected}`, but its body has type `{actual}`"
-                ),
+                Mismatch::Types { expected: inner, found: got } => {
+                    let inner = self.unifier.zonk(&inner);
+                    let got = self.unifier.zonk(&got);
+                    let detail = disagreement((&expected, &actual), (&inner, &got));
+                    let head = format!("this function returns `{expected}`,");
+                    format!("{head} but its body has type `{actual}`{detail}")
+                }
                 other => format!("this function returns `{expected}`, but its body {other}"),
             };
             self.error(message, range);
@@ -415,8 +465,15 @@ impl<'a> Checker<'a> {
                 }
             }
             Pat::Tuple(fields) => {
-                for field in fields {
-                    self.bind_pattern(field, &Type::Unknown);
+                // Destructuring only knows the component types when the
+                // scrutinee is a tuple of the same width; a mismatch is
+                // reported where the two are unified, not here.
+                for (i, field) in fields.iter().enumerate() {
+                    let component = match ty {
+                        Type::Tuple(items) => items.get(i).cloned().unwrap_or(Type::Unknown),
+                        _ => Type::Unknown,
+                    };
+                    self.bind_pattern(*field, &component);
                 }
             }
             Pat::Wildcard | Pat::Literal(_) | Pat::Path(_) | Pat::Missing => {}
@@ -442,14 +499,20 @@ impl<'a> Checker<'a> {
                 // Zonk first: a message naming `?3` instead of `Int` is useless,
                 // and unification may have solved the variable on the way to
                 // discovering the conflict.
-                let why = match why {
-                    Mismatch::Types { expected, found } => Mismatch::Types {
-                        expected: self.unifier.zonk(&expected),
-                        found: self.unifier.zonk(&found),
-                    },
-                    other => other,
+                let message = match why {
+                    Mismatch::Types { expected: inner, found: got } => {
+                        let inner = self.unifier.zonk(&inner);
+                        let got = self.unifier.zonk(&got);
+                        let outer = self.unifier.zonk(expected);
+                        let whole = self.unifier.zonk(found);
+                        let head =
+                            Mismatch::Types { expected: outer.clone(), found: whole.clone() };
+                        let detail = disagreement((&outer, &whole), (&inner, &got));
+                        format!("{context}: {head}{detail}")
+                    }
+                    other => format!("{context}: {other}"),
                 };
-                self.error(format!("{context}: {why}"), range);
+                self.error(message, range);
                 false
             }
         }
@@ -579,10 +642,8 @@ impl<'a> Checker<'a> {
                 Type::Unknown
             }
             Expr::Tuple(items) => {
-                for item in items {
-                    self.infer(item);
-                }
-                Type::Unknown
+                let types: Vec<Type> = items.iter().map(|i| self.infer(*i)).collect();
+                if types.is_empty() { Type::Unit } else { Type::Tuple(types) }
             }
             Expr::Match { scrutinee, arms } => self.infer_match(scrutinee, &arms, range),
         }

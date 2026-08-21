@@ -20,10 +20,11 @@
 use std::fmt::Write;
 use std::path::Path;
 
+use khora_hir::HirError;
 use khora_syntax::ParseError;
 
-/// How serious a diagnostic is. Parsing only produces errors today; the
-/// linter in phase 8.1 will produce the rest.
+/// How serious a diagnostic is. Parsing and type checking only produce errors
+/// today; the linter in phase 8.1 will produce the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
@@ -51,6 +52,17 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn from_parse_error(err: &ParseError) -> Diagnostic {
+        Diagnostic {
+            severity: Severity::Error,
+            message: err.message.clone(),
+            start: usize::from(err.range.start()),
+            end: usize::from(err.range.end()),
+        }
+    }
+
+    /// A diagnostic from a pass after parsing: name resolution, or the type
+    /// checker. Both report through `HirError`, so both render identically.
+    pub fn from_hir_error(err: &HirError) -> Diagnostic {
         Diagnostic {
             severity: Severity::Error,
             message: err.message.clone(),
@@ -117,5 +129,11 @@ pub fn render_all(path: &Path, source: &str, diagnostics: &[Diagnostic]) -> Stri
 /// Convenience for the common case: parse errors straight from the front end.
 pub fn render_parse_errors(path: &Path, source: &str, errors: &[ParseError]) -> String {
     let diagnostics: Vec<_> = errors.iter().map(Diagnostic::from_parse_error).collect();
+    render_all(path, source, &diagnostics)
+}
+
+/// The same, for errors from name resolution and type checking.
+pub fn render_hir_errors(path: &Path, source: &str, errors: &[HirError]) -> String {
+    let diagnostics: Vec<_> = errors.iter().map(Diagnostic::from_hir_error).collect();
     render_all(path, source, &diagnostics)
 }

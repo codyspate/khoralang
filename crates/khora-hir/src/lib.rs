@@ -375,19 +375,17 @@ pub fn resolve_path(
 
     // `Type::Constructor`, checked before module paths because a type in scope
     // is the more specific reading.
-    if rest.len() == 1 {
-        if map.item(first).is_some_and(|i| i.kind == ItemKind::Type) {
-            if map.variants_of(first).any(|v| &v.name == &rest[0]) {
-                return Ok(Resolution::Variant {
-                    module: map.module.clone().unwrap_or_else(|| ModulePath::new(vec![])),
-                    type_name: first.clone(),
-                    name: rest[0].clone(),
-                });
-            }
-            return Ok(Resolution::Unsupported(
-                "associated items are not supported until typeclasses land in phase 3",
-            ));
+    if rest.len() == 1 && map.item(first).is_some_and(|i| i.kind == ItemKind::Type) {
+        if map.variants_of(first).any(|v| v.name == rest[0]) {
+            return Ok(Resolution::Variant {
+                module: map.module.clone().unwrap_or_else(|| ModulePath::new(vec![])),
+                type_name: first.clone(),
+                name: rest[0].clone(),
+            });
         }
+        return Ok(Resolution::Unsupported(
+            "associated items are not supported until typeclasses land in phase 3",
+        ));
     }
 
     // `a.b.c` as a module path — case 2. The longest prefix that names a module
