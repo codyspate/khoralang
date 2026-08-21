@@ -269,3 +269,52 @@ fn unsupported_syntax_does_not_produce_type_errors() {
     let found = errors(&db, "module m;\nfn f() -> Int { let g = fn x => x; 1 }\n");
     assert!(found.is_empty(), "checker piled onto unsupported syntax: {found:?}");
 }
+
+// --- constructors are qualified by their type -----------------------------
+
+/// Case names are not unique across a program. A lookup by bare name resolved
+/// `Maybe::Some` to whichever `Some` was declared first, which is a wrong tag
+/// rather than a diagnostic.
+#[test]
+fn a_constructor_resolves_to_its_own_type() {
+    assert_clean(
+        "module m;\n\
+         export type Option<A> = | Some(value: A) | None;\n\
+         export type Maybe<A> = | Some(value: A) | None;\n\
+         fn f() -> Maybe<Int> { Maybe::Some(1) }\n\
+         fn g() -> Option<Int> { Option::Some(1) }\n",
+    );
+}
+
+#[test]
+fn a_constructor_of_another_type_is_not_reachable() {
+    // Name resolution rejects this, so it is a HIR error rather than a type
+    // error and `check_file` — which reports only the latter — cannot see it.
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(
+        &db,
+        "a.kh".into(),
+        "module m;\n\
+         export type Colour = | Red | Green;\n\
+         export type Fruit = | Apple;\n\
+         fn f() -> Fruit { Fruit::Red }\n"
+            .to_string(),
+    );
+    let found: Vec<String> =
+        khora_types::diagnostics(&db, file).iter().map(|e| e.message.clone()).collect();
+    assert!(
+        found.iter().any(|e| e.contains("cannot resolve `Fruit::Red`")),
+        "expected the path to be rejected, got {found:?}"
+    );
+}
+
+/// Matching is qualified too, so an arm cannot name another type's case.
+#[test]
+fn a_pattern_names_its_own_types_cases() {
+    assert_clean(
+        "module m;\n\
+         export type First = | A | B;\n\
+         export type Second = | B | A;\n\
+         fn f(s: Second) -> Int { match s { Second::B => 1, Second::A => 2 } }\n",
+    );
+}

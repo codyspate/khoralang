@@ -176,9 +176,17 @@ impl TypeMap {
         self.variants.iter().filter(|v| v.type_name == type_name).collect()
     }
 
-    fn variant(&self, name: &str) -> Option<&VariantInfo> {
-        self.variants.iter().find(|v| v.name == name)
+    /// A constructor, found by the type it belongs to *and* its own name.
+    ///
+    /// Both halves are required. Case names are not unique across a program —
+    /// two types may each have a `Some` — and `Resolution::Variant` carries the
+    /// type for exactly this reason. Looking one up by its bare name resolves
+    /// `Maybe::Some` to `Option::Some` whenever `Option` was declared first,
+    /// which is a wrong tag rather than an error.
+    pub fn variant_of(&self, type_name: &str, case: &str) -> Option<&VariantInfo> {
+        self.variants.iter().find(|v| v.type_name == type_name && v.name == case)
     }
+
 }
 
 #[salsa::tracked(returns(ref))]
@@ -554,7 +562,9 @@ impl<'a> Checker<'a> {
                 self.locals.insert(local, ty.clone());
             }
             Pat::TupleStruct { resolution, fields } => {
-                let variant = variant_name(&resolution).and_then(|n| self.types.variant(&n)).cloned();
+                let variant = variant_case(&resolution)
+                    .and_then(|(t, n)| self.types.variant_of(&t, &n))
+                    .cloned();
                 // Field types are declared against the type's own parameters,
                 // so they have to be read at the scrutinee's instantiation:
                 // matching `Option<Int>` binds `v` to `Int`, not to `A`.
@@ -839,8 +849,8 @@ impl<'a> Checker<'a> {
     fn infer_call(&mut self, callee: ExprId, args: &[ExprId], range: TextRange) -> Type {
         // A constructor call builds its ADT.
         if let Expr::Path(resolution) = self.body.expr(callee).clone() {
-            if let Some(name) = variant_name(&resolution) {
-                if let Some(variant) = self.types.variant(&name).cloned() {
+            if let Some((owner, case)) = variant_case(&resolution) {
+                if let Some(variant) = self.types.variant_of(&owner, &case).cloned() {
                     if args.len() != variant.fields.len() {
                         self.error(
                             format!(
@@ -1229,7 +1239,7 @@ impl<'a> Checker<'a> {
             khora_hir::Resolution::Variant { type_name, name, .. } => {
                 // A nullary constructor is a value; one with a payload is
                 // reached through a call, handled in `infer_call`.
-                match self.types.variant(name) {
+                match self.types.variant_of(type_name, name) {
                     Some(_) => self.instantiate_adt(type_name).0,
                     None => Type::Unknown,
                 }
@@ -1339,7 +1349,7 @@ impl<'a> Checker<'a> {
                     }
                     _ => Vec::new(),
                 };
-                match variant_name(resolution).and_then(|n| self.types.variant(&n)) {
+                match variant_case(resolution).and_then(|(t, n)| self.types.variant_of(&t, &n)) {
                     Some(v) => Pattern::Constructor { ctor: ctor_for(self.types, v), fields: sub },
                     None => Pattern::Wildcard,
                 }
@@ -1392,9 +1402,16 @@ fn column_type(types: &TypeMap, ty: &Type) -> ColumnType {
 /// it. Lowercase, which no declared type can be.
 const BOOL_TYPE: &str = "bool";
 
-fn variant_name(resolution: &khora_hir::Resolution) -> Option<String> {
+
+/// The type a constructor belongs to, and the constructor's own name.
+///
+/// Always prefer this to [`variant_name`] when looking a constructor up: the
+/// name alone is ambiguous across types.
+fn variant_case(resolution: &khora_hir::Resolution) -> Option<(String, String)> {
     match resolution {
-        khora_hir::Resolution::Variant { name, .. } => Some(name.clone()),
+        khora_hir::Resolution::Variant { type_name, name, .. } => {
+            Some((type_name.clone(), name.clone()))
+        }
         _ => None,
     }
 }

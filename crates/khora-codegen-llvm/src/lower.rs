@@ -599,9 +599,9 @@ impl<'ctx> Lower<'_, 'ctx> {
             // tag, and a tag lives in a header. Interning the nullary cases
             // would need the refcount to be saturating, which is a phase 6
             // conversation.
-            khora_hir::Resolution::Variant { name, .. } => {
-                let name = name.clone();
-                self.construct(&name, &[], range)
+            khora_hir::Resolution::Variant { type_name, name, .. } => {
+                let (owner, case) = (type_name.clone(), name.clone());
+                self.construct(&owner, &case, &[], range)
             }
             // A named function used as a value becomes a closure that
             // captures nothing and forwards to it.
@@ -635,8 +635,8 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     fn call(&mut self, callee: ExprId, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
         match self.body.expr(callee).clone() {
-            Expr::Path(khora_hir::Resolution::Variant { name, .. }) => {
-                self.construct(&name, args, range)
+            Expr::Path(khora_hir::Resolution::Variant { type_name, name, .. }) => {
+                self.construct(&type_name, &name, args, range)
             }
             Expr::Path(khora_hir::Resolution::TraitItem { name, .. }) => {
                 match self.mono.callee(self.types, callee) {
@@ -946,13 +946,19 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// The arguments are evaluated before the allocation, not after. An
     /// argument can diverge — `Cons(x, return 0)` — and an object allocated
     /// before that happens is unreachable and unfreed.
-    fn construct(&mut self, variant: &str, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
-        let Some((tag, info)) = self.be.variant(variant) else {
-            return self.fail(format!("`{variant}` is not a constructor"), range);
+    fn construct(
+        &mut self,
+        owner: &str,
+        case: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let Some((tag, info)) = self.be.variant_of(owner, case) else {
+            return self.fail(format!("`{owner}::{case}` is not a constructor"), range);
         };
         if args.len() != info.fields.len() {
             return self.fail(
-                format!("`{variant}` takes {} field(s)", info.fields.len()),
+                format!("`{owner}::{case}` takes {} field(s)", info.fields.len()),
                 range,
             );
         }
@@ -973,7 +979,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     self.be.ctx.i64_type().const_int(field_bytes, false).into(),
                     self.be.ctx.i32_type().const_int(tag as u64, false).into(),
                 ],
-                &format!("{variant}.obj"),
+                &format!("{case}.obj"),
             )
             .expect("allocating an ADT")
             .try_as_basic_value()
@@ -1691,8 +1697,8 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     fn tag_of(&self, resolution: &khora_hir::Resolution) -> Option<u32> {
         match resolution {
-            khora_hir::Resolution::Variant { name, .. } => {
-                self.be.variant(name).map(|(tag, _)| tag)
+            khora_hir::Resolution::Variant { type_name, name, .. } => {
+                self.be.variant_of(type_name, name).map(|(tag, _)| tag)
             }
             _ => None,
         }
@@ -1854,7 +1860,9 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     fn variant_of(&self, resolution: &khora_hir::Resolution) -> Option<(u32, VariantInfo)> {
         match resolution {
-            khora_hir::Resolution::Variant { name, .. } => self.be.variant(name),
+            khora_hir::Resolution::Variant { type_name, name, .. } => {
+                self.be.variant_of(type_name, name)
+            }
             _ => None,
         }
     }

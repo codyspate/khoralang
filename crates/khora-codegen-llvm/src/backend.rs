@@ -477,14 +477,16 @@ impl<'ctx> Backend<'ctx> {
     }
 
     /// A constructor's tag, and the fields it carries.
-    pub fn variant(&self, name: &str) -> Option<(u32, VariantInfo)> {
-        let info = self.types.variants.iter().find(|v| v.name == name)?;
-        let tag = self
-            .variants_of(&info.type_name)
-            .iter()
-            .position(|v| v.name == name)
-            .expect("a variant is among its own type's variants");
-        Some((tag as u32, info.clone()))
+    /// A constructor's tag and fields, found by its type *and* its own name.
+    ///
+    /// The type is not optional. Case names repeat across a program, and a tag
+    /// is an index within one type's variant list, so a lookup by bare name
+    /// silently returns another type's tag — which is a `match` taking the
+    /// wrong arm rather than a diagnostic.
+    pub fn variant_of(&self, type_name: &str, case: &str) -> Option<(u32, VariantInfo)> {
+        let variants = self.variants_of(type_name);
+        let tag = variants.iter().position(|v| v.name == case)?;
+        Some((tag as u32, variants[tag].clone()))
     }
 
     // -----------------------------------------------------------------------

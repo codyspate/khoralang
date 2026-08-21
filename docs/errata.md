@@ -484,3 +484,35 @@ The general shape is the same as entry 19 — something the compiler already
 knows, recomputed worse somewhere else. Here it is not a second implementation
 but a second *time*: a property was computed at the wrong stage, before
 monomorphisation had said what the types actually were.
+
+## 25. A constructor was found by its bare name
+
+`Resolution::Variant` carries both the type and the case — `Maybe::Some`
+resolves to `{ type_name: "Maybe", name: "Some" }`, correctly. Every consumer
+then called `variant_name()`, kept only `"Some"`, and looked it up across the
+whole program with first-match-wins.
+
+```khora
+export type Option<A> = | Some(value: A) | None;
+export type Maybe<A>  = | Some(value: A) | None;
+fn f() -> Maybe<Int> { Maybe::Some(1) }
+```
+
+> error: this function returns `Maybe<Int>`, but its body has type `Option<Int>`
+
+A type error caught that one only because the two types differ. A tag is an
+*index within one type's variant list*, so where the shapes line up the program
+compiles with another type's tag and a `match` takes the wrong arm — silently,
+at runtime.
+
+Found while checking whether the language was ready for a standard library. It
+was the reason it was not: `std` would declare `Option`, `Result`, `Step` and
+`Ordering`, and their case names would then shadow those of every program that
+imported it.
+
+`variant` and `variant_name` are deleted rather than left available, in both
+the type map and the backend, so nothing can reach the ambiguous lookup again.
+The replacement `variant_of(type_name, case)` requires both halves.
+
+The shape is familiar by now — the same as entries 19, 22 and 24. The
+information was present and correct; a consumer threw half of it away.

@@ -1495,3 +1495,31 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "42\nheld\n0\n");
     assert_eq!(ran.code, Some(0));
 }
+
+/// A tag is an index within *one* type's variant list, so resolving a
+/// constructor by its bare name returns another type's tag and the wrong
+/// `match` arm runs. The two types here declare the same cases in opposite
+/// order precisely so that a bare-name lookup produces wrong output rather
+/// than a type error.
+#[test]
+fn a_constructors_tag_comes_from_its_own_type() {
+    let ran = run(
+        "tags",
+        "module t;
+fn print(value: Int);
+
+export type First = | A | B;
+export type Second = | B | A;
+
+fn which(s: Second) -> Int { match s { Second::B => 1, Second::A => 2 } }
+
+fn main() -> Int {
+  print(which(Second::A));
+  print(which(Second::B));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "2\n1\n", "a bare-name lookup would swap these");
+    assert_eq!(ran.code, Some(0));
+}
