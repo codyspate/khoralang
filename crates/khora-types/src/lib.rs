@@ -1,10 +1,14 @@
-//! Type checking for the phase 2 subset.
+//! Type checking and inference.
 //!
-//! Not inference yet. Phase 2 is monomorphic, so this checks bodies against
-//! declared signatures rather than solving for them; Algorithm W arrives in
-//! phase 3 and row unification in phase 4. [`Type`] is shaped with those in
-//! view — the variants they need are noted where they will go.
+//! Bodies are inferred by unification ([`unify`]) against declared signatures.
+//! Signatures stay explicit at function boundaries — that is the decision in
+//! `docs/design/associated-items.md` and it is what keeps errors local — but
+//! everything inside a body is solved.
+//!
+//! Row unification for effects arrives in phase 4; the shape [`Type`] needs for
+//! it is noted where it will go.
 
+pub mod unify;
 pub mod usefulness;
 
 use std::collections::HashMap;
@@ -14,6 +18,7 @@ use khora_hir::body::{BinOp, Body, Expr, ExprId, Literal, LocalId, Pat, PatId, S
 use khora_hir::HirError;
 use khora_syntax::ast::{self};
 use text_size::TextRange;
+use unify::{Mismatch, Unifier};
 use usefulness::{ColumnType, Ctor, FieldType, Pattern};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,9 +27,14 @@ pub enum Type {
     Bool,
     Str,
     Unit,
-    /// A user-declared variant type, by name.
-    Adt(String),
+    /// A user-declared variant type, with its type arguments.
+    Adt { name: String, args: Vec<Type> },
     Fn { params: Vec<Type>, ret: Box<Type> },
+    /// A hole inference is free to fill.
+    Var(unify::TypeVar),
+    /// A type parameter the *caller* chose. Rigid: the body of a generic
+    /// function cannot decide what it is. See `unify`.
+    Param(String),
     /// The type of `return`, `break` and a diverging branch. Compatible with
     /// everything, because control never reaches the consumer.
     Never,
@@ -32,7 +42,7 @@ pub enum Type {
     /// usually downstream of an error already reported. Compatible with
     /// everything, so one mistake does not cascade.
     Unknown,
-    // Phase 3 adds Var(u32) and Const(i64); phase 4 adds Row(..).
+    // Phase 4 adds Row(..); const generics add Const(i64).
 }
 
 impl std::fmt::Display for Type {
@@ -42,7 +52,13 @@ impl std::fmt::Display for Type {
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "()"),
-            Type::Adt(name) => write!(f, "{name}"),
+            Type::Adt { name, args } if args.is_empty() => write!(f, "{name}"),
+            Type::Adt { name, args } => {
+                let inner: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{name}<{}>", inner.join(", "))
+            }
+            Type::Param(name) => write!(f, "{name}"),
+            Type::Var(v) => write!(f, "?{v}"),
             Type::Never => write!(f, "Never"),
             Type::Unknown => write!(f, "?"),
             Type::Fn { params, ret } => {
@@ -54,17 +70,9 @@ impl std::fmt::Display for Type {
 }
 
 impl Type {
-    /// Whether a value of `self` is acceptable where `expected` is wanted.
-    ///
-    /// `Unknown` and `Never` are compatible with anything, for opposite
-    /// reasons: the first because we already failed and do not want to fail
-    /// twice, the second because control does not arrive.
-    fn compatible_with(&self, expected: &Type) -> bool {
-        match (self, expected) {
-            (Type::Unknown, _) | (_, Type::Unknown) => true,
-            (Type::Never, _) | (_, Type::Never) => true,
-            (a, b) => a == b,
-        }
+    /// A nullary ADT, which is what most of the phase 2 subset used.
+    pub fn adt(name: impl Into<String>) -> Type {
+        Type::Adt { name: name.into(), args: Vec::new() }
     }
 }
 
@@ -162,7 +170,7 @@ fn type_of_syntax(ty: Option<&ast::Type>) -> Type {
                 "Bool" => Type::Bool,
                 "String" => Type::Str,
                 "" => Type::Unknown,
-                other => Type::Adt(other.to_string()),
+                other => Type::adt(other),
             }
         }
         _ => Type::Unknown,
@@ -220,6 +228,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             signature: &signature,
             locals: HashMap::new(),
             exprs: HashMap::new(),
+            unifier: Unifier::new(),
             errors: Vec::new(),
         };
         checker.check_function();
@@ -251,6 +260,7 @@ struct Checker<'a> {
     signature: &'a Signature,
     locals: HashMap<LocalId, Type>,
     exprs: HashMap<ExprId, Type>,
+    unifier: Unifier,
     errors: Vec<HirError>,
 }
 
@@ -268,11 +278,17 @@ impl<'a> Checker<'a> {
         let Some(root) = self.body.root else { return };
         let actual = self.infer(root);
         let expected = self.signature.ret.clone();
-        if !actual.compatible_with(&expected) {
-            self.error(
-                format!("this function returns `{expected}`, but its body has type `{actual}`"),
-                self.body.range(root),
-            );
+        if let Err(why) = self.unifier.unify(&expected, &actual) {
+            let range = self.body.range(root);
+            // The plain mismatch would read "expected `Int`, found `Bool`",
+            // which repeats what the sentence already said.
+            let message = match why {
+                Mismatch::Types { .. } => format!(
+                    "this function returns `{expected}`, but its body has type `{actual}`"
+                ),
+                other => format!("this function returns `{expected}`, but its body {other}"),
+            };
+            self.error(message, range);
         }
     }
 
@@ -301,15 +317,26 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Infers `id` and requires it to fit `expected`.
     fn expect(&mut self, id: ExprId, expected: &Type, context: &str) -> Type {
         let actual = self.infer(id);
-        if !actual.compatible_with(expected) {
-            self.error(
-                format!("{context} expects `{expected}`, found `{actual}`"),
-                self.body.range(id),
-            );
-        }
+        let range = self.body.range(id);
+        self.require(expected, &actual, context, range);
         actual
+    }
+
+    /// Requires two types to be equal, reporting `context` if they are not.
+    ///
+    /// `context` is a noun phrase: the mismatch supplies the detail after it,
+    /// so the two read as one sentence.
+    fn require(&mut self, expected: &Type, found: &Type, context: &str, range: TextRange) -> bool {
+        match self.unifier.unify(expected, found) {
+            Ok(()) => true,
+            Err(why) => {
+                self.error(format!("{context}: {why}"), range);
+                false
+            }
+        }
     }
 
     fn infer(&mut self, id: ExprId) -> Type {
@@ -376,13 +403,7 @@ impl<'a> Checker<'a> {
                 match else_branch {
                     Some(else_id) => {
                         let else_ty = self.infer(else_id);
-                        if !then_ty.compatible_with(&else_ty) {
-                            self.error(
-                                format!(
-                                    "`if` branches disagree: one is `{then_ty}`, the other `{else_ty}`"
-                                ),
-                                range,
-                            );
+                        if !self.require(&then_ty, &else_ty, "`if` branches disagree", range) {
                             return Type::Unknown;
                         }
                         if matches!(then_ty, Type::Never) { else_ty } else { then_ty }
@@ -390,15 +411,12 @@ impl<'a> Checker<'a> {
                     // Without an `else`, the branch is only well typed if it
                     // produces nothing — the same rule `match` follows.
                     None => {
-                        if !then_ty.compatible_with(&Type::Unit) {
-                            self.error(
-                                format!(
-                                    "an `if` without `else` must produce `()`, but this branch \
-                                     has type `{then_ty}`"
-                                ),
-                                range,
-                            );
-                        }
+                        self.require(
+                            &Type::Unit,
+                            &then_ty,
+                            "an `if` without `else` must produce `()`",
+                            range,
+                        );
                         Type::Unit
                     }
                 }
@@ -428,7 +446,7 @@ impl<'a> Checker<'a> {
                         self.expect(v, &expected, "this `return`");
                     }
                     None => {
-                        if !Type::Unit.compatible_with(&expected) {
+                        if self.unifier.unify(&expected, &Type::Unit).is_err() {
                             self.error(
                                 format!("this function returns `{expected}`, so `return` needs a value"),
                                 range,
@@ -464,12 +482,8 @@ impl<'a> Checker<'a> {
                     self.expect(rhs, &Type::Str, "string concatenation");
                     return Type::Str;
                 }
-                if !left.compatible_with(&Type::Int) {
-                    self.error(
-                        format!("arithmetic expects `Int`, found `{left}`"),
-                        self.body.range(lhs),
-                    );
-                }
+                let lhs_range = self.body.range(lhs);
+                self.require(&Type::Int, &left, "arithmetic", lhs_range);
                 self.expect(rhs, &Type::Int, "arithmetic");
                 Type::Int
             }
@@ -505,7 +519,7 @@ impl<'a> Checker<'a> {
                     for (arg, expected) in args.iter().zip(&variant.fields) {
                         self.expect(*arg, expected, "this argument");
                     }
-                    return Type::Adt(variant.type_name);
+                    return Type::adt(variant.type_name);
                 }
             }
         }
@@ -542,8 +556,8 @@ impl<'a> Checker<'a> {
                 match self.types.variant(name) {
                     // A nullary constructor is a value; one with a payload is
                     // reached through a call, handled in `infer_call`.
-                    Some(v) if v.fields.is_empty() => Type::Adt(type_name.clone()),
-                    Some(_) => Type::Adt(type_name.clone()),
+                    Some(v) if v.fields.is_empty() => Type::adt(type_name.clone()),
+                    Some(_) => Type::adt(type_name.clone()),
                     None => Type::Unknown,
                 }
             }
@@ -566,19 +580,17 @@ impl<'a> Checker<'a> {
                 self.expect(guard, &Type::Bool, "a match guard");
             }
             let arm_ty = self.infer(arm.body);
-            match &result {
+            match result.clone() {
                 None => result = Some(arm_ty),
-                Some(expected) if arm_ty.compatible_with(expected) => {
-                    if matches!(expected, Type::Never) {
-                        result = Some(arm_ty);
-                    }
-                }
                 Some(expected) => {
-                    self.error(
-                        format!("match arms disagree: expected `{expected}`, found `{arm_ty}`"),
-                        self.body.range(arm.body),
-                    );
-                    result = Some(Type::Unknown);
+                    let range = self.body.range(arm.body);
+                    if self.require(&expected, &arm_ty, "match arms disagree", range) {
+                        if matches!(expected, Type::Never) {
+                            result = Some(arm_ty);
+                        }
+                    } else {
+                        result = Some(Type::Unknown);
+                    }
                 }
             }
         }
@@ -613,7 +625,7 @@ impl<'a> Checker<'a> {
         let types = self.types;
         let resolve = move |name: &str| -> ColumnType {
             let ty =
-                if name == BOOL_TYPE { Type::Bool } else { Type::Adt(name.to_string()) };
+                if name == BOOL_TYPE { Type::Bool } else { Type::adt(name) };
             column_type(types, &ty)
         };
 
@@ -677,7 +689,7 @@ fn ctor_for(_types: &TypeMap, variant: &VariantInfo) -> Ctor {
 
 fn field_type(ty: &Type) -> FieldType {
     match ty {
-        Type::Adt(name) => FieldType::Named(name.clone()),
+        Type::Adt { name, .. } => FieldType::Named(name.clone()),
         Type::Bool => FieldType::Named(BOOL_TYPE.to_string()),
         Type::Int | Type::Str => FieldType::Unbounded,
         _ => FieldType::Opaque,
@@ -688,7 +700,7 @@ fn column_type(types: &TypeMap, ty: &Type) -> ColumnType {
     match ty {
         Type::Bool => ColumnType::Finite(vec![Ctor::Bool(true), Ctor::Bool(false)]),
         Type::Int | Type::Str => ColumnType::Unbounded,
-        Type::Adt(name) => {
+        Type::Adt { name, .. } => {
             let variants = types.variants_of(name);
             if variants.is_empty() {
                 ColumnType::Unknown

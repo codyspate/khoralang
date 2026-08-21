@@ -729,7 +729,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("narrowing a Bool field")
                     .into()
             }
-            Type::Str | Type::Adt(_) => self
+            Type::Str | Type::Adt { .. } => self
                 .be
                 .builder
                 .build_load(self.be.ctx.ptr_type(AddressSpace::default()), slot, "field")
@@ -1329,7 +1329,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// A tag per arm, or `None` for an arm that matches anything, when the
     /// whole `match` can dispatch through one `switch`.
     fn switch_plan(&self, arms: &[MatchArm], scrutinee_ty: &Type) -> Option<Vec<Option<u32>>> {
-        if !matches!(scrutinee_ty, Type::Adt(_)) {
+        if !matches!(scrutinee_ty, Type::Adt { .. }) {
             return None;
         }
 

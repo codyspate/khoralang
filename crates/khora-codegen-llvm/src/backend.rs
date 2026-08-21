@@ -242,7 +242,12 @@ impl<'ctx> Backend<'ctx> {
         match ty {
             Type::Int | Type::Unit => Some(self.ctx.i64_type().into()),
             Type::Bool => Some(self.ctx.bool_type().into()),
-            Type::Str | Type::Adt(_) => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
+            Type::Str | Type::Adt { .. } => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
+            // A variable or a rigid parameter reaching code generation means
+            // inference left something unsolved, or a generic function was not
+            // monomorphised. Both are compiler bugs rather than user errors, so
+            // there is no representation to pick here.
+            Type::Var(_) | Type::Param(_) => None,
             Type::Fn { .. } | Type::Never | Type::Unknown => None,
         }
     }
@@ -395,7 +400,7 @@ impl<'ctx> Backend<'ctx> {
     /// The runtime treats null as "nothing to release", so a drop site never
     /// needs to know which case it is in.
     pub fn drop_glue(&mut self, ty: &Type) -> PointerValue<'ctx> {
-        let Type::Adt(name) = ty else { return self.null_pointer() };
+        let Type::Adt { name, .. } = ty else { return self.null_pointer() };
 
         if let Some(cached) = self.drop_glue.get(name) {
             return match cached {

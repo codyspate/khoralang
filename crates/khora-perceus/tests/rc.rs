@@ -35,7 +35,7 @@ fn machine_words_are_not_counted() {
 #[test]
 fn strings_and_adts_are_counted() {
     assert!(is_boxed(&Type::Str));
-    assert!(is_boxed(&Type::Adt("R".into())));
+    assert!(is_boxed(&Type::adt("R")));
 }
 
 #[test]

@@ -40,7 +40,7 @@ fn a_body_disagreeing_with_the_return_type_is_reported() {
 
 #[test]
 fn arithmetic_requires_ints() {
-    assert_reports("module m;\nfn f(b: Bool) -> Int { b + 1 }\n", "arithmetic expects `Int`");
+    assert_reports("module m;\nfn f(b: Bool) -> Int { b + 1 }\n", "arithmetic: expected `Int`, found `Bool`");
 }
 
 /// The reference program concatenates strings with `+`, so it is overloaded.
@@ -49,7 +49,7 @@ fn plus_concatenates_strings() {
     assert_clean("module m;\nfn f(a: String, b: String) -> String { a + b }\n");
     assert_reports(
         "module m;\nfn f(a: String) -> String { a + 1 }\n",
-        "string concatenation expects `String`",
+        "string concatenation: expected `String`, found `Int`",
     );
 }
 

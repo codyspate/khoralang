@@ -78,7 +78,7 @@ impl RcPlan {
 /// `Unknown` counts as unboxed: it only appears downstream of an error, and a
 /// spurious `drop` on a machine word would be a wild free.
 pub fn is_boxed(ty: &Type) -> bool {
-    matches!(ty, Type::Str | Type::Adt(_))
+    matches!(ty, Type::Str | Type::Adt { .. })
 }
 
 /// Plans reference counting for every function body in a file.
@@ -261,7 +261,7 @@ impl<'a> Planner<'a> {
             Expr::Local(local) => self.local_types.get(local).cloned().unwrap_or(Type::Unknown),
             Expr::Call { callee, .. } => match self.body.expr(*callee) {
                 Expr::Path(khora_hir::Resolution::Variant { type_name, .. }) => {
-                    Type::Adt(type_name.clone())
+                    Type::adt(type_name.clone())
                 }
                 Expr::Path(khora_hir::Resolution::Item { name, .. }) => self
                     .types
@@ -272,7 +272,7 @@ impl<'a> Planner<'a> {
                 _ => Type::Unknown,
             },
             Expr::Path(khora_hir::Resolution::Variant { type_name, .. }) => {
-                Type::Adt(type_name.clone())
+                Type::adt(type_name.clone())
             }
             _ => Type::Unknown,
         }
