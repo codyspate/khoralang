@@ -97,27 +97,25 @@ fn document(text: &str) -> Result<Node, ManifestError> {
 
 fn walk(node: &Node, schema: &Schema, path: &mut String, text: &str, out: &mut Vec<Warning>) {
     let Node::Table(entries) = node else { return };
-    let fields = match schema {
-        Schema::Open => return,
-        Schema::Map(values) => {
-            for entry in entries {
-                let restore = path.len();
-                push_key(path, &entry.key);
-                walk(&entry.value, values, path, text, out);
-                path.truncate(restore);
-            }
-            return;
-        }
-        Schema::Fields(fields) => fields,
-    };
 
     for entry in entries {
+        let below = match schema {
+            // Whatever keys sit below belong to something other than the
+            // manifest schema, so there is nothing here to check them against.
+            Schema::Open => return,
+            Schema::Map(values) => Some(*values),
+            Schema::Fields(fields) => {
+                fields.iter().find(|(name, _)| *name == entry.key).map(|(_, values)| *values)
+            }
+        };
+
         let restore = path.len();
         push_key(path, &entry.key);
-        match fields.iter().find(|(name, _)| *name == entry.key) {
-            Some((_, values)) => walk(&entry.value, values, path, text, out),
-            // Reported once, at the table itself: warning about every key nested
-            // under an unknown table would bury the one line worth reading.
+        match below {
+            Some(values) => walk(&entry.value, values, path, text, out),
+            // Reported at the unknown key itself and not descended into: a
+            // warning per key underneath an unknown table would bury the one
+            // line worth reading.
             None => out.push(Warning::unknown_key(path.clone(), entry.span.clone(), text)),
         }
         path.truncate(restore);
