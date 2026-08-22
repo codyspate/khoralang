@@ -59,11 +59,20 @@ before the phase that depends on it starts.
 | --- | --- | --- |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
 | D8 | **The Rust interop boundary.** How Rust's ownership and traits map onto Khora's reference counting and rows; whether we bind at the C ABI or generate richer shims. | 7 |
-| D10 | **Non-atomic reference counts versus threads.** `khora-rt` counts non-atomically; A5 promises fibers running across cores. Not a blocker — code generation never touches a refcount directly, so atomicity is a change inside the runtime. The recommendation is atomic by default with non-atomic where an object provably does not escape its fiber, and no `Rc`/`Arc` split. `docs/design/effect-runtime.md` §9. | 5 |
 | D11 | **What happens to reference cycles.** None can be built today — the heap graph is provably a DAG — and mutable fields end that. A tracing cycle collector is ruled out by non-negotiable 5, which leaves "a cycle leaks, and a weak reference breaks it". Decide alongside records rather than in the abstract. `docs/design/memory.md` §2 and §4. | records |
 | D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Nothing in this roadmap owns this today, which is the failure mode errata entry 20 names. | 8.x |
 **Closed:**
 
+- **D10** (atomic reference counts) is decided in
+  `docs/design/effect-runtime.md` §9: **atomic, with no way to opt out.** The
+  forcing argument is not performance but correctness — a spawned fiber shares
+  at least the closure it was handed, so a non-atomic count is a data race in
+  the first concurrent program anyone writes. And a split is colouring: `Rc`
+  versus `Arc` propagates into every signature that touches one, which is the
+  one thing Khora's rows exist to avoid, and it would be there to save an
+  increment. The cost comes back in phase 6, where an object that provably does
+  not escape its fiber uses the cheap operations, chosen by the compiler and
+  invisible in every type.
 - **D3** (`Schema::Spec`) is decided in `docs/design/associated-items.md`. Two
   rules. A projection's owner must be *bounded* by a trait declaring the
   associated type — without a bound there is no impl to look it up in, and

@@ -108,44 +108,29 @@ will need the diagnostic to be good.
 Not decided here, because it should be decided alongside records and mutable
 fields rather than in the abstract. Logged as **D11**.
 
-## 5. Reference counts are non-atomic — and that is a commitment
+## 5. Reference counts are atomic
 
-`khora-rt` increments and decrements `KhoraHeader.refcount` with ordinary
-non-atomic loads and stores, documented there as deliberate: *"Perceus's
-ownership discipline is single-threaded."* Only the allocation statistics use
-atomics, and only because a threaded test harness reads them.
+`khora-rt` increments and decrements `KhoraHeader.refcount` atomically. This
+section used to argue the opposite at length, and to log the question as
+**D10**; both are settled now, and the argument is worth keeping only in
+summary.
 
-That is a reasonable choice — atomic refcount traffic on every `dup` and `drop`
-is one of the largest costs in a reference-counted runtime, and non-negotiable 5
-says the abstractions must be cheap enough that nobody picks Go or Rust over
-Khora for performance.
+The section claimed non-atomic counts *constrain code being written now*, on
+the grounds that every `dup` and `drop` already emitted assumes the
+single-threaded answer. That was wrong. Code generation never touches a
+refcount directly — every `dup` and `drop` is a call into `khora-rt` — so
+atomicity was a change inside the runtime, invisible to everything already
+emitted, and it was made in phase 5 in about thirty lines.
 
-**It also contradicts a commitment already made.** A5 promises structured
-concurrency with fibers, and phase 5's exit criterion says `khora test` runs
-isolated fibers *across cores*. A value that is reference counted non-atomically
-cannot be shared across threads. Both statements are in the repository and they
-cannot both be true.
+What settled it was not performance. A5 promises fibers running across cores,
+and a spawned fiber shares at least the closure it was handed, so a non-atomic
+count is a data race in the first concurrent program anyone writes. And the
+`Rc`-versus-`Arc` escape hatch is *colouring* — the thing Khora's rows exist to
+avoid — paid in every library signature to save an increment.
 
-The resolution is not obvious and is not made here. The options, honestly:
-
-- **Non-atomic counts plus a sharing discipline.** Values do not cross threads
-  unless they are provably unshared — a `Send`-like restriction, which needs
-  type-system support and a story for what fibers may capture.
-- **Atomic counts.** Correct, simple, and pays on every operation everywhere,
-  including in the overwhelming majority of code that never touches a thread.
-- **Both, chosen per type or per allocation.** What Rust does with `Rc` versus
-  `Arc`. Two types where users expected one, and every library must choose.
-
-Logged as **D10**. It was recorded here as constraining code being written now,
-on the grounds that every `dup` and `drop` already emitted assumes the
-single-threaded answer. That was wrong, and `docs/design/effect-runtime.md` §9
-corrects it: code generation never touches a refcount directly — every `dup`
-and `drop` is a call into `khora-rt` — so atomicity is a change inside the
-runtime, invisible to everything already emitted.
-
-The recommendation there is atomic counts once fibers can share values, with
-non-atomic where an object provably does not escape its fiber, and no `Rc`
-versus `Arc` split for users to make.
+`docs/design/effect-runtime.md` §9 has the decision in full, including where
+the cost comes back: phase 6, as an optimization for objects that provably do
+not escape their fiber, chosen by the compiler and invisible in every type.
 
 ## 6. Closures and handlers — open
 

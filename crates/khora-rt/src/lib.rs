@@ -98,11 +98,15 @@
 //!
 //! # Threads
 //!
-//! Refcounts are non-atomic. Perceus's ownership discipline is single-threaded
-//! by construction, atomic RC is a large tax on the hot path, and phase 2 has
-//! no concurrency at all. The *allocation counters* are atomic, because they
-//! are process-global statistics that a threaded test harness may touch from
-//! several threads at once.
+//! Refcounts are **atomic**, which is decision D10. A5 promises fibers running
+//! across cores, and a spawned fiber shares at least the closure it was handed,
+//! so a non-atomic count would be a data race in the first program anyone
+//! writes. Correct by default; see `docs/design/effect-runtime.md` §9 for why
+//! there is no `Rc`/`Arc` split to opt out with, and phase 6 for the escape
+//! analysis that makes a non-escaping object cheap again.
+//!
+//! The header layout is unchanged: an `AtomicUsize` has the size and alignment
+//! of a `usize`, so the contract with the code generator is untouched.
 
 #![deny(missing_docs, unsafe_op_in_unsafe_fn)]
 
@@ -119,7 +123,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[derive(Debug)]
 pub struct KhoraHeader {
     /// Number of live references. An object is freed when this reaches zero.
-    pub refcount: usize,
+    ///
+    /// Atomic, and the same width a plain `usize` would be — see the module
+    /// documentation. Generated code never touches it; every change goes
+    /// through [`khora_dup`] and [`khora_drop`], which is what made D10 a
+    /// runtime question rather than a language one.
+    pub refcount: AtomicUsize,
     /// Which variant of its ADT the object is. Opaque to the runtime.
     pub tag: u32,
     /// Bytes of fields following the header — the `size` passed to
@@ -264,7 +273,8 @@ pub extern "C" fn khora_alloc(size: usize, tag: u32) -> *mut u8 {
     // writing one `KhoraHeader`. Nothing else refers to it yet, so the write
     // cannot race and cannot clobber an initialized field.
     unsafe {
-        ptr.cast::<KhoraHeader>().write(KhoraHeader { refcount: 1, tag, field_bytes });
+        ptr.cast::<KhoraHeader>()
+            .write(KhoraHeader { refcount: AtomicUsize::new(1), tag, field_bytes });
     }
 
     ALLOC_COUNT.fetch_add(1, COUNTER_ORDER);
@@ -285,11 +295,14 @@ pub unsafe extern "C" fn khora_dup(ptr: *mut u8) {
         return;
     }
     // SAFETY: by the contract above `ptr` points at a live object, so its
-    // header is initialized and uniquely reachable by this thread (refcounts
-    // are non-atomic, see the module documentation).
+    // header is initialized.
     unsafe {
         let header = ptr.cast::<KhoraHeader>();
-        (*header).refcount += 1;
+        // Relaxed is enough: the caller already owns a reference, so the
+        // object cannot be freed underneath this, and nothing is being
+        // published. Ordering is only needed on the *last* release, where
+        // `khora_drop` establishes it.
+        (*header).refcount.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -329,22 +342,29 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     }
     let header = ptr.cast::<KhoraHeader>();
 
+    // Release, so that everything this thread did to the object happens
+    // before whichever thread performs the final decrement sees the count
+    // reach zero. The standard reference-counting pair; the matching acquire
+    // is the fence below.
+    //
     // SAFETY: `ptr` points at a live object per the contract above, so its
     // header is initialized and valid to read and write.
-    let refcount = unsafe { (*header).refcount };
+    let refcount = unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) };
     if refcount == 0 {
         fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
     }
     if refcount > 1 {
-        // SAFETY: as above; we still hold a reference, so the object outlives
-        // this write.
-        unsafe { (*header).refcount = refcount - 1 };
         return;
     }
 
-    // Last reference. Read the layout out of the header *before* running the
-    // callback, so a callback that scribbles on the header cannot make the
-    // deallocation use a layout that differs from the allocation's.
+    // Last reference, and this thread is the one that took it to zero. The
+    // acquire pairs with every other thread's release, so their writes are
+    // visible before the fields are read and the memory is freed.
+    std::sync::atomic::fence(Ordering::Acquire);
+
+    // Read the layout out of the header *before* running the callback, so a
+    // callback that scribbles on the header cannot make the deallocation use a
+    // layout that differs from the allocation's.
     //
     // SAFETY: as above; the object is still allocated at this point.
     let layout = object_layout(unsafe { (*header).field_bytes });
@@ -415,7 +435,7 @@ pub unsafe extern "C" fn khora_refcount(ptr: *const u8) -> usize {
     }
     // SAFETY: `ptr` points at a live object per the contract above, so its
     // header is initialized and valid to read.
-    unsafe { (*ptr.cast::<KhoraHeader>()).refcount }
+    unsafe { (*ptr.cast::<KhoraHeader>()).refcount.load(Ordering::Relaxed) }
 }
 
 // ---------------------------------------------------------------------------

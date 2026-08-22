@@ -391,7 +391,10 @@ already been settled by writing code, with no decision recording the choice.**
 - **Reference counts are non-atomic.** `khora-rt` says so deliberately, in a
   module comment. A5 promises fibers across cores. Nothing anywhere reconciled
   the two, and every `dup` and `drop` already emitted assumes the
-  single-threaded reading. Now D10.
+  single-threaded reading. Became D10, and was decided in phase 5: atomic, no
+  opt-out. The "every `dup` and `drop` already emitted assumes it" half of this
+  entry was itself wrong — generated code never touches a refcount — which is
+  why the change took thirty lines rather than a rewrite.
 - **Cycles are impossible, and nobody knew.** ADTs build bottom-up, closures
   capture by value, assignment rebinds rather than mutates, and a `let`
   initializer cannot see itself — so the heap graph is a DAG and Perceus is

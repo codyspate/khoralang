@@ -275,25 +275,58 @@ Keeping them separate in the syntax was right, and this is why: they compile to
 different things. A row that mixed them would have to ask, per label, which one
 it was.
 
-## 9. D10, revisited and downgraded
+## 9. D10 — reference counts are atomic
 
-`docs/design/memory.md` §5 says non-atomic reference counts constrain code being
-written now. Checking the backend, that is not accurate: code generation never
-touches a refcount directly — every `dup` and `drop` is a call to the runtime.
-Atomicity is a change *inside* `khora-rt`, invisible to everything that has been
-emitted so far.
+`docs/design/memory.md` §5 said non-atomic reference counts constrain code being
+written now. That was not accurate: code generation never touches a refcount
+directly — every `dup` and `drop` is a call to the runtime — so atomicity is a
+change *inside* `khora-rt`, invisible to everything already emitted. That is
+what made this a decision that could wait, and it is what made it cheap to make.
 
-D10 is therefore a performance and type-system question, not a blocker, and the
-recommendation is:
+**Decided: atomic, and there is no way to opt out.**
 
-- **Atomic counts once fibers can share values**, because correct-by-default is
-  the right starting point and Swift demonstrates that a whole language can
-  live with it.
-- **Non-atomic where an object provably does not escape its fiber**, as an
-  optimization, not as a user-visible distinction. Khora does not get `Rc`
-  versus `Arc`; that split is one of the things that makes Rust hard, and
-  paying for it in every library signature is worse than paying for an
-  uncontended atomic.
+The forcing argument is smaller than the performance one. A5 promises fibers
+running across cores, and a spawned fiber shares at least the closure it was
+handed — so a non-atomic count is a data race in the first concurrent program
+anyone writes, not an edge case to warn about. Correct by default is the only
+starting point that does not require every user to know this.
+
+`khora_dup` is a relaxed `fetch_add`: the caller already owns a reference, so
+nothing can be freed underneath it and nothing is being published. `khora_drop`
+is a `fetch_sub` with release, and the thread that takes the count to zero
+issues an acquire fence before touching the fields. That is the standard pair,
+and it is the whole of the change.
+
+### Why no `Rc` versus `Arc`
+
+Two reasons, and the second is the one that settles it.
+
+The performance case for a split is real but narrow: an uncontended atomic RMW
+is more expensive than an increment, and code that never leaves one fiber pays
+for a guarantee it does not use. Swift ships atomic counts for a whole language
+and is not thought of as slow, so this is a cost to measure rather than a
+reason to fork the type.
+
+The decisive reason is that a split is **colouring**. `Rc<T>` and `Arc<T>` are
+different types; the choice propagates into every signature that touches one,
+and a library that guessed wrong is a library you cannot use. Khora's whole
+argument is that the things which usually colour a codebase — async, failure,
+dependency injection — belong in a *row* on the signature, where they compose
+and can be abstracted over. Putting thread-sharing in the *representation*
+instead would be the one piece of colouring the language has no vocabulary for,
+and it would be there to save an increment.
+
+### Where the cost comes back
+
+Phase 6. An object that provably does not escape its fiber can use the
+non-atomic operations, chosen by the compiler and invisible in every type. That
+is the same whole-program shape as Perceus reuse analysis, which is what phase
+6 is for, and it is an optimization rather than a promise — a program is
+correct either way.
+
+The cost until then is unmeasured, and saying so is more useful than a number
+made up here. `bench` declarations parse but do not run yet; measuring this is
+work for the phase that has something to compare against.
 
 `memory.md` is corrected to match.
 
