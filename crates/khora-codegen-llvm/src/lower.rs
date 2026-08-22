@@ -849,6 +849,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if let Some(shape) = int_owner(&owner) {
                     return self.int_intrinsic(shape, &owner, &name, args, range);
                 }
+                if owner == "String" && matches!(name.as_str(), "bytes" | "byte" | "byte_length")
+                {
+                    return self.string_intrinsic(&name, args, range);
+                }
                 match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, site, args, range),
                     None => self.fail(
@@ -1236,6 +1240,200 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(good);
     }
 
+    /// `a + b` on two strings.
+    ///
+    /// Generated rather than a runtime call, for the same reason `String::bytes`
+    /// is: the string layout is the code generator's business, and the runtime
+    /// stays a function of the data it is handed. `khora_alloc` and two
+    /// `memcpy`s are the whole of it.
+    ///
+    /// Both operands are released afterwards. Neither is reused even when one
+    /// is empty — returning the other would be one fewer allocation and a
+    /// second rule about when the result shares storage, and a string is
+    /// immutable so nothing would notice, but nothing needs it yet either.
+    fn concat(&mut self, left: BasicValueEnum<'ctx>, right: BasicValueEnum<'ctx>) -> Flow<'ctx> {
+        let i64_type = self.be.ctx.i64_type();
+        let (a, b) = (left.into_pointer_value(), right.into_pointer_value());
+        let a_len = self.string_length(a);
+        let b_len = self.string_length(b);
+        let total = self
+            .be
+            .builder
+            .build_int_add(a_len, b_len, "concat.len")
+            .expect("adding two string lengths");
+
+        let size = self
+            .be
+            .builder
+            .build_int_add(total, i64_type.const_int(runtime::FIELD_WORD, false), "concat.size")
+            .expect("sizing the result");
+        let object = self
+            .be
+            .builder
+            .build_call(
+                self.be.rt.alloc,
+                &[size.into(), self.be.ctx.i32_type().const_int(STRING_TAG, false).into()],
+                "concat",
+            )
+            .expect("allocating a string")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_alloc returns a pointer")
+            .into_pointer_value();
+
+        let length_slot =
+            runtime::field_pointer(self.be.ctx, &self.be.builder, object, STRING_LEN_FIELD);
+        self.be
+            .builder
+            .build_store(length_slot, total)
+            .expect("storing the result's length");
+
+        let out = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            STRING_BYTES_OFFSET,
+            "concat.bytes",
+        );
+        for (source, len, offset) in [(a, a_len, None), (b, b_len, Some(a_len))] {
+            let from = runtime::byte_offset(
+                self.be.ctx,
+                &self.be.builder,
+                source,
+                STRING_BYTES_OFFSET,
+                "part.bytes",
+            );
+            let to = match offset {
+                None => out,
+                Some(at) => unsafe {
+                    self.be
+                        .builder
+                        .build_in_bounds_gep(self.be.ctx.i8_type(), out, &[at], "concat.second")
+                        .expect("addressing the second half")
+                },
+            };
+            // Alignment 1: the bytes follow a length word so they are in fact
+            // word-aligned, but the *second* copy starts wherever the first one
+            // ended, which is any offset at all.
+            self.be
+                .builder
+                .build_memcpy(to, 1, from, 1, len)
+                .expect("copying a string");
+        }
+
+        self.drop(left, &Type::Str);
+        self.drop(right, &Type::Str);
+        Some(object.into())
+    }
+
+    /// `String::byte_length`, `String::byte` and `String::bytes`.
+    ///
+    /// **A string's length is in bytes, and its index is a byte index.** Named
+    /// so, because a `String` is UTF-8 and a character is one to four of these
+    /// — a `length` that quietly meant one of the two would be wrong for half
+    /// its callers and silent about which half. Anything that wants characters
+    /// wants a decoder, and that is a library on top of this rather than a
+    /// different meaning for the same word.
+    ///
+    /// `bytes` copies. A string is immutable and an array is not, so handing
+    /// out a view would let one be edited through the other; and the two have
+    /// different headers besides.
+    ///
+    /// There is deliberately no `from_bytes` yet. Going the other way has to
+    /// answer what happens to bytes that are not UTF-8, and the honest answer
+    /// is a `Result` rather than a trap — bytes off a socket are data, not a
+    /// programmer's mistake. That wants the error channel wired into an
+    /// intrinsic, which is phase 7's problem and not a decision to make in
+    /// passing.
+    fn string_intrinsic(&mut self, name: &str, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+        let [subject, rest @ ..] = args else {
+            return self.fail(format!("`String::{name}` takes a string"), range);
+        };
+        let object = self.expr(*subject)?.into_pointer_value();
+        let length = self.string_length(object);
+        let bytes = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::STRING_BYTES_OFFSET,
+            "str.bytes",
+        );
+
+        let result = match (name, rest) {
+            ("byte_length", []) => length.into(),
+            ("byte", [index]) => {
+                let at = self.expr(*index)?.into_int_value();
+                self.check_index(at, length);
+                // Recomputed after the check, because the check split the block
+                // and the pointer above belongs to the one before it.
+                let bytes = runtime::byte_offset(
+                    self.be.ctx,
+                    &self.be.builder,
+                    object,
+                    runtime::STRING_BYTES_OFFSET,
+                    "str.bytes",
+                );
+                let slot = unsafe {
+                    self.be
+                        .builder
+                        .build_in_bounds_gep(self.be.ctx.i8_type(), bytes, &[at], "byte.ptr")
+                        .expect("addressing a byte")
+                };
+                self.be
+                    .builder
+                    .build_load(self.be.ctx.i8_type(), slot, "byte")
+                    .expect("reading a byte")
+            }
+            ("bytes", []) => {
+                let i8_type = self.be.ctx.i8_type();
+                let array = self
+                    .be
+                    .builder
+                    .build_call(
+                        self.be.rt.array_new,
+                        &[
+                            length.into(),
+                            self.be.ctx.i64_type().const_zero().into(),
+                            i8_type.const_int(1, false).into(),
+                            i8_type.const_zero().into(),
+                            self.be.null_pointer().into(),
+                        ],
+                        "str.array",
+                    )
+                    .expect("allocating a byte array")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("an array is a value")
+                    .into_pointer_value();
+                let elements = runtime::byte_offset(
+                    self.be.ctx,
+                    &self.be.builder,
+                    array,
+                    runtime::FIELD_OFFSET + runtime::ARRAY_HEADER_FIELDS * runtime::FIELD_WORD,
+                    "array.elements",
+                );
+                // Alignment 1 on both sides: the destination is word-aligned and
+                // the source usually is, but neither is *guaranteed* to be by
+                // anything written down, and claiming an alignment the data does
+                // not have is undefined behaviour rather than a slow copy.
+                self.be
+                    .builder
+                    .build_memcpy(elements, 1, bytes, 1, length)
+                    .expect("copying a string's bytes");
+                array.into()
+            }
+            _ => {
+                return self.fail(
+                    format!("`String::{name}` is not a string operation the backend knows"),
+                    range,
+                )
+            }
+        };
+
+        self.drop(object.into(), &Type::Str);
+        Some(result)
+    }
+
     /// The element type of the `Array<A>` this call is about.
     ///
     /// Read from the expression's own type rather than from the receiver,
@@ -1274,24 +1472,13 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
-    fn array_slot(
-        &mut self,
-        array: inkwell::values::PointerValue<'ctx>,
-        index: inkwell::values::IntValue<'ctx>,
-        stride: u64,
-    ) -> PointerValue<'ctx> {
-        let i64_type = self.be.ctx.i64_type();
-        let length_slot =
-            runtime::field_pointer(self.be.ctx, &self.be.builder, array, runtime::ARRAY_LEN_FIELD);
-        let length = self
-            .be
-            .builder
-            .build_load(i64_type, length_slot, "array.len")
-            .expect("reading an array's length")
-            .into_int_value();
-
-        // Unsigned, so a negative index is one enormous one and both ends are
-        // the same comparison.
+    /// Continues only if `index` is below `length`; otherwise stops the
+    /// program, saying which index and what length.
+    ///
+    /// Unsigned, so a negative index is one enormous one and both ends are the
+    /// same comparison. A trap rather than a wrapped index or a poisoned read,
+    /// for the same reason integer overflow traps.
+    fn check_index(&mut self, index: IntValue<'ctx>, length: IntValue<'ctx>) {
         let in_range = self
             .be
             .builder
@@ -1313,6 +1500,39 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.be.builder.build_unreachable().expect("sealing after a bounds failure");
 
         self.at(ok);
+    }
+
+    /// The length word of a string object.
+    fn string_length(&mut self, object: PointerValue<'ctx>) -> IntValue<'ctx> {
+        let slot = runtime::field_pointer(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::STRING_LEN_FIELD,
+        );
+        self.be
+            .builder
+            .build_load(self.be.ctx.i64_type(), slot, "str.len")
+            .expect("reading a string length")
+            .into_int_value()
+    }
+
+    fn array_slot(
+        &mut self,
+        array: inkwell::values::PointerValue<'ctx>,
+        index: inkwell::values::IntValue<'ctx>,
+        stride: u64,
+    ) -> PointerValue<'ctx> {
+        let i64_type = self.be.ctx.i64_type();
+        let length_slot =
+            runtime::field_pointer(self.be.ctx, &self.be.builder, array, runtime::ARRAY_LEN_FIELD);
+        let length = self
+            .be
+            .builder
+            .build_load(i64_type, length_slot, "array.len")
+            .expect("reading an array's length")
+            .into_int_value();
+        self.check_index(index, length);
         // The header is counted in whole words and the elements in strides, so
         // the two are added as bytes rather than as indices.
         runtime::element_pointer(
@@ -2595,15 +2815,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         let right = self.expr(rhs)?;
 
         match op {
-            BinOp::Add if matches!(operand_ty, Type::Str) => {
-                self.drop(left, &Type::Str);
-                self.drop(right, &Type::Str);
-                self.fail(
-                    "string concatenation needs a runtime routine that does not exist yet; \
-                     `khora-rt` has no allocator-side `concat`",
-                    range,
-                )
-            }
+            BinOp::Add if matches!(operand_ty, Type::Str) => self.concat(left, right),
             // IEEE arithmetic does not overflow — it reaches infinity — so
             // there is nothing to trap on and nothing to check.
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div

@@ -632,16 +632,20 @@ fn main() -> Int { true }
 /// panic and not a wrong program.
 #[test]
 fn an_unsupported_construct_is_reported() {
+    // A `raises` clause on a *foreign* declaration: the checker takes the
+    // promise on trust, and the backend has nothing to generate for a body
+    // that does not exist. Phase 7.2 is where this becomes a real thing.
     let found = errors(
         "unsupported",
         "module t;
-fn join(a: String, b: String) -> String { a + b }
-fn main() -> Int { 0 }
+export type Bag<A> = | Full(value: A) | Empty;
+fn peek<A>(bag: Bag<A>) -> A;
+fn main() -> Int { peek(Bag::Full(1)) }
 ",
     );
     assert!(
-        found.iter().any(|m| m.contains("concatenation")),
-        "expected a message about string concatenation, got {found:?}"
+        found.iter().any(|m| m.contains("was not resolved") || m.contains("cannot represent")),
+        "expected a message about a declaration with no body, got {found:?}"
     );
 }
 

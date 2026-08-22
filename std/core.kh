@@ -35,6 +35,24 @@ export trait Ord: Eq {
   fn cmp(self, other: Self) -> Ordering;
 }
 
+/// A value that can be a key.
+///
+/// Requires `Eq` rather than repeating it, because the two have to agree: a
+/// map finds a key by hashing it to a bucket and then comparing, so **equal
+/// values must hash equal**. Unequal values may collide — that is what the
+/// bucket's chain is for — but two values that `eq` says are the same and
+/// `hash` sends to different buckets are an entry that can be inserted and
+/// never found.
+///
+/// `Float` is deliberately not an instance, because it is not an instance of
+/// `Eq`: `NaN == NaN` is false, and a key that is not equal to itself is a
+/// lost entry in every language that allows one. `docs/design/numbers.md`.
+export trait Hash: Eq {
+  /// A number to bucket by. Any number: spreading it out is the map's job, not
+  /// this one's, so an implementation only has to be *consistent*.
+  fn hash(self) -> Int;
+}
+
 export trait Show {
   fn show(self) -> String;
 }
@@ -50,12 +68,46 @@ impl Ord for Int {
   }
 }
 
+/// An `Int` is its own hash. `Map::slot` does the mixing, so there is nothing
+/// for this to add.
+impl Hash for Int {
+  fn hash(self) -> Int { self }
+}
+
 impl Eq for Bool {
   fn eq(self, other: Bool) -> Bool { self == other }
 }
 
 impl Eq for String {
   fn eq(self, other: String) -> Bool { self == other }
+}
+
+impl Hash for Bool {
+  fn hash(self) -> Int { if self { 1 } else { 0 } }
+}
+
+/// FNV-1a over the bytes, which is one multiply and one xor each and is what a
+/// string hash is supposed to look like. Wrapping on purpose: the overflow is
+/// where the mixing comes from.
+impl Hash for String {
+  fn hash(self) -> Int {
+    U32::to_int(String::fold(self, 0, U32::of(2166136261)))
+  }
+}
+
+impl String {
+  /// The hash of the bytes from `index` on, given what came before.
+  ///
+  /// Written as a fold rather than a loop because a `while` would need a `mut`
+  /// binding and this needs neither.
+  fn fold(self, index: Int, seed: U32) -> U32 {
+    if index >= String::byte_length(self) {
+      seed
+    } else {
+      let mixed = U32::xor(seed, U32::of(U8::to_int(String::byte(self, index))));
+      String::fold(self, index + 1, U32::wrapping_mul(mixed, 16777619))
+    }
+  }
 }
 
 impl Eq for Ordering {
@@ -446,6 +498,29 @@ impl Int {
   fn shr(self, other: Int) -> Int;
 }
 
+/// A string's bytes.
+///
+/// **Length and index are both in bytes**, and say so in their names. A
+/// `String` is UTF-8, so a character is one to four of these, and a `length`
+/// that quietly meant one of the two would be wrong for half its callers and
+/// silent about which half. Anything that wants characters wants a decoder,
+/// which is a library on top of this rather than a different meaning for the
+/// same word.
+impl String {
+  /// How many bytes the string occupies. Not how many characters it has.
+  fn byte_length(self) -> Int;
+
+  /// The byte at `index`, counting from zero. Out of range stops the program,
+  /// the same as an array.
+  fn byte(self, index: Int) -> U8;
+
+  /// A copy of the bytes.
+  ///
+  /// A copy rather than a view, because a string is immutable and an array is
+  /// not — a view would let one be edited through the other.
+  fn bytes(self) -> Array<U8>;
+}
+
 // --- The fixed-width integers ----------------------------------------------
 //
 // A table, and it reads like one. Seven types, each with the same ten
@@ -682,28 +757,29 @@ impl I32 {
 /// ordinary recursive ADT and needs no tombstones, no sentinel value and no
 /// second array saying which slots are live. It allocates per entry, which is
 /// the price, and it is the shape the language is actually good at.
-export type Chain<V> =
+export type Chain<K, V> =
   | Empty
-  | Node(key: Int, value: V, rest: Chain<V>);
+  | Node(key: K, value: V, rest: Chain<K, V>);
 
-impl<V> Chain<V> {
-  fn find(self, key: Int) -> Option<V> {
+impl<K: Hash, V> Chain<K, V> {
+  fn find(self, key: K) -> Option<V> {
     match self {
       Chain::Empty => Option::None,
-      Chain::Node(k, v, rest) => if k == key { Option::Some(v) } else { Chain::find(rest, key) },
+      Chain::Node(k, v, rest) =>
+      if k.eq(key) { Option::Some(v) } else { Chain::find(rest, key) },
     }
   }
 
   /// The chain with `key` removed, or the same chain if it was not there.
-  fn without(self, key: Int) -> Chain<V> {
+  fn without(self, key: K) -> Chain<K, V> {
     match self {
       Chain::Empty => Chain::Empty,
       Chain::Node(k, v, rest) =>
-      if k == key { rest } else { Chain::Node(k, v, Chain::without(rest, key)) },
+      if k.eq(key) { rest } else { Chain::Node(k, v, Chain::without(rest, key)) },
     }
   }
 
-  fn holds(self, key: Int) -> Bool {
+  fn holds(self, key: K) -> Bool {
     match Chain::find(self, key) {
       Option::Some(v) => true,
       Option::None => false,
@@ -724,28 +800,28 @@ impl<V> Chain<V> {
 /// The bucket count is always a power of two, which is what lets `slot` mask
 /// instead of dividing. `new` starts at eight and `grow` doubles, so nothing
 /// else has to maintain it.
-export type Map<V> = {
-  mut buckets: Array<Chain<V>>,
+export type Map<K, V> = {
+  mut buckets: Array<Chain<K, V>>,
   mut count: Int,
 };
 
-impl<V> Map<V> {
-  fn new() -> Map<V> { { buckets: Array::new(8, Chain::Empty), count: 0 } }
+impl<K: Hash, V> Map<K, V> {
+  fn new() -> Map<K, V> { { buckets: Array::new(8, Chain::Empty), count: 0 } }
 
   fn len(self) -> Int { self.count }
 
-  fn get(self, key: Int) -> Option<V> {
+  fn get(self, key: K) -> Option<V> {
     Chain::find(Array::get(self.buckets, Map::slot(self, key)), key)
   }
 
-  fn holds(self, key: Int) -> Bool {
+  fn holds(self, key: K) -> Bool {
     Chain::holds(Array::get(self.buckets, Map::slot(self, key)), key)
   }
 
   /// Adds `key`, replacing whatever was there. The count only moves when the
   /// key is new, which is what makes it the number of entries rather than the
   /// number of insertions.
-  fn insert(self, key: Int, value: V) -> () {
+  fn insert(self, key: K, value: V) -> () {
     if self.count * 4 >= Array::length(self.buckets) * 3 { Map::grow(self); }
     let at = Map::slot(self, key);
     let bucket = Array::get(self.buckets, at);
@@ -757,7 +833,7 @@ impl<V> Map<V> {
     }
   }
 
-  fn remove(self, key: Int) -> () {
+  fn remove(self, key: K) -> () {
     let at = Map::slot(self, key);
     let bucket = Array::get(self.buckets, at);
     if Chain::holds(bucket, key) {
@@ -771,8 +847,8 @@ impl<V> Map<V> {
   /// Knuth's multiplicative constant, then a shift-xor so that the high bits —
   /// where multiplication puts the information — reach the low ones the mask
   /// keeps. Wrapping on purpose: overflow is where the mixing comes from.
-  fn slot(self, key: Int) -> Int {
-    let mixed = Int::wrapping_mul(key, 2654435761);
+  fn slot(self, key: K) -> Int {
+    let mixed = Int::wrapping_mul(key.hash(), 2654435761);
     let spread = Int::xor(mixed, Int::shr(mixed, 16));
     Int::and(spread, Array::length(self.buckets) - 1)
   }
@@ -788,7 +864,7 @@ impl<V> Map<V> {
     }
   }
 
-  fn rehash(self, chain: Chain<V>) -> () {
+  fn rehash(self, chain: Chain<K, V>) -> () {
     match chain {
       Chain::Empty => (),
       Chain::Node(k, v, rest) => {

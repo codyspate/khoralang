@@ -630,10 +630,17 @@ argument that settled A6.
   operations exist on every fixed-width type — `docs/design/numbers.md` has the
   table and why it reads like one.
 
-  **Still to do:** a string's bytes. The types exist and the array is packed,
-  but nothing turns a `String` into an `Array<U8>` yet, so hashing a string is
-  still out of reach and `Map`'s keys are still `Int`. That is the last piece
-  of this item and the first piece of a real `String`.
+  **A string's bytes**, finally. `String::byte_length`, `String::byte` and
+  `String::bytes` — named for bytes because a `String` is UTF-8 and a `length`
+  that quietly meant characters would be wrong for half its callers and silent
+  about which half. `+` on two strings works now too; it had been declared and
+  unimplemented since phase 2.
+
+  There is deliberately no `String::from_bytes`. Going the other way has to
+  answer what happens to bytes that are not UTF-8, and the honest answer is a
+  `Result` rather than a trap — bytes off a socket are data, not a programmer's
+  mistake. That wants the error channel wired into an intrinsic, which belongs
+  with phase 7 rather than being decided in passing.
 - **6.3 Floats — done.** `Float` is IEEE-754 double precision: `f64` in the
   backend, a decimal literal in the grammar, `+ - * /` and the six comparisons.
   No overflow trap, because IEEE arithmetic reaches infinity rather than
@@ -672,12 +679,24 @@ argument that settled A6.
   An index outside the array stops the program and says which index and what
   length — the same reasoning as trapping on overflow.
 
-**Exit — met** by 6.1 and 6.4, ahead of the other two. `Map<V>` is in
-`std::core`, written in Khora: an array for the buckets, a `mut` field for the
-count, and a recursive ADT for each chain. Sixty inserts followed by sixty
-removals leave the live-object count at zero —
+**Exit — met, and then met properly.** `Map<K, V>` is in `std::core`, written
+in Khora: an array for the buckets, a `mut` field for the count, and a
+recursive ADT for each chain. Sixty inserts followed by sixty removals leave
+the live-object count at zero —
 `a_round_trip_of_inserts_and_removals_leaves_nothing` in
 `crates/khora-codegen-llvm/tests/hashmap.rs`.
+
+Its key is **any type with a `Hash`**, which is what the bytes were for. `Hash`
+is a trait in the standard library requiring `Eq` — equal values must hash
+equal, or an entry can be inserted and never found — and `impl Hash for String`
+folds FNV-1a over the bytes, in Khora. `Float` is not an instance, because it
+is not an instance of `Eq`.
+
+Getting there needed a compiler fix: a bound on an *impl block*'s type
+parameters parsed and then meant nothing, so `impl<K: Hash, V> Map<K, V>` was
+told `K` had no bounds (errata 39). `the_standard_maps_keys_can_be_strings` in
+`tests/modules.rs` runs against the real `std/core.kh`, and includes a key
+built at run time so the lookup cannot be matching on a pointer.
 
 One thing the map is still honest about: its keys are `Int`. There are bytes
 now, and an `Array<U8>` is packed, but nothing turns a `String` into one — so

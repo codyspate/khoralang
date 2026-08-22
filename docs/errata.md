@@ -870,3 +870,26 @@ already done.
 The rule: **when two artifacts have to agree, one build step has to produce
 both.** Until that is true, the check belongs at the start of every consumer,
 not at the start of one of them.
+
+## 39. A bound that parsed and meant nothing
+
+`impl<K: Hash, V> Map<K, V>` was accepted by the grammar, and every method
+inside it was then told that `K` "is a type the caller chooses and **has no
+bounds**". The bound on a `fn`'s own parameters was read; the bound on the
+enclosing impl block's parameters was replaced, on the way into the method's
+signature, with `vec![Vec::new(); generics.len()]`.
+
+Not an oversight in the parser — `bound_lists` existed and worked. The impl
+paths simply never called it, and reserved the right shape of the wrong data.
+
+The same species as entry 36, and worth pairing with it: **syntax the compiler
+accepts and then ignores is a promise the language is not keeping.** Both were
+found the same way, by trying to write something that could not be written any
+other way — `let b: U8 = 65` for one, a hash map with string keys for the
+other. Inference and monomorphization are good enough that neither gap had ever
+been load-bearing before.
+
+What makes this one worse than 36 is the diagnostic. It did not say "bounds on
+impl blocks are not supported"; it said the parameter *has no bounds*, which is
+a statement about the user's code and was false. A compiler that reports a
+missing feature as a user error sends the reader to fix the wrong file.

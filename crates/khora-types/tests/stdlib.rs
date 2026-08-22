@@ -103,8 +103,12 @@ fn the_standard_library_declares_what_it_promises() {
         "impl<A, E> Result<A, E>",
         // Containers and iteration.
         "export type Array<A>",
-        "export type Map<V>",
-        "export type Chain<V>",
+        "export type Map<K, V>",
+        "export type Chain<K, V>",
+        // A map's key is any type with a `Hash`, which is what having bytes
+        // was for: before them, a `String` could not be one.
+        "export trait Hash: Eq",
+        "impl Hash for String",
         "export type List<A>",
         "export type Step<S, A>",
         "export trait Iterator",

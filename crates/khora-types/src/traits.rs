@@ -468,7 +468,12 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
                 [("Self", self_type.clone())].into_iter().collect();
             let mut own = generics.clone();
             own.extend(def.signature.generics.iter().cloned());
-            let mut bounds = vec![Vec::new(); generics.len()];
+            // The impl's own bounds, not empty ones. `impl<K: Hash, V> Map<K, V>`
+            // says every method here may use `K`'s `Hash`, exactly as a bound
+            // written on the method would — and dropping them made a bound on
+            // an impl block parse, mean nothing, and say nothing about it.
+            let mut bounds = crate::bound_lists(i.type_params().as_ref());
+            bounds.resize(generics.len(), Vec::new());
             bounds.extend(def.signature.bounds.iter().cloned());
             out.insert(
                 method_key("", &head, &def.name),
@@ -514,7 +519,12 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
             // receiver's type, and only then is `map<B>` instantiated.
             let mut own = generics.clone();
             own.extend(def.signature.generics.iter().cloned());
-            let mut bounds = vec![Vec::new(); generics.len()];
+            // The impl's own bounds, not empty ones. `impl<K: Hash, V> Map<K, V>`
+            // says every method here may use `K`'s `Hash`, exactly as a bound
+            // written on the method would — and dropping them made a bound on
+            // an impl block parse, mean nothing, and say nothing about it.
+            let mut bounds = crate::bound_lists(i.type_params().as_ref());
+            bounds.resize(generics.len(), Vec::new());
             bounds.extend(def.signature.bounds.iter().cloned());
             let signature = Signature {
                 generics: own,

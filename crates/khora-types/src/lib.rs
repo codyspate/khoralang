@@ -730,7 +730,7 @@ fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> String {
 /// The traits each parameter requires, positionally matched to
 /// [`generic_names`]. A parameter with no bounds contributes an empty list, so
 /// the two are always the same length.
-fn bound_lists(params: Option<&ast::TypeParams>) -> Vec<Vec<String>> {
+pub(crate) fn bound_lists(params: Option<&ast::TypeParams>) -> Vec<Vec<String>> {
     params
         .map(|p| {
             p.params()

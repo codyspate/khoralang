@@ -287,3 +287,113 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "15\n42\n99\n42\n3\n1\n");
     assert_eq!(ran.code, Some(0));
 }
+
+/// The payoff for bytes: a real `Map` from `std::core`, keyed by `String`.
+///
+/// Everything here is written in Khora. `Hash` is a trait in the standard
+/// library, `impl Hash for String` folds FNV-1a over the bytes, and
+/// `Map<K, V>` is generic over any key that has one — which is only possible
+/// because a bound on an *impl block* is now read rather than parsed and
+/// discarded.
+#[test]
+fn the_standard_maps_keys_can_be_strings() {
+    let core = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("std")
+            .join("core.kh"),
+    )
+    .expect("std/core.kh");
+
+    let ran = run(
+        "std_map_strings",
+        &[
+            ("core", core.as_str()),
+            (
+                "main",
+                "module demo::main;
+import std::core::{Option, Map, Hash};
+
+fn print(value: Int);
+fn khora_live_count() -> Int;
+
+fn main() -> Int {
+  let ages = Map::new();
+  Map::insert(ages, \"ada\", 36);
+  Map::insert(ages, \"grace\", 45);
+  Map::insert(ages, \"alan\", 41);
+  print(Map::len(ages));
+  print(Map::get(ages, \"grace\").unwrap_or(0));
+  print(Map::get(ages, \"nobody\").unwrap_or(0));
+
+  // A key built at run time rather than written as a literal, so the lookup
+  // cannot be matching on the pointer.
+  let built = \"gr\" + \"ace\";
+  print(Map::get(ages, built).unwrap_or(0));
+
+  Map::insert(ages, \"ada\", 37);
+  print(Map::len(ages));
+  print(Map::get(ages, \"ada\").unwrap_or(0));
+
+  Map::remove(ages, \"alan\");
+  print(Map::len(ages));
+  print(if Map::holds(ages, \"alan\") { 1 } else { 0 });
+  0
+}
+",
+            ),
+        ],
+    );
+
+    assert_eq!(
+        ran.stdout, "3\n45\n0\n45\n3\n37\n2\n0\n",
+        "the fourth line is the built key finding the same entry as the literal"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// And the old keys still work, because `Int` is a `Hash` too.
+#[test]
+fn the_standard_map_still_takes_int_keys() {
+    let core = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("std")
+            .join("core.kh"),
+    )
+    .expect("std/core.kh");
+
+    let ran = run(
+        "std_map_ints",
+        &[
+            ("core", core.as_str()),
+            (
+                "main",
+                "module demo::main;
+import std::core::{Option, Map, Hash};
+
+fn print(value: Int);
+
+fn main() -> Int {
+  let squares = Map::new();
+  let mut i = 0;
+  while i < 40 {
+    Map::insert(squares, i, i * i);
+    i = i + 1;
+  }
+  print(Map::len(squares));
+  print(Map::get(squares, 7).unwrap_or(0));
+  print(Map::get(squares, 39).unwrap_or(0));
+  print(Map::get(squares, 40).unwrap_or(0 - 1));
+  0
+}
+",
+            ),
+        ],
+    );
+
+    assert_eq!(ran.stdout, "40\n49\n1521\n-1\n");
+    assert_eq!(ran.code, Some(0));
+}

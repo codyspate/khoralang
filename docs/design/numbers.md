@@ -141,9 +141,10 @@ signedness says, and require the same number.
 
 - **`Float32`.** One float type is enough until something needs the other, and
   `std::ai`'s tensors are where it will come from.
-- **A string's bytes.** The types exist and `Array<U8>` is packed, but nothing
-  yet turns a `String` into one — so hashing a string is still out of reach and
-  `Map`'s keys are still `Int`.
+- **Bytes back into a string.** `String::bytes` goes one way; the other way has
+  to answer what happens to bytes that are not UTF-8, and the honest answer is
+  a `Result` rather than a trap — bytes off a socket are data, not a
+  programmer's mistake.
 - **Checked division.** `/` and `%` still fault on zero rather than raising.
 - **Negation does not trap.** `-x` where `x` is the type's minimum wraps to
   itself. It is the one value that cannot be negated, and the only way to
