@@ -37,7 +37,7 @@ pub const FIELD_OFFSET: u64 = KHORA_FIELD_OFFSET as u64;
 /// count up — so no `catch` can name it and none will accidentally match it.
 /// A cancellation is not an error the program declared; it is the runtime
 /// asking the computation to stop, and only the entry point absorbs it.
-pub const CANCELLED_WHICH: u64 = u32::MAX as u64;
+pub const CANCELLED_WHICH: u64 = khora_rt::CANCELLED_WHICH as u64;
 
 /// The exit status of a program that was cancelled and never stopped being.
 ///
@@ -108,7 +108,7 @@ pub struct Runtime<'ctx> {
     pub cancelled: FunctionValue<'ctx>,
     /// `_Noreturn void khora_cancel_stop(void)`
     pub cancel_stop: FunctionValue<'ctx>,
-    /// `void *khora_fiber_spawn(void *body, void (*glue)(void *))`
+    /// `void *khora_fiber_spawn(void *body, void (*glue)(void *), _Bool fallible)`
     pub fiber_spawn: FunctionValue<'ctx>,
     /// `void khora_fiber_join(void *fiber)`
     pub fiber_join: FunctionValue<'ctx>,
@@ -167,7 +167,7 @@ impl<'ctx> Runtime<'ctx> {
             cancel_stop: declare("khora_cancel_stop", void.fn_type(&[], false)),
             fiber_spawn: declare(
                 "khora_fiber_spawn",
-                ptr.fn_type(&[ptr.into(), ptr.into()], false),
+                ptr.fn_type(&[ptr.into(), ptr.into(), i8t.into()], false),
             ),
             fiber_join: declare("khora_fiber_join", void.fn_type(&[ptr.into()], false)),
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),

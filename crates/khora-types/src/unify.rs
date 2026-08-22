@@ -69,7 +69,15 @@ impl std::fmt::Display for Mismatch {
                 write!(f, "expected {expected} argument(s), found {found}")
             }
             Mismatch::Missing { label, ty } => {
-                write!(f, "`{label}: {ty}` is required here but not provided")
+                // An error row labels each entry with the error's own type
+                // name, so `Oops: Oops` is the label twice. A capability row
+                // labels a name against a type, where both halves say
+                // something.
+                if label == &ty.to_string() {
+                    write!(f, "`{label}` is not accounted for here")
+                } else {
+                    write!(f, "`{label}: {ty}` is required here but not provided")
+                }
             }
         }
     }

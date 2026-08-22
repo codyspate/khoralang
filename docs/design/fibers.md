@@ -173,28 +173,29 @@ per fiber, and three things follow:
    waits; put it in a block and the block waits. Nobody has to write `join`,
    and there is no way to write a fiber that escapes.
 
-2. **A fiber root that can absorb a cancellation** — *not built, and it comes
-   before the nursery.*
+2. **A fiber root that absorbs a cancellation** — *built*.
 
-   A cancellation reaching a frame with no error channel currently produces the
-   entry point's outcome: finalizers run, the process exits 130. On the
-   program's own computation that is right. On a fiber it is a hole — one
-   child's cancellation should stop that child, not the program — and
-   `khora_cancel_stop` reports it as a hole rather than taking the program down
-   quietly.
+   The spawned thunk is `() -> () raises 'e`. A thunk that can fail returns the
+   tagged pair, so the runtime reads how the fiber ended — done, cancelled, or
+   failed — and a cancellation stops *that fiber* rather than the program.
 
-   The fix is visible from here. The spawned thunk should be a *fallible*
-   closure, `() -> () raises 'e`, so it returns the tagged pair and the runtime
-   can see how the fiber ended — cancelled, failed, or done. Effect rows on
-   function types (4.5) already make that expressible and callable; what is
-   missing is that a lambda's rows are inferred empty, so the thunk has to be a
-   named function today. Inferring a lambda's rows is the real prerequisite,
-   and it is worth doing for its own sake.
+   Which makes the rule about cancellation points read the same from a fiber's
+   side as from anywhere else: **a fiber with no error row has no channel to be
+   interrupted on**, and runs to its end. That is not a limitation to explain
+   away, it is the same sentence as "a cancellation point is a `!` in something
+   that can raise".
+
+   A child's error nobody is waiting for is reported on stderr rather than
+   dropped in silence, which is what a panicking thread does everywhere else.
+   The error object is freed but not its fields, because the runtime cannot
+   know a value's drop routine and the row said `'e` — a bounded leak on a path
+   that goes away with (3), where the error reaches a parent who knows exactly
+   what it is.
 
 3. **The nursery**, as a region, with the ending-reason question above settled
    first.
-4. **Failure propagation**: a child that raises makes the nursery raise. Falls
-   out of (2), since the tagged return is what carries it.
+4. **Failure propagation**: a child that raises makes the nursery raise. The
+   tag already carries it; what is missing is a parent to give it to.
 5. **`khora test` across cores**, the exit criterion's second half.
 
 Work stealing, stack growth and the coroutine switch itself are phase 6 or

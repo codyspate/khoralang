@@ -363,6 +363,29 @@ impl Scope {
   }
 }
 
+/// A running fiber, and the only way to wait for one or stop it.
+///
+/// Releasing a handle *joins*, so a fiber cannot outlive the binding that
+/// holds it — on every path out, including a raise passing through. Put one in
+/// a region and the region waits; put it in a block and the block does. That
+/// is where structured concurrency comes from, and it needed nothing of its
+/// own. `docs/design/fibers.md`.
+export type Fiber;
+
+impl Fiber {
+  /// Runs `body` on a fiber of its own.
+  ///
+  /// The thunk may fail, and a thunk that can is also one that can be
+  /// *stopped*: a cancellation travels out on the same tagged return an error
+  /// does, so a fiber with no error row has no channel to be interrupted on
+  /// and runs to its end.
+  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
+  /// Waits for the fiber to finish. Joining twice is joining once.
+  fn join(self) -> ();
+  /// Asks the fiber to stop at its next cancellation point. Returns at once.
+  fn cancel(self) -> ();
+}
+
 /// Runs `body` in a fresh region, discharging its `scope` requirement.
 ///
 /// Row subtraction made concrete: `scope` is present in the body's requirement

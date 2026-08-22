@@ -46,7 +46,7 @@ fn khora_live_count() -> Int;
 
 export type Fiber;
 impl Fiber {
-  fn spawn(body: () -> ()) -> Fiber;
+  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
   fn join(self) -> ();
   fn cancel(self) -> ();
 }
@@ -238,5 +238,126 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
         ),
     );
     assert_eq!(ran.stdout, "1\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}
+
+// --- a fiber root that absorbs a cancellation ------------------------------
+
+const CANCELLABLE: &str = "module t;
+fn print(value: Int);
+fn khora_cancel();
+fn khora_live_count() -> Int;
+
+export type Fiber;
+impl Fiber {
+  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
+  fn join(self) -> ();
+  fn cancel(self) -> ();
+}
+
+export type Region;
+impl Region {
+  fn open() -> Region;
+  fn defer(self, finalizer: () -> ()) -> ();
+}
+
+export type Oops = | Bad;
+fn ok(n: Int) -> Int raises Oops { n }
+";
+
+/// Phase 5's exit criterion, for one fiber: cancelled, it runs every finalizer
+/// in scope, and it stops *itself* rather than the program.
+///
+/// The fiber cancels itself so the test is deterministic — a parent that
+/// cancels immediately after spawning wins the race and the child stops at its
+/// first mark, which is correct but proves less.
+#[test]
+fn a_cancelled_fiber_runs_every_finalizer_and_stops_only_itself() {
+    let ran = run(
+        "fiber_cancel_finalizers",
+        &format!(
+            "{CANCELLABLE}
+fn worker() -> () raises Oops {{
+  let region = Region::open();
+  Region::defer(region, fn () => print(99));
+  print(1);
+  khora_cancel();
+  ok(1)!;
+  print(2);
+}}
+
+fn run_it() -> () {{
+  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::join(f);
+}}
+
+fn main() -> Int {{
+  run_it();
+  print(3);
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n99\n3\n0\n",
+        "the child ran, was stopped, released its region, and the parent carried on"
+    );
+    assert_eq!(ran.code, Some(0), "and the program was not taken down with it");
+}
+
+/// A parent cancelling a child that has not started yet is not a race to lose:
+/// the child stops at its first cancellation point, which is before it does
+/// anything.
+#[test]
+fn a_fiber_cancelled_before_it_starts_does_nothing() {
+    let ran = run(
+        "fiber_cancel_early",
+        &format!(
+            "{CANCELLABLE}
+fn worker() -> () raises Oops {{
+  print(1);
+  ok(1)!;
+  print(2);
+}}
+
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::cancel(f);
+  Fiber::join(f);
+  print(3);
+  0
+}}
+"
+        ),
+    );
+    assert!(
+        ran.stdout == "3\n" || ran.stdout == "1\n3\n",
+        "the child stopped at its first mark, wherever it had reached: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// An infallible fiber has no channel to be stopped on, and runs to its end.
+/// That is the same rule as everywhere else — a cancellation point is a `!` in
+/// something that can raise — seen from the fiber's side.
+#[test]
+fn an_infallible_fiber_runs_to_its_end() {
+    let ran = run(
+        "fiber_infallible",
+        &format!(
+            "{CANCELLABLE}
+fn main() -> Int {{
+  let f = Fiber::spawn(fn () => {{ khora_cancel(); print(1); }});
+  Fiber::join(f);
+  print(2);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n2\n");
     assert_eq!(ran.code, Some(0));
 }

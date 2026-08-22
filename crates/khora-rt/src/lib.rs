@@ -791,6 +791,26 @@ struct Handed(*mut u8);
 // atomic refcount, and exactly one fiber owns the reference being moved.
 unsafe impl Send for Handed {}
 
+/// What a fallible Khora function returns: `{ i32 which, i64 payload }`.
+///
+/// `which` is 0 for an ordinary return and otherwise the error's type id, with
+/// [`CANCELLED_WHICH`] reserved for a cancellation. The layout is the code
+/// generator's — see `docs/design/effect-runtime.md` §2 — and `repr(C)` is what
+/// makes both sides agree about it.
+#[repr(C)]
+struct Tagged {
+    which: u32,
+    payload: u64,
+}
+
+/// The `which` a cancellation travels under.
+///
+/// Outside the range error-type ids are assigned from — they start at 1 and
+/// count up — so no `catch` can name it and none will match it by accident.
+/// The code generator's constant is defined *from* this one rather than beside
+/// it, because two numbers that must agree are one number.
+pub const CANCELLED_WHICH: u32 = u32::MAX;
+
 /// What a fiber handle points at.
 struct FiberState {
     /// `None` once joined. Joining twice is not an error — the second is a
@@ -813,14 +833,19 @@ const FIBER_TAG: u32 = 0;
 /// program cannot tell which — the handle is the same, and so is everything a
 /// program can do with it.
 ///
+/// `fallible` says whether the thunk returns the tagged pair, which is how a
+/// fiber reports that it was cancelled or that it failed. An infallible thunk
+/// has no channel to say either on, and so cannot be stopped part-way.
+///
 /// # Safety
 ///
 /// `body` must be a live Khora closure of type `() -> ()` whose drop routine
-/// is `glue`.
+/// is `glue`, returning the tagged pair exactly when `fallible` is non-zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_fiber_spawn(
     body: *mut u8,
     glue: Option<extern "C" fn(*mut u8)>,
+    fallible: u8,
 ) -> *mut u8 {
     let cancel = Arc::new(AtomicUsize::new(0));
     let handed = Handed(body);
@@ -842,8 +867,14 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         // code uses.
         unsafe {
             let code = *body.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
-            let call: extern "C" fn(*mut u8) = std::mem::transmute(code);
-            call(body);
+            if fallible == 0 {
+                let call: extern "C" fn(*mut u8) = std::mem::transmute(code);
+                call(body);
+            } else {
+                let call: extern "C" fn(*mut u8) -> Tagged = std::mem::transmute(code);
+                let outcome = call(body);
+                finish_fiber(outcome);
+            }
             khora_drop(body, glue);
         }
     });
@@ -856,6 +887,34 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         object.add(KHORA_FIELD_OFFSET).cast::<*mut FiberState>().write(Box::into_raw(state));
     }
     object
+}
+
+/// What to do with how a fiber ended.
+///
+/// A cancellation is the ordinary way for a stopped fiber to finish and needs
+/// no announcement — it carries no payload either, so there is nothing to
+/// release. An *error* nobody is waiting for is a different matter: it is
+/// reported here rather than dropped in silence, which is what a panicking
+/// thread does everywhere else.
+///
+/// The error object is freed but not its fields, because the runtime cannot
+/// know a value's drop routine and the row said `'e`. That is a bounded leak
+/// on a path that should not survive nurseries, where the error goes to a
+/// parent who knows exactly what it is.
+///
+/// # Safety
+///
+/// `outcome.payload` must be null or a live Khora object when `which` is
+/// neither 0 nor a cancellation.
+unsafe fn finish_fiber(outcome: Tagged) {
+    if outcome.which == 0 || outcome.which == CANCELLED_WHICH {
+        return;
+    }
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(b"khora: a fiber ended with an error nobody was waiting for\n");
+    // SAFETY: per the contract above; a null callback releases the object
+    // without touching fields whose types are not known here.
+    unsafe { khora_drop(outcome.payload as *mut u8, None) };
 }
 
 /// The state behind a fiber handle, or null if it has been released.

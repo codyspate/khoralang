@@ -472,23 +472,28 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   nothing can escape. That is 5.1 paying for itself a second time, with no part
   of it designed for this.
 
-  **Not built, and next:** a fiber root that can absorb a cancellation. One
-  child's cancellation currently reaches a frame with no error channel and
-  produces the *program's* outcome, which is right for the program's own
-  computation and a hole for a fiber; the runtime reports it as a hole rather
-  than exiting quietly. The fix is a fallible spawned thunk — and a closure can
-  now be one, so what remains is the runtime reading the tag.
+  **A fiber root absorbs a cancellation.** The spawned thunk is
+  `() -> () raises 'e`, so the runtime reads how the fiber ended and a
+  cancellation stops *that fiber* rather than the program. The rule reads the
+  same from a fiber's side as anywhere else: a fiber with no error row has no
+  channel to be interrupted on, and runs to its end.
+
+  **Not built, and next:** the nursery, and with it failure propagation — a
+  child's error is reported on stderr today because there is no parent to give
+  it to. A region's finalizer also cannot yet tell whether it is releasing
+  normally or unwinding, and a nursery wants to wait in the first case and
+  cancel-then-wait in the second.
 
   Also open: a region's finalizer cannot tell whether it is releasing normally
   or unwinding, and a nursery wants to wait in the first case and
   cancel-then-wait in the second.
 - **5.4 `Schedule` policies.** A library, once fibers exist.
 
-**Exit:** a canceled fiber runs every finalizer in scope, verified by test;
-`khora test` runs isolated fibers across cores. The first half is met for a
-cancelled *computation* — `a_cancelled_computation_runs_every_finalizer_in_scope`
-in `crates/khora-codegen-llvm/tests/regions.rs` — and becomes the criterion as
-written once 5.3 gives it a fiber to be. The second half waits on 5.3.
+**Exit:** a canceled fiber runs every finalizer in scope, verified by test —
+**met**, by `a_cancelled_fiber_runs_every_finalizer_and_stops_only_itself` in
+`crates/khora-codegen-llvm/tests/fibers.rs`, which also pins the other half of
+what "stops" has to mean: the program carries on. `khora test` running isolated
+fibers across cores waits on 5.4.
 
 ---
 

@@ -959,15 +959,27 @@ impl<'ctx> Lower<'_, 'ctx> {
     ) -> Flow<'ctx> {
         match (name, args) {
             ("spawn", [body]) => {
+                // Whether the thunk returns the tagged pair, which is how a
+                // fiber says it was cancelled or that it failed. Read from the
+                // thunk's own type: a closure carries its error row, so this
+                // is a fact about the value rather than a guess about it.
+                let fallible = match self.types.of(*body) {
+                    Type::Fn { raises, .. } => !matches!(
+                        &**raises,
+                        Type::Row { fields, tail } if fields.is_empty() && tail.is_none()
+                    ),
+                    _ => false,
+                };
                 // Handed over, not lent: the fiber releases the closure when
                 // it finishes, so this gives up the reference the plan gave it.
                 let closure = self.expr(*body)?;
                 let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
+                let flag = self.be.ctx.i8_type().const_int(u64::from(fallible), false);
                 let spawn = self.be.rt.fiber_spawn;
                 let fiber = self
                     .be
                     .builder
-                    .build_call(spawn, &[closure.into(), glue.into()], "fiber")
+                    .build_call(spawn, &[closure.into(), glue.into(), flag.into()], "fiber")
                     .expect("spawning a fiber")
                     .try_as_basic_value()
                     .basic()
