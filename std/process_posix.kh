@@ -1,0 +1,71 @@
+module std::process::shell;
+
+import std::core::{Ptr};
+
+// Starting a shell, everywhere that is not Windows.
+//
+// `_posix` rather than `_linux`, because nothing below is Linux's: `popen`,
+// `pclose`, `system` and the layout of a wait status are the same on macOS,
+// and naming the file for one of them would have meant writing it twice.
+// `khora_db::selected_for_target` reads the suffix.
+//
+// **This file is not `std::process`.** It declares `std::process::shell`, and
+// `process.kh` — which is in every build — is the module a caller imports.
+// See the head of `process_windows.kh` for why the split is three functions
+// rather than the whole module.
+//
+// Two things differ from Windows, and only one of them is a spelling. The
+// names here are the POSIX ones without an underscore, and the number that
+// comes back from `pclose` and `system` is a *wait status* rather than an exit
+// code — a packed word that has to be taken apart, which is what
+// [`exit_status`] is for and what the other target has no need of.
+
+extern fn popen(command: Ptr, mode: Ptr) -> Ptr;
+extern fn pclose(stream: Ptr) -> I32;
+extern fn system(command: Ptr) -> I32;
+
+/// A stream reading what `command` writes to its standard output, or null.
+///
+/// The child's standard *error* is not redirected, so it goes wherever this
+/// process's does. Merging it in would need `2>&1` appended to the command
+/// line, which is a decision for the caller who wrote the rest of that line.
+export fn open_pipe(command: String) -> Ptr {
+  String::with_c_string(command, fn c => String::with_c_string("r", fn m => popen(c, m)))
+}
+
+/// Waits for the pipe's command to finish, and gives its exit status.
+///
+/// -1 if the wait itself failed, which is the one answer that is not an exit
+/// status.
+export fn close_pipe(pipe: Ptr) -> Int {
+  exit_status(I32::to_int(pclose(pipe)))
+}
+
+/// Runs `command` through the shell, waits, and gives its exit status.
+///
+/// -1 if the shell could not be started at all. A shell that started and could
+/// not find the command is not that: it exits 127, and 127 is an exit status
+/// like any other.
+export fn run(command: String) -> Int {
+  exit_status(I32::to_int(String::with_c_string(command, fn c => system(c))))
+}
+
+/// A `wait` status as the single number the rest of the library speaks in.
+///
+/// `WEXITSTATUS` is macros in a header, so there is no symbol to bind and the
+/// bit layout is written out here: the low seven bits are the signal that
+/// killed the child, zero if none, and the next eight are the code it exited
+/// with. Nothing above this level should have to know that.
+///
+/// A child killed by a signal has no exit code, and the number reported for it
+/// is 128 plus the signal — the convention every Unix shell already uses for
+/// exactly this case, so a caller comparing against 130 for an interrupted
+/// child is comparing against what `$?` would have said.
+fn exit_status(status: Int) -> Int {
+  if status < 0 {
+    0 - 1
+  } else {
+    let signal = Int::and(status, 127);
+    if signal == 0 { Int::and(Int::shr(status, 8), 255) } else { 128 + signal }
+  }
+}

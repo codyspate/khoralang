@@ -1,0 +1,59 @@
+module std::process::shell;
+
+import std::core::{Ptr};
+
+// Starting a shell, on Windows.
+//
+// **This file is not `std::process`.** It declares `std::process::shell`, and
+// `process.kh` — which is in every build — is the module a caller imports.
+// The name looks like the whole-module split `std/net/socket_windows.kh` does,
+// and it is deliberately not that: three calls differ between the targets, and
+// `khora_db::selected_for_target` says in as many words that when two targets
+// share ninety per cent of a file the ten per cent belongs behind a function
+// they both call. This is the ten per cent. `process_posix.kh` is its twin and
+// exports the same three names.
+//
+// The differences are all spelling and all Microsoft's. `popen` and `pclose`
+// are POSIX names that the UCRT does not export — a program that asks for them
+// gets `undefined symbol: popen` out of the linker, which is measured rather
+// than assumed — so the underscore-prefixed spellings are the only ones there
+// are. `system` is ISO C and is itself on both.
+
+extern fn _popen(command: Ptr, mode: Ptr) -> Ptr;
+extern fn _pclose(stream: Ptr) -> I32;
+extern fn system(command: Ptr) -> I32;
+
+/// A stream reading what `command` writes to its standard output, or null.
+///
+/// The mode is `"r"` and not `"rb"`, which on Windows means the C library
+/// turns CRLF into LF on the way through. That is a translation, and a
+/// translation is a strange thing for a library to do behind a caller's back —
+/// but the only thing this pipe is ever turned into is a `String`, and a
+/// Khora program that captures `echo` should not read differently on the two
+/// hosts because one of them ends its lines with an extra byte. Anything that
+/// genuinely wants the child's bytes untouched wants a different function than
+/// one returning text.
+///
+/// The child's standard *error* is not redirected, so it goes wherever this
+/// process's does. Merging it in would need `2>&1` appended to the command
+/// line, which is a decision for the caller who wrote the rest of that line.
+export fn open_pipe(command: String) -> Ptr {
+  String::with_c_string(command, fn c => String::with_c_string("r", fn m => _popen(c, m)))
+}
+
+/// Waits for the pipe's command to finish, and gives its exit status.
+///
+/// -1 if the wait itself failed, which is the one answer that is not an exit
+/// status. Windows hands back the child's code directly — there is no wait
+/// status to unpack, which is the one place this target has less to do than
+/// the other one.
+export fn close_pipe(pipe: Ptr) -> Int {
+  I32::to_int(_pclose(pipe))
+}
+
+/// Runs `command` through the shell, waits, and gives its exit status.
+///
+/// -1 if the shell could not be started at all.
+export fn run(command: String) -> Int {
+  I32::to_int(String::with_c_string(command, fn c => system(c)))
+}

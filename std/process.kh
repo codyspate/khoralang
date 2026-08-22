@@ -1,0 +1,247 @@
+module std::process;
+
+import std::core::{Array, Ptr};
+import std::process::shell::{close_pipe, open_pipe, run};
+
+// Running another program.
+//
+// The last thing on the "not yet" list that a program needs before it can be
+// the thing that drives other things: a build script, a test runner, a
+// deployment step. Until this existed a Khora program could read a file, read
+// the clock and talk to a socket, and the one thing it could not do was ask
+// the machine it was already running on to do something.
+//
+// **It goes through a shell, and that is the honest headline rather than a
+// footnote.** ISO C offers `system` and `popen`, and both of them hand a
+// *command line* to `cmd.exe` or `/bin/sh` and let it decide what the words
+// mean. So the caller is not naming a program and its arguments; the caller is
+// writing a line of shell, and everything true of a line of shell is true
+// here — a path with a space in it needs quoting, a `&&` chains, a `>`
+// redirects, and a file name that came from somewhere untrusted can end the
+// command and start another one. That is a real difference from an
+// argv-based spawn and a reader deserves to be told rather than find out.
+//
+// What would fix it: `spawn(program, arguments)`, where the arguments are a
+// list Khora holds and no shell ever parses. That needs `CreateProcess` on
+// Windows and `posix_spawn` on Unix, neither of which can be reached from
+// here — `CreateProcess` takes a `STARTUPINFO` and returns a
+// `PROCESS_INFORMATION`, and errata 35 says no struct crosses the C ABI. It is
+// a runtime function, and it is the follow-up. When it arrives it joins this
+// effect as a third operation rather than replacing it, because the permission
+// a caller is granting — "may start another program" — is the same one either
+// way.
+//
+// **No quoting helper, deliberately.** An `escaped(argument)` would be the
+// obvious kindness and it would be a lie: `cmd.exe` and `sh` disagree about
+// backslashes, about carets, about what a quote inside a quote means, and a
+// helper that is subtly wrong on one host is worse than no helper at all
+// because it reads as though the problem has been handled. A caller building a
+// command line out of untrusted text should wait for `spawn`.
+
+// ---------------------------------------------------------------------------
+// The interface
+// ---------------------------------------------------------------------------
+
+/// Why running something did not work.
+///
+/// Coarse, for the reason `std::fs`'s `IoError` is: `system` and `popen` report
+/// failure as one number with no story attached, and inventing detail that the
+/// C library never supplied would be inventing it.
+///
+/// `NotStarted` is the shell itself refusing to run — *not* "the command was
+/// not found", which is a shell that started perfectly well and then exited
+/// 127. `NotText` is a command that ran and printed bytes that are not UTF-8,
+/// so there is no `String` to hand back; only [`Process::capture`] can raise
+/// it. `Failed` is raised by [`checked_output`] alone.
+///
+/// Note what is *not* here: a command that ran and exited non-zero. It ran.
+/// Its status is the answer, and a caller who wanted that to be a failure says
+/// so by calling [`checked_output`].
+export type ProcessError =
+  | NotStarted(command: String)
+  | NotText(command: String)
+  | Failed(command: String, status: Int);
+
+/// A finished command.
+///
+/// Both halves together because `popen` gives both for the price of one, and
+/// the alternative — a `capture` that returns text and a caller who then wants
+/// the status — is a caller running the command twice.
+export type Completed = {
+  /// What the command exited with. Zero is the universal "it worked".
+  status: Int,
+  /// Everything it wrote to its standard output. Its standard *error* is not
+  /// captured; it goes wherever this process's does, and a caller who wants it
+  /// folded in writes `2>&1` on the end of the command themselves.
+  text: String,
+};
+
+/// Permission to start another program.
+///
+/// The reason this is an effect and not two free functions is the reason every
+/// other capability in `std` is one, and it is sharper here than most: "this
+/// library may run arbitrary commands on your machine" is close to the largest
+/// thing a dependency can ask for, and a `with { process: Process }` in a
+/// signature is that sentence written where a reviewer will see it. A
+/// dependency that does not carry the row cannot start anything, and nothing
+/// it imports can either.
+///
+/// And it is a seam. A test that wanted to exercise a build driver used to
+/// have the choice of really invoking a compiler or not testing the thing;
+/// here it installs its own handler and the code under test cannot tell:
+///
+/// ```khora
+/// with { process: handler for Process {
+///   status: fn command => 0,
+///   capture: fn command => { status: 0, text: "v1.2.3\n" },
+/// } } {
+///   check(version_reported_by("git describe --tags"));
+/// }
+/// ```
+///
+/// That double is also where a test asserts what was *asked for* — capture the
+/// command into a `Shared<List<String>>` and the test can say that the driver
+/// built the command line it was supposed to, which is the assertion that
+/// matters and the one a real subprocess makes impossible to write.
+export effect Process {
+  /// Runs `command` and waits for it, giving what it exited with. Whatever it
+  /// prints goes to this process's own output, unredirected.
+  status: (String) -> Int raises ProcessError,
+  /// Runs `command` and waits for it, keeping what it wrote.
+  capture: (String) -> Completed raises ProcessError,
+}
+
+impl Process {
+  /// A real shell.
+  fn real() -> Process {
+    handler for Process {
+      status: fn command => started(command, run(command))!,
+      capture: fn command => capture_output(command)!,
+    }
+  }
+}
+
+/// What `command` printed, provided it succeeded.
+///
+/// The shape most callers actually mean. Reading a version number or a commit
+/// hash out of a tool, the branch on the status is not interesting — either it
+/// worked and there is text, or it did not and there is nothing useful to do
+/// with whatever came out. Written once here rather than as the same three
+/// lines at every call site, the way `std::env`'s `variable_or` is.
+export fn checked_output(command: String) -> String
+  with { process: Process }
+  raises ProcessError
+{
+  let done = process.capture(command)!;
+  if done.status == 0 { done.text } else { raise ProcessError::Failed(command, done.status) }
+}
+
+// ---------------------------------------------------------------------------
+// ISO C
+// ---------------------------------------------------------------------------
+//
+// `fread` and nothing else. The three calls that are spelled differently per
+// target live in `std::process::shell`, which is `process_windows.kh` or
+// `process_posix.kh` depending on the build; reading bytes out of a `FILE *`
+// is the same everywhere and so is here.
+
+extern fn fread(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
+
+/// How much to ask the pipe for at a time.
+///
+/// A page. The number matters less than it looks: a short read is normal on a
+/// pipe and the loop below is written for it, so this is the size of a buffer
+/// rather than a promise about how output arrives.
+fn chunk() -> Int { 4096 }
+
+/// Turns "the shell would not start" into the error, and anything else into
+/// the status it is.
+fn started(command: String, status: Int) -> Int raises ProcessError {
+  if status < 0 { raise ProcessError::NotStarted(command) } else { status }
+}
+
+fn capture_output(command: String) -> Completed raises ProcessError {
+  let pipe = open_pipe(command);
+  if Ptr::is_null(pipe) {
+    raise ProcessError::NotStarted(command)
+  } else {
+    // Every path from here reaches `close_pipe` before it can raise, which is
+    // why there is no `Region` around this the way `std::fs` has one: the
+    // draining loop has no failure of its own to report, and the two questions
+    // that can fail — was it a status, was it text — are both asked afterwards.
+    // A `spawn` with more to go wrong in the middle will want the region.
+    let bytes = drain(pipe);
+    let status = started(command, close_pipe(pipe))!;
+    if Array::is_utf8(bytes) {
+      { status: status, text: String::from_bytes(bytes) }
+    } else {
+      raise ProcessError::NotText(command)
+    }
+  }
+}
+
+/// Everything the pipe has, read until it ends.
+///
+/// **A `while` loop and a buffer that doubles, not a recursion per chunk.**
+/// The recursive version reads better and is a stack overflow with a size on
+/// it: `String::slice` in `std::core` recursed once per byte and took the
+/// process out at around nine kilobytes, which is less output than `dir`
+/// produces. Output has no length known in advance — that is the difference
+/// between a pipe and a file, and why `std::fs` can ask `ftell` how much to
+/// allocate and this cannot — so the only two honest options are a cap or a
+/// buffer that grows, and a cap on what another program is allowed to say is
+/// not a decision this module gets to make.
+fn drain(pipe: Ptr) -> Array<U8> {
+  let scratch: Array<U8> = Array::new(chunk(), 0);
+  let mut out: Array<U8> = Array::new(chunk(), 0);
+  let mut filled = 0;
+  let mut going = true;
+  while going {
+    let read = Array::with_data(scratch, fn (into, n) => fread(into, 1, n, pipe));
+    if read <= 0 {
+      // Zero is the end of the stream and a short read is not, so this is the
+      // only thing that ends the loop. `fread` cannot distinguish end-of-file
+      // from a failure without `ferror`, and for a pipe the two lead to the
+      // same place: there is no more.
+      going = false;
+    } else {
+      out = grown(out, filled + read);
+      copy_into(scratch, out, read, filled);
+      filled = filled + read;
+    }
+  }
+  Array::prefix(out, filled)
+}
+
+/// `old` if it already has room for `needed` bytes, or a bigger copy of it.
+///
+/// Doubling, so that reading n bytes costs a linear number of copies overall.
+/// Growing by one chunk each time would make a megabyte of output a quarter of
+/// a million element copies, which is the accident that makes a subprocess
+/// wrapper mysteriously slow on exactly the commands worth wrapping.
+///
+/// Answering "already big enough" with `old` itself rather than leaving the
+/// test at the call site keeps the loop above to one statement per step: the
+/// common case allocates nothing, and it is the same expression either way.
+fn grown(old: Array<U8>, needed: Int) -> Array<U8> {
+  let have = Array::length(old);
+  if have >= needed {
+    old
+  } else {
+    let mut size = have;
+    while size < needed {
+      size = size * 2;
+    }
+    let bigger: Array<U8> = Array::new(size, 0);
+    copy_into(old, bigger, have, 0);
+    bigger
+  }
+}
+
+fn copy_into(from: Array<U8>, into: Array<U8>, count: Int, offset: Int) -> () {
+  let mut i = 0;
+  while i < count {
+    Array::set(into, offset + i, Array::get(from, i));
+    i = i + 1;
+  }
+}
