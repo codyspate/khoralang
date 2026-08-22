@@ -150,17 +150,20 @@ fn resolves_a_constructor_through_its_type() {
     );
 }
 
-/// Case 3ii of the resolution rule. It must say so rather than guess, so the
-/// rule stays whole when typeclasses arrive in phase 3.
+/// Case 3ii of the resolution rule. Naming a type and then something that is
+/// not one of its constructors is a function it declares for itself, and
+/// *which* function is the checker's question — the resolver only has to say
+/// what the owner was.
 #[test]
-fn an_associated_item_reports_that_it_is_unsupported() {
+fn a_type_s_own_function_resolves_against_the_type() {
     let db = KhoraDatabase::new();
     let f = file(&db, "a.kh", "module m;\nexport type Risk = | Low;\n");
     let root = SourceRoot::new(&db, vec![f]);
 
     let res = resolve_path(&db, root, f, &path(&["Risk", "from_str"])).unwrap();
     assert!(
-        matches!(res, Resolution::Unsupported(msg) if msg.contains("typeclasses")),
+        matches!(res, Resolution::TraitItem { ref owner, ref name }
+            if owner == "Risk" && name == "from_str"),
         "{res:?}"
     );
 }

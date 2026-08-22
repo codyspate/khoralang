@@ -550,9 +550,12 @@ pub fn resolve_path(
                 name: rest[0].clone(),
             });
         }
-        return Ok(Resolution::Unsupported(
-            "associated items are not supported until typeclasses land in phase 3",
-        ));
+        // Not a constructor, so it is a function the type declares for
+        // itself. Which one is the checker's question, the same as it is for
+        // `Applicative::pure` — the resolver's job ends at "the owner is this
+        // name", because whether that name is a trait, a type, or a bounded
+        // parameter depends on what is in scope where it was written.
+        return Ok(Resolution::TraitItem { owner: first.clone(), name: rest[0].clone() });
     }
 
     // `a.b.c` as a module path — case 2. The longest prefix that names a module

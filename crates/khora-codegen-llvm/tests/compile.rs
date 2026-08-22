@@ -1078,6 +1078,36 @@ fn main() -> Int {
     assert_eq!(ran.code, Some(0));
 }
 
+/// A constructor function. It has no receiver, so the only way to reach it is
+/// by naming the type — which is how every `Type::new()` in the world is
+/// written, and until it worked no type could hide its representation.
+#[test]
+fn a_type_s_own_function_is_called_by_path() {
+    let ran = run(
+        "inherent_static",
+        "module t;
+fn print(value: Int);
+
+export type Counter = | Of(count: Int);
+
+impl Counter {
+  fn new() -> Counter { Counter::Of(0) }
+  fn from(n: Int) -> Counter { Counter::Of(n) }
+  fn count(self) -> Int { match self { Counter::Of(n) => n } }
+  fn bump(self) -> Counter { Counter::from(self.count() + 1) }
+}
+
+fn main() -> Int {
+  print(Counter::new().count());
+  print(Counter::from(41).bump().count());
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "0\n42\n");
+    assert_eq!(ran.code, Some(0));
+}
+
 /// A type's own method wins over a trait method of the same name, so adding a
 /// trait to a program cannot silently change what an existing call does.
 #[test]

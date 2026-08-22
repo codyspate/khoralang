@@ -947,6 +947,29 @@ impl<'a> Ctx<'a> {
             }
         }
 
+        // A function the type declares for itself: `User::new()`. After the
+        // constructors, so `Option::Some` still means the constructor even if
+        // an `impl Option` happens to declare a `Some`. Which function it is
+        // stays the checker's question, exactly as for `Applicative::pure` —
+        // hence the same resolution.
+        if let [owner, name] = segments.as_slice() {
+            let declared_here =
+                self.map.item(owner).is_some_and(|i| i.kind == crate::ItemKind::Type);
+            let imported = matches!(
+                self.scope.get(owner),
+                Some(crate::Resolution::Item { kind: crate::ItemKind::Type, .. })
+            );
+            if declared_here || imported {
+                return self.add_expr(
+                    Expr::Path(crate::Resolution::TraitItem {
+                        owner: owner.clone(),
+                        name: name.clone(),
+                    }),
+                    range,
+                );
+            }
+        }
+
         // Cross-module resolution needs the module graph, which is a source
         // root away; phase 2 programs are single-module.
         self.error(

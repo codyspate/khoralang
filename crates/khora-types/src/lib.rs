@@ -1893,6 +1893,23 @@ impl<'a> Checker<'a> {
     /// a type parameter, `Self` is that parameter and the choice is the
     /// caller's.
     fn type_of_trait_item(&mut self, at: ExprId, owner: &str, name: &str) -> Type {
+        // A type's own function comes first, for the same reason its own
+        // method beats a trait's: adding a trait must not silently change what
+        // an existing call does.
+        let self_ty = Type::adt(owner);
+        if let Some(own) = self.types.traits.inherent_method(&self_ty, name) {
+            let key = traits::method_key("", &own.head, name);
+            let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else {
+                return Type::Unknown;
+            };
+            let (ty, type_args) =
+                self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+            let range = self.body.range(at);
+            self.demand(&signature, &type_args, &key, at, range);
+            self.instantiations.insert(at, (key, type_args));
+            return ty;
+        }
+
         let bounds = self.bounds_on(owner);
         let candidates: Vec<String> = if bounds.is_empty() {
             vec![owner.to_string()]
@@ -1907,7 +1924,9 @@ impl<'a> Checker<'a> {
         let Some(trait_name) = found else {
             let range = self.body.range(at);
             self.error(
-                if bounds.is_empty() {
+                if self.types.adts.contains_key(owner) {
+                    format!("`{owner}` has no function named `{name}`")
+                } else if bounds.is_empty() {
                     format!("`{owner}` is not a trait with a function named `{name}`")
                 } else {
                     format!(

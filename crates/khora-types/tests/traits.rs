@@ -348,6 +348,44 @@ fn a_type_may_have_several_impl_blocks() {
     );
 }
 
+/// A constructor function. It has no receiver to be reached through, so the
+/// only way to call it is by naming the type — which is also the shape every
+/// `Type::new()` in the reference application uses.
+#[test]
+fn a_type_s_own_function_is_reached_by_path() {
+    assert_clean(
+        "module m;\n\
+         export type User = | Of(age: Int);\n\
+         impl User { fn new(age: Int) -> User { User::Of(age) } }\n\
+         fn f() -> User { User::new(3) }\n",
+    );
+}
+
+/// The same function, checked like any other.
+#[test]
+fn a_function_reached_by_path_checks_its_arguments() {
+    assert_reports(
+        "module m;\n\
+         export type User = | Of(age: Int);\n\
+         impl User { fn new(age: Int) -> User { User::Of(age) } }\n\
+         fn f() -> User { User::new(true) }\n",
+        "Bool",
+    );
+}
+
+/// Naming a type and then something it does not have is an error about that,
+/// not about traits — `User` is not one.
+#[test]
+fn a_function_the_type_does_not_have_is_reported_by_name() {
+    assert_reports(
+        "module m;\n\
+         export type User = | Of(age: Int);\n\
+         impl User { fn new(age: Int) -> User { User::Of(age) } }\n\
+         fn f() -> User { User::make(3) }\n",
+        "`make`",
+    );
+}
+
 /// A type's own method wins over a trait's. Adding a trait to a program must
 /// not silently change what an existing call does.
 #[test]
