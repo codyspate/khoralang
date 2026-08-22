@@ -852,6 +852,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == "String" && name == "with_data" {
                     return self.with_data(site, args, range);
                 }
+                if owner == "String" && name == "with_c_string" {
+                    return self.with_c_string(site, args, range);
+                }
                 if owner == "String" && matches!(name.as_str(), "bytes" | "byte" | "byte_length")
                 {
                     return self.string_intrinsic(&name, args, range);
@@ -1439,6 +1442,104 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
         };
         // The closure's own scope, then the one holding what was lent.
+        self.leave_scope();
+        self.leave_scope();
+        Some(result)
+    }
+
+    /// `String::with_c_string`: lend the bytes with a zero byte after them.
+    ///
+    /// Every function in the C library that takes a string takes a
+    /// `const char *` and finds the end by looking for a zero. A Khora string
+    /// knows its length instead and has no zero to find, so a copy is the only
+    /// honest answer — and it is a copy either way, since a borrowed view could
+    /// not have the extra byte appended to it.
+    ///
+    /// The copy is an `Array<U8>` of `len + 1`, which `khora_array_new` has
+    /// already zeroed, so the terminator is written by not writing anything.
+    /// It is released by the same scope discipline `with_data` uses, so a body
+    /// that raises does not leak it.
+    ///
+    /// A string containing an interior zero is *not* rejected. C will see a
+    /// shorter string than Khora has; that is what C strings are, and refusing
+    /// it here would be inventing a rule the boundary does not have.
+    fn with_c_string(&mut self, site: ExprId, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+        let [subject, body] = args else {
+            return self.fail("`with_c_string` takes a body to lend the string to", range);
+        };
+        let Some(shape) = FnShape::of(self.types.of(*body)) else {
+            return self.fail("`with_c_string` takes a function to run", range);
+        };
+
+        let object = self.expr(*subject)?.into_pointer_value();
+        let length = self.string_length(object);
+        let bytes = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::STRING_BYTES_OFFSET,
+            "str.bytes",
+        );
+
+        let i8_type = self.be.ctx.i8_type();
+        let with_room = self
+            .be
+            .builder
+            .build_int_add(length, self.be.ctx.i64_type().const_int(1, false), "c.len")
+            .expect("room for the terminator");
+        let buffer = self
+            .be
+            .builder
+            .build_call(
+                self.be.rt.array_new,
+                &[
+                    with_room.into(),
+                    self.be.ctx.i64_type().const_zero().into(),
+                    i8_type.const_int(1, false).into(),
+                    i8_type.const_zero().into(),
+                    self.be.null_pointer().into(),
+                ],
+                "c.string",
+            )
+            .expect("allocating a C string")
+            .try_as_basic_value()
+            .basic()
+            .expect("an array is a value")
+            .into_pointer_value();
+        let elements = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            buffer,
+            runtime::FIELD_OFFSET + runtime::ARRAY_HEADER_FIELDS * runtime::FIELD_WORD,
+            "c.bytes",
+        );
+        self.be
+            .builder
+            .build_memcpy(elements, 1, bytes, 1, length)
+            .expect("copying a string's bytes");
+
+        // The string is done with as soon as its bytes are copied; the buffer
+        // has to outlive the call, and a scope is what makes that true on the
+        // raising path as well.
+        self.drop(object.into(), &Type::Str);
+        let buffer_ty = Type::Adt {
+            name: runtime::ARRAY_TYPE.to_string(),
+            args: vec![Type::Fixed(khora_types::IntKind { signed: false, bits: 8 })],
+        };
+        self.scopes.push(vec![Cleanup::Temp(buffer.into(), buffer_ty)]);
+
+        let closure = self.expr(*body)?.into_pointer_value();
+        let Invoked { raw, fallible } =
+            self.invoke_closure_at(site, *body, closure, &shape, vec![elements.into()], range)?;
+        let result = if fallible {
+            let tagged = raw.expect("a fallible body returns a tagged value");
+            self.split_tagged(tagged, &shape.ret, range)?
+        } else {
+            match shape.ret {
+                Type::Unit => self.be.unit_value(),
+                _ => raw.unwrap_or_else(|| self.be.unit_value()),
+            }
+        };
         self.leave_scope();
         self.leave_scope();
         Some(result)

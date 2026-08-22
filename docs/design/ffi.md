@@ -156,17 +156,51 @@ is the binding author's responsibility. What the borrow removes is the
 *accidental* case, the one the compiler creates behind your back and nobody
 would think to look for.
 
+### And a C string is a copy
+
+`String::with_c_string(self, body)` lends the bytes with a zero after them.
+A copy, necessarily: a Khora string knows its length instead of carrying a
+terminator, and there is nowhere to append one to a borrowed view. The copy
+lives exactly as long as the call, released by the same scope discipline.
+
+A string with a zero *inside* it is not refused. C will see a shorter string
+than Khora has, which is what C strings are; inventing a rule here that the
+boundary does not have would be pretending the difference is smaller than it
+is.
+
 ## 4. Foreign resources are counted values
 
-An open file is a Khora object holding the descriptor, whose release calls the
-foreign close. That is the shape a region, a fiber handle and a nursery already
-have — `khora_region_release` and friends are runtime-provided drop glue on an
-ordinary counted object — so 7.3 is a use of machinery that exists rather than
-new machinery.
+This needed nothing new at all. `acquire(value, release)` in `std::core`
+registers a release with the enclosing `Scope`; a `Scope` is a region; and a
+region runs its deferred work on every way out. So:
 
-What it buys is the exit criterion: the file closes on *every* path out,
-including a raise and including a cancellation, because releasing it is what
-leaving the scope does.
+```khora
+let file = acquire(open_file(path), fn f => { fclose(f); });
+```
+
+and the file closes on every path out of the enclosing region — including a
+raise passing through it, and including a cancellation. Not because a file is
+special, but because *everything* is a counted value and this is what counted
+values already did.
+
+`a_file_is_closed_on_the_error_path` in `tests/files.rs` is the proof, and it
+does not take Khora's word for it: the program opens a real file, registers the
+close, raises, and lets the raise leave the region — and then the *test* deletes
+the file, which Windows refuses to do while a handle is open. The delete
+succeeding is the close having happened.
+
+## What this reaches, today
+
+`fopen`, `fread`, `fclose`, `strlen` — ISO C, spelled the same on every target
+Khora has, and `FILE *` is exactly what `Ptr` is for. `tests/files.rs` reads a
+real file into an `Array<U8>` with no Rust anywhere in between. Seven
+declarations is the whole of it.
+
+That is most of phase 7's exit criterion. The socket half is missing for a
+reason that is not about the boundary: a socket is not ISO C. It is Winsock or
+it is Berkeley sockets, and choosing between them per target needs conditional
+compilation, which the language does not have. That is a phase 8 problem
+wearing a phase 7 costume.
 
 ## Still open
 

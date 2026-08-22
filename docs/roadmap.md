@@ -767,10 +767,18 @@ rule for what may cross was settled the hard way in errata 35.
   misspelled name becomes a linker error rather than "no such function". It is
   a change to the language's surface and to every test that declares
   `fn print(value: Int);`, so it wants a decision rather than a drive-by.
-- **7.3 Foreign resources as counted values.** A Khora object holding the
-  pointer, with a release that calls the foreign close — the shape a region and
-  a fiber handle already have, so an open file closes on every path out
-  including a raise.
+- **7.3 Foreign resources as counted values — done, and it needed nothing.**
+  `acquire(value, release)` registers a release with the enclosing `Scope`, a
+  `Scope` is a region, and a region runs its deferred work on every way out.
+  So `acquire(open_file(path), fn f => { fclose(f); })` closes the file on
+  every path out including a raise passing through — not because a file is
+  special but because everything is a counted value and this is what counted
+  values already did.
+
+  `a_file_is_closed_on_the_error_path` does not take Khora's word for it: the
+  program opens a real file, registers the close, raises, and lets the raise
+  leave the region; then the *test* deletes the file, which Windows refuses to
+  do while a handle is open.
 
   **`Ptr` exists now**: a C `void *`, opaque, not counted, not dereferenceable,
   and never a pointer into Khora's own heap. `Ptr::null` and `Ptr::is_null` are
@@ -788,11 +796,26 @@ rule for what may cross was settled the hard way in errata 35.
   for the third time. Only an array of numbers can be lent, because an array of
   Khora objects holds counted pointers and handing those across is the mistake
   the boundary exists to prevent.
-- **7.4 Syscalls**: files, sockets, a clock.
+- **7.4 Syscalls — files done, sockets blocked on something else.** `fopen`,
+  `fread`, `fclose` and `strlen` are ISO C: the same names on every target
+  Khora has, and `FILE *` is exactly what `Ptr` is for. `tests/files.rs` reads
+  a real file into an `Array<U8>` with no Rust anywhere in between, from seven
+  declarations.
 
-**Exit:** read a file and write its contents to a socket, from Khora, with the
-file closed by the region that opened it — on the error path as well as the
-ordinary one.
+  `String::with_c_string` is what made it possible — every C function taking a
+  string takes a `const char *` and finds the end by looking for a zero, and a
+  Khora string knows its length instead. A copy, necessarily, living exactly as
+  long as the call.
+
+  **A socket is not ISO C.** It is Winsock or it is Berkeley sockets, and
+  choosing between them per target needs conditional compilation, which the
+  language does not have. That is a phase 8 problem wearing a phase 7 costume,
+  and it is the one thing standing between here and the exit criterion.
+
+**Exit — the file half is met.** Read a file, from Khora, with the file closed
+by the region that opened it, on the error path as well as the ordinary one:
+`tests/files.rs`. Writing it to a *socket* waits for a way to say "this
+declaration on Windows, that one elsewhere".
 
 ---
 

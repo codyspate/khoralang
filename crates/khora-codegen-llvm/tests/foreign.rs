@@ -364,6 +364,9 @@ impl String {
   fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
     with 'c
     raises 'e;
+  fn with_c_string<B, 'c, 'e>(self, body: (Ptr) -> B with 'c raises 'e) -> B
+    with 'c
+    raises 'e;
 }
 
 impl Ptr {
@@ -530,4 +533,57 @@ fn main() -> Int {{
         found.iter().any(|m| m.contains("reference-counted objects")),
         "expected a boundary error about counted elements, got {found:?}"
     );
+}
+
+/// A C string is the bytes plus a zero, and the proof is that C's own `strlen`
+/// finds the same length Khora reports. Nothing in the test measures the
+/// terminator directly — `strlen` is what a terminator is *for*.
+#[test]
+fn a_c_string_is_terminated() {
+    let ran = run(
+        "lend_c_string",
+        &format!(
+            "{LEND}
+fn strlen(s: Ptr) -> Int;
+
+fn main() -> Int {{
+  khora_print_int(String::with_c_string(\"khora\", fn p => strlen(p)));
+  khora_print_int(String::with_c_string(\"\", fn p => strlen(p)));
+  khora_print_int(String::with_c_string(\"a\" + \"bc\", fn p => strlen(p)));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "5\n0\n3\n0\n",
+        "the terminator is where C expects it, and the copy did not outlive the call"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The copy lives exactly as long as the call, on the failing path too.
+#[test]
+fn a_c_string_is_released_when_the_body_raises() {
+    let ran = run(
+        "lend_c_string_raises",
+        &format!(
+            "{LEND}
+export type Nope = | Bad;
+
+fn borrow() -> Int raises Nope {{
+  String::with_c_string(\"khora\", fn p => raise Nope::Bad)!
+}}
+
+fn main() -> Int {{
+  khora_print_int(borrow()! catch {{ Nope::Bad => 1 }});
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n0\n");
+    assert_eq!(ran.code, Some(0));
 }

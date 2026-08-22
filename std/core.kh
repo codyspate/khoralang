@@ -567,6 +567,20 @@ impl String {
   /// Lends the bytes to `body` as a pointer and a length, for the duration of
   /// the call and no longer.
   ///
+  /// Lends the bytes to `body` as a `const char *`: the same bytes with a
+  /// zero after them, which is how every function in the C library finds the
+  /// end of a string.
+  ///
+  /// A copy, necessarily — a Khora string knows its length instead of carrying
+  /// a terminator, and there is nowhere to append one to a borrowed view. The
+  /// copy lives exactly as long as the call.
+  ///
+  /// A string with a zero inside it is not refused: C will see a shorter
+  /// string than Khora has, which is what C strings are.
+  fn with_c_string<B, 'c, 'e>(self, body: (Ptr) -> B with 'c raises 'e) -> B
+    with 'c
+    raises 'e;
+
   /// See `Array::with_data`, which is the same thing and carries the argument
   /// for why the lifetime is a call rather than anything wider.
   fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
