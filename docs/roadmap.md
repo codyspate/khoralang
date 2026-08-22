@@ -604,8 +604,17 @@ argument that settled A6.
   An index outside the array stops the program and says which index and what
   length — the same reasoning as trapping on overflow.
 
-**Exit:** a hash map, written in Khora, in `std`, with a test that a
-round-trip of inserts and removals leaves the live-object count at zero.
+**Exit — met** by 6.1 and 6.4, ahead of the other two. `Map<V>` is in
+`std::core`, written in Khora: an array for the buckets, a `mut` field for the
+count, and a recursive ADT for each chain. Sixty inserts followed by sixty
+removals leave the live-object count at zero —
+`a_round_trip_of_inserts_and_removals_leaves_nothing` in
+`crates/khora-codegen-llvm/tests/hashmap.rs`.
+
+Two things the map is honest about, both waiting on 6.2. Its hash is the key's
+magnitude modulo the bucket count, because a good one wants multiplication that
+may overflow and bits to shift. And its keys are `Int`, because hashing a
+string means walking its bytes and there are no bytes yet.
 
 ---
 

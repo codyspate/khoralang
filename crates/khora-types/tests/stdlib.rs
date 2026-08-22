@@ -102,6 +102,9 @@ fn the_standard_library_declares_what_it_promises() {
         "impl<A> Option<A>",
         "impl<A, E> Result<A, E>",
         // Containers and iteration.
+        "export type Array<A>",
+        "export type Map<V>",
+        "export type Chain<V>",
         "export type List<A>",
         "export type Step<S, A>",
         "export trait Iterator",

@@ -420,6 +420,124 @@ impl<A> Array<A> {
   fn set(self, index: Int, value: A) -> ();
 }
 
+/// One bucket's worth of entries: the keys that hashed to the same slot.
+///
+/// Separate chaining rather than open addressing, because a chain is an
+/// ordinary recursive ADT and needs no tombstones, no sentinel value and no
+/// second array saying which slots are live. It allocates per entry, which is
+/// the price, and it is the shape the language is actually good at.
+export type Chain<V> =
+  | Empty
+  | Node(key: Int, value: V, rest: Chain<V>);
+
+impl<V> Chain<V> {
+  fn find(self, key: Int) -> Option<V> {
+    match self {
+      Chain::Empty => Option::None,
+      Chain::Node(k, v, rest) => if k == key { Option::Some(v) } else { Chain::find(rest, key) },
+    }
+  }
+
+  /// The chain with `key` removed, or the same chain if it was not there.
+  fn without(self, key: Int) -> Chain<V> {
+    match self {
+      Chain::Empty => Chain::Empty,
+      Chain::Node(k, v, rest) =>
+      if k == key { rest } else { Chain::Node(k, v, Chain::without(rest, key)) },
+    }
+  }
+
+  fn holds(self, key: Int) -> Bool {
+    match Chain::find(self, key) {
+      Option::Some(v) => true,
+      Option::None => false,
+    }
+  }
+}
+
+/// A hash map from `Int` keys.
+///
+/// Written in Khora, out of an array for the buckets and a `mut` field for the
+/// count — which is what phase 6 was for. Nothing below this is a compiler
+/// feature.
+///
+/// **The hash is deliberately weak**: the key's magnitude, modulo the bucket
+/// count. A good one wants multiplication that may overflow and bits to shift,
+/// and Khora has neither yet; when fixed-width integers land this is the first
+/// thing to revisit. Keys are `Int` for the same reason — hashing a string
+/// means walking its bytes, and there are no bytes yet.
+export type Map<V> = {
+  mut buckets: Array<Chain<V>>,
+  mut count: Int,
+};
+
+impl<V> Map<V> {
+  fn new() -> Map<V> { { buckets: Array::new(8, Chain::Empty), count: 0 } }
+
+  fn len(self) -> Int { self.count }
+
+  fn get(self, key: Int) -> Option<V> {
+    Chain::find(Array::get(self.buckets, Map::slot(self, key)), key)
+  }
+
+  fn holds(self, key: Int) -> Bool {
+    Chain::holds(Array::get(self.buckets, Map::slot(self, key)), key)
+  }
+
+  /// Adds `key`, replacing whatever was there. The count only moves when the
+  /// key is new, which is what makes it the number of entries rather than the
+  /// number of insertions.
+  fn insert(self, key: Int, value: V) -> () {
+    if self.count * 4 >= Array::length(self.buckets) * 3 { Map::grow(self); }
+    let at = Map::slot(self, key);
+    let bucket = Array::get(self.buckets, at);
+    if Chain::holds(bucket, key) {
+      Array::set(self.buckets, at, Chain::Node(key, value, Chain::without(bucket, key)));
+    } else {
+      Array::set(self.buckets, at, Chain::Node(key, value, bucket));
+      self.count = self.count + 1;
+    }
+  }
+
+  fn remove(self, key: Int) -> () {
+    let at = Map::slot(self, key);
+    let bucket = Array::get(self.buckets, at);
+    if Chain::holds(bucket, key) {
+      Array::set(self.buckets, at, Chain::without(bucket, key));
+      self.count = self.count - 1;
+    }
+  }
+
+  /// Which bucket a key belongs in. See the note on the type: this is not a
+  /// good hash, it is an honest one.
+  fn slot(self, key: Int) -> Int {
+    let spread = if key < 0 { 0 - key } else { key };
+    spread % Array::length(self.buckets)
+  }
+
+  /// Twice the buckets, and every entry moved into the new ones.
+  fn grow(self) -> () {
+    let old = self.buckets;
+    self.buckets = Array::new(Array::length(old) * 2, Chain::Empty);
+    let mut i = 0;
+    while i < Array::length(old) {
+      Map::rehash(self, Array::get(old, i));
+      i = i + 1;
+    }
+  }
+
+  fn rehash(self, chain: Chain<V>) -> () {
+    match chain {
+      Chain::Empty => (),
+      Chain::Node(k, v, rest) => {
+        let at = Map::slot(self, k);
+        Array::set(self.buckets, at, Chain::Node(k, v, Array::get(self.buckets, at)));
+        Map::rehash(self, rest);
+      },
+    };
+  }
+}
+
 /// The fibers a block is responsible for.
 ///
 /// Releasing one *cancels its children and waits*, which is the answer for a
