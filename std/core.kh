@@ -420,6 +420,32 @@ impl<A> Array<A> {
   fn set(self, index: Int, value: A) -> ();
 }
 
+/// Arithmetic that does not trap, and the bits underneath it.
+///
+/// Ordinary `+`, `-` and `*` **stop the program** when they do not fit: a
+/// program that passes its tests and then wraps in production is the failure
+/// worth a branch to prevent. These are how you ask for the other behaviour in
+/// the places that genuinely want it — a hash, a checksum, a pseudo-random
+/// number — by name, so that the trap stays the default without being in the
+/// way.
+///
+/// Methods rather than operators for now. `^`, `&`, `|`, `<<` and `>>` are five
+/// new tokens and `>>` has to be told apart from the end of two nested type
+/// arguments; none of that is hard and none of it is what a hash was waiting
+/// for.
+impl Int {
+  fn wrapping_add(self, other: Int) -> Int;
+  fn wrapping_sub(self, other: Int) -> Int;
+  fn wrapping_mul(self, other: Int) -> Int;
+  fn xor(self, other: Int) -> Int;
+  fn and(self, other: Int) -> Int;
+  fn or(self, other: Int) -> Int;
+  fn shl(self, other: Int) -> Int;
+  /// Arithmetic, so a negative number stays negative. A logical shift is what
+  /// `Int` cannot express and what an unsigned fixed-width type will.
+  fn shr(self, other: Int) -> Int;
+}
+
 /// One bucket's worth of entries: the keys that hashed to the same slot.
 ///
 /// Separate chaining rather than open addressing, because a chain is an
@@ -461,11 +487,13 @@ impl<V> Chain<V> {
 /// count — which is what phase 6 was for. Nothing below this is a compiler
 /// feature.
 ///
-/// **The hash is deliberately weak**: the key's magnitude, modulo the bucket
-/// count. A good one wants multiplication that may overflow and bits to shift,
-/// and Khora has neither yet; when fixed-width integers land this is the first
-/// thing to revisit. Keys are `Int` for the same reason — hashing a string
-/// means walking its bytes, and there are no bytes yet.
+/// Keys are `Int` because hashing a string means walking its bytes, and there
+/// are no bytes yet — that arrives with fixed-width integers, and is the first
+/// thing to revisit here.
+///
+/// The bucket count is always a power of two, which is what lets `slot` mask
+/// instead of dividing. `new` starts at eight and `grow` doubles, so nothing
+/// else has to maintain it.
 export type Map<V> = {
   mut buckets: Array<Chain<V>>,
   mut count: Int,
@@ -508,11 +536,15 @@ impl<V> Map<V> {
     }
   }
 
-  /// Which bucket a key belongs in. See the note on the type: this is not a
-  /// good hash, it is an honest one.
+  /// Which bucket a key belongs in.
+  ///
+  /// Knuth's multiplicative constant, then a shift-xor so that the high bits —
+  /// where multiplication puts the information — reach the low ones the mask
+  /// keeps. Wrapping on purpose: overflow is where the mixing comes from.
   fn slot(self, key: Int) -> Int {
-    let spread = if key < 0 { 0 - key } else { key };
-    spread % Array::length(self.buckets)
+    let mixed = Int::wrapping_mul(key, 2654435761);
+    let spread = Int::xor(mixed, Int::shr(mixed, 16));
+    Int::and(spread, Array::length(self.buckets) - 1)
   }
 
   /// Twice the buckets, and every entry moved into the new ones.

@@ -2439,7 +2439,15 @@ impl<'a> Checker<'a> {
         // A type's own function comes first, for the same reason its own
         // method beats a trait's: adding a trait must not silently change what
         // an existing call does.
-        let self_ty = Type::adt(owner);
+        // `Type::adt` for a builtin gives an ADT that shares its name, which
+        // is all `inherent_method` looks at — it compares head constructors,
+        // and `Int`'s is `Int` however the type was spelled.
+        let self_ty = match owner {
+            "Int" => Type::Int,
+            "Bool" => Type::Bool,
+            "String" => Type::Str,
+            other => Type::adt(other),
+        };
         if let Some(own) = self.types.traits.inherent_method(&self_ty, name) {
             let key = traits::method_key("", &own.head, name);
             let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else {

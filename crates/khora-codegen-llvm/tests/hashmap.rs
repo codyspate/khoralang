@@ -30,6 +30,13 @@ impl<A> Array<A> {
   fn set(self, index: Int, value: A) -> ();
 }
 
+impl Int {
+  fn wrapping_mul(self, other: Int) -> Int;
+  fn xor(self, other: Int) -> Int;
+  fn and(self, other: Int) -> Int;
+  fn shr(self, other: Int) -> Int;
+}
+
 export type Chain<V> = | Empty | Node(key: Int, value: V, rest: Chain<V>);
 
 impl<V> Chain<V> {
@@ -82,8 +89,9 @@ impl<V> Map<V> {
     }
   }
   fn slot(self, key: Int) -> Int {
-    let spread = if key < 0 { 0 - key } else { key };
-    spread % Array::length(self.buckets)
+    let mixed = Int::wrapping_mul(key, 2654435761);
+    let spread = Int::xor(mixed, Int::shr(mixed, 16));
+    Int::and(spread, Array::length(self.buckets) - 1)
   }
   fn grow(self) -> () {
     let old = self.buckets;
@@ -166,8 +174,9 @@ fn main() -> Int {{ print(work()); print(khora_live_count()); 0 }}
     assert_eq!(ran.code, Some(0));
 }
 
-/// Two keys in one bucket. With eight buckets and a modulo hash, 1 and 9
-/// collide by construction — which is the case a chain exists for.
+/// Several keys, at least some of which will share a bucket — with eight
+/// buckets and sixteen keys they must. Which ones is the hash's business, and
+/// not something to assert.
 #[test]
 fn keys_that_collide_are_both_kept() {
     let ran = run(

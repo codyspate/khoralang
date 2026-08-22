@@ -1053,7 +1053,8 @@ impl<'a> Ctx<'a> {
             let is_type = |kind: crate::ItemKind| {
                 matches!(kind, crate::ItemKind::Type | crate::ItemKind::Effect)
             };
-            let declared_here = self.map.item(owner).is_some_and(|i| is_type(i.kind));
+            let declared_here = self.map.item(owner).is_some_and(|i| is_type(i.kind))
+                || crate::BUILTIN_TYPES.contains(&owner.as_str());
             let imported = matches!(
                 self.scope.get(owner),
                 Some(crate::Resolution::Item { kind, .. }) if is_type(*kind)

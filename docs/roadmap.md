@@ -582,10 +582,25 @@ argument that settled A6.
 - **6.2 Fixed-width integers, and bytes.** No `u8` means no bytes, which means
   no parsing, no wire formats, no encoding. `Int` alone is a toy.
 
-  **Overflow traps, in every build.** Swift's answer rather than Rust's: a
-  program that passes its tests and then wraps in production is the failure
-  worth spending a branch to prevent, and phase 9 can remove many of them.
-  Explicit wrapping operators are how you ask for the other thing.
+  **Overflow traps, in every build — done for `Int`.** Swift's answer rather
+  than Rust's: a program that passes its tests and then wraps in production is
+  the failure worth spending a branch to prevent, and two behaviours put the
+  difference where it is most expensive to find. LLVM's `with.overflow`
+  intrinsics return the result and the flag together, so the check is a branch
+  the optimizer can usually see through, and phase 9 can remove many of them.
+
+  `Int::wrapping_add` and its siblings are how you ask for the other thing, by
+  name, in the places that genuinely want it — a hash, a checksum, a PRNG. The
+  bit operations landed with them, which is what let the hash map stop
+  apologising for its hash.
+
+  Methods rather than operators: `^`, `&`, `|`, `<<` and `>>` are five new
+  tokens and `>>` has to be told apart from the end of two nested type
+  arguments. Not hard, and not what a hash function was waiting for.
+
+  **Still to do:** the fixed-width types themselves. `Int` is the only integer
+  there is, so there are still no bytes, and `Array<U8>` is what a string index
+  and every wire format need.
 - **6.3 Floats.** Not in the backend and not in `Type`. `std::ai` promises
   tensors and the reference application cannot compile without them.
 - **6.4 Arrays — done**, and taken before 6.2 and 6.3 because the phase's exit

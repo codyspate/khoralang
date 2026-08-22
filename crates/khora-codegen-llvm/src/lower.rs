@@ -833,6 +833,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == runtime::ARRAY_TYPE {
                     return self.array_intrinsic(site, &name, args, range);
                 }
+                if owner == "Int" {
+                    return self.int_intrinsic(&name, args, range);
+                }
                 match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, site, args, range),
                     None => self.fail(
@@ -1041,6 +1044,57 @@ impl<'ctx> Lower<'_, 'ctx> {
                 range,
             ),
         }
+    }
+
+    /// The bit and wrapping operations on `Int`.
+    ///
+    /// Methods rather than operators, for now. `^`, `&`, `|`, `<<` and `>>`
+    /// are five new tokens and `>>` has to be told apart from the end of two
+    /// nested type arguments; none of that is hard and none of it is what a
+    /// hash function is waiting for.
+    ///
+    /// Wrapping arithmetic is here because ordinary arithmetic *traps* — see
+    /// `checked_arithmetic`. A hash, a checksum and a PRNG are the places that
+    /// genuinely want the other behaviour, and asking for it by name is how
+    /// the trap stays the default without being in the way.
+    fn int_intrinsic(&mut self, name: &str, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+        let [left, right] = args else {
+            return self.fail(format!("`Int::{name}` takes two arguments"), range);
+        };
+        let l = self.expr(*left)?.into_int_value();
+        let r = self.expr(*right)?.into_int_value();
+        let b = &self.be.builder;
+        let value = match name {
+            "wrapping_add" => b.build_int_add(l, r, "wrapping.add"),
+            "wrapping_sub" => b.build_int_sub(l, r, "wrapping.sub"),
+            "wrapping_mul" => b.build_int_mul(l, r, "wrapping.mul"),
+            "xor" => b.build_xor(l, r, "xor"),
+            "and" => b.build_and(l, r, "and"),
+            "or" => b.build_or(l, r, "or"),
+            // Shifting by 64 or more is undefined in LLVM, so the count is
+            // masked to the width. Silently, and deliberately: every shift
+            // would otherwise need a branch, and there is no answer for
+            // `x << 64` that is more right than any other.
+            "shl" | "shr" => {
+                let mask = self.be.ctx.i64_type().const_int(63, false);
+                let count = b.build_and(r, mask, "shift.count").expect("masking a shift");
+                if name == "shl" {
+                    b.build_left_shift(l, count, "shl")
+                } else {
+                    // Arithmetic, so a negative number stays negative. A
+                    // logical shift is what `Int` cannot express and what
+                    // fixed-width unsigned types will.
+                    b.build_right_shift(l, count, true, "shr")
+                }
+            }
+            _ => {
+                return self.fail(
+                    format!("`Int::{name}` is not an integer operation the backend knows"),
+                    range,
+                )
+            }
+        };
+        Some(value.expect("an integer operation").into())
     }
 
     /// The element type of the `Array<A>` this call is about.
@@ -1332,6 +1386,71 @@ impl<'ctx> Lower<'_, 'ctx> {
         // duplicated the reference. Give it back.
         self.drop(object.into(), &owner_ty);
         Some(self.be.unit_value())
+    }
+
+    /// Arithmetic that stops the program rather than wrapping.
+    ///
+    /// LLVM's `with.overflow` intrinsics return the result and a flag in one
+    /// go, so the check costs a branch the optimizer can usually see through
+    /// and never a second computation.
+    ///
+    /// Trapping in *every* build is the decision: a program that passes its
+    /// tests and then wraps in production is the failure worth this branch, and
+    /// two behaviours put the difference where it is most expensive to find.
+    fn checked_arithmetic(
+        &mut self,
+        intrinsic: &str,
+        what: &str,
+        left: IntValue<'ctx>,
+        right: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let i64_type = self.be.ctx.i64_type();
+        let checked = self.be.overflow_intrinsic(intrinsic);
+        let pair = self
+            .be
+            .builder
+            .build_call(checked, &[left.into(), right.into()], "checked")
+            .expect("checked arithmetic")
+            .try_as_basic_value()
+            .basic()
+            .expect("the intrinsic returns a pair")
+            .into_struct_value();
+        let value = self
+            .be
+            .builder
+            .build_extract_value(pair, 0, what)
+            .expect("reading the result");
+        let overflowed = self
+            .be
+            .builder
+            .build_extract_value(pair, 1, "overflowed")
+            .expect("reading the overflow flag")
+            .into_int_value();
+
+        let bad = self.block("overflow");
+        let good = self.block("in.range");
+        self.be
+            .builder
+            .build_conditional_branch(overflowed, bad, good)
+            .expect("branching on the overflow flag");
+
+        self.at(bad);
+        let text = self
+            .be
+            .builder
+            .build_global_string_ptr(what, "overflow.what")
+            .expect("naming the operation")
+            .as_pointer_value();
+        let len = i64_type.const_int(what.len() as u64, false);
+        let report = self.be.rt.overflow;
+        self.be
+            .builder
+            .build_call(report, &[text.into(), len.into()], "")
+            .expect("reporting an overflow");
+        self.be.builder.build_unreachable().expect("sealing after an overflow");
+
+        self.at(good);
+        value
     }
 
     /// The `attempt` intrinsic: run a computation and make its failure a value.
@@ -2297,15 +2416,22 @@ impl<'ctx> Lower<'_, 'ctx> {
                     range,
                 )
             }
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            BinOp::Add | BinOp::Sub | BinOp::Mul => {
                 let (l, r) = (left.into_int_value(), right.into_int_value());
+                let (intrinsic, what) = match op {
+                    BinOp::Add => ("llvm.sadd.with.overflow.i64", "addition"),
+                    BinOp::Sub => ("llvm.ssub.with.overflow.i64", "subtraction"),
+                    _ => ("llvm.smul.with.overflow.i64", "multiplication"),
+                };
+                Some(self.checked_arithmetic(intrinsic, what, l, r))
+            }
+            BinOp::Div | BinOp::Rem => {
+                let (l, r) = (left.into_int_value(), right.into_int_value());
+                // Signed division by zero faults rather than trapping
+                // politely, and `Int::MIN / -1` overflows. Both want the error
+                // channel rather than a hardware fault; `raises` exists now, so
+                // this is a gap to close rather than one to explain away.
                 let value = match op {
-                    BinOp::Add => self.be.builder.build_int_add(l, r, "add"),
-                    BinOp::Sub => self.be.builder.build_int_sub(l, r, "sub"),
-                    BinOp::Mul => self.be.builder.build_int_mul(l, r, "mul"),
-                    // Signed division by zero faults rather than trapping
-                    // politely. Phase 2 has no error channel to raise into;
-                    // `raises` in phase 4 is where a checked `/` belongs.
                     BinOp::Div => self.be.builder.build_int_signed_div(l, r, "div"),
                     _ => self.be.builder.build_int_signed_rem(l, r, "rem"),
                 };
