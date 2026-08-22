@@ -1216,16 +1216,14 @@ they will be missed:
 - **`Shared<A>`.** The sharing rules refuse a stateful test double, a cache and
   a counter on purpose. This is what they are refusing them *until*, and its
   API has to release under a raise and under cancellation.
-- **Evidence parameters for a lambda**, which is
-  `docs/design/capability-passing.md`. A named function receives what its
-  `with` clause names, so `nursery(serve)` works and is tested; a lambda
-  captures instead and its row is always empty, so `nursery(fn () => serve()!)`
-  is refused. **Eta-expansion changes meaning**, and it taxes every library
-  that installs a capability for a callback — `transaction`,
-  `with_connection`, `with_span`. The rule is decided and the call side is
-  already built; the three missing pieces are in the doc.
+- ~~**Evidence parameters for a lambda.**~~ Done —
+  `docs/design/capability-passing.md`. A lambda resolves a capability lexically
+  if it can and requires it if it cannot, so `nursery(fn () => serve()!)` works
+  and eta-expansion no longer changes meaning. What remains is narrow: a lambda
+  can require a capability it never mentions, but cannot *mention* one that is
+  not in scope, because a bare name is resolved by ordinary lookup.
 
-The last two need a decision; the rest is library work over a language that
+`Shared<A>` needs a decision; the rest is library work over a language that
 came out of phase 8 in good shape.
 
 ---

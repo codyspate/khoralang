@@ -502,3 +502,80 @@ fn f() -> Int { let go = fn n => if n == 0 { 0 } else { n + go(n - 1) }; go(3) }
 ",
     );
 }
+
+// --- what a closure requires -----------------------------------------------
+//
+// `docs/design/capability-passing.md`. A lambda resolves a capability
+// lexically if it can and requires it if it cannot, which is what lets a
+// library install one for the duration of a callback.
+
+const CALLBACK: &str = "module m;
+                        export type Ledger;
+                        export type Ai;
+                        fn report(id: Int) -> Int with { ledger: Ledger };
+                        fn install(body: (Int) -> Int with { ledger: Ledger }) -> Int;
+                        fn apply(body: (Int) -> Int) -> Int;
+";
+
+/// The one that was refused. `f` and `fn x => f(x)` are the same function, so a
+/// callback that needs a capability can be written either way.
+#[test]
+fn a_lambda_requires_what_it_cannot_resolve() {
+    assert_clean(&format!("{CALLBACK}export fn go() -> Int {{ install(fn id => report(id)) }}\n"));
+}
+
+/// And the named function it expands from, which always worked.
+#[test]
+fn a_named_function_can_be_the_same_callback() {
+    assert_clean(&format!("{CALLBACK}export fn go() -> Int {{ install(report) }}\n"));
+}
+
+/// The requirement is the *closure's*, not the enclosing function's. `go`
+/// neither has a ledger nor needs one — `install` is what supplies it — and
+/// charging it here is what the old error did.
+#[test]
+fn the_enclosing_function_is_not_charged_for_it() {
+    let found = errors(&format!(
+        "{CALLBACK}export fn go() -> Int {{ install(fn id => report(id)) }}\n"
+    ));
+    assert!(
+        !found.iter().any(|e| e.contains("does not require")),
+        "the closure asked for it, not `go`: {found:?}"
+    );
+}
+
+/// A capability that *is* in scope is captured, and the row stays empty — so a
+/// callback that logs can still be handed to something requiring nothing. This
+/// is what keeps every higher-order function in the library from having to be
+/// polymorphic in its callback's requirements.
+#[test]
+fn a_capability_in_scope_is_captured_not_required() {
+    assert_clean(&format!(
+        "{CALLBACK}\
+         export fn go() -> Int with {{ ledger: Ledger }} {{ apply(fn id => report(id)) }}\n"
+    ));
+}
+
+/// Requiring is not conjuring. A closure handed to something that supplies
+/// nothing still cannot call what needs a ledger.
+#[test]
+fn a_callback_cannot_require_what_nobody_supplies() {
+    assert_reports(
+        &format!("{CALLBACK}export fn go() -> Int {{ apply(fn id => report(id)) }}\n"),
+        "required here but not provided",
+    );
+}
+
+/// The row is exactly what the body could not reach: a closure needing two
+/// capabilities, handed one, still says so about the other.
+#[test]
+fn a_closure_requires_only_what_it_could_not_reach() {
+    assert_reports(
+        &format!(
+            "{CALLBACK}\
+             fn both(id: Int) -> Int with {{ ledger: Ledger, ai: Ai }};\n\
+             export fn go() -> Int {{ install(fn id => both(id)) }}\n"
+        ),
+        "ai: Ai",
+    );
+}

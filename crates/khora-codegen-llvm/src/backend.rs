@@ -301,7 +301,8 @@ fn declare_closures(
 ) {
     for (id, expr) in body.exprs() {
         let khora_hir::body::Expr::Lambda { captures, .. } = expr else { continue };
-        let Type::Fn { params, ret, raises, .. } = types.of(id).clone() else { continue };
+        let shape = types.of(id).clone();
+        let Type::Fn { params, ret, .. } = &shape else { continue };
 
         // The names the body mentions, and then the capabilities it uses
         // without mentioning. A `with` block lowers to a block of `let`s, so a
@@ -322,9 +323,9 @@ fn declare_closures(
         // feature.
         let unsolved = params
             .iter()
-            .chain(std::iter::once(&*ret))
+            .chain(std::iter::once(&**ret))
             .any(|t| matches!(t, Type::Var(_)));
-        if backend.declare_closure(symbol, id, params, *ret, *raises, captured).is_none() {
+        if backend.declare_closure(symbol, id, shape.clone(), captured).is_none() {
             backend.error(
                 if unsolved {
                     "the type of this closure was never pinned down; use it somewhere that \
@@ -584,7 +585,32 @@ pub(crate) struct ClosureSite {
     /// — so the row is part of its type, and a non-empty one means the lifted
     /// function returns the tagged pair like any other fallible one.
     pub raises: Type,
+    /// What the closure is *handed*, as opposed to what it captured.
+    ///
+    /// Usually empty — a capability in scope where the lambda was written is
+    /// captured like any other binding. What lands here is one that did not
+    /// exist yet at that point, supplied by whoever calls the closure:
+    /// `nursery(fn () => serve()!)`. `docs/design/capability-passing.md`.
+    pub requires: Type,
     pub captures: Vec<(khora_hir::body::LocalId, Type)>,
+}
+
+impl ClosureSite {
+    /// The requirement row, as the thing `evidence_of` reads.
+    ///
+    /// A shim rather than a second copy of the field access, so the closure and
+    /// the named function ask the same function what order the labels go in.
+    pub(crate) fn requires_signature(&self) -> Signature {
+        Signature {
+            is_extern: false,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            requires: self.requires.clone(),
+            raises: Type::empty_row(),
+            params: Vec::new(),
+            ret: Type::Unit,
+        }
+    }
 }
 
 impl<'ctx> Backend<'ctx> {
@@ -1050,15 +1076,18 @@ impl<'ctx> Backend<'ctx> {
     /// the lambda's own parameters after it, which is what makes an indirect
     /// call possible without knowing anything about the captures at the call
     /// site.
+    /// `shape` is the lambda's `Type::Fn` — all four of what it takes, gives
+    /// back, can fail with and has to be handed, which travel together because
+    /// they are one type.
     pub fn declare_closure(
         &mut self,
         owner: &str,
         expr: khora_hir::body::ExprId,
-        params: Vec<Type>,
-        ret: Type,
-        raises: Type,
+        shape: Type,
         captures: Vec<(khora_hir::body::LocalId, Type)>,
     ) -> Option<usize> {
+        let Type::Fn { params, ret, raises, requires } = shape else { return None };
+        let (params, ret, raises, requires) = (params, *ret, *raises, *requires);
         let index = self.closures.len();
         let symbol = format!("{owner}$$lambda{}", self.closures_by_owner.get(owner).map_or(0, Vec::len));
 
@@ -1066,6 +1095,16 @@ impl<'ctx> Backend<'ctx> {
         let mut llvm_params: Vec<BasicMetadataTypeEnum<'ctx>> = vec![ptr.into()];
         for param in &params {
             llvm_params.push(self.llvm_type(param)?.into());
+        }
+        // After the written parameters, in label order — the same convention a
+        // named function follows, and the one `invoke_closure_at` already
+        // builds its call around.
+        let handed: Vec<(String, Type)> = match &requires {
+            Type::Row { fields, .. } => fields.clone(),
+            _ => Vec::new(),
+        };
+        for (_, ty) in &handed {
+            llvm_params.push(self.llvm_type(ty)?.into());
         }
         let fallible =
             matches!(&raises, Type::Row { fields, tail } if !fields.is_empty() || tail.is_some());
@@ -1087,7 +1126,7 @@ impl<'ctx> Backend<'ctx> {
                 is_extern: false,
                 generics: Vec::new(),
                 bounds: Vec::new(),
-                requires: Type::empty_row(),
+                requires: requires.clone(),
                 raises: raises.clone(),
                 params: params.clone(),
                 ret: ret.clone(),
@@ -1100,6 +1139,7 @@ impl<'ctx> Backend<'ctx> {
             symbol,
             ret,
             raises,
+            requires,
             captures,
         });
         self.closures_by_owner.entry(owner.to_string()).or_default().push(index);

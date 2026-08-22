@@ -2080,15 +2080,18 @@ impl<'a> Checker<'a> {
                 // variable the body then solves, and so is the error row.
                 let result = self.unifier.fresh();
                 let raises = self.unifier.fresh();
+                let requires = self.unifier.fresh();
                 let whole = Type::Fn {
                     params: types,
                     ret: Box::new(result.clone()),
-                    // Always empty. A capability a closure uses is *captured*,
-                    // because a `with` block is a block of `let`s and a
-                    // closure captures the bindings it reads — so there is
-                    // nothing left for a caller to supply. A failure cannot be
-                    // captured, which is why the other row is inferred.
-                    requires: Box::new(Type::empty_row()),
+                    // A variable, solved below by what the body turned out to
+                    // need and could not reach. Usually that is nothing: a
+                    // capability in scope is *captured*, because a `with` block
+                    // is a block of `let`s and a closure captures the bindings
+                    // it reads. What is left over is a capability that does not
+                    // exist yet where the lambda is written, which is the whole
+                    // of `docs/design/capability-passing.md`.
+                    requires: Box::new(requires.clone()),
                     raises: Box::new(raises.clone()),
                 };
                 self.lambdas.push(whole.clone());
@@ -2096,6 +2099,8 @@ impl<'a> Checker<'a> {
 
                 let before = self.demanded.len();
                 let ret = self.infer(body);
+                let needs = self.absorb_requires(before);
+                let _ = self.unifier.unify(&requires, &needs);
                 let mine = self.absorb_raises(before);
                 // Left open, because what the body raises is a lower bound
                 // rather than the answer — see `open_raises`. A closed row here
@@ -2851,6 +2856,69 @@ impl<'a> Checker<'a> {
             .collect();
         self.demanded.extend(kept);
         Type::row(fields, tail)
+    }
+
+    /// Takes the capabilities a closure could not resolve lexically as its own.
+    ///
+    /// **Resolve if you can, require if you cannot.** A lambda written where
+    /// `ledger` is in scope captures it, and its requirement row stays empty —
+    /// that is the common case and it is left alone, so `List::map` does not
+    /// have to become row-polymorphic to accept a callback that logs.
+    ///
+    /// A lambda written where the capability does *not* exist yet is the other
+    /// case, and it is every library that installs one for its callback:
+    ///
+    /// ```khora
+    /// nursery(fn () => serve()!)
+    /// ```
+    ///
+    /// `serve` needs a nursery, `nursery` is what will supply one, and the
+    /// thunk was written before the binding existed. Charging that to the
+    /// enclosing function was wrong twice over — it does not have a nursery,
+    /// and it is not the one being asked. So the demand becomes the *closure's*
+    /// requirement instead, which is exactly what a named function does with
+    /// its `with` clause, and is why `nursery(serve)` already worked while its
+    /// own eta-expansion did not.
+    ///
+    /// Closed, not open: these are exactly what this body needs, the same
+    /// promise a written `with` clause makes. `docs/design/capability-passing.md`.
+    fn absorb_requires(&mut self, before: usize) -> Type {
+        let window: Vec<Demand> = self.demanded.split_off(before);
+        let mut mine: Vec<(String, Type)> = Vec::new();
+
+        let kept: Vec<Demand> = window
+            .into_iter()
+            .map(|mut demand| {
+                if demand.clause != Clause::Requires {
+                    return demand;
+                }
+                let Type::Row { fields, tail } = self.unifier.zonk(&demand.row) else {
+                    return demand;
+                };
+                // Label by label, because one call can need two capabilities
+                // and have a binding for only one of them.
+                let mut left = Vec::new();
+                for (label, ty) in fields {
+                    let lexical = demand
+                        .site
+                        .and_then(|site| self.body.capability_at(site, &label))
+                        .is_some();
+                    if lexical || self.installed.contains(&label) {
+                        left.push((label, ty));
+                    } else if !mine.iter().any(|(l, _)| l == &label) {
+                        mine.push((label, ty));
+                    }
+                }
+                demand.row = Type::row(left, tail.map(|t| *t));
+                demand
+            })
+            .collect();
+        self.demanded.extend(kept);
+        // In label order, which is the order code generation appends the
+        // parameters in. Two places agreeing on an order is how errata 33
+        // happened; one of them sorting is how it does not happen again.
+        mine.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Type::row(mine, None)
     }
 
     /// What a fiber's body may close over.

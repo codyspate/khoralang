@@ -1563,3 +1563,182 @@ fn main() -> Int {{
     );
     assert_eq!(ran.code, Some(0));
 }
+
+// --- a closure that is handed a capability ---------------------------------
+//
+// `docs/design/capability-passing.md`. A lambda resolves a capability
+// lexically if it can and *requires* it if it cannot, so a higher-order
+// function can install one for its callback. Before this, a lambda's
+// requirement row was always empty and only a named function could be passed —
+// which made eta-expansion change meaning.
+
+/// The bug in one line: `f` and `fn x => f(x)` are the same function.
+#[test]
+fn eta_expansion_does_not_change_what_a_callback_can_do() {
+    let ran = run(
+        "capability_eta",
+        &format!(
+            "{LEDGER}
+fn install(body: (Int) -> Int with {{ ledger: Ledger }}) -> Int {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{ body(4) }}
+}}
+
+fn main() -> Int {{
+  print(install(report));
+  print(install(fn id => report(id)));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n40\n", "the named function and its eta-expansion agree");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Handed at the *call*, not captured at creation.
+///
+/// The decisive one: one closure, called twice under two different
+/// installations. A captured capability would give the same answer twice, or
+/// no answer at all — this is what says the evidence is a parameter.
+#[test]
+fn a_closure_gets_the_capability_of_whoever_calls_it() {
+    let ran = run(
+        "capability_handed",
+        &format!(
+            "{LEDGER}
+fn both(body: (Int) -> Int with {{ ledger: Ledger }}) -> () {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{ print(body(4)); }}
+  with {{ ledger: handler for Ledger {{ balance: fn id => id + 1 }} }} {{ print(body(4)); }}
+}}
+
+fn main() -> Int {{ both(fn id => report(id)); 0 }}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "40\n5\n",
+        "the same closure answered to two different handlers"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The common case is untouched: a capability that *is* in scope where the
+/// lambda is written is captured, and the closure's row stays empty. That is
+/// what keeps `List::map` from having to be polymorphic in its callback's
+/// requirements.
+#[test]
+fn a_capability_in_scope_is_still_captured() {
+    let ran = run(
+        "capability_captured",
+        &format!(
+            "{LEDGER}
+fn apply(body: (Int) -> Int) -> Int {{ body(4) }}
+
+fn main() -> Int {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
+    // `apply` requires nothing, and this still compiles: the closure took the
+    // handler with it rather than asking for one.
+    print(apply(fn id => report(id)));
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Both at once. One capability is in scope and captured, the other is not and
+/// is required, and the closure is right about which is which.
+#[test]
+fn a_closure_can_capture_one_capability_and_require_another() {
+    let ran = run(
+        "capability_mixed",
+        &format!(
+            "{LEDGER}
+export effect Rate {{ scale: () -> Int, }}
+export fn scaled(id: Int) -> Int with {{ ledger: Ledger, rate: Rate }} {{
+  report(id) * rate.scale()
+}}
+
+fn install(body: (Int) -> Int with {{ rate: Rate }}) -> Int {{
+  with {{ rate: handler for Rate {{ scale: fn () => 2 }} }} {{ body(4) }}
+}}
+
+fn main() -> Int {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
+    print(install(fn id => scaled(id)));
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "80\n", "`ledger` was captured and `rate` was handed in");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `std::core::nursery` and `scoped` are the reason this exists: a library that
+/// installs a capability for the duration of a callback. Both were callable
+/// only with a named function before.
+#[test]
+fn a_lambda_can_be_given_a_nursery() {
+    let ran = run(
+        "capability_nursery_lambda",
+        "module t;
+fn print(value: Int);
+
+export type Fiber;
+impl Fiber {
+  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
+  fn join(self) -> ();
+  fn cancel(self) -> ();
+}
+
+export type Fibers;
+export trait Share {}
+impl Share for Fibers {}
+impl Fibers {
+  fn open() -> Fibers;
+  fn adopt(self, fiber: Fiber) -> ();
+  fn wait(self) -> ();
+}
+
+export effect Nursery { adopt: (Fiber) -> (), }
+
+export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
+  with 'e
+  raises 'r
+{
+  let crew = Fibers::open();
+  let value = with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
+    body()!
+  };
+  Fibers::wait(crew);
+  value
+}
+
+fn child(tag: Int) -> () { print(tag) }
+
+/// The capability is *named* here, where a binding for it exists. A lambda can
+/// require one it never mentions; it cannot mention one that is not in scope,
+/// because a bare name is resolved by ordinary lookup and there is nothing for
+/// it to find. See the note in `docs/design/capability-passing.md`.
+fn spawn_one<'e>() -> () with { 'e | nursery: Nursery } {
+  nursery.adopt(Fiber::spawn(fn () => child(1)));
+}
+
+fn main() -> Int {
+  nursery(fn () => spawn_one()!);
+  print(2);
+  0
+}
+",
+    );
+    assert_eq!(
+        ran.stdout, "1\n2\n",
+        "the child ran and the nursery waited for it before `nursery` returned"
+    );
+    assert_eq!(ran.code, Some(0));
+}

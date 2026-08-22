@@ -173,6 +173,25 @@ pub(crate) fn emit_closure<'ctx>(
             owned.push(Cleanup::Local(local));
         }
     }
+
+    // Then whatever the closure is *handed* rather than captured: a capability
+    // that did not exist where the lambda was written, supplied by whoever
+    // calls it. `docs/design/capability-passing.md`.
+    //
+    // No binding names these — the source never wrote them down, which is the
+    // whole point — so they go straight into `incoming`, where
+    // `evidence_from_row` already looks for a capability a `with 'r` clause
+    // forwarded. Owned like every other argument, and released here because
+    // there is no local for the reference-counting plan to hang them on.
+    let handed = crate::backend::evidence_of(&site.requires_signature());
+    let base = params.len() + 1;
+    for (offset, (label, ty)) in handed.into_iter().enumerate() {
+        let Some(value) = function.get_nth_param((base + offset) as u32) else { continue };
+        if is_boxed(&ty) {
+            owned.push(Cleanup::Temp(value, ty));
+        }
+        lower.incoming.insert(label, value);
+    }
     lower.scopes.push(owned);
 
     let value = lower.expr(root);

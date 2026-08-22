@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, Fiber, Fibers, List, Map, Never, Nursery, Option, SharedFn, Show, Split};
+import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, SharedFn, Show, Split, nursery};
 import std::net::socket::{accept_on, invalid_handle, listen_on, receive, shut, start, transmit};
 
 // HTTP/1.1, over the sockets in `std::net::socket`.
@@ -767,16 +767,14 @@ impl Router {
       // something to configure it with.
       print("listening on " + Int::to_string(port));
       // The nursery is opened here rather than asked of the caller: that a
-      // server answers on a fiber per connection is its own business, and the
-      // structure it needs is three lines.
-      let crew = Fibers::open();
-      with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
-        Router::serve_forever(router, server)!
-      };
-      // Reached only if accepting ever stops. Leaving `listen` any other way
-      // releases `crew`, which cancels the connections still in flight; getting
-      // here waits for them instead.
-      Fibers::wait(crew)
+      // server answers on a fiber per connection is its own business.
+      //
+      // Written as a lambda, which needed
+      // `docs/design/capability-passing.md`: the thunk requires a nursery that
+      // does not exist where it is written, so `nursery` supplies one when it
+      // calls it. Until that landed this was the handler spelled out by hand,
+      // because a lambda's requirement row was always empty.
+      nursery(fn () => Router::serve_forever(router, server)!)!
     }
   }
 
