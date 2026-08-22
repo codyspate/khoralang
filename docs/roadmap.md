@@ -454,10 +454,23 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
 
   The flag is process-wide until fibers make it per-fiber; nothing in generated
   code reads it directly, so that is a change inside the runtime.
-- **5.3 Fibers.** The one genuinely new subsystem, and the one that needs a
-  decision doc first: a fiber suspends a whole stack, and Khora has no
-  continuation machinery because §3 deliberately declined to build any. D10
-  (atomic reference counts) comes due here as well.
+- **5.3 Fibers — decided, not yet built.** `docs/design/fibers.md`: a fiber is
+  a stackful coroutine multiplexed onto worker threads, and the first
+  implementation makes each one an operating-system thread. Not a hedge — the
+  same argument as D10. A program sees `spawn`, `join`, `cancel` and a nursery,
+  is correct under either implementation, and cannot tell which is running
+  except in how many fibers it can afford.
+
+  A state-machine transform is rejected outright rather than deferred: it is
+  the one option that would have to be designed into the compiler now, and it
+  buys speed at the cost of the property the language is for.
+
+  **A nursery is a region.** A fiber cannot outlive the block that spawned it
+  because the region's finalizers wait for the children on every path out —
+  which is 5.1 paying for itself a second time, with no part of it designed for
+  this. One thing left open and called out in the doc: a region's finalizer
+  cannot yet tell whether it is releasing normally or unwinding, and a nursery
+  wants to wait in the first case and cancel-then-wait in the second.
 - **5.4 `Schedule` policies.** A library, once fibers exist.
 
 **Exit:** a canceled fiber runs every finalizer in scope, verified by test;
