@@ -387,9 +387,12 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   as calling by name, since the rows come from the callee's type rather than
   from a signature looked up by name.
 
-  The backend is behind: a closure is called through a pointer with no room
-  for evidence and no tag on its return, so building a value out of an
-  effectful function is refused with a message rather than miscompiled.
+  The backend follows the same rule. A closure's calling convention is read
+  off its *type* the way a named function's is read off its signature:
+  evidence appended in label order, a tagged return when the error row is not
+  empty, and an adapter that forwards both. So one function value can be
+  mounted once and served by two different handlers, which is what putting the
+  requirement in the type buys over capturing it where the name is written.
 - **4.4 Handler composition — done.** A service built on other services is a
   function returning a handler with a `with` clause of its own, which needed
   nothing new: a handler is a record, so building one is calling a function.

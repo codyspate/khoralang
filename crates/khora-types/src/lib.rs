@@ -1759,7 +1759,13 @@ impl<'a> Checker<'a> {
         range: TextRange,
     ) {
         for (clause, row) in [(Clause::Requires, requires), (Clause::Raises, raises)] {
-            let mut row = row.clone();
+            // Zonked here, not later: the `installed` subtraction below needs
+            // the labels, and `installed` is scoped to the `with` block this
+            // call sits in — by the time `check_effects` runs, the block is
+            // long gone. A row that a call's arguments have already solved is
+            // known by now, which is the ordinary case; one that is still a
+            // variable simply has nothing to subtract.
+            let mut row = self.unifier.zonk(row);
             // Whatever an enclosing `with` block supplies is already answered.
             if clause == Clause::Requires {
                 if let Type::Row { fields, tail } = &row {

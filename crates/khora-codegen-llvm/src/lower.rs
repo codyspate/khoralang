@@ -37,7 +37,7 @@ use khora_hir::body::{
     BinOp, Body, Expr, ExprId, Literal, LocalId, MatchArm, Pat, PatId, Stmt, UnOp,
 };
 use khora_perceus::{is_boxed, RcPlan};
-use khora_types::{as_written, BodyTypes, Type, VariantInfo};
+use khora_types::{BodyTypes, Type, VariantInfo};
 use text_size::TextRange;
 
 use crate::backend::{
@@ -80,16 +80,24 @@ pub(crate) fn emit_function<'ctx>(
         scopes: Vec::new(),
         loops: Vec::new(),
         catches: Vec::new(),
+        incoming: HashMap::new(),
         aborted: false,
     };
 
     lower.allocate_slots();
+    lower.take_evidence(&signature);
     lower.bind_parameters();
 
     let value = match body.root {
         Some(root) => lower.expr(root),
         None => Some(lower.be.unit_value()),
     };
+    // The scope `take_evidence` opened for the capabilities this body cannot
+    // name. Left on the ordinary path here; `unwind_to` covers a `return` and
+    // a `raise`, which is why they are a scope rather than a list.
+    if value.is_some() {
+        lower.leave_scope();
+    }
     lower.finish(value);
 }
 
@@ -129,6 +137,7 @@ pub(crate) fn emit_closure<'ctx>(
         scopes: Vec::new(),
         loops: Vec::new(),
         catches: Vec::new(),
+        incoming: HashMap::new(),
         aborted: false,
     };
 
@@ -183,6 +192,48 @@ enum Cleanup<'ctx> {
     Temp(BasicValueEnum<'ctx>, Type),
 }
 
+/// What a `Type::Fn` says about how to call it.
+///
+/// The same four facts a `Signature` gives a direct call, which is the point:
+/// a value's calling convention follows its type the way a named function's
+/// follows its signature, so neither has a shape the other cannot express.
+struct FnShape {
+    params: Vec<Type>,
+    ret: Type,
+    requires: Type,
+    raises: Type,
+}
+
+impl FnShape {
+    fn of(ty: &Type) -> Option<FnShape> {
+        match ty {
+            Type::Fn { params, ret, requires, raises } => Some(FnShape {
+                params: params.clone(),
+                ret: (**ret).clone(),
+                requires: (**requires).clone(),
+                raises: (**raises).clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The labelled entries of a row, or none for anything that is not one.
+fn row_fields(ty: &Type) -> Vec<(String, Type)> {
+    match ty {
+        Type::Row { fields, .. } => fields.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a row asks for nothing at all.
+fn row_is_empty(ty: &Type) -> bool {
+    match ty {
+        Type::Row { fields, tail } => fields.is_empty() && tail.is_none(),
+        _ => true,
+    }
+}
+
 /// A `catch` whose operand is being lowered.
 ///
 /// While one of these is on the stack, an error leaving a `!` inside the
@@ -234,6 +285,15 @@ struct Lower<'a, 'ctx> {
     scopes: Vec<Vec<Cleanup<'ctx>>>,
     loops: Vec<LoopFrame<'ctx>>,
     catches: Vec<CatchFrame<'ctx>>,
+    /// The evidence this function was handed, by label.
+    ///
+    /// Needed because a `with 'r` clause names nothing: the body has no
+    /// binding for `ledger`, cannot mention it, and only has to forward it.
+    /// Which labels `'r` turned out to be is a fact about the *specialization*,
+    /// so it is read from the instantiated signature rather than from the
+    /// source, and it is what makes a row-polymorphic function able to pass
+    /// its caller's capabilities to a function value it was given.
+    incoming: HashMap<String, BasicValueEnum<'ctx>>,
     /// Set once something could not be lowered. Everything after is skipped:
     /// the module is discarded anyway, and continuing would build IR against
     /// values that were never produced.
@@ -281,16 +341,52 @@ impl<'ctx> Lower<'_, 'ctx> {
     ///
     /// Parameters are owned by the callee, so nothing is `dup`ed here; the
     /// matching `drop` is in the plan's releases for the outermost block.
+    /// Records the evidence parameters this specialization receives.
+    ///
+    /// Capabilities follow the written parameters, in label order, which is
+    /// the order `function_type` declared them in. Which labels those are
+    /// comes from the *instantiated* signature: a body written `with 'r` has
+    /// no labels of its own, and its caller's are only known once `'r` is.
+    fn take_evidence(&mut self, signature: &khora_types::Signature) {
+        let base = self.body.params.len();
+        let named: Vec<String> =
+            self.body.evidence.iter().map(|(label, _)| label.clone()).collect();
+
+        // Evidence is passed owned, so this frame has to release it. The ones
+        // the source named are locals, and the reference-counting plan already
+        // covers them; the ones a `with 'r` clause brought have no binding to
+        // hang a plan on, so they are held here as temporaries of the
+        // outermost scope and released on every path out.
+        let mut owned = Vec::new();
+        for (offset, (label, ty)) in evidence_of(signature).into_iter().enumerate() {
+            let Some(value) = self.function.get_nth_param((base + offset) as u32) else {
+                continue;
+            };
+            if !named.contains(&label) && is_boxed(&ty) {
+                owned.push(Cleanup::Temp(value, ty));
+            }
+            self.incoming.insert(label, value);
+        }
+        self.scopes.push(owned);
+    }
+
     fn bind_parameters(&mut self) {
-        // Capabilities follow the written parameters, in label order, which is
-        // the order `function_type` declared them in.
-        let evidence: Vec<PatId> = self.body.evidence.iter().map(|(_, pat)| *pat).collect();
-        let all = self.body.params.iter().copied().chain(evidence);
-        for (index, pat) in all.enumerate() {
+        for (index, pat) in self.body.params.clone().into_iter().enumerate() {
             let Pat::Bind(local) = self.body.pat(pat).clone() else { continue };
             let Some(slot) = self.slots.get(&local).copied() else { continue };
             let Some(value) = self.function.get_nth_param(index as u32) else { continue };
             self.be.builder.build_store(slot, value).expect("storing a parameter");
+        }
+
+        // A capability the source *named* also gets a slot, so `ledger.balance`
+        // reads it like any other binding. Matched by label rather than by
+        // position: the signature's order is the contract, and a body that
+        // named only some of them would otherwise bind the wrong ones.
+        for (label, pat) in self.body.evidence.clone() {
+            let Pat::Bind(local) = self.body.pat(pat).clone() else { continue };
+            let Some(slot) = self.slots.get(&local).copied() else { continue };
+            let Some(value) = self.incoming.get(&label).copied() else { continue };
+            self.be.builder.build_store(slot, value).expect("storing a capability");
         }
     }
 
@@ -739,10 +835,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                     self.call_named(&symbol, site, &all, range)
                 }
                 None if matches!(self.types.of(callee), Type::Fn { .. }) => {
-                    let Type::Fn { params, ret, .. } = self.types.of(callee).clone() else {
-                        unreachable!("guarded by the match arm")
-                    };
-                    self.call_closure(callee, &params, &ret, args, range)
+                    let shape = FnShape::of(self.types.of(callee))
+                        .expect("guarded by the match arm");
+                    self.call_closure(site, callee, &shape, args, range)
                 }
                 None => self.fail(
                     "this method call was not resolved to an impl; that is a compiler bug",
@@ -751,10 +846,9 @@ impl<'ctx> Lower<'_, 'ctx> {
             },
             // A value of function type: a closure, called indirectly.
             _ if matches!(self.types.of(callee), Type::Fn { .. }) => {
-                let Type::Fn { params, ret, .. } = self.types.of(callee).clone() else {
-                    unreachable!("guarded by the match arm")
-                };
-                self.call_closure(callee, &params, &ret, args, range)
+                let shape =
+                    FnShape::of(self.types.of(callee)).expect("guarded by the match arm");
+                self.call_closure(site, callee, &shape, args, range)
             }
             _ => self.fail(
                 "only a named function or a constructor can be called; there are no function \
@@ -1116,31 +1210,6 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     /// Wraps a named function in a closure object so it can be passed along.
     fn function_value(&mut self, symbol: &str, range: TextRange) -> Flow<'ctx> {
-        // The type system lets an effectful function be a value; the backend
-        // does not yet. A closure is called through a pointer with no room for
-        // the evidence its callee needs and no tag on its return, so the
-        // adapter would forward the wrong shape. Reported here rather than
-        // miscompiled — the checker is right, this is the half that is behind.
-        if let Some(signature) = self.be.signature_of(symbol) {
-            let what = if can_raise(&signature) {
-                Some("raise")
-            } else if !evidence_of(&signature).is_empty() {
-                Some("require capabilities")
-            } else {
-                None
-            };
-            if let Some(what) = what {
-                return self.fail(
-                    format!(
-                        "`{}` can {what}, and the backend cannot build a value out of such a \
-                         function yet — call it directly for now",
-                        as_written(symbol)
-                    ),
-                    range,
-                );
-            }
-        }
-
         let Some(thunk) = self.be.thunk(symbol) else {
             return self.fail(
                 format!("`{symbol}` has a signature the backend cannot represent"),
@@ -1178,12 +1247,13 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// Calls a closure value: load its code pointer and call through it.
     fn call_closure(
         &mut self,
+        site: ExprId,
         callee: ExprId,
-        params: &[Type],
-        ret: &Type,
+        signature: &FnShape,
         args: &[ExprId],
         range: TextRange,
     ) -> Flow<'ctx> {
+        let FnShape { params, ret, requires, raises } = signature;
         let closure = self.expr(callee)?.into_pointer_value();
 
         if args.len() != params.len() {
@@ -1196,6 +1266,19 @@ impl<'ctx> Lower<'_, 'ctx> {
         for arg in args {
             values.push(self.expr(*arg)?.into());
         }
+        // Evidence is appended in label order, exactly as a direct call
+        // appends it — the closure's shape follows its *type* the way a named
+        // function's follows its signature.
+        // A name for the diagnostic if the callee has one; a closure often
+        // does not, and "this call" is honest about that.
+        let label = match self.body.expr(callee) {
+            Expr::Local(local) => self.body.local(*local).name.clone(),
+            Expr::Field { name, .. } => name.clone(),
+            _ => "this call".to_string(),
+        };
+        for value in self.evidence_from_row(requires, &label, site, range)? {
+            values.push(value.into());
+        }
 
         let ptr = self.be.ctx.ptr_type(AddressSpace::default());
         let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = vec![ptr.into()];
@@ -1205,12 +1288,23 @@ impl<'ctx> Lower<'_, 'ctx> {
             };
             param_types.push(ty.into());
         }
-        let fn_type = match ret {
-            Type::Unit => self.be.ctx.void_type().fn_type(&param_types, false),
-            other => match self.be.llvm_type(other) {
-                Some(ty) => ty.fn_type(&param_types, false),
-                None => return self.fail("a closure's result has no machine type", range),
-            },
+        for (_, ty) in row_fields(requires) {
+            let Some(ty) = self.be.llvm_type(&ty) else {
+                return self.fail("a capability has no machine type", range);
+            };
+            param_types.push(ty.into());
+        }
+        let fallible = !row_is_empty(raises);
+        let fn_type = if fallible {
+            self.be.tagged_type().fn_type(&param_types, false)
+        } else {
+            match ret {
+                Type::Unit => self.be.ctx.void_type().fn_type(&param_types, false),
+                other => match self.be.llvm_type(other) {
+                    Some(ty) => ty.fn_type(&param_types, false),
+                    None => return self.fail("a closure's result has no machine type", range),
+                },
+            }
         };
 
         let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, closure, 0);
@@ -1227,9 +1321,17 @@ impl<'ctx> Lower<'_, 'ctx> {
             .build_indirect_call(fn_type, code, &values, "closure.call")
             .expect("calling a closure");
 
-        let result = match ret {
-            Type::Unit => self.be.unit_value(),
-            _ => call.try_as_basic_value().basic().unwrap_or_else(|| self.be.unit_value()),
+        let result = if fallible {
+            let tagged = call
+                .try_as_basic_value()
+                .basic()
+                .expect("a fallible closure returns a tagged value");
+            self.split_tagged(tagged, ret, range)?
+        } else {
+            match ret {
+                Type::Unit => self.be.unit_value(),
+                _ => call.try_as_basic_value().basic().unwrap_or_else(|| self.be.unit_value()),
+            }
         };
 
         // The call site owns a reference to the closure: reading a local dup'ed
@@ -1260,14 +1362,42 @@ impl<'ctx> Lower<'_, 'ctx> {
         range: TextRange,
     ) -> Option<Vec<BasicValueEnum<'ctx>>> {
         let signature = self.be.signature_of(name)?;
-        let wanted = evidence_of(&signature);
+        self.evidence_from_row(&signature.requires, name, site, range)
+    }
+
+    /// The same, given a row rather than a signature.
+    ///
+    /// This is what a call *through a value* uses: the requirement is part of
+    /// the callee's type, so the evidence a closure is handed is worked out
+    /// exactly as it is for a direct call — same labels, same order, same
+    /// ownership.
+    fn evidence_from_row(
+        &mut self,
+        requires: &Type,
+        name: &str,
+        site: ExprId,
+        range: TextRange,
+    ) -> Option<Vec<BasicValueEnum<'ctx>>> {
+        let Type::Row { fields: wanted, .. } = requires else { return Some(Vec::new()) };
         if wanted.is_empty() {
             return Some(Vec::new());
         }
 
+        let wanted = wanted.clone();
         let mut out = Vec::with_capacity(wanted.len());
         for (label, ty) in wanted {
             let Some(local) = self.body.capability_at(site, &label) else {
+                // Not a binding this body can name, but possibly one it was
+                // handed: a `with 'r` clause forwards capabilities it has no
+                // name for. Passed on as it arrived, with a `dup` to match the
+                // ownership every other argument has.
+                if let Some(value) = self.incoming.get(&label).copied() {
+                    if is_boxed(&ty) {
+                        self.dup(value);
+                    }
+                    out.push(value);
+                    continue;
+                }
                 self.fail(
                     format!("`{name}` needs the capability `{label}`, which is not in scope"),
                     range,

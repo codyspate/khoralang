@@ -664,3 +664,30 @@ The lesson, then: **a feature that crosses modules needs a test that crosses
 modules**, and it is worth writing that test before the feature looks finished
 rather than after — the single-file version will pass either way, which is
 precisely the problem.
+
+## 32. A specialization kept its rows unsubstituted
+
+`specialized_signature` substituted the type arguments into a signature's
+parameters and its return type, and copied both rows across untouched. The
+comment above the copy even said why the rows have to survive — the capability
+row decides how many extra parameters the function takes, the error row whether
+it returns a tagged value — and then dropped the substitution that makes either
+of them mean anything.
+
+Invisible while every `with` clause named its labels: a written row has nothing
+to substitute. The first row-polymorphic function to reach code generation —
+`fn apply_to<'r>(f: (Int) -> Int with 'r) -> Int with 'r` — was compiled as
+though it needed nothing, so its caller passed evidence it never took.
+
+Two related things were missing with it, both consequences of `with 'r` naming
+nothing. The body has no binding for `ledger` and cannot mention it, so
+`bind_parameters` had nothing to bind and `evidence_for` had nothing to find;
+both now read the *specialization's* labels, and forward what they were handed.
+And nothing released it: evidence is passed owned, and the named ones are
+locals the reference-counting plan covers, so an unnamed one had no binding to
+hang a plan on. It is now a temporary of the outermost scope, which is what
+makes every path out — falling off the end, a `return`, a `raise` — release it.
+
+The shape here is not `Unknown` this time. It is **a substitution applied to
+some fields of a structure and not others**, which reads as correct at every
+call site that never exercises the difference.

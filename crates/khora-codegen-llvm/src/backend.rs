@@ -314,11 +314,13 @@ fn specialized_signature(
         .map(|(g, a)| (g.as_str(), a.clone()))
         .collect();
     Some(Signature {
-        // Both rows survive to here: the capability row says how many extra
-        // parameters the function takes, and the error row whether it returns
-        // a tagged value.
-        requires: signature.requires.clone(),
-        raises: signature.raises.clone(),
+        // Both rows survive to here, and both are substituted: the capability
+        // row says how many extra parameters the function takes and the error
+        // row whether it returns a tagged value, and a `with 'r` clause knows
+        // neither until `'r` does. Copying them unsubstituted made a
+        // row-polymorphic function look like it needed nothing.
+        requires: khora_types::unify::substitute(&signature.requires, &mapping),
+        raises: khora_types::unify::substitute(&signature.raises, &mapping),
         generics: Vec::new(),
         // A specialized signature has no parameters left, so it can carry no
         // bounds either: whatever they required was settled before this ran.
@@ -861,9 +863,20 @@ impl<'ctx> Backend<'ctx> {
         for param in &signature.params {
             params.push(self.llvm_type(param)?.into());
         }
-        let fn_type = match &signature.ret {
-            Type::Unit => self.ctx.void_type().fn_type(&params, false),
-            other => self.llvm_type(other)?.fn_type(&params, false),
+        // The adapter wears the same shape the real function does, evidence
+        // and tag included, so forwarding is a straight pass-through. A
+        // function value's convention follows its *type*, and its type says
+        // what it needs and how it can fail.
+        for (_, ty) in evidence_of(&signature) {
+            params.push(self.llvm_type(&ty)?.into());
+        }
+        let fn_type = if can_raise(&signature) {
+            self.tagged_type().fn_type(&params, false)
+        } else {
+            match &signature.ret {
+                Type::Unit => self.ctx.void_type().fn_type(&params, false),
+                other => self.llvm_type(other)?.fn_type(&params, false),
+            }
         };
 
         let f = self.module.add_function(
@@ -887,30 +900,28 @@ impl<'ctx> Backend<'ctx> {
             self.builder.position_at_end(entry);
 
             // Skip the closure argument: the adapter ignores it, because a
-            // named function captures nothing.
-            let args: Vec<BasicMetadataValueEnum<'ctx>> = (0..signature.params.len())
+            // named function captures nothing. Everything after it — the
+            // written parameters and then the evidence — forwards in order.
+            let forwarded = signature.params.len() + evidence_of(&signature).len();
+            let args: Vec<BasicMetadataValueEnum<'ctx>> = (0..forwarded)
                 .filter_map(|i| f.get_nth_param(i as u32 + 1))
                 .map(|v| v.into())
                 .collect();
             let call =
                 self.builder.build_call(target, &args, "forward").expect("forwarding a call");
 
-            match signature.ret {
-                Type::Unit => {
-                    self.builder.build_return(None).expect("returning from an adapter");
+            // A fallible target hands back the tagged pair, which the adapter
+            // returns unchanged — it has nothing to add and nowhere to send an
+            // error of its own.
+            let returns_value = can_raise(&signature) || signature.ret != Type::Unit;
+            match call.try_as_basic_value().basic().filter(|_| returns_value) {
+                Some(value) => {
+                    self.builder
+                        .build_return(Some(&value))
+                        .expect("returning from an adapter");
                 }
-                _ => {
-                    let value = call.try_as_basic_value().basic();
-                    match value {
-                        Some(value) => {
-                            self.builder
-                                .build_return(Some(&value))
-                                .expect("returning from an adapter");
-                        }
-                        None => {
-                            self.builder.build_return(None).expect("returning from an adapter");
-                        }
-                    }
+                None => {
+                    self.builder.build_return(None).expect("returning from an adapter");
                 }
             }
         }

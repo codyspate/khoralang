@@ -603,30 +603,147 @@ fn main() -> Int raises ConfigError {{ print(attempt(10)!); print(attempt(0)!); 
     assert_eq!(ran.code, Some(1));
 }
 
-/// The type system allows an effectful function as a value and the backend
-/// does not, so the gap has to be a message rather than a bad call. Pinned so
-/// that when the backend catches up, this test is what says so.
+// --- effectful function values ---------------------------------------------
+
+/// A function that needs a capability, passed as a value and called somewhere
+/// else. The requirement is part of its type, so it is supplied at the *call*
+/// — the value itself carries nothing but a code pointer.
 #[test]
-fn a_function_value_that_needs_capabilities_is_refused_by_the_backend() {
-    let source = format!(
-        "{LEDGER}
+fn a_function_value_can_need_a_capability() {
+    let ran = run(
+        "fnval_capability",
+        &format!(
+            "{LEDGER}
 export fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
 
-fn main() -> Int with {{ ledger: Ledger }} {{ apply_to(report, 4) }}
+fn main() -> Int {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
+    print(apply_to(report, 4));
+  }}
+  0
+}}
 "
+        ),
     );
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fnval_effect");
-    std::fs::create_dir_all(&dir).expect("a workspace");
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
 
-    let db = KhoraDatabase::new();
-    let file = SourceFile::new(&db, dir.join("main.kh"), source);
-    let root = SourceRoot::new(&db, vec![file]);
+/// The same value called under two different handlers. This is what a
+/// requirement travelling in the type buys over capturing it at the mention:
+/// the function is mounted once and served differently.
+#[test]
+fn one_function_value_serves_two_handlers() {
+    let ran = run(
+        "fnval_two_handlers",
+        &format!(
+            "{LEDGER}
+export fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
 
-    let errors = khora_codegen_llvm::compile(&db, root, &dir.join("program"))
-        .expect_err("a function value with a requirement should be refused");
-    let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
-    assert!(
-        messages.iter().any(|m| m.contains("cannot build a value out of such a function")),
-        "{messages:?}"
+export fn twice_over<'r>(f: (Int) -> Int with 'r) -> Int with 'r {{
+  apply_to(f, 1) + apply_to(f, 2)
+}}
+
+fn main() -> Int {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
+    print(twice_over(report));
+  }}
+  with {{ ledger: handler for Ledger {{ balance: fn id => id }} }} {{
+    print(twice_over(report));
+  }}
+  0
+}}
+"
+        ),
     );
+    assert_eq!(ran.stdout, "30\n3\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A fallible function as a value. The tagged return is part of the closure's
+/// convention too, so `!` on a call through a value is the same branch it is
+/// on a direct call.
+#[test]
+fn a_function_value_can_raise() {
+    let ran = run(
+        "fnval_raises",
+        &format!(
+            "{FALLIBLE}
+export fn apply_to<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
+
+fn main() -> Int raises DbError {{
+  print(apply_to(halve, 8)!);
+  print(apply_to(halve, 7)!);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "4\n", "the second call raises before it can print");
+    assert_eq!(ran.code, Some(1));
+}
+
+/// Both at once, which is the shape `Router::post` mounts: a handler that
+/// needs services and can fail.
+#[test]
+fn a_function_value_can_need_a_capability_and_raise() {
+    let ran = run(
+        "fnval_both",
+        "module t;
+fn print(value: Int);
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export type DbError = | Timeout | Refused;
+export effect Ledger { balance: (Int) -> Int, }
+
+export fn report(id: Int) -> Int with { ledger: Ledger } raises DbError {
+  if id < 0 { raise DbError::Refused }
+  ledger.balance(id)
+}
+
+export fn apply_to<'r, 'e>(f: (Int) -> Int with 'r raises 'e, n: Int) -> Int
+  with 'r
+  raises 'e
+{ f(n)! }
+
+fn main() -> Int raises DbError {
+  with { ledger: handler for Ledger { balance: fn id => id * 10 } } {
+    print(apply_to(report, 4)!);
+  }
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Nothing leaks along the way: the handler, the closure object and whatever
+/// the evidence held are all released.
+#[test]
+fn an_effectful_function_value_leaves_nothing_behind() {
+    let ran = run(
+        "fnval_leaks",
+        &format!(
+            "{LEDGER}
+export fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
+
+fn run_it() -> Int {{
+  let bonus = 100;
+  with {{ ledger: handler for Ledger {{ balance: fn id => id + bonus }} }} {{
+    apply_to(report, 1)
+  }}
+}}
+
+fn main() -> Int {{
+  khora_print_int(run_it());
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "101\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
 }
