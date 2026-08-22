@@ -1,0 +1,149 @@
+module std::random;
+
+import std::core::{Array, Shared};
+
+// Numbers nobody chose.
+//
+// A capability, not three free functions, and for a sharper reason than the
+// usual one. "May read the environment" is worth seeing in a signature; "may
+// generate randomness" is worth seeing *and* worth pinning, because a function
+// that draws is a function whose test passes ninety-nine runs in a hundred.
+// `Random::seeded` is the whole payoff: the same seed gives the same sequence,
+// so a failure is reproducible and a fixture is a fixture rather than a coin
+// flip. `docs/design/permissions.md` draws this line — the time, the
+// environment and the dice are three different things to deny a dependency.
+//
+// The generator is splitmix64, and it lives half here and half in the runtime:
+// the state is one `Int` in a `Shared`, `khora_random_step` advances it and
+// `khora_random_mix` turns a state into a draw. Splitting it that way is what
+// keeps the critical section to a single addition — see `draw` below.
+//
+// **These are not cryptographic numbers.** Anyone who sees one draw can predict
+// every draw after it. Right for a shuffle, a retry jitter, a load-balancing
+// choice or a test fixture; wrong for a session token or a key, which want a
+// generator with a different name so that a program says which one it needed.
+
+extern fn khora_random_seed() -> Int;
+extern fn khora_random_step(state: Int) -> Int;
+extern fn khora_random_mix(state: Int) -> Int;
+extern fn khora_random_scale(draw: Int, span: Int) -> Int;
+
+// ---------------------------------------------------------------------------
+// The interface
+// ---------------------------------------------------------------------------
+
+/// A source of numbers nobody chose.
+export effect Random {
+  /// A number with all sixty-four bits drawn, which means it is negative about
+  /// half the time. `in_range` is what a caller who wanted a positive number
+  /// meant.
+  int: () -> Int,
+  /// A number in `[low, high)` — `low` included, `high` not.
+  ///
+  /// Half-open because that is the range that composes: `in_range(0, n)`
+  /// indexes an array of `n`, and two adjacent ranges cover the space between
+  /// them exactly once. An empty range stops the program, like an index
+  /// outside an array does; there is no number in `[low, low)` to hand back,
+  /// and returning `low` would make an off-by-one look like data.
+  in_range: (Int, Int) -> Int,
+  /// Fills every element of the array with a drawn byte.
+  ///
+  /// Into a buffer the caller owns rather than out of a returned one, because
+  /// the caller is the one who knows how many bytes it wants and usually
+  /// already has somewhere to put them — the same shape a socket read has.
+  bytes: (Array<U8>) -> (),
+}
+
+impl Random {
+  /// The real thing, seeded by the operating system.
+  ///
+  /// A different sequence every run, which is what production wants and
+  /// exactly what a test does not. Note what this is *not*: a single generator
+  /// the whole process shares. Each call seeds a new one, so two of them handed
+  /// to two subsystems do not interleave — and a program that wants one shared
+  /// source passes one `Random` around, which is what the capability is for.
+  fn real() -> Random {
+    Random::seeded(khora_random_seed())
+  }
+
+  /// The same numbers every time, from the same seed.
+  ///
+  /// **The reason randomness is a capability.** A test pins the sequence and
+  /// gets an assertion that holds every run instead of a flake that shows up
+  /// once a fortnight in someone else's pull request. It also turns a failure
+  /// in production into something reproducible: draw a seed from the real
+  /// source, log it, hand it back here, and the run happens again.
+  ///
+  /// The state is a `Shared<Int>` and that is the answer to fibers being
+  /// threads. Two of them drawing at once are serialized by the cell's lock —
+  /// the same lock every other shared value uses, not a second mechanism — and
+  /// the handler may cross into a fiber because a `Shared` is the one writable
+  /// thing the sharing rules allow it to capture. `docs/design/sharing.md`.
+  fn seeded(seed: Int) -> Random {
+    let state = Shared::of(seed);
+    handler for Random {
+      int: fn () => draw(state),
+      in_range: fn (low, high) => low + khora_random_scale(draw(state), high - low),
+      bytes: fn buffer => fill(state, buffer),
+    }
+  }
+}
+
+// There is deliberately no `export fn os_seed() -> Int` beside these.
+//
+// It was written, and taken back out. A free function handing out operating
+// system entropy is entropy that reaches a program without appearing in
+// anybody's requirement row — and `docs/design/permissions.md` enforces grants
+// against exactly those rows, so a manifest that had not granted randomness
+// would not have stopped it. `Random::real` is the door, the same way
+// `Fs::real` is.
+//
+// A caller who wants a seed they can write down draws one:
+//
+// ```khora
+// let seed = rng.int();
+// print(Int::to_string(seed));
+// with { rng: Random::seeded(seed) } { .. }
+// ```
+//
+// which is how you split a source in two, and how you turn a production
+// failure into something you can run again in the morning.
+
+// ---------------------------------------------------------------------------
+// The generator
+// ---------------------------------------------------------------------------
+
+/// One draw: advance the state, then mix what came out.
+///
+/// The division of labour is deliberate. `Shared::update` runs its function
+/// under the cell's lock, so whatever goes inside it is what every other fiber
+/// waits behind — and what goes inside is one wrapping addition. The mixing,
+/// which is the expensive half, happens out here on a value nobody else can
+/// see. `update` gives back the state it left in the cell, so this needs no
+/// second read that another fiber could get between.
+fn draw(state: Shared<Int>) -> Int {
+  khora_random_mix(Shared::update(state, fn current => khora_random_step(current)))
+}
+
+/// Fills `buffer` with drawn bytes, eight per draw.
+///
+/// Eight rather than one because a draw costs a lock and a byte is an eighth of
+/// what a draw produces; throwing away fifty-six bits per byte would make
+/// filling a buffer eight times as much contention for no more randomness. The
+/// bytes come out low-order first, which is nothing a caller can observe — they
+/// are all equally arbitrary — but is written down because a wire format
+/// generated this way would depend on it.
+fn fill(state: Shared<Int>, buffer: Array<U8>) -> () {
+  let length = Array::length(buffer);
+  let mut word = 0;
+  let mut at = 0;
+  while at < length {
+    // A fresh draw every eighth byte, and the previous one shifted down in
+    // between. `shr` on an `Int` is arithmetic, so the top bytes of a negative
+    // draw come back as ones — harmless, because `wrapping` keeps only the low
+    // eight bits and those are the ones that were drawn.
+    word = if at % 8 == 0 { draw(state) } else { Int::shr(word, 8) };
+    Array::set(buffer, at, U8::wrapping(word));
+    at = at + 1;
+  }
+}
