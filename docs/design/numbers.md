@@ -26,10 +26,23 @@ it explicitly is what lets the trap be the default without being in the way;
 `Map::slot` in `std::core` is the first caller and a fair example of the whole
 category.
 
-`/` and `%` are **not yet checked**, and that is a gap rather than a decision.
-Division by zero faults, and `Int::MIN / -1` overflows. Both want the error
-channel rather than a hardware fault, and `raises` exists now, so the shape of
-the answer is clear and only the work is missing.
+`/` and `%` trap too, on both the ways they can go wrong: a zero divisor, and
+the minimum over minus one — whose quotient is one past the maximum. Unsigned
+division cannot overflow, so only the first check is generated for it.
+
+Both are *undefined* in LLVM, and what they do on hardware is a fault with no
+message attached: a bare `0xC0000094` or a `SIGFPE`, naming neither the line
+nor the value. A trap that says which is strictly better, whatever the eventual
+answer to the next question is.
+
+**And the next question is open.** A trap says a division by zero is a
+programmer's mistake, which it usually is — Go panics and Rust panics. But a
+divisor that came from a file or a socket is *data*, and the honest answer
+there is the error channel: `raises DivideByZero`, handled where the data came
+in. That would put a row on every function containing a division, which is a
+real cost and not obviously worth paying for the common case. `Int::checked_div`
+returning an `Option` is the middle answer and is probably what phase 8 wants.
+Trapping now is the decision that does not have to be unmade to get there.
 
 ## Bit operations are methods, for now
 
@@ -146,6 +159,9 @@ signedness says, and require the same number.
   a `Result` rather than a trap — bytes off a socket are data, not a
   programmer's mistake.
 - **Checked division.** `/` and `%` still fault on zero rather than raising.
+- **`checked_div` and friends.** See above: trapping is right for a bug and
+  wrong for untrusted data, and an `Option`-returning form is what closes the
+  gap without putting a row on every function that divides.
 - **Negation does not trap.** `-x` where `x` is the type's minimum wraps to
   itself. It is the one value that cannot be negated, and the only way to
   *write* it is as a negated literal, which is folded into the constant before

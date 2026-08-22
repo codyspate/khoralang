@@ -617,6 +617,14 @@ argument that settled A6.
   intrinsics return the result and the flag together, so the check is a branch
   the optimizer can usually see through, and phase 9 can remove many of them.
 
+  `/` and `%` trap as well, on a zero divisor and on the minimum over minus
+  one. Both are undefined in LLVM and both fault on hardware with no message
+  attached, so a trap that names the operation is strictly better whatever the
+  eventual answer is — and whether a division by zero should *raise* rather
+  than trap is still open, because a divisor off a socket is data rather than
+  a mistake. `docs/design/numbers.md` has the argument; `Int::checked_div` is
+  probably where it lands.
+
   `Int::wrapping_add` and its siblings are how you ask for the other thing, by
   name, in the places that genuinely want it — a hash, a checksum, a PRNG. The
   bit operations landed with them, which is what let the hash map stop

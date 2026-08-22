@@ -2849,11 +2849,41 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             BinOp::Div | BinOp::Rem => {
                 let (l, r) = (left.into_int_value(), right.into_int_value());
-                let (_, signed) = Self::int_shape(&operand_ty).expect("arithmetic on an integer");
-                // Division by zero faults rather than trapping politely, and
-                // `Int::MIN / -1` overflows. Both want the error channel rather
-                // than a hardware fault; `raises` exists now, so this is a gap
-                // to close rather than one to explain away.
+                let (bits, signed) =
+                    Self::int_shape(&operand_ty).expect("arithmetic on an integer");
+                let width = self.be.int_width(bits);
+
+                // Both ways an integer division can go wrong are *undefined* in
+                // LLVM, and what they do on hardware is a fault with no message
+                // attached — a bare 0xC0000094 or a SIGFPE, which says nothing
+                // about which line or which value. Checked for the same reason
+                // overflow is: the program is wrong either way, and the useful
+                // thing to do is say so.
+                let nonzero = self
+                    .be
+                    .builder
+                    .build_int_compare(IntPredicate::NE, r, width.const_zero(), "nonzero")
+                    .expect("comparing a divisor against zero");
+                self.guard(nonzero, &format!("{operand_ty} division by zero"));
+
+                // The other one only exists for a signed type, and only for one
+                // pair of values: the minimum over minus one, whose quotient is
+                // one past the maximum. Unsigned division cannot overflow.
+                if signed {
+                    let min = width.const_int(1u64 << (bits - 1), false);
+                    let minus_one = width.const_all_ones();
+                    let b = &self.be.builder;
+                    let is_min = b
+                        .build_int_compare(IntPredicate::EQ, l, min, "is.min")
+                        .expect("comparing against the minimum");
+                    let is_neg_one = b
+                        .build_int_compare(IntPredicate::EQ, r, minus_one, "is.neg.one")
+                        .expect("comparing against minus one");
+                    let both = b.build_and(is_min, is_neg_one, "overflows").expect("both");
+                    let ok = b.build_not(both, "in.range").expect("negating");
+                    self.guard(ok, &format!("{operand_ty} division"));
+                }
+
                 let b = &self.be.builder;
                 let value = match (op, signed) {
                     (BinOp::Div, true) => b.build_int_signed_div(l, r, "div"),

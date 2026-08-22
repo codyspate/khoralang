@@ -306,3 +306,59 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "-1.5\n-2.5\n-7\n-7\n");
     assert_eq!(ran.code, Some(0));
 }
+
+/// Both ways an integer division can go wrong are undefined in LLVM, and what
+/// they do on hardware is a fault with no message — a bare 0xC0000094 or a
+/// SIGFPE, which says nothing about which line or which value. Checked for the
+/// same reason overflow is.
+#[test]
+fn division_that_cannot_work_stops_the_program() {
+    let ordinary = run(
+        "div_ordinary",
+        &format!(
+            "{INT}
+fn main() -> Int {{
+  print(7 / 2);
+  print(0 - 7 / 2);
+  print(7 % 2);
+  print(0 - 7 % 2);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ordinary.stdout, "3\n-3\n1\n-1\n", "truncating toward zero, as C and Rust do");
+    assert_eq!(ordinary.code, Some(0));
+
+    let by_zero = run(
+        "div_zero",
+        &format!("{INT}fn main() -> Int {{ let d = 0; print(1); print(7 / d); 0 }}\n"),
+    );
+    assert_eq!(by_zero.stdout, "1\n", "nothing after the division ran");
+    assert_ne!(by_zero.code, Some(0));
+
+    let remainder_by_zero = run(
+        "rem_zero",
+        &format!("{INT}fn main() -> Int {{ let d = 0; print(7 % d); 0 }}\n"),
+    );
+    assert_eq!(remainder_by_zero.stdout, "");
+    assert_ne!(remainder_by_zero.code, Some(0));
+
+    // The one other pair: the minimum over minus one, whose quotient is one
+    // past the maximum.
+    let overflowing = run(
+        "div_overflow",
+        &format!(
+            "{INT}
+fn main() -> Int {{
+  let small = 0 - 9223372036854775807 - 1;
+  let minus_one = 0 - 1;
+  print(small / minus_one);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(overflowing.stdout, "");
+    assert_ne!(overflowing.code, Some(0));
+}
