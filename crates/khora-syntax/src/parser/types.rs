@@ -242,7 +242,9 @@ fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
             row_tail(p);
             break;
         }
-        if p.at(IDENT) && p.nth_at(1, COLON) {
+        // A record type's field may be `mut`; a row's entry may not, which is
+        // why only this one of the two field loops looks for the keyword.
+        if (p.at(IDENT) && p.nth_at(1, COLON)) || (p.at(MUT_KW) && p.nth_at(2, COLON)) {
             field(p);
             if !p.eat(COMMA) {
                 if p.at(PIPE) {
@@ -284,6 +286,10 @@ fn row_tail(p: &mut Parser<'_>) {
 
 pub(super) fn field(p: &mut Parser<'_>) {
     let m = p.start();
+    // `mut count: Int`. Only meaningful on a record type's field; a row's
+    // entries are a *name against a type* and there is nothing there to write
+    // to, so one written there is read by nobody and reported by the checker.
+    p.eat(MUT_KW);
     name(p);
     p.expect(COLON);
     type_(p);

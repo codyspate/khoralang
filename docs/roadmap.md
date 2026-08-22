@@ -59,7 +59,6 @@ before the phase that depends on it starts.
 | --- | --- | --- |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
 | D8 | **The FFI contract.** Narrowed by A6 from "map Rust onto Khora" to three answerable questions: exactly which types may cross and in what layout, how a foreign resource's lifetime is tied to a Khora binding, and what a callback looks like. The first is mostly written already in `khora-rt`'s module documentation, and the second has a working shape — a region and a fiber handle are both foreign resources with runtime-provided drop glue. | 7 |
-| D11 | **What happens to reference cycles.** None can be built today — the heap graph is provably a DAG — and mutable fields end that. A tracing cycle collector is ruled out by non-negotiable 5, which leaves "a cycle leaks, and a weak reference breaks it". Decide alongside records rather than in the abstract. `docs/design/memory.md` §2 and §4. | records |
 | D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Nothing in this roadmap owns this today, which is the failure mode errata entry 20 names. | 8.x |
 **Closed:**
 
@@ -73,6 +72,15 @@ before the phase that depends on it starts.
   increment. The cost comes back in phase 9, where an object that provably does
   not escape its fiber uses the cheap operations, chosen by the compiler and
   invisible in every type.
+- **D11** (reference cycles) is decided in `docs/design/memory.md` §2, by
+  phase 6 making one constructible. A `mut` field is shared by reference, so
+  `a.next = b; b.next = a` is a cycle and Perceus stops being complete. A
+  tracing collector was ruled out by non-negotiable 5 before this was a live
+  question, so what remains is what was predicted: **a cycle leaks, and a weak
+  reference breaks one.** The leak is bounded and quiet rather than unsound,
+  which is the right failure to have — `khora_live_count` sees it, and every
+  leak test in the repository is already watching. Weak references wait for the
+  first parent pointer, when the shape of the problem is in front of us.
 - **D3** (`Schema::Spec`) is decided in `docs/design/associated-items.md`. Two
   rules. A projection's owner must be *bounded* by a trait declaring the
   associated type — without a bound there is no impl to look it up in, and
@@ -540,7 +548,7 @@ compiler test and not enough to write a hash map. Every item here was on the
 critical path whatever the ecosystem strategy turned out to be — which is the
 argument that settled A6.
 
-- **6.1 D11, mutable fields, and what may cross a fiber.** The widest blocker in
+- **6.1 D11, mutable fields, and what may cross a fiber — done.** The widest blocker in
   the language: no hash map, no buffer, nothing that accumulates. It has already
   cost real work — a nursery cannot hold a child's error, and `retry` needed a
   runtime counter to be testable.

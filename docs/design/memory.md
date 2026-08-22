@@ -105,8 +105,29 @@ it.** A Swift developer reads this immediately; a Rust developer knows
 `Rc`/`Weak`; a TypeScript or Go developer has never had to think about it and
 will need the diagnostic to be good.
 
-Not decided here, because it should be decided alongside records and mutable
-fields rather than in the abstract. Logged as **D11**.
+**Decided in phase 6, and the DAG is gone.** A `mut` field is shared by
+reference, so `a.next = b; b.next = a` is a cycle and Perceus stops being
+complete. Of the options above, a tracing collector was ruled out by
+non-negotiable 5 before this was ever a live question, so what remains is what
+was predicted:
+
+> **A cycle leaks, and a weak reference is what breaks one.**
+
+The leak is bounded and quiet rather than unsound — nothing is freed early,
+nothing is read after free, the memory is simply never returned. That is the
+right failure to have: a program that leaks is wrong in a way you can measure
+with `khora_live_count`, and every leak test in this repository is already
+watching for it.
+
+Weak references do not exist yet. They are wanted the first time somebody
+writes a parent pointer, and that is the moment to design them — the shape of
+the problem will be in front of us, which is more than can be said now.
+
+What is worth noticing is how little the loss costs in practice. The three
+things that made the graph a DAG — bottom-up construction, capture by value,
+and a `let` that cannot see itself — are all still true. A cycle now requires
+*deliberately* writing one object into another that already reaches it. It is
+no longer impossible; it is still not accidental.
 
 ## 5. Reference counts are atomic
 

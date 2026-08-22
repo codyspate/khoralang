@@ -1097,6 +1097,59 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// `record.field = value`.
+    ///
+    /// The same shape as assigning to a binding, one indirection further out:
+    /// store, then release what was there. Store *first*, so that
+    /// `p.next = p.next` — where reading already duplicated the reference —
+    /// cannot free what it has just written.
+    ///
+    /// This is where the DAG invariant ends. Until now the heap graph could not
+    /// contain a cycle, which made Perceus provably complete; a field that can
+    /// be written to a value that (transitively) holds the record is a cycle,
+    /// and a cycle leaks. `docs/design/memory.md` §2.
+    fn assign_field(
+        &mut self,
+        base: ExprId,
+        label: &str,
+        value: ExprId,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let owner_ty = self.types.of(base).clone();
+        let Type::Adt { name: type_name, .. } = owner_ty.clone() else {
+            return self.fail("only a record's field can be assigned to", range);
+        };
+        let Some((_, info)) = self.be.variant_of(&type_name, &type_name).map(|(t, i)| (t, i.clone()))
+        else {
+            return self.fail(format!("`{type_name}` is not a record"), range);
+        };
+        let Some((index, field_ty)) = info.field(label).map(|(i, t)| (i, t.clone())) else {
+            return self.fail(format!("`{type_name}` has no field `{label}`"), range);
+        };
+
+        let object = self.expr(base)?.into_pointer_value();
+        let new = self.expr(value)?;
+
+        let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, index as u64);
+        if is_boxed(&field_ty) {
+            let llvm_ty = self.be.llvm_type(&field_ty).expect("a boxed type is a pointer");
+            let old = self
+                .be
+                .builder
+                .build_load(llvm_ty, slot, "overwritten")
+                .expect("reading the overwritten field");
+            self.be.builder.build_store(slot, new).expect("assigning a field");
+            self.drop(old, &field_ty);
+        } else {
+            self.be.builder.build_store(slot, new).expect("assigning a field");
+        }
+
+        // The record itself was read to reach the field, and reading it
+        // duplicated the reference. Give it back.
+        self.drop(object.into(), &owner_ty);
+        Some(self.be.unit_value())
+    }
+
     /// The `attempt` intrinsic: run a computation and make its failure a value.
     ///
     /// The tagged return is already "an error or a value"; this is the same
@@ -2247,11 +2300,11 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// a reference nobody ever releases. What the assignment owes instead is
     /// the *old* value's release, which the plan has no place to record.
     fn assign(&mut self, target: ExprId, value: ExprId, range: TextRange) -> Flow<'ctx> {
+        if let Expr::Field { base, name } = self.body.expr(target).clone() {
+            return self.assign_field(base, &name, value, range);
+        }
         let Expr::Local(local) = self.body.expr(target).clone() else {
-            return self.fail(
-                "only a `let mut` binding can be assigned to; fields need records",
-                range,
-            );
+            return self.fail("this expression cannot be assigned to", range);
         };
         let ty = self.types.local(local).clone();
         let Some(slot) = self.slots.get(&local).copied() else {

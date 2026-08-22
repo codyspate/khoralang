@@ -627,6 +627,10 @@ impl Field {
     pub fn ty(&self) -> Option<Type> {
         child(&self.0)
     }
+    /// `mut count: Int` — the field may be written after the record is built.
+    pub fn is_mut(&self) -> bool {
+        token(&self.0, MUT_KW).is_some()
+    }
 }
 
 impl RecordType {

@@ -131,3 +131,90 @@ fn a_record_of_functions_is_callable_through_its_fields() {
          fn make() -> Ledger { { get: fn i => i + 1, flag: fn i => i == 0 } }\n",
     );
 }
+
+// --- mutable fields --------------------------------------------------------
+
+const MUT: &str = "module m;\n\
+                   export type Counter = { mut count: Int, name: String };\n\
+                   export type Frozen = { total: Int };\n\
+                   export type Fiber;\n\
+                   impl Fiber {\n\
+                     fn spawn<'e>(body: () -> () raises 'e) -> Fiber;\n\
+                   }\n\
+                   export fn nothing() -> () { }\n";
+
+#[test]
+fn a_mut_field_can_be_assigned() {
+    assert_clean(&format!(
+        "{MUT}export fn f(c: Counter) -> () {{ c.count = 1; }}\n"
+    ));
+}
+
+/// The default. A field is written only where the declaration says it may be,
+/// which is what makes `is_shareable` mean anything.
+#[test]
+fn a_field_that_is_not_mut_cannot_be_assigned() {
+    assert_reports(
+        &format!("{MUT}export fn f(c: Counter) -> () {{ c.name = \"x\"; }}\n"),
+        "`Counter` does not declare `mut`",
+    );
+}
+
+// --- what may cross into a fiber -------------------------------------------
+
+/// The rule. Two fibers writing one value is a race, and atomic reference
+/// counts do not help — they protect the count, not the fields.
+#[test]
+fn a_mutable_value_cannot_be_handed_to_a_fiber() {
+    assert_reports(
+        &format!(
+            "{MUT}\
+             export fn bump(c: Counter) -> () {{ c.count = 1; }}\n\
+             export fn f(c: Counter) -> Fiber {{ Fiber::spawn(fn () => bump(c)) }}\n"
+        ),
+        "cannot be handed to a fiber",
+    );
+}
+
+/// An immutable value crosses freely, which is what refcount atomicity bought.
+#[test]
+fn an_immutable_value_can_be_handed_to_a_fiber() {
+    assert_clean(&format!(
+        "{MUT}\
+         export fn look(v: Frozen) -> () {{ }}\n\
+         export fn f(v: Frozen) -> Fiber {{ Fiber::spawn(fn () => look(v)) }}\n"
+    ));
+}
+
+/// A named function captures nothing, so there is nothing to check.
+#[test]
+fn a_named_function_can_be_handed_to_a_fiber() {
+    assert_clean(&format!("{MUT}export fn f() -> Fiber {{ Fiber::spawn(nothing) }}\n"));
+}
+
+/// Transitive: holding a mutable value is as unshareable as being one.
+#[test]
+fn holding_a_mutable_value_is_unshareable_too() {
+    assert_reports(
+        &format!(
+            "{MUT}\
+             export type Holder = {{ inner: Counter }};\n\
+             export fn look(h: Holder) -> () {{ }}\n\
+             export fn f(h: Holder) -> Fiber {{ Fiber::spawn(fn () => look(h)) }}\n"
+        ),
+        "cannot be handed to a fiber",
+    );
+}
+
+/// A thunk that cannot be seen cannot be checked, so it is refused rather than
+/// waved through. That also makes the rule worth having on its own: a fiber's
+/// body is written where it starts.
+#[test]
+fn a_forwarded_thunk_cannot_be_spawned() {
+    assert_reports(
+        &format!(
+            "{MUT}export fn f(body: () -> ()) -> Fiber {{ Fiber::spawn(body) }}\n"
+        ),
+        "written where it is spawned",
+    );
+}

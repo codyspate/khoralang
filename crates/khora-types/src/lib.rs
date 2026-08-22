@@ -244,6 +244,11 @@ pub struct VariantInfo {
     /// Matching is positional and never needed these; `p.x` does, and so does
     /// a record literal, which names its fields and nothing else.
     pub labels: Vec<String>,
+    /// Which fields were declared `mut`, positionally.
+    ///
+    /// Empty for a variant declared before this mattered, which reads as "none
+    /// of them" — the safe answer, and the one every constructor wants.
+    pub mutable: Vec<bool>,
 }
 
 impl VariantInfo {
@@ -251,6 +256,22 @@ impl VariantInfo {
     pub fn field(&self, label: &str) -> Option<(usize, &Type)> {
         let index = self.labels.iter().position(|l| l == label)?;
         self.fields.get(index).map(|ty| (index, ty))
+    }
+
+    /// Whether a named field may be written after the record is built.
+    pub fn is_mut(&self, label: &str) -> bool {
+        self.labels
+            .iter()
+            .position(|l| l == label)
+            .and_then(|i| self.mutable.get(i))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Whether any field may be written. What makes a value unshareable, and
+    /// what ends the DAG invariant — see `docs/design/memory.md`.
+    pub fn has_mutable_field(&self) -> bool {
+        self.mutable.iter().any(|m| *m)
     }
 }
 
@@ -286,6 +307,57 @@ impl TypeMap {
     /// which is a wrong tag rather than an error.
     pub fn variant_of(&self, type_name: &str, case: &str) -> Option<&VariantInfo> {
         self.variants.iter().find(|v| v.type_name == type_name && v.name == case)
+    }
+
+    /// Whether a value of this type may be handed to another fiber.
+    ///
+    /// False for anything that can be written, transitively: a record with a
+    /// `mut` field, and anything holding one. Two fibers sharing a value they
+    /// can both write is a data race, and refcount atomicity (D10) does not
+    /// help — it protects the count, not the fields.
+    ///
+    /// **A function type is never shareable**, conservatively, because a
+    /// closure's captures are not in its type and so nothing here can see what
+    /// it holds. A named function referenced by path captures nothing and is
+    /// not affected; only a closure kept in a binding is.
+    ///
+    /// `docs/design/memory.md` §5a.
+    pub fn is_shareable(&self, ty: &Type) -> bool {
+        self.shareable(ty, &mut Vec::new())
+    }
+
+    fn shareable(&self, ty: &Type, visiting: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Fn { .. } => false,
+            Type::Tuple(items) => items.iter().all(|t| self.shareable(t, visiting)),
+            Type::Applied { head, args } => {
+                self.shareable(head, visiting)
+                    && args.iter().all(|t| self.shareable(t, visiting))
+            }
+            Type::Adt { name, args } => {
+                if !args.iter().all(|t| self.shareable(t, visiting)) {
+                    return false;
+                }
+                // A type may contain itself, so an in-progress name answers
+                // "yes" — anything genuinely unshareable in the cycle is found
+                // by the field that is not the recursive one.
+                if visiting.iter().any(|n| n == name) {
+                    return true;
+                }
+                visiting.push(name.clone());
+                let ok = self
+                    .variants
+                    .iter()
+                    .filter(|v| &v.type_name == name)
+                    .all(|v| {
+                        !v.has_mutable_field()
+                            && v.fields.iter().all(|t| self.shareable(t, visiting))
+                    });
+                visiting.pop();
+                ok
+            }
+            _ => true,
+        }
     }
 
 }
@@ -361,6 +433,9 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     name,
                     fields,
                     labels,
+                    // An effect's operations are a handler's fields, and a
+                    // handler is built once and read.
+                    mutable: Vec::new(),
                 });
             }
             ast::Decl::Type(t) => {
@@ -377,11 +452,13 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 // field access, construction and drop glue are all reused.
                 if let Some(ast::Type::Record(r)) = t.definition() {
                     let (labels, fields) = record_fields(&r, &generics);
+                    let mutable = r.fields().map(|f| f.is_mut()).collect();
                     map.variants.push(VariantInfo {
                         type_name: type_name.clone(),
                         name: type_name.clone(),
                         fields,
                         labels,
+                        mutable,
                     });
                 }
                 if let Some(ast::Type::Variant(v)) = t.definition() {
@@ -410,11 +487,16 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        let mutable = case
+                            .fields()
+                            .map(|list| list.fields().map(|f| f.is_mut()).collect())
+                            .unwrap_or_default();
                         map.variants.push(VariantInfo {
                             type_name: type_name.clone(),
                             name,
                             fields,
                             labels,
+                            mutable,
                         });
                     }
                 }
@@ -596,6 +678,13 @@ pub fn as_written(key: &str) -> String {
         None => key.to_string(),
     }
 }
+
+/// The type whose `spawn` starts a fiber.
+///
+/// Named here rather than in the backend because the *checker* enforces what
+/// may cross into one, and a rule about sharing is a type error rather than a
+/// code-generation one.
+pub const FIBER_TYPE: &str = "Fiber";
 
 /// The error a failed assertion is.
 ///
@@ -1251,6 +1340,7 @@ impl<'a> Checker<'a> {
             Expr::Binary { op, lhs, rhs } => self.infer_binary(op, lhs, rhs),
             Expr::Assign { target, value } => {
                 let target_ty = self.infer(target);
+                self.check_writable(target, range);
                 self.expect(value, &target_ty, "this assignment");
                 Type::Unit
             }
@@ -1486,6 +1576,22 @@ impl<'a> Checker<'a> {
     }
 
     fn infer_call(&mut self, callee: ExprId, args: &[ExprId], range: TextRange) -> Type {
+        // Checked after the arguments, because a lambda's implicit captures are
+        // only known once it has been inferred.
+        let spawning = matches!(
+            self.body.expr(callee),
+            Expr::Path(khora_hir::Resolution::TraitItem { owner, name })
+                if owner == FIBER_TYPE && name == "spawn"
+        );
+        if spawning {
+            let result = self.infer_call_inner(callee, args, range);
+            self.check_spawnable(args, range);
+            return result;
+        }
+        self.infer_call_inner(callee, args, range)
+    }
+
+    fn infer_call_inner(&mut self, callee: ExprId, args: &[ExprId], range: TextRange) -> Type {
         // A constructor call builds its ADT.
         if let Expr::Path(resolution) = self.body.expr(callee).clone() {
             if let Some((owner, case)) = variant_case(&resolution) {
@@ -1926,6 +2032,79 @@ impl<'a> Checker<'a> {
             .collect();
         self.demanded.extend(kept);
         Type::row(fields, tail)
+    }
+
+    /// What a fiber's body may close over.
+    ///
+    /// A mutable value handed to another fiber is a data race, and this is the
+    /// only place one can cross: a fiber touches exactly what its thunk
+    /// captured. `docs/design/memory.md` §5a.
+    ///
+    /// The thunk therefore has to be one whose captures are visible here — a
+    /// lambda written at the call, or a named function, which captures
+    /// nothing. Anything else is refused rather than waved through, because a
+    /// check that cannot see what it is checking is not a check. That also
+    /// makes the rule worth having on its own terms: **a fiber's body is
+    /// written where it starts**, so what it closes over is on the screen.
+    fn check_spawnable(&mut self, args: &[ExprId], range: TextRange) {
+        let Some(body) = args.first().copied() else { return };
+        let captures: Vec<khora_hir::body::LocalId> = match self.body.expr(body) {
+            Expr::Lambda { captures, .. } => captures
+                .iter()
+                .copied()
+                .chain(self.lambda_captures.get(&body).into_iter().flatten().copied())
+                .collect(),
+            // A named function captures nothing. Its own `with` clause is
+            // checked at the call like any other.
+            Expr::Path(_) => return,
+            _ => {
+                self.error(
+                    "a fiber's body has to be written where it is spawned, so that what it \
+                     closes over can be checked"
+                        .to_string(),
+                    range,
+                );
+                return;
+            }
+        };
+
+        for local in captures {
+            let ty = self.unifier.zonk(self.locals.get(&local).unwrap_or(&Type::Unknown));
+            if self.types.is_shareable(&ty) {
+                continue;
+            }
+            let name = self.body.local(local).name.clone();
+            self.error(
+                format!(
+                    "`{name}` cannot be handed to a fiber: `{ty}` can be written, and two \
+                     fibers writing one value is a race"
+                ),
+                range,
+            );
+        }
+    }
+
+    /// Whether an assignment's target may be written.
+    ///
+    /// Lowering already rejects the targets that are wrong on their face — a
+    /// literal, a call, a binding that is not `mut`. What is left is a *field*,
+    /// and whether that may be written is a question about its record's
+    /// declaration, which only the checker has read.
+    fn check_writable(&mut self, target: ExprId, range: TextRange) {
+        let Expr::Field { base, name } = self.body.expr(target).clone() else { return };
+        let owner = self.infer(base);
+        let owner = self.unifier.zonk(&owner);
+        let Type::Adt { name: type_name, .. } = &owner else { return };
+        let Some(variant) = self.types.variant_of(type_name, type_name) else { return };
+        if variant.field(&name).is_none() || variant.is_mut(&name) {
+            return;
+        }
+        self.error(
+            format!(
+                "cannot assign to `{name}`, which `{type_name}` does not declare `mut`"
+            ),
+            range,
+        );
     }
 
     /// Records that a lambda uses a capability without naming it.

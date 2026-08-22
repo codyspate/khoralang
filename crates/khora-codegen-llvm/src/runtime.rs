@@ -53,7 +53,7 @@ pub const CANCELLED_EXIT: u64 = 130;
 /// The type name of a fiber handle. Like a region, a handle the runtime owns
 /// — and like a region, releasing it is what makes the structure structured:
 /// the release *joins*, so a fiber cannot outlive the binding that holds it.
-pub const FIBER_TYPE: &str = "Fiber";
+pub const FIBER_TYPE: &str = khora_types::FIBER_TYPE;
 
 /// The type name of a nursery: the fibers a block is responsible for.
 ///
