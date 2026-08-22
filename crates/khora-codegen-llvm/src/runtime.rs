@@ -39,6 +39,10 @@ pub const FIELD_OFFSET: u64 = KHORA_FIELD_OFFSET as u64;
 /// asking the computation to stop, and only the entry point absorbs it.
 pub const CANCELLED_WHICH: u64 = khora_rt::CANCELLED_WHICH as u64;
 
+/// The `which` a failed assertion travels under. Beside the cancellation, and
+/// outside the range error-type ids come from, so no `catch` can name it.
+pub const FAILED_WHICH: u64 = khora_rt::FAILED_WHICH as u64;
+
 /// The exit status of a program that was cancelled and never stopped being.
 ///
 /// 128 + SIGINT, which is what a shell already means by "interrupted". A
@@ -115,7 +119,8 @@ pub struct Runtime<'ctx> {
     pub cancelled: FunctionValue<'ctx>,
     /// `_Noreturn void khora_cancel_stop(void)`
     pub cancel_stop: FunctionValue<'ctx>,
-    /// `void *khora_fiber_spawn(void *body, void (*glue)(void *), _Bool fallible)`
+    /// `void *khora_fiber_spawn(void *body, void (*glue)(void *),
+    ///                            uint32_t (*call)(const void *, void *, uint64_t *))`
     pub fiber_spawn: FunctionValue<'ctx>,
     /// `void khora_fiber_join(void *fiber)`
     pub fiber_join: FunctionValue<'ctx>,
@@ -131,6 +136,11 @@ pub struct Runtime<'ctx> {
     pub fibers_wait: FunctionValue<'ctx>,
     /// `void khora_fibers_release(void *fibers)` — a `drop_fields` callback.
     pub fibers_release: FunctionValue<'ctx>,
+    /// `void khora_test_register(const uint8_t *name, size_t len, const void *code,
+    ///                             uint32_t (*call)(const void *, uint64_t *))`
+    pub test_register: FunctionValue<'ctx>,
+    /// `int32_t khora_test_run(void)`
+    pub test_run: FunctionValue<'ctx>,
     /// `void khora_region_close_root(void)`
     pub region_close_root: FunctionValue<'ctx>,
     /// `llvm.trap`, for a branch that exhaustiveness says cannot be taken.
@@ -182,7 +192,7 @@ impl<'ctx> Runtime<'ctx> {
             cancel_stop: declare("khora_cancel_stop", void.fn_type(&[], false)),
             fiber_spawn: declare(
                 "khora_fiber_spawn",
-                ptr.fn_type(&[ptr.into(), ptr.into(), i8t.into()], false),
+                ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
             ),
             fiber_join: declare("khora_fiber_join", void.fn_type(&[ptr.into()], false)),
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),
@@ -194,6 +204,11 @@ impl<'ctx> Runtime<'ctx> {
             ),
             fibers_wait: declare("khora_fibers_wait", void.fn_type(&[ptr.into()], false)),
             fibers_release: declare("khora_fibers_release", void.fn_type(&[ptr.into()], false)),
+            test_register: declare(
+                "khora_test_register",
+                void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),
+            ),
+            test_run: declare("khora_test_run", i32t.fn_type(&[], false)),
             region_close_root: declare("khora_region_close_root", void.fn_type(&[], false)),
             trap: declare("llvm.trap", void.fn_type(&[], false)),
         }

@@ -90,6 +90,34 @@ const FEATURES: &str = "";
 /// naming the command that produces it, not a link failure full of undefined
 /// symbols from Rust's `std`.
 pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Main)
+}
+
+/// Compiles the program's *tests* to an executable that runs them.
+///
+/// The same program, with a different entry point: instead of calling `main`,
+/// it registers every `test` block and hands them to the runner, which gives
+/// each one a fiber of its own. Everything else — the same monomorphization,
+/// the same lowering — is shared, because a test body is a function body.
+pub fn compile_tests(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Tests)
+}
+
+/// Which entry point an executable gets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    /// Call `main`, and its result is the exit status.
+    Main,
+    /// Run every test, and whether they all passed is the exit status.
+    Tests,
+}
+
+fn build(
+    db: &dyn Db,
+    root: SourceRoot,
+    out: &Path,
+    entry_point: Entry,
+) -> Result<(), Vec<HirError>> {
     let files = root.files(db);
     let mut diagnostics: Vec<HirError> = Vec::new();
     for file in files {
@@ -178,8 +206,29 @@ pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirE
         crate::lower::emit_closure(&mut backend, &site, body, Some(&plan), owner_types, mono);
     }
 
-    let entry = mono.instances.iter().find(|(i, _)| i.function == "main").map(|(i, _)| i.symbol());
-    backend.emit_c_main(entry.as_deref());
+    match entry_point {
+        Entry::Main => {
+            let entry =
+                mono.instances.iter().find(|(i, _)| i.function == "main").map(|(i, _)| i.symbol());
+            backend.emit_c_main(entry.as_deref());
+        }
+        Entry::Tests => {
+            // In written order, per file, which is the order a reader expects
+            // a report in even though the runs themselves overlap.
+            let mut tests: Vec<(String, String)> = Vec::new();
+            for file in files {
+                for test in &khora_hir::item_map(db, *file).tests {
+                    let Some((instance, _)) =
+                        mono.instances.iter().find(|(i, _)| i.function == test.key)
+                    else {
+                        continue;
+                    };
+                    tests.push((instance.symbol(), test.name.clone()));
+                }
+            }
+            backend.emit_test_main(&tests);
+        }
+    }
     backend.emit_pending_thunks();
     backend.emit_pending_drop_glue();
 
@@ -432,6 +481,9 @@ pub(crate) struct Backend<'ctx> {
     /// Adapters declared but not yet given a body, for the same reason
     /// `pending_glue` exists.
     pending_thunks: Vec<String>,
+    /// Trampolines that take a tagged return apart, by how many arguments the
+    /// callee takes. See [`Backend::tagged_trampoline`].
+    trampolines: HashMap<usize, FunctionValue<'ctx>>,
     /// A program-wide id for each error type, assigned on first sight. It is
     /// the `which` of a tagged return, so 1 is the lowest: 0 means the call
     /// did not raise. See `docs/design/effect-runtime.md` §2.
@@ -488,6 +540,7 @@ impl<'ctx> Backend<'ctx> {
             closures_by_owner: HashMap::new(),
             thunks: HashMap::new(),
             pending_thunks: Vec::new(),
+            trampolines: HashMap::new(),
             error_ids: HashMap::new(),
             errors: Vec::new(),
         }
@@ -868,6 +921,82 @@ impl<'ctx> Backend<'ctx> {
         self.closures.clone()
     }
 
+    /// A shim that calls a fallible function and hands back its tag.
+    ///
+    /// The runtime cannot call a fallible Khora function directly. Its return
+    /// is a 16-byte aggregate, and how one of those comes back is a target
+    /// decision that LLVM makes for `{ i32, i64 }` and rustc makes for a
+    /// `repr(C)` struct of the same shape — on x86-64 Windows they disagree,
+    /// and the disagreement is silent: the tag reads as zero and every failure
+    /// looks like a pass.
+    ///
+    /// So nothing but scalars crosses the boundary. The aggregate is taken
+    /// apart on *this* side, where both halves of the call are LLVM's and
+    /// agree by construction, and the runtime gets an `i32` back and a
+    /// pointer to write the payload through.
+    ///
+    /// `arity` is how many arguments the callee takes: a test takes none, a
+    /// fiber's thunk takes its closure. One shim per arity, not per callee.
+    pub fn tagged_trampoline(&mut self, arity: usize) -> FunctionValue<'ctx> {
+        if let Some(f) = self.trampolines.get(&arity) {
+            return *f;
+        }
+
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let i32_type = self.ctx.i32_type();
+        let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = vec![ptr.into()];
+        params.extend(std::iter::repeat_n(BasicMetadataTypeEnum::from(ptr), arity));
+        params.push(ptr.into());
+
+        let f = self.module.add_function(
+            &format!("kh$tagged_call{arity}"),
+            i32_type.fn_type(&params, false),
+            Some(Linkage::Internal),
+        );
+        self.trampolines.insert(arity, f);
+
+        // Emitted at once rather than queued: it calls nothing that has to be
+        // discovered first, and it borrows the builder for four instructions.
+        let saved = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+
+        let code = f.get_nth_param(0).expect("a code pointer").into_pointer_value();
+        let args: Vec<BasicMetadataValueEnum<'ctx>> =
+            (0..arity).filter_map(|i| f.get_nth_param(i as u32 + 1)).map(|v| v.into()).collect();
+        let out = f
+            .get_nth_param(arity as u32 + 1)
+            .expect("somewhere to put the payload")
+            .into_pointer_value();
+
+        let callee_params: Vec<BasicMetadataTypeEnum<'ctx>> =
+            std::iter::repeat_n(BasicMetadataTypeEnum::from(ptr), arity).collect();
+        let callee_type = self.tagged_type().fn_type(&callee_params, false);
+        let result = self
+            .builder
+            .build_indirect_call(callee_type, code, &args, "outcome")
+            .expect("calling a fallible function")
+            .try_as_basic_value()
+            .basic()
+            .expect("a fallible function returns a tagged value")
+            .into_struct_value();
+
+        let which = self
+            .builder
+            .build_extract_value(result, 0, "which")
+            .expect("reading the tag")
+            .into_int_value();
+        let payload =
+            self.builder.build_extract_value(result, 1, "payload").expect("reading the payload");
+        self.builder.build_store(out, payload).expect("handing back the payload");
+        self.builder.build_return(Some(&which)).expect("handing back the tag");
+
+        if let Some(block) = saved {
+            self.builder.position_at_end(block);
+        }
+        f
+    }
+
     /// The adapter that lets `symbol` be used as a closure.
     ///
     /// A named function and a closure have different shapes: the closure is
@@ -1214,6 +1343,52 @@ impl<'ctx> Backend<'ctx> {
     fn close_root_region(&mut self) {
         let close = self.rt.region_close_root;
         self.builder.build_call(close, &[], "").expect("closing the root region");
+    }
+
+    /// Emits a `main` that hands every test to the runner.
+    ///
+    /// Registration is a loop of calls rather than a table, because a table
+    /// would need a layout agreed with the runtime and this needs nothing: the
+    /// name is a pointer and a length, and the body is a function pointer.
+    fn emit_test_main(&mut self, tests: &[(String, String)]) {
+        let i32_type = self.ctx.i32_type();
+        let main = self.module.add_function("main", i32_type.fn_type(&[], false), None);
+        let entry = self.ctx.append_basic_block(main, "entry");
+        self.builder.position_at_end(entry);
+
+        for (symbol, name) in tests {
+            let Some(function) = self.functions.get(symbol).copied() else { continue };
+            let text = self
+                .builder
+                .build_global_string_ptr(name, "test.name")
+                .expect("a test's name")
+                .as_pointer_value();
+            let len = self.ctx.i64_type().const_int(name.len() as u64, false);
+            let code = function.as_global_value().as_pointer_value();
+            // The trampoline, not the test itself: a tagged return does not
+            // cross into the runtime. See `tagged_trampoline`.
+            let call = self.tagged_trampoline(0).as_global_value().as_pointer_value();
+            self.builder
+                .build_call(
+                    self.rt.test_register,
+                    &[text.into(), len.into(), code.into(), call.into()],
+                    "",
+                )
+                .expect("registering a test");
+        }
+
+        let status = self
+            .builder
+            .build_call(self.rt.test_run, &[], "status")
+            .expect("running the tests")
+            .try_as_basic_value()
+            .basic()
+            .expect("the runner returns a status")
+            .into_int_value();
+        // The root region ends here too: a test that deferred something to it
+        // is as entitled to have it run as `main` is.
+        self.close_root_region();
+        self.builder.build_return(Some(&status)).expect("returning from main");
     }
 
     /// Emits the C `main` the operating system actually starts.

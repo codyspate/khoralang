@@ -831,6 +831,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Path(khora_hir::Resolution::Item { name, .. }) => {
                 if name == "print" && args.len() == 1 {
                     self.print(args[0], range)
+                } else if name == "assert" && args.len() == 1 {
+                    self.assert(args[0], range)
                 } else {
                     // A generic callee resolves to the specialization this call
                     // site asked for; a concrete one keeps its own name.
@@ -977,12 +979,19 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // it finishes, so this gives up the reference the plan gave it.
                 let closure = self.expr(*body)?;
                 let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
-                let flag = self.be.ctx.i8_type().const_int(u64::from(fallible), false);
+                // Null for a thunk that cannot fail; otherwise the trampoline
+                // that takes its tagged return apart on this side of the
+                // boundary. See `Backend::tagged_trampoline`.
+                let call = if fallible {
+                    self.be.tagged_trampoline(1).as_global_value().as_pointer_value()
+                } else {
+                    self.be.null_pointer()
+                };
                 let spawn = self.be.rt.fiber_spawn;
                 let fiber = self
                     .be
                     .builder
-                    .build_call(spawn, &[closure.into(), glue.into(), flag.into()], "fiber")
+                    .build_call(spawn, &[closure.into(), glue.into(), call.into()], "fiber")
                     .expect("spawning a fiber")
                     .try_as_basic_value()
                     .basic()
@@ -1068,6 +1077,43 @@ impl<'ctx> Lower<'_, 'ctx> {
                 range,
             ),
         }
+    }
+
+    /// The `assert` intrinsic.
+    ///
+    /// A false assertion leaves the test the way a raise leaves a function:
+    /// release what this frame owns, and return with a tag. The tag is
+    /// reserved, so no `catch` can name a failed assertion and only the runner
+    /// reads it.
+    ///
+    /// Only inside a test, and inside one it needs no `!`. That is the one
+    /// place the mark rule bends, and it is bounded here rather than in the
+    /// checker so that the bend is impossible to reach from ordinary code.
+    fn assert(&mut self, condition: ExprId, range: TextRange) -> Flow<'ctx> {
+        if !khora_hir::is_test(&self.owner) {
+            return self.fail(
+                "`assert` is only allowed inside a `test` block; elsewhere, `raise` says the \
+                 same thing and says where it goes"
+                    .to_string(),
+                range,
+            );
+        }
+
+        let held = self.expr(condition)?.into_int_value();
+        let failed = self.block("assert.failed");
+        let held_ok = self.block("assert.ok");
+        self.be
+            .builder
+            .build_conditional_branch(held, held_ok, failed)
+            .expect("branching on an assertion");
+
+        self.at(failed);
+        let which = self.be.ctx.i32_type().const_int(runtime::FAILED_WHICH, false);
+        let none = self.be.ctx.i64_type().const_zero();
+        self.leave_with(which, none);
+
+        self.at(held_ok);
+        Some(self.be.unit_value())
     }
 
     /// The `print` intrinsic.

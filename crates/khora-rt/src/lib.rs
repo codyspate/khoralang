@@ -113,7 +113,7 @@
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::cell::RefCell;
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The header every Khora heap object begins with.
@@ -798,10 +798,20 @@ unsafe impl Send for Handed {}
 /// generator's — see `docs/design/effect-runtime.md` §2 — and `repr(C)` is what
 /// makes both sides agree about it.
 #[repr(C)]
-struct Tagged {
-    which: u32,
-    payload: u64,
+pub struct Tagged {
+    /// 0 for an ordinary return; an error type's id, or one of the two
+    /// reserved values, otherwise.
+    pub which: u32,
+    /// The error, as the one word every Khora value fits in.
+    pub payload: u64,
 }
+
+/// The `which` a failed assertion travels under.
+///
+/// Beside the cancellation and outside the range error-type ids are assigned
+/// from, for the same reason: no `catch` can name it, because `assert` is the
+/// only thing that produces one and a test is the only thing that catches one.
+pub const FAILED_WHICH: u32 = u32::MAX - 1;
 
 /// The `which` a cancellation travels under.
 ///
@@ -833,19 +843,19 @@ const FIBER_TAG: u32 = 0;
 /// program cannot tell which — the handle is the same, and so is everything a
 /// program can do with it.
 ///
-/// `fallible` says whether the thunk returns the tagged pair, which is how a
-/// fiber reports that it was cancelled or that it failed. An infallible thunk
-/// has no channel to say either on, and so cannot be stopped part-way.
+/// `call` is null for a thunk that cannot fail, and otherwise the trampoline
+/// that runs it and hands back its tag. A thunk with no error row has no
+/// channel to say it was cancelled on, and so cannot be stopped part-way.
 ///
 /// # Safety
 ///
 /// `body` must be a live Khora closure of type `() -> ()` whose drop routine
-/// is `glue`, returning the tagged pair exactly when `fallible` is non-zero.
+/// is `glue`, and `call` must match whether it returns the tagged pair.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_fiber_spawn(
     body: *mut u8,
     glue: Option<extern "C" fn(*mut u8)>,
-    fallible: u8,
+    call: Option<Trampoline1>,
 ) -> *mut u8 {
     let cancel = Arc::new(AtomicUsize::new(0));
     let handed = Handed(body);
@@ -867,13 +877,16 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         // code uses.
         unsafe {
             let code = *body.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
-            if fallible == 0 {
-                let call: extern "C" fn(*mut u8) = std::mem::transmute(code);
-                call(body);
-            } else {
-                let call: extern "C" fn(*mut u8) -> Tagged = std::mem::transmute(code);
-                let outcome = call(body);
-                finish_fiber(outcome);
+            match call {
+                None => {
+                    let run: extern "C" fn(*mut u8) = std::mem::transmute(code);
+                    run(body);
+                }
+                Some(run) => {
+                    let mut payload: u64 = 0;
+                    let which = run(code, body, &raw mut payload);
+                    finish_fiber(Tagged { which, payload });
+                }
             }
             khora_drop(body, glue);
         }
@@ -1127,4 +1140,117 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
             khora_drop(fiber, Some(fiber_release_shim));
         }
     }
+}
+
+// --- the test runner -------------------------------------------------------
+
+/// Calls a fallible Khora function of no arguments and returns its tag,
+/// writing the payload through the pointer.
+///
+/// Generated code hands this over rather than the function itself, because a
+/// tagged return is a 16-byte aggregate and how one of those comes back is a
+/// target decision LLVM and rustc make separately. Only scalars cross here.
+type Trampoline0 = extern "C" fn(*const u8, *mut u64) -> u32;
+
+/// The same, for a function taking one pointer — a closure taking itself.
+type Trampoline1 = extern "C" fn(*const u8, *mut u8, *mut u64) -> u32;
+
+/// One test, waiting to be run.
+struct PendingTest {
+    name: String,
+    code: Handed,
+    call: Trampoline0,
+}
+
+/// The tests a program declared, in the order they were written.
+static PENDING: Mutex<Vec<PendingTest>> = Mutex::new(Vec::new());
+
+/// Registers a test. Called once per `test` block by the generated entry point.
+///
+/// # Safety
+///
+/// `name` must point at `len` bytes of UTF-8 that outlive the run — a string
+/// literal does — and `code` must be a test's compiled body.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_test_register(
+    name: *const u8,
+    len: usize,
+    code: *const u8,
+    call: Trampoline0,
+) {
+    // SAFETY: the caller guarantees `len` bytes at `name`, live for the run.
+    let bytes = if len == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(name, len) } };
+    let name = String::from_utf8_lossy(bytes).into_owned();
+    if let Ok(mut pending) = PENDING.lock() {
+        pending.push(PendingTest { name, code: Handed(code as *mut u8), call });
+    }
+}
+
+/// Runs every registered test, one fiber each, and reports.
+///
+/// Returns the process's exit status: 0 when every test passed.
+///
+/// **One fiber each, all at once.** That is the point rather than a detail —
+/// tests are the first thing anyone writes that is embarrassingly parallel, and
+/// a test that only passes when it runs alone is a test that is lying. Isolated
+/// by construction too: a fiber has its own cancellation flag, and nothing else
+/// is shared but what the program itself shares.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_test_run() -> i32 {
+    let tests: Vec<PendingTest> = match PENDING.lock() {
+        Ok(mut pending) => std::mem::take(&mut *pending),
+        Err(_) => return 1,
+    };
+    if tests.is_empty() {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(b"no tests\n");
+        return 0;
+    }
+
+    let running: Vec<_> = tests
+        .into_iter()
+        .map(|test| {
+            let name = test.name.clone();
+            let code = test.code;
+            let call = test.call;
+            let handle = std::thread::spawn(move || {
+                let code = code;
+                ON_FIBER.with(|f| f.set(true));
+                let mut payload: u64 = 0;
+                let which = (call)(code.0, &raw mut payload);
+                Tagged { which, payload }
+            });
+            (name, handle)
+        })
+        .collect();
+
+    let mut failed = 0usize;
+    let mut total = 0usize;
+    let mut out = std::io::stdout().lock();
+    for (name, handle) in running {
+        total += 1;
+        let verdict = match handle.join() {
+            // A test that ends any way other than "returned" did not pass.
+            // Which way it was matters to the reader and not to the count.
+            Ok(outcome) if outcome.which == 0 => "ok",
+            Ok(outcome) if outcome.which == FAILED_WHICH => "FAILED",
+            Ok(outcome) if outcome.which == CANCELLED_WHICH => "cancelled",
+            Ok(outcome) => {
+                // The error is nobody's to interpret here, and freeing its
+                // fields would need a drop routine the runtime cannot know.
+                // SAFETY: a live Khora object, or null.
+                unsafe { khora_drop(outcome.payload as *mut u8, None) };
+                "raised"
+            }
+            Err(_) => "panicked",
+        };
+        if verdict != "ok" {
+            failed += 1;
+        }
+        let _ = writeln!(out, "test {name} ... {verdict}");
+    }
+
+    let passed = total - failed;
+    let _ = writeln!(out, "\n{passed} passed, {failed} failed");
+    i32::from(failed != 0)
 }

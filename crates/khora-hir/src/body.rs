@@ -370,7 +370,7 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
         })
         .collect();
 
-    parse
+    let mut out: Vec<(String, Body)> = parse
         .source_file()
         .decls()
         .flat_map(|decl| match decl {
@@ -391,7 +391,42 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
             ast::Decl::Impl(i) => methods(map, scope, &contexts, &impl_key(&i), i.functions()),
             _ => Vec::new(),
         })
-        .collect()
+        .collect();
+
+    // A test's body is a function body like any other: it is checked, it is
+    // reference counted, and `khora test` compiles it. Numbered by position
+    // rather than by name, because nothing stops two tests sharing a name.
+    for (index, decl) in parse.source_file().decls().enumerate() {
+        let ast::Decl::Test(t) = &decl else { continue };
+        let Some(block) = t.body() else { continue };
+        out.push((crate::test_key(index), lower_test(map, scope, &contexts, &block)));
+    }
+    out
+}
+
+/// Lowers a test's block. It takes no parameters and returns nothing; what it
+/// can do is fail, which is what `assert` is for.
+fn lower_test(
+    map: &crate::ItemMap,
+    scope: &crate::FileScope,
+    contexts: &[(String, ast::ContextDecl)],
+    block: &ast::Block,
+) -> Body {
+    let mut ctx = Ctx {
+        body: Body::default(),
+        scopes: vec![Vec::new()],
+        map,
+        scope,
+        contexts,
+        generics: vec!["Self".to_string()],
+        loop_depth: 0,
+        in_scope: Vec::new(),
+        lambdas: Vec::new(),
+        lambda_names: Vec::new(),
+    };
+    let root = ctx.lower_expr(&ast::Expr::Block(block.clone()));
+    ctx.body.root = Some(root);
+    ctx.body
 }
 
 /// A record literal's fields, or none when the literal is missing.
@@ -892,7 +927,16 @@ impl<'a> Ctx<'a> {
             // runtime of its own and why an inner `with` shadows an outer one.
             ast::Expr::With(e) => {
                 let body = e.body();
-                let row = fields_of(e.row().as_ref());
+                // `expr with Mock` names a context, the same as the block form
+                // does — and `expr with Mock { ai: stub }` names one *and*
+                // overrides part of it. The context's bindings come first and
+                // the written ones after, so the ordinary rule decides: later
+                // shadows earlier, exactly as it does inside one row.
+                let mut row = match e.context() {
+                    Some(named) => self.context_bindings(&named, range),
+                    None => Vec::new(),
+                };
+                row.extend(fields_of(e.row().as_ref()));
                 self.lower_installation(row, body.as_ref(), range)
             }
             ast::Expr::WithBlock(e) => {

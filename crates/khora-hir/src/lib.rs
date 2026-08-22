@@ -119,11 +119,45 @@ pub struct HirError {
     pub range: TextRange,
 }
 
+/// One `test "name" { .. }` block.
+///
+/// Not an [`Item`]: a test has no name a program can refer to, only one a
+/// person reads in a report. `key` is what its body is recorded under, and is
+/// mangled so it cannot collide with anything a program declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestItem {
+    pub key: String,
+    pub name: String,
+    pub range: TextRange,
+}
+
+/// What every test's key begins with. `#` cannot occur in a Khora identifier,
+/// so this can never collide with a name a program chose.
+pub const TEST_PREFIX: &str = "#test$";
+
+/// The body of the *n*th test in a file.
+pub fn test_key(index: usize) -> String {
+    format!("{TEST_PREFIX}{index}")
+}
+
+/// Whether a name is a test's, however it has been qualified.
+///
+/// Monomorphization prefixes a body's key with its module — `app$main$#test$0`
+/// — so a test is not recognised by what its symbol *starts* with. Searching
+/// is still exact rather than loose: `#` cannot occur in a Khora identifier
+/// and module segments are identifiers, so `#test$` can only have come from
+/// [`test_key`].
+pub fn is_test(symbol: &str) -> bool {
+    symbol.contains(TEST_PREFIX)
+}
+
 /// Everything one file declares and imports.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemMap {
     pub module: Option<ModulePath>,
     pub items: Vec<Item>,
+    /// The file's tests, in written order.
+    pub tests: Vec<TestItem>,
     pub variants: Vec<Variant>,
     pub imports: Vec<Import>,
     pub errors: Vec<HirError>,
@@ -165,6 +199,18 @@ pub fn item_map(db: &dyn Db, file: SourceFile) -> ItemMap {
 
     for decl in source.decls() {
         collect_decl(&decl, &mut map);
+    }
+
+    // Numbered by position, so a test's identity is where it is written. A
+    // name would be nicer to read in a symbol table and worse to rely on:
+    // nothing stops two tests sharing one.
+    for (index, decl) in source.decls().enumerate() {
+        let ast::Decl::Test(t) = &decl else { continue };
+        map.tests.push(TestItem {
+            key: test_key(index),
+            name: t.name().unwrap_or_default(),
+            range: t.syntax().text_range(),
+        });
     }
 
     detect_duplicates(&mut map);

@@ -17,6 +17,13 @@ export type Method =
 /// `/analyze/acc_9921` binds `account_id`.
 export type Params;
 
+impl Request {
+  /// A GET request for `path`, with no parameters matched yet. Chiefly for
+  /// tests: a real one arrives from a socket.
+  fn get(path: String) -> Request;
+  fn post(path: String, body: String) -> Request;
+}
+
 impl Params {
   /// `Option::None` when the route did not declare that parameter, which is a
   /// programming error the type makes you notice rather than an empty string.
@@ -32,7 +39,9 @@ export type Request = {
   body: String,
 };
 
-export type Response;
+export type Response = {
+  status: Int,
+};
 
 impl Response {
   /// Serializes `body` and sends it with the given status.

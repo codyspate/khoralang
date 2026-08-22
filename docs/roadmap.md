@@ -491,13 +491,30 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   Also open: a region's finalizer cannot tell whether it is releasing normally
   or unwinding, and a nursery wants to wait in the first case and
   cancel-then-wait in the second.
-- **5.4 `Schedule` policies.** A library, once fibers exist.
+- **5.4 `khora test` — done.** A `test` block lowers to an ordinary function
+  body, which means it is *checked* — it was not before, and the reference
+  application's tests had been quietly wrong for some time as a result — and
+  everything the language can do works inside one with no special cases. Its
+  error row is open, because an error escaping a test is a failing test rather
+  than a program that does not compile.
 
-**Exit:** a canceled fiber runs every finalizer in scope, verified by test —
-**met**, by `a_cancelled_fiber_runs_every_finalizer_and_stops_only_itself` in
-`crates/khora-codegen-llvm/tests/fibers.rs`, which also pins the other half of
-what "stops" has to mean: the program carries on. `khora test` running isolated
-fibers across cores waits on 5.4.
+  `khora test` compiles the program with a different entry point and gives each
+  test a fiber of its own. Tests are the first thing anyone writes that is
+  embarrassingly parallel, and a test that only passes when it runs alone is a
+  test that is lying. `docs/design/testing.md`.
+
+  `assert` needs no `!`, and only inside a `test` block: every test framework
+  the audience knows ends the test on a failed assertion without annotating it,
+  an assertion is the one place a reader of a test already looks for control
+  leaving, and the bend is bounded by refusing `assert` anywhere else.
+- **5.5 `Schedule` policies.** Retry and repeat over a fallible computation.
+
+**Exit — met.** A canceled fiber runs every finalizer in scope, verified by
+`a_cancelled_fiber_runs_every_finalizer_and_stops_only_itself` in
+`crates/khora-codegen-llvm/tests/fibers.rs`, which pins the other half of what
+"stops" has to mean as well: the program carries on. And `khora test` runs
+isolated fibers across cores, pinned by
+`crates/khora-codegen-llvm/tests/testing.rs`.
 
 ---
 

@@ -298,8 +298,25 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     // gets the kind `Int -> Int -> *` rather than `* -> * -> *`.
     let mut consts: HashMap<String, Vec<bool>> = HashMap::new();
 
-    for decl in parse.source_file().decls() {
+    for (index, decl) in parse.source_file().decls().enumerate() {
         match decl {
+            // A test takes nothing, returns nothing, and can fail — which is
+            // the only interesting thing about its signature. The row is
+            // *opened* where the body is checked, because a test may fail any
+            // way it likes: that is what a failing test is.
+            ast::Decl::Test(_) => {
+                map.signatures.insert(
+                    khora_hir::test_key(index),
+                    Signature {
+                        generics: Vec::new(),
+                        bounds: Vec::new(),
+                        requires: Type::empty_row(),
+                        raises: Type::row(vec![(FAILED.to_string(), Type::adt(FAILED))], None),
+                        params: Vec::new(),
+                        ret: Type::Unit,
+                    },
+                );
+            }
             ast::Decl::Fn(f) => {
                 let Some(name) = f.name().and_then(|n| n.ident()) else { continue };
                 let generics = generic_names(f.type_params().as_ref());
@@ -579,6 +596,13 @@ pub fn as_written(key: &str) -> String {
         None => key.to_string(),
     }
 }
+
+/// The error a failed assertion is.
+///
+/// Not a type a program can declare or name: `assert` is the only thing that
+/// produces one and a test is the only thing that catches one, so there is
+/// nothing for a `catch` arm to say about it.
+pub const FAILED: &str = "Failed";
 
 /// The label an error type carries in a `raises` row: its own name.
 fn label_of(ty: &Type) -> String {
@@ -871,7 +895,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
     let mut out = Checked::default();
 
     for (name, body) in khora_hir::body::bodies(db, file) {
-        let signature = types.signatures.get(name).cloned().unwrap_or(Signature {
+        let mut signature = types.signatures.get(name).cloned().unwrap_or(Signature {
             generics: Vec::new(),
             bounds: Vec::new(),
             requires: Type::empty_row(),
@@ -879,6 +903,14 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             params: Vec::new(),
             ret: Type::Unknown,
         });
+        let mut unifier = Unifier::new().with_assoc(types.traits.assoc_bindings());
+        // A test's error row is open: an error escaping a test is a *failing
+        // test*, not a program that does not compile. Opened here rather than
+        // in the signature because only a unifier can make a flexible tail,
+        // and a rigid one would reject the very thing this is for.
+        if name.starts_with(khora_hir::TEST_PREFIX) {
+            signature.raises = Type::row(Vec::new(), Some(unifier.fresh()));
+        }
         let mut checker = Checker {
             types,
             body,
@@ -886,7 +918,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             locals: HashMap::new(),
             exprs: HashMap::new(),
             instantiations: HashMap::new(),
-            unifier: Unifier::new().with_assoc(types.traits.assoc_bindings()),
+            unifier,
             lambdas: Vec::new(),
             demanded: Vec::new(),
             projections: Vec::new(),

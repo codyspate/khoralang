@@ -750,3 +750,34 @@ Worth stating as a rule, because it will come up again: **a reference held
 across a call belongs in a scope, not in a statement after it.** Anything that
 can leave early — a raise, a cancellation, a `return`, a `break` — sees the
 scope and does not see the statement.
+
+## 35. Every test passed, including the ones that failed
+
+The test runner reported three passes for a suite whose third test asserted
+`4 == 5`. The generated code was right — `ret { i32, i64 } { i32 -2, i64 0 }`,
+the reserved tag for a failed assertion, plainly there in the IR — and the
+runtime read the tag as zero.
+
+A tagged return is a 16-byte aggregate, and **how a 16-byte aggregate comes
+back is a target decision, made separately by LLVM for `{ i32, i64 }` and by
+rustc for a `repr(C)` struct of the same shape.** On x86-64 Windows they
+disagree. Nothing warns: the two sides compile independently, the link
+succeeds, and the value that arrives is whatever happened to be in the register
+the reader looked at.
+
+Silent in the worst direction, too. A tag of zero means "returned normally", so
+every failure read as a pass — the one wrong answer a test runner must never
+give.
+
+The fix is to stop crossing the boundary with an aggregate. A trampoline on the
+*generated* side calls the function, takes the tagged pair apart where both
+halves of the call are LLVM's and agree by construction, returns the tag as an
+`i32` and writes the payload through a pointer. One per arity, not per callee.
+
+The rule this leaves behind is narrow and worth keeping: **only scalars and
+pointers cross between generated code and the runtime.** Everything else in
+this interface already obeyed it — `khora_alloc` takes two integers, `khora_drop`
+takes two pointers — and the one place that did not was the one place that
+broke. It had been broken for as long as fibers had existed; the fiber tests
+passed because none of them could tell the difference between "read the tag as
+zero" and "the fiber finished".

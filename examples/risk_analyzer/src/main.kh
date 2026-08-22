@@ -1,6 +1,6 @@
 module app::main;
 
-import std::core::{Option, Scope, print};
+import std::core::{Option, Scope, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
 import std::ai::{Extract, LLMService, ModelError, Prompt};
 
@@ -133,15 +133,25 @@ export fn main() raises HttpError {
   }
 }
 
+/// A model that always fails the same way, for testing what a caller does
+/// about it.
+fn stub_classifier(failure: ModelError) -> LLMService {
+  handler for LLMService {
+    complete: fn _ => raise failure,
+    embed: fn _ => raise failure,
+    extract: fn (_, _) => raise failure,
+  }
+}
+
 test "a critical assessment flags the account" {
-  let report = analyze_transaction_risk("acc_9921") with Mock;
+  let report = analyze_transaction_risk("acc_9921")! with Mock;
 
   assert(report.risk == RiskLevel::Critical("Immediate fund freeze"));
   assert(report.confidence > 0.9);
 }
 
 test "a rate-limited model yields an unavailable report" {
-  let response = handle(Request::get("/analyze/acc_1")) with Mock {
+  let response = handle(Request::get("/analyze/acc_1"))! with Mock {
     ai: stub_classifier(ModelError::RateLimited(2000)),
   };
 

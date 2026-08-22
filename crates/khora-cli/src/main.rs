@@ -42,6 +42,12 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Compile and run the program's tests, one fiber each.
+    Test {
+        /// A `.kh` file, or a directory to walk.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Compile to a native executable.
     Build {
         /// A `.kh` file, or a directory containing one.
@@ -72,6 +78,7 @@ fn run() -> Result<bool> {
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out } => build(&path, out.as_deref()),
+        Command::Test { path } => test(&path),
     }
 }
 
@@ -168,40 +175,47 @@ fn fmt(paths: &[PathBuf], check: bool) -> Result<bool> {
     Ok(failed == 0)
 }
 
+/// Builds the program's tests and runs them.
+///
+/// The executable is written beside the sources rather than into a temporary,
+/// so that a failing test can be run again under a debugger without rebuilding
+/// — which is the first thing anyone wants and would otherwise need a flag.
+#[cfg(feature = "llvm")]
+fn test(path: &Path) -> Result<bool> {
+    let (db, inputs, root) = load(path)?;
+    let target = inputs
+        .first()
+        .expect("at least one source")
+        .0
+        .with_file_name("khora-tests")
+        .with_extension(std::env::consts::EXE_EXTENSION);
+
+    if let Err(errors) = khora_codegen_llvm::compile_tests(&db, root, &target) {
+        report_build_errors(&inputs, &errors);
+        return Ok(false);
+    }
+
+    let status = std::process::Command::new(&target)
+        .status()
+        .with_context(|| format!("running {}", target.display()))?;
+    Ok(status.success())
+}
+
+#[cfg(not(feature = "llvm"))]
+fn test(_path: &Path) -> Result<bool> {
+    anyhow::bail!(
+        "this `khora` was built without the LLVM backend. \
+         Rebuild with `--features llvm`; see docs/llvm-setup.md."
+    )
+}
+
 /// Compiles a single file to a native executable.
 ///
 /// Semantic errors are reported through the same renderer `check` uses, so a
 /// diagnostic reads identically whichever command surfaced it.
 #[cfg(feature = "llvm")]
 fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
-    let files = collect_sources(std::slice::from_ref(&path.to_path_buf()))?;
-    if files.is_empty() {
-        anyhow::bail!("no `.kh` files found");
-    }
-
-    let db = KhoraDatabase::new();
-    let mut inputs = Vec::with_capacity(files.len());
-    for path in &files {
-        let text = read(path)?;
-        inputs.push((path.clone(), text.clone(), SourceFile::new(&db, path.clone(), text)));
-    }
-    // Every module in one compilation. Monomorphization substitutes into a
-    // generic function's *body*, so every module's source has to be present at
-    // once — the same reason a C++ template lives in a header.
-    let root = SourceRoot::new(&db, inputs.iter().map(|(_, _, f)| *f).collect());
-
-    let mut clean = true;
-    for (path, text, input) in &inputs {
-        let parse = khora_db::parse(&db, *input);
-        if !parse.errors().is_empty() {
-            clean = false;
-            eprintln!("{}", render_parse_errors(path, text, parse.errors()));
-            eprintln!();
-        }
-    }
-    if !clean {
-        return Ok(false);
-    }
+    let (db, inputs, root) = load(path)?;
 
     // The binary is named after the module holding `main`, or after the one
     // file when there is only one.
@@ -221,17 +235,68 @@ fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
             Ok(true)
         }
         Err(errors) => {
-            // Errors can come from any module, and a span is only meaningful
-            // against the file it came from. Without a file on the error there
-            // is no honest way to place it, so the first source is used and the
-            // count is printed either way.
-            let (path, text, _) = &inputs[0];
-            eprintln!("{}", render_hir_errors(path, text, &errors));
-            eprintln!();
-            eprintln!("{} error(s)", errors.len());
+            report_build_errors(&inputs, &errors);
             Ok(false)
         }
     }
+}
+
+/// Every source under `path`, parsed, in one compilation.
+///
+/// One compilation because monomorphization substitutes into a generic
+/// function's *body*, so every module's source has to be present at once — the
+/// same reason a C++ template lives in a header.
+///
+/// Returns `Ok(None)`-shaped failure by way of a parse-error report: a program
+/// that does not parse has nothing worth compiling, and the errors are already
+/// on stderr by then.
+#[cfg(feature = "llvm")]
+type Loaded = (KhoraDatabase, Vec<(PathBuf, String, SourceFile)>, SourceRoot);
+
+#[cfg(feature = "llvm")]
+fn load(path: &Path) -> Result<Loaded> {
+    let files = collect_sources(std::slice::from_ref(&path.to_path_buf()))?;
+    if files.is_empty() {
+        anyhow::bail!("no `.kh` files found");
+    }
+
+    let db = KhoraDatabase::new();
+    let mut inputs = Vec::with_capacity(files.len());
+    for path in &files {
+        let text = read(path)?;
+        inputs.push((path.clone(), text.clone(), SourceFile::new(&db, path.clone(), text)));
+    }
+    let root = SourceRoot::new(&db, inputs.iter().map(|(_, _, f)| *f).collect());
+
+    let mut clean = true;
+    for (path, text, input) in &inputs {
+        let parse = khora_db::parse(&db, *input);
+        if !parse.errors().is_empty() {
+            clean = false;
+            eprintln!("{}", render_parse_errors(path, text, parse.errors()));
+            eprintln!();
+        }
+    }
+    if !clean {
+        anyhow::bail!("{} did not parse", path.display());
+    }
+    Ok((db, inputs, root))
+}
+
+/// Reports what the backend refused.
+///
+/// Errors can come from any module, and a span is only meaningful against the
+/// file it came from. Without a file on the error there is no honest way to
+/// place it, so the first source is used and the count is printed either way.
+#[cfg(feature = "llvm")]
+fn report_build_errors(
+    inputs: &[(PathBuf, String, SourceFile)],
+    errors: &[khora_hir::HirError],
+) {
+    let (path, text, _) = &inputs[0];
+    eprintln!("{}", render_hir_errors(path, text, errors));
+    eprintln!();
+    eprintln!("{} error(s)", errors.len());
 }
 
 #[cfg(not(feature = "llvm"))]

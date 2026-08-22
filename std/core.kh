@@ -308,6 +308,14 @@ impl Traversable for List {
 // implemented yet; the signatures are here so that the design is written down
 // where it will live rather than only in a document.
 
+/// Fails the test this is written in, if `condition` is false.
+///
+/// Only allowed inside a `test` block, and inside one it needs no `!`. Both
+/// halves of that are deliberate: an assertion is the one place a reader of a
+/// test already expects control to leave, it is written at every one of them,
+/// and a test is not ordinary code. `docs/design/testing.md`.
+export fn assert(condition: Bool);
+
 /// Writes a line to standard output.
 ///
 /// Declared without a body, so it is an extern: the backend dispatches it on
