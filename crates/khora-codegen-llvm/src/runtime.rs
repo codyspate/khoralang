@@ -55,6 +55,16 @@ pub const CANCELLED_EXIT: u64 = 130;
 /// the release *joins*, so a fiber cannot outlive the binding that holds it.
 pub const FIBER_TYPE: &str = khora_types::FIBER_TYPE;
 
+/// The type name of a contiguous, fixed-length array.
+pub const ARRAY_TYPE: &str = "Array";
+
+/// An array's layout, restated from `khora-rt` rather than redefined: length,
+/// the routine that releases one element, whether the elements are counted at
+/// all, and then the elements. Generated code reaches an element directly, so
+/// the two sides have to agree and there is one definition to agree with.
+pub const ARRAY_LEN_FIELD: u64 = khora_rt::ARRAY_LEN_FIELD as u64;
+pub const ARRAY_HEADER_FIELDS: u64 = khora_rt::ARRAY_HEADER_FIELDS as u64;
+
 /// The type name of a nursery: the fibers a block is responsible for.
 ///
 /// Releasing one cancels its children and waits, which is the answer for a
@@ -136,6 +146,12 @@ pub struct Runtime<'ctx> {
     pub fibers_wait: FunctionValue<'ctx>,
     /// `void khora_fibers_release(void *fibers)` — a `drop_fields` callback.
     pub fibers_release: FunctionValue<'ctx>,
+    /// `void *khora_array_new(int64_t len, size_t fill, _Bool boxed, void (*glue)(void *))`
+    pub array_new: FunctionValue<'ctx>,
+    /// `void khora_array_release(void *array)` — a `drop_fields` callback.
+    pub array_release: FunctionValue<'ctx>,
+    /// `_Noreturn void khora_bounds_fail(int64_t index, int64_t len)`
+    pub bounds_fail: FunctionValue<'ctx>,
     /// `void khora_test_register(const uint8_t *name, size_t len, const void *code,
     ///                             uint32_t (*call)(const void *, uint64_t *))`
     pub test_register: FunctionValue<'ctx>,
@@ -204,6 +220,15 @@ impl<'ctx> Runtime<'ctx> {
             ),
             fibers_wait: declare("khora_fibers_wait", void.fn_type(&[ptr.into()], false)),
             fibers_release: declare("khora_fibers_release", void.fn_type(&[ptr.into()], false)),
+            array_new: declare(
+                "khora_array_new",
+                ptr.fn_type(&[i64t.into(), i64t.into(), i8t.into(), ptr.into()], false),
+            ),
+            array_release: declare("khora_array_release", void.fn_type(&[ptr.into()], false)),
+            bounds_fail: declare(
+                "khora_bounds_fail",
+                void.fn_type(&[i64t.into(), i64t.into()], false),
+            ),
             test_register: declare(
                 "khora_test_register",
                 void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),
@@ -264,4 +289,29 @@ pub fn field_pointer<'ctx>(
     index: u64,
 ) -> PointerValue<'ctx> {
     byte_offset(ctx, builder, object, FIELD_OFFSET + FIELD_WORD * index, "field.ptr")
+}
+
+/// The same, for a field whose index is only known at run time.
+///
+/// An array element. The byte offset has to be computed rather than folded,
+/// which is the only difference — the layout claim is identical, and stated
+/// once in [`field_pointer`]'s documentation.
+pub fn element_pointer<'ctx>(
+    ctx: &'ctx Context,
+    builder: &inkwell::builder::Builder<'ctx>,
+    object: PointerValue<'ctx>,
+    index: inkwell::values::IntValue<'ctx>,
+) -> PointerValue<'ctx> {
+    let i64t = ctx.i64_type();
+    let scaled = builder
+        .build_int_mul(index, i64t.const_int(FIELD_WORD, false), "field.bytes")
+        .expect("scaling a field index");
+    let offset = builder
+        .build_int_add(scaled, i64t.const_int(FIELD_OFFSET, false), "field.offset")
+        .expect("offsetting past the header");
+    unsafe {
+        builder
+            .build_in_bounds_gep(ctx.i8_type(), object, &[offset], "element.ptr")
+            .expect("addressing an element")
+    }
 }

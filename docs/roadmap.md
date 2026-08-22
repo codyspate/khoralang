@@ -588,9 +588,21 @@ argument that settled A6.
   Explicit wrapping operators are how you ask for the other thing.
 - **6.3 Floats.** Not in the backend and not in `Type`. `std::ai` promises
   tensors and the reference application cannot compile without them.
-- **6.4 Arrays.** Contiguous and bounds-checked. `List` is a linked list, which
-  is the wrong shape for almost everything and the wrong shape for reuse
-  analysis to pay off on.
+- **6.4 Arrays — done**, and taken before 6.2 and 6.3 because the phase's exit
+  is a hash map and arrays are what block it. Contiguous, fixed-length,
+  bounds-checked; `List` is a linked list, which is the wrong shape for almost
+  everything and the wrong shape for reuse analysis to pay off on.
+
+  Fixed length because growing is a *library* question. A vector is
+  `{ mut items: Array<A>, mut len: Int }` and can be written in Khora now that
+  a field can be written — `a_vector_can_be_written_in_khora` does exactly
+  that, and it is the first non-trivial data structure the language has held.
+
+  Allocation and release are runtime calls, because both need the length at run
+  time. Reading an element is a bounds check and a load, because the layout is
+  a contract with the code generator rather than something the runtime hides.
+  An index outside the array stops the program and says which index and what
+  length — the same reasoning as trapping on overflow.
 
 **Exit:** a hash map, written in Khora, in `std`, with a test that a
 round-trip of inserts and removals leaves the live-object count at zero.

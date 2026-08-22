@@ -394,6 +394,32 @@ impl Fiber {
   fn cancel(self) -> ();
 }
 
+/// A fixed number of elements, side by side.
+///
+/// Fixed because growing is a *library* question and this is the primitive one
+/// is built out of: `{ mut items: Array<A>, mut len: Int }` is a vector, and
+/// it can be written in Khora now that a field can be written.
+///
+/// Reading an element is a bounds check and a load — no call — because the
+/// layout is a contract with the code generator rather than something the
+/// runtime hides. What the runtime does own is allocation and release, both of
+/// which need the length at run time.
+export type Array<A>;
+
+impl<A> Array<A> {
+  /// `length` elements, every one of them `fill`.
+  fn new(length: Int, fill: A) -> Array<A>;
+  fn length(self) -> Int;
+  /// The element at `index`.
+  ///
+  /// An index outside the array stops the program and says which index and
+  /// what length. Same reasoning as trapping on integer overflow: a program
+  /// that runs off its own array is wrong, and reading whatever is next in
+  /// memory is the least useful possible response.
+  fn get(self, index: Int) -> A;
+  fn set(self, index: Int, value: A) -> ();
+}
+
 /// The fibers a block is responsible for.
 ///
 /// Releasing one *cancels its children and waits*, which is the answer for a

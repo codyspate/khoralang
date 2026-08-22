@@ -1194,6 +1194,13 @@ impl<'ctx> Backend<'ctx> {
             return self.rt.fibers_release.as_global_value().as_pointer_value();
         }
 
+        // An array's release loops over its elements. The loop is the
+        // runtime's because the length is a run-time value; what to do with
+        // one element is generated, and travels in the object.
+        if name == runtime::ARRAY_TYPE {
+            return self.rt.array_release.as_global_value().as_pointer_value();
+        }
+
         let key = ty.to_string();
 
         if let Some(cached) = self.drop_glue.get(&key) {
