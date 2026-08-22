@@ -442,3 +442,87 @@ fn a_literal_must_fit_the_type_it_is_asked_to_be() {
     );
     assert_clean("module m;\nfn f() -> Int { let b: U8 = 255; 0 }\n");
 }
+
+// --- `Unknown` is a silence, not a type ------------------------------------
+
+/// A body the checker finished cleanly must have no `Unknown` left in it.
+///
+/// `Unknown` is compatible with everything, which is what makes it useful
+/// downstream of an error — one mistake should not become five — and exactly
+/// what makes it invisible when nothing went wrong. Four errata are the same
+/// sentence about different holes (24, 26, 27, 30), and the fifth was found by
+/// the code generator three layers away.
+///
+/// The construct that has no answer today is a `forall` in an effect
+/// operation: a handler is asked for a closure that works for every `A`, and
+/// whole-program monomorphization has nowhere to put it. What matters here is
+/// that it is *said* rather than swallowed.
+#[test]
+fn a_type_nobody_worked_out_is_reported() {
+    assert_reports(
+        "module m;
+export type Spec = { fields: String };
+export trait Extract { type Spec; fn spec() -> Self::Spec; }
+export effect Model {
+  extract: forall <A: Extract> . (A::Spec) -> A,
+}
+fn use_it() -> Int with { model: Model } { model.extract({ fields: \"x\" }); 0 }
+",
+        "never worked out",
+    );
+}
+
+/// And it must not fire after something else was already reported: after an
+/// error `Unknown` is doing its job, and saying so again would bury the
+/// message worth reading.
+#[test]
+fn an_unknown_after_an_error_is_not_reported_twice() {
+    let db = KhoraDatabase::new();
+    let found = errors(&db, "module m;\nfn f() -> Int { let x: Bool = 5; x }\n");
+    // Two real ones: the annotation disagrees with the initializer, and the
+    // body then disagrees with the return type. What must not be here is a
+    // third, about a type nobody worked out.
+    assert!(
+        found.iter().all(|e| !e.contains("never worked out")),
+        "the audit piled onto errors already reported: {found:?}"
+    );
+    assert!(found.iter().any(|e| e.contains("this binding")), "{found:?}");
+}
+
+// --- what a `loop` produces -------------------------------------------------
+
+/// A `loop` yields what its `break`s carry.
+///
+/// It used to be `Unknown`, which unifies with everything — so
+/// `let n: Bool = loop { break 1 };` was accepted. Left that way through phase
+/// 2 rather than guessed, which was fine until `Unknown` stopped being allowed
+/// to mean "not worked out".
+#[test]
+fn a_loop_produces_what_break_carries() {
+    assert_clean("module m;\nfn f() -> Int { loop { break 1; } }\n");
+    assert_reports(
+        "module m;\nfn f() -> Bool { loop { break 1; } }\n",
+        "this function returns `Bool`",
+    );
+}
+
+/// Two `break`s have to agree, and the second is where the disagreement shows.
+#[test]
+fn breaks_have_to_agree() {
+    assert_clean("module m;\nfn f(b: Bool) -> Int { loop { if b { break 1; } else { break 2; } } }\n");
+    assert_reports(
+        "module m;\nfn f(b: Bool) -> Int { loop { if b { break 1; } else { break false; } } }\n",
+        "`break` values disagree",
+    );
+}
+
+/// A loop nobody breaks out of *with a value* produces nothing, which is what
+/// a `loop` used as a statement has always meant.
+#[test]
+fn a_loop_with_no_value_produces_unit() {
+    assert_clean("module m;\nfn f() -> Int { loop { break; }; 0 }\n");
+    assert_reports(
+        "module m;\nfn f() -> Int { loop { break; } }\n",
+        "this function returns `Int`",
+    );
+}

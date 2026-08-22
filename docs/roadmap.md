@@ -447,11 +447,22 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   handlers, so `with { db: Db }` and `fn postgres_db() -> Db` agree without a
   wrapper to unwrap.
 
-**Exit:** the reference application typechecks — **met**, pinned by
-`the_reference_application_type_checks` — and an unhandled capability is
-rejected with a diagnostic naming the absent label and the function that
-required it — **met**. Serving a request needs real I/O and a backend that can
-build a value out of an effectful function; both belong to phase 5 and after.
+**Exit: the reference application typechecks — met *except for one thing*, and
+the exception was found late.** Pinned by
+`the_reference_application_type_checks_but_for_one_thing`. An unhandled
+capability is rejected with a diagnostic naming the absent label and the
+function that required it — **met**.
+
+The correction is worth making plainly. This read as met for a long time
+because `ai.extract` is declared `forall <A: Extract> . (Prompt, A::Spec) -> A`,
+the checker had nowhere to put the `A`, and the `Unknown` it produced agreed
+with everything downstream. The `Unknown` audit in 8.3a is what turned that
+silence into a sentence — the same way entry 24's test was green for the wrong
+reason. Everything else in the program fits; that one construct has no decided
+meaning.
+
+Serving a request needs real I/O and a backend that can build a value out of an
+effectful function; both belong to phase 5 and after.
 
 Three holes turned up only once a whole program was checked at once, each of
 them a place where something arrived as `Unknown` and was therefore accepted:
@@ -951,6 +962,16 @@ can be written before anything needs TLS.
 stack: capabilities, a fallible service, `catch`, a router carrying its
 handlers' requirements, and now real I/O underneath.
 
+- **8.3a The checker will not finish a body it did not understand.** A
+  published type of `Unknown` is now an error: `Unknown` is compatible with
+  everything, so it is right downstream of a mistake and invisible everywhere
+  else, and five errata are the same sentence about different holes. Errata 41.
+
+  It found two things on the first run. A `loop` had no type at all — the
+  comment said "left open rather than guessed", and left open meant
+  `let n: Bool = loop { break 1 }` was accepted; a loop now takes the type its
+  `break`s agree on, or `()` when none carries a value. And **the reference
+  application does not typecheck**, which is the next item.
 - **8.3 A module-level `let` is a constant — done.** It used to be a name with
   no type: resolved, never checked, never lowered. `Unknown` is compatible with
   everything so nothing complained, and the first sign was the code generator

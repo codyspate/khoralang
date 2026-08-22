@@ -928,3 +928,44 @@ It suggests the check worth having is not "did anything report an error" but
 **"is any published type `Unknown`?"** A body the checker finished with an
 `Unknown` in it is a body the checker did not understand, and saying so at the
 end of checking would have caught all five of these where they happened.
+
+## 41. Four entries, one check
+
+Entries 24, 26, 27, 30 and 40 are the same sentence about different holes:
+**`Unknown` is a silence, not a type.** It is compatible with everything, which
+is what makes it right downstream of an error — one mistake should not become
+five — and exactly what makes it invisible when nothing went wrong.
+
+Five times was enough. The checker now refuses to finish a body with an
+`Unknown` in it: if one is left and nothing else was reported, that is either a
+program nobody can type or a gap in the compiler, and both deserve a sentence
+where they happen rather than a symptom three subsystems away.
+
+Two exemptions, and both are the rule rather than holes in it. After an error —
+this pass's own, HIR's, or the parser's — `Unknown` is doing its job, and
+saying so again would bury the message worth reading. And the report names the
+*narrowest* expression, because an unknown type makes the block around it
+unknown too and the innermost one is where the trail starts.
+
+Turning it on found two things immediately.
+
+**The reference application does not typecheck**, and has not for as long as
+anyone has been claiming it does. `ai.extract` is declared
+`forall <A: Extract> . (Prompt, A::Spec) -> A`; the checker had nowhere to put
+the `A`, produced `Unknown`, and `Unknown` agreed with everything downstream of
+it. Phase 4's exit criterion was met the same way entry 24's test was green.
+The test now asserts what is true — everything fits *except* the one construct
+nobody has decided how to compile — and goes back to `is_empty` when it is
+decided.
+
+**A `loop` had no type.** The comment said so plainly — *"a `loop` yields
+whatever `break` carries; without tracking that in phase 2 it is left open
+rather than guessed"* — and left open meant `Unknown`, which meant
+`let n: Bool = loop { break 1 };` was accepted. A loop now takes the type its
+`break`s agree on, or `()` when none of them carries a value.
+
+The lesson is about the shape of the check rather than any of the bugs.
+Asking *"did anything report an error?"* is asking the compiler whether it
+noticed a problem. Asking **"is any published type `Unknown`?"** is asking
+whether it understood the program, which is a different and better question —
+and it is the one that would have caught all five.

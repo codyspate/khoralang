@@ -1133,6 +1133,10 @@ pub struct Checked {
 pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
     let types = type_map(db, file);
     let mut out = Checked::default();
+    // A file that did not parse has holes in it, and a hole is an `Unknown`
+    // that nothing in *this* pass reported. The syntax error is the message
+    // worth reading; see `Checker::check_unknowns`.
+    let parsed = khora_db::parse(db, file).errors().is_empty();
 
     for (name, body) in khora_hir::body::bodies(db, file) {
         let mut signature = types.signatures.get(name).cloned().unwrap_or(Signature {
@@ -1166,6 +1170,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
             installed: Vec::new(),
+            loops: Vec::new(),
             open_raises: Vec::new(),
             hint: None,
             marked: Vec::new(),
@@ -1176,6 +1181,9 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         checker.check_bounds();
         checker.settle_projections();
         checker.check_effects();
+        if parsed {
+            checker.check_unknowns();
+        }
         out.errors.extend(checker.errors);
         // Published types are zonked: a consumer should never see a variable,
         // and code generation cannot do anything with one.
@@ -1306,6 +1314,13 @@ struct Checker<'a> {
     /// signature. That is row subtraction: `with` *discharges* a requirement
     /// rather than forwarding it.
     installed: Vec<String>,
+    /// The loops currently being inferred, innermost last.
+    ///
+    /// Each holds the type its `break`s agree on and whether any `break`
+    /// carried a value at all. A loop nobody breaks out of with a value
+    /// produces `()`; one that does produces what they carry, and two `break`s
+    /// carrying different types is a mismatch reported at the second.
+    loops: Vec<(Type, bool)>,
     /// The open tail of every lambda's inferred `raises` row, in the order the
     /// lambdas were seen.
     ///
@@ -1498,6 +1513,61 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Reports any type the checker finished without working out.
+    ///
+    /// **`Unknown` is a silence, not a type.** It is compatible with
+    /// everything, which is exactly what makes it useful downstream of an error
+    /// — one mistake should not become five — and exactly what makes it
+    /// invisible when nothing went wrong. Four errata are the same sentence
+    /// about different holes (24, 26, 27, 30), and the fifth, entry 40, was
+    /// found by the *code generator* three layers away, in a message naming a
+    /// variable the author never wrote.
+    ///
+    /// So: a body the checker finished cleanly must have no `Unknown` left in
+    /// it. If one is there, either the program is ambiguous in a way nothing
+    /// reported, or the checker has a gap — and both are worth a sentence
+    /// where they happened rather than a symptom somewhere else.
+    ///
+    /// Run **only when the body is otherwise clean**, because after an error
+    /// `Unknown` is doing its job and saying so again would bury the real
+    /// message. "Clean" means more than this pass being quiet: a name that did
+    /// not resolve or a fragment that did not parse leaves an `Unknown` behind
+    /// too, and both were already reported — by a different pass, whose errors
+    /// are not in this list.
+    fn check_unknowns(&mut self) {
+        if !self.errors.is_empty() || !self.body.errors.is_empty() {
+            return;
+        }
+        let visited: Vec<ExprId> = self.exprs.keys().copied().collect();
+        if visited
+            .iter()
+            .any(|id| matches!(self.body.expr(*id), Expr::Missing | Expr::Unresolved(_)))
+        {
+            return;
+        }
+
+        let mut found: Vec<TextRange> = Vec::new();
+        for id in visited {
+            let ty = self.exprs[&id].clone();
+            if matches!(self.unifier.zonk(&ty), Type::Unknown) {
+                found.push(self.body.range(id));
+            }
+        }
+        // One report, at the *narrowest* expression. They cascade — an
+        // expression of unknown type makes the block around it one too — and
+        // the smallest range is the innermost, which is where the trail starts.
+        found.sort_by_key(|r| (r.len(), r.start()));
+        if let Some(range) = found.first().copied() {
+            self.error(
+                "the type of this expression was never worked out, and nothing else was \
+                 reported — so either it needs an annotation, or this is a gap in the \
+                 compiler worth reporting"
+                    .to_string(),
+                range,
+            );
+        }
+    }
+
     /// Closes every lambda error row nothing ever asked to be wider.
     ///
     /// Run once the body is checked. A tail still unsolved here was never
@@ -1650,14 +1720,30 @@ impl<'a> Checker<'a> {
                 Type::Unit
             }
             Expr::Loop { body } => {
+                // A `loop` yields whatever its `break`s carry. Left as
+                // `Unknown` through phase 2 rather than guessed — which was
+                // fine until `Unknown` stopped being allowed to mean "not
+                // worked out", because `Unknown` unifies with everything and so
+                // `let n: Bool = loop { break 1 };` was accepted.
+                let answer = self.unifier.fresh();
+                self.loops.push((answer.clone(), false));
                 self.infer(body);
-                // A `loop` yields whatever `break` carries; without tracking
-                // that in phase 2 it is left open rather than guessed.
-                Type::Unknown
+                let (answer, carried) = self.loops.pop().expect("just pushed");
+                // Nothing broke with a value, so there is no value: an infinite
+                // loop and a loop that just stops both produce `()`.
+                if carried { answer } else { Type::Unit }
             }
             Expr::Break(value) => {
                 if let Some(v) = value {
-                    self.infer(v);
+                    let carried = self.infer(v);
+                    // A `break` outside a loop is reported by HIR lowering,
+                    // which knows the nesting; nothing to add here.
+                    if let Some((answer, _)) = self.loops.last().cloned() {
+                        self.require(&answer, &carried, "`break` values disagree", range);
+                        if let Some(last) = self.loops.last_mut() {
+                            last.1 = true;
+                        }
+                    }
                 }
                 Type::Never
             }
