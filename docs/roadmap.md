@@ -58,9 +58,17 @@ before the phase that depends on it starts.
 | # | Question | Blocks |
 | --- | --- | --- |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
-| D8 | **The FFI contract.** Narrowed by A6 from "map Rust onto Khora" to three answerable questions: exactly which types may cross and in what layout, how a foreign resource's lifetime is tied to a Khora binding, and what a callback looks like. The first is mostly written already in `khora-rt`'s module documentation, and the second has a working shape — a region and a fiber handle are both foreign resources with runtime-provided drop glue. | 7 |
 | D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Nothing in this roadmap owns this today, which is the failure mode errata entry 20 names. | 8.x |
 **Closed:**
+
+- **D8** (the FFI contract) is decided in `docs/design/ffi.md`: **a foreign
+  function takes and returns scalars and pointers, requires capabilities
+  without receiving them, and cannot raise.** Everything else is a Khora
+  wrapper's job — which is not a limitation so much as errata 35's rule
+  applied to a boundary the user writes rather than one the compiler
+  generates, and the compiler now checks it. What remains under 7.3 is `Ptr`
+  and how a buffer is lent across, and under 7.2 whether `extern` should be a
+  keyword; neither changes the contract.
 
 - **D10** (atomic reference counts) is decided in
   `docs/design/effect-runtime.md` §9: **atomic, with no way to opt out.** The
@@ -721,16 +729,56 @@ Per A6 and `docs/design/ecosystem.md`. Small, because the boundary already
 exists: every runtime call generated code makes is a C ABI crossing, and the
 rule for what may cross was settled the hard way in errata 35.
 
-- **7.1 Decide D8** — which types cross and in what layout, how a foreign
-  resource's lifetime is tied to a Khora binding, and what a callback is.
-- **7.2 `extern` declarations that carry effect clauses.** A foreign function is
-  opaque, so its `with` and `raises` are a promise the compiler takes on trust
-  and then enforces on every caller. This is where the capability discipline is
-  asserted rather than inferred, and where D4 gets its teeth.
+- **7.1 D8 — decided, in `docs/design/ffi.md`.** In one line: *a foreign
+  function takes and returns scalars and pointers, requires capabilities
+  without receiving them, and cannot raise; everything else is a Khora
+  wrapper's job.*
+
+  **And the compiler now holds to it.** A function declared without a body is a
+  foreign function, and its signature is checked where the call is generated: a
+  parameter or return the C ABI cannot carry is an error naming the type and
+  the reason. Before this, `fn f(p: Pair) -> Int;` compiled and handed a
+  reference-counted heap object to C — only the missing symbol stopped it, and
+  a symbol that happened to exist would have been worse. That is errata 35's
+  rule turned from a lesson into a check.
+
+  `raises` on a foreign declaration is refused, and for the better of the two
+  available reasons: a fallible function returns the very aggregate errata 35
+  says must not cross, and *C has no error channel* — it has a return value
+  that means something, differently in every library. The three lines that turn
+  a negative return into a raise are written in Khora, where a reader can see
+  which convention this one uses.
+- **7.2 Effect clauses on a foreign declaration — the capability half is
+  done.** **A `with` clause on a foreign function is a permission, and nothing
+  is appended to the call.** A C function has no use for a Khora record of
+  closures, but the requirement is worth everything: nothing can open a file
+  without holding `Fs`, and `Fs` is not something a function can conjure — it
+  comes from `main`, through every frame that needs it, visible in every
+  signature on the way. That is D4's teeth, with no runtime check and no
+  sandbox.
+
+  A foreign function is opaque, so its row is a promise the compiler takes on
+  trust and then enforces on every caller. Which is the argument for bindings
+  to the operating system living in the standard library, reviewed once,
+  rather than being written afresh in every package.
+
+  **Still to do:** `extern` as a keyword. A bodyless top-level function *is* a
+  foreign function today, silently — the same trap as errata 36 and 39, and a
+  misspelled name becomes a linker error rather than "no such function". It is
+  a change to the language's surface and to every test that declares
+  `fn print(value: Int);`, so it wants a decision rather than a drive-by.
 - **7.3 Foreign resources as counted values.** A Khora object holding the
   pointer, with a release that calls the foreign close — the shape a region and
   a fiber handle already have, so an open file closes on every path out
   including a raise.
+
+  First it needs **`Ptr`**: an opaque machine address, not counted, not
+  dereferenceable from Khora. Until it exists a foreign function can only take
+  numbers, which is enough to prove the boundary works and not enough to do
+  anything with it. The open question is not the type but how a buffer is lent
+  — `Array::data(self) -> Ptr` is a dangling pointer waiting to happen, since
+  Perceus releases the array at its last *use*. A scoped borrow is the shape
+  that cannot go wrong, and is what `scoped` and `nursery` already are.
 - **7.4 Syscalls**: files, sockets, a clock.
 
 **Exit:** read a file and write its contents to a socket, from Khora, with the

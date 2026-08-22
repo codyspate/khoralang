@@ -644,8 +644,8 @@ fn main() -> Int { peek(Bag::Full(1)) }
 ",
     );
     assert!(
-        found.iter().any(|m| m.contains("was not resolved") || m.contains("cannot represent")),
-        "expected a message about a declaration with no body, got {found:?}"
+        found.iter().any(|m| m.contains("foreign function") && m.contains("generic")),
+        "expected a message about a generic foreign function, got {found:?}"
     );
 }
 
@@ -952,6 +952,12 @@ fn main() -> Int {
 
 /// The positive control for the test above: without it, a live count of zero
 /// could mean the counter is broken rather than the program clean.
+///
+/// Two objects are alive when the count is taken — a string the program has
+/// not finished with, and a closure it never uses. This used to call
+/// `khora_dup` on the string to hold an extra reference, which handed a
+/// reference-counted Khora object straight to C and is now refused:
+/// `docs/design/ffi.md` says only scalars and pointers cross.
 #[test]
 fn a_leaked_closure_is_actually_observable() {
     let ran = run(
@@ -959,18 +965,21 @@ fn a_leaked_closure_is_actually_observable() {
         "module t;
 fn khora_print_int(value: Int);
 fn khora_live_count() -> Int;
-fn khora_dup(object: String);
+
+impl String {
+  fn byte_length(self) -> Int;
+}
 
 fn main() -> Int {
   let s = \"held\";
-  khora_dup(s);
   let f = fn x => x + 0;
   khora_print_int(khora_live_count());
+  khora_print_int(String::byte_length(s));
   0
 }
 ",
     );
-    assert_eq!(ran.stdout, "2\n", "an extra reference and a live closure are both counted");
+    assert_eq!(ran.stdout, "2\n4\n", "a live string and a live closure are both counted");
     assert_eq!(ran.code, Some(0));
 }
 

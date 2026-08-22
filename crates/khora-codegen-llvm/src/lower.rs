@@ -2659,8 +2659,16 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
         // Then the capabilities, which the source never writes: the row said
         // which and in what order.
-        for capability in self.evidence_for(name, site, range)? {
-            values.push(capability.into());
+        //
+        // Except across the C ABI, where a `with` clause is a *permission*
+        // rather than an argument — a foreign function has no use for a Khora
+        // record of closures, and requiring one it never receives is how the
+        // boundary is governed. Decision 3 in `docs/design/ffi.md`; the
+        // checker has already charged the row to this frame either way.
+        if self.be.is_defined(name) {
+            for capability in self.evidence_for(name, site, range)? {
+                values.push(capability.into());
+            }
         }
 
         let call = self.be.builder.build_call(function, &values, "call").expect("a call");

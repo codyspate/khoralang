@@ -336,6 +336,73 @@ fn declare_closures(
     }
 }
 
+/// Why this type cannot cross the C ABI, or `None` if it can.
+///
+/// **Scalars and pointers only.** The rule comes from errata 35, where a
+/// 16-byte aggregate crossed between generated code and the runtime and the
+/// two sides disagreed about how one comes back — silently, in the direction
+/// that made every failing test report as passing. The runtime is only the
+/// first foreign library; a binding the user writes is the same boundary.
+///
+/// `docs/design/ffi.md` has the full contract.
+fn foreign_obstacle(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Int | Type::Fixed(_) | Type::Float | Type::Bool => None,
+        Type::Str => Some(
+            "a `String` is a reference-counted heap object with a header the C side knows \
+             nothing about; pass its bytes and length instead",
+        ),
+        Type::Adt { .. } | Type::Tuple(_) => Some(
+            "a Khora object is a reference-counted heap allocation, so the foreign side \
+             would get a pointer it cannot read and a reference it cannot release",
+        ),
+        Type::Fn { .. } => Some(
+            "a closure is a heap object holding its captures, and C expects a bare function \
+             pointer",
+        ),
+        Type::Param(_) | Type::Applied { .. } | Type::Assoc { .. } | Type::Var(_) => Some(
+            "a generic function has no single machine signature, and there is no body to \
+             specialize",
+        ),
+        Type::Unit => Some("`()` is not a value; a foreign function may only *return* it"),
+        Type::Row { .. } | Type::Const(_) | Type::Never | Type::Unknown => {
+            Some("it is not a type the C ABI has")
+        }
+    }
+}
+
+/// Why this whole signature cannot be a foreign function's, if it cannot.
+///
+/// Checked where the call is generated rather than at the declaration, so an
+/// unused binding to something this target does not have is not an error on a
+/// target that does not need it.
+pub(crate) fn foreign_signature_obstacle(signature: &Signature) -> Option<String> {
+    if !signature.generics.is_empty() {
+        return Some(
+            "it is generic, and a generic function has no single machine signature".to_string(),
+        );
+    }
+    if can_raise(signature) {
+        return Some(
+            "it can raise, and a fallible function returns a tagged pair — which is exactly \
+             the aggregate that must not cross (errata 35). C reports failure in its return \
+             value, and the wrapper that turns that into a raise belongs in Khora"
+                .to_string(),
+        );
+    }
+    for param in &signature.params {
+        if let Some(why) = foreign_obstacle(param) {
+            return Some(format!("its parameter of type `{param}` cannot cross: {why}"));
+        }
+    }
+    if !matches!(signature.ret, Type::Unit) {
+        if let Some(why) = foreign_obstacle(&signature.ret) {
+            return Some(format!("its return type `{}` cannot cross: {why}", signature.ret));
+        }
+    }
+    None
+}
+
 /// Whether a signature's `raises` row has anything in it.
 pub(crate) fn can_raise(signature: &Signature) -> bool {
     match &signature.raises {
@@ -691,6 +758,20 @@ impl<'ctx> Backend<'ctx> {
     }
 
     fn function_type(&self, signature: &Signature) -> Option<FunctionType<'ctx>> {
+        self.shaped(signature, false)
+    }
+
+    /// The machine type of a function, as a Khora definition or as a foreign
+    /// declaration.
+    ///
+    /// The two differ in exactly one way, and it is the whole of decision 3 in
+    /// `docs/design/ffi.md`: **a `with` clause on a foreign function is a
+    /// permission, and nothing is appended to the call.** A C function has no
+    /// use for a Khora record of closures, so passing one would be meaningless;
+    /// but requiring it is how the boundary is governed, since nothing can open
+    /// a file without holding `Fs` and `Fs` is not something a function can
+    /// conjure.
+    fn shaped(&self, signature: &Signature, foreign: bool) -> Option<FunctionType<'ctx>> {
         let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
         for param in &signature.params {
             params.push(self.llvm_type(param)?.into());
@@ -698,8 +779,10 @@ impl<'ctx> Backend<'ctx> {
         // Capabilities are ordinary parameters, appended after the written
         // ones in label order. The row is sorted, so both sides agree without
         // anything being written down twice.
-        for (_, capability) in evidence_of(signature) {
-            params.push(self.llvm_type(&capability)?.into());
+        if !foreign {
+            for (_, capability) in evidence_of(signature) {
+                params.push(self.llvm_type(&capability)?.into());
+            }
         }
         // A function that can raise returns a tagged word instead of its
         // value: `{ i1 raised, i64 payload }`. One word suffices because every
@@ -805,7 +888,20 @@ impl<'ctx> Backend<'ctx> {
         let signature = self
             .signature_of(name)
             .ok_or_else(|| format!("`{name}` has no signature to call through"))?;
-        let ty = self.function_type(&signature).ok_or_else(|| {
+        // A function with no body is a foreign function, and what may cross
+        // the C ABI is a much shorter list than what the backend can represent.
+        // Checked here rather than at the declaration so that a binding nobody
+        // calls is not an error.
+        let foreign = !self.is_defined(name);
+        if foreign {
+            if let Some(why) = foreign_signature_obstacle(&signature) {
+                return Err(format!(
+                    "`{name}` has no body, so it is a foreign function, and {why}. \
+                     Only scalars and pointers cross the C ABI — `docs/design/ffi.md`"
+                ));
+            }
+        }
+        let ty = self.shaped(&signature, foreign).ok_or_else(|| {
             format!(
                 "`{name}` has a parameter or return type the backend cannot represent yet; \
                  phase 2 handles `Int`, `Bool`, `String`, `()` and ADTs"
