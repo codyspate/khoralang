@@ -1147,11 +1147,13 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
             installed: Vec::new(),
+            open_raises: Vec::new(),
             hint: None,
             marked: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
+        checker.close_open_raises();
         checker.check_bounds();
         checker.settle_projections();
         checker.check_effects();
@@ -1285,6 +1287,22 @@ struct Checker<'a> {
     /// signature. That is row subtraction: `with` *discharges* a requirement
     /// rather than forwarding it.
     installed: Vec<String>,
+    /// The open tail of every lambda's inferred `raises` row, in the order the
+    /// lambdas were seen.
+    ///
+    /// A lambda's error row is a **lower bound**, not an exact answer: the body
+    /// raises at least these, and the context may reasonably ask it to be
+    /// declared as raising more. That is what makes a stub usable where a
+    /// fallible operation is expected — a mock that never fails satisfies
+    /// `raises IoError`, because raising fewer things is always safe.
+    ///
+    /// The tail is a variable, so it is filled in by whatever the lambda is
+    /// checked against. Anything still unsolved when the body is done was never
+    /// asked for anything, and defaults to closed-empty: nothing said this
+    /// could fail, so it cannot. Without that default an unconstrained tail
+    /// would leave the row *open*, and an open row is a fallible one to the
+    /// code generator — every lambda would return a tagged pair for nothing.
+    open_raises: Vec<Type>,
     /// The type the surrounding expression is asking for, when there is one.
     ///
     /// Only integer literals read it, and only to decide which integer they
@@ -1458,6 +1476,19 @@ impl<'a> Checker<'a> {
         let _ = self.unifier.unify(expected, found);
         for _ in before..self.unifier.deferred_len() {
             self.projections.push((range, "this call".to_string()));
+        }
+    }
+
+    /// Closes every lambda error row nothing ever asked to be wider.
+    ///
+    /// Run once the body is checked. A tail still unsolved here was never
+    /// compared against anything, so the honest reading is "this raises exactly
+    /// what its body raises" — which is the closed empty row on the end.
+    fn close_open_raises(&mut self) {
+        for tail in std::mem::take(&mut self.open_raises) {
+            if matches!(self.unifier.shallow(&tail), Type::Var(_)) {
+                let _ = self.unifier.unify(&tail, &Type::empty_row());
+            }
         }
     }
 
@@ -1714,6 +1745,18 @@ impl<'a> Checker<'a> {
                 let before = self.demanded.len();
                 let ret = self.infer(body);
                 let mine = self.absorb_raises(before);
+                // Left open, because what the body raises is a lower bound
+                // rather than the answer — see `open_raises`. A closed row here
+                // is what made a mock that cannot fail unusable as an operation
+                // declared to fail.
+                let mine = match mine {
+                    Type::Row { fields, tail: None } => {
+                        let rest = self.unifier.fresh();
+                        self.open_raises.push(rest.clone());
+                        Type::row(fields, Some(rest))
+                    }
+                    already_open => already_open,
+                };
                 let _ = self.unifier.unify(&raises, &mine);
 
                 if let Some((_, found)) = self.enclosing_lambdas.pop() {
@@ -2309,11 +2352,17 @@ impl<'a> Checker<'a> {
             if matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none()) {
                 continue;
             }
-            // A *concrete* non-empty row. A variable is not one yet — a closure
-            // calling itself asks for the row it is in the middle of inferring
-            // — and whether it becomes one is decided later.
-            let known_fallible =
-                matches!(&row, Type::Row { fields, tail } if !fields.is_empty() || tail.is_some());
+            // A row with something *in* it. A variable is not one yet — a
+            // closure calling itself asks for the row it is in the middle of
+            // inferring — and neither is an open tail, which says "possibly
+            // more" rather than "at least one". Every lambda's row is open
+            // now, because what a body raises is a lower bound; counting a
+            // tail here would make every self-call demand a `!` for nothing.
+            //
+            // Nothing is lost by ignoring it: if the tail is later solved to
+            // something with labels in it, the row itself says so, and
+            // `check_effects` re-reads the row.
+            let known_fallible = matches!(&row, Type::Row { fields, .. } if !fields.is_empty());
             self.demanded.push(Demand {
                 fallible: clause == Clause::Raises && known_fallible,
                 clause,

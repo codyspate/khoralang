@@ -869,12 +869,25 @@ effects.
   decision in the wrong place: what to *do* about bytes that are not text
   depends on where they came from, and `read_text` is where that is known.
 
-  **Found on the way, and not fixed:** an operation declared `raises IoError`
-  is not satisfied by a function that cannot fail. Rows unify exactly, with no
-  subsumption, so a mock that always succeeds does not typecheck and has to
-  raise on some branch it never takes. Defensible — it is what Rust's
-  `-> Result<T, E>` asks for — but Khora's rows *could* subsume, and this is
-  the first place the difference is felt. A design question rather than a bug.
+  Found on the way and then fixed: a mock that cannot fail now satisfies an
+  operation declared to fail. See 8.1a.
+- **8.1a What a lambda raises is a lower bound.** A body's error row says what
+  it raises *at least*; the context may ask it to be declared as raising more.
+  So a stub that never fails satisfies `raises IoError`, because raising fewer
+  things is always safe — and a test double no longer has to raise on a branch
+  it never takes, which was a tax on exactly the code an effect system exists
+  to make easy.
+
+  Mechanically it is small: a lambda's inferred row is left *open*, with a
+  variable tail that whatever it is checked against fills in. What made it more
+  than one line is what happens when nothing fills it in — an open row is a
+  fallible one to the code generator, so every lambda would have returned a
+  tagged pair for nothing. A tail nobody constrained is closed to empty once
+  the body is done: nothing said this could fail, so it cannot.
+
+  The widening only goes one way. Raising something the interface did not
+  mention is still refused, a body that can fail is still refused where nothing
+  may, and a call that really can leave still needs its `!`.
 
 The bindings A6 names — TLS and crypto, compression, numeric kernels — are
 consumers of phase 7 and are *not* on this critical path. A great deal of Khora

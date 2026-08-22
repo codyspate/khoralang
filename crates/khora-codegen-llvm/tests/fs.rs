@@ -170,11 +170,10 @@ fn main() -> Int {{
 /// file system mock is usually a poor imitation of, and it needed nothing from
 /// `std::fs` to work: the effect *is* the interface.
 ///
-/// The mock's operations raise on an empty path, which is not decoration. An
-/// operation declared `raises IoError` is not satisfied by a function that
-/// cannot fail — rows unify exactly, with no subsumption — so a mock that
-/// always succeeds does not typecheck. That is a real ergonomic edge and is
-/// noted in the roadmap; the workaround is to mean it.
+/// Neither operation can fail, though `Fs` says both may. That is the point of
+/// the change these two lines are really testing: what a lambda raises is a
+/// *lower bound*, so a stub that never fails satisfies an interface that allows
+/// failure. Before it, this mock had to raise on some branch it never took.
 #[test]
 fn the_file_system_can_be_replaced_wholesale() {
     let ran = run(
@@ -188,11 +187,8 @@ export fn work() -> Int with {{ fs: Fs }} raises IoError {{
 
 fn main() -> Int {{
   with {{ fs: handler for Fs {{
-    read: fn path =>
-      if String::byte_length(path) == 0 {{ raise IoError::NotFound(path) }}
-      else {{ String::bytes(\"pretend\") }},
-    write: fn (path, bytes) =>
-      if String::byte_length(path) == 0 {{ raise IoError::Failed(path) }} else {{ }},
+    read: fn path => String::bytes(\"pretend\"),
+    write: fn (path, bytes) => (),
   }} }} {{
     khora_print_int(work()! catch {{
       IoError::NotFound(p) => 0 - 1,

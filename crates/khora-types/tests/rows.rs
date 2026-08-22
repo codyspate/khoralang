@@ -389,3 +389,79 @@ fn a_context_that_does_not_exist_is_reported() {
         "cannot find a `context` named `Nope`",
     );
 }
+
+// --- what a lambda raises is a lower bound ---------------------------------
+
+const FALLIBLE: &str = "module m;
+export type Oops = | Bad;
+export type Other = | Worse;
+export fn run<A>(body: () -> A raises Oops) -> A raises Oops { body()! }
+";
+
+/// A stub that cannot fail satisfies an interface that allows failure.
+///
+/// Raising *fewer* things is always safe, so a body's error row is a lower
+/// bound rather than an exact answer. Before this, every test double had to
+/// raise on a branch it never took, which is a tax on exactly the code an
+/// effect system is supposed to make easy.
+#[test]
+fn a_body_that_cannot_fail_is_accepted_where_failure_is_allowed() {
+    assert_clean(&format!("{FALLIBLE}fn f() -> Int raises Oops {{ run(fn () => 1)! }}\n"));
+}
+
+/// And one that fails in the way expected is still accepted, which is the case
+/// that always worked.
+#[test]
+fn a_body_that_fails_the_expected_way_is_accepted() {
+    assert_clean(&format!(
+        "{FALLIBLE}fn f() -> Int raises Oops {{ run(fn () => raise Oops::Bad)! }}\n"
+    ));
+}
+
+/// A lower bound is a bound. Raising something the interface did not mention
+/// is still refused — the widening only ever goes one way.
+#[test]
+fn a_body_that_fails_an_unexpected_way_is_refused() {
+    assert_reports(
+        &format!("{FALLIBLE}fn f() -> Int raises Oops {{ run(fn () => raise Other::Worse)! }}\n"),
+        "Other",
+    );
+}
+
+/// And a body that *can* fail is still refused where nothing may.
+#[test]
+fn a_body_that_can_fail_is_refused_where_nothing_may() {
+    assert_reports(
+        "module m;
+export type Oops = | Bad;
+export fn run<A>(body: () -> A) -> A { body() }
+fn f() -> Int { run(fn () => raise Oops::Bad) }
+",
+        "Oops",
+    );
+}
+
+/// The widening is not a licence to lose the mark: a call that really can
+/// leave still needs its `!`.
+#[test]
+fn widening_does_not_excuse_the_mark() {
+    assert_reports(
+        &format!("{FALLIBLE}fn f() -> Int raises Oops {{ run(fn () => 1) }}\n"),
+        "needs `!`",
+    );
+}
+
+/// A lambda nothing ever asked to be wider is exactly as fallible as its body,
+/// which is what keeps `!` meaningful for the ordinary case.
+#[test]
+fn an_unconstrained_lambda_raises_only_what_its_body_does() {
+    // No `!` anywhere, and none needed: neither the lambda nor the call fails.
+    assert_clean("module m;\nfn f() -> Int { let g = fn n => n + 1; g(3) }\n");
+    // A recursive one is the case that made the tail visible: it asks for the
+    // row it is in the middle of inferring.
+    assert_clean(
+        "module m;
+fn f() -> Int { let go = fn n => if n == 0 { 0 } else { n + go(n - 1) }; go(3) }
+",
+    );
+}
