@@ -308,6 +308,13 @@ impl Type {
 /// calls to the same generic function have unrelated types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
+    /// Whether this names a C symbol rather than a Khora body.
+    ///
+    /// Read by the code generator, which is the only thing that can tell the
+    /// difference: to the type checker a declaration is a declaration, and a
+    /// signature written ahead of its implementation is a perfectly good one to
+    /// check against. `docs/design/ffi.md`.
+    pub is_extern: bool,
     pub generics: Vec<String>,
     /// What the caller must supply: the `with { .. }` row. The closed empty
     /// row when the clause is absent, so "requires nothing" is the default and
@@ -484,6 +491,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 map.signatures.insert(
                     khora_hir::test_key(index),
                     Signature {
+                        is_extern: false,
                         generics: Vec::new(),
                         bounds: Vec::new(),
                         requires: Type::empty_row(),
@@ -510,8 +518,18 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics);
                 let raises =
                     row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics);
-                map.signatures
-                    .insert(name, Signature { generics, bounds, requires, raises, params, ret });
+                map.signatures.insert(
+                    name,
+                    Signature {
+                        is_extern: f.is_extern(),
+                        generics,
+                        bounds,
+                        requires,
+                        raises,
+                        params,
+                        ret,
+                    },
+                );
             }
             // An effect *is* a record of function types — `effect Ledger
             // { get: String -> Int }` and `type Ledger = { get: (String) -> Int }`
@@ -1118,6 +1136,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
 
     for (name, body) in khora_hir::body::bodies(db, file) {
         let mut signature = types.signatures.get(name).cloned().unwrap_or(Signature {
+            is_extern: false,
             generics: Vec::new(),
             bounds: Vec::new(),
             requires: Type::empty_row(),

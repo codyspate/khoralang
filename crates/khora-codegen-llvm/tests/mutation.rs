@@ -45,7 +45,7 @@ fn run(name: &str, source: &str) -> Ran {
 
 const MUT: &str = "module t;
 fn print(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 export type Counter = { mut count: Int };
 export type Slot = { mut held: String };

@@ -193,7 +193,7 @@ fn main() -> Int {{
 
 const FLOAT: &str = "module t;
 fn print(value: Float);
-fn khora_print_int(value: Int);
+extern fn khora_print_int(value: Int);
 ";
 
 /// IEEE, which is what every reader expects and is why `Float` implements

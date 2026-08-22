@@ -45,8 +45,8 @@ fn run(name: &str, source: &str) -> Ran {
 
 const LEDGER: &str = "module t;
 fn print(value: Int);
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export effect Ledger { balance: (Int) -> Int, }
 
@@ -200,8 +200,8 @@ fn main() -> Int {{
 
 const FALLIBLE: &str = "module t;
 fn print(value: Int);
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type DbError = | Timeout | Refused;
 export type Node = | Of(value: Int);
@@ -323,8 +323,8 @@ fn main() -> Int {{ print(safe(8)); print(safe(7)); 0 }}
 
 const TWO_ERRORS: &str = "module t;
 fn print(value: Int);
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type DbError = | Timeout | Refused;
 export type ModelError = | RateLimited(ms: Int) | TooLong;
@@ -479,8 +479,8 @@ fn main() -> Int {{ print(attempt(5)); print(attempt(0 - 5)); 0 }}
 
 const LAYERED: &str = "module t;
 fn print(value: Int);
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export effect Config { rate: () -> Int, }
 export effect Ledger { balance: (Int) -> Int, }
@@ -694,8 +694,8 @@ fn a_function_value_can_need_a_capability_and_raise() {
         "fnval_both",
         "module t;
 fn print(value: Int);
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type DbError = | Timeout | Refused;
 export effect Ledger { balance: (Int) -> Int, }

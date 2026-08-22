@@ -55,8 +55,8 @@ fn run_over(name: &str, contents: &str, source: &str) -> Ran {
 
 /// The bindings, and nothing else. Seven declarations reach the file system.
 const C: &str = "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type Array<A>;
 impl<A> Array<A> {
@@ -85,9 +85,9 @@ impl U8 {
 }
 
 // ISO C. Not a shim, not a Rust binding — the same names on every target.
-fn fopen(path: Ptr, mode: Ptr) -> Ptr;
-fn fread(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
-fn fclose(file: Ptr) -> I32;
+extern fn fopen(path: Ptr, mode: Ptr) -> Ptr;
+extern fn fread(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
+extern fn fclose(file: Ptr) -> I32;
 ";
 
 /// The whole point: bytes out of a real file, in Khora, with no Rust in
@@ -192,11 +192,11 @@ fn a_file_is_closed_on_the_error_path() {
         "module demo::main;
 import std::core::{{Scope, Region, Ptr, acquire}};
 
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
-fn fopen(path: Ptr, mode: Ptr) -> Ptr;
-fn fclose(file: Ptr) -> I32;
+extern fn fopen(path: Ptr, mode: Ptr) -> Ptr;
+extern fn fclose(file: Ptr) -> I32;
 
 export type Torn = | Midway;
 

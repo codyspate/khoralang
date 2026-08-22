@@ -762,11 +762,26 @@ rule for what may cross was settled the hard way in errata 35.
   to the operating system living in the standard library, reviewed once,
   rather than being written afresh in every package.
 
-  **Still to do:** `extern` as a keyword. A bodyless top-level function *is* a
-  foreign function today, silently — the same trap as errata 36 and 39, and a
-  misspelled name becomes a linker error rather than "no such function". It is
-  a change to the language's surface and to every test that declares
-  `fn print(value: Int);`, so it wants a decision rather than a drive-by.
+  **`extern fn` says it out loud.** A function without a body used to *be* a
+  foreign function, silently — the same trap as errata 36 and 39, with the
+  worst possible symptom: a misspelled name became a C symbol nobody defines,
+  and the only sign was `undefined symbol` from the linker. Now there are three
+  kinds of declaration and they are three things: a Khora body, an `extern fn`
+  that is a C symbol, and a bodyless `fn` that is a promise nobody has kept
+  yet. The last is still allowed — `std::net::http` is nothing but those — and
+  refused at the *call*, in a sentence that names the function and suggests the
+  keyword.
+
+  Almost every language with an FFI makes you say it: Rust's `extern "C"`,
+  TypeScript's `declare`, C#'s `extern`, Java's `native`, Kotlin's `external`,
+  Zig's `extern`, Haskell's `foreign import`. Go allows the bodyless form but
+  refuses it unless the package really contains assembly. C is the one place a
+  bodyless declaration silently means "elsewhere", and C is where the
+  undefined-symbol experience comes from.
+
+  Contextual rather than reserved, on the principle the keyword audit
+  established: it costs nothing here, and adding the word cannot break a
+  program already using it.
 - **7.3 Foreign resources as counted values — done, and it needed nothing.**
   `acquire(value, release)` registers a release with the enclosing `Scope`, a
   `Scope` is a region, and a region runs its deferred work on every way out.

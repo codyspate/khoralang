@@ -441,6 +441,9 @@ fn specialized_signature(
         .map(|(g, a)| (g.as_str(), a.clone()))
         .collect();
     Some(Signature {
+        // A specialization of a Khora body, so never foreign: a generic
+        // `extern` has no single machine signature and is refused before this.
+        is_extern: false,
         // Both rows survive to here, and both are substituted: the capability
         // row says how many extra parameters the function takes and the error
         // row whether it returns a tagged value, and a `with 'r` clause knows
@@ -889,16 +892,33 @@ impl<'ctx> Backend<'ctx> {
         let signature = self
             .signature_of(name)
             .ok_or_else(|| format!("`{name}` has no signature to call through"))?;
-        // A function with no body is a foreign function, and what may cross
-        // the C ABI is a much shorter list than what the backend can represent.
-        // Checked here rather than at the declaration so that a binding nobody
-        // calls is not an error.
+        // Three kinds of function reach this point, and only one of them is a
+        // call to somewhere else.
+        //
+        // A Khora body is defined here and needs nothing said about it. An
+        // `extern fn` is a C symbol, and what may cross to one is a much
+        // shorter list than what the backend can represent. And anything else
+        // with no body is a **declaration nobody has kept** — a signature
+        // written ahead of its implementation, which is a useful thing to have
+        // and not a thing to call. That last kind used to be treated as a C
+        // symbol silently, so a misspelled name became `undefined symbol` from
+        // the linker rather than a sentence about the program.
+        //
+        // Checked where the call is generated rather than at the declaration,
+        // so a signature written ahead of its implementation is only an error
+        // once something tries to run it.
         let foreign = !self.is_defined(name);
         if foreign {
+            if !signature.is_extern {
+                return Err(format!(
+                    "`{name}` has no body, so there is nothing to call. Give it one, or \
+                     write `extern fn` if it is a C symbol to be found at link time"
+                ));
+            }
             if let Some(why) = foreign_signature_obstacle(&signature) {
                 return Err(format!(
-                    "`{name}` has no body, so it is a foreign function, and {why}. \
-                     Only scalars and pointers cross the C ABI — `docs/design/ffi.md`"
+                    "`{name}` is `extern`, so it crosses the C ABI, and {why}. \
+                     Only scalars and pointers cross — `docs/design/ffi.md`"
                 ));
             }
         }
@@ -981,6 +1001,7 @@ impl<'ctx> Backend<'ctx> {
         self.instance_signatures.insert(
             symbol.clone(),
             Signature {
+                is_extern: false,
                 generics: Vec::new(),
                 bounds: Vec::new(),
                 requires: Type::empty_row(),

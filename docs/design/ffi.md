@@ -13,6 +13,12 @@ Three questions were open. This answers them.
 
 ## 1. What may cross, and in what layout
 
+A foreign function is one written `extern fn`:
+
+```khora
+extern fn fopen(path: Ptr, mode: Ptr) -> Ptr;
+```
+
 **Scalars, by value.** `Int` and `I64` are `int64_t`. `U8`…`I32` are the C type
 of the same name and width. `Float` is `double`. `Bool` is a C `_Bool`. `()` as
 a return type is `void`, and is not allowed as a parameter.
@@ -59,6 +65,42 @@ parameter or return the C ABI cannot carry is an error naming the type and the
 reason, not a pointer quietly handed over. Before this, `fn f(p: Pair) -> Int;`
 compiled and passed a refcounted heap object to C; only the missing symbol
 stopped it, and a symbol that happened to exist would have been worse.
+
+### Three kinds of declaration, and only one of them is C
+
+Before `extern`, a function without a body *was* a foreign function, silently.
+That is the same trap as errata 36 and 39 — the language accepting something
+and quietly meaning something else — and it had the worst possible symptom: a
+misspelled name became a C symbol nobody defines, and the only sign was
+`undefined symbol` from the linker. No line, no file, no mention of Khora.
+
+There are three kinds, and now they are three things:
+
+| Written | Means |
+| --- | --- |
+| `fn f() -> Int { .. }` | a Khora body |
+| `extern fn f() -> Int;` | a C symbol, found at link time |
+| `fn f() -> Int;` | **a promise nobody has kept yet** |
+
+The third is not an error. A signature written ahead of its implementation is a
+useful thing to have — `std::net::http` is nothing but those, and the reference
+application typechecks against them. The checker takes it on trust. *Calling*
+one is where the promise comes due, and the code generator says so:
+
+> `` `calculat_total` has no body, so there is nothing to call. Give it one, or
+> write `extern fn` if it is a C symbol to be found at link time``
+
+Almost every language with a foreign interface makes you say it: Rust's
+`extern "C" { }`, TypeScript's `declare`, C#'s `extern`, Java's `native`,
+Kotlin's `external`, Zig's `extern`, Haskell's `foreign import`. Go allows the
+bodyless form but refuses it unless the package really does contain assembly,
+so a typo is a compile error rather than a link error. The one language where a
+bodyless declaration silently means "elsewhere" is C — and C is where the
+undefined-symbol experience comes from.
+
+`extern` is a **contextual** keyword, recognised only where a `fn` declaration
+begins. It costs nothing to make it one, and it means adding the word could not
+break a program that was already using it for something.
 
 ## 2. Failure: a foreign function cannot raise
 
@@ -232,10 +274,4 @@ check the other target's version at all.
   top-level function may be passed as a callback, which is a restriction the
   type system can state. `qsort` and every `on_event` want it; nothing does
   yet.
-- **`extern` as a keyword.** Today a top-level function without a body *is* a
-  foreign function, silently. That is the same trap as errata 36 and 39 — the
-  language accepting something and quietly meaning something else — and a
-  misspelled name becomes a linker error rather than "no such function".
-  `extern fn` would say it out loud. It is a change to the language's surface
-  and to every test that declares `fn print(value: Int);`, so it wants a
-  decision rather than a drive-by.
+- Nothing, for now. `extern` landed; see below.

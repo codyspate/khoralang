@@ -151,6 +151,31 @@ export fn f() -> Int;
     assert!(declared.errors().is_empty(), "{:?}", declared.errors());
 }
 
+/// `extern fn` says the body is a C symbol, found at link time.
+///
+/// Contextual, so the word is still an ordinary identifier everywhere else —
+/// adding it could not break a program that was already using it for
+/// something.
+#[test]
+fn extern_marks_a_foreign_declaration() {
+    for source in [
+        "module m;
+extern fn fopen(path: Ptr, mode: Ptr) -> Ptr;
+",
+        "module m;
+export extern fn strlen(s: Ptr) -> Int;
+",
+    ] {
+        let parsed = parse(source);
+        assert!(parsed.errors().is_empty(), "{source}: {:?}", parsed.errors());
+    }
+
+    let ordinary = parse("module m;
+fn f() -> Int { let extern = 1; extern }
+");
+    assert!(ordinary.errors().is_empty(), "{:?}", ordinary.errors());
+}
+
 /// The old `fn f() = { .. };` spelling should say what to do, not just fail.
 #[test]
 fn the_old_equals_form_gets_a_pointed_diagnostic() {

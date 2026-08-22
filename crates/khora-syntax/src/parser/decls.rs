@@ -36,6 +36,7 @@ fn declaration(p: &mut Parser<'_>) {
         LET_KW => let_decl(p),
         IDENT if p.at_contextual(CONTEXT_KW) => context_decl(p),
         IDENT if p.at_contextual(TEST_KW) || p.at_contextual(BENCH_KW) => test_decl(p),
+        IDENT if p.at_contextual(EXTERN_KW) => fn_decl(p),
         EXPORT_KW => match p.nth(1) {
             TYPE_KW => type_decl(p),
             TRAIT_KW => trait_decl(p),
@@ -43,8 +44,10 @@ fn declaration(p: &mut Parser<'_>) {
             FN_KW => fn_decl(p),
             LET_KW => let_decl(p),
             IDENT if p.nth_at_contextual(1, CONTEXT_KW) => context_decl(p),
+            IDENT if p.nth_at_contextual(1, EXTERN_KW) => fn_decl(p),
             _ => p.err_recover(
-                "expected `type`, `trait`, `effect`, `context`, `fn` or `let` after `export`",
+                "expected `type`, `trait`, `effect`, `context`, `fn`, `extern` or `let` \
+                 after `export`",
                 Parser::at_decl_start,
             ),
         },
@@ -291,6 +294,13 @@ fn context_decl(p: &mut Parser<'_>) {
 fn fn_decl(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(EXPORT_KW);
+    // `extern fn` says the body is a C symbol found at link time. Without it a
+    // function with no body is a declaration nobody has kept yet, which the
+    // checker allows — a signature ahead of its implementation is a useful
+    // thing to write — and the code generator refuses to call.
+    if p.at_contextual(EXTERN_KW) {
+        p.bump_contextual(EXTERN_KW);
+    }
     p.bump(FN_KW);
     name(p);
     if p.at(LT) {

@@ -86,12 +86,12 @@ export fn read_text(path: String) -> String
 // Not bound per target: these are the C standard library, spelled the same
 // everywhere Khora runs. `FILE *` is a `Ptr`, which is what `Ptr` is for.
 
-fn fopen(path: Ptr, mode: Ptr) -> Ptr;
-fn fread(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
-fn fwrite(from: Ptr, size: Int, count: Int, file: Ptr) -> Int;
-fn fclose(file: Ptr) -> I32;
-fn fseek(file: Ptr, offset: Int, whence: I32) -> I32;
-fn ftell(file: Ptr) -> Int;
+extern fn fopen(path: Ptr, mode: Ptr) -> Ptr;
+extern fn fread(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
+extern fn fwrite(from: Ptr, size: Int, count: Int, file: Ptr) -> Int;
+extern fn fclose(file: Ptr) -> I32;
+extern fn fseek(file: Ptr, offset: Int, whence: I32) -> I32;
+extern fn ftell(file: Ptr) -> Int;
 
 /// `SEEK_SET` and `SEEK_END`.
 ///

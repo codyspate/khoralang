@@ -316,7 +316,7 @@ fn the_standard_maps_keys_can_be_strings() {
 import std::core::{Option, Map, Hash};
 
 fn print(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 fn main() -> Int {
   let ages = Map::new();

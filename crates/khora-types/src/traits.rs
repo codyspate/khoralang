@@ -345,6 +345,7 @@ fn method_def(f: &ast::FnDecl, scope: &[String]) -> Option<MethodDef> {
     Some(MethodDef {
         name,
         signature: Signature {
+            is_extern: f.is_extern(),
             generics: own,
             bounds: own_bounds,
             requires,
@@ -479,6 +480,7 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
             out.insert(
                 method_key("", &head, &def.name),
                 Signature {
+                    is_extern: def.signature.is_extern,
                     generics: own,
                     bounds,
                     requires: crate::unify::substitute(&def.signature.requires, &mapping),
@@ -528,6 +530,7 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
             bounds.resize(generics.len(), Vec::new());
             bounds.extend(def.signature.bounds.iter().cloned());
             let signature = Signature {
+                is_extern: def.signature.is_extern,
                 generics: own,
                 bounds,
                 requires: crate::unify::substitute(&def.signature.requires, &mapping),

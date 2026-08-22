@@ -44,7 +44,7 @@ fn run(name: &str, source: &str) -> Ran {
 
 const ARRAY: &str = "module t;
 fn print(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 export type Array<A>;
 impl<A> Array<A> {

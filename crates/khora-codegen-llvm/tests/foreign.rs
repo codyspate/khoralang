@@ -58,7 +58,7 @@ fn refused(name: &str, source: &str) -> Vec<String> {
 fn rejects(name: &str, declaration: &str, call: &str, needle: &str) {
     let source = format!(
         "module t;
-fn khora_print_int(value: Int);
+extern fn khora_print_int(value: Int);
 export type Pair = {{ a: Int, b: Int }};
 export type Oops = | Bad;
 
@@ -69,7 +69,7 @@ fn main() -> Int {{ {call} 0 }}
     );
     let found = refused(name, &source);
     assert!(
-        found.iter().any(|m| m.contains(needle) && m.contains("foreign function")),
+        found.iter().any(|m| m.contains(needle) && m.contains("crosses the C ABI")),
         "expected a boundary error mentioning {needle:?}, got {found:?}"
     );
 }
@@ -83,8 +83,8 @@ fn scalars_cross() {
     let found = refused(
         "ffi_scalars",
         "module t;
-fn khora_print_int(value: Int);
-fn takes_numbers(a: Int, b: U8, c: I32, d: Float, e: Bool) -> I64;
+extern fn khora_print_int(value: Int);
+extern fn takes_numbers(a: Int, b: U8, c: I32, d: Float, e: Bool) -> I64;
 
 fn main() -> Int {
   khora_print_int(takes_numbers(1, 2, 3, 4.0, true));
@@ -93,7 +93,7 @@ fn main() -> Int {
 ",
     );
     assert!(
-        found.iter().all(|m| !m.contains("foreign function")),
+        found.iter().all(|m| !m.contains("crosses the C ABI") && !m.contains("nothing to call")),
         "a signature of scalars is allowed to cross; only the symbol is missing: {found:?}"
     );
     assert!(
@@ -109,7 +109,7 @@ fn main() -> Int {
 fn a_record_may_not_cross() {
     rejects(
         "ffi_record",
-        "fn takes_a_record(p: Pair) -> Int;",
+        "extern fn takes_a_record(p: Pair) -> Int;",
         "khora_print_int(takes_a_record({ a: 1, b: 2 }));",
         "`Pair` cannot cross",
     );
@@ -119,7 +119,7 @@ fn a_record_may_not_cross() {
 fn a_string_may_not_cross() {
     rejects(
         "ffi_string",
-        "fn takes_a_string(s: String) -> Int;",
+        "extern fn takes_a_string(s: String) -> Int;",
         "khora_print_int(takes_a_string(\"hi\"));",
         "`String` cannot cross",
     );
@@ -131,7 +131,7 @@ fn a_string_may_not_cross() {
 fn a_closure_may_not_cross() {
     rejects(
         "ffi_closure",
-        "fn takes_a_closure(f: (Int) -> Int) -> Int;",
+        "extern fn takes_a_closure(f: (Int) -> Int) -> Int;",
         "khora_print_int(takes_a_closure(fn (x) => x + 1));",
         "cannot cross",
     );
@@ -145,9 +145,9 @@ fn a_foreign_function_may_not_raise() {
     let found = refused(
         "ffi_raises",
         "module t;
-fn khora_print_int(value: Int);
+extern fn khora_print_int(value: Int);
 export type Oops = | Bad;
-fn can_fail(n: Int) -> Int raises Oops;
+extern fn can_fail(n: Int) -> Int raises Oops;
 
 fn wrapper() -> Int raises Oops { can_fail(1)! }
 
@@ -165,7 +165,7 @@ fn main() -> Int { 0 }
 fn a_foreign_function_may_not_be_generic() {
     rejects(
         "ffi_generic",
-        "fn identity<A>(value: A) -> A;",
+        "extern fn identity<A>(value: A) -> A;",
         "khora_print_int(identity(1));",
         "it is generic",
     );
@@ -176,7 +176,7 @@ fn a_foreign_function_may_not_be_generic() {
 fn a_foreign_function_may_not_return_an_object() {
     rejects(
         "ffi_returns_object",
-        "fn makes_a_record() -> Pair;",
+        "extern fn makes_a_record() -> Pair;",
         "khora_print_int(makes_a_record().a);",
         "return type `Pair` cannot cross",
     );
@@ -197,11 +197,11 @@ fn a_capability_is_required_but_not_passed() {
     let found = refused(
         "ffi_capability",
         "module t;
-fn khora_print_int(value: Int);
+extern fn khora_print_int(value: Int);
 
 export effect Fs { open: (Int) -> Int, }
 
-fn sys_open(flags: I32) -> I32 with { fs: Fs };
+extern fn sys_open(flags: I32) -> I32 with { fs: Fs };
 
 fn run() -> Int with { fs: Fs } { I32::to_int(sys_open(0)) }
 
@@ -214,7 +214,7 @@ impl I32 { fn to_int(self) -> Int; }
 ",
     );
     assert!(
-        found.iter().all(|m| !m.contains("foreign function")),
+        found.iter().all(|m| !m.contains("crosses the C ABI") && !m.contains("nothing to call")),
         "a `with` row is a permission and must not become a parameter: {found:?}"
     );
     assert!(
@@ -230,11 +230,11 @@ fn a_caller_without_the_capability_is_refused() {
     let found = refused(
         "ffi_capability_missing",
         "module t;
-fn khora_print_int(value: Int);
+extern fn khora_print_int(value: Int);
 
 export effect Fs { open: (Int) -> Int, }
 
-fn sys_open(flags: I32) -> I32 with { fs: Fs };
+extern fn sys_open(flags: I32) -> I32 with { fs: Fs };
 
 fn main() -> Int { khora_print_int(I32::to_int(sys_open(0))); 0 }
 
@@ -257,10 +257,10 @@ fn a_pointer_crosses() {
     let found = refused(
         "ffi_ptr",
         "module t;
-fn khora_print_int(value: Int);
-fn sys_open(flags: I32) -> Ptr;
-fn sys_read(handle: Ptr, into: Ptr, len: Int) -> Int;
-fn sys_close(handle: Ptr) -> ();
+extern fn khora_print_int(value: Int);
+extern fn sys_open(flags: I32) -> Ptr;
+extern fn sys_read(handle: Ptr, into: Ptr, len: Int) -> Int;
+extern fn sys_close(handle: Ptr) -> ();
 
 fn main() -> Int {
   let handle = sys_open(0);
@@ -278,7 +278,7 @@ impl Ptr {
 ",
     );
     assert!(
-        found.iter().all(|m| !m.contains("foreign function")),
+        found.iter().all(|m| !m.contains("crosses the C ABI") && !m.contains("nothing to call")),
         "a pointer is allowed to cross: {found:?}"
     );
     assert!(
@@ -294,7 +294,7 @@ fn a_null_pointer_knows_it_is_null() {
     let exe = build(
         "ffi_null",
         "module t;
-fn khora_print_int(value: Int);
+extern fn khora_print_int(value: Int);
 
 impl Ptr {
   fn null() -> Ptr;
@@ -323,7 +323,7 @@ fn a_khora_object_cannot_be_turned_into_a_pointer() {
     let found = refused(
         "ffi_no_address_of",
         "module t;
-fn khora_print_int(value: Int);
+extern fn khora_print_int(value: Int);
 
 impl String {
   fn data(self) -> Ptr;
@@ -345,8 +345,8 @@ impl Ptr {
 // --- lending a buffer -------------------------------------------------------
 
 const LEND: &str = "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type Array<A>;
 impl<A> Array<A> {
@@ -379,7 +379,7 @@ impl U8 {
 }
 
 /// Stands in for a foreign function: it takes what a foreign function takes.
-fn khora_sum_bytes(data: Ptr, len: Int) -> Int;
+extern fn khora_sum_bytes(data: Ptr, len: Int) -> Int;
 ";
 
 /// The body is handed a pointer and a count, and the count is the element
@@ -544,7 +544,7 @@ fn a_c_string_is_terminated() {
         "lend_c_string",
         &format!(
             "{LEND}
-fn strlen(s: Ptr) -> Int;
+extern fn strlen(s: Ptr) -> Int;
 
 fn main() -> Int {{
   khora_print_int(String::with_c_string(\"khora\", fn p => strlen(p)));
@@ -585,5 +585,86 @@ fn main() -> Int {{
         ),
     );
     assert_eq!(ran.stdout, "1\n0\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+// --- saying it out loud -----------------------------------------------------
+
+/// A function with no body and no `extern` is a promise nobody has kept. The
+/// checker takes it — a signature written ahead of its implementation is a
+/// useful thing to have, and `std::net::http` is nothing but those — and the
+/// code generator refuses to call it.
+///
+/// This is the whole reason the keyword exists. Before it, a misspelled name
+/// became a C symbol nobody defines, and the only sign was `undefined symbol`
+/// from the linker: no line, no file, no mention of Khora.
+#[test]
+fn a_body_less_function_is_not_silently_foreign() {
+    let found = refused(
+        "extern_missing",
+        "module t;
+extern fn khora_print_int(value: Int);
+
+fn calculat_total(items: Int) -> Int;
+
+fn main() -> Int {{ khora_print_int(calculat_total(3)); 0 }}
+"
+        .replace("{{", "{")
+        .replace("}}", "}")
+        .as_str(),
+    );
+    assert!(
+        found.iter().any(|m| m.contains("calculat_total") && m.contains("nothing to call")),
+        "expected the typo to be named, got {found:?}"
+    );
+    assert!(
+        found.iter().all(|m| !m.contains("undefined symbol")),
+        "the linker should never have been reached: {found:?}"
+    );
+}
+
+/// Declaring it is not calling it. A module full of signatures ahead of their
+/// implementations still compiles, which is what keeps `extern` from being a
+/// tax on writing an interface first.
+#[test]
+fn a_body_less_function_nobody_calls_is_fine() {
+    let exe = build(
+        "extern_unused",
+        "module t;
+extern fn khora_print_int(value: Int);
+
+fn not_written_yet(items: Int) -> Int;
+
+fn main() -> Int { khora_print_int(1); 0 }
+",
+    )
+    .expect("a declaration nobody calls is a promise nobody has come to collect");
+    let output = std::process::Command::new(&exe).output().expect("the program should run");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "1\n");
+}
+
+/// And `extern` is what makes a C symbol reachable. `strlen` is ISO C, so this
+/// is a real call to a real library.
+#[test]
+fn extern_reaches_the_c_library() {
+    let ran = run(
+        "extern_works",
+        "module t;
+extern fn khora_print_int(value: Int);
+extern fn strlen(s: Ptr) -> Int;
+
+impl String {
+  fn with_c_string<B, 'c, 'e>(self, body: (Ptr) -> B with 'c raises 'e) -> B
+    with 'c
+    raises 'e;
+}
+
+fn main() -> Int {
+  khora_print_int(String::with_c_string(\"khora\", fn p => strlen(p)));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "5\n");
     assert_eq!(ran.code, Some(0));
 }

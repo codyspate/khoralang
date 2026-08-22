@@ -189,6 +189,15 @@
               "name": "keyword.declaration.khora"
             }
           }
+        },
+        {
+          "comment": "`extern fn` only: the word is a keyword when it is what a `fn` declaration begins with.",
+          "match": "^\\s*(?:export\\s+)?(extern)\\b(?=\\s+fn\\b)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.khora"
+            }
+          }
         }
       ]
     },

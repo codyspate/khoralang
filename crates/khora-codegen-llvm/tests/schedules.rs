@@ -48,8 +48,8 @@ fn run(name: &str, source: &str) -> Ran {
 /// compiler feature.
 const PRELUDE: &str = "module t;
 fn print(value: Int);
-fn khora_live_count() -> Int;
-fn khora_tick() -> Int;
+extern fn khora_live_count() -> Int;
+extern fn khora_tick() -> Int;
 
 export type Result<A, E> = | Ok(value: A) | Err(error: E);
 export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;

@@ -388,6 +388,13 @@ impl FnDecl {
     pub fn is_exported(&self) -> bool {
         token(&self.0, EXPORT_KW).is_some()
     }
+    /// Whether the body is a C symbol, found at link time.
+    ///
+    /// A function with no body and no `extern` is a declaration nobody has
+    /// kept yet — a useful thing to write, and not a thing to call.
+    pub fn is_extern(&self) -> bool {
+        token(&self.0, EXTERN_KW).is_some()
+    }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
     }

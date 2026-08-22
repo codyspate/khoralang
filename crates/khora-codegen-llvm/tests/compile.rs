@@ -373,8 +373,8 @@ fn every_allocation_is_freed() {
     let ran = run(
         "leaks",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 fn print(value: String);
 
 export type List = | Nil | Cons(head: Int, tail: List);
@@ -454,7 +454,7 @@ fn the_live_count_is_actually_observable() {
     let ran = run(
         "live_count",
         "module t;
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 export type Wrapper = | Wrap(value: Int);
 
@@ -631,10 +631,14 @@ fn main() -> Int { true }
 /// What the backend cannot lower is a diagnostic with a source range, not a
 /// panic and not a wrong program.
 #[test]
-fn an_unsupported_construct_is_reported() {
-    // A `raises` clause on a *foreign* declaration: the checker takes the
-    // promise on trust, and the backend has nothing to generate for a body
-    // that does not exist. Phase 7.2 is where this becomes a real thing.
+fn a_declaration_with_no_body_cannot_be_called() {
+    // A signature written ahead of its implementation is a useful thing to
+    // have — `std::net::http` is nothing but those — and the checker takes it
+    // on trust. Calling one is where the promise comes due.
+    //
+    // This used to be treated as a C symbol silently, so the only sign was
+    // `undefined symbol` from the linker: no line, no file, no mention of
+    // Khora. `docs/design/ffi.md`.
     let found = errors(
         "unsupported",
         "module t;
@@ -644,8 +648,8 @@ fn main() -> Int { peek(Bag::Full(1)) }
 ",
     );
     assert!(
-        found.iter().any(|m| m.contains("foreign function") && m.contains("generic")),
-        "expected a message about a generic foreign function, got {found:?}"
+        found.iter().any(|m| m.contains("nothing to call") && m.contains("extern fn")),
+        "expected a message about the missing body, got {found:?}"
     );
 }
 
@@ -903,8 +907,8 @@ fn closures_and_their_captures_are_freed() {
     let ran = run(
         "closure_leaks",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type List = | Nil | Cons(head: Int, tail: List);
 
@@ -963,8 +967,8 @@ fn a_leaked_closure_is_actually_observable() {
     let ran = run(
         "closure_leak_control",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 impl String {
   fn byte_length(self) -> Int;
@@ -990,8 +994,8 @@ fn a_named_function_can_be_passed_as_a_value() {
     let ran = run(
         "fn_value",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 fn double(x: Int) -> Int { x * 2 }
 fn apply(f: (Int) -> Int, x: Int) -> Int { f(x) }
@@ -1152,8 +1156,8 @@ fn an_inherent_method_does_not_leak_its_receiver() {
     let ran = run(
         "inherent_leaks",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type List = | Nil | Cons(head: Int, tail: List);
 
@@ -1344,8 +1348,8 @@ export fn main() -> Int {
 }
 
 const ITERATOR: &str = "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type Step<S, A> = | Yield(state: S, item: A) | Done;
 export type Range = | Of(from: Int, to: Int);
@@ -1457,8 +1461,8 @@ fn a_generic_container_releases_what_it_holds() {
     let ran = run(
         "generic_glue",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type Wrapper<A> = | Of(value: A);
 
@@ -1486,8 +1490,8 @@ fn a_generic_function_counts_its_boxed_arguments() {
     let ran = run(
         "generic_rc",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 fn print(value: String);
 
 export type Pair<A> = | Of(first: A, second: A);
@@ -1550,8 +1554,8 @@ fn strings_compare_by_content() {
     let ran = run(
         "string_eq",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 fn yes(b: Bool) -> Int { if b { 1 } else { 0 } }
 
@@ -1604,8 +1608,8 @@ fn a_closure_can_call_itself() {
     let ran = run(
         "recursive_closure",
         "module t;
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 
 export type List = | Nil | Cons(head: Int, tail: List);
 

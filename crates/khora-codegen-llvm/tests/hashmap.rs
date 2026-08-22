@@ -20,7 +20,7 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 /// `the_standard_library_declares_what_it_promises`.
 const MAP: &str = "module t;
 fn print(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 export type Option<A> = | Some(value: A) | None;
 

@@ -63,8 +63,8 @@ import std::core::{Array, Option, Result, attempt};
 import std::fs::{Fs, IoError, read_text};
 
 fn print(value: String);
-fn khora_print_int(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
 ";
 
 /// Write a file and read it back, through the effect, with nothing left alive.
@@ -222,7 +222,7 @@ fn nothing_reaches_a_file_without_the_capability() {
             "module demo::main;
 import std::fs::{read_text};
 
-fn khora_print_int(value: Int);
+extern fn khora_print_int(value: Int);
 
 fn main() -> Int {
   khora_print_int(String::byte_length(read_text(\"any\")!));

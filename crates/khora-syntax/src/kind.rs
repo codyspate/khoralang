@@ -45,6 +45,7 @@ pub enum SyntaxKind {
     FORALL_KW,
     CONST_KW,
     EFFECT_KW,
+    EXTERN_KW,
     WITH_KW,
     RAISES_KW,
     RAISE_KW,
@@ -359,6 +360,11 @@ contextual_keywords! {
     "context" => CONTEXT_KW,
     "test" => TEST_KW,
     "bench" => BENCH_KW,
+    // `extern fn` only, and every other language that has the word spells it
+    // as a hard keyword. Contextual anyway, for the reason above: it costs
+    // nothing here, and adding it cannot break a program that already uses the
+    // word for something.
+    "extern" => EXTERN_KW,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {

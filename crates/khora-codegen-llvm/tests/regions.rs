@@ -48,7 +48,7 @@ fn run(name: &str, source: &str) -> Ran {
 /// declares the same three operations against the same runtime.
 const REGIONS: &str = "module t;
 fn print(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 export type Region;
 
@@ -254,7 +254,7 @@ fn main() -> Int raises Oops {{
 /// takes `scope` out of the caller's requirement.
 const SCOPE: &str = "module t;
 fn print(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 export type Region;
 impl Region {
@@ -363,9 +363,9 @@ fn main() -> Int {{
 /// `which` no error type can be assigned, and only the entry point absorbs it.
 const CANCEL: &str = "module t;
 fn print(value: Int);
-fn khora_cancel();
-fn khora_cancel_reset();
-fn khora_live_count() -> Int;
+extern fn khora_cancel();
+extern fn khora_cancel_reset();
+extern fn khora_live_count() -> Int;
 
 export type Region;
 impl Region {

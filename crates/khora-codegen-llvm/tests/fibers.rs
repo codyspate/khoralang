@@ -45,7 +45,7 @@ fn run(name: &str, source: &str) -> Ran {
 
 const FIBERS: &str = "module t;
 fn print(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 export type Fiber;
 impl Fiber {
@@ -248,8 +248,8 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
 
 const CANCELLABLE: &str = "module t;
 fn print(value: Int);
-fn khora_cancel();
-fn khora_live_count() -> Int;
+extern fn khora_cancel();
+extern fn khora_live_count() -> Int;
 
 export type Fiber;
 impl Fiber {
@@ -374,7 +374,7 @@ fn main() -> Int {{
 /// checked against the rule that a mutable value may not cross.
 const NURSERY: &str = "module t;
 fn print(value: Int);
-fn khora_live_count() -> Int;
+extern fn khora_live_count() -> Int;
 
 export type Fiber;
 impl Fiber {
