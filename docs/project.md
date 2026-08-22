@@ -196,11 +196,17 @@ version = "0.1.0"
 authors = ["Engineering Team <dev@khora.internal>"]
 edition = "2026"
 
-# OS-level capability limits enforced at compile time
+# Which capabilities this program may hold — checked when it is compiled.
+# Which host or path each may be used with — checked where the access happens.
+# See docs/design/permissions.md, which decides D4 and narrows the claim this
+# section used to make.
 [permissions]
-network = ["allow-net=0.0.0.0:8080", "allow-net=db.internal:5432"]
-fs = ["allow-read=/etc/config", "allow-write=./tmp"]
-env = ["DB_URL"]
+network = ["0.0.0.0:8080", "*.internal:5432"]
+env = ["DB_*"]
+
+[permissions.fs]
+read = ["/etc/config", "./data/**"]
+write = ["./tmp/**"]
 
 # Unified Toolchain Config
 [fmt]

@@ -52,22 +52,199 @@ pub struct Package {
     pub edition: Option<String>,
 }
 
-/// The `[permissions]` table: Deno-style capability limits.
+/// What an unmentioned category grants.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Default_ {
+    /// Everything. A category nobody wrote down is not a category anybody is
+    /// restricting, and a program that has never heard of permissions should
+    /// compile.
+    #[default]
+    Allow,
+    /// Nothing. The strict posture: one line, set once, and adding a capability
+    /// becomes a deliberate edit.
+    Deny,
+}
+
+/// The `[permissions]` table.
 ///
-/// The grants stay verbatim strings (`allow-read=/etc/config`). Their grammar is
-/// the capability checker's business, and it needs the text the author wrote in
-/// order to point at the offending grant.
+/// **The manifest decides what capabilities a program may hold; the capability
+/// decides what may be done with it.** The first half is checked when the
+/// program is compiled and is total; the second is checked where the access
+/// happens, because a host read out of a config file cannot be checked any
+/// earlier. `docs/design/permissions.md` is the argument.
+///
+/// A missing table grants everything, and each category is independent of the
+/// others: naming `network` says nothing about `fs`. Tightening is opt-in, so
+/// that the first step towards being careful is not also the most expensive
+/// one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Permissions {
-    /// Network grants, such as `allow-net=db.internal:5432`.
+    /// What a category nobody mentioned grants.
     #[serde(default)]
-    pub network: Vec<String>,
-    /// Filesystem grants, such as `allow-write=./tmp`.
+    pub default: Default_,
+    /// Hosts that may be reached, as `host:port`. `["*"]` is any.
     #[serde(default)]
-    pub fs: Vec<String>,
-    /// Environment variables the package may read.
+    pub network: Option<Vec<String>>,
+    /// Paths that may be read and written.
     #[serde(default)]
-    pub env: Vec<String>,
+    pub fs: Option<FsGrants>,
+    /// Environment variables that may be read.
+    #[serde(default)]
+    pub env: Option<Vec<String>>,
+}
+
+/// `[permissions.fs]`: reading and writing are not the same grant.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct FsGrants {
+    #[serde(default)]
+    pub read: Vec<String>,
+    #[serde(default)]
+    pub write: Vec<String>,
+}
+
+impl Permissions {
+    /// Whether the manifest grants this category at all.
+    ///
+    /// The compile-time half of the decision, and the only half the compiler
+    /// can keep: whether a program may *hold* the capability. What it may do
+    /// with it is the capability's own business.
+    pub fn grants(&self, category: Category) -> bool {
+        let listed = match category {
+            Category::Network => self.network.as_ref().map(|g| !g.is_empty()),
+            Category::Env => self.env.as_ref().map(|g| !g.is_empty()),
+            Category::Fs => {
+                self.fs.as_ref().map(|g| !g.read.is_empty() || !g.write.is_empty())
+            }
+        };
+        match listed {
+            Some(any) => any,
+            None => matches!(self.default, Default_::Allow),
+        }
+    }
+}
+
+/// A kind of access to the outside world, as the manifest names it.
+///
+/// Short because the manifest names *kinds of access*, and there are not many.
+/// A capability an application defines for itself is not here: it is a seam the
+/// program chose to have, and nothing outside the program has an opinion about
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Fs,
+    Network,
+    Env,
+}
+
+impl Category {
+    /// The capability type this category governs.
+    pub fn capability(self) -> &'static str {
+        match self {
+            Category::Fs => "Fs",
+            Category::Network => "Net",
+            Category::Env => "Env",
+        }
+    }
+
+    /// The manifest key, for a diagnostic that tells the reader what to add.
+    pub fn key(self) -> &'static str {
+        match self {
+            Category::Fs => "fs",
+            Category::Network => "network",
+            Category::Env => "env",
+        }
+    }
+
+    /// The category governing a capability type, if any does.
+    pub fn of_capability(name: &str) -> Option<Category> {
+        match name {
+            "Fs" => Some(Category::Fs),
+            "Net" => Some(Category::Network),
+            "Env" => Some(Category::Env),
+            _ => None,
+        }
+    }
+}
+
+/// Whether any of `grants` covers the environment variable `name`.
+///
+/// `*` matches any run of characters, because a variable name has no structure
+/// to respect. `DB_*` is the shape almost every grant takes.
+pub fn granted_name(grants: &[String], name: &str) -> bool {
+    grants.iter().any(|g| glob(g, name, None))
+}
+
+/// Whether any of `grants` covers `path`.
+///
+/// `*` matches within one path segment and `**` across them, which is the glob
+/// dialect everyone already has in their fingers from `.gitignore`. Separators
+/// are normalized, so a grant written with `/` covers a Windows path.
+pub fn granted_path(grants: &[String], path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    grants.iter().any(|g| glob(&g.replace('\\', "/"), &path, Some('/')))
+}
+
+/// Whether any of `grants` covers `host`, which is `name` or `name:port`.
+///
+/// Two rules, and both are chosen to be the reading that costs a newcomer
+/// least:
+///
+/// - **`*` in a host spans dots**, so `*.internal` covers `db.eu.internal` and
+///   not only `db.internal`. This is what a Content-Security-Policy origin
+///   means by it and what most people expect; the one-label reading belongs to
+///   TLS certificates, and surprising somebody into a denied connection is a
+///   worse failure than covering a subdomain they did not enumerate.
+/// - **A grant with no port covers every port.** `api.example.com` grants the
+///   host, which is the same thing Deno's `--allow-net=example.com` does.
+pub fn granted_host(grants: &[String], host: &str) -> bool {
+    let (name, port) = split_port(host);
+    grants.iter().any(|g| {
+        let (pattern, allowed) = split_port(g);
+        let port_ok = match allowed {
+            None | Some("*") => true,
+            Some(p) => Some(p) == port,
+        };
+        port_ok && glob(pattern, name, None)
+    })
+}
+
+/// Splits a trailing `:port` off, if there is one.
+fn split_port(text: &str) -> (&str, Option<&str>) {
+    match text.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (text, None),
+    }
+}
+
+/// Matches `pattern` against `value`.
+///
+/// `**` matches any run of characters. `*` matches any run that does not cross
+/// `boundary`, or any run at all when there is no boundary. Everything else is
+/// literal.
+///
+/// Backtracking, and exponential on a pathological pattern — which a grant in a
+/// manifest is not, being a handful of characters written by hand.
+fn glob(pattern: &str, value: &str, boundary: Option<char>) -> bool {
+    if let Some(rest) = pattern.strip_prefix("**") {
+        return splits(value, value.len()).any(|at| glob(rest, &value[at..], boundary));
+    }
+    if let Some(rest) = pattern.strip_prefix('*') {
+        let limit = boundary.and_then(|b| value.find(b)).unwrap_or(value.len());
+        return splits(value, limit).any(|at| glob(rest, &value[at..], boundary));
+    }
+    match (pattern.chars().next(), value.chars().next()) {
+        (None, None) => true,
+        (None, Some(_)) | (Some(_), None) => false,
+        (Some(p), Some(v)) => {
+            p == v && glob(&pattern[p.len_utf8()..], &value[v.len_utf8()..], boundary)
+        }
+    }
+}
+
+/// Every character boundary in `value` up to and including `limit`.
+fn splits(value: &str, limit: usize) -> impl Iterator<Item = usize> + '_ {
+    (0..=limit).filter(|at| value.is_char_boundary(*at))
 }
 
 /// The `[fmt]` table.

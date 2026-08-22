@@ -57,9 +57,29 @@ before the phase that depends on it starts.
 
 | # | Question | Blocks |
 | --- | --- | --- |
-| D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
 | D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Nothing in this roadmap owns this today, which is the failure mode errata entry 20 names. | 8.x |
 **Closed:**
+
+- **D4** (what `[permissions]` enforces) is decided in
+  `docs/design/permissions.md`: **the manifest decides what capabilities a
+  program may hold, and the capability decides what may be done with it.** The
+  first is compile-time and total — a scan of the requirement rows
+  monomorphization already computes, which holds transitively through
+  dependencies. The second is run-time, because `connect(config.host)` is not
+  checkable any earlier and claiming otherwise is claiming to solve halting.
+
+  A missing `[permissions]` table grants everything, categories are
+  independent, and `default = "deny"` is the one line that flips it — the
+  barrier to entry is nothing until somebody chooses otherwise. Wildcards are
+  per-shape: `*` crosses dots in a host and stops at a separator in a path,
+  because `*.internal` and `./data/*.json` both have to mean what they look
+  like. Parsed and tested in `khora-manifest`; enforcement arrives with the
+  capabilities in phase 8.
+
+  The hole it names and does not close: an `extern fn` with no capability row
+  reaches the OS with nothing in anybody's signature. The answer is an
+  allow-list on `extern` itself, which needs package identity and so belongs
+  to 10.2.
 
 - **D8** (the FFI contract) is decided in `docs/design/ffi.md`: **a foreign
   function takes and returns scalars and pointers, requires capabilities
@@ -938,7 +958,9 @@ Ordered by value, not by §6's numbering.
   because publishing a package is the first act that makes a promise.
 - **10.2 `khora-pkg`**: `khora.lock` with SHA-256 hashes, content-addressed
   cache, DAG task runner. Also what finally lets the orphan rule be *enforced*,
-  which needs cross-package resolution.
+  which needs cross-package resolution — and the `extern` allow-list from D4,
+  which is the rule that turns the permission system from a convention into a
+  guarantee and cannot be written until a declaration belongs to a package.
 - **10.3 Linter** (needs types): unused capability, dangling pure expression,
   redundant match arm.
 - **10.4 LSP** over the salsa database: diagnostics, hover, completion,

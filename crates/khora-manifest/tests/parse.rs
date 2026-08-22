@@ -43,12 +43,15 @@ fn the_reference_manifest_parses_with_no_warnings() {
     assert_eq!(manifest.package.edition.as_deref(), Some("2026"));
 
     assert_eq!(
-        manifest.permissions.network,
-        ["allow-net=0.0.0.0:8080", "allow-net=db.internal:5432"],
-        "network grants should survive verbatim, for the capability checker to interpret"
+        manifest.permissions.network.as_deref(),
+        Some(["0.0.0.0:8080".to_string(), "*.internal:5432".to_string()].as_slice()),
+        "grants survive verbatim: the checker needs the text the author wrote in order \
+         to point at the offending one"
     );
-    assert_eq!(manifest.permissions.fs, ["allow-read=/etc/config", "allow-write=./tmp"]);
-    assert_eq!(manifest.permissions.env, ["DB_URL"]);
+    let fs = manifest.permissions.fs.clone().expect("the reference manifest grants file access");
+    assert_eq!(fs.read, ["/etc/config", "./data/**"]);
+    assert_eq!(fs.write, ["./tmp/**"]);
+    assert_eq!(manifest.permissions.env.as_deref(), Some(["DB_*".to_string()].as_slice()));
 
     let fmt = manifest.fmt.expect("the reference manifest configures `[fmt]`");
     assert_eq!(fmt.indent_style, Some(IndentStyle::Space));
@@ -98,7 +101,6 @@ fn every_key_the_schema_documents_is_recognized() {
 
         [permissions]
         network = []
-        fs = []
         env = []
 
         [fmt]

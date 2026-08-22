@@ -4,12 +4,21 @@ version = "0.1.0"
 authors = ["Engineering Team <dev@khora.internal>"]
 edition = "2026"
 
-# OS-level capability limits enforced at compile time.
-# See docs/roadmap.md D4: only const-known values are statically checkable.
+# What this program may reach outside itself.
+#
+# The manifest decides which capabilities the program may *hold*, and that half
+# is checked when it is compiled. What may be done with one — which host, which
+# path — is checked where the access happens, because a host read out of a
+# config file cannot be checked any earlier. `docs/design/permissions.md`.
+#
+# A missing table grants everything: nothing here is a tax on getting started.
 [permissions]
-network = ["allow-net=0.0.0.0:8080", "allow-net=db.internal:5432"]
-fs = ["allow-read=/etc/config", "allow-write=./tmp"]
-env = ["DB_URL"]
+network = ["0.0.0.0:8080", "*.internal:5432"]
+env = ["DB_*"]
+
+[permissions.fs]
+read = ["/etc/config", "./data/**"]
+write = ["./tmp/**"]
 
 [fmt]
 indent-style = "space"
