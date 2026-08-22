@@ -855,6 +855,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == "String" && name == "with_c_string" {
                     return self.with_c_string(site, args, range);
                 }
+                if owner == "String" && name == "from_bytes" {
+                    return self.string_from_bytes(args, range);
+                }
                 if owner == "String" && matches!(name.as_str(), "bytes" | "byte" | "byte_length")
                 {
                     return self.string_intrinsic(&name, args, range);
@@ -1447,6 +1450,154 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(result)
     }
 
+    /// The bytes of an `Array<U8>`, as a pointer and a length.
+    ///
+    /// Shared by `is_utf8` and `from_bytes`, which want the same three values
+    /// out of the same object and would otherwise each work them out.
+    fn byte_array(
+        &mut self,
+        array: ExprId,
+        what: &str,
+        range: TextRange,
+    ) -> Option<(PointerValue<'ctx>, PointerValue<'ctx>, IntValue<'ctx>, Type)> {
+        let array_ty = self.types.of(array).clone();
+        let element = self.array_element(&array_ty, range)?;
+        if element != Type::Fixed(khora_types::IntKind { signed: false, bits: 8 }) {
+            self.fail(format!("`{what}` is about bytes, and `{element}` is not one"), range)?;
+        }
+        let object = self.expr(array)?.into_pointer_value();
+        let length_slot = runtime::field_pointer(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::ARRAY_LEN_FIELD,
+        );
+        let length = self
+            .be
+            .builder
+            .build_load(self.be.ctx.i64_type(), length_slot, "array.len")
+            .expect("reading an array's length")
+            .into_int_value();
+        let elements = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::FIELD_OFFSET + runtime::ARRAY_HEADER_FIELDS * runtime::FIELD_WORD,
+            "array.elements",
+        );
+        Some((object, elements, length, array_ty))
+    }
+
+    /// `Array::is_utf8`: whether these bytes are a `String`'s worth.
+    ///
+    /// Separate from the conversion, and paired with it the way `Array::length`
+    /// is paired with `Array::get`: the check is how you avoid the trap, and
+    /// having both means the *policy* — raise, substitute, give up — is written
+    /// in Khora by whoever knows which is right.
+    fn is_utf8(&mut self, array: ExprId, range: TextRange) -> Flow<'ctx> {
+        let (object, elements, length, array_ty) =
+            self.byte_array(array, "Array::is_utf8", range)?;
+        let answer = self
+            .be
+            .builder
+            .build_call(self.be.rt.utf8_valid, &[elements.into(), length.into()], "utf8")
+            .expect("checking for UTF-8")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_utf8_valid returns a _Bool")
+            .into_int_value();
+        self.drop(object.into(), &array_ty);
+        // A C `_Bool` is one byte; Khora's `Bool` is an `i1`.
+        let narrowed = self
+            .be
+            .builder
+            .build_int_truncate_or_bit_cast(answer, self.be.ctx.bool_type(), "utf8.bit")
+            .expect("narrowing a C bool");
+        Some(narrowed.into())
+    }
+
+    /// `String::from_bytes`: the same bytes, as a `String`.
+    ///
+    /// **Stops the program if they are not UTF-8**, which is the same bargain
+    /// `Array::get` makes about an index: the check exists — `Array::is_utf8` —
+    /// and calling this without it is the mistake. Returning an `Option` was
+    /// the alternative and would have put the decision in the wrong place: what
+    /// to *do* about bytes that are not text depends entirely on where they
+    /// came from, and only the caller knows.
+    fn string_from_bytes(&mut self, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+        let [array] = args else {
+            return self.fail("`String::from_bytes` takes an `Array<U8>`", range);
+        };
+        let (object, elements, length, array_ty) =
+            self.byte_array(*array, "String::from_bytes", range)?;
+
+        let valid = self
+            .be
+            .builder
+            .build_call(self.be.rt.utf8_valid, &[elements.into(), length.into()], "utf8")
+            .expect("checking for UTF-8")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_utf8_valid returns a _Bool")
+            .into_int_value();
+        let ok = self
+            .be
+            .builder
+            .build_int_truncate_or_bit_cast(valid, self.be.ctx.bool_type(), "utf8.bit")
+            .expect("narrowing a C bool");
+        self.guard(ok, "these bytes are not UTF-8, so they are not a String");
+
+        // The check split the block, so the addresses are recomputed on the
+        // side of the branch that continues.
+        let elements = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::FIELD_OFFSET + runtime::ARRAY_HEADER_FIELDS * runtime::FIELD_WORD,
+            "array.elements",
+        );
+        let i64_type = self.be.ctx.i64_type();
+        let size = self
+            .be
+            .builder
+            .build_int_add(length, i64_type.const_int(runtime::FIELD_WORD, false), "str.size")
+            .expect("sizing a string")
+        ;
+        let string = self
+            .be
+            .builder
+            .build_call(
+                self.be.rt.alloc,
+                &[size.into(), self.be.ctx.i32_type().const_int(STRING_TAG, false).into()],
+                "str",
+            )
+            .expect("allocating a string")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_alloc returns a pointer")
+            .into_pointer_value();
+        let length_slot =
+            runtime::field_pointer(self.be.ctx, &self.be.builder, string, STRING_LEN_FIELD);
+        self.be
+            .builder
+            .build_store(length_slot, length)
+            .expect("storing a string length");
+        let into = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            string,
+            STRING_BYTES_OFFSET,
+            "str.bytes",
+        );
+        self.be
+            .builder
+            .build_memcpy(into, 1, elements, 1, length)
+            .expect("copying the bytes");
+
+        self.drop(object.into(), &array_ty);
+        Some(string.into())
+    }
+
     /// `String::with_c_string`: lend the bytes with a zero byte after them.
     ///
     /// Every function in the C library that takes a string takes a
@@ -1805,6 +1956,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     ) -> Flow<'ctx> {
         match (name, args) {
             ("with_data", _) => self.with_data(site, args, range),
+            ("is_utf8", [array]) => self.is_utf8(*array, range),
             ("new", [length, fill]) => {
                 let array_ty = self.types.of(site).clone();
                 let element = self.array_element(&array_ty, range)?;

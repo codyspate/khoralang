@@ -238,6 +238,30 @@ pub extern "C" fn khora_tick() -> i64 {
     TICKS.fetch_add(1, COUNTER_ORDER) as i64 + 1
 }
 
+/// Whether `len` bytes starting at `data` are well-formed UTF-8.
+///
+/// The runtime's job because the answer is a table nobody should write twice,
+/// and Rust's standard library already has it. Note what crosses: a pointer
+/// and a length, and a `_Bool` back — the boundary rule holds here as it does
+/// everywhere else.
+///
+/// # Safety
+///
+/// `data` must be null with a zero `len`, or address `len` initialized bytes
+/// that stay live for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_utf8_valid(data: *const u8, len: i64) -> bool {
+    if len <= 0 {
+        return true;
+    }
+    if data.is_null() {
+        return false;
+    }
+    // SAFETY: the contract above.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    std::str::from_utf8(bytes).is_ok()
+}
+
 /// Adds up `len` bytes starting at `data`.
 ///
 /// A testing aid, and specifically a *foreign function* one: it is here so that

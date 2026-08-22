@@ -471,6 +471,10 @@ impl<A> Array<A> {
   fn get(self, index: Int) -> A;
   fn set(self, index: Int, value: A) -> ();
 
+  /// Whether these bytes are well-formed UTF-8, and so whether
+  /// `String::from_bytes` will accept them. Only an `Array<U8>` has an answer.
+  fn is_utf8(self) -> Bool;
+
   /// Lends the elements to `body` as a pointer and a count, for the duration
   /// of the call and no longer.
   ///
@@ -557,6 +561,15 @@ impl String {
   /// The byte at `index`, counting from zero. Out of range stops the program,
   /// the same as an array.
   fn byte(self, index: Int) -> U8;
+
+  /// The same bytes, as a `String`.
+  ///
+  /// **Stops the program if they are not UTF-8.** The same bargain `get` makes
+  /// about an index: the check exists — `Array::is_utf8` — and calling this
+  /// without it is the mistake. An `Option` was the alternative and would put
+  /// the decision in the wrong place, because what to *do* about bytes that
+  /// are not text depends entirely on where they came from.
+  fn from_bytes(bytes: Array<U8>) -> String;
 
   /// A copy of the bytes.
   ///

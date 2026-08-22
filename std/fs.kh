@@ -1,0 +1,172 @@
+module std::fs;
+
+import std::core::{Array, Ptr, Region, Scope, acquire};
+
+// The file system, over ISO C.
+//
+// Two layers, and the split is the point.
+//
+// *Inside* this module are the foreign declarations — `fopen`, `fread` and the
+// rest — and the code that gets their conventions right: a null `FILE *` means
+// the open failed, a short read means something went wrong, and a file has to
+// be closed on the path where it failed as much as on the path where it did
+// not. That code is not exported. This module is the trusted boundary, in the
+// same way that Rust's standard library is the place `unsafe` lives so that
+// nothing above it needs to.
+//
+// *Outside* is the `Fs` effect, and nothing reaches a file without one. That
+// buys two things at once. It is a **permission**: a function that reads a file
+// says so in its signature, all the way up to the `main` that decided to allow
+// it. And it is a **seam**: a test installs its own handler and the code under
+// test cannot tell, which is the thing a file system mock is usually a poor
+// imitation of.
+//
+// `docs/design/ffi.md` for the boundary rules this obeys.
+
+// ---------------------------------------------------------------------------
+// The interface
+// ---------------------------------------------------------------------------
+
+/// Why a file operation did not work.
+///
+/// Deliberately coarse. C reports failure through `errno`, whose values are
+/// not portable and whose meanings are not always the ones a caller wants to
+/// branch on; promising more detail than can be delivered everywhere would be
+/// promising something. What a caller can act on is "it was not there" against
+/// "it did not work", and both carry the path so the message can say which
+/// file.
+export type IoError =
+  | NotFound(path: String)
+  | Failed(path: String);
+
+/// Access to the file system.
+///
+/// Whole files, not handles. A handle would have to be an opaque type, which
+/// nothing but this module could construct — and an effect whose operations
+/// only the real implementation can satisfy is not a seam, it is a wrapper.
+/// Streaming will want one and can have its own effect when something needs it.
+export effect Fs {
+  read: (String) -> Array<U8> raises IoError,
+  write: (String, Array<U8>) -> () raises IoError,
+}
+
+impl Fs {
+  /// The real file system.
+  ///
+  /// Everything else in this module exists so that this is three lines.
+  fn real() -> Fs {
+    handler for Fs {
+      read: fn path => read_whole(path)!,
+      write: fn (path, bytes) => write_whole(path, bytes)!,
+    }
+  }
+}
+
+/// The bytes of a file, as text.
+///
+/// A convenience over `read`, and the reason `Fs` traffics in bytes rather
+/// than strings: a file is bytes, and whether they are text is a question with
+/// a wrong answer. This one takes the optimistic view and is named for it.
+export fn read_text(path: String) -> String
+  with { fs: Fs }
+  raises IoError
+{
+  let bytes = fs.read(path)!;
+  // The policy lives here rather than in the conversion, which is the whole
+  // reason `is_utf8` and `from_bytes` are two things: what to do about bytes
+  // that are not text depends on where they came from, and here they came from
+  // a file that was supposed to hold text.
+  if Array::is_utf8(bytes) { String::from_bytes(bytes) } else { raise IoError::Failed(path) }
+}
+
+// ---------------------------------------------------------------------------
+// ISO C
+// ---------------------------------------------------------------------------
+//
+// Not bound per target: these are the C standard library, spelled the same
+// everywhere Khora runs. `FILE *` is a `Ptr`, which is what `Ptr` is for.
+
+fn fopen(path: Ptr, mode: Ptr) -> Ptr;
+fn fread(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
+fn fwrite(from: Ptr, size: Int, count: Int, file: Ptr) -> Int;
+fn fclose(file: Ptr) -> I32;
+fn fseek(file: Ptr, offset: Int, whence: I32) -> I32;
+fn ftell(file: Ptr) -> Int;
+
+/// `SEEK_SET` and `SEEK_END`.
+///
+/// Macros in C, so there is no symbol to bind — but 0, 1 and 2 are what every
+/// C library on every platform Khora targets defines them as, and have been
+/// since before C was standardised.
+fn seek_set() -> I32 { I32::of(0) }
+fn seek_end() -> I32 { I32::of(2) }
+
+// ---------------------------------------------------------------------------
+// Getting the conventions right, once
+// ---------------------------------------------------------------------------
+
+/// Opens `path`, or a null pointer.
+///
+/// The mode is a Khora string turned into a `const char *` for exactly the
+/// duration of the call, which is all `fopen` looks at it for.
+fn open(path: String, mode: String) -> Ptr {
+  String::with_c_string(path, fn p => String::with_c_string(mode, fn m => fopen(p, m)))
+}
+
+/// `fclose` on a null pointer is undefined, and an open that failed hands back
+/// exactly that.
+fn close(file: Ptr) -> () {
+  if Ptr::is_null(file) {} else { fclose(file); }
+}
+
+/// How many bytes the file holds, by going to the end and asking where that is.
+///
+/// A negative answer means the question could not be answered — a pipe, a
+/// device — and is reported as a failure rather than turned into an allocation
+/// of some other size.
+fn size_of(file: Ptr) -> Int {
+  fseek(file, 0, seek_end());
+  let end = ftell(file);
+  fseek(file, 0, seek_set());
+  end
+}
+
+/// The whole file.
+///
+/// The region is what closes the file. It is a local, so leaving this function
+/// releases it whichever way the leaving happens — including the two `raise`s
+/// below, which is the reason the close is registered rather than written out
+/// after each one.
+fn read_whole(path: String) -> Array<U8> raises IoError {
+  let region = Region::open();
+  with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
+    let file = acquire(open(path, "rb"), fn f => close(f));
+    if Ptr::is_null(file) {
+      raise IoError::NotFound(path)
+    } else {
+      let size = size_of(file);
+      if size < 0 {
+        raise IoError::Failed(path)
+      } else {
+        let bytes: Array<U8> = Array::new(size, 0);
+        let read = Array::with_data(bytes, fn (into, n) => fread(into, 1, n, file));
+        if read == size { bytes } else { raise IoError::Failed(path) }
+      }
+    }
+  }
+}
+
+/// The whole file, replaced.
+fn write_whole(path: String, bytes: Array<U8>) -> () raises IoError {
+  let region = Region::open();
+  with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
+    let file = acquire(open(path, "wb"), fn f => close(f));
+    if Ptr::is_null(file) {
+      raise IoError::Failed(path)
+    } else {
+      let count = Array::length(bytes);
+      let written = Array::with_data(bytes, fn (from, n) => fwrite(from, 1, n, file));
+      if written == count {} else { raise IoError::Failed(path) }
+    }
+  }
+}

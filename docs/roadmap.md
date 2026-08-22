@@ -843,6 +843,39 @@ encoding, JSON, time, logging, and HTTP over the syscalls from phase 7 —
 everything a normal program touches, written in Khora and generic over its
 effects.
 
+- **8.1 `std::fs` — done, and it is the answer to the question above.** The
+  whole module is written in Khora: the C conventions, the region that closes
+  the file, the effect that gates access to it.
+
+  Two layers, and the split is the point. *Inside* are the foreign declarations
+  and the code that gets their conventions right — a null `FILE *` means the
+  open failed, a short read means something went wrong, and the file has to
+  close on the path where it failed as much as on the path where it did not.
+  None of that is exported; the module is the trusted boundary, the way Rust's
+  standard library is where `unsafe` lives so nothing above it needs to.
+
+  *Outside* is the `Fs` effect, which buys two things at once. It is a
+  **permission** — a function that reads a file says so in its signature, all
+  the way up to the `main` that allowed it — and it is a **seam**: a test
+  installs its own handler and the code under test cannot tell.
+  `the_file_system_can_be_replaced_wholesale` reads `/etc/passwd` on Windows
+  and gets back what the mock decided, which is what an effect system is *for*
+  and what a file-system mock is usually a poor imitation of.
+
+  `String::from_bytes` and `Array::is_utf8` came with it, and are two things
+  rather than one on purpose. The conversion **traps** on bytes that are not
+  UTF-8 — the same bargain `Array::get` makes about an index, where the check
+  exists and calling without it is the mistake. An `Option` would have put the
+  decision in the wrong place: what to *do* about bytes that are not text
+  depends on where they came from, and `read_text` is where that is known.
+
+  **Found on the way, and not fixed:** an operation declared `raises IoError`
+  is not satisfied by a function that cannot fail. Rows unify exactly, with no
+  subsumption, so a mock that always succeeds does not typecheck and has to
+  raise on some branch it never takes. Defensible — it is what Rust's
+  `-> Result<T, E>` asks for — but Khora's rows *could* subsume, and this is
+  the first place the difference is felt. A design question rather than a bug.
+
 The bindings A6 names — TLS and crypto, compression, numeric kernels — are
 consumers of phase 7 and are *not* on this critical path. A great deal of Khora
 can be written before anything needs TLS.

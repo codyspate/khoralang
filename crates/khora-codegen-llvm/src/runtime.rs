@@ -148,6 +148,8 @@ pub struct Runtime<'ctx> {
     pub fibers_wait: FunctionValue<'ctx>,
     /// `void khora_fibers_release(void *fibers)` — a `drop_fields` callback.
     pub fibers_release: FunctionValue<'ctx>,
+    /// `_Bool khora_utf8_valid(const uint8_t *data, int64_t len)`
+    pub utf8_valid: FunctionValue<'ctx>,
     /// `void *khora_array_new(int64_t len, size_t fill, uint8_t stride, _Bool boxed,
     ///                            void (*glue)(void *))`
     pub array_new: FunctionValue<'ctx>,
@@ -229,6 +231,10 @@ impl<'ctx> Runtime<'ctx> {
             ),
             fibers_wait: declare("khora_fibers_wait", void.fn_type(&[ptr.into()], false)),
             fibers_release: declare("khora_fibers_release", void.fn_type(&[ptr.into()], false)),
+            utf8_valid: declare(
+                "khora_utf8_valid",
+                ctx.bool_type().fn_type(&[ptr.into(), i64t.into()], false),
+            ),
             array_new: declare(
                 "khora_array_new",
                 ptr.fn_type(
