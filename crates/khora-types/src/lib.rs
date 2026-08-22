@@ -31,7 +31,15 @@ pub enum Type {
     Unit,
     /// A user-declared variant type, with its type arguments.
     Adt { name: String, args: Vec<Type> },
-    Fn { params: Vec<Type>, ret: Box<Type> },
+    /// A function *value*'s type, effects included.
+    ///
+    /// The rows are why a function that needs capabilities can be passed as a
+    /// value at all: without them, mentioning `analyze` would have to charge
+    /// its requirements to whatever function wrote the name, rather than to
+    /// whoever eventually calls it. `List::map(analyze)` working is the single
+    /// largest ergonomic difference from a monadic design — see
+    /// `docs/design/effects.md`.
+    Fn { params: Vec<Type>, ret: Box<Type>, requires: Box<Type>, raises: Box<Type> },
     /// A hole inference is free to fill.
     Var(unify::TypeVar),
     /// A type parameter the *caller* chose. Rigid: the body of a generic
@@ -133,12 +141,27 @@ impl std::fmt::Display for Type {
             }
             Type::Never => write!(f, "Never"),
             Type::Unknown => write!(f, "?"),
-            Type::Fn { params, ret } => {
+            Type::Fn { params, ret, requires, raises } => {
                 let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
-                write!(f, "({}) -> {ret}", ps.join(", "))
+                write!(f, "({}) -> {ret}", ps.join(", "))?;
+                // An empty row is the ordinary case and says nothing, so it is
+                // not printed: `(Int) -> Int` should not read as a type with
+                // two invisible clauses.
+                if !is_empty_row(requires) {
+                    write!(f, " with {requires}")?;
+                }
+                if !is_empty_row(raises) {
+                    write!(f, " raises {raises}")?;
+                }
+                Ok(())
             }
         }
     }
+}
+
+/// Whether a row asks for nothing at all — no labels and no tail.
+fn is_empty_row(ty: &Type) -> bool {
+    matches!(ty, Type::Row { fields, tail } if fields.is_empty() && tail.is_none())
 }
 
 impl Type {
@@ -157,6 +180,20 @@ impl Type {
     /// A nullary ADT, which is what most of the phase 2 subset used.
     pub fn adt(name: impl Into<String>) -> Type {
         Type::Adt { name: name.into(), args: Vec::new() }
+    }
+
+    /// A function that needs nothing and cannot fail.
+    ///
+    /// Most functions in most programs, and every one the backend can build a
+    /// value of today — so this is the constructor, and the effectful form is
+    /// spelled out where it is meant.
+    pub fn func(params: Vec<Type>, ret: Type) -> Type {
+        Type::Fn {
+            params,
+            ret: Box::new(ret),
+            requires: Box::new(Type::empty_row()),
+            raises: Box::new(Type::empty_row()),
+        }
     }
 }
 
@@ -187,7 +224,12 @@ pub struct Signature {
 impl Signature {
     /// The signature as a function type, with its parameters still rigid.
     pub fn as_fn(&self) -> Type {
-        Type::Fn { params: self.params.clone(), ret: Box::new(self.ret.clone()) }
+        Type::Fn {
+            params: self.params.clone(),
+            ret: Box::new(self.ret.clone()),
+            requires: Box::new(self.requires.clone()),
+            raises: Box::new(self.raises.clone()),
+        }
     }
 }
 
@@ -524,7 +566,7 @@ fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
 /// Keys are mangled so the two halves cannot collide with a name a program
 /// chose — `#Router::listen`, `Eq#Int::eq` — and `#` cannot occur in an
 /// identifier, which is exactly why it must not reach a diagnostic either.
-fn as_written(key: &str) -> String {
+pub fn as_written(key: &str) -> String {
     match key.split_once('#') {
         // `#Head::method`: a type's own function.
         Some(("", rest)) => rest.to_string(),
@@ -644,7 +686,18 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
                 Some(other) => vec![type_of_syntax(Some(&other), generics)],
             };
             let ret = type_of_syntax(f.return_type().as_ref(), generics);
-            Type::Fn { params, ret: Box::new(ret) }
+            Type::Fn {
+                params,
+                ret: Box::new(ret),
+                requires: Box::new(row_of_syntax(
+                    f.with_clause().and_then(|c| c.row()).as_ref(),
+                    generics,
+                )),
+                raises: Box::new(row_of_syntax(
+                    f.raises_clause().and_then(|c| c.row()).as_ref(),
+                    generics,
+                )),
+            }
         }
         // A bare integer in type position is a const-generic argument.
         ast::Type::Literal(l) => l.value().map(Type::Const).unwrap_or(Type::Unknown),
@@ -659,6 +712,14 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
                 .type_args()
                 .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics)).collect())
                 .unwrap_or_default();
+
+            // A bare `'r`. It has no `Path` of its own — it is one token — so
+            // without this it read as the empty name and became `Unknown`,
+            // which then absorbed whatever it was unified with and made every
+            // row-polymorphic signature pass by saying nothing.
+            if let Some(row_var) = p.row_var() {
+                return Type::Param(row_var.text().to_string());
+            }
 
             // `T::Item` where `T` is a parameter in scope is a projection, not
             // a type whose name happens to contain `::`.
@@ -1240,7 +1301,7 @@ impl<'a> Checker<'a> {
                 // variable the body then solves.
                 let result = self.unifier.fresh();
                 let whole =
-                    Type::Fn { params: types, ret: Box::new(result.clone()) };
+                    Type::func(types, result.clone());
                 self.lambdas.push(whole.clone());
                 let ret = self.infer(body);
                 self.lambdas.pop();
@@ -1353,8 +1414,7 @@ impl<'a> Checker<'a> {
             let owner = self.infer(base);
             let owner = self.unifier.shallow(&owner);
             if self.record_field(&owner, &name).is_some() {
-                let field = self.infer(callee);
-                return self.apply(field, args, range);
+                return self.apply(Some(callee), args, range);
             }
             if let Some(ty) = self.infer_method_call(callee, base, &name, args, range) {
                 return ty;
@@ -1364,14 +1424,23 @@ impl<'a> Checker<'a> {
         // Resolved first: a callee's type is often a *variable solved to* a
         // function rather than a function, and matching the shape without
         // following the variable silently treats it as uncallable.
-        let inferred = self.infer(callee);
-        self.apply(inferred, args, range)
+        self.apply(Some(callee), args, range)
     }
 
     /// Checks a call whose callee is an ordinary value of function type.
-    fn apply(&mut self, inferred: Type, args: &[ExprId], range: TextRange) -> Type {
+    ///
+    /// This is also where a call is charged to the enclosing function. The
+    /// rows come from the callee's *type*, not from a signature looked up by
+    /// name, which is what makes calling an effectful function through a
+    /// variable — or a parameter, or a field — check the same as calling it
+    /// directly.
+    fn apply(&mut self, callee: Option<ExprId>, args: &[ExprId], range: TextRange) -> Type {
+        let inferred = match callee {
+            Some(callee) => self.infer(callee),
+            None => Type::Unknown,
+        };
         let callee_ty = self.unifier.shallow(&inferred);
-        let Type::Fn { params, ret } = callee_ty else {
+        let Type::Fn { params, ret, requires, raises } = callee_ty else {
             for arg in args {
                 self.infer(*arg);
             }
@@ -1395,7 +1464,29 @@ impl<'a> Checker<'a> {
         for (arg, expected) in args.iter().zip(&params) {
             self.expect(*arg, expected, "this argument");
         }
+
+        let label = callee.map(|c| self.callee_label(c)).unwrap_or_else(|| "this call".into());
+        self.demand_rows(&requires, &raises, &label, callee, range);
         *ret
+    }
+
+    /// What to call the callee in a diagnostic.
+    ///
+    /// A name when there is one, and otherwise a description: `(f(x))(y)` has
+    /// no name for its callee, and "this call" beats inventing one.
+    fn callee_label(&self, callee: ExprId) -> String {
+        match self.body.expr(callee) {
+            Expr::Path(khora_hir::Resolution::Item { name, .. }) => as_written(name),
+            Expr::Path(khora_hir::Resolution::Variant { type_name, name, .. }) => {
+                format!("{type_name}::{name}")
+            }
+            Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
+                format!("{owner}::{name}")
+            }
+            Expr::Local(local) => self.body.local(*local).name.clone(),
+            Expr::Field { name, .. } => name.clone(),
+            _ => "this call".to_string(),
+        }
     }
 
     /// Resolves `receiver.method(args)` through the traits in scope.
@@ -1553,7 +1644,7 @@ impl<'a> Checker<'a> {
             self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
         self.demand(&signature, &type_args, key, callee, range);
         self.instantiations.insert(callee, (key.to_string(), type_args));
-        let Type::Fn { params, ret } = ty else { return Type::Unknown };
+        let Type::Fn { params, ret, .. } = ty else { return Type::Unknown };
 
         // Bind `Self` by unifying the *receiver parameter* with the receiver,
         // not by assigning the receiver's type to `Self` directly. For `Eq` the
@@ -1630,10 +1721,26 @@ impl<'a> Checker<'a> {
             .map(String::as_str)
             .zip(type_args.iter().cloned())
             .collect();
-        for (clause, row) in
-            [(Clause::Requires, &signature.requires), (Clause::Raises, &signature.raises)]
-        {
-            let mut row = unify::substitute(row, &mapping);
+        let requires = unify::substitute(&signature.requires, &mapping);
+        let raises = unify::substitute(&signature.raises, &mapping);
+        self.demand_rows(&requires, &raises, key, Some(callee_site), range);
+    }
+
+    /// Records what a call requires, given rows that are already instantiated.
+    ///
+    /// This is the form a call *through a value* uses: the rows are part of
+    /// the callee's type rather than looked up from a signature, which is what
+    /// lets an effectful function be passed around and called somewhere else.
+    fn demand_rows(
+        &mut self,
+        requires: &Type,
+        raises: &Type,
+        key: &str,
+        callee_site: Option<ExprId>,
+        range: TextRange,
+    ) {
+        for (clause, row) in [(Clause::Requires, requires), (Clause::Raises, raises)] {
+            let mut row = row.clone();
             // Whatever an enclosing `with` block supplies is already answered.
             if clause == Clause::Requires {
                 if let Type::Row { fields, tail } = &row {
@@ -1653,7 +1760,7 @@ impl<'a> Checker<'a> {
                 row,
                 range,
                 callee: key.to_string(),
-                site: Some(callee_site),
+                site: callee_site,
             });
         }
     }
@@ -1962,10 +2069,10 @@ impl<'a> Checker<'a> {
             let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else {
                 return Type::Unknown;
             };
+            // No demand here: the rows are in the type now, and are charged
+            // where the function is *called* rather than where it is named.
             let (ty, type_args) =
                 self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
-            let range = self.body.range(at);
-            self.demand(&signature, &type_args, &key, at, range);
             self.instantiations.insert(at, (key, type_args));
             return ty;
         }
@@ -1986,8 +2093,6 @@ impl<'a> Checker<'a> {
                 };
                 let (ty, type_args) =
                     self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
-                let range = self.body.range(at);
-                self.demand(&signature, &type_args, &key, at, range);
                 self.instantiations.insert(at, (key, type_args));
                 return ty;
             }
@@ -2064,8 +2169,6 @@ impl<'a> Checker<'a> {
                     Some(sig) => {
                         let (ty, args) =
                             self.unifier.instantiate_with(&sig.generics, &sig.as_fn());
-                        let range = self.body.range(at);
-                        self.demand(&sig, &args, name, at, range);
                         self.instantiations.insert(at, (name.clone(), args));
                         ty
                     }

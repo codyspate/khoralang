@@ -378,6 +378,18 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   subtracted and left in. Discriminating them at runtime is what widened the
   tagged return to `{ i32 which, i64 payload }` — see
   `docs/design/effect-runtime.md` §2.
+- **4.5 Effect rows on function types — done** in the type system. A function
+  value's type is `(A) -> B with 'r raises 'e`, so naming an effectful function
+  no longer charges its requirements to whoever wrote the name: they travel
+  with the value and are charged where it is called. `List::map(analyze)`
+  working is what `docs/design/effects.md` calls the single largest ergonomic
+  difference from a monadic design. Calling *through a value* checks the same
+  as calling by name, since the rows come from the callee's type rather than
+  from a signature looked up by name.
+
+  The backend is behind: a closure is called through a pointer with no room
+  for evidence and no tag on its return, so building a value out of an
+  effectful function is refused with a message rather than miscompiled.
 - **4.4 Handler composition — done.** A service built on other services is a
   function returning a handler with a `with` clause of its own, which needed
   nothing new: a handler is a record, so building one is calling a function.

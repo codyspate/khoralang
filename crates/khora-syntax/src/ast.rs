@@ -663,6 +663,15 @@ impl FnType {
     pub fn return_type(&self) -> Option<Type> {
         children::<Type>(&self.0).nth(1)
     }
+    /// `A -> B with { db: Db }`. The clause's row is nested inside the clause
+    /// node, not beside the return type, which is what keeps `return_type`'s
+    /// index right.
+    pub fn with_clause(&self) -> Option<WithClause> {
+        child(&self.0)
+    }
+    pub fn raises_clause(&self) -> Option<RaisesClause> {
+        child(&self.0)
+    }
 }
 
 impl PathType {

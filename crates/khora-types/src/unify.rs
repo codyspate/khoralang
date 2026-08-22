@@ -230,9 +230,11 @@ impl Unifier {
     /// is useless.
     pub fn zonk(&self, ty: &Type) -> Type {
         match self.shallow(ty) {
-            Type::Fn { params, ret } => Type::Fn {
+            Type::Fn { params, ret, requires, raises } => Type::Fn {
                 params: params.iter().map(|p| self.zonk(p)).collect(),
                 ret: Box::new(self.zonk(&ret)),
+                requires: Box::new(self.zonk(&requires)),
+                raises: Box::new(self.zonk(&raises)),
             },
             Type::Adt { name, args } => Type::Adt {
                 name,
@@ -383,8 +385,8 @@ impl Unifier {
             }
 
             (
-                Type::Fn { params: p1, ret: r1 },
-                Type::Fn { params: p2, ret: r2 },
+                Type::Fn { params: p1, ret: r1, requires: q1, raises: e1 },
+                Type::Fn { params: p2, ret: r2, requires: q2, raises: e2 },
             ) => {
                 if p1.len() != p2.len() {
                     return Err(Mismatch::Arity { expected: p1.len(), found: p2.len() });
@@ -392,7 +394,13 @@ impl Unifier {
                 for (x, y) in p1.iter().zip(p2) {
                     self.unify(x, y)?;
                 }
-                self.unify(r1, r2)
+                self.unify(r1, r2)?;
+                // The rows are part of the type, so two function values only
+                // agree if they need and can fail the same way. A row variable
+                // on one side absorbs whatever the other has, which is what
+                // makes `Router::post` accept a handler with capabilities.
+                self.unify(q1, q2)?;
+                self.unify(e1, e2)
             }
 
             _ => Err(Mismatch::Types { expected: a.clone(), found: b.clone() }),
@@ -479,8 +487,11 @@ impl Unifier {
     fn occurs(&self, var: TypeVar, ty: &Type) -> bool {
         match self.shallow(ty) {
             Type::Var(v) => v == var,
-            Type::Fn { params, ret } => {
-                params.iter().any(|p| self.occurs(var, p)) || self.occurs(var, &ret)
+            Type::Fn { params, ret, requires, raises } => {
+                params.iter().any(|p| self.occurs(var, p))
+                    || self.occurs(var, &ret)
+                    || self.occurs(var, &requires)
+                    || self.occurs(var, &raises)
             }
             Type::Adt { args, .. } => args.iter().any(|a| self.occurs(var, a)),
             Type::Tuple(items) => items.iter().any(|i| self.occurs(var, i)),
@@ -554,10 +565,15 @@ pub fn match_params(
         (Type::Tuple(x), Type::Tuple(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(p, c)| match_params(p, c, params, out))
         }
-        (Type::Fn { params: p1, ret: r1 }, Type::Fn { params: p2, ret: r2 }) => {
+        (
+            Type::Fn { params: p1, ret: r1, requires: q1, raises: e1 },
+            Type::Fn { params: p2, ret: r2, requires: q2, raises: e2 },
+        ) => {
             p1.len() == p2.len()
                 && p1.iter().zip(p2).all(|(p, c)| match_params(p, c, params, out))
                 && match_params(r1, r2, params, out)
+                && match_params(q1, q2, params, out)
+                && match_params(e1, e2, params, out)
         }
         _ => pattern == concrete,
     }
@@ -602,9 +618,11 @@ fn match_type<'a>(
 pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
     match ty {
         Type::Param(name) => mapping.get(name.as_str()).cloned().unwrap_or(ty.clone()),
-        Type::Fn { params, ret } => Type::Fn {
+        Type::Fn { params, ret, requires, raises } => Type::Fn {
             params: params.iter().map(|p| substitute(p, mapping)).collect(),
             ret: Box::new(substitute(ret, mapping)),
+            requires: Box::new(substitute(requires, mapping)),
+            raises: Box::new(substitute(raises, mapping)),
         },
         Type::Adt { name, args } => Type::Adt {
             name: name.clone(),
@@ -823,8 +841,8 @@ mod tests {
     fn functions_unify_pointwise() {
         let mut u = Unifier::new();
         let v = u.fresh();
-        let expected = Type::Fn { params: vec![v.clone()], ret: Box::new(Type::Bool) };
-        let found = Type::Fn { params: vec![Type::Int], ret: Box::new(Type::Bool) };
+        let expected = Type::func(vec![v.clone()], Type::Bool);
+        let found = Type::func(vec![Type::Int], Type::Bool);
         assert!(u.unify(&expected, &found).is_ok());
         assert_eq!(u.zonk(&v), Type::Int);
     }
@@ -832,8 +850,8 @@ mod tests {
     #[test]
     fn functions_of_different_arity_do_not_unify() {
         let mut u = Unifier::new();
-        let one = Type::Fn { params: vec![Type::Int], ret: Box::new(Type::Int) };
-        let two = Type::Fn { params: vec![Type::Int, Type::Int], ret: Box::new(Type::Int) };
+        let one = Type::func(vec![Type::Int], Type::Int);
+        let two = Type::func(vec![Type::Int, Type::Int], Type::Int);
         assert!(matches!(u.unify(&one, &two), Err(Mismatch::Arity { .. })));
     }
 
@@ -856,10 +874,7 @@ mod tests {
     #[test]
     fn instantiation_gives_each_call_site_fresh_variables() {
         let mut u = Unifier::new();
-        let identity = Type::Fn {
-            params: vec![Type::Param("A".into())],
-            ret: Box::new(Type::Param("A".into())),
-        };
+        let identity = Type::func(vec![Type::Param("A".into())], Type::Param("A".into()));
         let generics = vec!["A".to_string()];
 
         let first = u.instantiate(&generics, &identity);
@@ -877,13 +892,10 @@ mod tests {
     #[test]
     fn instantiation_keeps_a_parameter_consistent_within_one_signature() {
         let mut u = Unifier::new();
-        let identity = Type::Fn {
-            params: vec![Type::Param("A".into())],
-            ret: Box::new(Type::Param("A".into())),
-        };
+        let identity = Type::func(vec![Type::Param("A".into())], Type::Param("A".into()));
         let instance = u.instantiate(&["A".to_string()], &identity);
 
-        let Type::Fn { params, ret } = &instance else { panic!() };
+        let Type::Fn { params, ret, .. } = &instance else { panic!() };
         assert!(u.unify(&params[0], &Type::Int).is_ok());
         assert_eq!(u.zonk(ret), Type::Int, "argument and return share one variable");
     }

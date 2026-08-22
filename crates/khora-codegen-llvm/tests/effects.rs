@@ -602,3 +602,31 @@ fn main() -> Int raises ConfigError {{ print(attempt(10)!); print(attempt(0)!); 
     assert_eq!(ran.stdout, "40\n", "the second build raises before it can serve");
     assert_eq!(ran.code, Some(1));
 }
+
+/// The type system allows an effectful function as a value and the backend
+/// does not, so the gap has to be a message rather than a bad call. Pinned so
+/// that when the backend catches up, this test is what says so.
+#[test]
+fn a_function_value_that_needs_capabilities_is_refused_by_the_backend() {
+    let source = format!(
+        "{LEDGER}
+export fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
+
+fn main() -> Int with {{ ledger: Ledger }} {{ apply_to(report, 4) }}
+"
+    );
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fnval_effect");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(&db, dir.join("main.kh"), source);
+    let root = SourceRoot::new(&db, vec![file]);
+
+    let errors = khora_codegen_llvm::compile(&db, root, &dir.join("program"))
+        .expect_err("a function value with a requirement should be refused");
+    let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("cannot build a value out of such a function")),
+        "{messages:?}"
+    );
+}

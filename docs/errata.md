@@ -612,3 +612,27 @@ a corner they did not cover: **`owner` was not wrong, the question was.** The
 field means "which function's table do I belong to", and it was read as "which
 function am I", which is the same string for everything except the case that
 matters.
+
+## 30. A row variable in type position read as nothing at all
+
+`fn mount<'r>(handler: Req -> Res with 'r)` was accepted, and so was every
+argument passed to it. `type_of_syntax` read a path type by its `Path` child,
+and a bare `'r` has no `Path` — it is one token — so the name came out empty,
+the empty name mapped to `Unknown`, and `Unknown` unifies with everything.
+
+The row tests passed the whole time. `with { 'e | ledger: Ledger }` reads its
+tail through the same function, so the tail was `Unknown` there too; the tests
+checked that a caller providing more than was asked for is accepted, and
+`Unknown` accepts that along with everything else. They were green for the
+wrong reason and would have stayed green if row unification had been deleted.
+
+The fix is four lines: read `row_var()` before looking for a `Path`. What the
+entry is really about is the fourth appearance of one shape — 24, 26, 27, and
+now this — **`Unknown` is not a type, it is a silence**, and a lookup that
+produces it has reported nothing while looking like it reported something. The
+three earlier entries were about a lookup that missed. This one is about a
+*parse* that missed, which is worse: the checker had the token in hand.
+
+Worth stating as a rule rather than a fifth entry. `Unknown` should be
+reachable from exactly two places — a parse error, and an error already
+reported — and never from "I did not recognize this shape".

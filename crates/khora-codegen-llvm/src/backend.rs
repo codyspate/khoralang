@@ -248,7 +248,7 @@ fn declare_closures(
 ) {
     for (id, expr) in body.exprs() {
         let khora_hir::body::Expr::Lambda { captures, .. } = expr else { continue };
-        let Type::Fn { params, ret } = types.of(id).clone() else { continue };
+        let Type::Fn { params, ret, .. } = types.of(id).clone() else { continue };
         let captured: Vec<(khora_hir::body::LocalId, Type)> =
             captures.iter().map(|l| (*l, types.local(*l).clone())).collect();
         // An unsolved variable here means nothing ever pinned the type down —

@@ -381,7 +381,7 @@ fn applied_arity(ty: &Type, param: &str) -> usize {
         }
         Type::Adt { args, .. } => args.iter().map(|a| applied_arity(a, param)).max().unwrap_or(0),
         Type::Tuple(items) => items.iter().map(|a| applied_arity(a, param)).max().unwrap_or(0),
-        Type::Fn { params, ret } => params
+        Type::Fn { params, ret, .. } => params
             .iter()
             .chain(std::iter::once(&**ret))
             .map(|a| applied_arity(a, param))

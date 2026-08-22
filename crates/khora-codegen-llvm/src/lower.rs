@@ -37,7 +37,7 @@ use khora_hir::body::{
     BinOp, Body, Expr, ExprId, Literal, LocalId, MatchArm, Pat, PatId, Stmt, UnOp,
 };
 use khora_perceus::{is_boxed, RcPlan};
-use khora_types::{BodyTypes, Type, VariantInfo};
+use khora_types::{as_written, BodyTypes, Type, VariantInfo};
 use text_size::TextRange;
 
 use crate::backend::{
@@ -739,7 +739,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     self.call_named(&symbol, site, &all, range)
                 }
                 None if matches!(self.types.of(callee), Type::Fn { .. }) => {
-                    let Type::Fn { params, ret } = self.types.of(callee).clone() else {
+                    let Type::Fn { params, ret, .. } = self.types.of(callee).clone() else {
                         unreachable!("guarded by the match arm")
                     };
                     self.call_closure(callee, &params, &ret, args, range)
@@ -751,7 +751,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             },
             // A value of function type: a closure, called indirectly.
             _ if matches!(self.types.of(callee), Type::Fn { .. }) => {
-                let Type::Fn { params, ret } = self.types.of(callee).clone() else {
+                let Type::Fn { params, ret, .. } = self.types.of(callee).clone() else {
                     unreachable!("guarded by the match arm")
                 };
                 self.call_closure(callee, &params, &ret, args, range)
@@ -1116,6 +1116,31 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     /// Wraps a named function in a closure object so it can be passed along.
     fn function_value(&mut self, symbol: &str, range: TextRange) -> Flow<'ctx> {
+        // The type system lets an effectful function be a value; the backend
+        // does not yet. A closure is called through a pointer with no room for
+        // the evidence its callee needs and no tag on its return, so the
+        // adapter would forward the wrong shape. Reported here rather than
+        // miscompiled — the checker is right, this is the half that is behind.
+        if let Some(signature) = self.be.signature_of(symbol) {
+            let what = if can_raise(&signature) {
+                Some("raise")
+            } else if !evidence_of(&signature).is_empty() {
+                Some("require capabilities")
+            } else {
+                None
+            };
+            if let Some(what) = what {
+                return self.fail(
+                    format!(
+                        "`{}` can {what}, and the backend cannot build a value out of such a \
+                         function yet — call it directly for now",
+                        as_written(symbol)
+                    ),
+                    range,
+                );
+            }
+        }
+
         let Some(thunk) = self.be.thunk(symbol) else {
             return self.fail(
                 format!("`{symbol}` has a signature the backend cannot represent"),

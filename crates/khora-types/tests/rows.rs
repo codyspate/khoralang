@@ -263,3 +263,81 @@ fn a_catch_still_needs_the_mark() {
         "needs `!`",
     );
 }
+
+// --- rows on function types ------------------------------------------------
+
+const HANDLERS: &str = "module m;\n\
+                        export type Db;\n\
+                        export type Ai;\n\
+                        export type Req = | Of;\n\
+                        export type Res = | Of;\n\
+                        export type Oops = | Bad;\n\
+                        export fn mount<'r>(handler: Req -> Res with 'r) -> Int;\n\
+                        export fn mount_db(handler: Req -> Res with { db: Db }) -> Int;\n\
+                        export fn plain(r: Req) -> Res { Res::Of }\n\
+                        export fn served(r: Req) -> Res with { db: Db } { Res::Of }\n\
+                        export fn fallible(r: Req) -> Res raises Oops { Res::Of }\n";
+
+/// The point of the whole feature. Naming `served` does not charge its
+/// requirement to whoever wrote the name — the requirement is part of its
+/// type, and travels with the value to whoever eventually calls it.
+#[test]
+fn a_function_that_needs_a_capability_can_be_passed_as_a_value() {
+    assert_clean(&format!("{HANDLERS}export fn go() -> Int {{ mount(served) }}\n"));
+}
+
+/// The same, with the row written out rather than a variable.
+#[test]
+fn an_explicit_row_on_a_parameter_accepts_a_matching_function() {
+    assert_clean(&format!("{HANDLERS}export fn go() -> Int {{ mount_db(served) }}\n"));
+}
+
+/// A row variable absorbs the empty row too, so a plain function fits where a
+/// row-polymorphic one is wanted.
+#[test]
+fn a_row_variable_accepts_a_function_that_needs_nothing() {
+    assert_clean(&format!("{HANDLERS}export fn go() -> Int {{ mount(plain) }}\n"));
+}
+
+/// `with { db: Db }` is a demand on the *argument*, not a wildcard. This is
+/// what the fix for bare `'r` in type position was hiding: an unread row
+/// variable became `Unknown`, and `Unknown` accepts everything.
+#[test]
+fn an_explicit_row_on_a_parameter_rejects_a_function_needing_something_else() {
+    assert_reports(
+        &format!(
+            "{HANDLERS}\
+             export fn other(r: Req) -> Res with {{ ai: Ai }} {{ Res::Of }}\n\
+             export fn go() -> Int {{ mount_db(other) }}\n"
+        ),
+        "ai: Ai",
+    );
+}
+
+/// The error row travels the same way the requirement row does.
+#[test]
+fn a_functions_error_row_travels_with_it() {
+    assert_reports(
+        &format!("{HANDLERS}export fn go() -> Int {{ mount(fallible) }}\n"),
+        "Oops",
+    );
+}
+
+/// Calling through a binding charges the caller, exactly as calling by name
+/// does — the rows are in the type, so where the name came from is irrelevant.
+#[test]
+fn calling_through_a_binding_still_charges_the_caller() {
+    assert_reports(
+        &format!(
+            "{HANDLERS}export fn go(r: Req) -> Res {{ let f = served; f(r) }}\n"
+        ),
+        "db: Db",
+    );
+}
+
+#[test]
+fn calling_through_a_binding_is_accepted_when_declared() {
+    assert_clean(&format!(
+        "{HANDLERS}export fn go(r: Req) -> Res with {{ db: Db }} {{ let f = served; f(r) }}\n"
+    ));
+}
