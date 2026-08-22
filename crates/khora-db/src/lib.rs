@@ -200,3 +200,49 @@ pub fn host_target() -> &'static str {
         "linux"
     }
 }
+
+/// The standard library's source directory, if it can be found.
+///
+/// **`std` is not a dependency anybody declares.** It is found beside the
+/// compiler, the way `rustc` finds its sysroot and `go` finds `GOROOT`, so a
+/// program that has never written a manifest still has one. A line every
+/// package repeats and no package can get wrong is not a line worth writing.
+///
+/// Searched rather than configured, in the same order and for the same reasons
+/// as the runtime archive:
+///
+/// 1. `KHORA_STD`, for a packaged toolchain or an unusual layout.
+/// 2. Beside the running executable, and one directory up — which covers both
+///    an installed `khora` and a `cargo test` binary in `target/*/deps`.
+/// 3. This workspace's own `std/`, for a compiler still sitting in the tree it
+///    was built from.
+///
+/// `None` when nothing plausible is on disk, so the caller can decide whether
+/// that is fatal. It is not always: a test that hands the database its own
+/// sources needs no standard library at all.
+pub fn standard_library() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os("KHORA_STD") {
+        let path = std::path::PathBuf::from(explicit);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("std"));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("std"));
+            }
+        }
+    }
+    // Baked in at build time, so this only helps a compiler still in its own
+    // tree — which is exactly where the probes above miss.
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace) = manifest.parent().and_then(|c| c.parent()) {
+        candidates.push(workspace.join("std"));
+    }
+
+    candidates.into_iter().find(|p| p.is_dir())
+}

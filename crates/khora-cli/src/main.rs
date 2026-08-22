@@ -341,20 +341,110 @@ fn read(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// Every source file that makes up the program rooted at `paths`.
+///
+/// **The command line names an entry point; the manifest names everything
+/// else.** `khora build ./app` is the whole of what a developer should have to
+/// say — which packages it is built against is a property of the package, not
+/// of the invocation, and repeating it at every call is how the two come to
+/// disagree.
+///
+/// Three sources, in this order:
+///
+/// 1. What was named. A directory is walked; a file is taken as written.
+/// 2. Each `path` entry in the nearest `khora.toml`'s `[dependencies]`,
+///    resolved relative to that manifest. A `version` entry needs a registry,
+///    which is phase 10.
+/// 3. The standard library, always and without being asked — see
+///    [`khora_db::standard_library`].
+///
+/// Deduplicated by canonical path, so naming something the manifest already
+/// pulls in is harmless rather than a duplicate-module error.
 fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let roots: Vec<PathBuf> =
         if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
 
     let mut out = Vec::new();
-    for root in roots {
-        if root.is_dir() {
-            walk(&root, &mut out)?;
-        } else {
-            out.push(root);
+    for root in &roots {
+        gather(root, &mut out)?;
+    }
+
+    for root in &roots {
+        for dependency in path_dependencies(root)? {
+            gather(&dependency, &mut out)?;
         }
     }
-    out.sort();
+
+    if let Some(std_dir) = khora_db::standard_library() {
+        gather(&std_dir, &mut out)?;
+    }
+
+    // Sorted *and* deduplicated by canonical path, because the same file
+    // reached two ways has two spellings — `std/core.kh` from the command line
+    // and an absolute path from `standard_library()` — and two spellings of one
+    // file is a duplicate-module error rather than a harmless repetition.
+    let mut keyed: Vec<(PathBuf, PathBuf)> = out
+        .into_iter()
+        .map(|p| (std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone()), p))
+        .collect();
+    keyed.sort();
+    keyed.dedup_by(|a, b| a.0 == b.0);
+    Ok(keyed.into_iter().map(|(_, path)| path).collect())
+}
+
+/// Adds a file, or everything under a directory.
+fn gather(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if root.is_dir() {
+        walk(root, out)
+    } else {
+        out.push(root.to_path_buf());
+        Ok(())
+    }
+}
+
+/// The directories named by `path` dependencies of the manifest nearest `root`.
+///
+/// A manifest that cannot be parsed is not this command's problem to report —
+/// `khora check` on the manifest is — so it contributes nothing rather than
+/// failing the build with a second opinion about the same file.
+fn path_dependencies(root: &Path) -> Result<Vec<PathBuf>> {
+    let Some(manifest_path) = nearest_manifest(root) else { return Ok(Vec::new()) };
+    let Ok(text) = std::fs::read_to_string(&manifest_path) else { return Ok(Vec::new()) };
+    let Ok(parsed) = khora_manifest::Manifest::parse(&text) else { return Ok(Vec::new()) };
+    let base = manifest_path.parent().unwrap_or(Path::new("."));
+
+    let mut out = Vec::new();
+    for (name, dependency) in &parsed.manifest.dependencies {
+        match (&dependency.path, &dependency.version) {
+            (Some(relative), _) => out.push(base.join(relative)),
+            (None, Some(_)) => anyhow::bail!(
+                "`{name}` is declared with a version, and resolving one needs a registry \
+                 that does not exist yet. Point it at a `path` for now."
+            ),
+            (None, None) => anyhow::bail!(
+                "`{name}` says neither `path` nor `version`, so there is nothing to resolve"
+            ),
+        }
+    }
     Ok(out)
+}
+
+/// The `khora.toml` governing `start`: in it if it is a directory, beside it if
+/// it is a file, or in the nearest ancestor of either.
+fn nearest_manifest(start: &Path) -> Option<PathBuf> {
+    let mut here: Option<&Path> = Some(if start.is_dir() {
+        start
+    } else {
+        start.parent().unwrap_or(Path::new("."))
+    });
+    while let Some(dir) = here {
+        let candidate = dir.join("khora.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        here = dir.parent();
+    }
+    None
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {

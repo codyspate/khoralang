@@ -29,10 +29,10 @@ explicit-semicolons = true
 unused-capabilities = "deny"
 cyclomatic-complexity = { level = "warn", max = 15 }
 
+# `std` is not here: the standard library is found beside the compiler, the way
+# `rustc` finds its sysroot. A line every package repeats and none can get
+# wrong is not a line worth writing.
 [dependencies]
-"std.core" = { version = "1.0.0" }
-"std.net.http" = { version = "1.0.0" }
-"std.ai" = { version = "1.0.0" }
 
 # Sandboxed WASM build plugins replace arbitrary build.rs execution.
 [build]

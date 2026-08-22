@@ -112,10 +112,10 @@ fn only_this_targets_files_are_read() {
         + &String::from_utf8_lossy(&out.stderr);
 
     assert!(out.status.success(), "expected success, got:\n{text}");
-    assert!(
-        text.contains("checked 2 file(s)"),
-        "two of the four files belong in this build, got:\n{text}"
-    );
+    // Two of the four fixtures belong in this build, plus the standard library,
+    // which every build gets without asking. The count is what proves the other
+    // two targets' files were never read.
+    assert_eq!(count_of(&text), 2 + std_files(), "got:\n{text}");
 }
 
 /// A file named on the command line is read whichever target it names. Asking
@@ -139,5 +139,150 @@ fn a_file_named_outright_is_read_anyway() {
         + &String::from_utf8_lossy(&out.stderr);
 
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("checked 1 file(s)"), "{text}");
+    assert_eq!(count_of(&text), 1 + std_files(), "{text}");
+}
+
+/// How many files `khora check` said it checked.
+fn count_of(output: &str) -> usize {
+    let at = output.find("checked ").expect("a count in the output");
+    output[at + "checked ".len()..]
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("a number after `checked`")
+}
+
+/// How many files the standard library contributes to every build.
+///
+/// Counted rather than written down: `std` grows, and a test that has to be
+/// edited every time a module is added to it is a test nobody trusts.
+fn std_files() -> usize {
+    fn walk(dir: &std::path::Path, seen: &mut usize) {
+        for entry in std::fs::read_dir(dir).expect("a readable directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                walk(&path, seen);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                *seen += 1;
+            }
+        }
+    }
+    let root = khora_db::standard_library().expect("a standard library beside the compiler");
+    let mut seen = 0;
+    walk(&root, &mut seen);
+    seen
+}
+
+// --- the command line names an entry point; the manifest names the rest -----
+
+/// A package is built against what its manifest says, not against what the
+/// invocation remembers to mention.
+///
+/// `khora build ./app` is the whole of what a developer should have to say.
+/// Which packages it is built against is a property of the package, and
+/// repeating it at every call is how the two come to disagree.
+#[test]
+fn a_path_dependency_comes_from_the_manifest() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("deps");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("app")).expect("a workspace");
+    std::fs::create_dir_all(root.join("greet")).expect("a workspace");
+
+    std::fs::write(
+        root.join("greet/greet.kh"),
+        "module acme::greet;\nexport fn greeting() -> Int { 7 }\n",
+    )
+    .expect("a fixture");
+    std::fs::write(
+        root.join("app/khora.toml"),
+        "[package]
+name = \"app\"
+version = \"0.1.0\"
+edition = \"2026\"
+
+[dependencies]
+\"acme.greet\" = { path = \"../greet\" }
+",
+    )
+    .expect("a manifest");
+    std::fs::write(
+        root.join("app/main.kh"),
+        "module app::main;
+import acme::greet::{greeting};
+export fn main() -> Int { greeting() }
+",
+    )
+    .expect("a fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(root.join("app"))
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "the dependency should have been found:\n{text}");
+    assert_eq!(count_of(&text), 2 + std_files(), "the app and its dependency:\n{text}");
+}
+
+/// The standard library is there without being declared, the way `rustc` finds
+/// its sysroot. A program that has never written a manifest still has one.
+#[test]
+fn the_standard_library_needs_no_declaring() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("implicit_std");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    std::fs::write(
+        dir.join("main.kh"),
+        "module app::main;
+import std::core::{Option};
+export fn main() -> Int { Option::Some(41).unwrap_or(0) + 1 }
+",
+    )
+    .expect("a fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(&dir)
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "no manifest, and `std` is still there:\n{text}");
+}
+
+/// A version needs a registry, which does not exist. Saying so beats resolving
+/// to nothing and failing somewhere further along.
+#[test]
+fn a_version_dependency_says_what_is_missing() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("versioned");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    std::fs::write(
+        dir.join("khora.toml"),
+        "[package]
+name = \"app\"
+version = \"0.1.0\"
+edition = \"2026\"
+
+[dependencies]
+\"acme.json\" = { version = \"1.0.0\" }
+",
+    )
+    .expect("a manifest");
+    std::fs::write(dir.join("main.kh"), "module app::main;\nexport fn main() -> Int { 0 }\n")
+        .expect("a fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(&dir)
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("registry"), "expected the missing registry to be named:\n{text}");
 }

@@ -66,7 +66,7 @@ static FMT: Schema = Schema::Fields(&[
 static LINTS: Schema = Schema::Map(&OPEN);
 
 static DEPENDENCIES: Schema = Schema::Map(&DEPENDENCY);
-static DEPENDENCY: Schema = Schema::Fields(&[("version", &OPEN)]);
+static DEPENDENCY: Schema = Schema::Fields(&[("version", &OPEN), ("path", &OPEN)]);
 
 static BUILD: Schema = Schema::Fields(&[("target", &OPEN), ("plugin", &OPEN)]);
 

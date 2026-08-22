@@ -324,6 +324,7 @@ dependencies = [
  "khora-diagnostics",
  "khora-fmt",
  "khora-hir",
+ "khora-manifest",
  "khora-syntax",
  "khora-types",
 ]

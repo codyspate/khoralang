@@ -421,10 +421,34 @@ impl<'de> Visitor<'de> for LintVisitor {
 }
 
 /// One entry of the `[dependencies]` table.
+///
+/// Exactly one of `version` and `path` says where the package comes from. A
+/// `path` is resolved relative to the manifest, and needs no version because
+/// the source is right there; a `version` is resolved through the registry,
+/// which does not exist until phase 10.
+///
+/// **`std` is not among these.** The standard library is found beside the
+/// compiler, the way `rustc` finds its sysroot, so a program that has never
+/// written a manifest still has one. Declaring it would be a line every
+/// package repeats and no package can get wrong.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Dependency {
-    /// The requested version.
-    pub version: String,
+    /// The requested version, for a package from the registry.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Where the package is, relative to this manifest.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+impl Dependency {
+    /// Whether this says where the package comes from at all.
+    ///
+    /// A dependency with neither is the mistake worth naming: it parses, and
+    /// then resolves to nothing.
+    pub fn is_located(&self) -> bool {
+        self.version.is_some() || self.path.is_some()
+    }
 }
 
 /// The `[build]` table.

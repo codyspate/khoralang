@@ -71,12 +71,11 @@ fn the_reference_manifest_parses_with_no_warnings() {
         "lint-defined options should be kept as written"
     );
 
-    assert_eq!(
-        manifest.dependencies.keys().collect::<Vec<_>>(),
-        ["std.ai", "std.core", "std.net.http"],
-        "a quoted dotted name is one dependency, not a tree of tables"
+    assert!(
+        manifest.dependencies.is_empty(),
+        "`std` is found beside the compiler rather than declared, so the reference \
+         application depends on nothing yet"
     );
-    assert_eq!(manifest.dependencies["std.core"].version, "1.0.0");
 
     let build = manifest.build.expect("the reference manifest configures `[build]`");
     assert_eq!(build.target.as_deref(), Some("x86_64-unknown-linux-musl"));
@@ -281,7 +280,7 @@ retries = 3
         parsed.manifest.package.name, "p",
         "the recognized part of the manifest must survive intact"
     );
-    assert_eq!(parsed.manifest.dependencies["std.effect"].version, "1.0.0");
+    assert_eq!(parsed.manifest.dependencies["std.effect"].version.as_deref(), Some("1.0.0"));
     assert_eq!(parsed.manifest.tasks["ci"].description.as_deref(), Some("CI"));
 
     let license = &parsed.warnings[0];
@@ -456,4 +455,47 @@ fn task_names_may_be_anything_a_toml_key_may_be() {
         "task names are user-chosen keys, not a fixed set"
     );
     assert!(parsed.warnings.is_empty(), "a task name is never an unknown key");
+}
+
+/// A dotted name in quotes is one key, not a tree of tables. TOML will happily
+/// read `[dependencies.std.net.http]` as three nested tables, and a dependency
+/// called `std.net.http` is one thing.
+#[test]
+fn a_quoted_dotted_dependency_is_one_key() {
+    let parsed = Manifest::parse(
+        "[package]
+name = \"p\"
+version = \"0.1.0\"
+edition = \"2026\"
+
+[dependencies]
+\"acme.json\" = { version = \"1.0.0\" }
+\"acme.http\" = { path = \"../http\" }
+",
+    )
+    .expect("a manifest");
+    let deps = parsed.manifest.dependencies;
+    assert_eq!(deps.keys().collect::<Vec<_>>(), ["acme.http", "acme.json"]);
+    assert_eq!(deps["acme.json"].version.as_deref(), Some("1.0.0"));
+    assert_eq!(deps["acme.json"].path, None);
+    assert_eq!(deps["acme.http"].path.as_deref(), Some("../http"));
+    assert!(deps.values().all(|d| d.is_located()));
+}
+
+/// A dependency that says neither where nor which version parses, and resolves
+/// to nothing. Worth naming rather than discovering at link time.
+#[test]
+fn a_dependency_with_no_source_is_not_located() {
+    let parsed = Manifest::parse(
+        "[package]
+name = \"p\"
+version = \"0.1.0\"
+edition = \"2026\"
+
+[dependencies]
+\"acme.json\" = {}
+",
+    )
+    .expect("a manifest");
+    assert!(!parsed.manifest.dependencies["acme.json"].is_located());
 }

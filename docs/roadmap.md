@@ -928,10 +928,38 @@ The bindings A6 names — TLS and crypto, compression, numeric kernels — are
 consumers of phase 7 and are *not* on this critical path. A great deal of Khora
 can be written before anything needs TLS.
 
+- **8.2 One entry point, and the manifest names the rest — done.**
+  `khora build ./app` is the whole of what a developer says. Which packages it
+  is built against is a property of the package rather than of the invocation,
+  and repeating it at every call is how the two come to disagree. `path`
+  dependencies in `[dependencies]` are resolved relative to the nearest
+  `khora.toml`; a `version` says plainly that it needs a registry, which is
+  10.2.
+
+  **`std` is not declared at all.** It is found beside the compiler, the way
+  `rustc` finds its sysroot and `go` finds `GOROOT` — a line every package
+  repeats and none can get wrong is not a line worth writing, and a program
+  with no manifest still has a standard library. Same search as the runtime
+  archive: `KHORA_STD`, then beside the executable, then this workspace.
+
+  This is what made the reference application measurable. Building it went from
+  twelve `cannot find module` errors to six real ones, which is now the list
+  phase 8 is working through.
+
 **Exit:** the reference application runs and serves a request. That is phase
 4's unmet half, and it stays the criterion because it exercises the whole
 stack: capabilities, a fallible service, `catch`, a router carrying its
 handlers' requirements, and now real I/O underneath.
+
+What stands between here and it, measured rather than guessed:
+
+- `std::net::http` and `std::ai` are signatures with no bodies —
+  `#Params::get` is the first the backend trips over.
+- Three capability values (`ledger`, `ai`, `report`) have no machine type,
+  because an effect whose operations carry a `forall` is not something the
+  backend can lay out yet.
+- Two closures whose types were never pinned down, and one *"this closure was
+  never declared, which is a compiler bug"* — which is exactly what it says.
 
 ---
 
