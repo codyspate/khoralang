@@ -41,11 +41,19 @@ export type ModelError =
   | InferenceEngineFailure(msg: String)
   | SchemaExtractionError(details: String);
 
+/// A type a model can be asked to produce, and the description it is asked
+/// with. `Spec` is deliberately the type's own business: a JSON schema, a
+/// grammar, a set of examples — `extract` only has to hand it over.
+export trait Extract {
+  type Spec;
+  fn spec() -> Self::Spec;
+}
+
 /// Inference is a capability, not a value: a function that classifies text
 /// declares `with { ai: LLMService }`, and the caller decides what serves it.
 export effect LLMService {
   complete: Prompt -> String raises ModelError,
-  extract: forall <Schema> . (Prompt, Schema::Spec) -> Schema raises ModelError,
+  extract: forall <A: Extract> . (Prompt, A::Spec) -> A raises ModelError,
   embed: forall <const Dim: Int> . String -> Embedding<Dim, F32> raises ModelError,
 }
 

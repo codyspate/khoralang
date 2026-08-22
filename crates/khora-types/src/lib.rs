@@ -760,12 +760,14 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             unifier: Unifier::new().with_assoc(types.traits.assoc_bindings()),
             lambdas: Vec::new(),
             demanded: Vec::new(),
+            projections: Vec::new(),
             installed: Vec::new(),
             marked: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
         checker.check_bounds();
+        checker.settle_projections();
         checker.check_effects();
         out.errors.extend(checker.errors);
         // Published types are zonked: a consumer should never see a variable,
@@ -871,6 +873,9 @@ struct Checker<'a> {
     /// because an exported signature is a promise and inferring one silently
     /// would let a body widen it. `docs/design/effects.md`.
     demanded: Vec<Demand>,
+    /// Where each deferred projection was written, in the order the unifier
+    /// deferred them, so `settle_projections` can report against the source.
+    projections: Vec<(TextRange, String)>,
     /// The capabilities in scope from enclosing `with` blocks.
     ///
     /// A call inside one is served by it, so its labels never reach the
@@ -997,7 +1002,16 @@ impl<'a> Checker<'a> {
     /// `context` is a noun phrase: the mismatch supplies the detail after it,
     /// so the two read as one sentence.
     fn require(&mut self, expected: &Type, found: &Type, context: &str, range: TextRange) -> bool {
-        match self.unifier.unify(expected, found) {
+        // A projection whose owner is not known yet defers instead of failing,
+        // and is retried in `settle_projections`. Where it was written is not
+        // recoverable from the unifier, so it is noted here, in the one place
+        // that has both a range and a reason.
+        let before = self.unifier.deferred_len();
+        let outcome = self.unifier.unify(expected, found);
+        for _ in before..self.unifier.deferred_len() {
+            self.projections.push((range, context.to_string()));
+        }
+        match outcome {
             Ok(()) => true,
             Err(why) => {
                 // Zonk first: a message naming `?3` instead of `Int` is useless,
@@ -1613,6 +1627,20 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Retries the projections that were waiting on their owner.
+    ///
+    /// Run after the body, for the same reason `check_effects` is: the fact
+    /// that settles `?A` in `extract(Num::spec())` is the call's return type,
+    /// and that is not known until the expression it sits in has been
+    /// inferred. `docs/design/associated-items.md` decides this (D3).
+    fn settle_projections(&mut self) {
+        let sites = std::mem::take(&mut self.projections);
+        for ((_, why), (range, context)) in self.unifier.settle().into_iter().zip(sites) {
+            let Some(why) = why else { continue };
+            self.error(format!("{context}: {why}"), range);
+        }
+    }
+
     /// Checks everything the body demanded against what the signature promised.
     ///
     /// Run once, after the body: a requirement is satisfied by the declaration
@@ -1908,6 +1936,29 @@ impl<'a> Checker<'a> {
             self.demand(&signature, &type_args, &key, at, range);
             self.instantiations.insert(at, (key, type_args));
             return ty;
+        }
+
+        // `Num::spec()` where `spec` belongs to a trait `Num` implements. The
+        // owner names the *impl* rather than the trait, which is the reading a
+        // caller with a concrete type in hand wants: they know what they have,
+        // not which trait declared the function.
+        if self.types.adts.contains_key(owner) {
+            let found = self.types.traits.impls.iter().find(|i| {
+                traits::head_of(&i.self_type).as_deref() == Some(owner)
+                    && i.methods.iter().any(|m| m == name)
+            });
+            if let Some(chosen) = found {
+                let key = traits::method_key(&chosen.trait_name, owner, name);
+                let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else {
+                    return Type::Unknown;
+                };
+                let (ty, type_args) =
+                    self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+                let range = self.body.range(at);
+                self.demand(&signature, &type_args, &key, at, range);
+                self.instantiations.insert(at, (key, type_args));
+                return ty;
+            }
         }
 
         let bounds = self.bounds_on(owner);

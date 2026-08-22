@@ -755,3 +755,65 @@ fn an_impl_may_rename_the_methods_own_parameters() {
          }\n",
     );
 }
+
+// --- projecting off a type variable (D3) -----------------------------------
+
+const EXTRACT: &str = "module m;\n\
+                       export type Text = | Of(s: String);\n\
+                       export type Num = | Of(n: Int);\n\
+                       export type TextSpec = | Of;\n\
+                       export type NumSpec = | Of;\n\
+                       export trait Extract { type Spec; fn spec() -> Self::Spec; }\n\
+                       impl Extract for Text \
+                         { type Spec = TextSpec; fn spec() -> TextSpec { TextSpec::Of } }\n\
+                       impl Extract for Num \
+                         { type Spec = NumSpec; fn spec() -> NumSpec { NumSpec::Of } }\n\
+                       export fn extract<A: Extract>(spec: A::Spec) -> A;\n";
+
+/// The shape D3 was named after. `?A::Spec ~ NumSpec` cannot be solved when it
+/// is met — projection is not injective — so it waits for the return type to
+/// say what `A` is.
+#[test]
+fn a_projection_waits_for_its_owner() {
+    assert_clean(&format!("{EXTRACT}export fn f() -> Num {{ extract(Num::spec()) }}\n"));
+}
+
+/// A trait function reached through the type that implements it, which is how
+/// the spec gets named at all.
+#[test]
+fn a_trait_function_is_reached_through_the_implementing_type() {
+    assert_clean(&format!("{EXTRACT}export fn f() -> NumSpec {{ Num::spec() }}\n"));
+}
+
+/// Nothing settles `A`, and nothing later will.
+#[test]
+fn a_projection_nothing_settles_is_reported() {
+    assert_reports(
+        &format!("{EXTRACT}export fn f() -> Int {{ extract(Num::spec()); 0 }}\n"),
+        "nothing here says which type this is projected from",
+    );
+}
+
+/// The spec is one type's and the result is asked to be another's. Deferring
+/// must not turn a real mismatch into a pass.
+#[test]
+fn a_projection_that_does_not_fit_is_still_reported() {
+    assert_reports(
+        &format!("{EXTRACT}export fn f() -> Text {{ extract(Num::spec()) }}\n"),
+        "expected `TextSpec`, found `NumSpec`",
+    );
+}
+
+/// A rigid owner is the case that stays an error: inside a generic body
+/// `A::Spec` is opaque, and assuming what it becomes is the body deciding its
+/// caller's type.
+#[test]
+fn a_projection_off_a_rigid_parameter_is_still_rigid() {
+    assert_reports(
+        &format!(
+            "{EXTRACT}export fn f<A: Extract>(spec: A::Spec) -> A \
+             {{ extract(NumSpec::Of) }}\n"
+        ),
+        "NumSpec",
+    );
+}

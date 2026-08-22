@@ -213,10 +213,67 @@ That is the reason this document unblocks Phase 2.1 without settling everything.
 - **Typeclass method resolution.** Once A4 lands, `.` case 2 and `::` case 2ii
   have to consider instances, not just items declared against the type.
   Coherence rules are D6.
-- **`Schema::Spec` (D3).** `forall <Schema> . (Prompt, Schema::Spec) -> Schema`
-  projects an associated *type* off a type *variable*. That is `::` case 2ii
-  applied to something not yet known, and it is the hardest case in the language.
-  It needs associated types on typeclasses, and it is the reason the `impl` shape
-  above is probably the right one.
+- ~~**`Schema::Spec` (D3).**~~ Decided below.
 - **Glob imports and ambiguity.** If `import a::*;` and `import b::*;` both
   export `f`, referring to `f` should be an error naming both, not a silent pick.
+
+## D3 — projecting an associated type off a type variable
+
+`forall <Schema> . (Prompt, Schema::Spec) -> Schema` was listed as the hardest
+case in the language. It splits into two questions, and one of them turns out
+not to be hard.
+
+### The bound is not optional
+
+`Schema` as written has no bound, and without one `Schema::Spec` names nothing.
+There is no impl to look the projection up in, and any type could claim any
+`Spec`. So:
+
+> **A projection's owner must be bounded by a trait that declares the
+> associated type.** `A::Spec` is well formed exactly when some bound on `A`
+> declares `type Spec`.
+
+That is the same rule `Self::Item` already follows inside a trait, so no new
+coherence question arises: one impl per (trait, head) is already enforced, and
+the binding a projection normalizes through is the one that impl declares. The
+signature becomes:
+
+```
+export trait Extract {
+  type Spec;
+  fn spec() -> Self::Spec;
+}
+
+export effect LLMService {
+  extract: forall <A: Extract> . (Prompt, A::Spec) -> A raises ModelError,
+}
+```
+
+### The real difficulty is when, not whether
+
+`extract(Num::spec())` meets `?A::Spec ~ NumSpec` before anything has said what
+`?A` is. It cannot be solved backwards: projection is not injective, and two
+types may perfectly well share a `Spec`. But it is not an error either — the
+call's own return type usually settles `?A` a moment later, and in
+`fn f() -> Num { extract(Num::spec()) }` it does.
+
+> **A projection whose owner is still a variable defers.** It is retried once
+> the body has been inferred, alongside the effect-row obligations, which are
+> deferred for exactly the same reason. An owner that is *still* unsolved then
+> is an error asking for an annotation, not a silent pass.
+
+Retrying runs to a fixed point, because settling one projection can solve the
+owner of another: `f(g(x))` can leave the inner call waiting on the outer
+call's return type.
+
+A rigid `Param` owner is the case that stays an error. Inside a generic body
+`A::Spec` is opaque and will never normalize — assuming what it becomes is the
+body deciding its caller's type, which is the rule every other rigid parameter
+already follows.
+
+### What this does not decide
+
+Where the *bound* comes from when the projection appears in an effect
+operation's `forall`. The operation is checked against the effect declaration,
+so the bound is written there; nothing checks yet that a handler's
+implementation respects it.

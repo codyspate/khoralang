@@ -41,6 +41,10 @@ pub enum Mismatch {
     /// A row lacks a label the other requires, and cannot grow one because it
     /// is closed.
     Missing { label: String, ty: Type },
+    /// A projection whose owner inference never settled. `A::Spec` cannot be
+    /// solved backwards — two types may share a `Spec` — so if nothing else
+    /// says what `A` is, nothing will.
+    Unsolved,
 }
 
 impl std::fmt::Display for Mismatch {
@@ -52,6 +56,11 @@ impl std::fmt::Display for Mismatch {
             Mismatch::Infinite { ty, .. } => {
                 write!(f, "this would make an infinite type, containing `{ty}`")
             }
+            Mismatch::Unsolved => write!(
+                f,
+                "nothing here says which type this is projected from; \
+                 name it at the call or annotate the result"
+            ),
             Mismatch::Rigid { param, ty } => write!(
                 f,
                 "`{param}` is a type the caller chooses, so it cannot be assumed to be `{ty}`"
@@ -76,6 +85,15 @@ pub struct Unifier {
     /// rather than borrowed: there are a handful per program, and a lifetime
     /// here would spread to everything that holds a `Unifier`.
     assoc: Vec<AssocBinding>,
+    /// Projections whose owner was not known yet, and what they have to equal.
+    ///
+    /// `extract<A: Extract>(spec: A::Spec) -> A` called as `extract(Num::spec())`
+    /// meets `?A::Spec ~ NumSpec` before anything has said what `?A` is, and
+    /// projection is not injective — two types may share a `Spec` — so this
+    /// cannot be solved backwards. It is not an error either: the return type
+    /// usually settles `?A` a moment later. So it waits, and
+    /// [`Unifier::settle`] retries it once inference is done.
+    deferred: Vec<(Type, Type)>,
 }
 
 /// One `type Name = Value` from one impl.
@@ -113,6 +131,57 @@ impl Unifier {
         let mut mapping = HashMap::new();
         match_type(&binding.self_type, owner, &binding.generics, &mut mapping);
         Some(substitute(&binding.value, &mapping))
+    }
+
+    /// How many projections are waiting. Paired with [`Unifier::settle`] so a
+    /// caller can tell which of its own unifications deferred one.
+    pub fn deferred_len(&self) -> usize {
+        self.deferred.len()
+    }
+
+    /// Retries the projections that were waiting on their owner.
+    ///
+    /// One entry per deferral, **in the order they were deferred**, so a caller
+    /// that recorded where each one came from can pair the two up. Each is the
+    /// projection as it now stands and the mismatch if it still does not fit;
+    /// an owner that is *still* a hole is [`Mismatch::Unsolved`], since nothing
+    /// later is going to decide it.
+    pub fn settle(&mut self) -> Vec<(Type, Option<Mismatch>)> {
+        // Settling one can solve the owner of another — `f(g(x))` leaves the
+        // inner call waiting on the outer call's return type — so this runs to
+        // a fixed point. Results carry their original index because the order
+        // they *resolve* in is not the order they were written in.
+        let mut waiting: Vec<(usize, Type, Type)> = std::mem::take(&mut self.deferred)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (projection, other))| (i, projection, other))
+            .collect();
+        let mut out: Vec<(usize, Type, Option<Mismatch>)> = Vec::new();
+
+        loop {
+            let before = waiting.len();
+            let mut again = Vec::new();
+            for (index, projection, other) in waiting {
+                let Type::Assoc { owner, .. } = &projection else { continue };
+                if matches!(self.shallow(owner), Type::Var(_)) {
+                    again.push((index, projection, other));
+                    continue;
+                }
+                let resolved = self.shallow(&projection);
+                let why = self.unify(&resolved, &other).err();
+                out.push((index, resolved, why));
+            }
+            waiting = again;
+            if waiting.len() == before {
+                break;
+            }
+        }
+
+        for (index, projection, _) in waiting {
+            out.push((index, self.zonk(&projection), Some(Mismatch::Unsolved)));
+        }
+        out.sort_by_key(|(index, _, _)| *index);
+        out.into_iter().map(|(_, projection, why)| (projection, why)).collect()
     }
 
     /// A new hole for inference to fill.
@@ -224,6 +293,14 @@ impl Unifier {
                 self.unify(o1, o2)
             }
             (Type::Assoc { owner, name }, other) | (other, Type::Assoc { owner, name }) => {
+                // An owner that is still a hole may yet be filled, and usually
+                // is — by the call's own return type. One that is a rigid
+                // parameter never will be, and that is the real error.
+                if matches!(self.shallow(owner), Type::Var(_)) {
+                    let projection = Type::Assoc { owner: owner.clone(), name: name.clone() };
+                    self.deferred.push((projection, other.clone()));
+                    return Ok(());
+                }
                 Err(Mismatch::Rigid {
                     param: format!("{owner}::{name}"),
                     ty: other.clone(),

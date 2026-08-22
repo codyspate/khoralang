@@ -57,7 +57,6 @@ before the phase that depends on it starts.
 
 | # | Question | Blocks |
 | --- | --- | --- |
-| D3 | **`Schema::Spec` projects an associated type off a type *variable*.** With A4 this is tractable — associated types on typeclasses — but the coherence rules still need deciding. | 4.2 |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
 | D8 | **The Rust interop boundary.** How Rust's ownership and traits map onto Khora's reference counting and rows; whether we bind at the C ABI or generate richer shims. | 7 |
 | D10 | **Non-atomic reference counts versus threads.** `khora-rt` counts non-atomically; A5 promises fibers running across cores. Not a blocker — code generation never touches a refcount directly, so atomicity is a change inside the runtime. The recommendation is atomic by default with non-atomic where an object provably does not escape its fiber, and no `Rc`/`Arc` split. `docs/design/effect-runtime.md` §9. | 5 |
@@ -65,6 +64,15 @@ before the phase that depends on it starts.
 | D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Nothing in this roadmap owns this today, which is the failure mode errata entry 20 names. | 8.x |
 **Closed:**
 
+- **D3** (`Schema::Spec`) is decided in `docs/design/associated-items.md`. Two
+  rules. A projection's owner must be *bounded* by a trait declaring the
+  associated type — without a bound there is no impl to look it up in, and
+  `forall <Schema> . .. Schema::Spec ..` as originally written names nothing.
+  And a projection whose owner is still a variable *defers*, retried once the
+  body is inferred, because the call's own return type is usually what settles
+  it. Not the hardest case in the language after all: the coherence question
+  was already answered by one impl per (trait, head), and what was left was an
+  ordering problem with the same shape as the effect-row obligations.
 - **D1** (handler execution) is decided in `docs/design/effect-runtime.md`. The
   deciding argument is reference counting: multi-shot capture must *copy*
   frames, so every reference in them needs a `dup`, so the runtime needs to
