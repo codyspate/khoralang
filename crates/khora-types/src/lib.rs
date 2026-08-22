@@ -1531,7 +1531,7 @@ impl<'a> Checker<'a> {
                 field
             }
             Expr::Unary { op, operand } => match op {
-                UnOp::Neg => self.expect(operand, &Type::Int, "negation"),
+                UnOp::Neg => self.infer_negation(operand, hint, range),
                 UnOp::Not => self.expect(operand, &Type::Bool, "`!`"),
             },
             Expr::Binary { op, lhs, rhs } => self.infer_binary(op, lhs, rhs, hint),
@@ -1714,6 +1714,42 @@ impl<'a> Checker<'a> {
                 self.lambdas.last().cloned().unwrap_or(Type::Unknown)
             }
         }
+    }
+
+    /// `-x`, over any number.
+    ///
+    /// Two things it has to get right. The type is whatever is being negated
+    /// rather than always `Int`, so `-1.5` is a `Float` and `-b` on a `U8` is
+    /// refused for the better reason.
+    ///
+    /// And a negated *literal* is checked as one number, not as a negation
+    /// applied to another: `-128` is an `I8` even though `128` is not, and
+    /// there is no other way to write that type's smallest value. Folding it
+    /// here is what makes the sign part of the literal, which is what a reader
+    /// already assumes it is.
+    fn infer_negation(&mut self, operand: ExprId, hint: Option<Type>, range: TextRange) -> Type {
+        if let (Some(Type::Fixed(kind)), Expr::Literal(Literal::Int(text))) =
+            (&hint, self.body.expr(operand).clone())
+        {
+            let kind = *kind;
+            self.check_literal_fits(&format!("-{text}"), kind, range);
+            let ty = Type::Fixed(kind);
+            self.exprs.insert(operand, ty.clone());
+            return ty;
+        }
+
+        self.hint = hint;
+        let inner = self.infer(operand);
+        let inner = self.unifier.zonk(&inner);
+        // An unsolved variable becomes `Int`, which is what a bare `-x` in a
+        // generic position has always meant.
+        let expected = match inner {
+            Type::Float => Type::Float,
+            Type::Fixed(kind) => Type::Fixed(kind),
+            _ => Type::Int,
+        };
+        self.require(&expected, &inner, "negation", self.body.range(operand));
+        expected
     }
 
     fn infer_binary(

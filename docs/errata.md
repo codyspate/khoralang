@@ -781,3 +781,92 @@ takes two pointers — and the one place that did not was the one place that
 broke. It had been broken for as long as fibers had existed; the fiber tests
 passed because none of them could tell the difference between "read the tag as
 zero" and "the fiber finished".
+
+## 36. An annotation nobody read
+
+`let x: Bool = 5;` compiled clean, and had for as long as `let` had existed.
+The annotation was parsed, reached HIR lowering, and was dropped on the floor:
+`Stmt::Let` carried a pattern and an initializer and nothing else, so the
+binding simply took whatever type the initializer had.
+
+Nothing failed because of it, which is the whole trouble. **An annotation that
+is only a comment is worse than no annotation, because it is believed** — by
+the reader, and by the next person who changes the initializer and trusts the
+line above it to catch them.
+
+It survived this long because the type system never needed it. Inference is
+good enough that an annotation is usually redundant, so no test was written
+that turned on one, and the only annotations in the standard library happened
+to agree with what was inferred anyway. It was found while making
+`let b: U8 = 65` work, which is the first case where an annotation is the
+*only* thing that can decide the answer.
+
+The fix needed HIR to carry a type, which it could not: HIR sits below the type
+system and cannot name a `khora_types::Type`. So it carries `TypeRef`, an echo
+of the syntax — and `khora-types` resolves that through the same `named_type`
+that resolves the syntax, because two interpreters of one name is how the two
+come to disagree, and the disagreement would be silent.
+
+The rule: **a feature the compiler never reads is not a feature.** Anything the
+grammar accepts and the checker ignores is a promise the language is not
+keeping, and the only reliable way to find one is to ask, of each piece of
+syntax, which test fails when it is deleted.
+
+## 37. An entry that stopped being itself
+
+Pushing an expected type into a call — so that `let cells: Array<U8> =
+Array::new(4, 0)` can decide `A := U8` before the `0` decides it — made a row
+error appear in `std::core`'s `retry`, on a line that had not changed:
+`` `E` is not accounted for here ``, against two rows that printed identically.
+
+An error row labels each entry by *its own type's* name, since two errors of
+one type cannot be told apart. An entry whose type is not known yet therefore
+has no name yet, and carries the variable as a placeholder. `zonk` re-reads
+those labels when the variable is solved. **Unification did not — and it
+compares rows before anything zonks them.**
+
+While the variable was solved *by* the row unification, nobody noticed: the
+entry was still a placeholder when it was matched, and `pair_nameless` matched
+it by position. Solving it from somewhere else first — which is exactly what
+pushing a return type in does — left an entry still called `_` staring at an
+identical entry called `E`. Neither matched, both rows looked short, and a
+closed row that cannot grow reported a label nobody was missing.
+
+A latent bug rather than a new one. Any solution arriving from outside the row
+would have done it, and one eventually would have.
+
+The rule, which is the same one as entry 33 from the other side: **a derived
+value has exactly one place it is derived.** A label computed from a type has
+to be recomputed everywhere that type can change, and the way to be sure of
+that is to compute it on the way *out* rather than store it on the way in.
+
+## 38. A test suite that linked last week's runtime
+
+Making an array pack its elements changed `khora_array_new` to take a `stride`
+and grew the array header by a field. Every array test then failed, in a way
+that looked exactly like a code generator bug: an integer element dropped as if
+it were a pointer, `misaligned pointer dereference: address must be a multiple
+of 0x8 but is 0xa` — `0xa` being the number 10, which the program had just
+stored in the array.
+
+The generated IR was correct, and reading it proved nothing was wrong with it.
+What was wrong was on the other side of the link. **Generated executables link
+`khora-rt`'s `staticlib`, and `cargo test` does not build that** — it builds
+the rlib, because that is what a dependency needs. The archive on disk was
+forty minutes old. A program calling a five-argument function against an
+archive whose copy took four arguments read the stride as the `boxed` flag,
+concluded every element was a counted pointer, and released the integers.
+
+One test binary, `compile.rs`, did know to build the archive first. That made
+it worse rather than better: cargo runs test binaries in parallel, so whether
+any *other* binary saw a current archive was a race it usually won and
+sometimes did not. A suite that is right most of the time is how a real bug
+gets attributed to flakiness.
+
+The fix is a shared `tests/harness` every test binary that links a program
+calls. Cargo takes its own build lock, so the second caller finds the work
+already done.
+
+The rule: **when two artifacts have to agree, one build step has to produce
+both.** Until that is true, the check belongs at the start of every consumer,
+not at the start of one of them.

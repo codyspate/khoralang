@@ -1259,10 +1259,26 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// than reading whatever is next in memory. Same reasoning as trapping on
     /// integer overflow: a program that runs off its own array is wrong, and
     /// the useful thing is to say where.
+    /// How many bytes one element of `ty` occupies inside an array.
+    ///
+    /// Read from the *type* rather than from LLVM's data layout, because it is
+    /// also what the runtime is told and the two have to agree exactly. A
+    /// pointer and an `Int` are a word; a fixed-width integer is its own
+    /// width; a `Bool` is a byte, which it may as well be now that anything
+    /// narrower than a word is possible at all.
+    fn stride(ty: &Type) -> u64 {
+        match ty {
+            Type::Fixed(kind) => u64::from(kind.bits) / 8,
+            Type::Bool => 1,
+            _ => runtime::FIELD_WORD,
+        }
+    }
+
     fn array_slot(
         &mut self,
         array: inkwell::values::PointerValue<'ctx>,
         index: inkwell::values::IntValue<'ctx>,
+        stride: u64,
     ) -> PointerValue<'ctx> {
         let i64_type = self.be.ctx.i64_type();
         let length_slot =
@@ -1297,16 +1313,16 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.be.builder.build_unreachable().expect("sealing after a bounds failure");
 
         self.at(ok);
-        let offset = self
-            .be
-            .builder
-            .build_int_add(
-                index,
-                i64_type.const_int(runtime::ARRAY_HEADER_FIELDS, false),
-                "array.slot",
-            )
-            .expect("offsetting past the array header");
-        runtime::element_pointer(self.be.ctx, &self.be.builder, array, offset)
+        // The header is counted in whole words and the elements in strides, so
+        // the two are added as bytes rather than as indices.
+        runtime::element_pointer(
+            self.be.ctx,
+            &self.be.builder,
+            array,
+            index,
+            stride,
+            runtime::ARRAY_HEADER_FIELDS * runtime::FIELD_WORD,
+        )
     }
 
     /// `Array::new`, `Array::length`, `Array::get` and `Array::set`.
@@ -1332,11 +1348,17 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let glue = if boxed { self.be.drop_glue(&element) } else { self.be.null_pointer() };
                 let word = self.be.to_word(value);
                 let flag = self.be.ctx.i8_type().const_int(u64::from(boxed), false);
+                let stride =
+                    self.be.ctx.i8_type().const_int(Self::stride(&element), false);
                 let new = self.be.rt.array_new;
                 let array = self
                     .be
                     .builder
-                    .build_call(new, &[len.into(), word.into(), flag.into(), glue.into()], "array")
+                    .build_call(
+                        new,
+                        &[len.into(), word.into(), stride.into(), flag.into(), glue.into()],
+                        "array",
+                    )
                     .expect("allocating an array")
                     .try_as_basic_value()
                     .basic()
@@ -1367,7 +1389,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let element = self.array_element(&array_ty, range)?;
                 let object = self.expr(*array)?.into_pointer_value();
                 let at = self.expr(*index)?.into_int_value();
-                let slot = self.array_slot(object, at);
+                let slot = self.array_slot(object, at, Self::stride(&element));
 
                 let Some(llvm_ty) = self.be.llvm_type(&element) else {
                     return self.fail("an array of that element type cannot be read", range);
@@ -1391,7 +1413,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let object = self.expr(*array)?.into_pointer_value();
                 let at = self.expr(*index)?.into_int_value();
                 let new = self.expr(*value)?;
-                let slot = self.array_slot(object, at);
+                let slot = self.array_slot(object, at, Self::stride(&element));
 
                 if is_boxed(&element) {
                     let llvm_ty = self.be.llvm_type(&element).expect("a boxed type is a pointer");
@@ -2817,8 +2839,22 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     fn unary(&mut self, op: UnOp, operand: ExprId, _range: TextRange) -> Flow<'ctx> {
-        let value = self.expr(operand)?.into_int_value();
+        let ty = self.types.of(operand).clone();
+        let value = self.expr(operand)?;
+        if matches!(op, UnOp::Neg) && matches!(ty, Type::Float) {
+            let negated = self
+                .be
+                .builder
+                .build_float_neg(value.into_float_value(), "fneg")
+                .expect("negating a float");
+            return Some(negated.into());
+        }
+        let value = value.into_int_value();
         let result = match op {
+            // Not checked, unlike `-` the binary operator: the one value that
+            // cannot be negated is the type's minimum, and the only way to
+            // write it is as a negated literal, which the checker folds into
+            // the constant before it ever reaches here.
             UnOp::Neg => self.be.builder.build_int_neg(value, "neg"),
             // On an `i1`, `not` is `xor 1`, which is exactly logical negation.
             UnOp::Not => self.be.builder.build_not(value, "not"),

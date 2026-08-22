@@ -7,6 +7,8 @@
 //! has to be present at once. The same constraint C++ templates and Rust
 //! generics have, and the reason a symbol carries the module that defines it.
 
+mod harness;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -20,6 +22,7 @@ struct Ran {
 /// Compiles every `(name, source)` as one program and runs it.
 fn run(test: &str, modules: &[(&str, &str)]) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(test);
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
     let _ = std::fs::remove_file(&exe);

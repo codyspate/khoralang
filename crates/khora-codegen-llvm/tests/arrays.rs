@@ -7,6 +7,8 @@
 //! writes the vector, in Khora, out of an array and the mutable fields from
 //! 6.1, which is the pair phase 6 exists to make possible.
 
+mod harness;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -19,6 +21,7 @@ struct Ran {
 
 fn run(name: &str, source: &str) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
     let _ = std::fs::remove_file(&exe);

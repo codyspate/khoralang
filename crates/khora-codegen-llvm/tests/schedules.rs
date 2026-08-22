@@ -7,6 +7,8 @@
 //! — `retry`, `repeat` — is ordinary Khora written against that choice, which
 //! is the claim these tests are really checking.
 
+mod harness;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -19,6 +21,7 @@ struct Ran {
 
 fn run(name: &str, source: &str) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
     let _ = std::fs::remove_file(&exe);

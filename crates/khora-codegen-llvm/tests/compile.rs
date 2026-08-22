@@ -10,9 +10,12 @@
 //! the whole file compiles to nothing so the default `cargo test` stays green.
 #![cfg(feature = "llvm")]
 
+mod harness;
+
+use harness::ensure_runtime;
+
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::OnceLock;
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
@@ -20,35 +23,6 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 struct Ran {
     code: Option<i32>,
     stdout: String,
-}
-
-/// Makes sure the runtime archive exists and is current.
-///
-/// `cargo test -p khora-codegen-llvm` builds `khora-rt`'s *rlib*, because that
-/// is what a dependency needs; it does not build the `staticlib` crate type,
-/// which is what generated executables link against. So the archive is built
-/// here, once per test binary. A nested cargo invocation is safe: the build
-/// lock is released before test binaries run.
-fn ensure_runtime() {
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let built = Command::new("cargo")
-            .args(["build", "-p", "khora-rt"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .output();
-        match built {
-            Ok(output) if output.status.success() => {}
-            other => {
-                // Only fatal if there is no archive to fall back on: a
-                // developer may have built one by hand, or be running from a
-                // packaged toolchain with no cargo at all.
-                assert!(
-                    khora_codegen_llvm::toolchain::runtime_archive().is_some(),
-                    "could not build khora-rt and no runtime archive was found: {other:?}"
-                );
-            }
-        }
-    });
 }
 
 /// A private directory for one test's artifacts.

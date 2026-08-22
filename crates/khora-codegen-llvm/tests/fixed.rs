@@ -8,6 +8,8 @@
 //! comparison follows the type's signedness, and a conversion either fits or
 //! stops. `docs/design/numbers.md`.
 
+mod harness;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -20,6 +22,7 @@ struct Ran {
 
 fn build(name: &str, source: &str) -> Result<PathBuf, Vec<String>> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
     let _ = std::fs::remove_file(&exe);
@@ -89,6 +92,11 @@ impl U64 {
   fn to_int(self) -> Int;
   fn wrapping_to_int(self) -> Int;
   fn shr(self, other: U64) -> U64;
+}
+
+impl U16 {
+  fn of(value: Int) -> U16;
+  fn to_int(self) -> Int;
 }
 
 impl I8 {
@@ -223,7 +231,7 @@ fn main() -> Int {{
   print(if big < small {{ 1 }} else {{ 0 }});
   print(if big > small {{ 1 }} else {{ 0 }});
   print(U8::to_int(U8::shr(big, 1)));
-  let negative: I8 = 0 - 100;
+  let negative: I8 = -100;
   print(I8::to_int(I8::shr(negative, 1)));
   0
 }}
@@ -331,5 +339,80 @@ fn main() -> Int {{
     let top: i64 = lines[1].parse().expect("a number");
     assert!(whole > 0 && whole <= u32::MAX.into(), "a U32 came back as {whole}");
     assert_eq!(top, whole >> 24, "the shift is logical, so the top byte is just the top byte");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The point of a byte array: a byte per element.
+///
+/// Measured rather than asserted in a comment. `khora_alloc_count` cannot see
+/// sizes, so this reads the array's own header — the length, and the stride the
+/// allocator was told — which is the same pair the runtime uses to walk it. An
+/// `Array<U8>` of a thousand elements is a thousand bytes plus a header, and a
+/// word per byte would be the difference between a byte buffer and a joke.
+#[test]
+fn a_byte_array_is_packed() {
+    let ran = run(
+        "fixed_packed",
+        &format!(
+            "{HEAD}
+fn main() -> Int {{
+  let bytes: Array<U8> = Array::new(1000, 0);
+  Array::set(bytes, 0, 1);
+  Array::set(bytes, 1, 2);
+  Array::set(bytes, 999, 255);
+  print(U8::to_int(Array::get(bytes, 0)));
+  print(U8::to_int(Array::get(bytes, 1)));
+  print(U8::to_int(Array::get(bytes, 999)));
+  print(U8::to_int(Array::get(bytes, 500)));
+  print(Array::length(bytes));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n2\n255\n0\n1000\n",
+        "neighbouring bytes do not overwrite each other, and the untouched ones are the fill"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Every width addresses its own elements, and none of them tread on the next.
+/// A stride that is right for one width and wrong for another is a bug that
+/// only the wrong width finds.
+#[test]
+fn every_width_addresses_its_own_elements() {
+    let ran = run(
+        "fixed_strides",
+        &format!(
+            "{HEAD}
+fn main() -> Int {{
+  let halves: Array<U16> = Array::new(3, 0);
+  Array::set(halves, 0, 65535);
+  Array::set(halves, 1, 1);
+  print(U16::to_int(Array::get(halves, 0)));
+  print(U16::to_int(Array::get(halves, 1)));
+
+  let quarters: Array<U32> = Array::new(3, 0);
+  Array::set(quarters, 1, 4294967295);
+  Array::set(quarters, 2, 7);
+  print(U32::to_int(Array::get(quarters, 1)));
+  print(U32::to_int(Array::get(quarters, 2)));
+  print(U32::to_int(Array::get(quarters, 0)));
+
+  let signed: Array<I8> = Array::new(2, 0);
+  Array::set(signed, 0, -128);
+  Array::set(signed, 1, 127);
+  print(I8::to_int(Array::get(signed, 0)));
+  print(I8::to_int(Array::get(signed, 1)));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout,
+        "65535\n1\n4294967295\n7\n0\n-128\n127\n"
+    );
     assert_eq!(ran.code, Some(0));
 }

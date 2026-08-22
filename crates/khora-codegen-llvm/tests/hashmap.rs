@@ -8,6 +8,8 @@
 //! the pieces phase 6 added really do compose into a data structure, and that a
 //! round trip of inserts and removals leaves nothing behind.
 
+mod harness;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -126,6 +128,7 @@ struct Ran {
 
 fn run(name: &str, source: &str) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
     let _ = std::fs::remove_file(&exe);

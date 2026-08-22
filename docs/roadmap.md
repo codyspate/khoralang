@@ -579,10 +579,38 @@ argument that settled A6.
   better primitive. Until then a nursery whose children all write into one
   collection is rejected. That is real friction and it is the honest cost of
   the rule.
-- **6.2 Fixed-width integers, and bytes.** No `u8` means no bytes, which means
-  no parsing, no wire formats, no encoding. `Int` alone is a toy.
+- **6.2 Fixed-width integers, and bytes — done, except for strings.** `U8`,
+  `U16`, `U32`, `U64`, `I8`, `I16` and `I32`. `I64` is not among them: it is a
+  second spelling of `Int`, because two 64-bit signed integers would mean a
+  conversion between them that can never fail and never does anything.
 
-  **Overflow traps, in every build — done for `Int`.** Swift's answer rather
+  Everything is at the type's own width, which is the only thing that makes any
+  of it worth having: a `U8` addition traps at 255 rather than 2^63, `255 < 100`
+  is false because an unsigned type compares unsigned, and `>>` brings in zeros
+  for an unsigned type — the logical shift `Int` could never express. An
+  `Array<U8>` is **one byte per element**; the array header carries the stride,
+  and a byte buffer that cost eight bytes a byte would not be one. FNV-1a over
+  a byte array is in the tests, which is the first real hash in this repository.
+
+  A literal takes the type being asked of it — `let b: U8 = 65`, the `56` in
+  `U8::wrapping_add(b, 56)`, and the `0` in `Array::new(4, 0)` when the binding
+  says `Array<U8>`. It is a hint rather than a demand, re-armed only where a
+  type passes through unchanged, so the `0` in `array[0]` stays an index. The
+  sign is part of the literal too: `-128` is an `I8` even though `128` is not.
+
+  Conversions are explicit and go through `Int` — `U8::of` traps, `U8::wrapping`
+  truncates, `U8::to_int` goes back — which is four methods per type instead of
+  one for each of the forty-two ordered pairs. `docs/design/numbers.md` has the
+  reasoning.
+
+  Two older bugs came out of it, both silent: a `let` annotation was parsed and
+  then ignored (errata 36), and a row entry's label went stale when its variable
+  was solved from outside the row (errata 37). A third was in the test harness
+  rather than the compiler — every test binary now builds the runtime archive it
+  links, because one of them doing it was a race the others sometimes lost
+  (errata 38).
+
+  **Overflow traps, in every build.** Swift's answer rather
   than Rust's: a program that passes its tests and then wraps in production is
   the failure worth spending a branch to prevent, and two behaviours put the
   difference where it is most expensive to find. LLVM's `with.overflow`
@@ -594,13 +622,18 @@ argument that settled A6.
   bit operations landed with them, which is what let the hash map stop
   apologising for its hash.
 
-  Methods rather than operators: `^`, `&`, `|`, `<<` and `>>` are five new
-  tokens and `>>` has to be told apart from the end of two nested type
-  arguments. Not hard, and not what a hash function was waiting for.
+  `^`, `&`, `|`, `<<` and `>>` are five new tokens and `>>` has to be told
+  apart from the end of two nested type arguments. Not hard, and not what a
+  hash function was waiting for.
 
-  **Still to do:** the fixed-width types themselves. `Int` is the only integer
-  there is, so there are still no bytes, and `Array<U8>` is what a string index
-  and every wire format need.
+  Methods rather than operators for the bit operations, and the same seven
+  operations exist on every fixed-width type — `docs/design/numbers.md` has the
+  table and why it reads like one.
+
+  **Still to do:** a string's bytes. The types exist and the array is packed,
+  but nothing turns a `String` into an `Array<U8>` yet, so hashing a string is
+  still out of reach and `Map`'s keys are still `Int`. That is the last piece
+  of this item and the first piece of a real `String`.
 - **6.3 Floats — done.** `Float` is IEEE-754 double precision: `f64` in the
   backend, a decimal literal in the grammar, `+ - * /` and the six comparisons.
   No overflow trap, because IEEE arithmetic reaches infinity rather than
@@ -646,8 +679,9 @@ removals leave the live-object count at zero —
 `a_round_trip_of_inserts_and_removals_leaves_nothing` in
 `crates/khora-codegen-llvm/tests/hashmap.rs`.
 
-One thing the map is still honest about, waiting on 6.2: its keys are `Int`,
-because hashing a string means walking its bytes and there are no bytes yet.
+One thing the map is still honest about: its keys are `Int`. There are bytes
+now, and an `Array<U8>` is packed, but nothing turns a `String` into one — so
+hashing a string is the piece still missing rather than the bytes themselves.
 The hash itself is no longer an apology — once wrapping multiplication and the
 bit operations landed, `Map::slot` became a Fibonacci multiply and an xor-shift,
 which is what a hash is supposed to look like.

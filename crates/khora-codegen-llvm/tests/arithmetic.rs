@@ -10,6 +10,8 @@
 //!
 //! Wrapping is still reachable, by name, for the places that genuinely want it.
 
+mod harness;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -22,6 +24,7 @@ struct Ran {
 
 fn run(name: &str, source: &str) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
     let _ = std::fs::remove_file(&exe);
@@ -264,6 +267,7 @@ fn main() -> Int {{
 #[test]
 fn an_int_and_a_float_do_not_mix() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float_mix");
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
 
     let db = KhoraDatabase::new();
@@ -278,4 +282,27 @@ fn an_int_and_a_float_do_not_mix() {
         .expect_err("mixing an Int and a Float should be refused");
     let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
     assert!(messages.iter().any(|m| m.contains("arithmetic")), "{messages:?}");
+}
+
+/// Negation is over whatever is being negated, and a negated literal is one
+/// number rather than a negation applied to another — which is the only way
+/// `I8`'s smallest value can be written at all.
+#[test]
+fn negation_follows_the_type_it_negates() {
+    let ran = run(
+        "neg_typed",
+        &format!(
+            "{FLOAT}
+fn main() -> Int {{
+  print(-1.5);
+  print(-0.0 - 2.5);
+  khora_print_int(-7);
+  khora_print_int(- (3 + 4));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "-1.5\n-2.5\n-7\n-7\n");
+    assert_eq!(ran.code, Some(0));
 }

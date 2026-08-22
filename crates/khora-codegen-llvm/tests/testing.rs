@@ -8,6 +8,8 @@
 //! these pin is the visible half of that: every test runs, each one's verdict
 //! is its own, and the suite's exit status is whether they all passed.
 
+mod harness;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -20,6 +22,7 @@ struct Ran {
 
 fn run_tests(name: &str, source: &str) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "tests.exe" } else { "tests" });
     let _ = std::fs::remove_file(&exe);
@@ -140,6 +143,7 @@ test \"d\" {{ assert(halve(8)! == 4); }}
 #[test]
 fn assert_outside_a_test_is_refused() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("suite_assert_outside");
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
 
     let db = KhoraDatabase::new();

@@ -9,6 +9,8 @@
 //! end of a block, an early `return`, a raise passing through — are paths code
 //! generation already emitted. Nothing here needed a new rule about unwinding.
 
+mod harness;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -21,6 +23,7 @@ struct Ran {
 
 fn run(name: &str, source: &str) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
     let _ = std::fs::remove_file(&exe);

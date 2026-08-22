@@ -148,7 +148,8 @@ pub struct Runtime<'ctx> {
     pub fibers_wait: FunctionValue<'ctx>,
     /// `void khora_fibers_release(void *fibers)` — a `drop_fields` callback.
     pub fibers_release: FunctionValue<'ctx>,
-    /// `void *khora_array_new(int64_t len, size_t fill, _Bool boxed, void (*glue)(void *))`
+    /// `void *khora_array_new(int64_t len, size_t fill, uint8_t stride, _Bool boxed,
+    ///                            void (*glue)(void *))`
     pub array_new: FunctionValue<'ctx>,
     /// `void khora_array_release(void *array)` — a `drop_fields` callback.
     pub array_release: FunctionValue<'ctx>,
@@ -230,7 +231,10 @@ impl<'ctx> Runtime<'ctx> {
             fibers_release: declare("khora_fibers_release", void.fn_type(&[ptr.into()], false)),
             array_new: declare(
                 "khora_array_new",
-                ptr.fn_type(&[i64t.into(), i64t.into(), i8t.into(), ptr.into()], false),
+                ptr.fn_type(
+                    &[i64t.into(), i64t.into(), i8t.into(), i8t.into(), ptr.into()],
+                    false,
+                ),
             ),
             array_release: declare("khora_array_release", void.fn_type(&[ptr.into()], false)),
             bounds_fail: declare(
@@ -302,21 +306,29 @@ pub fn field_pointer<'ctx>(
 
 /// The same, for a field whose index is only known at run time.
 ///
-/// An array element. The byte offset has to be computed rather than folded,
-/// which is the only difference — the layout claim is identical, and stated
-/// once in [`field_pointer`]'s documentation.
+/// An array element. Two differences from [`field_pointer`]: the byte offset
+/// is computed rather than folded, and the scale is the element's own width
+/// rather than a word — an `Array<U8>` is a byte per element, because a byte
+/// buffer that costs eight bytes a byte is not one. The layout claim is
+/// otherwise identical and is stated once over there.
+///
+/// `stride` is 1, 2, 4 or 8, all of which divide a word, so an element is
+/// aligned whenever the header is — and the header is a whole number of words
+/// by construction.
 pub fn element_pointer<'ctx>(
     ctx: &'ctx Context,
     builder: &inkwell::builder::Builder<'ctx>,
     object: PointerValue<'ctx>,
     index: inkwell::values::IntValue<'ctx>,
+    stride: u64,
+    base: u64,
 ) -> PointerValue<'ctx> {
     let i64t = ctx.i64_type();
     let scaled = builder
-        .build_int_mul(index, i64t.const_int(FIELD_WORD, false), "field.bytes")
+        .build_int_mul(index, i64t.const_int(stride, false), "field.bytes")
         .expect("scaling a field index");
     let offset = builder
-        .build_int_add(scaled, i64t.const_int(FIELD_OFFSET, false), "field.offset")
+        .build_int_add(scaled, i64t.const_int(FIELD_OFFSET + base, false), "field.offset")
         .expect("offsetting past the header");
     unsafe {
         builder

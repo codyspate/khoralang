@@ -1280,8 +1280,17 @@ pub const ARRAY_LEN_FIELD: usize = 0;
 pub const ARRAY_GLUE_FIELD: usize = 1;
 /// Field index of the flag saying whether elements are counted at all.
 pub const ARRAY_BOXED_FIELD: usize = 2;
+/// Field index of the element size in bytes: 1, 2, 4 or 8.
+///
+/// An `Array<U8>` is a byte per element, not a word per element. A byte buffer
+/// that costs eight bytes a byte is not a byte buffer, and every wire format,
+/// file and string is one.
+pub const ARRAY_STRIDE_FIELD: usize = 3;
 /// How many fields precede the elements.
-pub const ARRAY_HEADER_FIELDS: usize = 3;
+///
+/// A whole number of words, so element zero is word-aligned and every stride
+/// that divides a word is aligned along with it.
+pub const ARRAY_HEADER_FIELDS: usize = 4;
 
 /// The tag every array carries. Arrays are not an ADT, so nothing competes.
 const ARRAY_TAG: u32 = 0;
@@ -1308,14 +1317,28 @@ fn array_word(array: *const u8, index: usize) -> usize {
 pub extern "C" fn khora_array_new(
     len: i64,
     fill: usize,
+    stride: u8,
     boxed: u8,
     glue: Option<extern "C" fn(*mut u8)>,
 ) -> *mut u8 {
     if len < 0 {
         fatal("an array cannot have a negative length");
     }
+    if !matches!(stride, 1 | 2 | 4 | 8) {
+        fatal("an array element must be 1, 2, 4 or 8 bytes wide");
+    }
     let len = len as usize;
-    let Some(fields) = len.checked_add(ARRAY_HEADER_FIELDS).and_then(|n| n.checked_mul(FIELD_WORD))
+    let stride = stride as usize;
+    // Header first, then `len * stride` bytes rounded up to a whole word so the
+    // allocation stays word-aligned and the next object after it does too.
+    let Some(bytes) = len.checked_mul(stride) else {
+        fatal("an array that large cannot be allocated");
+    };
+    let Some(fields) = bytes
+        .checked_add(FIELD_WORD - 1)
+        .map(|b| b / FIELD_WORD)
+        .and_then(|words| words.checked_add(ARRAY_HEADER_FIELDS))
+        .and_then(|n| n.checked_mul(FIELD_WORD))
     else {
         fatal("an array that large cannot be allocated");
     };
@@ -1328,13 +1351,20 @@ pub extern "C" fn khora_array_new(
         base.add(ARRAY_LEN_FIELD).write(len);
         base.add(ARRAY_GLUE_FIELD).write(glue.map_or(0, |g| g as usize));
         base.add(ARRAY_BOXED_FIELD).write(usize::from(boxed != 0));
+        base.add(ARRAY_STRIDE_FIELD).write(stride);
 
         // Every slot holds the same value and every slot owns it, so the count
         // goes up once per slot. The caller keeps its own reference and
         // releases it after the call, which is why this does not take one.
-        let elements = base.add(ARRAY_HEADER_FIELDS);
+        //
+        // The fill arrives as a whole word and only its low `stride` bytes are
+        // written, which is the same thing on a little-endian target — and both
+        // targets Khora has are little-endian. A big-endian port would take the
+        // *high* bytes, and this is where it would say so.
+        let elements = base.add(ARRAY_HEADER_FIELDS).cast::<u8>();
+        let source = fill.to_le_bytes();
         for index in 0..len {
-            elements.add(index).write(fill);
+            elements.add(index * stride).copy_from_nonoverlapping(source.as_ptr(), stride);
             if boxed != 0 {
                 khora_dup(fill as *mut u8);
             }
@@ -1424,6 +1454,11 @@ pub unsafe extern "C" fn khora_array_release(array: *mut u8) {
         };
 
     for index in 0..len {
+        debug_assert_eq!(
+            array_word(array, ARRAY_STRIDE_FIELD),
+            FIELD_WORD,
+            "a counted element is a pointer, so it is always a whole word wide"
+        );
         // SAFETY: every element slot is within the allocation, and holds
         // either null or a live object this array owned a reference to.
         unsafe {
