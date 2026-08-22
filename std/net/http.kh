@@ -9,10 +9,14 @@ import std::net::socket::{accept_on, invalid_handle, listen_on, receive, shut, s
 // reconstructed from how the reference application uses it, and every line
 // below it is Khora over `String::slice`, `String::index_of` and `Map`.
 //
-// Enough of the protocol to serve a request and no more: a request line, the
-// headers skipped, a body, and a response with a length on it. Chunked
-// transfer, keep-alive, TLS and content negotiation are all absent and all
-// deliberate — this is the exit criterion for phase 8, not a web server.
+// What it does: a request line with its query string, headers, a body read to
+// the length the headers promised, routing on method and path with `:name`
+// segments, and a response that can carry headers of its own.
+//
+// What it does not: chunked transfer, keep-alive, TLS, content negotiation,
+// multipart bodies, or more than one connection at a time. Each is absent
+// deliberately rather than forgotten, and `Router::serve_once` carries the
+// reason the last one is harder than it looks.
 
 export type Method =
   | Get
@@ -71,8 +75,21 @@ impl Params {
 
 export type Request = {
   method: Method,
+  /// The path with the query string taken off: `/analyze/acc_1?deep=true` has
+  /// a path of `/analyze/acc_1`. Routes match against this, so mounting
+  /// `/analyze/:id` does not stop working the moment a client adds a
+  /// parameter.
   path: String,
   params: Params,
+  /// Decoded once, when the request arrives, rather than on every lookup — a
+  /// handler that reads three parameters should not decode the query three
+  /// times.
+  queries: Map<String, String>,
+  /// Keyed by the **lowercased** name, because HTTP header names are
+  /// case-insensitive and a map is not. Folding the case here rather than in
+  /// `header` means two headers differing only in case collide on arrival,
+  /// which is the correct reading: they are the same header.
+  headers: Map<String, String>,
   body: String,
 };
 
@@ -80,18 +97,60 @@ impl Request {
   /// A GET request for `path`, with no parameters matched yet. Chiefly for
   /// tests: a real one arrives from a socket.
   fn get(path: String) -> Request {
-    { method: Method::Get, path: path, params: Params::empty(), body: "" }
+    Request::of(Method::Get, path, "")
   }
 
   fn post(path: String, body: String) -> Request {
-    { method: Method::Post, path: path, params: Params::empty(), body: body }
+    Request::of(Method::Post, path, body)
+  }
+
+  /// The query string is honoured here too, so a hand-built request behaves
+  /// like one off the wire. A test that writes `Request::get("/x?a=1")` and
+  /// finds no `a` would be testing the constructor rather than the code.
+  fn of(method: Method, target: String, body: String) -> Request {
+    let split = split_target(target);
+    {
+      method: method,
+      path: split.head,
+      params: Params::empty(),
+      queries: parse_query(split.rest),
+      headers: Map::new(),
+      body: body,
+    }
+  }
+
+  /// A query parameter, already percent-decoded.
+  ///
+  /// A parameter written with no `=` — `/x?verbose` — is present with an empty
+  /// value, which is how every server reads it and what lets a handler ask
+  /// "was this requested" rather than "what does it say".
+  fn query(self, name: String) -> Option<String> {
+    Map::get(self.queries, name)
+  }
+
+  /// A header, by a name in any case.
+  ///
+  /// `Host`, `host` and `HOST` are one header. The RFC says so, and this is
+  /// the half of it that everybody gets wrong.
+  fn header(self, name: String) -> Option<String> {
+    Map::get(self.headers, lowered(name))
   }
 }
+
+/// One header on the way out.
+export type Header = {
+  name: String,
+  value: String,
+};
 
 export type Response = {
   status: Int,
   body: String,
   content_type: String,
+  /// Anything beyond the three a response always carries. A list rather than a
+  /// map, because `Set-Cookie` may legitimately appear more than once and a
+  /// map would silently keep only the last.
+  headers: List<Header>,
 };
 
 impl Response {
@@ -101,11 +160,25 @@ impl Response {
   /// and `Show` is the trait a type already uses to say how it reads. When
   /// there is one, this is where it goes and nothing above it changes.
   fn json<A: Show>(status: Int, body: A) -> Response {
-    { status: status, body: body.show(), content_type: "application/json" }
+    { status: status, body: body.show(), content_type: "application/json", headers: List::Nil }
   }
 
   fn text(status: Int, body: String) -> Response {
-    { status: status, body: body, content_type: "text/plain" }
+    { status: status, body: body, content_type: "text/plain", headers: List::Nil }
+  }
+
+  /// The same response with one more header on it.
+  ///
+  /// A new response rather than a mutated one, like `Prompt`'s builders and
+  /// for the same reason: a half-built response cannot be shared and then
+  /// changed underneath its other holder.
+  fn with_header(self, name: String, value: String) -> Response {
+    {
+      status: self.status,
+      body: self.body,
+      content_type: self.content_type,
+      headers: List::Cons({ name: name, value: value }, self.headers),
+    }
   }
 
   /// The response, as bytes on the wire.
@@ -113,9 +186,20 @@ impl Response {
     "HTTP/1.1 " + Int::to_string(self.status) + " " + Response::reason(self.status) + "\r\n"
     + "Content-Type: " + self.content_type + "\r\n"
     + "Content-Length: " + Int::to_string(String::byte_length(self.body)) + "\r\n"
+    + Response::extra(self.headers)
     + "Connection: close\r\n"
     + "\r\n"
     + self.body
+  }
+
+  /// The caller's own headers. `with_header` prepends, so the most recently
+  /// added is written first — which no client cares about, and saying so here
+  /// is cheaper than reversing a list to make it look tidy.
+  fn extra(headers: List<Header>) -> String {
+    match headers {
+      List::Nil => "",
+      List::Cons(h, rest) => h.name + ": " + h.value + "\r\n" + Response::extra(rest),
+    }
   }
 
   /// The handful of statuses this server can produce. A number nobody here
@@ -127,6 +211,8 @@ impl Response {
       "Bad Request"
     } else if status == 404 {
       "Not Found"
+    } else if status == 413 {
+      "Payload Too Large"
     } else if status == 500 {
       "Internal Server Error"
     } else {
@@ -140,32 +226,187 @@ export type HttpError =
   | MalformedRequest(details: String);
 
 // ---------------------------------------------------------------------------
+// Bytes and text
+// ---------------------------------------------------------------------------
+//
+// Written with `while` rather than as folds. Everything else in `std` walks a
+// string by recursion, and for a few dozen characters that is the nicer shape
+// — but a header block is thousands of bytes and one stack frame each buys
+// nothing.
+
+/// `text` with every ASCII letter in lower case.
+///
+/// ASCII only, deliberately: this exists for header names, which the RFC
+/// restricts to ASCII, and case in every other alphabet is a question no
+/// answer to which fits in six lines.
+fn lowered(text: String) -> String {
+  let length = String::byte_length(text);
+  if length == 0 {
+    ""
+  } else {
+    let out: Array<U8> = Array::new(length, 0);
+    let mut i = 0;
+    while i < length {
+      let c = U8::to_int(String::byte(text, i));
+      let shifted = if c >= 65 && c <= 90 { c + 32 } else { c };
+      Array::set(out, i, U8::of(shifted));
+      i = i + 1;
+    }
+    String::from_bytes(out)
+  }
+}
+
+/// `text` without leading or trailing spaces and tabs.
+fn trimmed(text: String) -> String {
+  let length = String::byte_length(text);
+  let mut start = 0;
+  while start < length && blank(String::byte(text, start)) {
+    start = start + 1;
+  }
+  let mut end = length;
+  while end > start && blank(String::byte(text, end - 1)) {
+    end = end - 1;
+  }
+  String::slice(text, start, end)
+}
+
+fn blank(byte: U8) -> Bool {
+  let c = U8::to_int(byte);
+  c == 32 || c == 9
+}
+
+/// The leading digits of `text`, as a number.
+///
+/// Stops at the first character that is not a digit, and at a value no server
+/// should be asked to hold. The cap is not politeness: `value * 10` **traps**
+/// on overflow, so a twenty-digit `Content-Length` would stop the process
+/// rather than the request. Refusing to read past it turns a crash into a 413.
+fn digits_of(text: String) -> Int {
+  let length = String::byte_length(text);
+  let mut value = 0;
+  let mut i = 0;
+  let mut going = true;
+  while going && i < length {
+    let c = U8::to_int(String::byte(text, i));
+    if c >= 48 && c <= 57 && value <= 100000000 {
+      value = value * 10 + (c - 48);
+      i = i + 1;
+    } else {
+      going = false;
+    }
+  }
+  value
+}
+
+/// One hex digit's value, or `None` for anything else.
+fn hex_value(byte: U8) -> Option<Int> {
+  let c = U8::to_int(byte);
+  if c >= 48 && c <= 57 {
+    Option::Some(c - 48)
+  } else if c >= 97 && c <= 102 {
+    Option::Some(c - 87)
+  } else if c >= 65 && c <= 70 {
+    Option::Some(c - 55)
+  } else {
+    Option::None
+  }
+}
+
+/// The byte that two hex digits at `at` spell, if they are two hex digits.
+fn hex_pair(text: String, at: Int) -> Option<Int> {
+  if at + 1 >= String::byte_length(text) {
+    Option::None
+  } else {
+    match hex_value(String::byte(text, at)) {
+      Option::None => Option::None,
+      Option::Some(high) => match hex_value(String::byte(text, at + 1)) {
+        Option::None => Option::None,
+        Option::Some(low) => Option::Some(high * 16 + low),
+      },
+    }
+  }
+}
+
+/// `%20` becomes a space, and so does `+`.
+///
+/// A `%` not followed by two hex digits stays a literal `%`. Refusing the
+/// whole parameter would be defensible and is not what any browser or server
+/// does, and a query string is not the place to be the only strict one.
+///
+/// The decoded form is never longer than the encoded one, so a buffer of the
+/// input's length is always enough and there is nothing to grow.
+export fn percent_decode(text: String) -> String {
+  let length = String::byte_length(text);
+  if length == 0 {
+    ""
+  } else {
+    let out: Array<U8> = Array::new(length, 0);
+    let mut at = 0;
+    let mut written = 0;
+    while at < length {
+      let here = U8::to_int(String::byte(text, at));
+      if here == 37 {
+        match hex_pair(text, at + 1) {
+          Option::Some(value) => {
+            Array::set(out, written, U8::of(value));
+            written = written + 1;
+            at = at + 3;
+          },
+          Option::None => {
+            Array::set(out, written, String::byte(text, at));
+            written = written + 1;
+            at = at + 1;
+          },
+        };
+      } else if here == 43 {
+        Array::set(out, written, U8::of(32));
+        written = written + 1;
+        at = at + 1;
+      } else {
+        Array::set(out, written, String::byte(text, at));
+        written = written + 1;
+        at = at + 1;
+      }
+    }
+    // A valid escape can spell a byte that is not text — `%FF` is not UTF-8 —
+    // and `from_bytes` stops the program rather than pretend. A parameter
+    // nobody can read as text is dropped instead of taking the server with it.
+    let taken = Array::prefix(out, written);
+    if Array::is_utf8(taken) { String::from_bytes(taken) } else { "" }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
 /// A request read off the wire.
-///
-/// Only the request line and the body are looked at. Headers are skipped
-/// wholesale, which is honest about what this serves: a router that dispatches
-/// on a method and a path needs neither.
 export fn parse(text: String) -> Option<Request> {
   match String::split_once(text, "\r\n") {
     Option::None => Option::None,
     Option::Some(lines) => match parse_request_line(lines.head) {
       Option::None => Option::None,
-      Option::Some(head) => Option::Some({
-          method: head.method,
-          path: head.path,
-          params: Params::empty(),
-          body: body_of(lines.rest),
-        }),
+      Option::Some(head) => {
+        let split = split_target(head.target);
+        Option::Some({
+            method: head.method,
+            path: split.head,
+            params: Params::empty(),
+            queries: parse_query(split.rest),
+            headers: parse_headers(lines.rest),
+            body: body_of(lines.rest),
+          })
+      },
     },
   }
 }
 
 export type RequestLine = {
   method: Method,
-  path: String,
+  /// The request target as written, query string and all. `parse` splits it;
+  /// keeping it whole here means a caller reading a request line for its own
+  /// reasons gets what the client actually sent.
+  target: String,
 };
 
 fn parse_request_line(line: String) -> Option<RequestLine> {
@@ -175,11 +416,85 @@ fn parse_request_line(line: String) -> Option<RequestLine> {
       Option::None => Option::None,
       Option::Some(method) => match String::split_once(after_method.rest, " ") {
         // `GET /path` with no version is still a request line worth honouring.
-        Option::None => Option::Some({ method: method, path: after_method.rest }),
-        Option::Some(after_path) => Option::Some({ method: method, path: after_path.head }),
+        Option::None => Option::Some({ method: method, target: after_method.rest }),
+        Option::Some(after_path) => Option::Some({ method: method, target: after_path.head }),
       },
     },
   }
+}
+
+/// The path and the query string, either side of the first `?`.
+fn split_target(target: String) -> Split {
+  match String::split_once(target, "?") {
+    Option::None => { head: target, rest: "" },
+    Option::Some(parts) => parts,
+  }
+}
+
+/// `a=1&b=hello%20world` as a map, decoded.
+fn parse_query(text: String) -> Map<String, String> {
+  let out: Map<String, String> = Map::new();
+  fill_query(out, text);
+  out
+}
+
+fn fill_query(out: Map<String, String>, text: String) -> () {
+  if String::byte_length(text) == 0 {
+  } else {
+    match String::split_once(text, "&") {
+      Option::None => add_pair(out, text),
+      Option::Some(parts) => {
+        add_pair(out, parts.head);
+        fill_query(out, parts.rest);
+      },
+    };
+  }
+}
+
+fn add_pair(out: Map<String, String>, pair: String) -> () {
+  if String::byte_length(pair) == 0 {
+  } else {
+    match String::split_once(pair, "=") {
+      Option::None => Map::insert(out, percent_decode(pair), ""),
+      Option::Some(kv) => Map::insert(out, percent_decode(kv.head), percent_decode(kv.rest)),
+    };
+  }
+}
+
+/// The headers, keyed by their lowercased names.
+///
+/// `rest` is everything after the request line; anything past the blank line
+/// is the body and is not looked at here.
+fn parse_headers(rest: String) -> Map<String, String> {
+  let out: Map<String, String> = Map::new();
+  let block = match String::index_of(rest, "\r\n\r\n") {
+    Option::None => rest,
+    Option::Some(at) => String::slice(rest, 0, at),
+  };
+  fill_headers(out, block);
+  out
+}
+
+fn fill_headers(out: Map<String, String>, block: String) -> () {
+  if String::byte_length(block) == 0 {
+  } else {
+    match String::split_once(block, "\r\n") {
+      Option::None => add_header(out, block),
+      Option::Some(parts) => {
+        add_header(out, parts.head);
+        fill_headers(out, parts.rest);
+      },
+    };
+  }
+}
+
+fn add_header(out: Map<String, String>, line: String) -> () {
+  match String::split_once(line, ":") {
+    // A line with no colon is not a header. Dropping it rather than failing
+    // the whole request is what a server does with a client's small mistakes.
+    Option::None => (),
+    Option::Some(parts) => Map::insert(out, lowered(parts.head), trimmed(parts.rest)),
+  };
 }
 
 /// Everything after the blank line, or nothing.
@@ -187,6 +502,143 @@ fn body_of(rest: String) -> String {
   match String::index_of(rest, "\r\n\r\n") {
     Option::None => "",
     Option::Some(at) => String::slice(rest, at + 4, String::byte_length(rest)),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reading a whole request
+// ---------------------------------------------------------------------------
+
+/// The most a request may be. Anything longer gets a 413.
+///
+/// The buffer is allocated once at this size and never grows, which is what
+/// makes a lying `Content-Length` harmless: the header is a promise about what
+/// is coming, not an instruction to allocate.
+///
+/// **Eight kilobytes because that is where the stack runs out, not because
+/// eight kilobytes is a sensible maximum request.** `String::slice`,
+/// `String::index_of` and `String::matches_at` in `std::core` each recurse once
+/// per byte, so parsing a request of around nine thousand bytes overflows the
+/// stack and takes the process with it — measured, not guessed: 8000 answers
+/// and 9000 does not.
+///
+/// Raising this needs those three rewritten as loops. Until then a limit that
+/// is under the cliff turns a crashed server into a 413, which is the whole of
+/// what this number is for.
+fn limit() -> Int { 8192 }
+
+/// How many bytes to ask the socket for at a time.
+fn chunk() -> Int { 4096 }
+
+/// Reads one request into `into`, and says how many bytes arrived.
+///
+/// Stops at whichever comes first: the body is as long as `Content-Length`
+/// promised, the peer closed, the buffer filled, or a read came back short.
+/// One `recv` and hope was what this used to be, and it worked only because
+/// every body so far fitted in one packet — which stops being true the first
+/// time anything real is posted.
+///
+/// **A short read ends the request**, and that rule is doing more work than it
+/// looks. `receive` blocks, and `std::net::socket` offers no timeout, so a
+/// client that promises four gigabytes and sends nine bytes would otherwise
+/// deadlock the server: it waits for a body that is not coming while the
+/// client waits for an answer. Neither side moves, and one bad `Content-Length`
+/// takes the whole process out.
+///
+/// The cost is a client that sends its headers, pauses, and then sends the
+/// body: that pause reads as the end and the handler sees a short body. Every
+/// blocking server without a receive timeout has this trade, and the honest
+/// fix is a timeout on `receive` rather than a cleverer rule here.
+fn read_request(connection: Int, into: Array<U8>) -> Int {
+  let scratch: Array<U8> = Array::new(chunk(), 0);
+  let mut filled = 0;
+  // Negative until the headers are complete, then the whole request's length.
+  let mut want = 0 - 1;
+  // Whether the last read filled its buffer, which is the only evidence
+  // available that the client has more to say.
+  let mut brimming = true;
+  let mut going = true;
+  while going {
+    if want >= 0 && filled >= want {
+      going = false;
+    } else if filled >= Array::length(into) {
+      going = false;
+    } else if brimming {
+      let read = receive(connection, scratch);
+      if read <= 0 {
+        going = false;
+      } else {
+        let room = Array::length(into) - filled;
+        let taken = if read > room { room } else { read };
+        copy_at(scratch, into, taken, filled);
+        filled = filled + taken;
+        brimming = read >= chunk();
+        if want < 0 {
+          want = wanted(into, filled);
+        }
+      }
+    } else {
+      going = false;
+    }
+  }
+  filled
+}
+
+fn copy_at(from: Array<U8>, into: Array<U8>, count: Int, offset: Int) -> () {
+  let mut i = 0;
+  while i < count {
+    Array::set(into, offset + i, Array::get(from, i));
+    i = i + 1;
+  }
+}
+
+/// How long the whole request should be, or negative while the headers are
+/// still arriving.
+fn wanted(bytes: Array<U8>, filled: Int) -> Int {
+  let after = end_of_headers(bytes, filled);
+  if after < 0 {
+    0 - 1
+  } else {
+    let head = Array::prefix(bytes, after);
+    // Header bytes that are not text are a request nobody can answer, and
+    // saying it ends here turns that into a 400 rather than a trap inside
+    // `from_bytes`.
+    if Array::is_utf8(head) {
+      after + content_length(String::from_bytes(head))
+    } else {
+      after
+    }
+  }
+}
+
+/// Where the body starts, or negative if the blank line has not arrived.
+///
+/// Searched over bytes rather than text, because the headers are only complete
+/// once this says so: converting first would mean converting a fragment, and a
+/// fragment can split a character.
+fn end_of_headers(bytes: Array<U8>, filled: Int) -> Int {
+  let mut i = 0;
+  let mut found = 0 - 1;
+  while found < 0 && i + 3 < filled {
+    if U8::to_int(Array::get(bytes, i)) == 13
+    && U8::to_int(Array::get(bytes, i + 1)) == 10
+    && U8::to_int(Array::get(bytes, i + 2)) == 13
+    && U8::to_int(Array::get(bytes, i + 3)) == 10 {
+      found = i + 4;
+    } else {
+      i = i + 1;
+    }
+  }
+  found
+}
+
+fn content_length(head: String) -> Int {
+  match String::split_once(head, "\r\n") {
+    Option::None => 0,
+    Option::Some(lines) => match Map::get(parse_headers(lines.rest), "content-length") {
+      Option::None => 0,
+      Option::Some(value) => digits_of(value),
+    },
   }
 }
 
@@ -288,11 +740,6 @@ impl Router {
   }
 
   /// Serves until the process stops.
-  ///
-  /// One connection at a time, read once, answered, closed. A fiber per
-  /// connection is what this wants and `Fiber::spawn` is right there; it is
-  /// left out because a server that can only be stopped by killing it is not
-  /// yet worth making concurrent.
   fn listen<'r, 'e>(router: Router<'r, 'e>, port: Int) -> ()
     with { 'r | scope: Scope }
     raises 'e + HttpError
@@ -323,6 +770,30 @@ impl Router {
   }
 
   /// Accepts one connection, answers it, and closes it.
+  ///
+  /// **Serial, and blocked on something bigger than this module.**
+  /// `Fiber::spawn` and `nursery` are both in `std::core`, and the obvious
+  /// shape —
+  /// `nursery.adopt(Fiber::spawn(fn () => Router::answer_on(router, taken)!))`
+  /// — does not compile, for a reason worth writing down where somebody will
+  /// find it:
+  ///
+  /// > `ledger` cannot be handed to a fiber: `Ledger` can be written, and two
+  /// > fibers writing one value is a race
+  ///
+  /// The capture itself is fine — a closure written inside a `with 'r`
+  /// function *does* pick up the row's capabilities, unnamed though they are.
+  /// What stops it is the shareability rule (`docs/design/memory.md` §5a): a
+  /// fiber may only close over values that cannot be written, and **an effect
+  /// is a record of function types**, so a handler is a record of closures,
+  /// and a closure is never shareable.
+  ///
+  /// Which means the rule as it stands says *no capability may ever cross into
+  /// a fiber* — not this one, any of them. Concurrency and capabilities are
+  /// the two things this language is most pleased with, and today a program
+  /// cannot use both at once. That is a design question rather than a missing
+  /// line, and until it is answered a server that talks to a database serves
+  /// one caller at a time.
   fn serve_once<'r, 'e>(router: Router<'r, 'e>, server: Int) -> ()
     with { 'r | scope: Scope }
     raises 'e + HttpError
@@ -330,16 +801,40 @@ impl Router {
     let connection = accept_on(server);
     if connection == invalid_handle() {
     } else {
-      let buffer: Array<U8> = Array::new(8192, 0);
-      let read = receive(connection, buffer);
-      let answer =
-      if read <= 0 {
-        Response::text(400, "empty request")
-      } else {
-        Router::answer(router, String::from_bytes(Array::prefix(buffer, read)))!
-      };
-      transmit(connection, Response::rendered(answer));
+      Router::answer_on(router, connection)!;
       shut(connection);
+    }
+  }
+
+  /// Reads one request off `connection` and writes the answer back.
+  fn answer_on<'r, 'e>(router: Router<'r, 'e>, connection: Int) -> ()
+    with 'r
+    raises 'e
+  {
+    let buffer: Array<U8> = Array::new(limit(), 0);
+    let filled = read_request(connection, buffer);
+    let answer = Router::answer_bytes(router, buffer, filled)!;
+    transmit(connection, Response::rendered(answer));
+  }
+
+  /// The answer to what arrived, whatever state it arrived in.
+  fn answer_bytes<'r, 'e>(router: Router<'r, 'e>, buffer: Array<U8>, filled: Int) -> Response
+    with 'r
+    raises 'e
+  {
+    if filled <= 0 {
+      Response::text(400, "empty request")
+    } else if filled >= limit() {
+      // The buffer filled before the request ended. Whether the client lied
+      // about its length or simply sent too much, the answer is the same.
+      Response::text(413, "request too large")
+    } else {
+      let taken = Array::prefix(buffer, filled);
+      if Array::is_utf8(taken) {
+        Router::answer(router, String::from_bytes(taken))!
+      } else {
+        Response::text(400, "request was not text")
+      }
     }
   }
 
@@ -368,6 +863,8 @@ impl Router {
               method: request.method,
               path: request.path,
               params: params,
+              queries: request.queries,
+              headers: request.headers,
               body: request.body,
             })!,
           Option::None => Router::dispatch(rest, request)!,

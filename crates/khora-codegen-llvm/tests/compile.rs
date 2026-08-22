@@ -1591,7 +1591,7 @@ fn main() -> Int { if \"a\" < \"b\" { 0 } else { 1 } }
 ",
     );
     assert!(
-        found.iter().any(|e| e.contains("cannot be ordered")),
+        found.iter().any(|e| e.contains("no `Ord` impl")),
         "{found:?}"
     );
 }

@@ -992,6 +992,39 @@ can be written before anything needs TLS.
   `i64` and stored into its own smaller slot, writing over the frame. A leak in
   `Option<Bool>` was the symptom and a stack buffer overflow was the cause.
 
+- **8.12 `std::net::http`, for real.** Query strings with percent-decoding, and
+  the path a route matches is the part before `?` so a client adding a
+  parameter does not break a route. Headers, folded to lower case *on arrival*
+  rather than on lookup, so two spellings collide — which is the correct
+  reading — and a response that can carry its own. A body read to its
+  `Content-Length` across as many `recv`s as it takes, into a buffer allocated
+  once, so a lying length cannot make it allocate.
+
+  Two findings came out of it and neither is about HTTP.
+
+  **`std::core`'s text helpers recursed once per byte**, and the stack gave out
+  around 9 KB — which capped *every* Khora program's text handling, not just a
+  request body. The comments justified recursion with "a `while` would need a
+  `mut` binding and this needs neither", which was wrong: it needs a bounded
+  stack. `slice`, `index_of`, `matches_at`, the byte comparison behind
+  `Ord for String` and the string hash are all loops now, and a 100 KB slice
+  works. `Array::prefix` also trapped on an empty array, which is fixed.
+
+  **A fiber per connection is impossible**, and that is 8.13.
+
+- **8.13 No capability can cross into a fiber — open.**
+  `docs/design/sharing.md`. An effect is a record of function types, a closure
+  is unshareable because its captures are not in its type, so **every handler
+  is unshareable and a fiber can never be spawned from a function that has
+  one**. That is the shape of every concurrent server, and it is why the HTTP
+  server serves one connection at a time.
+
+  Neither half is wrong on its own and the combination is not something anybody
+  chose. The fix is a soundness rule and wants deciding deliberately; the
+  options and a recommendation are in the doc. The diagnostic at least states
+  the real reason now, rather than sending a reader to look for a `mut` that is
+  not there.
+
 **Exit — the real one.** *You can write a useful program.* The served request
 below is a milestone rather than the criterion: it proved the stack works end
 to end and it measured the compiler, not the library. What the library still

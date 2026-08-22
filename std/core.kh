@@ -96,17 +96,17 @@ impl Hash for String {
 }
 
 impl String {
-  /// The hash of the bytes from `index` on, given what came before.
-  ///
-  /// Written as a fold rather than a loop because a `while` would need a `mut`
-  /// binding and this needs neither.
-  fn fold(self, index: Int, seed: U32) -> U32 {
-    if index >= String::byte_length(self) {
-      seed
-    } else {
-      let mixed = U32::xor(seed, U32::of(U8::to_int(String::byte(self, index))));
-      String::fold(self, index + 1, U32::wrapping_mul(mixed, 16777619))
+  /// FNV-1a over the bytes from `from` on.
+  fn fold(self, from: Int, seed: U32) -> U32 {
+    let count = String::byte_length(self);
+    let mut at = from;
+    let mut hash = seed;
+    while at < count {
+      let mixed = U32::xor(hash, U32::of(U8::to_int(String::byte(self, at))));
+      hash = U32::wrapping_mul(mixed, 16777619);
+      at = at + 1;
     }
+    hash
   }
 }
 
@@ -124,20 +124,27 @@ impl Ord for String {
 }
 
 impl String {
-  fn compare_bytes(self, other: String, at: Int) -> Ordering {
+  fn compare_bytes(self, other: String, from: Int) -> Ordering {
     let mine = String::byte_length(self);
     let theirs = String::byte_length(other);
-    if at >= mine || at >= theirs {
-      // One ran out. The shorter is first, and equal lengths mean equal text.
+    let shorter = if mine < theirs { mine } else { theirs };
+    let mut at = from;
+    let mut answer = Ordering::Equal;
+    while at < shorter && answer.is_equal() {
+      let here = String::byte(self, at);
+      let there = String::byte(other, at);
+      if here < there { answer = Ordering::Less }
+      else if here > there { answer = Ordering::Greater }
+      else { at = at + 1 }
+    }
+    // Neither differed in the bytes they share, so the shorter one is first
+    // and equal lengths mean equal text.
+    if answer.is_equal() {
       if mine < theirs { Ordering::Less }
       else if mine > theirs { Ordering::Greater }
       else { Ordering::Equal }
     } else {
-      let here = String::byte(self, at);
-      let there = String::byte(other, at);
-      if here < there { Ordering::Less }
-      else if here > there { Ordering::Greater }
-      else { String::compare_bytes(self, other, at + 1) }
+      answer
     }
   }
 }
@@ -592,18 +599,23 @@ impl<A> Array<A> {
   /// says how many bytes arrived, and the rest of the buffer is not part of
   /// the message.
   fn prefix(self, count: Int) -> Array<A> {
-    let taken = if count < 0 { 0 } else if count > Array::length(self) { Array::length(self) }
-    else { count };
-    let out: Array<A> = Array::new(taken, Array::get(self, 0));
-    Array::copy_into(self, out, taken, 0);
-    out
-  }
-
-  fn copy_into(self, out: Array<A>, count: Int, done: Int) -> () {
-    if done >= count {
+    let length = Array::length(self);
+    // Nothing to copy and — the part that used to trap — nothing to seed the
+    // new array with. `Array::new` needs a value of `A`, and the only one to
+    // hand is `self`'s first element, which an empty array does not have.
+    // Returning `self` is exact: it is already the empty array of the right
+    // type.
+    if length == 0 {
+      self
     } else {
-      Array::set(out, done, Array::get(self, done));
-      Array::copy_into(self, out, count, done + 1)
+      let taken = if count < 0 { 0 } else if count > length { length } else { count };
+      let out: Array<A> = Array::new(taken, Array::get(self, 0));
+      let mut at = 0;
+      while at < taken {
+        Array::set(out, at, Array::get(self, at));
+        at = at + 1;
+      }
+      out
     }
   }
 
@@ -681,54 +693,46 @@ impl String {
     let length = String::byte_length(self);
     let start = if from < 0 { 0 } else if from > length { length } else { from };
     let end = if to < start { start } else if to > length { length } else { to };
-    let out: Array<U8> = Array::new(end - start, 0);
-    String::fill_slice(self, out, start, end - start, 0);
-    String::from_bytes(out)
-  }
-
-  /// Copies `count` bytes from `at` into `out`, one at a time.
-  ///
-  /// A loop written as a fold, because a `while` would need a `mut` binding
-  /// and this needs neither.
-  fn fill_slice(self, out: Array<U8>, at: Int, count: Int, done: Int) -> () {
-    if done >= count {
-    } else {
-      Array::set(out, done, String::byte(self, at + done));
-      String::fill_slice(self, out, at, count, done + 1)
+    let count = end - start;
+    let out: Array<U8> = Array::new(count, 0);
+    let mut at = 0;
+    while at < count {
+      Array::set(out, at, String::byte(self, start + at));
+      at = at + 1;
     }
+    String::from_bytes(out)
   }
 
   /// Where `needle` first appears, or `None`.
   fn index_of(self, needle: String) -> Option<Int> {
-    String::scan_for(self, needle, 0)
-  }
-
-  fn scan_for(self, needle: String, at: Int) -> Option<Int> {
     let room = String::byte_length(self) - String::byte_length(needle);
-    if at > room {
-      Option::None
-    } else if String::matches_at(self, needle, at, 0) {
-      Option::Some(at)
-    } else {
-      String::scan_for(self, needle, at + 1)
+    let mut at = 0;
+    let mut found = 0 - 1;
+    while at <= room && found < 0 {
+      if String::matches_at(self, needle, at) { found = at; } else { at = at + 1; }
     }
+    if found < 0 { Option::None } else { Option::Some(found) }
   }
 
-  fn matches_at(self, needle: String, at: Int, done: Int) -> Bool {
-    if done >= String::byte_length(needle) {
-      true
-    } else if String::byte(self, at + done) == String::byte(needle, done) {
-      String::matches_at(self, needle, at, done + 1)
-    } else {
-      false
+  fn matches_at(self, needle: String, at: Int) -> Bool {
+    let count = String::byte_length(needle);
+    let mut done = 0;
+    let mut same = true;
+    while done < count && same {
+      if String::byte(self, at + done) == String::byte(needle, done) {
+        done = done + 1;
+      } else {
+        same = false;
+      }
     }
+    same
   }
 
   fn starts_with(self, prefix: String) -> Bool {
     if String::byte_length(prefix) > String::byte_length(self) {
       false
     } else {
-      String::matches_at(self, prefix, 0, 0)
+      String::matches_at(self, prefix, 0)
     }
   }
 

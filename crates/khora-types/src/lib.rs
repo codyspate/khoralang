@@ -437,6 +437,58 @@ impl TypeMap {
         self.shareable(ty, &mut Vec::new())
     }
 
+    /// Why a value of this type may not be handed to another fiber.
+    ///
+    /// Two different reasons wear the same refusal, and telling them apart is
+    /// the difference between a fix and a hunt. A record with a `mut` field is
+    /// a *race*, and the answer is to stop sharing it. A closure is refused
+    /// because **what it captured is not in its type** — it may hold nothing at
+    /// all — and the answer is a language question rather than a change to the
+    /// program.
+    ///
+    /// The second is the one that matters: an effect *is* a record of function
+    /// types, so no capability can cross into a fiber. The message says so
+    /// rather than sending the reader to look for a `mut` that is not there.
+    pub fn why_unshareable(&self, ty: &Type) -> String {
+        if self.holds_a_closure(ty, &mut Vec::new()) {
+            format!(
+                "`{ty}` holds a closure, and what a closure captured is not in its type — so \
+                 nothing here can tell whether *that* can be written. An effect is a record \
+                 of function types, so this is every capability"
+            )
+        } else {
+            format!("`{ty}` can be written, and two fibers writing one value is a race")
+        }
+    }
+
+    fn holds_a_closure(&self, ty: &Type, visiting: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Fn { .. } => true,
+            Type::Tuple(items) => items.iter().any(|t| self.holds_a_closure(t, visiting)),
+            Type::Applied { head, args } => {
+                self.holds_a_closure(head, visiting)
+                    || args.iter().any(|t| self.holds_a_closure(t, visiting))
+            }
+            Type::Adt { name, args } => {
+                if args.iter().any(|t| self.holds_a_closure(t, visiting)) {
+                    return true;
+                }
+                if visiting.iter().any(|n| n == name) {
+                    return false;
+                }
+                visiting.push(name.clone());
+                let found = self
+                    .variants
+                    .iter()
+                    .filter(|v| &v.type_name == name)
+                    .any(|v| v.fields.iter().any(|t| self.holds_a_closure(t, visiting)));
+                visiting.pop();
+                found
+            }
+            _ => false,
+        }
+    }
+
     fn shareable(&self, ty: &Type, visiting: &mut Vec<String>) -> bool {
         match ty {
             Type::Fn { .. } => false,
@@ -2018,8 +2070,8 @@ impl<'a> Checker<'a> {
         };
         if !available {
             let advice = match ty {
-                Type::Param(param) => format!("add the bound, as `{param}: {trait_name}`"),
-                other => format!("write `impl {trait_name} for {other}`"),
+                Type::Param(param) => format!("Add the bound, as `{param}: {trait_name}`"),
+                other => format!("Write `impl {trait_name} for {other}`"),
             };
             let operators = if trait_name == "Eq" {
                 "`==` and `!=` have"
@@ -2644,13 +2696,8 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let name = self.body.local(local).name.clone();
-            self.error(
-                format!(
-                    "`{name}` cannot be handed to a fiber: `{ty}` can be written, and two \
-                     fibers writing one value is a race"
-                ),
-                range,
-            );
+            let why = self.types.why_unshareable(&ty);
+            self.error(format!("`{name}` cannot be handed to a fiber: {why}"), range);
         }
     }
 
