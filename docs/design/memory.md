@@ -132,6 +132,29 @@ avoid — paid in every library signature to save an increment.
 the cost comes back: phase 9, as an optimization for objects that provably do
 not escape their fiber, chosen by the compiler and invisible in every type.
 
+## 5a. What may cross a fiber
+
+Decided with mutable fields, because the two cannot ship apart.
+
+Reference counts are atomic (D10), so *sharing an immutable value* across
+fibers is safe today, and nothing is mutable — a data race is currently not
+expressible in Khora. Mutable fields end that unless something says otherwise.
+
+> **A mutable value cannot be captured by a spawned fiber.** Structural and
+> transitive: a record with a mutable field is not shareable, nor is anything
+> holding one.
+
+The reason Khora can afford this where Rust needs `Send`, `Sync`, lifetimes and
+a borrow checker is that **there is exactly one place a value crosses a fiber
+boundary** — the captures of the closure handed to `spawn`. Nothing else
+escapes anywhere, because there are no references. So the rule is one property,
+checked in one place, over a list the checker already computes and publishes.
+
+What crosses instead is `Shared<A>`, which does not exist yet and waits for a
+workload worth judging its API against. Compare what it replaces:
+`Arc<Mutex<HashMap<K, V>>>` becomes `Shared<Map<K, V>>`, because reference
+counting is implicit and there are no lifetimes to name.
+
 ## 6. Closures and handlers — open
 
 A closure captured across a handler boundary, or a continuation captured inside

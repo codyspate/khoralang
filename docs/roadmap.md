@@ -540,13 +540,44 @@ compiler test and not enough to write a hash map. Every item here was on the
 critical path whatever the ecosystem strategy turned out to be — which is the
 argument that settled A6.
 
-- **6.1 Decide D11, and mutable fields.** The widest blocker in the language: no
-  hash map, no buffer, nothing that accumulates. It has already cost real work —
-  a nursery cannot hold a child's error and `retry` needed a runtime counter to
-  be testable. The heap graph is provably a DAG today and mutable fields end
-  that, so the decision and the feature are one piece of work.
+- **6.1 D11, mutable fields, and what may cross a fiber.** The widest blocker in
+  the language: no hash map, no buffer, nothing that accumulates. It has already
+  cost real work — a nursery cannot hold a child's error, and `retry` needed a
+  runtime counter to be testable.
+
+  **Decided.** A mutable field is *shared by reference*: two bindings to one
+  record see each other's writes, which is what a hash map needs and what a Go,
+  Rust or TypeScript reader expects a struct field to mean. Requiring an
+  explicit cell instead would be importing `RefCell`, which exists in Rust to
+  work around a borrow checker Khora does not have.
+
+  That makes cycles constructible, so **D11 resolves as it was predicted to**: a
+  cycle leaks, and a weak reference is what breaks one. The DAG invariant that
+  made Perceus provably complete ends here, deliberately, and
+  `docs/design/memory.md` §2 says so while it is still true.
+
+  **And a mutable value cannot be captured by a spawned fiber.** Refcounts are
+  atomic (D10) so *sharing an immutable value* across fibers is already safe,
+  but nothing is mutable yet, so a data race is currently not expressible —
+  shipping mutation without this rule would ship Go's problem into a language
+  that does not have it. Khora can afford the rule cheaply because there is
+  exactly one place a value crosses a fiber boundary: the captures of a spawned
+  closure. One structural, transitive property, checked in one place, over a
+  list the checker already publishes. No lifetimes and no borrow checker,
+  because there are no borrows.
+
+  `Shared<A>` — the synchronized thing that *can* cross — waits for phase 7 or
+  8, where there is I/O worth parallelising and a channel may turn out to be the
+  better primitive. Until then a nursery whose children all write into one
+  collection is rejected. That is real friction and it is the honest cost of
+  the rule.
 - **6.2 Fixed-width integers, and bytes.** No `u8` means no bytes, which means
   no parsing, no wire formats, no encoding. `Int` alone is a toy.
+
+  **Overflow traps, in every build.** Swift's answer rather than Rust's: a
+  program that passes its tests and then wraps in production is the failure
+  worth spending a branch to prevent, and phase 9 can remove many of them.
+  Explicit wrapping operators are how you ask for the other thing.
 - **6.3 Floats.** Not in the backend and not in `Type`. `std::ai` promises
   tensors and the reference application cannot compile without them.
 - **6.4 Arrays.** Contiguous and bounds-checked. `List` is a linked list, which
