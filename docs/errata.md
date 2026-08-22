@@ -636,3 +636,31 @@ three earlier entries were about a lookup that missed. This one is about a
 Worth stating as a rule rather than a fifth entry. `Unknown` should be
 reachable from exactly two places — a parse error, and an error already
 reported — and never from "I did not recognize this shape".
+
+## 31. Three features were only ever tested one file at a time
+
+Checking the reference application against `std/` for the first time found
+three holes, and none of them was subtle once seen:
+
+- **An imported `effect` brought nothing.** `import_types` matched
+  `ItemKind::Type` and `ItemKind::Trait` and had a `_ => {}` for the rest. An
+  effect declares exactly what a type does — an entry in `adts`, and one
+  record of operations — so the type arrived as `Unknown` and every
+  `ai.extract(..)` on it read as a call to a method that was not there.
+- **`with Mock { .. }` installed nothing.** Installation read the block's
+  *record literal*, and a named context is not one. No `let`s were emitted, no
+  labels recorded, and the requirement it was supposed to discharge stayed on
+  the enclosing function — where, in a single-file test, it was declared
+  anyway.
+- **A bare `'r` in type position parsed as no name** (entry 30).
+
+The pattern is not that these were hard. It is that every one of them had a
+passing unit test *of the same feature*, written in one file, against one
+module, with the row spelled out. `docs/roadmap.md` has said since phase 1 that
+the reference application is the exit criterion for phase 4; what it did not
+say is that a whole-program check is a different test, not a bigger one.
+
+The lesson, then: **a feature that crosses modules needs a test that crosses
+modules**, and it is worth writing that test before the feature looks finished
+rather than after — the single-file version will pass either way, which is
+precisely the problem.

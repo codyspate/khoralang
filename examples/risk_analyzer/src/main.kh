@@ -1,8 +1,8 @@
 module app::main;
 
-import std::core::{Option, Scope};
-import std::net::http::{Request, Response, Router};
-import std::ai::{LLMService, ModelError, Prompt};
+import std::core::{Option, Scope, print};
+import std::net::http::{HttpError, Request, Response, Router};
+import std::ai::{Extract, LLMService, ModelError, Prompt};
 
 export type RiskLevel =
   | Low
@@ -14,6 +14,32 @@ export type AnalysisReport = {
   risk: RiskLevel,
   confidence: Float,
 };
+
+/// What the model is told to produce. `Extract` is how `ai.extract` learns to
+/// take a description and hand back the type it describes, without the effect
+/// declaration having to know about reports.
+export type ReportSpec = {
+  fields: String,
+};
+
+impl Extract for AnalysisReport {
+  type Spec = ReportSpec;
+  fn spec() -> ReportSpec {
+    { fields: "account_id: string, risk: low | moderate | critical, confidence: number" }
+  }
+}
+
+impl AnalysisReport {
+  /// What to serve when the model could not produce an assessment. Treating a
+  /// missing answer as `Low` would be a lie; this says so instead.
+  fn unavailable(account_id: String) -> AnalysisReport {
+    {
+      account_id: account_id,
+      risk: RiskLevel::Moderate("no assessment available"),
+      confidence: 0.0,
+    }
+  }
+}
 
 export type DbError =
   | QueryFailed(detail: String)
@@ -38,7 +64,7 @@ export fn analyze_transaction_risk(account_id: String) -> AnalysisReport
     |> Prompt::system("You are a financial fraud and risk engine. Output structured assessments.")
     |> Prompt::user("Analyze history: " + history);
 
-  let report = ai.extract(prompt, AnalysisReport::spec)!;
+  let report = ai.extract(prompt, AnalysisReport::spec())!;
 
   match report.risk {
     RiskLevel::Low => (),
@@ -58,7 +84,13 @@ export fn handle(req: Request) -> Response
   with { ai: LLMService, ledger: Ledger }
   raises DbError
 {
-  let id = req.params.get("account_id");
+  // The route declares `:account_id`, so this is only `None` if the route
+  // and the handler have drifted apart — which is worth an answer, not a
+  // crash.
+  let id = match req.params.get("account_id") {
+    Option::Some(id) => id,
+    Option::None => return Response::text(400, "no account id in the path"),
+  };
 
   let report = analyze_transaction_risk(id)! catch {
     ModelError::ContextLengthExceeded(_) => AnalysisReport::unavailable(id),
@@ -93,11 +125,11 @@ export context Mock {
   ai: mock_ai,
 }
 
-export fn main() {
+export fn main() raises HttpError {
   with Mock {
     Router::new()
       |> Router::post("/analyze/:account_id", handle)
-      |> Router::listen(8080)
+      |> Router::listen(8080)!
   }
 }
 

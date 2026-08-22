@@ -477,7 +477,11 @@ fn import_types(
                     map.signatures.entry(local.clone()).or_insert_with(|| signature.clone());
                 }
             }
-            khora_hir::ItemKind::Type => {
+            // An `effect` declares exactly what a type does here: an entry in
+            // `adts` and one `VariantInfo` holding its operations as fields.
+            // Left out, an imported effect arrived as `Unknown` and every
+            // operation call on it read as a missing method.
+            khora_hir::ItemKind::Type | khora_hir::ItemKind::Effect => {
                 if let Some(generics) = exported.adts.get(name.as_str()) {
                     if !map.adts.contains_key(local.as_str()) {
                         map.adts.insert(local.clone(), generics.clone());
@@ -633,8 +637,23 @@ fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String]) -> Type {
         // `raises DbError + ModelError`. An error row labels each entry with
         // the error's own type name: two errors of one type cannot be told
         // apart, and by name is how they are handled.
+        //
+        // A row variable among the operands is the row's *tail*, not an entry
+        // in it: `raises 'e + HttpError` means "whatever the caller's handler
+        // can raise, and also this". Reading it as a label gave the row an
+        // entry called `'e`, which no `raises` clause could ever satisfy.
         ast::Type::Union(u) => {
-            Type::row(u.operands().filter_map(|t| error_label(&t, generics)).collect(), None)
+            let mut fields = Vec::new();
+            let mut tail = None;
+            for operand in u.operands() {
+                match type_of_syntax(Some(&operand), generics) {
+                    Type::Param(name) if name.starts_with('\'') => {
+                        tail = Some(Type::Param(name));
+                    }
+                    resolved => fields.push((label_of(&resolved), resolved)),
+                }
+            }
+            Type::row(fields, tail)
         }
         // `raises DbError`, or a bare `'r`.
         other => {

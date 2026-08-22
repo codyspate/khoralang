@@ -351,6 +351,18 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
     let map = item_map(db, file);
     let scope = crate::file_scope(db, file);
 
+    // `with Mock { .. }` is `with { <Mock's bindings> } { .. }`, so the
+    // bindings have to be reachable from inside a body. Collected once here
+    // rather than searched for at each mention.
+    let contexts: Vec<(String, ast::ContextDecl)> = parse
+        .source_file()
+        .decls()
+        .filter_map(|d| match d {
+            ast::Decl::Context(c) => Some((c.name()?.ident()?, c)),
+            _ => None,
+        })
+        .collect();
+
     parse
         .source_file()
         .decls()
@@ -359,7 +371,7 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
                 let lowered = (|| {
                     let name = f.name()?.ident()?;
                     let body = f.body()?;
-                    Some((name, lower_function(map, scope, &f, &body)))
+                    Some((name, lower_function(map, scope, &contexts, &f, &body)))
                 })();
                 lowered.into_iter().collect::<Vec<_>>()
             }
@@ -367,12 +379,17 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
             // implementation, and it has to be checked like any other.
             ast::Decl::Trait(t) => {
                 let owner = t.name().and_then(|n| n.ident()).unwrap_or_default();
-                methods(map, scope, &owner, t.functions())
+                methods(map, scope, &contexts, &owner, t.functions())
             }
-            ast::Decl::Impl(i) => methods(map, scope, &impl_key(&i), i.functions()),
+            ast::Decl::Impl(i) => methods(map, scope, &contexts, &impl_key(&i), i.functions()),
             _ => Vec::new(),
         })
         .collect()
+}
+
+/// A record literal's fields, or none when the literal is missing.
+fn fields_of(row: Option<&ast::RecordExpr>) -> Vec<ast::RecordExprField> {
+    row.map(|r| r.fields().collect()).unwrap_or_default()
 }
 
 /// The name an impl's bodies are recorded under.
@@ -404,6 +421,7 @@ pub fn type_head(ty: &ast::Type) -> Option<String> {
 fn methods(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
+    contexts: &[(String, ast::ContextDecl)],
     owner: &str,
     functions: impl Iterator<Item = ast::FnDecl>,
 ) -> Vec<(String, Body)> {
@@ -411,7 +429,10 @@ fn methods(
         .filter_map(|f| {
             let name = f.name()?.ident()?;
             let body = f.body()?;
-            Some((format!("{owner}::{name}"), lower_function(map, scope, &f, &body)))
+            Some((
+                format!("{owner}::{name}"),
+                lower_function(map, scope, contexts, &f, &body),
+            ))
         })
         .collect()
 }
@@ -419,6 +440,7 @@ fn methods(
 fn lower_function(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
+    contexts: &[(String, ast::ContextDecl)],
     decl: &ast::FnDecl,
     block: &ast::Block,
 ) -> Body {
@@ -432,6 +454,7 @@ fn lower_function(
         scopes: vec![Vec::new()],
         map,
         scope,
+        contexts,
         generics,
         loop_depth: 0,
         in_scope: Vec::new(),
@@ -493,6 +516,9 @@ struct Ctx<'a> {
     /// Names this file imported. Consulted after the file's own items, so a
     /// local declaration shadows an import rather than colliding with it.
     scope: &'a crate::FileScope,
+    /// The `context` declarations of this file, by name. `with Mock { .. }`
+    /// installs the bindings of the one it names.
+    contexts: &'a [(String, ast::ContextDecl)],
     /// The type parameters the enclosing function declared, plus `Self` inside
     /// a trait or impl. A path whose first segment is one of these names a
     /// trait function reached through that parameter.
@@ -846,11 +872,16 @@ impl<'a> Ctx<'a> {
             // runtime of its own and why an inner `with` shadows an outer one.
             ast::Expr::With(e) => {
                 let body = e.body();
-                self.lower_installation(e.row().as_ref(), body.as_ref(), range)
+                let row = fields_of(e.row().as_ref());
+                self.lower_installation(row, body.as_ref(), range)
             }
             ast::Expr::WithBlock(e) => {
                 let body = e.body().map(ast::Expr::Block);
-                self.lower_installation(e.row().as_ref(), body.as_ref(), range)
+                let row = match e.context() {
+                    Some(named) => self.context_bindings(&named, range),
+                    None => fields_of(e.row().as_ref()),
+                };
+                self.lower_installation(row, body.as_ref(), range)
             }
         }
     }
@@ -953,11 +984,15 @@ impl<'a> Ctx<'a> {
         // stays the checker's question, exactly as for `Applicative::pure` —
         // hence the same resolution.
         if let [owner, name] = segments.as_slice() {
-            let declared_here =
-                self.map.item(owner).is_some_and(|i| i.kind == crate::ItemKind::Type);
+            // An `effect` names a type too — the type of its handlers — so
+            // `Scope::root()` reads the same way `Router::new()` does.
+            let is_type = |kind: crate::ItemKind| {
+                matches!(kind, crate::ItemKind::Type | crate::ItemKind::Effect)
+            };
+            let declared_here = self.map.item(owner).is_some_and(|i| is_type(i.kind));
             let imported = matches!(
                 self.scope.get(owner),
-                Some(crate::Resolution::Item { kind: crate::ItemKind::Type, .. })
+                Some(crate::Resolution::Item { kind, .. }) if is_type(*kind)
             );
             if declared_here || imported {
                 return self.add_expr(
@@ -1103,9 +1138,31 @@ impl<'a> Ctx<'a> {
     }
 
     /// `with { ledger: h } { .. }` — the labels bound over a region.
+    /// The bindings of the `context` a `with Mock { .. }` names.
+    ///
+    /// A context is a named `with` row and nothing else, so installing one is
+    /// installing its bindings: same `let`s, same labels, same subtraction.
+    fn context_bindings(
+        &mut self,
+        named: &ast::Path,
+        range: TextRange,
+    ) -> Vec<ast::RecordExprField> {
+        let name = named.text_path();
+        match self.contexts.iter().find(|(n, _)| n == &name) {
+            Some((_, decl)) => decl.bindings().collect(),
+            None => {
+                self.error(
+                    format!("cannot find a `context` named `{name}` in this file"),
+                    range,
+                );
+                Vec::new()
+            }
+        }
+    }
+
     fn lower_installation(
         &mut self,
-        row: Option<&ast::RecordExpr>,
+        row: Vec<ast::RecordExprField>,
         body: Option<&ast::Expr>,
         range: TextRange,
     ) -> ExprId {
@@ -1114,7 +1171,7 @@ impl<'a> Ctx<'a> {
 
         let mut stmts = Vec::new();
         let mut labels = Vec::new();
-        for field in row.map(|r| r.fields().collect::<Vec<_>>()).unwrap_or_default() {
+        for field in row {
             let value = match field.value() {
                 Some(v) => self.lower_expr(&v),
                 None => self.add_expr(Expr::Missing, range),
@@ -1307,6 +1364,22 @@ impl<'a> Ctx<'a> {
             return self.add_expr(Expr::Missing, range);
         };
 
+        // `x |> f(y)!` means `f(x, y)!`. The other reading — `x |> (f(y)!)` —
+        // is never meaningful: `f(y)` on the right of a pipe is a call with a
+        // hole in it, so a `!` there has nothing to mark. Unwrapping the mark
+        // here and putting it back around the finished call is what the reader
+        // means and is where the branch actually belongs.
+        let (rhs, marked) = match &rhs {
+            ast::Expr::Try(t) => match t.operand() {
+                Some(inner) => (inner, true),
+                None => (rhs, false),
+            },
+            _ => (rhs, false),
+        };
+        let mark = |ctx: &mut Self, call: ExprId| {
+            if marked { ctx.add_expr(Expr::Try(call), range) } else { call }
+        };
+
         match &rhs {
             ast::Expr::Call(call) => {
                 let callee = match call.callee() {
@@ -1348,12 +1421,14 @@ impl<'a> Ctx<'a> {
                         }
                     }
                 }
-                self.add_call(Expr::Call { callee, args }, range)
+                let call = self.add_call(Expr::Call { callee, args }, range);
+                mark(self, call)
             }
             // `x |> f` is `f(x)`.
             _ => {
                 let callee = self.lower_expr(&rhs);
-                self.add_call(Expr::Call { callee, args: vec![piped] }, range)
+                let call = self.add_call(Expr::Call { callee, args: vec![piped] }, range);
+                mark(self, call)
             }
         }
     }

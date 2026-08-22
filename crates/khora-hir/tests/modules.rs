@@ -254,3 +254,47 @@ fn a_function_arrives_on_a_type_that_was_never_imported() {
         ),
     ]);
 }
+
+/// An imported `effect` has to arrive with its operations. Without them the
+/// type read as `Unknown`, and every `ai.extract(..)` on it read as a call to
+/// a method that was not there.
+#[test]
+fn an_imported_effect_brings_its_operations() {
+    assert_clean(&[
+        (
+            "svc.kh",
+            "module svc;\n\
+             export type Row = | Of(n: Int);\n\
+             export effect Db { query: (String) -> Row, }\n",
+        ),
+        (
+            "app.kh",
+            "module app;\n\
+             import svc::{Db, Row};\n\
+             export fn load(id: String) -> Row with { db: Db } { db.query(id) }\n",
+        ),
+    ]);
+}
+
+/// And its requirement has to be satisfiable from another module, which is the
+/// same fact from the caller's side.
+#[test]
+fn an_imported_effect_can_be_installed() {
+    assert_clean(&[
+        (
+            "svc.kh",
+            "module svc;\n\
+             export type Row = | Of(n: Int);\n\
+             export effect Db { query: (String) -> Row, }\n\
+             export fn load(id: String) -> Row with { db: Db } { db.query(id) }\n",
+        ),
+        (
+            "app.kh",
+            "module app;\n\
+             import svc::{Db, Row, load};\n\
+             export fn go() -> Row {\n\
+               with { db: handler for Db { query: fn _ => Row::Of(1) } } { load(\"x\") }\n\
+             }\n",
+        ),
+    ]);
+}

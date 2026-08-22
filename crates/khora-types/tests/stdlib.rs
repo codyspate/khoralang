@@ -10,12 +10,16 @@ use std::path::{Path, PathBuf};
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
+fn repo_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
 fn std_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std")
+    repo_dir().join("std")
 }
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).expect("std/ should exist").flatten() {
+    for entry in std::fs::read_dir(dir).expect("the source directory should exist").flatten() {
         let path = entry.path();
         if path.is_dir() {
             sources(&path, out);
@@ -25,19 +29,21 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every diagnostic from every file in `std/`, checked as one compilation so
-/// that cross-module imports resolve.
-fn errors() -> Vec<String> {
+/// Every diagnostic from every file under `dirs`, checked as one compilation
+/// so that cross-module imports resolve.
+fn errors_under(dirs: &[PathBuf]) -> Vec<String> {
     let mut paths = Vec::new();
-    sources(&std_dir(), &mut paths);
+    for dir in dirs {
+        sources(dir, &mut paths);
+    }
     paths.sort();
-    assert!(!paths.is_empty(), "no .kh files under std/");
+    assert!(!paths.is_empty(), "no .kh files under {dirs:?}");
 
     let db = KhoraDatabase::new();
     let files: Vec<SourceFile> = paths
         .iter()
         .map(|p| {
-            let text = std::fs::read_to_string(p).expect("std/ should be readable");
+            let text = std::fs::read_to_string(p).expect("the sources should be readable");
             SourceFile::new(&db, p.clone(), text)
         })
         .collect();
@@ -57,8 +63,26 @@ fn errors() -> Vec<String> {
 
 #[test]
 fn the_standard_library_type_checks() {
-    let found = errors();
+    let found = errors_under(&[std_dir()]);
     assert!(found.is_empty(), "std/ does not type check:\n  {}", found.join("\n  "));
+}
+
+/// The phase 4 exit criterion, minus serving a request.
+///
+/// `examples/risk_analyzer` is the program the whole design was written
+/// against — capabilities, a fallible service, `catch` discharging half an
+/// error row, a router carrying its handlers' requirements, a named context
+/// installing three services at once. It type checking is the claim that the
+/// pieces fit together, and it is worth a test precisely because every one of
+/// those pieces has a unit test that passed while this did not.
+#[test]
+fn the_reference_application_type_checks() {
+    let found = errors_under(&[std_dir(), repo_dir().join("examples")]);
+    assert!(
+        found.is_empty(),
+        "the reference application does not type check:\n  {}",
+        found.join("\n  ")
+    );
 }
 
 /// The pieces that make `std::core` worth having, so that losing one is a test

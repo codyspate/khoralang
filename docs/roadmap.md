@@ -399,9 +399,17 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   handlers, so `with { db: Db }` and `fn postgres_db() -> Db` agree without a
   wrapper to unwrap.
 
-**Exit:** the reference application typechecks and serves a request; an
-unhandled capability is rejected with a diagnostic naming the absent label and
-the function that required it.
+**Exit:** the reference application typechecks — **met**, pinned by
+`the_reference_application_type_checks` — and an unhandled capability is
+rejected with a diagnostic naming the absent label and the function that
+required it — **met**. Serving a request needs real I/O and a backend that can
+build a value out of an effectful function; both belong to phase 5 and after.
+
+Three holes turned up only once a whole program was checked at once, each of
+them a place where something arrived as `Unknown` and was therefore accepted:
+an imported `effect` brought neither its type nor its operations, `with Mock`
+installed nothing at all because a named context is not a record literal, and a
+bare `'r` in type position parsed as no name.
 
 ---
 

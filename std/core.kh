@@ -308,6 +308,14 @@ impl Traversable for List {
 // implemented yet; the signatures are here so that the design is written down
 // where it will live rather than only in a document.
 
+/// Writes a line to standard output.
+///
+/// Declared without a body, so it is an extern: the backend dispatches it on
+/// the argument's type, because there is no prelude yet to declare three
+/// differently-typed printers. It is not an effect, which it eventually should
+/// be — writing to a console is exactly the sort of thing a capability is for.
+export fn print(value: String);
+
 /// The empty type. A function whose return type is `Never` does not return
 /// normally — it raises, diverges, or transfers control to a handler.
 export type Never;
@@ -318,6 +326,16 @@ export type Never;
 /// exits, including when the region is left by a raise or by interruption.
 export effect Scope {
   acquire: forall <A> . (A, A -> ()) -> A,
+}
+
+impl Scope {
+  /// The outermost region: the one that ends when the program does.
+  ///
+  /// An entry point has to get a `Scope` from somewhere, and there is nothing
+  /// above it to ask. Everything else should take one rather than reach for
+  /// this — a library that roots its own scope has decided its caller's
+  /// lifetimes for it.
+  fn root() -> Scope;
 }
 
 /// Runs `body` in a fresh region, discharging its `scope` requirement.

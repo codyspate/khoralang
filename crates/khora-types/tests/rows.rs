@@ -341,3 +341,51 @@ fn calling_through_a_binding_is_accepted_when_declared() {
         "{HANDLERS}export fn go(r: Req) -> Res with {{ db: Db }} {{ let f = served; f(r) }}\n"
     ));
 }
+
+// --- named contexts --------------------------------------------------------
+
+const TWO_SERVICES: &str = "module m;\n\
+                            export type Ledger;\n\
+                            export type Ai;\n\
+                            export effect Log { note: (Int) -> Int, }\n\
+                            export effect Clock { now: () -> Int, }\n\
+                            export fn stamped(n: Int) -> Int \
+                              with { log: Log, clock: Clock } { log.note(clock.now() + n) }\n";
+
+/// `with Mock { .. }` is `with { <Mock's bindings> } { .. }`. It used to be a
+/// no-op: the block had no record literal, so nothing was installed and
+/// nothing was discharged.
+#[test]
+fn a_named_context_installs_its_bindings() {
+    assert_clean(&format!(
+        "{TWO_SERVICES}\
+         export context Mock {{\n\
+           log: handler for Log {{ note: fn n => n }},\n\
+           clock: handler for Clock {{ now: fn () => 7 }},\n\
+         }}\n\
+         export fn go() -> Int {{ with Mock {{ stamped(1) }} }}\n"
+    ));
+}
+
+/// Half a context is still half: what it does not bind is still required.
+#[test]
+fn a_named_context_discharges_only_what_it_binds() {
+    assert_reports(
+        &format!(
+            "{TWO_SERVICES}\
+             export context Half {{\n\
+               log: handler for Log {{ note: fn n => n }},\n\
+             }}\n\
+             export fn go() -> Int {{ with Half {{ stamped(1) }} }}\n"
+        ),
+        "clock: Clock",
+    );
+}
+
+#[test]
+fn a_context_that_does_not_exist_is_reported() {
+    assert_reports(
+        &format!("{TWO_SERVICES}export fn go() -> Int {{ with Nope {{ 1 }} }}\n"),
+        "cannot find a `context` named `Nope`",
+    );
+}
