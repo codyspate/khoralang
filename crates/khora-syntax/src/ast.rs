@@ -897,6 +897,37 @@ impl RecordExpr {
     }
 }
 
+impl WithExpr {
+    /// The computation the handlers serve: `analyze(id) with { .. }`.
+    ///
+    /// The row is itself an expression child, and it comes second, so the
+    /// first one that is not the row is the body.
+    pub fn body(&self) -> Option<Expr> {
+        let row = self.row().map(|r| r.syntax().clone());
+        children::<Expr>(&self.0).find(|e| Some(e.syntax()) != row.as_ref())
+    }
+    /// The handlers being installed.
+    pub fn row(&self) -> Option<RecordExpr> {
+        children::<RecordExpr>(&self.0).last()
+    }
+    /// A named context, as in `expr with Mock`. Phase 4.4.
+    pub fn context(&self) -> Option<Path> {
+        child::<PathExpr>(&self.0).and_then(|p| child(p.syntax()))
+    }
+}
+
+impl WithBlock {
+    pub fn row(&self) -> Option<RecordExpr> {
+        child(&self.0)
+    }
+    pub fn body(&self) -> Option<Block> {
+        child(&self.0)
+    }
+    pub fn context(&self) -> Option<Path> {
+        child::<PathExpr>(&self.0).and_then(|p| child(p.syntax()))
+    }
+}
+
 impl HandlerExpr {
     /// The effect being handled: the path after `for`.
     pub fn effect(&self) -> Option<Path> {

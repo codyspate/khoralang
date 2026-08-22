@@ -278,6 +278,32 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 map.signatures
                     .insert(name, Signature { generics, bounds, requires, raises, params, ret });
             }
+            // An effect *is* a record of function types — `effect Ledger
+            // { get: String -> Int }` and `type Ledger = { get: (String) -> Int }`
+            // describe the same value. Collecting it as one keeps handlers,
+            // field access and reference counting on the paths that already
+            // work. `docs/design/effects.md` says as much: the shape "is a
+            // record of function types".
+            ast::Decl::Effect(e) => {
+                let Some(name) = e.name().and_then(|n| n.ident()) else { continue };
+                let generics = generic_names(e.type_params().as_ref());
+                consts.insert(name.clone(), vec![false; generics.len()]);
+                map.adts.insert(name.clone(), generics.clone());
+
+                let mut labels = Vec::new();
+                let mut fields = Vec::new();
+                for op in e.operations() {
+                    let Some(label) = op.name().and_then(|n| n.ident()) else { continue };
+                    labels.push(label);
+                    fields.push(type_of_syntax(op.ty().as_ref(), &generics));
+                }
+                map.variants.push(VariantInfo {
+                    type_name: name.clone(),
+                    name,
+                    fields,
+                    labels,
+                });
+            }
             ast::Decl::Type(t) => {
                 let Some(type_name) = t.name().and_then(|n| n.ident()) else { continue };
                 let generics = generic_names(t.type_params().as_ref());
@@ -725,6 +751,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             unifier: Unifier::new().with_assoc(types.traits.assoc_bindings()),
             lambdas: Vec::new(),
             demanded: Vec::new(),
+            installed: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
@@ -831,6 +858,12 @@ struct Checker<'a> {
     /// because an exported signature is a promise and inferring one silently
     /// would let a body widen it. `docs/design/effects.md`.
     demanded: Vec<Demand>,
+    /// The capabilities in scope from enclosing `with` blocks.
+    ///
+    /// A call inside one is served by it, so its labels never reach the
+    /// signature. That is row subtraction: `with` *discharges* a requirement
+    /// rather than forwarding it.
+    installed: Vec<String>,
     errors: Vec<HirError>,
 }
 
@@ -843,6 +876,20 @@ impl<'a> Checker<'a> {
         for (i, pat) in self.body.params.iter().enumerate() {
             let ty = self.signature.params.get(i).cloned().unwrap_or(Type::Unknown);
             self.bind_pattern(*pat, &ty);
+        }
+        // `with { ledger: Ledger }` binds `ledger` for the body at the type the
+        // row gave it.
+        let required = match self.signature.requires.clone() {
+            Type::Row { fields, .. } => fields,
+            _ => Vec::new(),
+        };
+        for (label, pat) in self.body.evidence.clone() {
+            let ty = required
+                .iter()
+                .find(|(l, _)| *l == label)
+                .map(|(_, t)| t.clone())
+                .unwrap_or(Type::Unknown);
+            self.bind_pattern(pat, &ty);
         }
 
         let Some(root) = self.body.root else { return };
@@ -999,28 +1046,14 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args } => self.infer_call(callee, &args, range),
             Expr::Block { stmts, tail } => {
-                // A statement that diverges makes the whole block diverge:
-                // `{ return 0; }` has type Never, not `()`, or an `if` whose
-                // branch returns would wrongly disagree with the other branch.
-                let mut diverged = false;
-                for stmt in stmts {
-                    match stmt {
-                        Stmt::Let { pat, init } => {
-                            let ty = init.map(|e| self.infer(e)).unwrap_or(Type::Unknown);
-                            diverged |= matches!(ty, Type::Never);
-                            self.bind_pattern(pat, &ty);
-                        }
-                        Stmt::Expr(e) => {
-                            diverged |= matches!(self.infer(e), Type::Never);
-                        }
-                    }
-                }
-                let tail_ty = tail.map(|t| self.infer(t)).unwrap_or(Type::Unit);
-                if diverged {
-                    Type::Never
-                } else {
-                    tail_ty
-                }
+                // A `with` block lowered to an ordinary one, and its labels
+                // are supplied to everything inside it.
+                let supplied = self.body.installs.get(&id).cloned().unwrap_or_default();
+                let depth = self.installed.len();
+                self.installed.extend(supplied);
+                let ty = self.infer_block(&stmts, tail);
+                self.installed.truncate(depth);
+                ty
             }
             Expr::If { condition, then_branch, else_branch } => {
                 self.expect(condition, &Type::Bool, "an `if` condition");
@@ -1455,6 +1488,33 @@ impl<'a> Checker<'a> {
     }
 
     /// The trait's signature for a method key, with `Self` still a parameter.
+    /// The type of a block: its tail, or `Never` if anything in it diverges.
+    ///
+    /// A statement that diverges makes the whole block diverge — `{ return 0; }`
+    /// has type `Never`, not `()`, or an `if` whose branch returns would
+    /// wrongly disagree with the other branch.
+    fn infer_block(&mut self, stmts: &[Stmt], tail: Option<ExprId>) -> Type {
+        let mut diverged = false;
+        for stmt in stmts {
+            match stmt {
+                Stmt::Let { pat, init } => {
+                    let ty = init.map(|e| self.infer(e)).unwrap_or(Type::Unknown);
+                    diverged |= matches!(ty, Type::Never);
+                    self.bind_pattern(*pat, &ty);
+                }
+                Stmt::Expr(e) => {
+                    diverged |= matches!(self.infer(*e), Type::Never);
+                }
+            }
+        }
+        let tail_ty = tail.map(|t| self.infer(t)).unwrap_or(Type::Unit);
+        if diverged {
+            Type::Never
+        } else {
+            tail_ty
+        }
+    }
+
     /// Records what a call requires of the enclosing function.
     ///
     /// The rows are instantiated with the same arguments the signature was, so
@@ -1476,7 +1536,18 @@ impl<'a> Checker<'a> {
         for (clause, row) in
             [(Clause::Requires, &signature.requires), (Clause::Raises, &signature.raises)]
         {
-            let row = unify::substitute(row, &mapping);
+            let mut row = unify::substitute(row, &mapping);
+            // Whatever an enclosing `with` block supplies is already answered.
+            if clause == Clause::Requires {
+                if let Type::Row { fields, tail } = &row {
+                    let left: Vec<(String, Type)> = fields
+                        .iter()
+                        .filter(|(l, _)| !self.installed.contains(l))
+                        .cloned()
+                        .collect();
+                    row = Type::row(left, tail.as_deref().cloned());
+                }
+            }
             if matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none()) {
                 continue;
             }

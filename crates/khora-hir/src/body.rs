@@ -247,6 +247,30 @@ pub struct Body {
     /// Source range of each expression, for diagnostics.
     expr_ranges: Vec<TextRange>,
     pub params: Vec<PatId>,
+    /// The capabilities this function requires, by the label the body calls
+    /// them and the binding that holds them.
+    ///
+    /// `with { ledger: Ledger }` puts `ledger` in scope for the body — there
+    /// is no `ask`. They are kept apart from `params` because they are not
+    /// written at the call site: code generation appends them, per
+    /// `docs/design/effect-runtime.md` §2.
+    pub evidence: Vec<(String, PatId)>,
+    /// The capabilities each `with` block supplies, by the block's id.
+    ///
+    /// A `with` block lowers to an ordinary block of `let`s — that is the whole
+    /// of installation at runtime. But *which* labels it supplied is not
+    /// recoverable from that, and the checker needs it: a requirement raised
+    /// inside the block is discharged by it rather than by the signature. This
+    /// is row subtraction, kept where it can still be read.
+    pub installs: std::collections::HashMap<ExprId, Vec<String>>,
+    /// Which binding supplies each capability label at each call site.
+    ///
+    /// Recorded here because it can only be answered *while* lowering, when
+    /// the scope stack is live. Resolving it later by name is wrong the moment
+    /// two `with` blocks in one function bind the same label: they are sibling
+    /// scopes, and the last declaration is not the one in scope at the first
+    /// call.
+    pub capabilities: std::collections::HashMap<ExprId, Vec<(String, LocalId)>>,
     pub root: Option<ExprId>,
     pub errors: Vec<HirError>,
 }
@@ -258,6 +282,20 @@ impl Body {
 
     pub fn pat(&self, id: PatId) -> &Pat {
         &self.pats[id.index()]
+    }
+
+    /// The binding that supplies `label` at the call site `at`.
+    ///
+    /// Recorded during lowering rather than searched for here: two `with`
+    /// blocks in one function are sibling scopes binding the same label, and
+    /// nothing about the finished arena says which was in scope where.
+    pub fn capability_at(&self, at: ExprId, label: &str) -> Option<LocalId> {
+        self.capabilities
+            .get(&at)?
+            .iter()
+            .rev()
+            .find(|(l, _)| l == label)
+            .map(|(_, local)| *local)
     }
 
     pub fn local(&self, id: LocalId) -> &Local {
@@ -374,6 +412,7 @@ fn lower_function(
         scope,
         generics,
         loop_depth: 0,
+        in_scope: Vec::new(),
         lambdas: Vec::new(),
         lambda_names: Vec::new(),
     };
@@ -392,9 +431,36 @@ fn lower_function(
         }
     }
 
+    // `with { ledger: Ledger }` puts `ledger` in scope for the body, sorted by
+    // label so the order matches the row and, through it, the order code
+    // generation appends the arguments in.
+    let mut labels: Vec<String> = decl
+        .with_clause()
+        .and_then(|c| c.row())
+        .map(|row| capability_labels(&row))
+        .unwrap_or_default();
+    labels.sort();
+    labels.dedup();
+    for label in labels {
+        let local = ctx.declare(label.clone(), false, decl.syntax().text_range());
+        let pat = ctx.add_pat(Pat::Bind(local));
+        ctx.in_scope.push((label.clone(), local));
+        ctx.body.evidence.push((label, pat));
+    }
+
     let root = ctx.lower_block(block);
     ctx.body.root = Some(root);
     ctx.body
+}
+
+/// The labels a capability row names, wherever they are written.
+///
+/// With a tail they nest inside it rather than beside it, so both places have
+/// to be read — the same trap `khora-types` hit.
+fn capability_labels(row: &ast::Type) -> Vec<String> {
+    let ast::Type::Record(r) = row else { return Vec::new() };
+    let nested: Vec<ast::Field> = r.row_tail().map(|t| t.fields().collect()).unwrap_or_default();
+    r.fields().chain(nested).filter_map(|f| f.name().and_then(|n| n.ident())).collect()
 }
 
 struct Ctx<'a> {
@@ -414,6 +480,9 @@ struct Ctx<'a> {
     /// locals that existed when it started. A local below the innermost mark
     /// belongs to an enclosing scope, which is exactly what "captured" means.
     lambdas: Vec<usize>,
+    /// Capability bindings in scope, innermost last. A `with` clause seeds
+    /// it and a `with` block extends it for its region.
+    in_scope: Vec<(String, LocalId)>,
     /// The name each lambda being lowered was bound to, when it was written as
     /// the initializer of a `let`. Inside the innermost one, that name is the
     /// closure itself rather than a capture of it.
@@ -425,6 +494,24 @@ impl<'a> Ctx<'a> {
         self.body.exprs.push(expr);
         self.body.expr_ranges.push(range);
         ExprId((self.body.exprs.len() - 1) as u32)
+    }
+
+    /// Adds a call, remembering which bindings could supply its capabilities.
+    ///
+    /// Which ones it actually needs is the callee's row, which is not known
+    /// here; what is known, and only here, is what is in scope.
+    fn add_call(&mut self, expr: Expr, range: TextRange) -> ExprId {
+        let id = self.add_expr(expr, range);
+        if !self.in_scope.is_empty() {
+            // Innermost last, so a later duplicate label shadows an earlier one.
+            let mut visible: Vec<(String, LocalId)> = Vec::new();
+            for (label, local) in &self.in_scope {
+                visible.retain(|(l, _)| l != label);
+                visible.push((label.clone(), *local));
+            }
+            self.body.capabilities.insert(id, visible);
+        }
+        id
     }
 
     fn add_pat(&mut self, pat: Pat) -> PatId {
@@ -597,7 +684,7 @@ impl<'a> Ctx<'a> {
                     .args()
                     .map(|list| list.args().map(|a| self.lower_expr(&a)).collect())
                     .unwrap_or_default();
-                self.add_expr(Expr::Call { callee, args }, range)
+                self.add_call(Expr::Call { callee, args }, range)
             }
             ast::Expr::Pipe(e) => self.lower_pipe(e, range),
             ast::Expr::Bin(e) => self.lower_binary(e, range),
@@ -712,8 +799,17 @@ impl<'a> Ctx<'a> {
                 self.add_expr(Expr::Record { owner, fields }, range)
             }
             ast::Expr::Catch(_) => self.unsupported("`catch`", range),
-            ast::Expr::With(_) | ast::Expr::WithBlock(_) => {
-                self.unsupported("handler installation", range)
+            // `with { ledger: h } { body }` and `body with { ledger: h }`
+            // are one thing: a region in which the labels are bound. That is
+            // an ordinary block of `let`s, which is why installation needs no
+            // runtime of its own and why an inner `with` shadows an outer one.
+            ast::Expr::With(e) => {
+                let body = e.body();
+                self.lower_installation(e.row().as_ref(), body.as_ref(), range)
+            }
+            ast::Expr::WithBlock(e) => {
+                let body = e.body().map(ast::Expr::Block);
+                self.lower_installation(e.row().as_ref(), body.as_ref(), range)
             }
         }
     }
@@ -898,7 +994,7 @@ impl<'a> Ctx<'a> {
                 Expr::Field { base: receiver, name: "next".to_string() },
                 range,
             );
-            self.add_expr(Expr::Call { callee: next, args: Vec::new() }, range)
+            self.add_call(Expr::Call { callee: next, args: Vec::new() }, range)
         };
         let dispatch = self.add_expr(
             Expr::Match {
@@ -945,6 +1041,46 @@ impl<'a> Ctx<'a> {
                 "`for` needs the `Step` type in scope; import it from `std::core`",
             ),
         }
+    }
+
+    /// `with { ledger: h } { .. }` — the labels bound over a region.
+    fn lower_installation(
+        &mut self,
+        row: Option<&ast::RecordExpr>,
+        body: Option<&ast::Expr>,
+        range: TextRange,
+    ) -> ExprId {
+        self.scopes.push(Vec::new());
+        let outer = self.in_scope.len();
+
+        let mut stmts = Vec::new();
+        let mut labels = Vec::new();
+        for field in row.map(|r| r.fields().collect::<Vec<_>>()).unwrap_or_default() {
+            let value = match field.value() {
+                Some(v) => self.lower_expr(&v),
+                None => self.add_expr(Expr::Missing, range),
+            };
+            // Declared after its own initializer, so `with { ledger: ledger }`
+            // means the outer one — the same rule every `let` follows.
+            let pat = match field.name().and_then(|n| n.ident()) {
+                Some(label) => {
+                    labels.push(label.clone());
+                    let local = self.declare(label.clone(), false, field.syntax().text_range());
+                    self.in_scope.push((label, local));
+                    self.add_pat(Pat::Bind(local))
+                }
+                None => self.add_pat(Pat::Wildcard),
+            };
+            stmts.push(Stmt::Let { pat, init: Some(value) });
+        }
+
+        let tail = body.map(|b| self.lower_expr(b));
+        self.scopes.pop();
+        self.in_scope.truncate(outer);
+
+        let block = self.add_expr(Expr::Block { stmts, tail }, range);
+        self.body.installs.insert(block, labels);
+        block
     }
 
     /// The labelled expressions of a record literal.
@@ -1153,12 +1289,12 @@ impl<'a> Ctx<'a> {
                         }
                     }
                 }
-                self.add_expr(Expr::Call { callee, args }, range)
+                self.add_call(Expr::Call { callee, args }, range)
             }
             // `x |> f` is `f(x)`.
             _ => {
                 let callee = self.lower_expr(&rhs);
-                self.add_expr(Expr::Call { callee, args: vec![piped] }, range)
+                self.add_call(Expr::Call { callee, args: vec![piped] }, range)
             }
         }
     }

@@ -276,6 +276,17 @@ fn declare_closures(
     }
 }
 
+/// The capabilities a signature requires, in the order they are passed.
+///
+/// Sorted by label, which `Type::row` already guarantees, so the caller and
+/// the callee agree on the order without it being recorded anywhere.
+pub(crate) fn evidence_of(signature: &Signature) -> Vec<(String, Type)> {
+    match &signature.requires {
+        Type::Row { fields, .. } => fields.clone(),
+        _ => Vec::new(),
+    }
+}
+
 /// A signature with the instance's type arguments substituted in.
 ///
 /// This is what makes a specialization compilable: the declared signature still
@@ -295,10 +306,10 @@ fn specialized_signature(
         .map(|(g, a)| (g.as_str(), a.clone()))
         .collect();
     Some(Signature {
-        // Effects are erased by the time anything is emitted: a capability is
-        // an ordinary parameter and a failure an ordinary tagged return, so
-        // the rows have no machine meaning of their own.
-        requires: Type::empty_row(),
+        // The capability row survives to here: it is what says how many extra
+        // parameters the function takes and in what order. The error row does
+        // not yet — tagged returns are 4.3b.
+        requires: signature.requires.clone(),
         raises: Type::empty_row(),
         generics: Vec::new(),
         // A specialized signature has no parameters left, so it can carry no
@@ -528,6 +539,12 @@ impl<'ctx> Backend<'ctx> {
         let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
         for param in &signature.params {
             params.push(self.llvm_type(param)?.into());
+        }
+        // Capabilities are ordinary parameters, appended after the written
+        // ones in label order. The row is sorted, so both sides agree without
+        // anything being written down twice.
+        for (_, capability) in evidence_of(signature) {
+            params.push(self.llvm_type(&capability)?.into());
         }
         Some(match &signature.ret {
             Type::Unit => self.ctx.void_type().fn_type(&params, false),

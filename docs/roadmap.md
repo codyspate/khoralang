@@ -348,7 +348,13 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   `{ ledger, ai }` call something needing only `{ ledger }`. No clause means
   the closed empty row, so an entry point is checked without annotating it.
   Row subtraction for handler installation lands with 4.3a. D3 still open.
-- **4.3 Handler lowering and runtime**, per D1.
+- **4.3a Capabilities as evidence — done.** An `effect` is a record of
+  closures, a `with` clause is extra parameters appended in label order, and
+  installing a handler is a block of `let`s. No handler stack, no dynamic
+  lookup, no stack map. Row subtraction falls out: a requirement raised inside
+  a `with` block is discharged by it rather than reaching the signature.
+- **4.3b Tagged returns** for a non-empty `raises` row, the branch at `!`, and
+  drops on the error path.
 - **4.4 `Layer` as handler composition**, including merge.
 
 **Exit:** the reference application typechecks and serves a request; an

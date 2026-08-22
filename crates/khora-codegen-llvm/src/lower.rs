@@ -40,7 +40,7 @@ use khora_perceus::{is_boxed, RcPlan};
 use khora_types::{BodyTypes, Type, VariantInfo};
 use text_size::TextRange;
 
-use crate::backend::{Backend, CLOSURE_ADAPTER_TAG, CLOSURE_CAPTURE_BASE};
+use crate::backend::{evidence_of, Backend, CLOSURE_ADAPTER_TAG, CLOSURE_CAPTURE_BASE};
 use crate::runtime::{self, FIELD_WORD, STRING_BYTES_OFFSET, STRING_LEN_FIELD, STRING_TAG};
 
 /// The result of lowering an expression: `None` when control diverged.
@@ -251,8 +251,12 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// Parameters are owned by the callee, so nothing is `dup`ed here; the
     /// matching `drop` is in the plan's releases for the outermost block.
     fn bind_parameters(&mut self) {
-        for (index, pat) in self.body.params.iter().enumerate() {
-            let Pat::Bind(local) = self.body.pat(*pat).clone() else { continue };
+        // Capabilities follow the written parameters, in label order, which is
+        // the order `function_type` declared them in.
+        let evidence: Vec<PatId> = self.body.evidence.iter().map(|(_, pat)| *pat).collect();
+        let all = self.body.params.iter().copied().chain(evidence);
+        for (index, pat) in all.enumerate() {
+            let Pat::Bind(local) = self.body.pat(pat).clone() else { continue };
             let Some(slot) = self.slots.get(&local).copied() else { continue };
             let Some(value) = self.function.get_nth_param(index as u32) else { continue };
             self.be.builder.build_store(slot, value).expect("storing a parameter");
@@ -451,7 +455,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Literal(lit) => self.literal(lit, range),
             Expr::Local(local) => self.read_local(id, local, range),
             Expr::Path(resolution) => self.path(id, &resolution, range),
-            Expr::Call { callee, args } => self.call(callee, &args, range),
+            Expr::Call { callee, args } => self.call(id, callee, &args, range),
             Expr::Binary { op, lhs, rhs } => self.binary(op, lhs, rhs, range),
             Expr::Unary { op, operand } => self.unary(op, operand, range),
             Expr::Assign { target, value } => self.assign(target, value, range),
@@ -642,14 +646,20 @@ impl<'ctx> Lower<'_, 'ctx> {
     // Calls
     // -----------------------------------------------------------------------
 
-    fn call(&mut self, callee: ExprId, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+    fn call(
+        &mut self,
+        site: ExprId,
+        callee: ExprId,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
         match self.body.expr(callee).clone() {
             Expr::Path(khora_hir::Resolution::Variant { type_name, name, .. }) => {
                 self.construct(&type_name, &name, args, range)
             }
             Expr::Path(khora_hir::Resolution::TraitItem { name, .. }) => {
                 match self.mono.callee(&self.owner.clone(), callee) {
-                    Some(symbol) => self.call_named(&symbol, args, range),
+                    Some(symbol) => self.call_named(&symbol, site, args, range),
                     None => self.fail(
                         format!("`{name}` was not resolved to an impl; that is a compiler bug"),
                         range,
@@ -666,16 +676,27 @@ impl<'ctx> Lower<'_, 'ctx> {
                         .mono
                         .callee(&self.owner.clone(), callee)
                         .unwrap_or_else(|| name.clone());
-                    self.call_named(&symbol, args, range)
+                    self.call_named(&symbol, site, args, range)
                 }
             }
             // `a.show()` — the receiver becomes the first argument, and which
             // impl runs was settled by monomorphization.
+            //
+            // Unless the callee is a *field* holding a function, which wins
+            // over a method of the same name (D2). The checker decided that
+            // already, and recorded it by typing the field access as a
+            // function; monomorphization has nothing for such a site.
             Expr::Field { base, .. } => match self.mono.callee(&self.owner.clone(), callee) {
                 Some(symbol) => {
                     let mut all = vec![base];
                     all.extend_from_slice(args);
-                    self.call_named(&symbol, &all, range)
+                    self.call_named(&symbol, site, &all, range)
+                }
+                None if matches!(self.types.of(callee), Type::Fn { .. }) => {
+                    let Type::Fn { params, ret } = self.types.of(callee).clone() else {
+                        unreachable!("guarded by the match arm")
+                    };
+                    self.call_closure(callee, &params, &ret, args, range)
                 }
                 None => self.fail(
                     "this method call was not resolved to an impl; that is a compiler bug",
@@ -995,7 +1016,61 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(result)
     }
 
-    fn call_named(&mut self, name: &str, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+    /// The capabilities a call needs, read out of the caller's own bindings.
+    ///
+    /// A label is in scope because the caller declared it in its own `with`
+    /// clause or bound it in a `with` block — both are locals by the time
+    /// lowering runs, which is why installation needs no runtime of its own.
+    fn evidence_for(
+        &mut self,
+        name: &str,
+        site: ExprId,
+        range: TextRange,
+    ) -> Option<Vec<BasicValueEnum<'ctx>>> {
+        let signature = self.be.signature_of(name)?;
+        let wanted = evidence_of(&signature);
+        if wanted.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut out = Vec::with_capacity(wanted.len());
+        for (label, ty) in wanted {
+            let Some(local) = self.body.capability_at(site, &label) else {
+                self.fail(
+                    format!("`{name}` needs the capability `{label}`, which is not in scope"),
+                    range,
+                );
+                return None;
+            };
+            let (Some(slot), Some(llvm_ty)) =
+                (self.slots.get(&local).copied(), self.be.llvm_type(&ty))
+            else {
+                self.fail(format!("`{label}` has no storage, which is a compiler bug"), range);
+                return None;
+            };
+            let value = self
+                .be
+                .builder
+                .build_load(llvm_ty, slot, &format!("{label}.evidence"))
+                .expect("reading a capability");
+            // Passed owned, as every other argument is: the callee's plan
+            // releases it where its body ends, so the caller hands over a
+            // reference of its own rather than lending the one it holds.
+            if is_boxed(&ty) {
+                self.dup(value);
+            }
+            out.push(value);
+        }
+        Some(out)
+    }
+
+    fn call_named(
+        &mut self,
+        name: &str,
+        site: ExprId,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
         let Some(signature) = self.be.signature_of(name) else {
             return self.fail(format!("`{name}` has no signature to call through"), range);
         };
@@ -1007,6 +1082,11 @@ impl<'ctx> Lower<'_, 'ctx> {
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
             values.push(self.expr(*arg)?.into());
+        }
+        // Then the capabilities, which the source never writes: the row said
+        // which and in what order.
+        for capability in self.evidence_for(name, site, range)? {
+            values.push(capability.into());
         }
 
         let call = self.be.builder.build_call(function, &values, "call").expect("a call");
@@ -1124,16 +1204,16 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("narrowing a Bool field")
                     .into()
             }
-            Type::Str | Type::Adt { .. } => self
-                .be
-                .builder
-                .build_load(self.be.ctx.ptr_type(AddressSpace::default()), slot, "field")
-                .expect("reading a boxed field"),
-            _ => self
-                .be
-                .builder
-                .build_load(self.be.ctx.i64_type(), slot, "field")
-                .expect("reading a word field"),
+            // Everything else is read back at whatever `llvm_type` says it
+            // is. Listing the pointer-shaped types here instead meant a
+            // closure in a field — added later — came back as an `i64`.
+            other => {
+                let ty = self
+                    .be
+                    .llvm_type(other)
+                    .unwrap_or_else(|| self.be.ctx.i64_type().into());
+                self.be.builder.build_load(ty, slot, "field").expect("reading a field")
+            }
         }
     }
 

@@ -116,7 +116,12 @@ fn postfix_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                 p.close(R_BRACE, brace);
                 m.complete(p, CATCH_EXPR)
             }
-            WITH_KW => {
+            // Postfix `with` installs handlers over a *value*. A block-like
+            // expression is a statement, so `with { a } { .. }` followed by
+            // another `with` block is two statements, not one installed over
+            // the other — the same rule that lets `if c { .. }` stand without
+            // a `;`. Parenthesize to mean the other thing.
+            WITH_KW if !is_block_like(lhs.kind()) => {
                 let m = lhs.precede(p);
                 p.bump(WITH_KW);
                 context_row(p);

@@ -130,7 +130,19 @@ struct Planner<'a> {
 impl<'a> Planner<'a> {
     fn plan_function(&mut self) {
         let mut owned = Vec::new();
-        for pat in self.body.params.clone() {
+        // Capabilities are parameters like any other: owned by the callee,
+        // read with a dup, released where the body ends. Treating them as
+        // borrowed instead would be cheaper and wrong — `ledger.balance(id)`
+        // releases the record it read the field out of, and a borrowed
+        // capability would be freed under its caller.
+        let params: Vec<PatId> = self
+            .body
+            .params
+            .iter()
+            .copied()
+            .chain(self.body.evidence.iter().map(|(_, pat)| *pat))
+            .collect();
+        for pat in params {
             self.bind(pat, &mut owned);
         }
 
