@@ -439,6 +439,25 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
         })
         .collect();
 
+    // A `let` at module level is a **constant**: a named expression, lowered
+    // wherever it is mentioned. Rust's `const` rather than its `static`, and
+    // for the same reasons — there is no initialization order to get wrong, no
+    // global to release at exit, and no shared state for two fibers to reach.
+    //
+    // Collected once here rather than searched for at each mention, exactly as
+    // the contexts above are.
+    let constants: Vec<(String, ast::LetDecl)> = parse
+        .source_file()
+        .decls()
+        .filter_map(|d| match d {
+            ast::Decl::Let(l) => match l.pat()? {
+                ast::Pat::Ident(p) => Some((p.name()?.ident()?, l)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+
     let mut out: Vec<(String, Body)> = parse
         .source_file()
         .decls()
@@ -447,7 +466,7 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
                 let lowered = (|| {
                     let name = f.name()?.ident()?;
                     let body = f.body()?;
-                    Some((name, lower_function(map, scope, &contexts, &f, &body)))
+                    Some((name, lower_function(map, scope, &contexts, &constants, &f, &body)))
                 })();
                 lowered.into_iter().collect::<Vec<_>>()
             }
@@ -455,9 +474,9 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
             // implementation, and it has to be checked like any other.
             ast::Decl::Trait(t) => {
                 let owner = t.name().and_then(|n| n.ident()).unwrap_or_default();
-                methods(map, scope, &contexts, &owner, t.functions())
+                methods(map, scope, &contexts, &constants, &owner, t.functions())
             }
-            ast::Decl::Impl(i) => methods(map, scope, &contexts, &impl_key(&i), i.functions()),
+            ast::Decl::Impl(i) => methods(map, scope, &contexts, &constants, &impl_key(&i), i.functions()),
             _ => Vec::new(),
         })
         .collect();
@@ -468,7 +487,7 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
     for (index, decl) in parse.source_file().decls().enumerate() {
         let ast::Decl::Test(t) = &decl else { continue };
         let Some(block) = t.body() else { continue };
-        out.push((crate::test_key(index), lower_test(map, scope, &contexts, &block)));
+        out.push((crate::test_key(index), lower_test(map, scope, &contexts, &constants, &block)));
     }
     out
 }
@@ -479,6 +498,7 @@ fn lower_test(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
     contexts: &[(String, ast::ContextDecl)],
+    constants: &[(String, ast::LetDecl)],
     block: &ast::Block,
 ) -> Body {
     let mut ctx = Ctx {
@@ -487,6 +507,8 @@ fn lower_test(
         map,
         scope,
         contexts,
+        constants,
+        expanding: Vec::new(),
         generics: vec!["Self".to_string()],
         loop_depth: 0,
         in_scope: Vec::new(),
@@ -533,6 +555,7 @@ fn methods(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
     contexts: &[(String, ast::ContextDecl)],
+    constants: &[(String, ast::LetDecl)],
     owner: &str,
     functions: impl Iterator<Item = ast::FnDecl>,
 ) -> Vec<(String, Body)> {
@@ -542,7 +565,7 @@ fn methods(
             let body = f.body()?;
             Some((
                 format!("{owner}::{name}"),
-                lower_function(map, scope, contexts, &f, &body),
+                lower_function(map, scope, contexts, constants, &f, &body),
             ))
         })
         .collect()
@@ -552,6 +575,7 @@ fn lower_function(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
     contexts: &[(String, ast::ContextDecl)],
+    constants: &[(String, ast::LetDecl)],
     decl: &ast::FnDecl,
     block: &ast::Block,
 ) -> Body {
@@ -566,6 +590,8 @@ fn lower_function(
         map,
         scope,
         contexts,
+        constants,
+        expanding: Vec::new(),
         generics,
         loop_depth: 0,
         in_scope: Vec::new(),
@@ -630,6 +656,16 @@ struct Ctx<'a> {
     /// The `context` declarations of this file, by name. `with Mock { .. }`
     /// installs the bindings of the one it names.
     contexts: &'a [(String, ast::ContextDecl)],
+    /// The `let` declarations of this file, by name. A mention of one is
+    /// lowered into the initializer, so a module-level `let` is a constant
+    /// rather than a global.
+    constants: &'a [(String, ast::LetDecl)],
+    /// The constants currently being expanded, innermost last.
+    ///
+    /// `let a = b; let b = a;` is a cycle, and inlining is what turns a cycle
+    /// into a stack overflow rather than a diagnostic. Naming the loop is
+    /// cheaper than discovering it.
+    expanding: Vec<String>,
     /// The type parameters the enclosing function declared, plus `Self` inside
     /// a trait or impl. A path whose first segment is one of these names a
     /// trait function reached through that parameter.
@@ -1050,6 +1086,13 @@ impl<'a> Ctx<'a> {
                 );
                 return self.add_expr(Expr::Unresolved(only.clone()), range);
             }
+            // A module-level `let` is a constant, so a mention of one *is* its
+            // initializer. Checked before the item table, because the item is
+            // only there to make the name resolve and to catch duplicates —
+            // there is no function to call and no global to load.
+            if let Some(expanded) = self.expand_constant(only, range) {
+                return expanded;
+            }
             if let Some(item) = self.map.item(only) {
                 return self.add_expr(
                     Expr::Path(crate::Resolution::Item {
@@ -1293,6 +1336,62 @@ impl<'a> Ctx<'a> {
                 Vec::new()
             }
         }
+    }
+
+    /// A mention of a module-level `let`, lowered into what it was bound to.
+    ///
+    /// `None` when the name is not one, which is the ordinary case.
+    ///
+    /// **Inlined rather than called.** A `let` at module level is a named
+    /// expression — Rust's `const`, not its `static` — so there is no
+    /// initialization order to get wrong, no global to release at exit, and no
+    /// shared state for two fibers to reach. It costs one copy of the
+    /// expression per mention, which for the handlers this exists to name is
+    /// the right answer anyway: two `with` blocks should get two handlers.
+    fn expand_constant(&mut self, name: &str, range: TextRange) -> Option<ExprId> {
+        let decl = self.constants.iter().find(|(n, _)| n == name).map(|(_, d)| d.clone())?;
+
+        // `let a = b; let b = a;` would otherwise be a stack overflow, and a
+        // stack overflow is not a diagnostic.
+        if self.expanding.iter().any(|n| n == name) {
+            let loop_ = self.expanding.join("` -> `");
+            self.error(
+                format!("`{name}` is defined in terms of itself: `{loop_}` -> `{name}`"),
+                range,
+            );
+            return Some(self.add_expr(Expr::Missing, range));
+        }
+
+        // A mutable global is shared state that two fibers could reach, which
+        // is the one thing `docs/design/memory.md` §5a does not allow to cross.
+        // A constant has no such question to answer.
+        if decl.is_mut() {
+            self.error(
+                format!(
+                    "`{name}` is a `let mut` at module level, which would be a mutable global \
+                     — shared state two fibers could reach. Make it a `let`, or move it inside \
+                     a function"
+                ),
+                range,
+            );
+            return Some(self.add_expr(Expr::Missing, range));
+        }
+
+        let Some(initializer) = decl.initializer() else {
+            self.error(format!("`{name}` has no value to stand for"), range);
+            return Some(self.add_expr(Expr::Missing, range));
+        };
+
+        // Lowered in the *constant's* scope, not the mention's: a constant
+        // cannot see the locals of whatever function happens to name it.
+        let outer = std::mem::take(&mut self.scopes);
+        let outer_in_scope = std::mem::take(&mut self.in_scope);
+        self.expanding.push(name.to_string());
+        let id = self.lower_expr(&initializer);
+        self.expanding.pop();
+        self.scopes = outer;
+        self.in_scope = outer_in_scope;
+        Some(id)
     }
 
     fn lower_installation(

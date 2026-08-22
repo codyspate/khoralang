@@ -2,7 +2,7 @@ module app::main;
 
 import std::core::{Option, Scope, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
-import std::ai::{Extract, LLMService, ModelError, Prompt};
+import std::ai::{Extract, LLMService, ModelError, Prompt, Tensor};
 
 export type RiskLevel =
   | Low

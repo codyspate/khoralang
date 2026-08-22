@@ -951,15 +951,32 @@ can be written before anything needs TLS.
 stack: capabilities, a fallible service, `catch`, a router carrying its
 handlers' requirements, and now real I/O underneath.
 
-What stands between here and it, measured rather than guessed:
+- **8.3 A module-level `let` is a constant — done.** It used to be a name with
+  no type: resolved, never checked, never lowered. `Unknown` is compatible with
+  everything so nothing complained, and the first sign was the code generator
+  three layers away. Errata 40, and the fourth entry to say that **`Unknown` is
+  a silence, not a type**.
 
-- `std::net::http` and `std::ai` are signatures with no bodies —
-  `#Params::get` is the first the backend trips over.
-- Three capability values (`ledger`, `ai`, `report`) have no machine type,
-  because an effect whose operations carry a `forall` is not something the
-  backend can lay out yet.
-- Two closures whose types were never pinned down, and one *"this closure was
-  never declared, which is a compiler bug"* — which is exactly what it says.
+  It is Rust's `const` rather than its `static`: lowered wherever it is
+  mentioned, so there is no initialization order to get wrong, nothing to
+  release at exit, and no shared state for two fibers to reach. `let mut` at
+  module level is refused for that last reason.
+
+  This was five of the six things standing between the reference application
+  and a binary.
+
+What stands between here and the exit, measured rather than guessed:
+
+- **One compiler gap: `forall` in an effect operation.**
+  `extract: forall <A: Extract> . (Prompt, A::Spec) -> A` asks a handler to
+  provide a closure that works for every `A`. Whole-program monomorphization
+  has no way to lay that out — the handler is a *value* in a record, so there
+  is no call site to specialize it from, and Khora passes no dictionaries by
+  design. Every remaining compiler error in the reference application is on
+  this one construct, and it wants a decision doc rather than a patch.
+- **`std::net::http` and `std::ai` are signatures with no bodies.**
+  `#Params::get` is the first the backend trips over. Ordinary library work,
+  and it needs sockets under it.
 
 ---
 

@@ -893,3 +893,38 @@ What makes this one worse than 36 is the diagnostic. It did not say "bounds on
 impl blocks are not supported"; it said the parameter *has no bounds*, which is
 a statement about the user's code and was false. A compiler that reports a
 missing feature as a user error sends the reader to fix the wrong file.
+
+## 40. A name with no type, and nothing complained
+
+`let mock = handler for Ledger { .. }` at module level parsed, resolved, and
+had no type. The name reached the item table — which is why every mention of it
+resolved — and then nothing else happened to it: no body was lowered, no
+signature was recorded, and a reference typed as `Unknown`.
+
+`Unknown` is compatible with everything, so the checker was silent. `khora check`
+on the reference application said "no errors" while five of the six things
+standing between it and a binary were caused by this one gap. The first sign
+was the *code generator* saying it could not represent the type of a binding
+nobody had worked out — a message about the backend, three layers away from the
+cause, naming a variable the author never wrote.
+
+The fix decides what a module-level `let` *is*: a **constant**, lowered
+wherever it is mentioned. Rust's `const` rather than its `static`, and the
+choice pays for itself three ways — there is no initialization order to get
+wrong, nothing to release at exit, and no shared state for two fibers to reach.
+It cost one new rule (`let mut` at module level is refused, because a mutable
+global is exactly the thing `memory.md` §5a will not let cross) and one guard
+against `let a = b; let b = a;`, which inlining would otherwise turn into a
+stack overflow.
+
+The rule is the fourth entry to say it, and this is the plainest case yet:
+**`Unknown` is a silence, not a type.** Entries 24, 26, 27 and 30 are the same
+sentence about different holes. What is new here is the *distance*: the other
+four were caught by a test that was green for the wrong reason, and this one
+was caught by a completely different subsystem, in a message that pointed at
+neither the declaration nor the mention.
+
+It suggests the check worth having is not "did anything report an error" but
+**"is any published type `Unknown`?"** A body the checker finished with an
+`Unknown` in it is a body the checker did not understand, and saying so at the
+end of checking would have caught all five of these where they happened.

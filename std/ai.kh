@@ -17,6 +17,15 @@ export type Tensor<D: Device, Shape: Tuple, T: Scalar>;
 
 export type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
 
+impl<D: Device, Shape: Tuple, T: Scalar> Tensor<D, Shape, T> {
+  /// A tensor of the given shape, every element zero.
+  ///
+  /// The shape is passed as a value and read back as a type, which is what
+  /// makes `Embedding<1536, F32>` and `Tensor::zeros((1536))` the same thing
+  /// said twice. Provisional along with the rest of this module.
+  fn zeros(shape: Shape) -> Tensor<D, Shape, T>;
+}
+
 // The shared dimension `K` must unify, so a mismatched product is a type error
 // rather than a runtime assertion.
 export fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(

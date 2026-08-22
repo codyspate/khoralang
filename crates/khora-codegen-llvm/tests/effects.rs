@@ -20,6 +20,25 @@ struct Ran {
     code: Option<i32>,
 }
 
+/// Compiles `source` expecting it to be refused, and hands back the messages.
+fn refused(name: &str, source: &str) -> Vec<String> {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
+    let root = SourceRoot::new(&db, vec![file]);
+    match khora_codegen_llvm::compile(&db, root, &exe) {
+        Ok(()) => panic!("`{name}` should have been refused:
+
+{source}"),
+        Err(errors) => errors.into_iter().map(|e| e.message).collect(),
+    }
+}
+
 fn run(name: &str, source: &str) -> Ran {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
@@ -956,4 +975,154 @@ fn main() -> Int {{
     );
     assert_eq!(ran.stdout, "-2\n0\n", "the trailing 0 is the live-object count");
     assert_eq!(ran.code, Some(0));
+}
+
+// --- a `let` at module level ------------------------------------------------
+
+const CONST: &str = "module t;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
+
+export effect Ledger { balance: (Int) -> Int, }
+
+export fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
+";
+
+/// A `let` at module level is a **constant**: a named expression, lowered
+/// wherever it is mentioned.
+///
+/// It used to be a name with no type and no value at all. Nothing complained —
+/// the reference to it typed as `Unknown`, which is compatible with everything
+/// — and the first sign was the code generator saying it could not represent a
+/// binding whose type nobody had worked out. Errata 40.
+#[test]
+fn a_module_level_let_is_a_constant() {
+    let ran = run(
+        "const_let",
+        &format!(
+            "{CONST}
+let mock = handler for Ledger {{ balance: fn id => id * 10 }};
+
+fn main() -> Int {{
+  with {{ ledger: mock }} {{ khora_print_int(report(4)); }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// And a `context` may name one, which is what the whole thing was for: a
+/// composed set of handlers written once and installed by name.
+#[test]
+fn a_context_can_name_a_constant() {
+    let ran = run(
+        "const_context",
+        &format!(
+            "{CONST}
+let mock = handler for Ledger {{ balance: fn id => id * 10 }};
+
+export context Mock {{ ledger: mock, }}
+
+fn main() -> Int {{
+  with Mock {{ khora_print_int(report(4)); }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **Inlined, not shared.** Two mentions are two handlers, which is the right
+/// answer for the thing this exists to name — and the reason there is no
+/// initialization order to get wrong and nothing to release at exit.
+#[test]
+fn two_mentions_are_two_values() {
+    let ran = run(
+        "const_twice",
+        &format!(
+            "{CONST}
+let mock = handler for Ledger {{ balance: fn id => id * 10 }};
+
+fn main() -> Int {{
+  with {{ ledger: mock }} {{ khora_print_int(report(1)); }}
+  with {{ ledger: mock }} {{ khora_print_int(report(2)); }}
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "10\n20\n0\n", "two handlers, and both released");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A constant may be built from an ordinary expression, not only a handler.
+#[test]
+fn a_constant_can_be_any_expression() {
+    let ran = run(
+        "const_value",
+        &format!(
+            "{CONST}
+let answer = 6 * 7;
+let greeting = \"kh\" + \"ora\";
+
+impl String {{ fn byte_length(self) -> Int; }}
+
+fn main() -> Int {{
+  khora_print_int(answer);
+  khora_print_int(String::byte_length(greeting));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "42\n5\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A constant defined in terms of itself would be a stack overflow while
+/// inlining, and a stack overflow is not a diagnostic.
+#[test]
+fn a_constant_defined_in_terms_of_itself_is_refused() {
+    let found = refused(
+        "const_cycle",
+        &format!(
+            "{CONST}
+let a = b;
+let b = a;
+
+fn main() -> Int {{ khora_print_int(a); 0 }}
+"
+        ),
+    );
+    assert!(
+        found.iter().any(|m| m.contains("defined in terms of itself")),
+        "expected the loop to be named, got {found:?}"
+    );
+}
+
+/// A mutable global is shared state two fibers could reach, which is the one
+/// thing `docs/design/memory.md` §5a does not let cross. A constant has no
+/// such question to answer.
+#[test]
+fn a_mutable_global_is_refused() {
+    let found = refused(
+        "const_mut",
+        &format!(
+            "{CONST}
+let mut counter = 0;
+
+fn main() -> Int {{ khora_print_int(counter); 0 }}
+"
+        ),
+    );
+    assert!(
+        found.iter().any(|m| m.contains("mutable global")),
+        "expected the reason to be named, got {found:?}"
+    );
 }
