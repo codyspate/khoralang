@@ -172,7 +172,7 @@ Four consequences, all improvements:
   not a projection at all; `import a::b::{X};` needs no such exception.
 - **A regex can color paths.** The VS Code TextMate grammar could not
   distinguish `Effect.map` from `report.risk` from `RiskLevel.Low`, and the
-  precise answer was deferred to LSP semantic tokens in phase 8.4. It no longer
+  precise answer was deferred to LSP semantic tokens in phase 10.4. It no longer
   has to be: an identifier followed by `::` is a path segment and can be nothing
   else. Semantic tokens remain the right answer for locals and bare type names;
   they are no longer needed to get paths right.

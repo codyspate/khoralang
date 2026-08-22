@@ -141,7 +141,7 @@ is sound and Phase 2 codegen can rely on it.
   against.
 - `clang` is the link driver rather than `lld-link` directly: it already knows
   how to find the MSVC CRT and system libraries, and it is the same driver that
-  will handle the musl and darwin cross-targets in Phase 6.
+  will handle the musl and darwin cross-targets in Phase 10.
 - Code is generated for a *generic* CPU, not the host. §6.1 requires bit-for-bit
   reproducible builds, which host-specific instruction selection would break.
 - `~/.llvm/llvm.tar.xz` (862 MB) can be deleted once the verify step passes.

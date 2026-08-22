@@ -129,7 +129,7 @@ count is a data race in the first concurrent program anyone writes. And the
 avoid — paid in every library signature to save an increment.
 
 `docs/design/effect-runtime.md` §9 has the decision in full, including where
-the cost comes back: phase 6, as an optimization for objects that provably do
+the cost comes back: phase 9, as an optimization for objects that provably do
 not escape their fiber, chosen by the compiler and invisible in every type.
 
 ## 6. Closures and handlers — open

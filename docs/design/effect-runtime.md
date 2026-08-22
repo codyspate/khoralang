@@ -318,7 +318,7 @@ and it would be there to save an increment.
 
 ### Where the cost comes back
 
-Phase 6. An object that provably does not escape its fiber can use the
+Phase 9. An object that provably does not escape its fiber can use the
 non-atomic operations, chosen by the compiler and invisible in every type. That
 is the same whole-program shape as Perceus reuse analysis, which is what phase
 6 is for, and it is an optimization rather than a promise — a program is

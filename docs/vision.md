@@ -89,9 +89,18 @@ different language.
    toolchain in the industry.
 5. **Zero VM, zero tracing GC.** Native static binaries. The abstractions must
    be cheap enough that nobody chooses Go or Rust over Khora for performance.
-6. **An ecosystem on day one.** A new language with no libraries loses to Go and
-   Node regardless of merit. First-class Rust interop is how we refuse that
-   fight — crates.io is native, LLVM-based, and the closest ecosystem to reach.
+6. **An ecosystem on day one.** A new language with no libraries loses to Go
+   and Node regardless of merit. The libraries are written *in Khora*, on a
+   standard library deliberately larger than most, with a narrow C ABI for the
+   short list of things nobody should write twice — the operating system, TLS
+   and crypto, compression, numeric kernels. `docs/design/ecosystem.md`.
+
+   This replaces first-class Rust interop, which was the original answer. Not
+   because it would be hard, but because it does not skip the work it appears
+   to skip: Khora has no byte buffers, so no crate can hand it one, and every
+   primitive a binding would need is one the language needs anyway. An
+   ecosystem strategy that makes the strongest competitor a dependency is also
+   answering the wrong question.
 
 ## The tie-breaker
 

@@ -20,7 +20,7 @@ familiarity rule picks the one a Go, Rust or TypeScript developer already knows.
 | A3 | **Salsa from the start.** `khora-hir` and `khora-types` are salsa queries. | Retrofitting incrementality means rewriting every pass. §6.5 wants sub-15 ms LSP responses; that is not a bolt-on. |
 | A4 | **Full HKT and typeclasses.** Native `* -> *`, kind inference, instances. | What Rust structurally cannot express. Carries `Traversable`, `Stream` and user abstractions. Note it is justified by *containers*, not by the effect system — see A8. |
 | A5 | **Structured concurrency with interruption in v1.** Fibers, cancellation that runs finalizers, `Scope`-bound lifetimes, `Schedule`. | Effect's headline safety property, and §6.4 already assumes it. Retrofitting interruption into a runtime that never had it is close to a rewrite. |
-| A6 | **First-class Rust interop** as the ecosystem strategy. | A new language with no libraries loses to Go and Node on merit-independent grounds, and crates.io is the closest large ecosystem: native, non-GC, and already built on LLVM. Note what that does *not* buy. Sharing a backend gives nothing across a boundary — Rust has no stable ABI, and its traits, generics and ownership map to nothing automatically. The real boundary is the C ABI plus generated shims, and its cost is D8, not a detail. |
+| A6 | **A C ABI foreign boundary**, and libraries written in Khora. | Non-negotiable 6 stands — a language with no libraries loses — but crates.io is the wrong way to meet it. It does not skip the work it looks like it skips: Khora has no byte buffers, so no crate can hand it one, and every primitive a binding needs is needed anyway. The mapping has no bottom either (lifetimes, traits, a second async runtime, a version treadmill), and pointing at Rust's ecosystem sharpens "why not just use Rust". The boundary is the C ABI, which generated code already crosses on every runtime call. `docs/design/ecosystem.md`. |
 | A7 | **Developer experience is a product requirement.** Diagnostic quality, compile speed and LSP latency are tested from Phase 2, not polished in Phase 6. | The thesis is "beats Rust's DX". Rust's advantage is mostly cargo, rustc diagnostics, rust-analyzer and clippy. Deferring all of it means we cannot evaluate our main claim until the end. |
 | A8 | **Direct-style algebraic effects, not a monadic `Effect<A, R, E>`.** Effects are rows on the signature (`with` / `raises`), discharged by handlers, with fallible calls marked `!` at the call site. Settled in `docs/design/effects.md`. | The spec already specifies Perceus and Leijen/Rémy scoped rows — both Koka, which pairs them with exactly this model. A monadic API fights that substrate. Effect-TS's `Effect.gen`/`yield*` is itself a simulation of direct style, just as `TypeLambda` simulates HKT. Decisively, only direct style lets a non-functional programmer write an effectful `for` loop at all — under a monad it must become a fold. |
 
@@ -58,7 +58,7 @@ before the phase that depends on it starts.
 | # | Question | Blocks |
 | --- | --- | --- |
 | D4 | **What in `[permissions]` is actually compile-time enforceable?** `allow-net=0.0.0.0:8080` is checkable when the address is const; a computed URL is not. Likely part static, part runtime-gated. Capability rows make this far more tractable than it would otherwise be. | 6.x |
-| D8 | **The Rust interop boundary.** How Rust's ownership and traits map onto Khora's reference counting and rows; whether we bind at the C ABI or generate richer shims. | 7 |
+| D8 | **The FFI contract.** Narrowed by A6 from "map Rust onto Khora" to three answerable questions: exactly which types may cross and in what layout, how a foreign resource's lifetime is tied to a Khora binding, and what a callback looks like. The first is mostly written already in `khora-rt`'s module documentation, and the second has a working shape — a region and a fiber handle are both foreign resources with runtime-provided drop glue. | 7 |
 | D11 | **What happens to reference cycles.** None can be built today — the heap graph is provably a DAG — and mutable fields end that. A tracing cycle collector is ruled out by non-negotiable 5, which leaves "a cycle leaks, and a weak reference breaks it". Decide alongside records rather than in the abstract. `docs/design/memory.md` §2 and §4. | records |
 | D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Nothing in this roadmap owns this today, which is the failure mode errata entry 20 names. | 8.x |
 **Closed:**
@@ -70,7 +70,7 @@ before the phase that depends on it starts.
   the first concurrent program anyone writes. And a split is colouring: `Rc`
   versus `Arc` propagates into every signature that touches one, which is the
   one thing Khora's rows exist to avoid, and it would be there to save an
-  increment. The cost comes back in phase 6, where an object that provably does
+  increment. The cost comes back in phase 9, where an object that provably does
   not escape its fiber uses the cheap operations, chosen by the compiler and
   invisible in every type.
 - **D3** (`Schema::Spec`) is decided in `docs/design/associated-items.md`. Two
@@ -151,7 +151,7 @@ Four Windows-specific obstacles had to be cleared; all are documented in
    7. Restricted to `target-x86` and `target-aarch64`.
 
 Host target `x86_64-pc-windows-msvc` only. The musl and darwin cross-targets in
-§5.1 remain Phase 6.
+§5.1 remain Phase 10.
 
 ### 0.2 Salsa spine — **done**
 
@@ -249,14 +249,14 @@ imports.
 - **2.2 `khora-types`.** Monomorphic checking plus exhaustiveness and
   reachability over the decision tree.
 - **2.3 `khora-perceus`.** Uniform boxed representation, `dup`/`drop` at scope
-  boundaries. Reuse analysis deferred to Phase 6.
+  boundaries. Reuse analysis deferred to Phase 9.
 - **2.4 `khora-rt`.** New crate: allocator shim, RC header, `khora_alloc`,
   `khora_dup`, `khora_drop`, `print`. Static library.
 - **2.5 `khora-codegen-llvm`.** HIR plus RC ops to LLVM IR to an object, linked
   against `khora-rt`.
 - **2.6 Diagnostic harness (A7).** Snapshot tests over rendered diagnostics, so
   message quality is a tracked regression surface from the first error the
-  compiler can emit — not a Phase 8 cleanup.
+  compiler can emit — not a Phase 10 cleanup.
 
 **Exit:** `khora build examples/core_demo` produces an executable that runs,
 prints the expected output and exits 0; a counting-allocator test asserts every
@@ -532,40 +532,127 @@ isolated fibers across cores, pinned by
 
 ---
 
-## Phase 6 — Perceus reuse and FBIP
+## Phase 6 — The values a library needs
 
-Reuse analysis, drop specialization, borrowed parameters.
+Nothing above this can be judged until it exists. The whole type universe today
+is `Int`, `Bool`, `String`, `()`, ADTs and tuples, which is enough to write a
+compiler test and not enough to write a hash map. Every item here was on the
+critical path whatever the ecosystem strategy turned out to be — which is the
+argument that settled A6.
+
+- **6.1 Decide D11, and mutable fields.** The widest blocker in the language: no
+  hash map, no buffer, nothing that accumulates. It has already cost real work —
+  a nursery cannot hold a child's error and `retry` needed a runtime counter to
+  be testable. The heap graph is provably a DAG today and mutable fields end
+  that, so the decision and the feature are one piece of work.
+- **6.2 Fixed-width integers, and bytes.** No `u8` means no bytes, which means
+  no parsing, no wire formats, no encoding. `Int` alone is a toy.
+- **6.3 Floats.** Not in the backend and not in `Type`. `std::ai` promises
+  tensors and the reference application cannot compile without them.
+- **6.4 Arrays.** Contiguous and bounds-checked. `List` is a linked list, which
+  is the wrong shape for almost everything and the wrong shape for reuse
+  analysis to pay off on.
+
+**Exit:** a hash map, written in Khora, in `std`, with a test that a
+round-trip of inserts and removals leaves the live-object count at zero.
+
+---
+
+## Phase 7 — The foreign boundary
+
+Per A6 and `docs/design/ecosystem.md`. Small, because the boundary already
+exists: every runtime call generated code makes is a C ABI crossing, and the
+rule for what may cross was settled the hard way in errata 35.
+
+- **7.1 Decide D8** — which types cross and in what layout, how a foreign
+  resource's lifetime is tied to a Khora binding, and what a callback is.
+- **7.2 `extern` declarations that carry effect clauses.** A foreign function is
+  opaque, so its `with` and `raises` are a promise the compiler takes on trust
+  and then enforces on every caller. This is where the capability discipline is
+  asserted rather than inferred, and where D4 gets its teeth.
+- **7.3 Foreign resources as counted values.** A Khora object holding the
+  pointer, with a release that calls the foreign close — the shape a region and
+  a fiber handle already have, so an open file closes on every path out
+  including a raise.
+- **7.4 Syscalls**: files, sockets, a clock.
+
+**Exit:** read a file and write its contents to a socket, from Khora, with the
+file closed by the region that opened it — on the error path as well as the
+ordinary one.
+
+---
+
+## Phase 8 — A standard library worth using
+
+The first real test of whether Khora is pleasant to write libraries in, which
+is a question no amount of compiler work answers. Collections, strings and
+encoding, JSON, time, logging, and HTTP over the syscalls from phase 7 —
+everything a normal program touches, written in Khora and generic over its
+effects.
+
+The bindings A6 names — TLS and crypto, compression, numeric kernels — are
+consumers of phase 7 and are *not* on this critical path. A great deal of Khora
+can be written before anything needs TLS.
+
+**Exit:** the reference application runs and serves a request. That is phase
+4's unmet half, and it stays the criterion because it exercises the whole
+stack: capabilities, a fallible service, `catch`, a router carrying its
+handlers' requirements, and now real I/O underneath.
+
+---
+
+## Phase 9 — Perceus reuse and FBIP
+
+Reuse analysis, drop specialization, borrowed parameters. Also the escape
+analysis D10 promised: an object that provably does not leave its fiber gets
+the cheap reference-counting operations back.
+
+Later than it used to be, deliberately. An optimization is measured against
+real code and there was none; reuse analysis over a linked list is also worth
+much less than over the arrays phase 6 brings.
 
 **Exit:** `map` over a uniquely-owned list performs zero allocations, asserted
 by a counting-allocator test.
 
 ---
 
-## Phase 7 — Rust interop
-
-Per A6 and D8: consume crates.io from Khora. The hard part is mapping Rust's
-ownership and trait system onto reference counting and rows at the boundary.
-
-**Exit:** an HTTP server with real TLS and JSON, built on Rust crates through
-the interop boundary.
-
----
-
-## Phase 8 — Toolchain and platform
+## Phase 10 — Packaging and toolchain
 
 Ordered by value, not by §6's numbering.
 
-- **8.1 Linter** (needs types): unused capability, dangling pure expression,
+- **10.1 Decide D12** — what Khora promises not to break. It comes due here
+  because publishing a package is the first act that makes a promise.
+- **10.2 `khora-pkg`**: `khora.lock` with SHA-256 hashes, content-addressed
+  cache, DAG task runner. Also what finally lets the orphan rule be *enforced*,
+  which needs cross-package resolution.
+- **10.3 Linter** (needs types): unused capability, dangling pure expression,
   redundant match arm.
-- **8.2 `khora test` / `khora bench`**: snapshots with `--update-snapshots`,
-  P50/P95/P99.
-- **8.3 `khora-pkg`**: `khora.lock` with SHA-256 hashes, content-addressed cache,
-  DAG task runner.
-- **8.4 LSP** over the salsa database: diagnostics, hover, completion, capability
-  inlay hints, rename.
-- **8.5 Cross-targets**: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`.
-- **8.6 WASM build plugins** via wasmtime. Last: largest scope, least critical,
+- **10.4 LSP** over the salsa database: diagnostics, hover, completion,
+  capability inlay hints, rename.
+- **10.5 `khora bench`**, and `khora test` grown up: filtering, snapshots with
+  `--update-snapshots`, P50/P95/P99.
+- **10.6 Cross-targets**: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`.
+- **10.7 WASM build plugins** via wasmtime. Last: largest scope, least critical,
   and it needs D4 settled first.
 
 Note that A7 pulls the *quality* of diagnostics and LSP latency forward into
 Phases 2 and 3. What remains here is surface area, not standards.
+
+**Exit:** a package built outside this repository, resolved through
+`khora.lock`, and used by the reference application.
+
+---
+
+## When can libraries be written?
+
+The question A6 was really about, and the phases answer it in two steps.
+
+**After 6 and 7 you can write one.** Mutable state, arrays, bytes, floats and
+syscalls are the whole of what is missing; everything above them is library
+code. Phase 8 *is* the first batch, and writing it is how we find out whether
+the language is good for the job while it is still cheap to change.
+
+**After 10 you can hand it to someone.** Packaging is last rather than first on
+purpose: D12 asks what may not break, and that question is unanswerable while
+the language is still moving. A minimal package manager could come earlier if
+the goal changes to letting other people start.

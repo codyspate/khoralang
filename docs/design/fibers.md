@@ -211,5 +211,5 @@ per fiber, and three things follow:
    therefore D11.
 5. **`khora test` across cores**, the exit criterion's second half.
 
-Work stealing, stack growth and the coroutine switch itself are phase 6 or
+Work stealing, stack growth and the coroutine switch itself are phase 9 or
 later, and are not on the path to the exit criterion.

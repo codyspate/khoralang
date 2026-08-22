@@ -69,7 +69,7 @@ badly missed before Phase 3.
 - **Loop bodies and effect rows.** A loop body's effects join the enclosing
   function's row. Nothing special is needed, but inference has to thread it.
 - **FBIP.** A `for` over a uniquely owned list should reuse cells in place
-  (Phase 6). The loop form should not be designed in a way that blocks it.
+  (Phase 9). The loop form should not be designed in a way that blocks it.
 - **Exhaustiveness.** `if` without `else` is only well typed when the branch has
   type `()`, matching the rule `match` already follows.
 - **Purity is still the default.** A function with no `with` and no `raises`
