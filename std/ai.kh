@@ -54,6 +54,9 @@ impl Prompt {
   fn user(self, message: String) -> Prompt;
   fn assistant(self, message: String) -> Prompt;
   fn at_temperature(self, temperature: Float) -> Prompt;
+  /// The prompt, with a description of what the answer should look like
+  /// appended. What `extract` puts between a caller's request and the model.
+  fn describing<S>(self, spec: S) -> Prompt;
 }
 
 export type ModelError =
@@ -62,21 +65,66 @@ export type ModelError =
   | InferenceEngineFailure(msg: String)
   | SchemaExtractionError(details: String);
 
-/// A type a model can be asked to produce, and the description it is asked
-/// with. `Spec` is deliberately the type's own business: a JSON schema, a
-/// grammar, a set of examples — `extract` only has to hand it over.
+/// A type a model can be asked to produce: how to describe it, and how to read
+/// the answer back.
+///
+/// `Spec` is deliberately the type's own business — a JSON schema, a grammar, a
+/// set of examples — because `extract` only has to hand it over. `parse` is the
+/// other half, and was missing: something has to turn the model's text into a
+/// value, and before now nothing said what.
 export trait Extract {
   type Spec;
   fn spec() -> Self::Spec;
+  /// The answer, read back. `ModelError::SchemaExtractionError` when the text
+  /// is not what the spec asked for, which is the ordinary case rather than an
+  /// exceptional one — a model is allowed to be wrong.
+  fn parse(text: String) -> Self raises ModelError;
 }
 
 /// Inference is a capability, not a value: a function that classifies text
 /// declares `with { ai: LLMService }`, and the caller decides what serves it.
+///
+/// **Two operations, and both are rank-1.** A model takes a prompt and returns
+/// text, or takes text and returns numbers; that is the whole of what it does,
+/// and it is the whole of what belongs here. Asking for a typed answer is
+/// `extract` below — a generic *function* over this effect, because an
+/// operation is a field of a handler and a field has one type.
+/// `docs/design/polymorphic-operations.md`.
+///
+/// Keeping the effect this small is what makes a mock one line: return a
+/// string. It used to have to fabricate whatever the caller asked for, which
+/// tests the mock rather than the code under it.
 export effect LLMService {
   complete: Prompt -> String raises ModelError,
-  extract: forall <A: Extract> . (Prompt, A::Spec) -> A raises ModelError,
-  embed: forall <const Dim: Int> . String -> Embedding<Dim, F32> raises ModelError,
+  /// The raw vector, at whatever width the model produces. `embed` below is
+  /// the shape-safe reading of it.
+  embed_raw: String -> List<Float> raises ModelError,
 }
+
+/// A typed answer from the model.
+///
+/// The call every caller wants — `let report = extract(prompt)!` — and the
+/// reason `LLMService` does not have to know that reports exist. `A` is chosen
+/// by the caller, which is what makes this a function rather than an
+/// operation: a generic function is specialized at each call site, and a field
+/// of a handler cannot be.
+export fn extract<A: Extract>(prompt: Prompt) -> A
+  with { ai: LLMService }
+  raises ModelError
+{
+  let described = Prompt::describing(prompt, A::spec());
+  A::parse(ai.complete(described)!)!
+}
+
+/// An embedding of a known width.
+///
+/// **The width is the model's, not the caller's.** Nobody can choose to get 768
+/// numbers out of a model that returns 1536, so asking for a `Dim` is asking a
+/// question, and a `Dim` that does not match the answer is a `ModelError`. The
+/// old declaration made it a caller-chosen parameter, which said otherwise.
+export fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32>
+  with { ai: LLMService }
+  raises ModelError;
 
 export fn cosine_similarity<const Dim: Int>(
   a: Embedding<Dim, F32>,

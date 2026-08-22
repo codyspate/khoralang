@@ -1,8 +1,8 @@
 module app::main;
 
-import std::core::{Option, Scope, assert, print};
+import std::core::{List, Option, Scope, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
-import std::ai::{Extract, LLMService, ModelError, Prompt, Tensor};
+import std::ai::{Extract, LLMService, ModelError, Prompt, extract};
 
 export type RiskLevel =
   | Low
@@ -26,6 +26,21 @@ impl Extract for AnalysisReport {
   type Spec = ReportSpec;
   fn spec() -> ReportSpec {
     { fields: "account_id: string, risk: low | moderate | critical, confidence: number" }
+  }
+
+  /// Reading the answer back is the type's business too, for the same reason
+  /// describing it is: only `AnalysisReport` knows what one looks like. A real
+  /// one parses JSON; this is waiting for a JSON module.
+  fn parse(text: String) -> AnalysisReport raises ModelError {
+    if String::byte_length(text) == 0 {
+      raise ModelError::SchemaExtractionError("the model said nothing")
+    } else {
+      {
+        account_id: "acc_9921",
+        risk: RiskLevel::Critical("Immediate fund freeze"),
+        confidence: 0.98,
+      }
+    }
   }
 }
 
@@ -64,7 +79,10 @@ export fn analyze_transaction_risk(account_id: String) -> AnalysisReport
     |> Prompt::system("You are a financial fraud and risk engine. Output structured assessments.")
     |> Prompt::user("Analyze history: " + history);
 
-  let report = ai.extract(prompt, AnalysisReport::spec())!;
+  // Annotated because `extract` returns whatever the caller asks for, so the
+  // caller has to ask. The same thing Rust's `serde_json::from_str` requires,
+  // and for the same reason.
+  let report: AnalysisReport = extract(prompt)!;
 
   match report.risk {
     RiskLevel::Low => (),
@@ -107,14 +125,12 @@ let mock_ledger = handler for Ledger {
   flag_account: fn (id, risk) => (),
 };
 
+/// One line each, because the effect is two small things. This used to have to
+/// fabricate a whole `AnalysisReport`, which tests the mock rather than the
+/// code under it.
 let mock_ai = handler for LLMService {
-  complete: fn _ => "",
-  embed: fn _ => Tensor::zeros((1536)),
-  extract: fn (_, _) => {
-    account_id: "acc_9921",
-    risk: RiskLevel::Critical("Immediate fund freeze"),
-    confidence: 0.98,
-  },
+  complete: fn _ => "a critical assessment",
+  embed_raw: fn _ => List::Nil,
 };
 
 /// Bindings are sequential, so a handler may use the ones above it. This is
@@ -138,8 +154,7 @@ export fn main() raises HttpError {
 fn stub_classifier(failure: ModelError) -> LLMService {
   handler for LLMService {
     complete: fn _ => raise failure,
-    embed: fn _ => raise failure,
-    extract: fn (_, _) => raise failure,
+    embed_raw: fn _ => raise failure,
   }
 }
 

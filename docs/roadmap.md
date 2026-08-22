@@ -986,18 +986,33 @@ handlers' requirements, and now real I/O underneath.
   This was five of the six things standing between the reference application
   and a binary.
 
-What stands between here and the exit, measured rather than guessed:
+- **8.4 An effect operation is rank-1 — decided and done.**
+  `docs/design/polymorphic-operations.md`. An operation is a *field of a
+  handler*, and a field has one type, so a `forall` in one cannot be laid out
+  by a compiler that monomorphizes — Rust cannot put a generic function in a
+  struct field either, and for the same reason.
 
-- **One compiler gap: `forall` in an effect operation.**
-  `extract: forall <A: Extract> . (Prompt, A::Spec) -> A` asks a handler to
-  provide a closure that works for every `A`. Whole-program monomorphization
-  has no way to lay that out — the handler is a *value* in a record, so there
-  is no call site to specialize it from, and Khora passes no dictionaries by
-  design. Every remaining compiler error in the reference application is on
-  this one construct, and it wants a decision doc rather than a patch.
-- **`std::net::http` and `std::ai` are signatures with no bodies.**
-  `#Params::get` is the first the backend trips over. Ordinary library work,
-  and it needs sockets under it.
+  The polymorphism moves one level out, into a generic function over the
+  effect. `LLMService` keeps `complete` and `embed_raw`; `extract<A: Extract>`
+  is an ordinary function that describes, calls, and parses. Not a compromise:
+  a mock now fakes one string instead of fabricating whatever the caller asked
+  for, the schema-and-parse logic is testable with no model near it, and the
+  effect describes what an LLM *is* rather than what one library wanted from
+  it. `Extract` gained the `parse` it was always missing, and `embed`'s
+  dimension stopped pretending to be the caller's choice.
+
+  **The reference application typechecks** — for real, with the `Unknown` audit
+  watching, which is the first time that sentence has been true.
+
+What stands between here and the exit is now library work only:
+
+- **`std::net::http` and `std::ai` have signatures with no bodies** —
+  `Router::listen`, `Request::get`, `Params::get`, `Prompt::user`,
+  `Prompt::describing`. Sockets underneath.
+- **`==` on an ADT** is refused by the backend: comparing two `RiskLevel`s has
+  no implementation. `Eq` is a trait in `std::core` and scalars compare
+  primitively, so the missing piece is dispatching the operator to an `Eq` impl
+  — which is a language decision of its own, small but not nothing.
 
 ---
 

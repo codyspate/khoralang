@@ -67,7 +67,7 @@ fn the_standard_library_type_checks() {
     assert!(found.is_empty(), "std/ does not type check:\n  {}", found.join("\n  "));
 }
 
-/// The phase 4 exit criterion, minus serving a request — **and one known gap**.
+/// The phase 4 exit criterion, minus serving a request.
 ///
 /// `examples/risk_analyzer` is the program the whole design was written
 /// against: capabilities, a fallible service, `catch` discharging half an error
@@ -76,32 +76,20 @@ fn the_standard_library_type_checks() {
 /// pieces fit together, and it is worth a test precisely because every one of
 /// those pieces has a unit test that passed while this did not.
 ///
-/// It reported clean for a long time, and it should not have. `ai.extract` is
+/// **This reported clean for a long time while it was not.** `ai.extract` was
 /// declared `forall <A: Extract> . (Prompt, A::Spec) -> A`, the checker had
-/// nowhere to put the `A`, and the result was `Unknown` — which is compatible
-/// with everything and so said nothing. The `Unknown` audit is what turned that
-/// silence into a sentence; errata 40 and 41.
-///
-/// So the test asserts what is actually true: everything fits except the one
-/// construct nobody has decided how to compile. When `forall` in an effect
-/// operation is decided, this goes back to `is_empty`.
+/// nowhere to put the `A`, and the `Unknown` it produced agreed with everything
+/// downstream — the same way entry 24's test was green. Errata 40 and 41 are
+/// that story, the `Unknown` audit is what ended it, and
+/// `docs/design/polymorphic-operations.md` is the decision that made the
+/// program true rather than the test lenient.
 #[test]
-fn the_reference_application_type_checks_but_for_one_thing() {
+fn the_reference_application_type_checks() {
     let found = errors_under(&[std_dir(), repo_dir().join("examples")]);
-    let (known, rest): (Vec<String>, Vec<String>) =
-        found.into_iter().partition(|e| e.contains("never worked out"));
-
     assert!(
-        rest.is_empty(),
+        found.is_empty(),
         "the reference application does not type check:\n  {}",
-        rest.join("\n  ")
-    );
-    assert_eq!(
-        known.len(),
-        1,
-        "one gap is known — `forall` in an effect operation — and it is one report, at \
-         `ai.extract`. Anything else here is new:\n  {}",
-        known.join("\n  ")
+        found.join("\n  ")
     );
 }
 
