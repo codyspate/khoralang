@@ -184,6 +184,10 @@ impl<'a> Planner<'a> {
             }
             // A record's fields are moved into it, exactly as a
             // constructor's arguments are.
+            // The error is moved into the return, and `!` is the identity on
+            // ownership: the value it unwraps is the value the call produced.
+            Expr::Raise(error) => self.walk(error),
+            Expr::Try(inner) => self.walk(inner),
             Expr::Record { fields, .. } => {
                 for (_, value) in &fields {
                     self.walk(*value);

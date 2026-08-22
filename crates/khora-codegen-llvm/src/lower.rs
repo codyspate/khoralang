@@ -40,7 +40,9 @@ use khora_perceus::{is_boxed, RcPlan};
 use khora_types::{BodyTypes, Type, VariantInfo};
 use text_size::TextRange;
 
-use crate::backend::{evidence_of, Backend, CLOSURE_ADAPTER_TAG, CLOSURE_CAPTURE_BASE};
+use crate::backend::{
+    can_raise, evidence_of, Backend, CLOSURE_ADAPTER_TAG, CLOSURE_CAPTURE_BASE,
+};
 use crate::runtime::{self, FIELD_WORD, STRING_BYTES_OFFSET, STRING_LEN_FIELD, STRING_TAG};
 
 /// The result of lowering an expression: `None` when control diverged.
@@ -265,6 +267,17 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     /// Emits the function's `ret`, and repairs the IR if lowering gave up.
     fn finish(&mut self, value: Flow<'ctx>) {
+        // A fallible function always returns the tagged pair, so falling off
+        // the end of the body is the *ok* case rather than a bare return.
+        if can_raise(&self.signature()) {
+            if let Some(value) = value {
+                self.return_tagged(false, value);
+            } else if self.here().get_terminator().is_none() {
+                let zero = self.be.ctx.i64_type().const_zero();
+                self.return_tagged(false, zero.into());
+            }
+            return;
+        }
         if let Some(value) = value {
             let expected = self.function.get_type().get_return_type();
             match (&self.ret, expected) {
@@ -470,6 +483,10 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Continue => self.lower_continue(range),
             Expr::Return(value) => self.lower_return(value),
             Expr::Record { fields, .. } => self.build_record(id, &fields, range),
+            Expr::Raise(error) => self.lower_raise(error, range),
+            // `!` is the identity on values. The branch it stands for is
+            // emitted by the call underneath, which knows it is marked.
+            Expr::Try(inner) => self.expr(inner),
             Expr::Lambda { captures, .. } => self.make_closure(id, &captures, range),
             // Parameter 0 of a lifted lambda *is* the closure, and it is live
             // for the duration of the call because the caller holds it. No
@@ -783,6 +800,105 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(self.be.unit_value())
     }
 
+    /// `raise e` — leave the function carrying the error.
+    ///
+    /// Everything the frame owns is released first, exactly as an early
+    /// `return` releases it. A raise *is* a return, with a tag.
+    fn lower_raise(&mut self, error: ExprId, range: TextRange) -> Flow<'ctx> {
+        if !can_raise(&self.signature()) {
+            return self.fail(
+                "this function has no `raises` clause, so it cannot raise",
+                range,
+            );
+        }
+        let value = self.expr(error)?;
+        self.unwind_to(0);
+        self.return_tagged(true, value);
+        None
+    }
+
+    /// The signature of the function being emitted.
+    fn signature(&self) -> khora_types::Signature {
+        self.be.signature_of(&self.owner).unwrap_or_else(|| khora_types::Signature {
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            requires: Type::empty_row(),
+            raises: Type::empty_row(),
+            params: Vec::new(),
+            ret: Type::Unit,
+        })
+    }
+
+    /// Returns `{ raised, payload }` from a fallible function.
+    fn return_tagged(&mut self, raised: bool, payload: BasicValueEnum<'ctx>) {
+        let tagged = self.be.tagged_type();
+        let word = self.be.to_word(payload);
+        let flag = self.be.ctx.bool_type().const_int(u64::from(raised), false);
+
+        let value = self
+            .be
+            .builder
+            .build_insert_value(tagged.get_undef(), flag, 0, "tagged.flag")
+            .expect("setting the tag");
+        let value = self
+            .be
+            .builder
+            .build_insert_value(value, word, 1, "tagged")
+            .expect("setting the payload");
+        self.be
+            .builder
+            .build_return(Some(&value.into_struct_value()))
+            .expect("returning a tagged value");
+    }
+
+    /// Splits a fallible call's result: propagate the error, or take the value.
+    ///
+    /// This is the branch `!` marks. On the error path every binding this frame
+    /// owns is released and the error is returned onward, which is the whole of
+    /// unwinding — no tables, no personality routine.
+    fn split_tagged(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+        ret: &Type,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        if !can_raise(&self.signature()) {
+            return self.fail(
+                "this call can leave the function, but the function has no `raises` clause",
+                range,
+            );
+        }
+
+        let aggregate = result.into_struct_value();
+        let flag = self
+            .be
+            .builder
+            .build_extract_value(aggregate, 0, "raised")
+            .expect("reading the tag")
+            .into_int_value();
+        let word = self
+            .be
+            .builder
+            .build_extract_value(aggregate, 1, "payload")
+            .expect("reading the payload")
+            .into_int_value();
+
+        let propagate = self.block("raised");
+        let continue_to = self.block("ok");
+        self.be
+            .builder
+            .build_conditional_branch(flag, propagate, continue_to)
+            .expect("branching on the tag");
+
+        self.at(propagate);
+        self.unwind_to(0);
+        let error = self.be.word_to_value(word, &Type::Str);
+        self.return_tagged(true, error);
+
+        self.at(continue_to);
+        Some(self.be.word_to_value(word, ret))
+    }
+
     /// Builds a record: the same object a constructor builds, with the fields
     /// written in whatever order and stored in declaration order.
     fn build_record(
@@ -1090,9 +1206,19 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         let call = self.be.builder.build_call(function, &values, "call").expect("a call");
+        let result = call.try_as_basic_value().basic();
+
+        // A fallible callee handed back `{ raised, payload }`. Splitting it is
+        // the branch `!` marks, and the error path is where this frame's
+        // bindings are released on the way out.
+        if can_raise(&signature) {
+            let result = result.expect("a fallible call returns a tagged value");
+            return self.split_tagged(result, &signature.ret, range);
+        }
+
         Some(match signature.ret {
             Type::Unit => self.be.unit_value(),
-            _ => call.try_as_basic_value().basic().unwrap_or_else(|| self.be.unit_value()),
+            _ => result.unwrap_or_else(|| self.be.unit_value()),
         })
     }
 
@@ -1689,6 +1815,23 @@ impl<'ctx> Lower<'_, 'ctx> {
         None
     }
 
+    /// An early `return` from a fallible function is the ok case: it carries a
+    /// value, not an error, and still has to wear the tag.
+    fn return_value(&mut self, value: BasicValueEnum<'ctx>) {
+        if can_raise(&self.signature()) {
+            self.return_tagged(false, value);
+            return;
+        }
+        match self.ret {
+            Type::Unit => {
+                self.be.builder.build_return(None).expect("returning unit");
+            }
+            _ => {
+                self.be.builder.build_return(Some(&value)).expect("returning a value");
+            }
+        }
+    }
+
     fn lower_return(&mut self, value: Option<ExprId>) -> Flow<'ctx> {
         let value = match value {
             Some(expr) => Some(self.expr(expr)?),
@@ -1698,14 +1841,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         // frame, and the parameters are released by the outermost one.
         self.unwind_to(0);
 
-        match (&self.ret, value) {
-            (Type::Unit, _) | (_, None) => {
-                self.be.builder.build_return(None).expect("returning unit");
-            }
-            (_, Some(value)) => {
-                self.be.builder.build_return(Some(&value)).expect("returning a value");
-            }
-        }
+        let value = value.unwrap_or_else(|| self.be.unit_value());
+        self.return_value(value);
         None
     }
 

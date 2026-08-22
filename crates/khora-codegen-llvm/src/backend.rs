@@ -276,6 +276,14 @@ fn declare_closures(
     }
 }
 
+/// Whether a signature's `raises` row has anything in it.
+pub(crate) fn can_raise(signature: &Signature) -> bool {
+    match &signature.raises {
+        Type::Row { fields, tail } => !fields.is_empty() || tail.is_some(),
+        _ => false,
+    }
+}
+
 /// The capabilities a signature requires, in the order they are passed.
 ///
 /// Sorted by label, which `Type::row` already guarantees, so the caller and
@@ -306,11 +314,11 @@ fn specialized_signature(
         .map(|(g, a)| (g.as_str(), a.clone()))
         .collect();
     Some(Signature {
-        // The capability row survives to here: it is what says how many extra
-        // parameters the function takes and in what order. The error row does
-        // not yet — tagged returns are 4.3b.
+        // Both rows survive to here: the capability row says how many extra
+        // parameters the function takes, and the error row whether it returns
+        // a tagged value.
         requires: signature.requires.clone(),
-        raises: Type::empty_row(),
+        raises: signature.raises.clone(),
         generics: Vec::new(),
         // A specialized signature has no parameters left, so it can carry no
         // bounds either: whatever they required was settled before this ran.
@@ -512,6 +520,51 @@ impl<'ctx> Backend<'ctx> {
         }
     }
 
+    /// `{ i1 raised, i64 payload }` — what a fallible function returns.
+    pub fn tagged_type(&self) -> inkwell::types::StructType<'ctx> {
+        self.ctx.struct_type(&[self.ctx.bool_type().into(), self.ctx.i64_type().into()], false)
+    }
+
+    /// A value as the one word a tagged return carries it in.
+    ///
+    /// Every Khora value fits: an `Int` is already one, a `Bool` widens, and
+    /// everything boxed is a pointer.
+    pub fn to_word(&self, value: BasicValueEnum<'ctx>) -> inkwell::values::IntValue<'ctx> {
+        match value {
+            BasicValueEnum::PointerValue(p) => self
+                .builder
+                .build_ptr_to_int(p, self.ctx.i64_type(), "word")
+                .expect("a pointer as a word"),
+            BasicValueEnum::IntValue(i) if i.get_type().get_bit_width() < 64 => self
+                .builder
+                .build_int_z_extend(i, self.ctx.i64_type(), "word")
+                .expect("widening to a word"),
+            BasicValueEnum::IntValue(i) => i,
+            other => other.into_int_value(),
+        }
+    }
+
+    /// The inverse: a word read back as a value of `ty`.
+    pub fn word_to_value(
+        &self,
+        word: inkwell::values::IntValue<'ctx>,
+        ty: &Type,
+    ) -> BasicValueEnum<'ctx> {
+        match self.llvm_type(ty) {
+            Some(BasicTypeEnum::PointerType(p)) => self
+                .builder
+                .build_int_to_ptr(word, p, "unword")
+                .expect("a word as a pointer")
+                .into(),
+            Some(BasicTypeEnum::IntType(i)) if i.get_bit_width() < 64 => self
+                .builder
+                .build_int_truncate(word, i, "unword")
+                .expect("narrowing from a word")
+                .into(),
+            _ => word.into(),
+        }
+    }
+
     /// The zero value of a type: `null` for a pointer, `0` otherwise.
     ///
     /// Every local slot starts here. A boxed slot holding null is what makes an
@@ -545,6 +598,16 @@ impl<'ctx> Backend<'ctx> {
         // anything being written down twice.
         for (_, capability) in evidence_of(signature) {
             params.push(self.llvm_type(&capability)?.into());
+        }
+        // A function that can raise returns a tagged word instead of its
+        // value: `{ i1 raised, i64 payload }`. One word suffices because every
+        // Khora value is word-sized — the same fact `store_field` relies on —
+        // and two fields come back in registers rather than through memory.
+        //
+        // No unwinder, no landing pads, no personality routine: a raise is a
+        // return with a tag. `docs/design/effect-runtime.md` §2.
+        if can_raise(signature) {
+            return Some(self.tagged_type().fn_type(&params, false));
         }
         Some(match &signature.ret {
             Type::Unit => self.ctx.void_type().fn_type(&params, false),
@@ -1099,17 +1162,52 @@ impl<'ctx> Backend<'ctx> {
         }
 
         let khora_main = self.functions[entry];
+        let raises = self.signature_of(entry).is_some_and(|s| can_raise(&s));
         let i32_type = self.ctx.i32_type();
         let main = self.module.add_function("main", i32_type.fn_type(&[], false), None);
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
 
         let call = self.builder.build_call(khora_main, &[], "result").expect("calling main");
+
+        // An entry point that can raise has nowhere to hand the error, so an
+        // uncaught raise is a failing exit. This is what makes a program that
+        // raises runnable at all before `catch` lands, and it is the behaviour
+        // a shell expects either way.
+        let result = if raises {
+            let tagged = call
+                .try_as_basic_value()
+                .basic()
+                .expect("a fallible main returns a tagged value")
+                .into_struct_value();
+            let flag = self
+                .builder
+                .build_extract_value(tagged, 0, "raised")
+                .expect("reading the tag")
+                .into_int_value();
+            let word = self
+                .builder
+                .build_extract_value(tagged, 1, "payload")
+                .expect("reading the payload")
+                .into_int_value();
+
+            let failed = self.ctx.append_basic_block(main, "raised");
+            let ok = self.ctx.append_basic_block(main, "ok");
+            self.builder.build_conditional_branch(flag, failed, ok).expect("branching on the tag");
+
+            self.builder.position_at_end(failed);
+            let one = i32_type.const_int(1, false);
+            self.builder.build_return(Some(&one)).expect("exiting on an uncaught raise");
+
+            self.builder.position_at_end(ok);
+            Some(word.into())
+        } else {
+            call.try_as_basic_value().basic()
+        };
+
         let code = match signature.ret {
             Type::Int => {
-                let value = call
-                    .try_as_basic_value()
-                    .basic()
+                let value = result
                     .expect("an `Int` main returns a value")
                     .into_int_value();
                 self.builder

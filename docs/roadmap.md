@@ -353,8 +353,14 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   installing a handler is a block of `let`s. No handler stack, no dynamic
   lookup, no stack map. Row subtraction falls out: a requirement raised inside
   a `with` block is discharged by it rather than reaching the signature.
-- **4.3b Tagged returns** for a non-empty `raises` row, the branch at `!`, and
-  drops on the error path.
+- **4.3b Tagged returns — done.** A function whose `raises` row is non-empty
+  returns `{ i1, i64 }`: the tag, and the payload as a word — one word is
+  enough because every Khora value is word-sized. `raise e` releases what the
+  frame owns and returns with the tag set; `f()!` reads the tag and branches,
+  and the error path releases and re-returns. An uncaught raise reaching the
+  entry point is a failing exit. A fallible call *must* be marked, so the
+  branch is always where the source says it is. No tables, no personality
+  routine, no unwinder — a raise is a return with a tag.
 - **4.4 `Layer` as handler composition**, including merge.
 
 **Exit:** the reference application typechecks and serves a request; an

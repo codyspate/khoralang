@@ -187,6 +187,17 @@ pub enum Expr {
     Return(Option<ExprId>),
     List(Vec<ExprId>),
     Tuple(Vec<ExprId>),
+    /// `raise DbError::Timeout` — leaves the function with an error.
+    ///
+    /// Type `Never`, so it stands wherever an expression can.
+    Raise(ExprId),
+    /// `f()!` — this call can leave the enclosing function.
+    ///
+    /// Type-wise the identity: `f()!` has the type `f()` has. Its work is to
+    /// mark, and to say where the branch goes. `docs/design/effects.md`
+    /// justifies the mark on readability; `docs/design/effect-runtime.md` §2
+    /// notes it is also exactly where the check belongs.
+    Try(ExprId),
     /// The closure currently executing, inside its own body.
     ///
     /// `let go = fn n => .. go(n - 1) ..` reads as a capture and would be one:
@@ -785,8 +796,20 @@ impl<'a> Ctx<'a> {
                 let fields = self.lower_record_fields(e);
                 self.add_expr(Expr::Record { owner: None, fields }, range)
             }
-            ast::Expr::Raise(_) => self.unsupported("`raise`", range),
-            ast::Expr::Try(_) => self.unsupported("`!`", range),
+            ast::Expr::Raise(e) => {
+                let error = match e.value() {
+                    Some(v) => self.lower_expr(&v),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.add_expr(Expr::Raise(error), range)
+            }
+            ast::Expr::Try(e) => {
+                let inner = match e.operand() {
+                    Some(v) => self.lower_expr(&v),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                self.add_expr(Expr::Try(inner), range)
+            }
             // `handler for Ledger { .. }` is a record literal whose type the
             // syntax names. Nothing about it is special at runtime: it builds
             // the same object a bare literal would.

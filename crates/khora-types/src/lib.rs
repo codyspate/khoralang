@@ -503,6 +503,15 @@ fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The label an error type carries in a `raises` row: its own name.
+fn label_of(ty: &Type) -> String {
+    match ty {
+        Type::Adt { name, .. } => name.clone(),
+        Type::Param(name) => name.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Whether `declared` and `written` name the same set of fields.
 fn covers(declared: &[String], written: &[&str]) -> bool {
     declared.len() == written.len() && declared.iter().all(|d| written.iter().any(|w| w == d))
@@ -752,6 +761,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             lambdas: Vec::new(),
             demanded: Vec::new(),
             installed: Vec::new(),
+            marked: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
@@ -836,6 +846,9 @@ struct Demand {
     row: Type,
     range: TextRange,
     callee: String,
+    /// The call this came from, for checking that a fallible one is marked.
+    /// `None` for a `raise`, which is its own mark.
+    site: Option<ExprId>,
 }
 
 struct Checker<'a> {
@@ -864,6 +877,13 @@ struct Checker<'a> {
     /// signature. That is row subtraction: `with` *discharges* a requirement
     /// rather than forwarding it.
     installed: Vec<String>,
+    /// Calls written with `!`.
+    ///
+    /// A call that can leave the function has to say so at the call site —
+    /// that is the whole justification for the mark in
+    /// `docs/design/effects.md`. Recorded rather than checked inline because
+    /// the inner expression is inferred before its parent is known.
+    marked: Vec<ExprId>,
     errors: Vec<HirError>,
 }
 
@@ -1126,6 +1146,36 @@ impl<'a> Checker<'a> {
             }
             Expr::Match { scrutinee, arms } => self.infer_match(scrutinee, &arms, range),
             Expr::Record { owner, fields } => self.infer_record(owner, &fields, range),
+
+            // `raise e` leaves the function, so it stands wherever an
+            // expression can and its type constrains nothing.
+            Expr::Raise(error) => {
+                let ty = self.infer(error);
+                let ty = self.unifier.zonk(&ty);
+                if !matches!(ty, Type::Unknown | Type::Var(_)) {
+                    self.demanded.push(Demand {
+                        clause: Clause::Raises,
+                        row: Type::row(vec![(label_of(&ty), ty)], None),
+                        range,
+                        callee: "raise".to_string(),
+                        site: None,
+                    });
+                }
+                Type::Never
+            }
+
+            // `f()!` is the identity on types. What it does is mark, and the
+            // mark is what excuses the call from needing one.
+            Expr::Try(inner) => {
+                // A demand is recorded against the *callee*, since that is
+                // what carries the signature, so the mark has to reach it too:
+                // `f()!` marks the call and the `f` inside it.
+                self.marked.push(inner);
+                if let Expr::Call { callee, .. } = self.body.expr(inner) {
+                    self.marked.push(*callee);
+                }
+                self.infer(inner)
+            }
             Expr::Lambda { params, body, .. } => {
                 // A parameter with no annotation gets a variable, so the type
                 // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
@@ -1455,7 +1505,7 @@ impl<'a> Checker<'a> {
         // monomorphization the same way every other type argument does.
         let (ty, type_args) =
             self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
-        self.demand(&signature, &type_args, key, range);
+        self.demand(&signature, &type_args, key, callee, range);
         self.instantiations.insert(callee, (key.to_string(), type_args));
         let Type::Fn { params, ret } = ty else { return Type::Unknown };
 
@@ -1525,6 +1575,7 @@ impl<'a> Checker<'a> {
         signature: &Signature,
         type_args: &[Type],
         key: &str,
+        callee_site: ExprId,
         range: TextRange,
     ) {
         let mapping: HashMap<&str, Type> = signature
@@ -1551,7 +1602,13 @@ impl<'a> Checker<'a> {
             if matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none()) {
                 continue;
             }
-            self.demanded.push(Demand { clause, row, range, callee: key.to_string() });
+            self.demanded.push(Demand {
+                clause,
+                row,
+                range,
+                callee: key.to_string(),
+                site: Some(callee_site),
+            });
         }
     }
 
@@ -1561,7 +1618,7 @@ impl<'a> Checker<'a> {
     /// or it is an error, and reporting it at the call that raised it is what
     /// makes the message actionable.
     fn check_effects(&mut self) {
-        for Demand { clause, row, range, callee } in std::mem::take(&mut self.demanded) {
+        for Demand { clause, row, range, callee, site } in std::mem::take(&mut self.demanded) {
             // Satisfied means *subsumed*, not equal: a caller providing
             // `{ ledger, ai }` can call something needing only `{ ledger }`.
             // Opening the demand is that check — its labels must all be
@@ -1578,6 +1635,23 @@ impl<'a> Checker<'a> {
                 Clause::Requires => self.signature.requires.clone(),
                 Clause::Raises => self.signature.raises.clone(),
             };
+
+            // A call that can leave the function says so at the call site.
+            // Reported before the row is compared: "mark it" is the actionable
+            // half, and a marked call whose row is also wrong reports both.
+            if clause == Clause::Raises {
+                if let Some(site) = site {
+                    if !self.marked.contains(&site) {
+                        self.error(
+                            format!(
+                                "`{callee}` can leave this function, so the call needs `!`: \
+                                 write `{callee}(..)!`"
+                            ),
+                            range,
+                        );
+                    }
+                }
+            }
 
             if let Err(why) = self.unifier.unify(&promise, &row) {
                 self.error(
@@ -1877,7 +1951,7 @@ impl<'a> Checker<'a> {
                         let (ty, args) =
                             self.unifier.instantiate_with(&sig.generics, &sig.as_fn());
                         let range = self.body.range(at);
-                        self.demand(&sig, &args, name, range);
+                        self.demand(&sig, &args, name, at, range);
                         self.instantiations.insert(at, (name.clone(), args));
                         ty
                     }

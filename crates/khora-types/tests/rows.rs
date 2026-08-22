@@ -95,7 +95,7 @@ fn a_row_is_the_same_written_either_way() {
 #[test]
 fn a_raise_the_caller_does_not_declare_is_rejected() {
     assert_reports(
-        &format!("{SERVICES}export fn f(id: Int) -> Int {{ risky(id) }}\n"),
+        &format!("{SERVICES}export fn f(id: Int) -> Int {{ risky(id)! }}\n"),
         "`risky` needs `DbError`, which this function does not raise",
     );
 }
@@ -103,7 +103,7 @@ fn a_raise_the_caller_does_not_declare_is_rejected() {
 #[test]
 fn declaring_the_raise_accepts_it() {
     assert_clean(&format!(
-        "{SERVICES}export fn f(id: Int) -> Int raises DbError {{ risky(id) }}\n"
+        "{SERVICES}export fn f(id: Int) -> Int raises DbError {{ risky(id)! }}\n"
     ));
 }
 
@@ -111,7 +111,7 @@ fn declaring_the_raise_accepts_it() {
 #[test]
 fn a_wider_error_row_accepts_a_narrower_call() {
     assert_clean(&format!(
-        "{SERVICES}export fn f(id: Int) -> Int raises DbError + ModelError {{ risky(id) }}\n"
+        "{SERVICES}export fn f(id: Int) -> Int raises DbError + ModelError {{ risky(id)! }}\n"
     ));
 }
 

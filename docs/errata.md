@@ -566,3 +566,24 @@ the third of its kind: **a lookup or a match that quietly produces nothing is
 indistinguishable from one that succeeded**, because `Unknown` absorbs the
 difference. Anywhere the checker pattern-matches a type's shape, it has to
 follow the variables first.
+
+## 28. A mark and the demand it answered were filed under different keys
+
+`f()!` records two facts. The checker records a *demand* — this call reaches a
+fallible function, so its row has to be subsumed by the enclosing one — and it
+records the `!` *mark* that answers the demand. The demand was keyed by the
+callee expression, because that is what carries the signature; the mark was
+keyed by the call, because that is what the `!` is attached to in the source.
+Every properly marked call therefore looked unmarked.
+
+The failure was loud rather than silent, which is the only reason it cost
+minutes instead of a day: correct programs were rejected with "this call can
+raise; mark it with `!`" pointing at a call that already had one. Had the
+lookup defaulted to *marked* it would have been entry 26 all over again.
+
+The fix records the mark against both expressions. The lesson is narrower than
+"resolve before matching" but comes from the same place: **two passes agreeing
+about a fact is not enough if they disagree about what to file it under.** A
+map whose keys come from one pass and whose lookups come from another needs
+the key to be part of the interface, not an implementation detail either side
+picked for its own convenience.

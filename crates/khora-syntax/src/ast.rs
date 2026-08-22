@@ -897,6 +897,20 @@ impl RecordExpr {
     }
 }
 
+impl RaiseExpr {
+    /// The error being raised.
+    pub fn value(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+}
+
+impl TryExpr {
+    /// The call that can leave the enclosing function.
+    pub fn operand(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+}
+
 impl WithExpr {
     /// The computation the handlers serve: `analyze(id) with { .. }`.
     ///

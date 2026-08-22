@@ -192,3 +192,102 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "202\n0\n", "the trailing 0 is the live-object count");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- failures --------------------------------------------------------------
+
+const FALLIBLE: &str = "module t;
+fn print(value: Int);
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export type DbError = | Timeout | Refused;
+export type Node = | Of(value: Int);
+
+fn halve(n: Int) -> Int raises DbError {
+  if n % 2 == 0 { n / 2 } else { raise DbError::Refused }
+}
+";
+
+/// The ordinary path: a raise that never happens costs a branch.
+#[test]
+fn a_call_that_does_not_raise_returns_its_value() {
+    let ran = run(
+        "raises_ok",
+        &format!(
+            "{FALLIBLE}
+fn twice(n: Int) -> Int raises DbError {{ halve(n)! + halve(n)! }}
+fn main() -> Int raises DbError {{ print(twice(8)!); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "8\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A raise leaves through every frame between it and the entry point, which
+/// has nowhere to hand it — so an uncaught raise is a failing exit.
+#[test]
+fn a_raise_propagates_to_the_entry_point() {
+    let ran = run(
+        "raises_err",
+        &format!(
+            "{FALLIBLE}
+fn twice(n: Int) -> Int raises DbError {{ halve(n)! + halve(n)! }}
+fn main() -> Int raises DbError {{ print(twice(7)!); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "", "nothing after the raise runs");
+    assert_eq!(ran.code, Some(1));
+}
+
+/// Both paths from one program, so the branch is really a branch.
+#[test]
+fn the_tag_chooses_between_the_two_paths() {
+    let ran = run(
+        "raises_both",
+        &format!(
+            "{FALLIBLE}
+fn attempt(n: Int) -> Int raises DbError {{
+  if n < 0 {{ raise DbError::Timeout }}
+  halve(n)!
+}}
+fn main() -> Int raises DbError {{
+  print(attempt(10)!);
+  print(attempt(20)!);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "5\n10\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The whole of unwinding: the raising frame releases what it owns on the way
+/// out. No tables, no personality routine — a raise is a return with a tag.
+#[test]
+fn a_raising_frame_releases_what_it_owns() {
+    let ran = run(
+        "raises_leaks",
+        &format!(
+            "{FALLIBLE}
+/// Holds two boxed values, then raises past both.
+fn holding(n: Int) -> Int raises DbError {{
+  let node = Node::Of(n);
+  let text = \"held\";
+  if n == 0 {{ raise DbError::Refused }}
+  n
+}}
+
+fn main() -> Int raises DbError {{
+  khora_print_int(holding(3)!);
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "3\n0\n", "the ok path leaves nothing behind either");
+    assert_eq!(ran.code, Some(0));
+}
