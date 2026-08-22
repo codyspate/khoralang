@@ -285,6 +285,13 @@ pub struct Body {
     /// inside the block is discharged by it rather than by the signature. This
     /// is row subtraction, kept where it can still be read.
     pub installs: std::collections::HashMap<ExprId, Vec<String>>,
+    /// How many locals existed when each lambda started.
+    ///
+    /// A local below the mark was declared outside the lambda, which is what
+    /// "captured" means. The capture scan here uses it directly; the checker
+    /// needs it too, because a capability used *implicitly* is captured on the
+    /// same terms and only the checker knows which labels those are.
+    pub lambda_marks: std::collections::HashMap<ExprId, usize>,
     /// Which binding supplies each capability label at each call site.
     ///
     /// Recorded here because it can only be answered *while* lowering, when
@@ -549,6 +556,10 @@ impl<'a> Ctx<'a> {
     /// Which ones it actually needs is the callee's row, which is not known
     /// here; what is known, and only here, is what is in scope.
     fn add_call(&mut self, expr: Expr, range: TextRange) -> ExprId {
+        let callee = match &expr {
+            Expr::Call { callee, .. } => Some(*callee),
+            _ => None,
+        };
         let id = self.add_expr(expr, range);
         if !self.in_scope.is_empty() {
             // Innermost last, so a later duplicate label shadows an earlier one.
@@ -556,6 +567,15 @@ impl<'a> Ctx<'a> {
             for (label, local) in &self.in_scope {
                 visible.retain(|(l, _)| l != label);
                 visible.push((label.clone(), *local));
+            }
+            // Filed under the call *and* its callee, because the two halves of
+            // the compiler reach for different ones: code generation has the
+            // call, and the checker records a demand against the callee, which
+            // is what carries the signature. Errata 28 is the same pair
+            // disagreeing about which key to use; one entry under each is
+            // cheaper than remembering.
+            if let Some(callee) = callee {
+                self.body.capabilities.insert(callee, visible.clone());
             }
             self.body.capabilities.insert(id, visible);
         }
@@ -1281,7 +1301,9 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        self.add_expr(Expr::Lambda { params, body, captures }, range)
+        let id = self.add_expr(Expr::Lambda { params, body, captures }, range);
+        self.body.lambda_marks.insert(id, local_mark);
+        id
     }
 
     /// Whether `name` is the name of the lambda currently being lowered.

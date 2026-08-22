@@ -747,3 +747,117 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "101\n0\n", "the trailing 0 is the live-object count");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- capabilities inside a closure -----------------------------------------
+
+/// A `with` block lowers to a block of `let`s, so a capability is an ordinary
+/// binding and a closure that uses one captures it — the same as any other
+/// name it reads. Except that this one is never written down: `report(n)`
+/// needs `ledger` without saying so, and the capture scan watches names.
+///
+/// It compiled and segfaulted before the checker's answer was published to the
+/// scan.
+#[test]
+fn a_closure_captures_a_capability_it_uses_without_naming() {
+    let ran = run(
+        "closure_capability",
+        &format!(
+            "{LEDGER}
+export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+
+fn main() -> Int {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
+    print(apply(fn n => report(n), 4));
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// And it is still the handler that was installed where the closure was
+/// *written*, not one installed where it is called. A capability is captured
+/// lexically because it is a binding, and a binding does not change meaning by
+/// being read somewhere else.
+#[test]
+fn a_captured_capability_is_the_one_in_scope_where_the_closure_was_written() {
+    let ran = run(
+        "closure_capability_lexical",
+        &format!(
+            "{LEDGER}
+export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+
+fn make() -> (Int) -> Int {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
+    fn n => report(n)
+  }}
+}}
+
+fn main() -> Int {{
+  let f = make();
+  with {{ ledger: handler for Ledger {{ balance: fn id => 0 }} }} {{
+    print(apply(f, 4));
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n", "the closure kept the handler it was made with");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A closure inside a closure reads the binding out of the outer one's frame,
+/// so the outer one has to have captured it too.
+#[test]
+fn a_nested_closure_captures_through_the_one_around_it() {
+    let ran = run(
+        "closure_capability_nested",
+        &format!(
+            "{LEDGER}
+export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+
+fn main() -> Int {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
+    print(apply(fn n => apply(fn m => report(m), n), 4));
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Nothing leaks: the closure holds a reference to the handler and gives it
+/// back.
+#[test]
+fn a_closure_holding_a_capability_leaves_nothing_behind() {
+    let ran = run(
+        "closure_capability_leaks",
+        &format!(
+            "{LEDGER}
+export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+
+fn run_it() -> Int {{
+  let bonus = 100;
+  with {{ ledger: handler for Ledger {{ balance: fn id => id + bonus }} }} {{
+    apply(fn n => report(n), 1)
+  }}
+}}
+
+fn main() -> Int {{
+  khora_print_int(run_it());
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "101\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}

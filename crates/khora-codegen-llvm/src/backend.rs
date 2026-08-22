@@ -249,8 +249,19 @@ fn declare_closures(
     for (id, expr) in body.exprs() {
         let khora_hir::body::Expr::Lambda { captures, .. } = expr else { continue };
         let Type::Fn { params, ret, .. } = types.of(id).clone() else { continue };
-        let captured: Vec<(khora_hir::body::LocalId, Type)> =
-            captures.iter().map(|l| (*l, types.local(*l).clone())).collect();
+
+        // The names the body mentions, and then the capabilities it uses
+        // without mentioning. A `with` block lowers to a block of `let`s, so a
+        // capability is an ordinary binding — but `report(n)` needs `ledger`
+        // without writing it down, and the capture scan in lowering watches
+        // names. Reading the checker's answer rather than re-deriving it here
+        // is what keeps the two from disagreeing.
+        let implicit = types.implicit_captures(id);
+        let captured: Vec<(khora_hir::body::LocalId, Type)> = captures
+            .iter()
+            .chain(implicit.iter().filter(|l| !captures.contains(l)))
+            .map(|l| (*l, types.local(*l).clone()))
+            .collect();
         // An unsolved variable here means nothing ever pinned the type down —
         // `let f = fn x => x;` with `f` unused. That is an ambiguity in the
         // program, not a limit of the backend, and saying which it is decides

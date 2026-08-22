@@ -788,6 +788,15 @@ pub struct BodyTypes {
     /// created the variables and solved them. Monomorphization reads it to
     /// find out which specializations a body needs.
     instantiations: HashMap<ExprId, (String, Vec<Type>)>,
+    /// Bindings a lambda captures because its body uses them *implicitly*.
+    ///
+    /// A `with` block lowers to a block of `let`s, so a capability is an
+    /// ordinary binding and a lambda that uses one captures it like any other.
+    /// But nothing in the body *names* it — `report(n)` needs `ledger` without
+    /// saying so — and the capture scan watches names. Which labels a call
+    /// needs is the callee's row, which only the checker has read, so the
+    /// answer is published here rather than guessed at twice.
+    lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
 }
 
 impl BodyTypes {
@@ -804,6 +813,11 @@ impl BodyTypes {
     /// The generic function this expression mentions, and at what arguments.
     pub fn instantiation(&self, id: ExprId) -> Option<&(String, Vec<Type>)> {
         self.instantiations.get(&id)
+    }
+
+    /// Bindings this lambda captures implicitly. See the field.
+    pub fn implicit_captures(&self, id: ExprId) -> &[khora_hir::body::LocalId] {
+        self.lambda_captures.get(&id).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn instantiations(&self) -> impl Iterator<Item = (&ExprId, &(String, Vec<Type>))> {
@@ -831,6 +845,10 @@ impl BodyTypes {
                     (*k, (name.clone(), args))
                 })
                 .collect(),
+            // Bindings, not types: a specialization captures the same ones the
+            // generic body does, and there is nothing in a `LocalId` to
+            // substitute.
+            lambda_captures: self.lambda_captures.clone(),
         }
     }
 }
@@ -872,6 +890,8 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             lambdas: Vec::new(),
             demanded: Vec::new(),
             projections: Vec::new(),
+            enclosing_lambdas: Vec::new(),
+            lambda_captures: HashMap::new(),
             installed: Vec::new(),
             marked: Vec::new(),
             errors: Vec::new(),
@@ -893,7 +913,11 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
                 (*k, (n.clone(), args))
             })
             .collect();
-        out.bodies.push((name.clone(), BodyTypes { exprs, locals, instantiations }));
+        let lambda_captures = std::mem::take(&mut checker.lambda_captures);
+        out.bodies.push((
+            name.clone(),
+            BodyTypes { exprs, locals, instantiations, lambda_captures },
+        ));
     }
     out
 }
@@ -987,6 +1011,11 @@ struct Checker<'a> {
     /// Where each deferred projection was written, in the order the unifier
     /// deferred them, so `settle_projections` can report against the source.
     projections: Vec<(TextRange, String)>,
+    /// The lambdas currently being inferred, innermost last, each with the
+    /// bindings it has been found to use implicitly.
+    enclosing_lambdas: Vec<(ExprId, Vec<khora_hir::body::LocalId>)>,
+    /// The finished answer, moved out as each lambda closes.
+    lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
     /// The capabilities in scope from enclosing `with` blocks.
     ///
     /// A call inside one is served by it, so its labels never reach the
@@ -1322,7 +1351,11 @@ impl<'a> Checker<'a> {
                 let whole =
                     Type::func(types, result.clone());
                 self.lambdas.push(whole.clone());
+                self.enclosing_lambdas.push((id, Vec::new()));
                 let ret = self.infer(body);
+                if let Some((_, found)) = self.enclosing_lambdas.pop() {
+                    self.lambda_captures.insert(id, found);
+                }
                 self.lambdas.pop();
 
                 self.require(&result, &ret, "this closure's body", range);
@@ -1758,6 +1791,16 @@ impl<'a> Checker<'a> {
         callee_site: Option<ExprId>,
         range: TextRange,
     ) {
+        // Before anything is subtracted: what an enclosing `with` block
+        // supplies is exactly what a lambda inside it has to capture, so the
+        // labels have to be read here rather than after they are discharged.
+        if let (Some(site), Type::Row { fields, .. }) = (callee_site, &self.unifier.zonk(requires))
+        {
+            for (label, _) in fields {
+                self.note_implicit_capture(site, label);
+            }
+        }
+
         for (clause, row) in [(Clause::Requires, requires), (Clause::Raises, raises)] {
             // Zonked here, not later: the `installed` subtraction below needs
             // the labels, and `installed` is scoped to the `with` block this
@@ -1787,6 +1830,23 @@ impl<'a> Checker<'a> {
                 callee: key.to_string(),
                 site: callee_site,
             });
+        }
+    }
+
+    /// Records that a lambda uses a capability without naming it.
+    ///
+    /// Against every enclosing lambda, not just the innermost: an inner
+    /// lambda reads the binding out of the outer one's frame, so the outer one
+    /// has to have captured it too. The mark is what says whether a binding is
+    /// outside a given lambda — below it means declared before the lambda
+    /// began, which is what captured means everywhere else.
+    fn note_implicit_capture(&mut self, site: ExprId, label: &str) {
+        let Some(local) = self.body.capability_at(site, label) else { return };
+        for (lambda, found) in &mut self.enclosing_lambdas {
+            let mark = self.body.lambda_marks.get(lambda).copied().unwrap_or(0);
+            if local.index() < mark && !found.contains(&local) {
+                found.push(local);
+            }
         }
     }
 

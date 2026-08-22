@@ -694,3 +694,37 @@ makes every path out — falling off the end, a `return`, a `raise` — release 
 The shape here is not `Unknown` this time. It is **a substitution applied to
 some fields of a structure and not others**, which reads as correct at every
 call site that never exercises the difference.
+
+## 33. A closure could use a capability it had not captured
+
+`apply(fn n => report(n), 4)` inside a `with { ledger: .. }` block type checked
+and segfaulted. The lifted lambda read a slot for `ledger` that its frame did
+not have.
+
+A `with` block lowers to a block of `let`s, so a capability *is* an ordinary
+binding, and a closure that uses one should capture it the way it captures any
+other name it reads. But nothing in the body names it: `report(n)` needs
+`ledger` without saying so, the requirement is discovered from the callee's
+row, and the capture scan in lowering watches `Expr::Local`. The one pass that
+knew a capability was in play was the checker, and it was not telling anyone.
+
+The fix is the errata-19 shape once more: publish it. The checker records, per
+lambda, the bindings its body uses implicitly, and code generation reads that
+list instead of deriving a second one. Two smaller things came out with it.
+
+**The same fact under two keys.** The checker records a demand against the
+*callee* — that is what carries the signature — and the capability scope was
+filed against the *call*, so the lookup missed. Entry 28 is this exact pair
+disagreeing about a key, which is why the fix is the same one: record the scope
+under both, and stop having to remember.
+
+**Two lists of the same thing, one of which grew.** The closure object was
+*sized* from lowering's capture list and *filled* from the site's. That was
+fine for as long as the two agreed, and wrote past the end of the allocation
+the moment the checker's captures were added to one of them. It now reads the
+site for both, and the other list is not passed in at all — a parameter that
+can disagree with the truth is a parameter worth deleting.
+
+Worth saying plainly, because it is the fourth entry of its kind: **when two
+places compute the same list, delete one.** Not "keep them in sync" — the bug
+here was introduced by a change that had no reason to look at the sizing line.

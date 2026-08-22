@@ -621,7 +621,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.check_cancellation(range);
                 self.expr(inner)
             }
-            Expr::Lambda { captures, .. } => self.make_closure(id, &captures, range),
+            Expr::Lambda { .. } => self.make_closure(id, range),
             // Parameter 0 of a lifted lambda *is* the closure, and it is live
             // for the duration of the call because the caller holds it. No
             // capture, no reference count, no cycle.
@@ -1355,12 +1355,12 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// Field 0 holds the lifted function's address and the captures follow, all
     /// under the ordinary object header — so a closure is dup'ed, dropped and
     /// counted by exactly the machinery every other heap value already uses.
-    fn make_closure(
-        &mut self,
-        id: ExprId,
-        captures: &[LocalId],
-        range: TextRange,
-    ) -> Flow<'ctx> {
+    ///
+    /// Which captures those are comes from the *site*, not from the lambda
+    /// expression: lowering finds the names the body reads, and the checker
+    /// adds the capabilities it uses without naming. The site is where the two
+    /// were put together, and it is the only list this may read.
+    fn make_closure(&mut self, id: ExprId, range: TextRange) -> Flow<'ctx> {
         let owner = self.owner.clone();
         let Some(site) = self.be.closure_at(&owner, id).cloned() else {
             return self.fail("this closure was never declared, which is a compiler bug", range);
@@ -1372,7 +1372,11 @@ impl<'ctx> Lower<'_, 'ctx> {
             return self.fail("this closure has no lifted function, which is a compiler bug", range);
         };
 
-        let fields = CLOSURE_CAPTURE_BASE + captures.len();
+        // Sized from the *site*, which is the list the fields are written
+        // from. Sizing it from the lowering's list instead worked for as long
+        // as the two agreed, and wrote past the end of the object the moment
+        // one of them grew.
+        let fields = CLOSURE_CAPTURE_BASE + site.captures.len();
         let alloc = self.be.rt.alloc;
         let object = self
             .be
