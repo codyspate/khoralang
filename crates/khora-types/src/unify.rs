@@ -253,8 +253,21 @@ impl Unifier {
                 let tail = tail.map(|t| self.zonk(&t));
                 // Zonking a tail may reveal more labels, which belong in this
                 // row rather than nested inside it.
-                let mut fields: Vec<(String, Type)> =
-                    fields.iter().map(|(l, t)| (l.clone(), self.zonk(t))).collect();
+                // Relabelled for the same reason `substitute` relabels: an
+                // error row's label *is* its type's name, and solving the
+                // variable is what gives it one. A row that kept `?` for a
+                // label would satisfy nothing, however well solved.
+                let mut fields: Vec<(String, Type)> = fields
+                    .iter()
+                    .map(|(label, ty)| {
+                        let solved = self.zonk(ty);
+                        if label == &row_label(ty) {
+                            (row_label(&solved), solved)
+                        } else {
+                            (label.clone(), solved)
+                        }
+                    })
+                    .collect();
                 match tail {
                     Some(Type::Row { fields: more, tail }) => {
                         fields.extend(more);
@@ -438,8 +451,20 @@ impl Unifier {
         let only_in = |a: &[(String, Type)], b: &[(String, Type)]| -> Vec<(String, Type)> {
             a.iter().filter(|(l, _)| !b.iter().any(|(o, _)| o == l)).cloned().collect()
         };
-        let missing_from_2 = only_in(f1, f2);
-        let missing_from_1 = only_in(f2, f1);
+        let mut missing_from_2 = only_in(f1, f2);
+        let mut missing_from_1 = only_in(f2, f1);
+
+        // An *error* row labels each entry with its type's own name, so an
+        // entry whose type is not known yet has no name yet either. `raises E`
+        // with `E` a type parameter is exactly that: at the call it is a fresh
+        // variable, and it is a variable's business to become something.
+        //
+        // Such an entry matches by *position among the leftovers* rather than
+        // by name — there is no name to match on, and pairing it with anything
+        // else would be pairing it with the wrong thing for no reason. Solving
+        // it is what gives it a label, and by then it is an ordinary entry.
+        self.pair_nameless(&mut missing_from_1, &mut missing_from_2)?;
+        self.pair_nameless(&mut missing_from_2, &mut missing_from_1)?;
 
         match (missing_from_1.is_empty(), missing_from_2.is_empty()) {
             // The same labels on both sides: the tails describe the same rest.
@@ -455,6 +480,35 @@ impl Unifier {
                 self.grow(t2, missing_from_2, Some(&rest))
             }
         }
+    }
+
+    /// Matches each nameless entry in `theirs` against a named leftover in
+    /// `ours`, consuming both. See the caller for why position rather than
+    /// name.
+    fn pair_nameless(
+        &mut self,
+        theirs: &mut Vec<(String, Type)>,
+        ours: &mut Vec<(String, Type)>,
+    ) -> Result<(), Mismatch> {
+        while let Some(index) = theirs.iter().position(|(l, t)| self.is_nameless(l, t)) {
+            let Some(other) = ours.iter().position(|(l, t)| !self.is_nameless(l, t)) else {
+                break;
+            };
+            let (_, left) = theirs.remove(index);
+            let (_, right) = ours.remove(other);
+            self.unify(&left, &right)?;
+        }
+        Ok(())
+    }
+
+    /// Whether a row entry's label is one it has not earned yet.
+    ///
+    /// True when the entry's type is still a variable *and* its label is that
+    /// variable's rendering — which is what makes it an error-row entry whose
+    /// type nobody has decided. A capability's label is a name someone wrote,
+    /// and stays itself however its type is solved.
+    fn is_nameless(&self, label: &str, ty: &Type) -> bool {
+        matches!(self.shallow(ty), Type::Var(_)) && label == row_label(ty)
     }
 
     /// Requires `tail` to cover `missing`, with `rest` beyond it.
@@ -622,6 +676,18 @@ fn match_type<'a>(
     }
 }
 
+/// The label an entry carries when its label *is* its type: an error row's.
+///
+/// Shared with the checker, which builds those rows in the first place, so the
+/// two cannot disagree about what an entry is called.
+pub fn row_label(ty: &Type) -> String {
+    match ty {
+        Type::Adt { name, .. } => name.clone(),
+        Type::Param(name) => name.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Rewrites rigid parameters according to `mapping`.
 pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
     match ty {
@@ -638,8 +704,26 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
         },
         Type::Tuple(items) => Type::Tuple(items.iter().map(|i| substitute(i, mapping)).collect()),
         Type::Row { fields, tail } => {
-            let mut fields: Vec<(String, Type)> =
-                fields.iter().map(|(l, t)| (l.clone(), substitute(t, mapping))).collect();
+            let mut fields: Vec<(String, Type)> = fields
+                .iter()
+                .map(|(label, ty)| {
+                    let substituted = substitute(ty, mapping);
+                    // An *error* row labels each entry with its type's own
+                    // name, so the label is a function of the type rather than
+                    // data beside it — substituting `E := DbError` has to
+                    // relabel, or `raises E` instantiates to a row still
+                    // labelled `E` and matches nothing.
+                    //
+                    // A capability row labels a *name* against a type, where
+                    // the two say different things, and the test tells them
+                    // apart: `ledger` is not what `Ledger` is called.
+                    if label == &row_label(ty) {
+                        (row_label(&substituted), substituted)
+                    } else {
+                        (label.clone(), substituted)
+                    }
+                })
+                .collect();
             // A row variable standing for more labels is spliced in, not
             // nested: `{ a | 'e }` with `'e := { b }` is `{ a, b }`.
             match tail.as_ref().map(|t| substitute(t, mapping)) {

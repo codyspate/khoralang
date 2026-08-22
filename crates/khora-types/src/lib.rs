@@ -605,13 +605,9 @@ pub fn as_written(key: &str) -> String {
 pub const FAILED: &str = "Failed";
 
 /// The label an error type carries in a `raises` row: its own name.
-fn label_of(ty: &Type) -> String {
-    match ty {
-        Type::Adt { name, .. } => name.clone(),
-        Type::Param(name) => name.clone(),
-        other => other.to_string(),
-    }
-}
+///
+/// One definition, in `unify`, because substitution has to relabel with it.
+use unify::row_label as label_of;
 
 /// Whether `declared` and `written` name the same set of fields.
 fn covers(declared: &[String], written: &[&str]) -> bool {

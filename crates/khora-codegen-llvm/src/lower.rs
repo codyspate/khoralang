@@ -195,6 +195,16 @@ enum Cleanup<'ctx> {
     Temp(BasicValueEnum<'ctx>, Type),
 }
 
+/// A closure call that has happened, before anything is decided about its tag.
+///
+/// The scope holding the closure's reference is still open — the caller closes
+/// it — because what happens next differs: propagating an error leaves through
+/// a branch that must see the scope, and capturing one does not.
+struct Invoked<'ctx> {
+    raw: Option<BasicValueEnum<'ctx>>,
+    fallible: bool,
+}
+
 /// What a `Type::Fn` says about how to call it.
 ///
 /// The same four facts a `Signature` gives a direct call, which is the point:
@@ -829,17 +839,25 @@ impl<'ctx> Lower<'_, 'ctx> {
                 }
             }
             Expr::Path(khora_hir::Resolution::Item { name, .. }) => {
-                if name == "print" && args.len() == 1 {
+                // A generic callee resolves to the specialization this call
+                // site asked for; a concrete one keeps its own name.
+                let symbol = self
+                    .mono
+                    .callee(&self.owner.clone(), callee)
+                    .unwrap_or_else(|| name.clone());
+
+                // An intrinsic is a *declaration the backend implements*, so
+                // the test is that nothing else does. A program with its own
+                // `attempt` — the tests in this repository have one — gets its
+                // own, and the name means what it was written to mean.
+                let is_intrinsic = !self.be.is_defined(&symbol) && args.len() == 1;
+                if is_intrinsic && name == "print" {
                     self.print(args[0], range)
-                } else if name == "assert" && args.len() == 1 {
+                } else if is_intrinsic && name == "assert" {
                     self.assert(args[0], range)
+                } else if is_intrinsic && name == "attempt" {
+                    self.attempt(site, args[0], range)
                 } else {
-                    // A generic callee resolves to the specialization this call
-                    // site asked for; a concrete one keeps its own name.
-                    let symbol = self
-                        .mono
-                        .callee(&self.owner.clone(), callee)
-                        .unwrap_or_else(|| name.clone());
                     self.call_named(&symbol, site, args, range)
                 }
             }
@@ -1077,6 +1095,78 @@ impl<'ctx> Lower<'_, 'ctx> {
                 range,
             ),
         }
+    }
+
+    /// The `attempt` intrinsic: run a computation and make its failure a value.
+    ///
+    /// The tagged return is already "an error or a value"; this is the same
+    /// thing with a name the type system can see. An intrinsic rather than a
+    /// library function because catching *whatever* a body raises is not
+    /// something `catch` can express — `catch` names constructors, and this
+    /// names none.
+    ///
+    /// It is what makes retrying possible at all: a policy that runs a
+    /// computation again cannot know what the computation failed with.
+    fn attempt(&mut self, site: ExprId, body: ExprId, range: TextRange) -> Flow<'ctx> {
+        let Some(shape) = FnShape::of(self.types.of(body)) else {
+            return self.fail("`attempt` takes a function to run", range);
+        };
+        let result_ty = self.types.of(site).clone();
+        let Type::Adt { name: result_name, .. } = result_ty.clone() else {
+            return self.fail("`attempt` produces a `Result`", range);
+        };
+        let (Some((ok_tag, ok_info)), Some((err_tag, err_info))) = (
+            self.be.variant_of(&result_name, "Ok").map(|(t, i)| (t, i.clone())),
+            self.be.variant_of(&result_name, "Err").map(|(t, i)| (t, i.clone())),
+        ) else {
+            return self.fail("`attempt` produces a `Result`, which has `Ok` and `Err`", range);
+        };
+
+        let Invoked { raw, fallible } = self.invoke_closure(site, body, &shape, &[], range)?;
+        let slot = self.result_slot(&result_ty);
+
+        if !fallible {
+            // Nothing to catch. Still a `Result`, because the *type* says so:
+            // a caller reading one should not have to know whether the body it
+            // passed happened to be infallible.
+            let value = raw.unwrap_or_else(|| self.be.unit_value());
+            let object = self.allocate(ok_info.fields.len(), ok_tag, &result_name);
+            let field = ok_info.fields.first().cloned().unwrap_or(Type::Unit);
+            self.store_field(object, 0, value, &field);
+            self.leave_scope();
+            return Some(object.into());
+        }
+
+        let tagged = raw.expect("a fallible closure returns a tagged value");
+        let (which, word) = self.read_tagged(tagged);
+        let raised = self.raised(which);
+        let failed = self.block("attempt.err");
+        let succeeded = self.block("attempt.ok");
+        let merge = self.block("attempt.end");
+        self.be
+            .builder
+            .build_conditional_branch(raised, failed, succeeded)
+            .expect("branching on the tag");
+
+        self.at(succeeded);
+        let ok_field = ok_info.fields.first().cloned().unwrap_or(Type::Unit);
+        let value = self.be.word_to_value(word, &ok_field);
+        let object = self.allocate(ok_info.fields.len(), ok_tag, &result_name);
+        self.store_field(object, 0, value, &ok_field);
+        self.store_result(slot, object.into());
+        self.br(merge);
+
+        self.at(failed);
+        let err_field = err_info.fields.first().cloned().unwrap_or(Type::Unit);
+        let error = self.be.word_to_value(word, &err_field);
+        let object = self.allocate(err_info.fields.len(), err_tag, &result_name);
+        self.store_field(object, 0, error, &err_field);
+        self.store_result(slot, object.into());
+        self.br(merge);
+
+        self.at(merge);
+        self.leave_scope();
+        Some(self.load_result(slot, &result_ty))
     }
 
     /// The `assert` intrinsic.
@@ -1577,22 +1667,22 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// Calls a closure value: load its code pointer and call through it.
-    fn call_closure(
+    fn invoke_closure(
         &mut self,
         site: ExprId,
         callee: ExprId,
         signature: &FnShape,
         args: &[ExprId],
         range: TextRange,
-    ) -> Flow<'ctx> {
+    ) -> Option<Invoked<'ctx>> {
         let FnShape { params, ret, requires, raises } = signature;
         let closure = self.expr(callee)?.into_pointer_value();
 
         if args.len() != params.len() {
-            return self.fail(
+            self.fail(
                 format!("this call takes {} argument(s), but {} were given", params.len(), args.len()),
                 range,
-            );
+            )?;
         }
         let mut values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![closure.into()];
         for arg in args {
@@ -1616,13 +1706,15 @@ impl<'ctx> Lower<'_, 'ctx> {
         let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = vec![ptr.into()];
         for param in params {
             let Some(ty) = self.be.llvm_type(param) else {
-                return self.fail("a closure parameter has no machine type", range);
+                self.fail("a closure parameter has no machine type", range)?;
+                unreachable!("`fail` returns None")
             };
             param_types.push(ty.into());
         }
         for (_, ty) in row_fields(requires) {
             let Some(ty) = self.be.llvm_type(&ty) else {
-                return self.fail("a capability has no machine type", range);
+                self.fail("a capability has no machine type", range)?;
+                unreachable!("`fail` returns None")
             };
             param_types.push(ty.into());
         }
@@ -1634,7 +1726,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                 Type::Unit => self.be.ctx.void_type().fn_type(&param_types, false),
                 other => match self.be.llvm_type(other) {
                     Some(ty) => ty.fn_type(&param_types, false),
-                    None => return self.fail("a closure's result has no machine type", range),
+                    None => {
+                        self.fail("a closure's result has no machine type", range)?;
+                        unreachable!("`fail` returns None")
+                    }
                 },
             }
         };
@@ -1672,16 +1767,30 @@ impl<'ctx> Lower<'_, 'ctx> {
             .build_indirect_call(fn_type, code, &values, "closure.call")
             .expect("calling a closure");
 
+        Some(Invoked { raw: call.try_as_basic_value().basic(), fallible })
+    }
+
+    /// Calls a closure and propagates whatever it raised.
+    ///
+    /// The ordinary reading of `f(x)`: an error leaves through the branch `!`
+    /// marks. [`Lower::attempt`] is the other reading, and the two differ only
+    /// in what they do with the tag.
+    fn call_closure(
+        &mut self,
+        site: ExprId,
+        callee: ExprId,
+        signature: &FnShape,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let Invoked { raw, fallible } = self.invoke_closure(site, callee, signature, args, range)?;
         let result = if fallible {
-            let tagged = call
-                .try_as_basic_value()
-                .basic()
-                .expect("a fallible closure returns a tagged value");
-            self.split_tagged(tagged, ret, range)?
+            let tagged = raw.expect("a fallible closure returns a tagged value");
+            self.split_tagged(tagged, &signature.ret, range)?
         } else {
-            match ret {
+            match signature.ret {
                 Type::Unit => self.be.unit_value(),
-                _ => call.try_as_basic_value().basic().unwrap_or_else(|| self.be.unit_value()),
+                _ => raw.unwrap_or_else(|| self.be.unit_value()),
             }
         };
 

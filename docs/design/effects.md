@@ -153,6 +153,44 @@ export fn analyze_or_defer(id: String) -> Report
 
 `ModelError` is gone from the signature; `DbError` passes through untouched.
 
+### An error row's label is its type's name
+
+Which has a consequence worth stating, because it took a while to notice: **an
+entry whose type is not known yet has no label yet either.**
+
+`raises E`, with `E` a type parameter, is exactly that. At a call site `E` is a
+fresh variable, so the entry cannot be matched by name against `{ DbError }` —
+there is no name to match with. It matches by *position among the leftovers*
+instead: once the known labels on both sides have been paired off, an entry
+with no name takes whatever is left. Solving the variable is what gives it a
+label, and by then it is an ordinary entry.
+
+Substituting and solving both relabel for the same reason. A row that kept `?`
+for a label would satisfy nothing, however well solved.
+
+A capability row is untouched by any of this: it labels a *name* against a
+type, where the two say different things, and `ledger` is not what `Ledger` is
+called.
+
+### Turning the channel into a value
+
+```
+export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
+  with 'e;
+```
+
+A tagged return already *is* "an error or a value"; `attempt` is where a caller
+chooses which way to read it, and the row of `body` is discharged so what comes
+back cannot fail again.
+
+It has to be a compiler intrinsic rather than a library function, and the
+reason is instructive: catching *whatever* a body raises is not something
+`catch` can express. `catch` names constructors, and this names none.
+
+`attempt` is also what makes retrying possible. A policy that runs a
+computation a second time cannot know what the computation was doing, so it
+cannot name what went wrong — it only has to see that something did.
+
 Two rules the arms have to follow, both of them consequences of subtracting by
 type rather than by variant:
 

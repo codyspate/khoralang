@@ -226,6 +226,18 @@ pub extern "C" fn khora_live_count() -> usize {
     LIVE_COUNT.load(COUNTER_ORDER)
 }
 
+/// A counter that goes up by one every time it is read, starting at 1.
+///
+/// A testing aid, beside the allocation counters and there for the same
+/// reason: some behaviour is only visible over repetition, and a Khora program
+/// has no way to remember how many times it has done something. Mutable state
+/// is D11's, and a test should not have to wait for it.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_tick() -> i64 {
+    static TICKS: AtomicUsize = AtomicUsize::new(0);
+    TICKS.fetch_add(1, COUNTER_ORDER) as i64 + 1
+}
+
 /// Resets both counters to zero, for test isolation.
 ///
 /// Call it when nothing is live. Resetting while objects are still allocated

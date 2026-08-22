@@ -507,7 +507,23 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   the audience knows ends the test on a failed assertion without annotating it,
   an assertion is the one place a reader of a test already looks for control
   leaving, and the bend is bounded by refusing `assert` anywhere else.
-- **5.5 `Schedule` policies.** Retry and repeat over a fallible computation.
+- **5.5 `Schedule` policies — done**, and in Khora rather than in the
+  compiler, which was the claim worth checking. `retry` and `repeat` are
+  ordinary functions over `attempt`, and a schedule is a record.
+
+  `attempt` is the one new primitive: it turns the error channel into a
+  `Result`, which `catch` cannot do because `catch` names constructors and this
+  names none. It is also what makes retrying possible at all — a policy that
+  runs a computation again cannot know what the computation was doing.
+
+  Getting there needed `raises E` with `E` a type parameter to work, which it
+  did not: an error row's label *is* its type's name, so an entry whose type is
+  a fresh variable has no label to be matched by. Such an entry now matches by
+  position among the leftovers, and substituting or solving it relabels.
+  `docs/design/effects.md`.
+
+  A schedule carries no clock. One that does needs I/O, and a policy that can
+  be read, compared and tested without one is worth having first.
 
 **Exit — met.** A canceled fiber runs every finalizer in scope, verified by
 `a_cancelled_fiber_runs_every_finalizer_and_stops_only_itself` in
