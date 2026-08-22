@@ -454,7 +454,7 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
 
   The flag is process-wide until fibers make it per-fiber; nothing in generated
   code reads it directly, so that is a change inside the runtime.
-- **5.3 Fibers — decided, and started.** `docs/design/fibers.md`: a fiber is
+- **5.3 Fibers — done.** `docs/design/fibers.md`: a fiber is
   a stackful coroutine multiplexed onto worker threads, and the first
   implementation makes each one an operating-system thread. Not a hedge — the
   same argument as D10. A program sees `spawn`, `join`, `cancel` and a nursery,
@@ -484,13 +484,11 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   and then wait — needed no way to ask which happened: the normal path waits
   *before* the release, so the release only ever runs on the other one.
 
-  **Not built, and next:** failure propagation. A child's error goes to stderr
+  **Left for later, on purpose.** The coroutine itself: fibers are threads
+  until there is a scheduler, and that is a change inside `khora-rt` that no
+  program can see. And failure *propagation* — a child's error goes to stderr
   because the parent has nowhere to put it, which is a mutable cell and
   therefore D11.
-
-  Also open: a region's finalizer cannot tell whether it is releasing normally
-  or unwinding, and a nursery wants to wait in the first case and
-  cancel-then-wait in the second.
 - **5.4 `khora test` — done.** A `test` block lowers to an ordinary function
   body, which means it is *checked* — it was not before, and the reference
   application's tests had been quietly wrong for some time as a result — and
