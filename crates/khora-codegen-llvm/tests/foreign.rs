@@ -229,3 +229,98 @@ impl I32 { fn to_int(self) -> Int; }
         "expected the missing capability to be named, got {found:?}"
     );
 }
+
+/// A `Ptr` is what makes the contract above more than a description of what is
+/// forbidden: it is the one thing besides a number that may cross.
+///
+/// The declaration is accepted and only the symbol is missing, which is the
+/// same shape as `scalars_cross`.
+#[test]
+fn a_pointer_crosses() {
+    let found = refused(
+        "ffi_ptr",
+        "module t;
+fn khora_print_int(value: Int);
+fn sys_open(flags: I32) -> Ptr;
+fn sys_read(handle: Ptr, into: Ptr, len: Int) -> Int;
+fn sys_close(handle: Ptr) -> ();
+
+fn main() -> Int {
+  let handle = sys_open(0);
+  if Ptr::is_null(handle) { 0 } else {
+    khora_print_int(sys_read(handle, Ptr::null(), 8));
+    sys_close(handle);
+    0
+  }
+}
+
+impl Ptr {
+  fn null() -> Ptr;
+  fn is_null(self) -> Bool;
+}
+",
+    );
+    assert!(
+        found.iter().all(|m| !m.contains("foreign function")),
+        "a pointer is allowed to cross: {found:?}"
+    );
+    assert!(
+        found.iter().any(|m| m.contains("undefined symbol") || m.contains("link")),
+        "expected only the missing symbols, got {found:?}"
+    );
+}
+
+/// `Ptr::null` and `Ptr::is_null` are the whole of what a `Ptr` can do, and
+/// they run.
+#[test]
+fn a_null_pointer_knows_it_is_null() {
+    let exe = build(
+        "ffi_null",
+        "module t;
+fn khora_print_int(value: Int);
+
+impl Ptr {
+  fn null() -> Ptr;
+  fn is_null(self) -> Bool;
+}
+
+fn main() -> Int {
+  khora_print_int(if Ptr::is_null(Ptr::null()) { 1 } else { 0 });
+  0
+}
+",
+    )
+    .expect("a program that only makes and tests a null pointer");
+
+    let output = std::process::Command::new(&exe).output().expect("the program should run");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "1\n");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+/// There is no way to *make* a `Ptr` from a Khora value, which is what keeps a
+/// dangling one impossible. A buffer is the harder question and is unanswered
+/// on purpose — this pins that it stays unanswered rather than drifting into
+/// existence.
+#[test]
+fn a_khora_object_cannot_be_turned_into_a_pointer() {
+    let found = refused(
+        "ffi_no_address_of",
+        "module t;
+fn khora_print_int(value: Int);
+
+impl String {
+  fn data(self) -> Ptr;
+}
+
+fn main() -> Int { khora_print_int(if Ptr::is_null(String::data(\"hi\")) { 1 } else { 0 }); 0 }
+
+impl Ptr {
+  fn is_null(self) -> Bool;
+}
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("String::data")),
+        "expected `String::data` to be unknown, got {found:?}"
+    );
+}

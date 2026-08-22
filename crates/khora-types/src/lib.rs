@@ -117,6 +117,19 @@ pub enum Type {
     Bool,
     Str,
     Unit,
+    /// An opaque machine address: a `void *`.
+    ///
+    /// **Not counted, not dereferenceable from Khora, and never a pointer into
+    /// Khora's own heap.** It exists so that a foreign function can hand back
+    /// a handle — a `FILE *`, an `SSL_CTX *` — and be given it again later.
+    /// Nothing in the language produces one from a Khora value, which is what
+    /// makes it impossible to create a dangling one: the only pointers that
+    /// exist came from the other side, and their lifetimes are that side's
+    /// business.
+    ///
+    /// Lending a *buffer* — `Array<U8>`'s bytes — is the harder question and is
+    /// deliberately not answered by this type. `docs/design/ffi.md`.
+    Ptr,
     /// A user-declared variant type, with its type arguments.
     Adt { name: String, args: Vec<Type> },
     /// A function *value*'s type, effects included.
@@ -190,6 +203,7 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Int => write!(f, "Int"),
+            Type::Ptr => write!(f, "Ptr"),
             Type::Fixed(kind) => write!(f, "{}", kind.name()),
             Type::Float => write!(f, "Float"),
             Type::Bool => write!(f, "Bool"),
@@ -966,6 +980,7 @@ fn named_type(name: &str, args: Vec<Type>, generics: &[String]) -> Type {
         "Float" => Type::Float,
         "Bool" => Type::Bool,
         "String" => Type::Str,
+        "Ptr" => Type::Ptr,
         "" => Type::Unknown,
         other if IntKind::parse(other).is_some() => {
             Type::Fixed(IntKind::parse(other).expect("just checked"))
@@ -2757,6 +2772,7 @@ impl<'a> Checker<'a> {
             "Float" => Type::Float,
             "Bool" => Type::Bool,
             "String" => Type::Str,
+            "Ptr" => Type::Ptr,
             other => match IntKind::parse(other) {
                 Some(kind) => Type::Fixed(kind),
                 None => Type::adt(other),

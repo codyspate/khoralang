@@ -353,6 +353,7 @@ impl Unifier {
 
             (Type::Int, Type::Int)
             | (Type::Float, Type::Float)
+            | (Type::Ptr, Type::Ptr)
             | (Type::Bool, Type::Bool)
             | (Type::Str, Type::Str)
             | (Type::Unit, Type::Unit) => Ok(()),
@@ -685,6 +686,7 @@ fn head_name(ty: &Type) -> Option<String> {
         Type::Int => Some("Int".to_string()),
         Type::Float => Some("Float".to_string()),
         Type::Fixed(kind) => Some(kind.name()),
+        Type::Ptr => Some("Ptr".to_string()),
         Type::Bool => Some("Bool".to_string()),
         Type::Str => Some("String".to_string()),
         _ => None,

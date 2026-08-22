@@ -139,8 +139,9 @@ pub struct TestItem {
 ///
 /// `I64` is here because it is a second spelling of `Int` rather than another
 /// type, so `I64::to_u8` has to resolve exactly as `Int::to_u8` does.
-pub const BUILTIN_TYPES: [&str; 12] = [
-    "Int", "Float", "Bool", "String", "U8", "U16", "U32", "U64", "I8", "I16", "I32", "I64",
+pub const BUILTIN_TYPES: [&str; 13] = [
+    "Int", "Float", "Bool", "String", "Ptr", "U8", "U16", "U32", "U64", "I8", "I16", "I32",
+    "I64",
 ];
 
 /// What every test's key begins with. `#` cannot occur in a Khora identifier,

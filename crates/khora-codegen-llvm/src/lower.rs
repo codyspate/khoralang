@@ -853,6 +853,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 {
                     return self.string_intrinsic(&name, args, range);
                 }
+                if owner == "Ptr" && matches!(name.as_str(), "null" | "is_null") {
+                    return self.ptr_intrinsic(&name, args, range);
+                }
                 match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, site, args, range),
                     None => self.fail(
@@ -1324,6 +1327,33 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.drop(left, &Type::Str);
         self.drop(right, &Type::Str);
         Some(object.into())
+    }
+
+    /// The two things a `Ptr` can do, which is deliberately all of them.
+    ///
+    /// A `Ptr` is an opaque machine address that came from the other side of
+    /// the C ABI. It cannot be dereferenced, offset, or made from a Khora
+    /// value — the last is what keeps a dangling one impossible, because the
+    /// only pointers that exist are ones a foreign library handed over and
+    /// whose lifetimes are that library's business.
+    ///
+    /// `null` and `is_null` are here because a C function that fails by
+    /// returning `NULL` is not a rare case, and because passing `NULL` where a
+    /// library allows it is ordinary. `docs/design/ffi.md`.
+    fn ptr_intrinsic(&mut self, name: &str, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+        match (name, args) {
+            ("null", []) => Some(self.be.null_pointer().into()),
+            ("is_null", [subject]) => {
+                let value = self.expr(*subject)?.into_pointer_value();
+                let answer = self
+                    .be
+                    .builder
+                    .build_is_null(value, "is.null")
+                    .expect("comparing a pointer against null");
+                Some(answer.into())
+            }
+            _ => self.fail(format!("`Ptr::{name}` takes no arguments but `self`"), range),
+        }
     }
 
     /// `String::byte_length`, `String::byte` and `String::bytes`.

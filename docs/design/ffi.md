@@ -17,10 +17,15 @@ Three questions were open. This answers them.
 of the same name and width. `Float` is `double`. `Bool` is a C `_Bool`. `()` as
 a return type is `void`, and is not allowed as a parameter.
 
-**Pointers, as addresses.** This is what `Ptr` is for, and it does not exist
-yet — it is the first thing 7.3 needs. Until it does, a foreign function can
-only take numbers, which is enough to prove the boundary works and not enough
-to do anything with it.
+**Pointers, as addresses.** `Ptr` is a C `void *`: opaque, not counted, not
+dereferenceable from Khora, and **never a pointer into Khora's own heap**. It
+exists so a foreign library can hand back a handle — a `FILE *`, an
+`SSL_CTX *` — and be given it again later.
+
+`Ptr::null` and `Ptr::is_null` are the whole of what one can do, which is
+deliberate. Since nothing turns a Khora value into a pointer, a dangling `Ptr`
+is not something the language can express: every pointer that exists came from
+the other side, and its lifetime is that side's business.
 
 **Nothing else.** In particular:
 
@@ -127,13 +132,18 @@ leaving the scope does.
 
 ## Still open
 
-- **`Ptr` itself.** An opaque machine address, not counted, not dereferenceable
-  from Khora. The open question is not the type but how a buffer is lent:
-  `Array::data(self) -> Ptr` is a dangling pointer waiting to happen, since
-  Perceus releases the array at its last *use* and that may be before the
-  pointer's. A scoped borrow — `Array::with_data(self, f)`, where the array is
-  provably alive across the call — is the shape that cannot go wrong, and is
-  the same shape `scoped` and `nursery` already use.
+- **Lending a buffer.** `Ptr` handles opaque handles and stops there, so a
+  foreign function still cannot be given an `Array<U8>` to read or fill. The
+  obvious `Array::data(self) -> Ptr` is a dangling pointer waiting to happen:
+  Perceus releases the array at its last *use*, and that is the `data` call
+  itself, so the array can be freed before the pointer is used.
+
+  A scoped borrow is the shape that cannot go wrong — `Array::with_data(self, f)`,
+  where the array is provably alive across the call, which is what `scoped`
+  and `nursery` already are. What makes it more than an afternoon is the error
+  path: if `f` raises, the array still has to be released, so the borrow has to
+  be a scope rather than a pair of statements. That is errata 34, and it is
+  worth doing deliberately.
 - **Callbacks.** A Khora closure cannot be a C function pointer, but a
   *top-level* Khora function very nearly can: it has a symbol and a machine
   signature. The likely answer is that only a non-capturing, non-raising,

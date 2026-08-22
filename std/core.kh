@@ -498,6 +498,28 @@ impl Int {
   fn shr(self, other: Int) -> Int;
 }
 
+/// An opaque machine address: a C `void *`.
+///
+/// **Not counted, not dereferenceable, and never a pointer into Khora's own
+/// heap.** It exists so a foreign library can hand back a handle — a `FILE *`,
+/// an `SSL_CTX *` — and be given it again later. Nothing in the language turns
+/// a Khora value into one, which is what makes a dangling `Ptr` impossible:
+/// every pointer that exists came from the other side, and its lifetime is
+/// that side's business.
+///
+/// Lending a *buffer* across is the harder question and this type deliberately
+/// does not answer it. `docs/design/ffi.md`.
+export type Ptr;
+
+impl Ptr {
+  /// The null pointer, for the libraries that take one.
+  fn null() -> Ptr;
+
+  /// Whether this is null — which is how a great many C functions say they
+  /// failed.
+  fn is_null(self) -> Bool;
+}
+
 /// A string's bytes.
 ///
 /// **Length and index are both in bytes**, and say so in their names. A

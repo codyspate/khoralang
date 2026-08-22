@@ -772,13 +772,19 @@ rule for what may cross was settled the hard way in errata 35.
   a fiber handle already have, so an open file closes on every path out
   including a raise.
 
-  First it needs **`Ptr`**: an opaque machine address, not counted, not
-  dereferenceable from Khora. Until it exists a foreign function can only take
-  numbers, which is enough to prove the boundary works and not enough to do
-  anything with it. The open question is not the type but how a buffer is lent
-  — `Array::data(self) -> Ptr` is a dangling pointer waiting to happen, since
-  Perceus releases the array at its last *use*. A scoped borrow is the shape
-  that cannot go wrong, and is what `scoped` and `nursery` already are.
+  **`Ptr` exists now**: a C `void *`, opaque, not counted, not dereferenceable,
+  and never a pointer into Khora's own heap. `Ptr::null` and `Ptr::is_null` are
+  the whole of what it can do. Since nothing turns a Khora value into one, a
+  dangling `Ptr` is not something the language can express — every pointer that
+  exists came from the other side.
+
+  **Still to do: lending a buffer.** A foreign function cannot yet be given an
+  `Array<U8>` to read or fill, and the obvious `Array::data(self) -> Ptr` is a
+  dangling pointer waiting to happen, since Perceus releases the array at its
+  last *use* — which is the `data` call. A scoped borrow is the shape that
+  cannot go wrong; what makes it more than an afternoon is that a raise inside
+  the borrow still has to release the array, so it must be a scope rather than
+  a pair of statements. Errata 34, and worth doing deliberately.
 - **7.4 Syscalls**: files, sockets, a clock.
 
 **Exit:** read a file and write its contents to a socket, from Khora, with the

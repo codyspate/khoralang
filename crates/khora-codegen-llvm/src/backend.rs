@@ -347,7 +347,7 @@ fn declare_closures(
 /// `docs/design/ffi.md` has the full contract.
 fn foreign_obstacle(ty: &Type) -> Option<&'static str> {
     match ty {
-        Type::Int | Type::Fixed(_) | Type::Float | Type::Bool => None,
+        Type::Int | Type::Fixed(_) | Type::Float | Type::Bool | Type::Ptr => None,
         Type::Str => Some(
             "a `String` is a reference-counted heap object with a header the C side knows \
              nothing about; pass its bytes and length instead",
@@ -644,8 +644,9 @@ impl<'ctx> Backend<'ctx> {
             Type::Fixed(kind) => Some(self.int_width(kind.bits.into()).into()),
             Type::Bool => Some(self.ctx.bool_type().into()),
             // A closure is a heap object holding its function pointer and its
-            // captures, so a value of function type is a pointer to one.
-            Type::Str | Type::Adt { .. } | Type::Fn { .. } => {
+            // captures, so a value of function type is a pointer to one. `Ptr`
+            // is a pointer that is only a pointer: no header, no count.
+            Type::Ptr | Type::Str | Type::Adt { .. } | Type::Fn { .. } => {
                 Some(self.ctx.ptr_type(AddressSpace::default()).into())
             }
             // A variable or a rigid parameter reaching code generation means
