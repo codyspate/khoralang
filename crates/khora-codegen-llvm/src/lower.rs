@@ -610,7 +610,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Local(local) => self.read_local(id, local, range),
             Expr::Path(resolution) => self.path(id, &resolution, range),
             Expr::Call { callee, args } => self.call(id, callee, &args, range),
-            Expr::Binary { op, lhs, rhs } => self.binary(op, lhs, rhs, range),
+            Expr::Binary { op, lhs, rhs } => self.binary(id, op, lhs, rhs, range),
             Expr::Unary { op, operand } => self.unary(op, operand, range),
             Expr::Assign { target, value } => self.assign(target, value, range),
             Expr::Block { stmts, tail } => self.lower_block(id, &stmts, tail),
@@ -3241,7 +3241,14 @@ impl<'ctx> Lower<'_, 'ctx> {
     // Operators
     // -----------------------------------------------------------------------
 
-    fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, range: TextRange) -> Flow<'ctx> {
+    fn binary(
+        &mut self,
+        site: ExprId,
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        range: TextRange,
+    ) -> Flow<'ctx> {
         if matches!(op, BinOp::And | BinOp::Or) {
             return self.logical(op, lhs, rhs);
         }
@@ -3329,7 +3336,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 };
                 Some(value.expect("integer arithmetic").into())
             }
-            _ => self.compare(op, left, right, &operand_ty, range),
+            _ => self.compare(site, op, left, right, &operand_ty, range),
         }
     }
 
@@ -3394,6 +3401,7 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     fn compare(
         &mut self,
+        site: ExprId,
         op: BinOp,
         left: BasicValueEnum<'ctx>,
         right: BasicValueEnum<'ctx>,
@@ -3459,13 +3467,48 @@ impl<'ctx> Lower<'_, 'ctx> {
             return self.compare_strings(op, left, right);
         }
 
+        // Anything with a shape decides for itself what equality means, in an
+        // `Eq` impl the checker already resolved and monomorphization already
+        // emitted. The operator is one thing whichever type it is used on: a
+        // machine instruction where that is the answer, and a call where the
+        // answer is a question only the type can settle.
+        if matches!(op, BinOp::Eq | BinOp::Ne) {
+            if let Some(symbol) = self.mono.callee(&self.owner.clone(), site) {
+                let function = match self.be.callee(&symbol) {
+                    Ok(function) => function,
+                    Err(message) => return self.fail(message, range),
+                };
+                let equal = self
+                    .be
+                    .builder
+                    .build_call(function, &[left.into(), right.into()], "eq")
+                    .expect("calling an `Eq` impl")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("`eq` returns a Bool")
+                    .into_int_value();
+                // `!=` is `==` negated. Asking a type for both would be asking
+                // it to be consistent about something it cannot get wrong here.
+                return Some(match op {
+                    BinOp::Ne => self
+                        .be
+                        .builder
+                        .build_not(equal, "ne")
+                        .expect("negating an equality")
+                        .into(),
+                    _ => equal.into(),
+                });
+            }
+        }
+
         if !matches!(operand_ty, Type::Int | Type::Fixed(_) | Type::Bool | Type::Unit) {
             self.drop(left, operand_ty);
             self.drop(right, operand_ty);
             return self.fail(
                 format!(
-                    "two `{operand_ty}` values can only be compared with `==` and `!=`, and \
-                     ordering one needs a `Ord` impl the backend does not call yet"
+                    "two `{operand_ty}` values cannot be ordered with `<`, `>`, `<=` or `>=`; \
+                     that needs an `Ord` impl the operator does not reach yet. `==` and `!=` \
+                     do reach an `Eq` impl"
                 ),
                 range,
             );

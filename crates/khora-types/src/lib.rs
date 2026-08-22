@@ -1669,7 +1669,7 @@ impl<'a> Checker<'a> {
                 UnOp::Neg => self.infer_negation(operand, hint, range),
                 UnOp::Not => self.expect(operand, &Type::Bool, "`!`"),
             },
-            Expr::Binary { op, lhs, rhs } => self.infer_binary(op, lhs, rhs, hint),
+            Expr::Binary { op, lhs, rhs } => self.infer_binary(id, op, lhs, rhs, hint),
             Expr::Assign { target, value } => {
                 let target_ty = self.infer(target);
                 self.check_writable(target, range);
@@ -1917,6 +1917,7 @@ impl<'a> Checker<'a> {
 
     fn infer_binary(
         &mut self,
+        site: ExprId,
         op: BinOp,
         lhs: ExprId,
         rhs: ExprId,
@@ -1957,6 +1958,12 @@ impl<'a> Checker<'a> {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 let left = self.infer(lhs);
                 self.expect(rhs, &left, "this comparison");
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    let left = self.unifier.zonk(&left);
+                    if needs_an_eq_impl(&left) {
+                        self.require_eq(site, &left, self.body.range(site));
+                    }
+                }
                 Type::Bool
             }
             BinOp::And | BinOp::Or => {
@@ -1965,6 +1972,46 @@ impl<'a> Checker<'a> {
                 Type::Bool
             }
         }
+    }
+
+    /// Resolves the `Eq` impl that `==` on this type will call.
+    ///
+    /// **`==` on a scalar is a machine instruction; on anything else it is
+    /// `Eq::eq`.** That keeps one meaning for the operator rather than two: a
+    /// type decides what equality means for it, in Khora, in a function a
+    /// reader can go and look at. `impl Eq for Int` is written *in terms of*
+    /// `==` and not the other way round, which is what stops the rule being
+    /// circular — and is why `Float` can have the operator without the trait.
+    ///
+    /// Recorded as an instantiation so that monomorphization emits the impl and
+    /// the code generator can find it, exactly as a written `a.eq(b)` would.
+    fn require_eq(&mut self, site: ExprId, ty: &Type, range: TextRange) {
+        const KEY: &str = "Eq::eq";
+        // Reported whether or not the trait is in this file's scope. "There is
+        // no impl" is true either way, and staying quiet here is what let the
+        // reference application reach the code generator before anybody
+        // mentioned that `RiskLevel` cannot be compared.
+        if self.types.traits.find("Eq", ty).is_none() {
+            self.error(
+                format!(
+                    "`{ty}` has no `Eq` impl, so `==` has nothing to call. Write \
+                     `impl Eq for {ty}`, or match on it instead"
+                ),
+                range,
+            );
+            return;
+        }
+        let Some(signature) = self.types.signatures.get(KEY).cloned() else { return };
+
+        // `Self` is the method's first type argument — the same fact
+        // `call_signature` relies on — and binding it is what tells
+        // monomorphization which impl to emit.
+        let (_, type_args) =
+            self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+        if let Some(self_arg) = type_args.first() {
+            let _ = self.unifier.unify(self_arg, ty);
+        }
+        self.instantiations.insert(site, (KEY.to_string(), type_args));
     }
 
     /// Maps a type's parameters onto the arguments `ty` supplies.
@@ -3364,4 +3411,29 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(trait_errors(db, file).iter().cloned());
     all.extend(check_file(db, file).iter().cloned());
     all
+}
+
+/// Whether `==` on this type has to go through an `Eq` impl.
+///
+/// The scalars compare with one instruction and `String` by its bytes, so those
+/// are primitive. Everything with a shape needs a decision about what equality
+/// *means* for it, and the type is the only thing that can make it.
+///
+/// A type still being inferred is not asked: whatever it turns out to be, the
+/// question is answered where it is answered, and guessing here would report
+/// against whichever expression happened to be visited first.
+fn needs_an_eq_impl(ty: &Type) -> bool {
+    !matches!(
+        ty,
+        Type::Int
+            | Type::Fixed(_)
+            | Type::Float
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Var(_)
+            | Type::Param(_)
+            | Type::Never
+            | Type::Unknown
+    )
 }

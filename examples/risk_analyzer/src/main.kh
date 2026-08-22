@@ -1,6 +1,6 @@
 module app::main;
 
-import std::core::{List, Option, Scope, assert, print};
+import std::core::{Eq, List, Option, Scope, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
 import std::ai::{Extract, LLMService, ModelError, Prompt, extract};
 
@@ -8,6 +8,34 @@ export type RiskLevel =
   | Low
   | Moderate(reason: String)
   | Critical(action_required: String);
+
+/// What equality means for a risk level, which is a question only `RiskLevel`
+/// can answer: two `Critical`s with different actions are different risks.
+///
+/// Written out rather than derived, because Khora has no `derive` — and
+/// because the reason `==` reaches a trait at all is that a type should get to
+/// say. `docs/design/numbers.md` has the same argument from the other end.
+impl Eq for RiskLevel {
+  fn eq(self, other: RiskLevel) -> Bool {
+    match self {
+      RiskLevel::Low => match other {
+        RiskLevel::Low => true,
+        RiskLevel::Moderate(r) => false,
+        RiskLevel::Critical(a) => false,
+      },
+      RiskLevel::Moderate(mine) => match other {
+        RiskLevel::Low => false,
+        RiskLevel::Moderate(theirs) => mine == theirs,
+        RiskLevel::Critical(a) => false,
+      },
+      RiskLevel::Critical(mine) => match other {
+        RiskLevel::Low => false,
+        RiskLevel::Moderate(r) => false,
+        RiskLevel::Critical(theirs) => mine == theirs,
+      },
+    }
+  }
+}
 
 export type AnalysisReport = {
   account_id: String,

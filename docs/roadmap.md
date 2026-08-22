@@ -1009,10 +1009,20 @@ What stands between here and the exit is now library work only:
 - **`std::net::http` and `std::ai` have signatures with no bodies** —
   `Router::listen`, `Request::get`, `Params::get`, `Prompt::user`,
   `Prompt::describing`. Sockets underneath.
-- **`==` on an ADT** is refused by the backend: comparing two `RiskLevel`s has
-  no implementation. `Eq` is a trait in `std::core` and scalars compare
-  primitively, so the missing piece is dispatching the operator to an `Eq` impl
-  — which is a language decision of its own, small but not nothing.
+- **8.5 `==` reaches an `Eq` impl — done.** A scalar compares with one
+  instruction and a `String` by its bytes; **anything with a shape decides for
+  itself**, in an `Eq` impl written in Khora. One meaning for the operator
+  rather than two, and the type gets to say — two `Critical`s with different
+  actions are different risks, and only `RiskLevel` knows that.
+
+  The rule is not circular because `impl Eq for Int` is written *in terms of*
+  `==` rather than the other way round, which is also why `Float` can have the
+  operator and not the trait. `!=` is `==` negated, so a type is never asked to
+  be consistent about something it cannot get wrong.
+
+  Missing impls are reported where the comparison is, not where the code
+  generator gives up. Ordering — `<`, `>` — still does not reach `Ord`; the
+  message says so now instead of claiming `==` is refused too.
 
 ---
 

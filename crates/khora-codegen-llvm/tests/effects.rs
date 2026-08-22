@@ -1126,3 +1126,158 @@ fn main() -> Int {{ khora_print_int(counter); 0 }}
         "expected the reason to be named, got {found:?}"
     );
 }
+
+// --- `==` on something with a shape -----------------------------------------
+
+const EQ: &str = "module t;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
+
+export trait Eq { fn eq(self, other: Self) -> Bool; }
+
+export type Colour = | Red | Green | Blue(shade: Int);
+
+impl Eq for Colour {
+  fn eq(self, other: Colour) -> Bool {
+    match self {
+      Colour::Red => match other {
+        Colour::Red => true,
+        Colour::Green => false,
+        Colour::Blue(s) => false,
+      },
+      Colour::Green => match other {
+        Colour::Red => false,
+        Colour::Green => true,
+        Colour::Blue(s) => false,
+      },
+      Colour::Blue(mine) => match other {
+        Colour::Red => false,
+        Colour::Green => false,
+        Colour::Blue(theirs) => mine == theirs,
+      },
+    }
+  }
+}
+";
+
+/// **`==` on a scalar is an instruction; on anything with a shape it is
+/// `Eq::eq`.** One meaning for the operator, and the type gets to say what
+/// equality means for it — in Khora, in a function a reader can go and look at.
+#[test]
+fn equality_on_an_adt_calls_its_eq_impl() {
+    let ran = run(
+        "eq_adt",
+        &format!(
+            "{EQ}
+fn main() -> Int {{
+  khora_print_int(if Colour::Red == Colour::Red {{ 1 }} else {{ 0 }});
+  khora_print_int(if Colour::Red == Colour::Green {{ 1 }} else {{ 0 }});
+  khora_print_int(if Colour::Blue(3) == Colour::Blue(3) {{ 1 }} else {{ 0 }});
+  khora_print_int(if Colour::Blue(3) == Colour::Blue(4) {{ 1 }} else {{ 0 }});
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n0\n1\n0\n0\n", "and nothing left alive");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `!=` is `==` negated. Asking a type for both would be asking it to be
+/// consistent about something it cannot get wrong.
+#[test]
+fn inequality_is_equality_negated() {
+    let ran = run(
+        "ne_adt",
+        &format!(
+            "{EQ}
+fn main() -> Int {{
+  khora_print_int(if Colour::Blue(3) != Colour::Blue(4) {{ 1 }} else {{ 0 }});
+  khora_print_int(if Colour::Green != Colour::Green {{ 1 }} else {{ 0 }});
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n0\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A record has a shape too, and the same rule.
+#[test]
+fn equality_on_a_record_calls_its_eq_impl() {
+    let ran = run(
+        "eq_record",
+        &format!(
+            "{EQ}
+export type Point = {{ x: Int, y: Int }};
+
+impl Eq for Point {{
+  fn eq(self, other: Point) -> Bool {{ self.x == other.x }}
+}}
+
+fn main() -> Int {{
+  // Bound first: a record literal at the start of an `if` condition reads as
+  // the start of a block, which is a grammar wrinkle rather than anything to
+  // do with equality.
+  let here: Point = {{ x: 1, y: 2 }};
+  let same_x: Point = {{ x: 1, y: 9 }};
+  let other: Point = {{ x: 2, y: 2 }};
+  khora_print_int(if here == same_x {{ 1 }} else {{ 0 }});
+  khora_print_int(if here == other {{ 1 }} else {{ 0 }});
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n0\n", "the impl only looks at `x`, and that is its business");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Without an impl there is nothing to call, and the checker says so where the
+/// comparison is rather than letting the code generator find out.
+#[test]
+fn equality_without_an_impl_is_refused() {
+    let found = refused(
+        "eq_missing",
+        "module t;
+extern fn khora_print_int(value: Int);
+
+export trait Eq { fn eq(self, other: Self) -> Bool; }
+
+export type Colour = | Red | Green;
+
+fn main() -> Int {
+  khora_print_int(if Colour::Red == Colour::Green { 1 } else { 0 });
+  0
+}
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("no `Eq` impl") && m.contains("impl Eq for Colour")),
+        "expected the missing impl to be named, got {found:?}"
+    );
+}
+
+/// The scalars stay primitive, which is what keeps the rule from being
+/// circular: `impl Eq for Int` is written *in terms of* `==`.
+#[test]
+fn scalars_still_compare_primitively() {
+    let ran = run(
+        "eq_scalars",
+        &format!(
+            "{EQ}
+fn main() -> Int {{
+  khora_print_int(if 1 == 1 {{ 1 }} else {{ 0 }});
+  khora_print_int(if true == false {{ 1 }} else {{ 0 }});
+  khora_print_int(if 1.5 == 1.5 {{ 1 }} else {{ 0 }});
+  khora_print_int(if \"a\" == \"a\" {{ 1 }} else {{ 0 }});
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n0\n1\n1\n");
+    assert_eq!(ran.code, Some(0));
+}
