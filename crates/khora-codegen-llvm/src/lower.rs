@@ -834,6 +834,20 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.construct(&type_name, &name, args, range)
             }
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
+                // **A method somebody wrote wins over one the backend
+                // implements.** An intrinsic is a *declaration the backend
+                // fills in*, so the test is that nothing else filled it in
+                // first — `Int::to_string` is written in `std::core`, and
+                // keying `Int::` on the owner alone sent it to the two-argument
+                // integer operations and asked a `String` to be an `i64`.
+                //
+                // The same rule `attempt` already needed, applied where it
+                // belongs: once, before any of them.
+                if let Some(symbol) = self.mono.callee(&self.owner.clone(), callee) {
+                    if self.be.is_defined(&symbol) {
+                        return self.call_named(&symbol, site, args, range);
+                    }
+                }
                 if owner == runtime::REGION_TYPE {
                     return self.region_intrinsic(&name, args, range);
                 }

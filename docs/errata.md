@@ -969,3 +969,32 @@ Asking *"did anything report an error?"* is asking the compiler whether it
 noticed a problem. Asking **"is any published type `Unknown`?"** is asking
 whether it understood the program, which is a different and better question —
 and it is the one that would have caught all five.
+
+## 42. The intrinsic that ate a standard library function
+
+`Int::to_string` is written in `std::core`, in Khora, in four lines. Calling it
+crashed the compiler: *"Found PointerValue but expected the IntValue variant"*.
+
+The code generator recognises `Int::` methods by their owner and sends them to
+`int_intrinsic`, which implements `wrapping_add`, `xor`, `shl` and the rest —
+all two-argument integer operations. `Int::to_string` is a one-argument method
+returning a `String`, so the second argument it did not have was read as an
+`i64` that it was not.
+
+This is the *second* time. `attempt` had it in phase 5: a program with its own
+function called `attempt` got the intrinsic instead. That was fixed by checking
+`!self.be.is_defined(&symbol)` at the one call site that had the problem, which
+fixed the symptom and left the shape of the bug in place for the next name to
+collide.
+
+The rule, now applied once and before all of them:
+
+> **A method somebody wrote wins over one the backend implements.** An
+> intrinsic is a *declaration the backend fills in*, so the test is that
+> nothing else filled it in first.
+
+The general form is worth keeping in view: **a table keyed on a name is a
+collision waiting for the name.** The other keys in that table — `Array`,
+`String`, `Ptr`, `Region`, `Fiber` — were all one standard-library function away
+from the same crash, and none of them had a test for it, because the intrinsics
+and the library are written by the same person on different days.

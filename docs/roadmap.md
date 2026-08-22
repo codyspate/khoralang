@@ -1004,6 +1004,18 @@ handlers' requirements, and now real I/O underneath.
   **The reference application typechecks** — for real, with the `Unknown` audit
   watching, which is the first time that sentence has been true.
 
+- **8.6 Text, written in Khora.** `String::slice`, `index_of`, `starts_with`,
+  `split_once` and `Int::to_string` — all of it in `std::core`, over
+  `String::byte` and `Array<U8>`, **with no new intrinsic behind any of it**.
+  That was the test as much as the feature: if slicing a string needed the
+  compiler's help, so would everything above it.
+
+  It found errata 42 on the way. `Int::to_string` is a written function whose
+  owner the code generator recognises, so the `Int::` intrinsic table ate it and
+  asked a `String` to be an `i64`. The rule now applies once, before every
+  intrinsic: **a method somebody wrote wins over one the backend implements.**
+  `attempt` had the same bug in phase 5 and was fixed one call site at a time.
+
 What stands between here and the exit is now library work only:
 
 - **`std::net::http` and `std::ai` have signatures with no bodies** —

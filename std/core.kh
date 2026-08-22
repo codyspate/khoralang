@@ -524,6 +524,130 @@ impl Int {
   fn shr(self, other: Int) -> Int;
 }
 
+// --- text ------------------------------------------------------------------
+//
+/// What `split_once` found: the text before the separator, and everything
+/// after it.
+export type Split = {
+  head: String,
+  rest: String,
+};
+//
+// All of it written in Khora, over `String::byte`, `Array<U8>` and
+// `String::from_bytes`. Nothing here is an intrinsic, which is the point: if
+// slicing a string needed the compiler's help, so would everything above it.
+
+impl String {
+  /// The bytes from `from` up to but not including `to`.
+  ///
+  /// **Byte indices, and no rounding.** A range that splits a character gives
+  /// back bytes that are not text, and `from_bytes` stops the program rather
+  /// than pretend — which is the honest failure for a caller who sliced by
+  /// eye. Indices outside the string are clamped, because "the rest of it" is
+  /// what every caller of `slice(i, byte_length(s))` means.
+  fn slice(self, from: Int, to: Int) -> String {
+    let length = String::byte_length(self);
+    let start = if from < 0 { 0 } else if from > length { length } else { from };
+    let end = if to < start { start } else if to > length { length } else { to };
+    let out: Array<U8> = Array::new(end - start, 0);
+    String::fill_slice(self, out, start, end - start, 0);
+    String::from_bytes(out)
+  }
+
+  /// Copies `count` bytes from `at` into `out`, one at a time.
+  ///
+  /// A loop written as a fold, because a `while` would need a `mut` binding
+  /// and this needs neither.
+  fn fill_slice(self, out: Array<U8>, at: Int, count: Int, done: Int) -> () {
+    if done >= count {
+    } else {
+      Array::set(out, done, String::byte(self, at + done));
+      String::fill_slice(self, out, at, count, done + 1)
+    }
+  }
+
+  /// Where `needle` first appears, or `None`.
+  fn index_of(self, needle: String) -> Option<Int> {
+    String::scan_for(self, needle, 0)
+  }
+
+  fn scan_for(self, needle: String, at: Int) -> Option<Int> {
+    let room = String::byte_length(self) - String::byte_length(needle);
+    if at > room {
+      Option::None
+    } else if String::matches_at(self, needle, at, 0) {
+      Option::Some(at)
+    } else {
+      String::scan_for(self, needle, at + 1)
+    }
+  }
+
+  fn matches_at(self, needle: String, at: Int, done: Int) -> Bool {
+    if done >= String::byte_length(needle) {
+      true
+    } else if String::byte(self, at + done) == String::byte(needle, done) {
+      String::matches_at(self, needle, at, done + 1)
+    } else {
+      false
+    }
+  }
+
+  fn starts_with(self, prefix: String) -> Bool {
+    if String::byte_length(prefix) > String::byte_length(self) {
+      false
+    } else {
+      String::matches_at(self, prefix, 0, 0)
+    }
+  }
+
+  /// The text either side of the first `separator`, or `None` if it is absent.
+  ///
+  /// One split rather than a list of them, because a list wants an allocation
+  /// per piece and every caller here wants the head and the rest. A record
+  /// rather than a pair, because `.head` says which one it is and `.0` does
+  /// not.
+  fn split_once(self, separator: String) -> Option<Split> {
+    match String::index_of(self, separator) {
+      Option::None => Option::None,
+      Option::Some(at) => Option::Some({
+          head: String::slice(self, 0, at),
+          rest: String::slice(self, at + String::byte_length(separator), String::byte_length(self)),
+        }),
+    }
+  }
+}
+
+impl Int {
+  /// The number, written out.
+  ///
+  /// Needed by anything that puts a number in a message — a `Content-Length`,
+  /// a status line, a log — and written here rather than in the runtime
+  /// because it is four lines of Khora and a good test of whether they are
+  /// pleasant to write.
+  fn to_string(self) -> String {
+    if self == 0 {
+      "0"
+    } else if self < 0 {
+      "-" + Int::digits(0 - self, "")
+    } else {
+      Int::digits(self, "")
+    }
+  }
+
+  /// `self`'s digits, most significant first, accumulated from the least.
+  fn digits(self, tail: String) -> String {
+    let here = Int::digit(self % 10);
+    if self < 10 { here + tail } else { Int::digits(self / 10, here + tail) }
+  }
+
+  fn digit(self) -> String {
+    let out: Array<U8> = Array::new(1, 0);
+    // `0` is 48, and the digits are consecutive.
+    Array::set(out, 0, U8::of(48 + self));
+    String::from_bytes(out)
+  }
+}
+
 /// An opaque machine address: a C `void *`.
 ///
 /// **Not counted, not dereferenceable, and never a pointer into Khora's own
