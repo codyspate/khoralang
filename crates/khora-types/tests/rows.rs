@@ -214,12 +214,49 @@ fn naming_an_error_type_means_handling_all_of_it() {
     );
 }
 
-/// The arms have to say which errors they handle, and a wildcard cannot: the
-/// subtraction is by type name and `_` names nothing.
+/// `_` handles everything the operand can raise, so the function that wrote it
+/// cannot fail.
+#[test]
+fn a_wildcard_catch_arm_handles_the_whole_row() {
+    assert_clean(&format!(
+        "{ERRORS}export fn safe(id: Int) -> Int {{ fetch(id)! catch {{ _ => 0, }} }}
+"
+    ));
+}
+
+/// The point of it: a row nobody can name because the *caller* chooses it.
+///
+/// A supervisor takes work whose failures are a type parameter and has to be
+/// able to recover from them anyway — no constructor exists to write down, so
+/// without a wildcard there is nothing that can be written at all.
+#[test]
+fn a_wildcard_catch_arm_handles_a_row_variable() {
+    assert_clean(
+        "module m;
+         export fn supervise<'e>(work: () -> Int raises 'e) -> Int {
+           work()! catch { _ => 0, }
+         }
+",
+    );
+}
+
+/// Handling a type by name and the rest with `_` is one `catch`, and after it
+/// nothing is left.
+#[test]
+fn named_arms_and_a_wildcard_compose() {
+    assert_clean(&format!(
+        "{ERRORS}export fn safe(id: Int) -> Int {{ fetch(id)! catch {{
+           DbError::Timeout => 0, DbError::Refused => 1, _ => 2, }} }}
+"
+    ));
+}
+
+/// A pattern that is neither a constructor nor `_` still has nothing to say
+/// about which errors it handles.
 #[test]
 fn a_catch_arm_has_to_name_a_constructor() {
     assert_reports(
-        &format!("{ERRORS}export fn safe(id: Int) -> Int {{ only_db(id)! catch {{ _ => 0, }} }}
+        &format!("{ERRORS}export fn safe(id: Int) -> Int {{ only_db(id)! catch {{ 3 => 0, }} }}
 "),
         "name an error constructor",
     );

@@ -1,6 +1,6 @@
 module app::main;
 
-import std::core::{Eq, List, Option, Scope, Show, assert, print};
+import std::core::{Eq, List, Option, Scope, SharedFn, Show, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
 import std::ai::{Extract, LLMService, ModelError, Prompt, extract};
 
@@ -207,10 +207,16 @@ export context Mock {
 /// widens `Router::listen`'s own error row. That is the property the type was
 /// designed for, and it shows up here as one word nobody had to remember to
 /// write — the compiler asked for it.
+///
+/// `SharedFn::of` is the other thing the mount site says, and it is what makes
+/// the server answer more than one caller at a time. The closure captures
+/// `ledger` and `ai` from the `with` block above it; certifying it here — where
+/// those captures are on the screen — is what lets the whole router cross into
+/// a fiber later. `docs/design/sharing.md`.
 export fn main() raises DbError + HttpError {
   with Mock {
     Router::new()
-      |> Router::post("/analyze/:account_id", handle)
+      |> Router::post("/analyze/:account_id", SharedFn::of(fn request => handle(request)!))
       |> Router::listen(8080)!
   }
 }

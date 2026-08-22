@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, List, Map, Never, Option, Scope, Show, Split};
+import std::core::{Array, Fiber, Fibers, List, Map, Never, Nursery, Option, SharedFn, Show, Split};
 import std::net::socket::{accept_on, invalid_handle, listen_on, receive, shut, start, transmit};
 
 // HTTP/1.1, over the sockets in `std::net::socket`.
@@ -14,9 +14,10 @@ import std::net::socket::{accept_on, invalid_handle, listen_on, receive, shut, s
 // segments, and a response that can carry headers of its own.
 //
 // What it does not: chunked transfer, keep-alive, TLS, content negotiation,
-// multipart bodies, or more than one connection at a time. Each is absent
-// deliberately rather than forgotten, and `Router::serve_once` carries the
-// reason the last one is harder than it looks.
+// or multipart bodies. Each is absent deliberately rather than forgotten.
+//
+// It does answer on a fiber per connection, which took a language feature to
+// reach rather than a line here: see `Router::serve_once`.
 
 export type Method =
   | Get
@@ -704,16 +705,26 @@ fn segment(text: String) -> Split {
 // ---------------------------------------------------------------------------
 
 /// One mounted route.
-export type Route<'r, 'e> = {
+///
+/// The handler is a `SharedFn` rather than a plain closure, and that is what
+/// lets a router be answered on a fiber of its own. A closure's captures are
+/// not in its type, so a record holding one can never be handed to another
+/// fiber; `SharedFn::of` checks the captures where the closure is written and
+/// hands back something that has forgotten it was ever a closure.
+///
+/// It also takes the capabilities out of the router's type. A handler closes
+/// over what it needs at the mount site, so there is no `'r` left for a `Route`
+/// to carry — `Router<'e>` says only how its handlers can fail.
+export type Route<'e> = {
   method: Method,
   pattern: String,
-  handler: (Request) -> Response with 'r raises 'e,
+  handler: SharedFn<Request, Response, 'e>,
 };
 
-/// A router carries the capabilities its handlers need, so mounting a route
-/// that talks to the database widens the router's own requirement row.
-export type Router<'r, 'e> = {
-  routes: List<Route<'r, 'e>>,
+/// A router carries its handlers' failures, so mounting a route that can fail
+/// against the database widens the router's own error row.
+export type Router<'e> = {
+  routes: List<Route<'e>>,
 };
 
 /// Mounting is written `router |> Router::post(..)`, so the router is the
@@ -721,27 +732,26 @@ export type Router<'r, 'e> = {
 /// ones so that the pipeline reads as a chain against `Router` and cannot
 /// collide with another module's `get`.
 impl Router {
-  fn new<'r, 'e>() -> Router<'r, 'e> { { routes: List::Nil } }
+  fn new<'e>() -> Router<'e> { { routes: List::Nil } }
 
-  fn post<'r, 'e>(
-    router: Router<'r, 'e>,
+  fn post<'e>(
+    router: Router<'e>,
     route: String,
-    handler: (Request) -> Response with 'r raises 'e
-  ) -> Router<'r, 'e> {
+    handler: SharedFn<Request, Response, 'e>
+  ) -> Router<'e> {
     { routes: List::Cons({ method: Method::Post, pattern: route, handler: handler }, router.routes) }
   }
 
-  fn get<'r, 'e>(
-    router: Router<'r, 'e>,
+  fn get<'e>(
+    router: Router<'e>,
     route: String,
-    handler: (Request) -> Response with 'r raises 'e
-  ) -> Router<'r, 'e> {
+    handler: SharedFn<Request, Response, 'e>
+  ) -> Router<'e> {
     { routes: List::Cons({ method: Method::Get, pattern: route, handler: handler }, router.routes) }
   }
 
-  /// Serves until the process stops.
-  fn listen<'r, 'e>(router: Router<'r, 'e>, port: Int) -> ()
-    with { 'r | scope: Scope }
+  /// Serves until the process stops, on a fiber per connection.
+  fn listen<'e>(router: Router<'e>, port: Int) -> ()
     raises 'e + HttpError
   {
     if start() {
@@ -756,59 +766,75 @@ impl Router {
       // caller that wants silence can have a quieter one when there is
       // something to configure it with.
       print("listening on " + Int::to_string(port));
-      Router::serve_forever(router, server)!
+      // The nursery is opened here rather than asked of the caller: that a
+      // server answers on a fiber per connection is its own business, and the
+      // structure it needs is three lines.
+      let crew = Fibers::open();
+      with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
+        Router::serve_forever(router, server)!
+      };
+      // Reached only if accepting ever stops. Leaving `listen` any other way
+      // releases `crew`, which cancels the connections still in flight; getting
+      // here waits for them instead.
+      Fibers::wait(crew)
     }
   }
 
-  /// One connection at a time, for as long as the process lives.
-  fn serve_forever<'r, 'e>(router: Router<'r, 'e>, server: Int) -> ()
-    with { 'r | scope: Scope }
+  /// Accepts for as long as the process lives.
+  fn serve_forever<'e>(router: Router<'e>, server: Int) -> ()
+    with { nursery: Nursery }
     raises 'e + HttpError
   {
     Router::serve_once(router, server)!;
     Router::serve_forever(router, server)!
   }
 
-  /// Accepts one connection, answers it, and closes it.
+  /// Accepts one connection and hands it to a fiber of its own.
   ///
-  /// **Serial, and blocked on something bigger than this module.**
-  /// `Fiber::spawn` and `nursery` are both in `std::core`, and the obvious
-  /// shape —
-  /// `nursery.adopt(Fiber::spawn(fn () => Router::answer_on(router, taken)!))`
-  /// — does not compile, for a reason worth writing down where somebody will
-  /// find it:
+  /// **This is what `SharedFn` bought.** A closure's captures are not in its
+  /// type, so a `Router` holding plain closures could never cross into a fiber
+  /// and the server answered one caller at a time. Certifying each handler
+  /// where it is mounted makes the route an ordinary shareable record, and the
+  /// thunk below closes over the whole router without anything special being
+  /// said about routers. `docs/design/sharing.md`.
   ///
-  /// > `ledger` cannot be handed to a fiber: `Ledger` can be written, and two
-  /// > fibers writing one value is a race
-  ///
-  /// The capture itself is fine — a closure written inside a `with 'r`
-  /// function *does* pick up the row's capabilities, unnamed though they are.
-  /// What stops it is the shareability rule (`docs/design/memory.md` §5a): a
-  /// fiber may only close over values that cannot be written, and **an effect
-  /// is a record of function types**, so a handler is a record of closures,
-  /// and a closure is never shareable.
-  ///
-  /// Which means the rule as it stands says *no capability may ever cross into
-  /// a fiber* — not this one, any of them. Concurrency and capabilities are
-  /// the two things this language is most pleased with, and today a program
-  /// cannot use both at once. That is a design question rather than a missing
-  /// line, and until it is answered a server that talks to a database serves
-  /// one caller at a time.
-  fn serve_once<'r, 'e>(router: Router<'r, 'e>, server: Int) -> ()
-    with { 'r | scope: Scope }
+  /// The nursery is what makes it structured rather than merely concurrent: an
+  /// adopted fiber cannot outlive it, so leaving `listen` — by a raise, or by
+  /// cancellation — deals with the connections still being answered instead of
+  /// abandoning them.
+  fn serve_once<'e>(router: Router<'e>, server: Int) -> ()
+    with { nursery: Nursery }
     raises 'e + HttpError
   {
     let connection = accept_on(server);
     if connection == invalid_handle() {
     } else {
-      Router::answer_on(router, connection)!;
-      shut(connection);
+      nursery.adopt(Fiber::spawn(fn () => Router::serve_connection(router, connection)));
     }
   }
 
+  /// One connection, from the first byte to the close.
+  ///
+  /// What a fiber runs, and it does not fail: a fiber has nobody to hand a
+  /// failure to, and a connection nothing closes is a descriptor leaked for the
+  /// life of the process. So whatever the handler raised becomes a 500 and the
+  /// socket is shut either way.
+  ///
+  /// The arm is `_`, because `'e` is whatever the mounted handlers raise and
+  /// this function cannot name a constructor of it. Catching *whatever* is the
+  /// one thing naming constructors cannot express, and the reason a total
+  /// wildcard arm exists at all.
+  fn serve_connection<'e>(router: Router<'e>, connection: Int) -> () {
+    Router::answer_on(router, connection) catch {
+      _ => {
+        transmit(connection, Response::rendered(Response::text(500, "handler failed")));
+      },
+    };
+    shut(connection)
+  }
+
   /// Reads one request off `connection` and writes the answer back.
-  fn answer_on<'r, 'e>(router: Router<'r, 'e>, connection: Int) -> ()
-    with 'r
+  fn answer_on<'e>(router: Router<'e>, connection: Int) -> ()
     raises 'e
   {
     let buffer: Array<U8> = Array::new(limit(), 0);
@@ -818,8 +844,7 @@ impl Router {
   }
 
   /// The answer to what arrived, whatever state it arrived in.
-  fn answer_bytes<'r, 'e>(router: Router<'r, 'e>, buffer: Array<U8>, filled: Int) -> Response
-    with 'r
+  fn answer_bytes<'e>(router: Router<'e>, buffer: Array<U8>, filled: Int) -> Response
     raises 'e
   {
     if filled <= 0 {
@@ -839,8 +864,7 @@ impl Router {
   }
 
   /// What to send back for this request text.
-  fn answer<'r, 'e>(router: Router<'r, 'e>, text: String) -> Response
-    with 'r
+  fn answer<'e>(router: Router<'e>, text: String) -> Response
     raises 'e
   {
     match parse(text) {
@@ -849,8 +873,7 @@ impl Router {
     }
   }
 
-  fn dispatch<'r, 'e>(routes: List<Route<'r, 'e>>, request: Request) -> Response
-    with 'r
+  fn dispatch<'e>(routes: List<Route<'e>>, request: Request) -> Response
     raises 'e
   {
     match routes {
@@ -859,7 +882,7 @@ impl Router {
       if Method::same(route.method, request.method) {
         match matches(route.pattern, request.path) {
           Option::Some(params) =>
-          route.handler({
+          SharedFn::call(route.handler, {
               method: request.method,
               path: request.path,
               params: params,

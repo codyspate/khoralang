@@ -51,6 +51,9 @@ fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
 export type Region;
+export trait Share {}
+/// `khora_region_defer` locks, so a scope may be handed across fibers.
+impl Share for Region {}
 
 impl Region {
   fn open() -> Region;
@@ -257,6 +260,9 @@ fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
 export type Region;
+export trait Share {}
+/// `khora_region_defer` locks, so a scope may be handed across fibers.
+impl Share for Region {}
 impl Region {
   fn open() -> Region;
   fn defer(self, finalizer: () -> ()) -> ();
@@ -368,6 +374,9 @@ extern fn khora_cancel_reset();
 extern fn khora_live_count() -> Int;
 
 export type Region;
+export trait Share {}
+/// `khora_region_defer` locks, so a scope may be handed across fibers.
+impl Share for Region {}
 impl Region {
   fn open() -> Region;
   fn root() -> Region;

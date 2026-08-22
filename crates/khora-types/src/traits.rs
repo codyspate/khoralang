@@ -630,6 +630,7 @@ pub fn check(
     traits: &Traits,
     kinds: &HashMap<String, Kind>,
     signatures: &HashMap<String, Signature>,
+    opaque: &dyn Fn(&Type) -> bool,
 ) -> Vec<HirError> {
     let mut errors = Vec::new();
 
@@ -677,6 +678,31 @@ pub fn check(
                 range: imp.range,
             });
             let _ = first;
+            continue;
+        }
+
+        // `Share` is not an ordinary trait and its impl is not an ordinary
+        // impl: it *asserts* rather than provides, and everything downstream
+        // trusts it without being able to check it. So it may only be written
+        // where there is nothing to check — a type declared with no body, whose
+        // behaviour lives in the runtime or across the C ABI.
+        //
+        // For every other type the answer is derived from what the compiler can
+        // see, and an impl is either redundant or a lie. A record with a `mut`
+        // field is the lie: writing `impl Share` for one would hand two fibers
+        // a value they can both write, with the compiler's blessing and no
+        // diagnostic anywhere.
+        if imp.trait_name == crate::SHARE && !opaque(&imp.self_type) {
+            let what = imp.head().unwrap_or_else(|| "this type".to_string());
+            errors.push(HirError {
+                message: format!(
+                    "`Share` cannot be implemented for `{what}`: this compiler can see \
+                     what `{what}` holds, so it decides for itself whether two fibers may \
+                     have it. An impl is only for a type declared with no body, where \
+                     there is nothing to look at"
+                ),
+                range: imp.range,
+            });
             continue;
         }
 

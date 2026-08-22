@@ -172,7 +172,7 @@ fn a_mutable_value_cannot_be_handed_to_a_fiber() {
              export fn bump(c: Counter) -> () {{ c.count = 1; }}\n\
              export fn f(c: Counter) -> Fiber {{ Fiber::spawn(fn () => bump(c)) }}\n"
         ),
-        "cannot be handed to a fiber",
+        "cannot be handed to another fiber",
     );
 }
 
@@ -202,7 +202,7 @@ fn holding_a_mutable_value_is_unshareable_too() {
              export fn look(h: Holder) -> () {{ }}\n\
              export fn f(h: Holder) -> Fiber {{ Fiber::spawn(fn () => look(h)) }}\n"
         ),
-        "cannot be handed to a fiber",
+        "cannot be handed to another fiber",
     );
 }
 
@@ -215,6 +215,206 @@ fn a_forwarded_thunk_cannot_be_spawned() {
         &format!(
             "{MUT}export fn f(body: () -> ()) -> Fiber {{ Fiber::spawn(body) }}\n"
         ),
-        "written where it is spawned",
+        "a closure written here or a named function",
     );
+}
+
+// --- shareability ----------------------------------------------------------
+//
+// `docs/design/sharing.md`. Fibers are operating-system threads, so each of
+// these is about a real data race rather than a future one.
+
+/// A type declared with no body is refused by default, because nothing here can
+/// see whether it can be written — and `Array` can, through `Array::set`.
+///
+/// This compiled and raced before the rule existed: two fibers writing one
+/// array, no diagnostic anywhere.
+#[test]
+fn an_opaque_type_cannot_cross_without_saying_so() {
+    assert_reports(
+        &format!(
+            "{MUT}\
+             export type Buffer;\n\
+             export fn look(b: Buffer) -> () {{ }}\n\
+             export fn f(b: Buffer) -> Fiber {{ Fiber::spawn(fn () => look(b)) }}\n"
+        ),
+        "declared without a body",
+    );
+}
+
+/// And accepted once it does. The impl is the author asserting what the
+/// compiler cannot check, which is why it may only be written here.
+#[test]
+fn an_opaque_type_crosses_once_it_says_so() {
+    assert_clean(&format!(
+        "{MUT}\
+         export type Buffer;\n\
+         export trait Share {{}}\n\
+         impl Share for Buffer {{}}\n\
+         export fn look(b: Buffer) -> () {{ }}\n\
+         export fn f(b: Buffer) -> Fiber {{ Fiber::spawn(fn () => look(b)) }}\n"
+    ));
+}
+
+/// `Share` asserts; it does not describe. For a type this compiler can see
+/// into it decides for itself, and an impl would be a way to write down a lie
+/// about a record with a `mut` field.
+#[test]
+fn share_cannot_be_claimed_for_a_type_the_compiler_can_see() {
+    assert_reports(
+        &format!("{MUT}export trait Share {{}}\nimpl Share for Counter {{}}\n"),
+        "cannot be implemented for `Counter`",
+    );
+}
+
+/// A type the caller chooses could be anything, so a generic function that
+/// spawns has to require it. Without this a two-line wrapper laundered a
+/// caller's mutable record onto another fiber.
+#[test]
+fn a_type_parameter_has_to_be_required_to_be_shareable() {
+    assert_reports(
+        &format!(
+            "{MUT}\
+             export fn sink<A>(a: A) -> () {{ }}\n\
+             export fn launder<A>(a: A) -> Fiber {{ Fiber::spawn(fn () => sink(a)) }}\n"
+        ),
+        "is a type the caller chooses",
+    );
+}
+
+/// With the bound written it crosses, and the bound is what the caller then has
+/// to satisfy.
+#[test]
+fn a_bounded_type_parameter_crosses() {
+    assert_clean(&format!(
+        "{MUT}\
+         export trait Share {{}}\n\
+         export fn sink<A>(a: A) -> () {{ }}\n\
+         export fn launder<A: Share>(a: A) -> Fiber {{ Fiber::spawn(fn () => sink(a)) }}\n"
+    ));
+}
+
+/// Nobody writes `impl Share` for a record: a structure this compiler can see
+/// is shareable exactly when everything in it is, so the bound is satisfied by
+/// looking rather than by finding an impl.
+#[test]
+fn a_share_bound_is_satisfied_structurally() {
+    assert_clean(&format!(
+        "{MUT}\
+         export trait Share {{}}\n\
+         export fn sink<A>(a: A) -> () {{ }}\n\
+         export fn launder<A: Share>(a: A) -> Fiber {{ Fiber::spawn(fn () => sink(a)) }}\n\
+         export fn go(v: Frozen) -> Fiber {{ launder(v) }}\n"
+    ));
+}
+
+#[test]
+fn a_share_bound_is_not_satisfied_by_a_mutable_record() {
+    assert_reports(
+        &format!(
+            "{MUT}\
+             export trait Share {{}}\n\
+             export fn sink<A>(a: A) -> () {{ }}\n\
+             export fn launder<A: Share>(a: A) -> Fiber {{ Fiber::spawn(fn () => sink(a)) }}\n\
+             export fn go(c: Counter) -> Fiber {{ launder(c) }}\n"
+        ),
+        "`Counter` does not implement `Share`",
+    );
+}
+
+/// A generic container follows its argument. The declared field types speak in
+/// the *type's* parameters, and reading those as the caller's made every
+/// `List` unshareable.
+#[test]
+fn a_generic_container_follows_its_argument() {
+    assert_clean(&format!(
+        "{MUT}\
+         export type Stack<A> = | Empty | Push(A, Stack<A>);\n\
+         export fn look(s: Stack<Frozen>) -> () {{ }}\n\
+         export fn f(s: Stack<Frozen>) -> Fiber {{ Fiber::spawn(fn () => look(s)) }}\n"
+    ));
+}
+
+#[test]
+fn a_generic_container_of_something_mutable_does_not() {
+    assert_reports(
+        &format!(
+            "{MUT}\
+             export type Stack<A> = | Empty | Push(A, Stack<A>);\n\
+             export fn look(s: Stack<Counter>) -> () {{ }}\n\
+             export fn f(s: Stack<Counter>) -> Fiber {{ Fiber::spawn(fn () => look(s)) }}\n"
+        ),
+        "cannot be handed to another fiber",
+    );
+}
+
+// --- handlers --------------------------------------------------------------
+
+const EFFECTS: &str = "module m;\n\
+                       export type Counter = { mut count: Int, name: String };\n\
+                       export type Frozen = { total: Int };\n\
+                       export type Fiber;\n\
+                       impl Fiber {\n\
+                         fn spawn<'e>(body: () -> () raises 'e) -> Fiber;\n\
+                       }\n\
+                       export effect Counting { tick: () -> (), }\n\
+                       export fn bump(c: Counter) -> () { c.count = 1; }\n\
+                       export fn peek(v: Frozen) -> () { }\n";
+
+/// An effect is shareable, and this is what pays for it: the captures are
+/// checked at the `handler for` literal, the one place they are visible.
+#[test]
+fn a_handler_capturing_something_mutable_is_refused() {
+    assert_reports(
+        &format!(
+            "{EFFECTS}export fn make(c: Counter) -> Counting {{ \
+             handler for Counting {{ tick: fn () => bump(c) }} }}\n"
+        ),
+        "has to be safe to hand to another fiber",
+    );
+}
+
+#[test]
+fn a_handler_capturing_something_immutable_is_accepted() {
+    assert_clean(&format!(
+        "{EFFECTS}export fn make(v: Frozen) -> Counting {{ \
+         handler for Counting {{ tick: fn () => peek(v) }} }}\n"
+    ));
+}
+
+/// A handler may capture a capability, which is the case the exception exists
+/// for: a fiber answering a request needs the database its handler holds.
+#[test]
+fn a_handler_may_capture_another_handler() {
+    assert_clean(&format!(
+        "{EFFECTS}\
+         export effect Logging {{ note: () -> (), }}\n\
+         export fn make(inner: Counting) -> Logging {{ \
+         handler for Logging {{ note: fn () => inner.tick() }} }}\n"
+    ));
+}
+
+/// The laundering move: write the closure somewhere else, then name it. What it
+/// captured went with it, so there is nothing at this line to look at — and the
+/// whole exception rests on this line being the one that cannot be dodged.
+#[test]
+fn a_pre_bound_closure_cannot_be_a_handler_operation() {
+    assert_reports(
+        &format!(
+            "{EFFECTS}export fn make(c: Counter) -> Counting {{ \
+             let leak = fn () => bump(c); \
+             handler for Counting {{ tick: leak }} }}\n"
+        ),
+        "has to be a closure written here or a named function",
+    );
+}
+
+/// And a capability crosses, which is the whole point of the exception.
+#[test]
+fn a_capability_can_be_handed_to_a_fiber() {
+    assert_clean(&format!(
+        "{EFFECTS}\
+         export fn use_it(c: Counting) -> () {{ c.tick() }}\n\
+         export fn f(c: Counting) -> Fiber {{ Fiber::spawn(fn () => use_it(c)) }}\n"
+    ));
 }

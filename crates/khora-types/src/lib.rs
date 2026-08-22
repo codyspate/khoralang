@@ -13,7 +13,7 @@ pub mod traits;
 pub mod unify;
 pub mod usefulness;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use khora_db::{Db, SourceFile};
 use khora_hir::body::{BinOp, Body, Expr, ExprId, Literal, LocalId, Pat, PatId, Stmt, UnOp};
@@ -391,6 +391,11 @@ impl VariantInfo {
 /// Read from the syntax tree rather than from `ItemMap`, which records what
 /// exists but not what shape it has. Keeping that in one place here avoids
 /// growing a HIR type layer before generics force its shape.
+/// The marker trait that answers for a type the compiler cannot see inside.
+///
+/// `docs/design/sharing.md`.
+pub const SHARE: &str = "Share";
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TypeMap {
     pub signatures: HashMap<String, Signature>,
@@ -402,6 +407,14 @@ pub struct TypeMap {
     /// The kind of every named type, so an impl can be checked against the
     /// kind its trait requires.
     pub kinds: HashMap<String, traits::Kind>,
+    /// The names declared with `effect` rather than `type`.
+    ///
+    /// An effect is a record of function types, which would make every one of
+    /// them unshareable — and so make a capability impossible to hand to a
+    /// fiber, which is every concurrent server there is. It is shareable
+    /// instead, and what pays for that is a check where each handler is
+    /// *written*. `docs/design/sharing.md`.
+    pub effects: HashSet<String>,
 }
 
 impl TypeMap {
@@ -432,9 +445,50 @@ impl TypeMap {
     /// it holds. A named function referenced by path captures nothing and is
     /// not affected; only a closure kept in a binding is.
     ///
-    /// `docs/design/memory.md` §5a.
-    pub fn is_shareable(&self, ty: &Type) -> bool {
-        self.shareable(ty, &mut Vec::new())
+    /// **An effect is the exception, and it has to be.** An effect *is* a
+    /// record of function types, so the rule above would make every capability
+    /// unshareable — and a fiber could never be spawned from a function holding
+    /// one, which is the shape of every concurrent server. What pays for the
+    /// exception is [`Checker::check_handler_is_shareable`]: a handler's
+    /// closures are written at the `handler for` literal, where the checker can
+    /// see exactly what they captured, so the question is answered once, there,
+    /// instead of at every spawn where it cannot be answered at all.
+    ///
+    /// `docs/design/memory.md` §5a and `docs/design/sharing.md`.
+    /// **A type the caller chooses answers only if it was asked to.** A
+    /// generic function cannot see what `A` will be, so `A` is shareable
+    /// exactly when the signature wrote `A: Share` — otherwise
+    /// `fn launder<A>(v: A) -> Fiber { Fiber::spawn(fn () => sink(v)) }`
+    /// would hand a caller's mutable record to a fiber with nothing to say
+    /// about it, which is what it did before `bounded` existed.
+    ///
+    /// `bounded` is the parameters of the enclosing signature that carry the
+    /// bound, which the checker reads off `bounds_on`.
+    /// Whether this compiler can see what `ty` holds.
+    ///
+    /// A declared type with no body cannot be looked into, which is the one
+    /// place `impl Share` is allowed to speak. Everything else — a record, a
+    /// variant, a tuple, a primitive — answers for itself.
+    pub fn is_opaque(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Applied { head, .. } => self.is_opaque(head),
+            // A name with no variants recorded and no `effect` declaration.
+            // Not `adts.contains_key`, deliberately: a type imported from
+            // another module reaches this map through its impls but not its
+            // declaration, and treating an absent name as *visible* would
+            // refuse `impl Share for Fibers` in every file but the one that
+            // declared it. A name that exists nowhere is reported as unknown
+            // by resolution, which is the diagnostic that helps.
+            Type::Adt { name, .. } => {
+                !self.variants.iter().any(|v| &v.type_name == name)
+                    && !self.effects.contains(name)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_shareable(&self, ty: &Type, bounded: &[String]) -> bool {
+        self.shareable(ty, &mut Vec::new(), bounded)
     }
 
     /// Why a value of this type may not be handed to another fiber.
@@ -450,6 +504,21 @@ impl TypeMap {
     /// types, so no capability can cross into a fiber. The message says so
     /// rather than sending the reader to look for a `mut` that is not there.
     pub fn why_unshareable(&self, ty: &Type) -> String {
+        if let Type::Param(name) = ty {
+            return format!(
+                "`{name}` is a type the caller chooses, so nothing here can tell whether it \
+                 can be written. Require it: `{name}: Share`"
+            );
+        }
+        if let Type::Adt { name, .. } = ty {
+            if !self.variants.iter().any(|v| &v.type_name == name) && !self.effects.contains(name) {
+                return format!(
+                    "`{ty}` is declared without a body, so nothing here can see whether it \
+                     can be written — and `Array` and `Ptr` both can. A type that is safe \
+                     for two fibers to hold at once says so with `impl Share for {name}`"
+                );
+            }
+        }
         if self.holds_a_closure(ty, &mut Vec::new()) {
             format!(
                 "`{ty}` holds a closure, and what a closure captured is not in its type — so \
@@ -473,6 +542,9 @@ impl TypeMap {
                 if args.iter().any(|t| self.holds_a_closure(t, visiting)) {
                     return true;
                 }
+                if self.effects.contains(name) {
+                    return false;
+                }
                 if visiting.iter().any(|n| n == name) {
                     return false;
                 }
@@ -489,16 +561,32 @@ impl TypeMap {
         }
     }
 
-    fn shareable(&self, ty: &Type, visiting: &mut Vec<String>) -> bool {
+    fn shareable(&self, ty: &Type, visiting: &mut Vec<String>, bounded: &[String]) -> bool {
         match ty {
+            // A row variable is not a value and carries none: `'e` is how a
+            // function fails, and nobody hands a failure to a fiber. Only a
+            // *type* the caller chooses has to be asked about.
+            Type::Param(name) if name.starts_with('\'') => true,
+            Type::Param(name) => bounded.iter().any(|b| b == name),
             Type::Fn { .. } => false,
-            Type::Tuple(items) => items.iter().all(|t| self.shareable(t, visiting)),
+            Type::Tuple(items) => items.iter().all(|t| self.shareable(t, visiting, bounded)),
             Type::Applied { head, args } => {
-                self.shareable(head, visiting)
-                    && args.iter().all(|t| self.shareable(t, visiting))
+                self.shareable(head, visiting, bounded)
+                    && args.iter().all(|t| self.shareable(t, visiting, bounded))
             }
             Type::Adt { name, args } => {
-                if !args.iter().all(|t| self.shareable(t, visiting)) {
+                // The trusted answer comes first, arguments included. A type
+                // with no body does not necessarily *hold* its parameters —
+                // `SharedFn<Request, Response, 'e>` describes a call rather
+                // than a contents, and a `Request` is built inside the fiber
+                // that answers it — so asking about them would refuse the one
+                // thing the wrapper exists to allow. An impl asserts for every
+                // instantiation, which is what makes it a thing you have to be
+                // trusted to write.
+                if self.is_opaque(ty) {
+                    return self.traits.find(SHARE, ty).is_some();
+                }
+                if !args.iter().all(|t| self.shareable(t, visiting, bounded)) {
                     return false;
                 }
                 // A type may contain itself, so an in-progress name answers
@@ -507,6 +595,37 @@ impl TypeMap {
                 if visiting.iter().any(|n| n == name) {
                     return true;
                 }
+                // A handler's operations are closures whose captures were
+                // checked where the handler was written, so they are not asked
+                // about again here — see the note above.
+                if self.effects.contains(name) {
+                    return true;
+                }
+                // **A type with no body has to say.** Nothing here can see
+                // inside `export type Array<A>;`, and answering "shareable"
+                // because no mutable field is *visible* is the wrong default in
+                // the one direction that matters: `Array::set` writes, `Ptr`
+                // points at foreign memory, and a runtime handle may need a
+                // lock of its own. All three looked safe to share until this
+                // line existed, and two fibers writing one array compiled.
+                //
+                // So the answer is declared, with `impl Share for T`. That is
+                // the same trade `unsafe impl Sync` makes, minus a keyword this
+                // language does not have: the author of the type knows what the
+                // compiler cannot, and writing it down is what makes it
+                // reviewable. `docs/design/sharing.md`.
+                // The declared field types speak in the *type's* parameters —
+                // `Cons(A, List<A>)` — and those are not the enclosing
+                // function's, so they have to be replaced by what this use
+                // actually supplied before anything is asked about them.
+                // Reading `A` as a rigid parameter of the caller made every
+                // generic container unshareable, `List` included.
+                let parameters = self.adts.get(name).cloned().unwrap_or_default();
+                let mapping: HashMap<&str, Type> = parameters
+                    .iter()
+                    .map(String::as_str)
+                    .zip(args.iter().cloned())
+                    .collect();
                 visiting.push(name.clone());
                 let ok = self
                     .variants
@@ -514,11 +633,18 @@ impl TypeMap {
                     .filter(|v| &v.type_name == name)
                     .all(|v| {
                         !v.has_mutable_field()
-                            && v.fields.iter().all(|t| self.shareable(t, visiting))
+                            && v.fields.iter().all(|t| {
+                                let t = unify::substitute(t, &mapping);
+                                self.shareable(&t, visiting, bounded)
+                            })
                     });
                 visiting.pop();
                 ok
             }
+            // Foreign memory. Nothing on this side of the ABI knows what is
+            // behind it or who else is writing there, and a pointer is exactly
+            // the value whose whole purpose is to be written through.
+            Type::Ptr => false,
             _ => true,
         }
     }
@@ -602,6 +728,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     labels.push(label);
                     fields.push(type_of_syntax(op.ty().as_ref(), &generics));
                 }
+                map.effects.insert(name.clone());
                 map.variants.push(VariantInfo {
                     type_name: name.clone(),
                     name,
@@ -761,9 +888,46 @@ fn import_types(
                         consts.insert(local.clone(), vec![false; generics.len()]);
                     }
                 }
+                // That it was declared `effect` travels with it. Without this
+                // an imported capability was a plain record of closures here,
+                // and so unshareable — which is to say no capability from
+                // another module could reach a fiber, the exact thing the
+                // exception exists to allow.
+                if exported.effects.contains(name.as_str()) {
+                    map.effects.insert(local.clone());
+                }
                 map.variants.extend(
                     exported.variants.iter().filter(|v| &v.type_name == name).cloned(),
                 );
+                // **`Share` travels with the type, not with the trait.** An
+                // impl normally arrives when its trait is imported, which is
+                // right for `Show` — you ask for the trait, you get the impls.
+                // `Share` is not asked for: it is a property the compiler reads
+                // when a value crosses a fiber, and a file that never mentions
+                // it still needs the answer. Without this, importing `SharedFn`
+                // without also importing `Share` made it silently unshareable.
+                for shared in exported.traits.impls.iter().filter(|i| {
+                    i.trait_name == SHARE && i.head().as_deref() == Some(name.as_str())
+                }) {
+                    let known = map
+                        .traits
+                        .impls
+                        .iter()
+                        .any(|i| i.trait_name == SHARE && i.head() == shared.head());
+                    if known {
+                        // Imported twice under two names is still one impl, and
+                        // the duplicate check downstream would call it two.
+                        continue;
+                    }
+                    map.traits.impls.push(shared.clone());
+                    // The declaration too, or the impl is an impl of nothing.
+                    if let Some(def) = exported.traits.traits.get(SHARE) {
+                        map.traits.traits.entry(SHARE.to_string()).or_insert_with(|| def.clone());
+                    }
+                    if let Some(kind) = exported.kinds.get(name.as_str()) {
+                        map.kinds.entry(local.clone()).or_insert_with(|| kind.clone());
+                    }
+                }
                 // A type's own methods come with it — see `import_inherent`,
                 // which brings the whole module's rather than this type's.
             }
@@ -859,6 +1023,9 @@ pub fn as_written(key: &str) -> String {
 /// may cross into one, and a rule about sharing is a type error rather than a
 /// code-generation one.
 pub const FIBER_TYPE: &str = "Fiber";
+
+/// The certified-closure wrapper. `SharedFn::of` is where the check happens.
+pub const SHARED_FN_TYPE: &str = "SharedFn";
 
 /// The error a failed assertion is.
 ///
@@ -1278,7 +1445,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile) -> &Vec<HirError> {
 #[salsa::tracked(returns(ref))]
 pub fn trait_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     let types = type_map(db, file);
-    traits::check(&types.traits, &types.kinds, &types.signatures)
+    traits::check(&types.traits, &types.kinds, &types.signatures, &|ty| types.is_opaque(ty))
 }
 
 /// Which clause a requirement came from.
@@ -2144,12 +2311,14 @@ impl<'a> Checker<'a> {
     ) -> Type {
         // Checked after the arguments, because a lambda's implicit captures are
         // only known once it has been inferred.
-        let spawning = matches!(
-            self.body.expr(callee),
-            Expr::Path(khora_hir::Resolution::TraitItem { owner, name })
-                if owner == FIBER_TYPE && name == "spawn"
-        );
-        if spawning {
+        let certifying = match self.body.expr(callee) {
+            Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
+                (owner == FIBER_TYPE && name == "spawn")
+                    || (owner == SHARED_FN_TYPE && name == "of")
+            }
+            _ => false,
+        };
+        if certifying {
             let result = self.infer_call_inner(callee, args, hint, range);
             self.check_spawnable(args, range);
             return result;
@@ -2681,8 +2850,9 @@ impl<'a> Checker<'a> {
             Expr::Path(_) => return,
             _ => {
                 self.error(
-                    "a fiber's body has to be written where it is spawned, so that what it \
-                     closes over can be checked"
+                    "this has to be a closure written here or a named function, so that \
+                     what it closes over can be checked — a closure that arrived under a \
+                     name captured whatever it captured somewhere else"
                         .to_string(),
                     range,
                 );
@@ -2692,12 +2862,90 @@ impl<'a> Checker<'a> {
 
         for local in captures {
             let ty = self.unifier.zonk(self.locals.get(&local).unwrap_or(&Type::Unknown));
-            if self.types.is_shareable(&ty) {
+            if self.types.is_shareable(&ty, &self.shared_params()) {
                 continue;
             }
             let name = self.body.local(local).name.clone();
             let why = self.types.why_unshareable(&ty);
-            self.error(format!("`{name}` cannot be handed to a fiber: {why}"), range);
+            self.error(format!("`{name}` cannot be handed to another fiber: {why}"), range);
+        }
+    }
+
+    /// Every operation of a handler must be safe to hand to another fiber.
+    ///
+    /// **This is what buys an effect its shareability.** A capability has to be
+    /// able to cross into a fiber — a request arrives, a fiber handles it, the
+    /// handler needs the database — and an effect is a record of closures,
+    /// which nothing at the type level can see inside. So the question is asked
+    /// *here*, at the one place a handler comes into existence, where the
+    /// lambdas are written and what they captured is on the screen.
+    ///
+    /// Answered once, where it is answerable, instead of at every spawn where
+    /// it is not. `docs/design/sharing.md`.
+    ///
+    /// The cost is a real restriction: a handler may not capture something
+    /// writable, so a test double that counts its calls in a `mut` field is
+    /// refused. That is the same trade `Shared<A>` is being kept in reserve
+    /// for, and the error says which binding and why.
+    fn check_handler_is_shareable(&mut self, owner: &str, fields: &[(String, ExprId)]) {
+        for (label, value) in fields {
+            let range = self.body.range(*value);
+            // **The closure has to be written here.** A binding holding one
+            // was written somewhere else, and its captures went with it:
+            //
+            // ```
+            // let leak = fn () => bump(tally);
+            // let h = handler for Counting { tick: leak };
+            // ```
+            //
+            // Nothing at this line can see what `leak` took, so accepting it
+            // would let any closure through by the simple move of naming it
+            // first — and the whole exception that makes an effect shareable
+            // rests on this check being the one place it cannot be dodged.
+            if !matches!(self.body.expr(*value), Expr::Lambda { .. } | Expr::Path(_)) {
+                self.error(
+                    format!(
+                        "`{owner}`'s `{label}` has to be a closure written here or a named \
+                         function: a handler is safe to hand to another fiber only because \
+                         what its operations captured is checked at this line, and a \
+                         closure that arrived under a name captured it somewhere else"
+                    ),
+                    range,
+                );
+                continue;
+            }
+            for local in self.captures_of(*value) {
+                let ty = self.unifier.zonk(self.locals.get(&local).unwrap_or(&Type::Unknown));
+                if self.types.is_shareable(&ty, &self.shared_params()) {
+                    continue;
+                }
+                let name = self.body.local(local).name.clone();
+                let why = self.types.why_unshareable(&ty);
+                self.error(
+                    format!(
+                        "`{owner}`'s `{label}` captures `{name}`, and a handler has to be safe \
+                         to hand to another fiber: {why}"
+                    ),
+                    range,
+                );
+            }
+        }
+    }
+
+    /// What the expression behind a handler's operation closes over.
+    ///
+    /// A lambda's captures are recorded; a named function has none. Anything
+    /// else is a closure this expression did not create, whose captures were
+    /// decided elsewhere — and "elsewhere" is exactly what cannot be checked,
+    /// so it is refused by having no answer rather than by pretending to one.
+    fn captures_of(&self, value: ExprId) -> Vec<khora_hir::body::LocalId> {
+        match self.body.expr(value) {
+            Expr::Lambda { captures, .. } => captures
+                .iter()
+                .copied()
+                .chain(self.lambda_captures.get(&value).into_iter().flatten().copied())
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -2994,6 +3242,12 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // A handler is the one place a capability's closures are visible, and
+        // an effect's shareability is paid for by asking here.
+        if self.types.effects.contains(&record.type_name) {
+            let owner = record.type_name.clone();
+            self.check_handler_is_shareable(&owner, fields);
+        }
         whole
     }
 
@@ -3023,6 +3277,19 @@ impl<'a> Checker<'a> {
 
     fn signature_for(&self, key: &str, _self_ty: &Type) -> Option<Signature> {
         self.types.signatures.get(key).cloned()
+    }
+
+    /// The type parameters this function declared `Share` for.
+    fn shared_params(&self) -> Vec<String> {
+        self.signature
+            .generics
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                self.signature.bounds.get(*i).is_some_and(|b| b.iter().any(|t| t == SHARE))
+            })
+            .map(|(_, g)| g.clone())
+            .collect()
     }
 
     /// The traits the enclosing function requires of `param`.
@@ -3078,6 +3345,15 @@ impl<'a> Checker<'a> {
     /// enclosing signature promised about it, which is why this is a method on
     /// the checker rather than on `Traits`.
     fn satisfies(&self, wanted: &str, ty: &Type) -> bool {
+        // `Share` is answered by looking, not by finding an impl. A record of
+        // immutable fields is safe for two fibers whether or not anybody wrote
+        // it down, and requiring the impl would mean writing one for every
+        // type that ever crosses — which is the tax `Send`/`Sync` avoid by
+        // being derived. The impl still matters for the types this cannot see
+        // into; `TypeMap::is_shareable` is what asks for it there.
+        if wanted == SHARE {
+            return self.types.is_shareable(ty, &self.shared_params());
+        }
         match ty {
             // Not solved, or downstream of an error already reported.
             Type::Unknown | Type::Var(_) | Type::Never => true,
@@ -3280,6 +3556,17 @@ impl<'a> Checker<'a> {
     /// this is not a `match` on a result: the arms do not see a value the
     /// operand produced, they see the error it left with, and the ones they
     /// name stop being the enclosing function's problem.
+    ///
+    /// **A `_` arm subtracts the whole row, including its tail.** That is the
+    /// one thing naming constructors cannot express, and a general-purpose
+    /// language needs it: a supervisor — a server answering a request, a queue
+    /// running a job — has to recover from work whose failures it does not know
+    /// the shape of, because they are the *caller's* choice. Every neighbour
+    /// has the form (`catch_unwind`, `recover`, `catchAll`); this one is
+    /// checked rather than dynamic, and it costs what it should — the arm
+    /// learns nothing about what went wrong, since there is no name to learn
+    /// it under. Name the constructors when they are known; `_` is for when
+    /// they cannot be.
     fn infer_catch(
         &mut self,
         inner: ExprId,
@@ -3297,11 +3584,34 @@ impl<'a> Checker<'a> {
         // one scrutinee, which is the other way this differs from `match`.
         let mut caught: Vec<String> = Vec::new();
         let mut result: Option<Type> = None;
+        // Whether an arm handles what the named ones did not.
+        let mut everything = false;
         for arm in arms {
             let owner = match self.body.pat(arm.pat) {
                 Pat::Path(r) | Pat::TupleStruct { resolution: r, .. } => variant_case(r).map(|(t, _)| t),
                 _ => None,
             };
+            if owner.is_none() && matches!(self.body.pat(arm.pat), Pat::Wildcard) {
+                everything = true;
+                if let Some(guard) = arm.guard {
+                    self.expect(guard, &Type::Bool, "a match guard");
+                }
+                let arm_ty = self.infer(arm.body);
+                match result.clone() {
+                    None => result = Some(arm_ty),
+                    Some(expected) => {
+                        let at = self.body.range(arm.body);
+                        if self.require(&expected, &arm_ty, "catch arms disagree", at) {
+                            if matches!(expected, Type::Never) {
+                                result = Some(arm_ty);
+                            }
+                        } else {
+                            result = Some(Type::Unknown);
+                        }
+                    }
+                }
+                continue;
+            }
             let Some(owner) = owner else {
                 // Silent when the pattern named a constructor that did not
                 // resolve: that is already reported, and saying it twice buries
@@ -3346,7 +3656,10 @@ impl<'a> Checker<'a> {
         // have to stay in the row *and* divert some of its variants, so the
         // signature would say it can still leave while the reader sees it
         // handled — the subtraction is only honest if it is total.
-        for owner in &caught {
+        //
+        // Unless a `_` arm is there to take the rest, which is what makes
+        // `catch { NotFound => .., _ => .. }` the ordinary shape it looks like.
+        for owner in caught.iter().filter(|_| !everything) {
             let mine: Vec<khora_hir::body::MatchArm> = arms
                 .iter()
                 .filter(|a| {
@@ -3376,9 +3689,18 @@ impl<'a> Checker<'a> {
                 if demand.clause == Clause::Raises {
                     if let Type::Row { fields, tail } = &demand.row {
                         names.extend(fields.iter().map(|(l, _)| l.clone()));
-                        let left: Vec<(String, Type)> =
-                            fields.iter().filter(|(l, _)| !caught.contains(l)).cloned().collect();
-                        demand.row = Type::row(left, tail.as_deref().cloned());
+                        if everything {
+                            // Tail and all: that is the difference between this
+                            // and any number of named arms.
+                            demand.row = Type::row(Vec::new(), None);
+                        } else {
+                            let left: Vec<(String, Type)> = fields
+                                .iter()
+                                .filter(|(l, _)| !caught.contains(l))
+                                .cloned()
+                                .collect();
+                            demand.row = Type::row(left, tail.as_deref().cloned());
+                        }
                     }
                 }
                 demand

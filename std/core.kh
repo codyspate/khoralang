@@ -57,6 +57,26 @@ export trait Show {
   fn show(self) -> String;
 }
 
+/// Two fibers may hold this at once.
+///
+/// A marker: no methods, and implementing it asserts rather than provides.
+/// Nothing has to write it for an ordinary type — a record, a variant, a tuple
+/// is shareable exactly when everything inside it is, and the compiler can see
+/// that. This is for the types it *cannot* see inside: one declared with no
+/// body, whose behaviour lives in the runtime or across the C ABI.
+///
+/// Those default to unshareable, which is the only safe way round. `Array` can
+/// be written through `Array::set` and `Ptr` points at memory this language
+/// did not allocate; both look like empty structures and neither is safe for
+/// two fibers to share. So the author says which is which, and the reader can
+/// see where the assertion was made.
+///
+/// Fibers are operating-system threads today, so this is `Sync` rather than
+/// `Send`: both fibers keep their reference, and neither hands it over.
+///
+/// `docs/design/sharing.md`.
+export trait Share {}
+
 impl Eq for Int {
   fn eq(self, other: Int) -> Bool { self == other }
 }
@@ -520,6 +540,11 @@ export effect Scope {
 /// paths that release a binding are already the paths a region has to end on.
 export type Region;
 
+/// A fiber that acquires something wants it released by the scope that outlives
+/// it, so a `Scope` has to be able to cross — which means the region behind it
+/// does. `khora_region_defer` takes a lock for exactly this.
+impl Share for Region {}
+
 impl Region {
   fn open() -> Region;
   fn defer(self, finalizer: () -> ()) -> ();
@@ -549,6 +574,11 @@ impl Scope {
 /// is where structured concurrency comes from, and it needed nothing of its
 /// own. `docs/design/fibers.md`.
 export type Fiber;
+
+/// A handle to a running fiber, and every operation on one is a message to the
+/// runtime rather than a write to shared memory. Joining twice is joining once,
+/// from either side.
+impl Share for Fiber {}
 
 impl Fiber {
   /// Runs `body` on a fiber of its own.
@@ -1262,7 +1292,43 @@ impl<K: Hash, V> Map<K, V> {
 /// nothing to stop. That is how one value means both "wait for the children"
 /// and "the answers are no longer wanted" without ever being told which
 /// happened.
+/// A function two fibers may hold.
+///
+/// A closure is never shareable on its own: what it captured is not in its
+/// type, so no amount of looking at `(Request) -> Response` says whether the
+/// thing behind it can be written. That is fine until a container of closures
+/// has to cross — a router holding its handlers, a table of callbacks — at
+/// which point the whole container is stuck on this side.
+///
+/// This is the proof, reified. `SharedFn::of` accepts only a closure written at
+/// the call, where the captures are on the screen and can be checked; what it
+/// returns has forgotten how it was made, and is shareable because the check
+/// already happened. A `Route` holding one is shareable in the ordinary
+/// structural way, with nothing special said about routers.
+///
+/// The cost is the wrapper at the mount site, and that is the honest price: the
+/// alternative is a bit in every function type, which colours every container
+/// of a function all the way up. `docs/design/sharing.md`.
+export type SharedFn<A, B, 'e>;
+
+impl<A, B, 'e> Share for SharedFn<A, B, 'e> {}
+
+impl<A, B, 'e> SharedFn<A, B, 'e> {
+  /// Certifies a closure written here.
+  ///
+  /// The argument has to be a closure literal or a named function — anything
+  /// else was written elsewhere and took its captures with it, which is the
+  /// one thing this cannot check and so the one thing it refuses.
+  fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>;
+  /// Calls it. A plain closure call; the wrapper costs nothing at runtime.
+  fn call(self, argument: A) -> B raises 'e;
+}
+
 export type Fibers;
+
+/// Adopting from more than one fiber at once is what a nursery is for, and the
+/// runtime takes a lock to do it. `khora-rt`.
+impl Share for Fibers {}
 
 impl Fibers {
   fn open() -> Fibers;
@@ -1315,6 +1381,9 @@ export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises
 /// row and absent from the result's. The region is an ordinary binding of this
 /// function, so it ends when this function does — including when `body` raises
 /// and the error passes straight through.
+///
+/// **Cannot be called yet**, for the reason on `nursery`: a thunk cannot
+/// receive a capability from the function it is passed to.
 export fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A
   with 'e
   raises 'r

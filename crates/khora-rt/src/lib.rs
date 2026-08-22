@@ -578,7 +578,7 @@ struct Finalizer {
 /// Held Rust-side rather than as a Khora list because deferring *grows* it, and
 /// nothing in Khora can grow a value in place. The Khora object is a handle:
 /// one field holding a pointer to this.
-type Finalizers = Vec<Finalizer>;
+type Finalizers = Mutex<Vec<Finalizer>>;
 
 /// The tag every region object carries. Regions are not an ADT, so no variant
 /// index competes for it.
@@ -688,9 +688,17 @@ pub unsafe extern "C" fn khora_region_defer(
     if list.is_null() {
         fatal("deferring a finalizer to a region that has already been released");
     }
-    // SAFETY: as above; the box is alive until the region is released, and no
-    // other reference to it exists — the field is the only handle.
-    unsafe { (*list).push(Finalizer { closure, glue }) };
+    // Locked, because a region is shareable and so two fibers may defer to one
+    // at the same moment: a fiber that acquires a connection wants it released
+    // by the scope that outlives it, which is the whole point of handing a
+    // `Scope` across. `std::core::Share`.
+    //
+    // Uncontended almost always, and a region is not a hot path — it is
+    // touched when a resource is acquired, not when one is used.
+    //
+    // SAFETY: as above; the box is alive until the region is released, and the
+    // field is the only handle to it.
+    unsafe { (*list).lock().unwrap_or_else(|e| e.into_inner()).push(Finalizer { closure, glue }) };
 }
 
 /// Runs a region's finalizers and frees its list.
@@ -730,6 +738,7 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
     // SAFETY: the pointer came from `Box::into_raw` in `khora_region_open` and
     // has not been freed — the null check above is what guarantees that.
     let list = unsafe { Box::from_raw(list) };
+    let list = list.into_inner().unwrap_or_else(|e| e.into_inner());
     for finalizer in list.into_iter().rev() {
         // SAFETY: a closure's first field is its code pointer, and a `() -> ()`
         // closure is called with its own object as the only argument. This is
@@ -883,7 +892,12 @@ pub const CANCELLED_WHICH: u32 = u32::MAX;
 struct FiberState {
     /// `None` once joined. Joining twice is not an error — the second is a
     /// no-op — because the handle's release joins whatever `join` did not.
-    thread: Option<std::thread::JoinHandle<()>>,
+    ///
+    /// Behind a lock because `Fiber` is `Share`: two fibers may hold one handle
+    /// and both call `join`, and "take the handle if it is there" is exactly
+    /// the read-modify-write that has to happen once. Without it both could see
+    /// `Some` and join the same thread twice.
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// The child's flag, shared with the child so a parent can set it.
     cancel: Arc<AtomicUsize>,
 }
@@ -951,7 +965,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     });
 
     let object = khora_alloc(std::mem::size_of::<*mut FiberState>(), FIBER_TAG);
-    let state: Box<FiberState> = Box::new(FiberState { thread: Some(thread), cancel });
+    let state: Box<FiberState> = Box::new(FiberState { thread: Mutex::new(Some(thread)), cancel });
     // SAFETY: `khora_alloc` returned an object with one field's worth of space,
     // zeroed and aligned, and nothing else holds this pointer yet.
     unsafe {
@@ -993,13 +1007,15 @@ unsafe fn finish_fiber(outcome: Tagged) {
 /// # Safety
 ///
 /// `fiber` must be a live object from [`khora_fiber_spawn`].
-unsafe fn fiber_state<'a>(fiber: *mut u8) -> Option<&'a mut FiberState> {
+unsafe fn fiber_state<'a>(fiber: *mut u8) -> Option<&'a FiberState> {
     if fiber.is_null() {
         return None;
     }
     // SAFETY: the caller guarantees a live handle, whose field holds what
-    // `khora_fiber_spawn` wrote there.
-    unsafe { (*fiber.add(KHORA_FIELD_OFFSET).cast::<*mut FiberState>()).as_mut() }
+    // `khora_fiber_spawn` wrote there. Shared rather than exclusive: the handle
+    // is shareable, so another fiber may be inside this state at the same
+    // moment and a `&mut` would be undefined behaviour on its own.
+    unsafe { (*fiber.add(KHORA_FIELD_OFFSET).cast::<*mut FiberState>()).as_ref() }
 }
 
 /// Waits for a fiber to finish.
@@ -1015,7 +1031,8 @@ unsafe fn fiber_state<'a>(fiber: *mut u8) -> Option<&'a mut FiberState> {
 pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
-    if let Some(thread) = state.thread.take() {
+    let taken = state.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(thread) = taken {
         // A child that panicked has already reported it; there is nothing this
         // fiber can do with the payload, and turning it into a parent panic
         // would lose the child's message behind a second one.
@@ -1064,8 +1081,9 @@ pub unsafe extern "C" fn khora_fiber_release(fiber: *mut u8) {
         }
         slot.write(std::ptr::null_mut());
 
-        let mut state = Box::from_raw(state);
-        if let Some(thread) = state.thread.take() {
+        let state = Box::from_raw(state);
+        let taken = state.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(thread) = taken {
             let _ = thread.join();
         }
     }
@@ -1084,7 +1102,7 @@ extern "C" fn fiber_release_shim(fiber: *mut u8) {
 ///
 /// Held Rust-side for the same reason a region's finalizers are: adopting one
 /// *grows* the list, and nothing in Khora grows a value in place.
-type Crew = Vec<Handed>;
+type Crew = Mutex<Vec<Handed>>;
 
 /// The tag every nursery object carries.
 const FIBERS_TAG: u32 = 0;
@@ -1094,13 +1112,13 @@ const FIBERS_TAG: u32 = 0;
 /// # Safety
 ///
 /// `fibers` must be a live object from [`khora_fibers_open`].
-unsafe fn crew<'a>(fibers: *mut u8) -> Option<&'a mut Crew> {
+unsafe fn crew<'a>(fibers: *mut u8) -> Option<&'a Crew> {
     if fibers.is_null() {
         return None;
     }
     // SAFETY: the caller guarantees a live handle, whose field holds what
     // `khora_fibers_open` wrote there.
-    unsafe { (*fibers.add(KHORA_FIELD_OFFSET).cast::<*mut Crew>()).as_mut() }
+    unsafe { (*fibers.add(KHORA_FIELD_OFFSET).cast::<*mut Crew>()).as_ref() }
 }
 
 /// Opens a nursery: a set of fibers that ends when the binding holding it does.
@@ -1135,7 +1153,9 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
     let Some(list) = (unsafe { crew(fibers) }) else {
         fatal("adopting a fiber into a nursery that has already ended");
     };
-    list.push(Handed(fiber));
+    // Locked: a nursery exists to be adopted into from more than one fiber, so
+    // this is the one place contention is expected rather than incidental.
+    list.lock().unwrap_or_else(|e| e.into_inner()).push(Handed(fiber));
 }
 
 /// Waits for every fiber in the nursery, oldest first, and empties it.
@@ -1152,12 +1172,25 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
 pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) {
     // SAFETY: the caller guarantees a live nursery.
     let Some(list) = (unsafe { crew(fibers) }) else { return };
-    for Handed(fiber) in std::mem::take(list) {
-        // SAFETY: each handle was live when adopted and this list has held the
-        // only reference since.
-        unsafe {
-            khora_fiber_join(fiber);
-            khora_drop(fiber, Some(fiber_release_shim));
+    // **Drained in rounds, until a round finds nothing.** A child may adopt a
+    // fiber of its own while this one is waiting — that is what a shareable
+    // nursery is for — and a single pass would return with that grandchild
+    // still running, which is precisely the promise a nursery makes.
+    //
+    // Taken under the lock and joined outside it, because holding the lock
+    // across a join would deadlock against exactly that adoption.
+    loop {
+        let waiting = std::mem::take(&mut *list.lock().unwrap_or_else(|e| e.into_inner()));
+        if waiting.is_empty() {
+            return;
+        }
+        for Handed(fiber) in waiting {
+            // SAFETY: each handle was live when adopted and this list has held
+            // the only reference since.
+            unsafe {
+                khora_fiber_join(fiber);
+                khora_drop(fiber, Some(fiber_release_shim));
+            }
         }
     }
 }
@@ -1189,13 +1222,22 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
         }
         slot.write(std::ptr::null_mut());
 
+        // Same rounds as `khora_fibers_wait`, for the same reason: a child
+        // being cancelled runs its finalizers on the way out, and one of those
+        // may still be adopting. The list is this function's alone now — the
+        // slot was nulled above — so each round takes what the last one did not
+        // know about.
         let list = Box::from_raw(list);
-        for Handed(fiber) in list.iter() {
-            khora_fiber_cancel(*fiber);
-        }
-        for Handed(fiber) in list.into_iter() {
-            khora_fiber_join(fiber);
-            khora_drop(fiber, Some(fiber_release_shim));
+        let mut round = std::mem::take(&mut *list.lock().unwrap_or_else(|e| e.into_inner()));
+        while !round.is_empty() {
+            for Handed(fiber) in round.iter() {
+                khora_fiber_cancel(*fiber);
+            }
+            for Handed(fiber) in round {
+                khora_fiber_join(fiber);
+                khora_drop(fiber, Some(fiber_release_shim));
+            }
+            round = std::mem::take(&mut *list.lock().unwrap_or_else(|e| e.into_inner()));
         }
     }
 }

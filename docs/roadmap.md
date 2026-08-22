@@ -1010,20 +1010,43 @@ can be written before anything needs TLS.
   `Ord for String` and the string hash are all loops now, and a 100 KB slice
   works. `Array::prefix` also trapped on an empty array, which is fixed.
 
-  **A fiber per connection is impossible**, and that is 8.13.
+  **A fiber per connection was impossible**, and that was 8.13.
 
-- **8.13 No capability can cross into a fiber — open.**
-  `docs/design/sharing.md`. An effect is a record of function types, a closure
-  is unshareable because its captures are not in its type, so **every handler
-  is unshareable and a fiber can never be spawned from a function that has
-  one**. That is the shape of every concurrent server, and it is why the HTTP
-  server serves one connection at a time.
+- **8.13 What may cross into a fiber — decided, and three holes closed.**
+  `docs/design/sharing.md`. An effect is a record of function types and a
+  closure is unshareable because its captures are not in its type, so **every
+  handler was unshareable and a fiber could never be spawned from a function
+  holding one** — the shape of every concurrent server.
 
-  Neither half is wrong on its own and the combination is not something anybody
-  chose. The fix is a soundness rule and wants deciding deliberately; the
-  options and a recommendation are in the doc. The diagnostic at least states
-  the real reason now, rather than sending a reader to look for a `mut` that is
-  not there.
+  Decided: the question is asked where the thing being asserted is *visible*.
+  An effect is shareable, paid for by checking each operation at the
+  `handler for` literal; a closure that has to be forwarded is wrapped by
+  `SharedFn::of`, checked the same way, which is how a `Router` full of
+  handlers now crosses. Rejected: a shareability bit in the function type,
+  which colours every container of a function; and a blanket ban on capturing
+  anything writable, which passed the whole corpus and would still have made
+  an ordinary accumulating callback illegal.
+
+  An outside review of the first attempt found three ways to get an unshareable
+  value onto another fiber, all of which compiled and raced:
+
+  - **An opaque type answered "yes" for want of anything to look at.** `Array`
+    is written through `Array::set` and `Ptr` points at foreign memory; both
+    are bodyless. A type with no body is now unshareable until `impl Share`,
+    which may only be written where there is nothing to check.
+  - **A generic function laundered anything.** `fn f<A>(v: A) -> Fiber` spawned
+    with `v` captured, and `A` was assumed shareable. It now needs `A: Share`.
+  - **A pre-bound closure bypassed handler certification.** `let leak = fn ..`
+    then `handler for C { op: leak }` had nothing at the literal to look at,
+    and was accepted. Refused now.
+
+  The runtime owes what the impls promise, so `Region`, the nursery and a fiber
+  handle all take locks, and `khora_fibers_wait` drains in rounds — a child may
+  adopt while its parent is waiting, and one pass would return with a
+  grandchild still running.
+
+  The HTTP server answers on a fiber per connection, pinned by a client that
+  connects and says nothing while another is served past it.
 
 **Exit — the real one.** *You can write a useful program.* The served request
 below is a milestone rather than the criterion: it proved the stack works end
@@ -1160,10 +1183,16 @@ they will be missed:
   puts a length byte where the others put half the family.
 - **Processes**, for a program that runs another one, and **randomness**, which
   every server needs before it needs most of what is above.
+- **`Shared<A>`.** The sharing rules refuse a stateful test double, a cache and
+  a counter on purpose. This is what they are refusing them *until*, and its
+  API has to release under a raise and under cancellation.
+- **Evidence parameters for a lambda.** A capability is a lexical binding, so a
+  thunk cannot receive one from the function it is passed to:
+  `std::core::nursery` and `scoped` cannot be called, and `Router::listen`
+  writes their `with` block out by hand instead.
 
-None of it needs a decision. All of it is library work over a language that
-came out of phase 8 in good shape — the gaps that phase found were three
-compiler bugs, and they are fixed.
+The last two need a decision; the rest is library work over a language that
+came out of phase 8 in good shape.
 
 ---
 

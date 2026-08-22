@@ -72,6 +72,9 @@ pub const ARRAY_HEADER_FIELDS: u64 = khora_rt::ARRAY_HEADER_FIELDS as u64;
 /// emptied it, so one object means both without being told which happened.
 pub const FIBERS_TYPE: &str = "Fibers";
 
+/// The certified-closure wrapper, which is a closure and nothing else.
+pub const SHARED_FN_TYPE: &str = khora_types::SHARED_FN_TYPE;
+
 /// The type name of a region. Not an ADT: it is a handle the runtime owns,
 /// and the only thing generated code does with one is hand it back and let it
 /// be released.

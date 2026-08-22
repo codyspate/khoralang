@@ -50,7 +50,7 @@ fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceF
 /// `echo` reports what the parser made of the request, one field per line, so
 /// a single response can be read for several separate claims.
 const SERVER: &str = "module demo::main;
-import std::core::{Option, Scope};
+import std::core::{Option, SharedFn};
 import std::net::http::{HttpError, Request, Response, Router};
 
 fn print(value: String);
@@ -74,16 +74,15 @@ fn body_size(req: Request) -> Response {
 }
 
 export fn main() raises HttpError {
-  // `listen` wants a `Scope` for the same reason the reference application
-  // does: binding a socket is a resource, and a resource wants a region to
-  // outlive it. The root one is the process, which is this server's lifetime.
-  with { scope: Scope::root } {
-    Router::new()
-      |> Router::get(\"/echo/:who\", echo)
-      |> Router::get(\"/tagged\", tagged)
-      |> Router::post(\"/size\", body_size)
-      |> Router::listen(@PORT@)!
-  }
+  // No `with` block: `listen` opens the nursery it needs itself, and these
+  // handlers want no capabilities. `SharedFn::of` is what each mount says
+  // instead — the certificate that lets the whole router cross into the fiber
+  // that answers a connection.
+  Router::new()
+    |> Router::get(\"/echo/:who\", SharedFn::of(echo))
+    |> Router::get(\"/tagged\", SharedFn::of(tagged))
+    |> Router::post(\"/size\", SharedFn::of(body_size))
+    |> Router::listen(@PORT@)!
 }
 ";
 
@@ -293,6 +292,34 @@ fn the_server_reads_what_a_client_actually_sends() {
     // --- nonsense on the wire
     let answer = ask(b"not a request at all\r\n\r\n");
     assert!(answer.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{answer}");
+
+    // --- a slow client does not hold up the next one
+    //
+    // No clock and no sleep: this connection is opened and nothing is sent on
+    // it, so whichever fiber accepted it is parked inside its very first
+    // `recv` until the last two lines of this test. A server that answered one
+    // connection at a time would be inside that read too, and everything below
+    // would wait behind it until the deadline.
+    //
+    // Before `SharedFn` this could not be written. A `Router` holds its
+    // handlers, a closure's captures are not in its type, and so the router
+    // could not be handed to the fiber that makes this work — the server
+    // served one caller at a time and said so in a comment.
+    let mut silent = connect().expect("could not reach the server");
+
+    let answer = ask(b"GET /tagged HTTP/1.1\r\n\r\n");
+    assert_eq!(
+        body_of(&answer),
+        "tagged",
+        "a second client was answered while the first had not said anything: {answer}"
+    );
+
+    // The parked fiber was waiting, not lost.
+    silent.write_all(b"GET /tagged HTTP/1.1\r\n\r\n").expect("the request, at last");
+    silent.flush().expect("flush");
+    let mut late = String::new();
+    silent.read_to_string(&mut late).expect("reading the late answer");
+    assert_eq!(body_of(&late), "tagged", "the connection that waited was answered too: {late}");
 
     // --- and it is still serving after all of that
     let answer = ask(b"GET /tagged HTTP/1.1\r\n\r\n");

@@ -1,116 +1,187 @@
 # What may cross into a fiber
 
-**An open question, not a decision.** The most important one the language has
-right now, because the two things it is proudest of do not compose.
+**Decided.** Fibers are operating-system threads today (`khora-rt`), so every
+rule here is about a data race that can happen now, not one that might later.
 
-## The state of it
+> A value may be held by two fibers when this compiler can see that nothing can
+> write it. Where it cannot see — a closure's captures, a type with no body, a
+> type the caller chooses — the answer is *no* until somebody writes down why
+> not, at the one place where the thing being asserted is visible.
 
-`docs/design/memory.md` §5a says a value may cross into a fiber only if it
-cannot be written, because two fibers writing one value is a race and atomic
-refcounts (D10) protect the count rather than the fields. That rule is right.
+## The problem it solves
 
-Its implementation says something wider:
+`docs/design/memory.md` §5a says a value may cross only if it cannot be written:
+two fibers writing one value is a race, and atomic refcounts (D10) protect the
+count rather than the fields. Right, and easy to check for a record — it has a
+`mut` field or it does not.
 
-```rust
-Type::Fn { .. } => false,
-```
+A closure is the hard case, because **what it captured is not in its type**.
+`(Request) -> Response` says nothing about whether the thing behind it holds a
+counter somebody else is incrementing. The conservative answer is to refuse
+every function type, and taken alone that is right too.
 
-A closure is refused because **what it captured is not in its type**. Nothing at
-the type level can see whether a closure holds a `mut` record, so the
-conservative answer is no. Also right, taken alone.
+Together the two said something nobody intended:
 
-Together they say something nobody intended:
+> No capability can ever cross into a fiber.
 
-> **No capability can ever cross into a fiber.**
+An effect *is* a record of function types — the whole of
+`docs/design/effects.md`'s shape decision — so every handler is a record of
+closures, so every handler was unshareable, so a fiber could not be spawned from
+any function holding one. The two features this language is proudest of did not
+compose, and an HTTP server answered one caller at a time.
 
-An effect *is* a record of function types — that is the whole of
-`docs/design/effects.md`'s shape decision — so every handler holds closures, so
-every handler is unshareable, so a fiber can never be spawned from a function
-that has one.
+## What was rejected
 
-```khora
-export fn forked<'r>(id: Int) -> () with { 'r | ledger: Ledger } {
-  let f = Fiber::spawn(fn () => print(report(id)));   // refused
-  Fiber::join(f);
-}
-```
+**A shareability bit in the function type, inferred.** Sound, and it *colours*:
+a `Router` holds a handler, so `Router` carries the handler's bit, and so does
+every container of a function above it. Colouring is the thing the rows exist to
+avoid, and buying concurrency with it would trade this language's best property
+for its second-best.
 
-This is not a corner. It is *the* shape of a concurrent server: a request
-arrives, a fiber handles it, and the handler needs the database. `std::net::http`
-serves one connection at a time for exactly this reason, and `Fiber::spawn` sits
-unused three lines away.
-
-Found by the agent writing the HTTP server; the diagnostic now states the real
-reason rather than "can be written", which sent a reader looking for a `mut`
-that was not there.
-
-## Why it is not a one-line fix
-
-Making `Type::Fn` shareable is unsound. A closure may capture a `mut` record,
-and then two fibers write it:
+**Refusing any closure that captures something writable, everywhere.** Tried,
+and the whole corpus passed — which is exactly how a bad rule looks from inside
+a small codebase written in one idiom. It makes every closure shareable by
+construction, at the price of making
 
 ```khora
-let tally = { mut count: 0 };
-let bump = fn () => { tally.count = tally.count + 1; };
-Fiber::spawn(bump);
-Fiber::spawn(bump);   // a race, and nothing said so
+items.each(fn item => { total.sum = total.sum + item; })
 ```
 
-So the question is how to tell that closure from a handler that captured
-nothing but other functions.
+illegal in a program that never spawns anything. Rust allows that; a language
+whose thesis is to beat Rust's ergonomics cannot forbid it to make concurrency
+easier. Backed out.
 
-## The options
+## What is decided
 
-**A. Check the captures at the spawn.** The checker already records what each
-lambda captured, and `check_spawnable` already walks that list. Extend it: a
-captured *closure* is shareable if the checker can see what *it* captured and
-those are shareable.
+### An effect is shareable, and the handler pays for it
 
-Cheap, and it does not solve the case above: `ledger` in `forked` arrived as an
-evidence parameter, so its captures were decided in another function and are not
-visible here. It would unblock a handler built and spawned in the same body,
-which is the smaller half.
+`handler for Ledger { .. }` is the one place a capability comes into existence,
+and its operations are written right there — so the captures are on the screen
+and can be checked. Answered once, where it is answerable, instead of at every
+spawn where it is not.
 
-**B. Put shareability in the function type.** `Type::Fn` gains a bit: this
-closure captures nothing unshareable. A lambda's bit is computed from its
-captures; a written function type declares one; an effect's operations declare
-theirs, and a handler that captures something unshareable fails to satisfy an
-effect whose operations are declared shareable.
+The check has teeth only if it cannot be dodged, so an operation must be a
+closure **written at that literal** or a named function. A binding holding one:
 
-Sound, complete, and checkable — and it is a new thing in every function type,
-which is the kind of change that shows up in error messages for years. It is
-also the honest one: shareability *is* a property of the value, and the type is
-where properties of values go.
+```khora
+let leak = fn () => bump(tally);
+handler for Counting { tick: leak }     // refused
+```
 
-**C. Make it a capability question rather than a type question.** A handler is
-built by `with { .. }`, and that is a place a rule could live: an effect could
-be declared *shareable*, and installing a handler for it would then require the
-handler's captures to be shareable — checked once, where the handler is written,
-rather than at every spawn.
+was written elsewhere and took its captures with it. Refused for want of
+anything to look at, rather than waved through.
 
-Narrower than B and aimed exactly at the case that matters. It does nothing for
-an ordinary closure crossing a fiber, which A does.
+The cost is real and stated: a handler may not capture something writable, so a
+test double that counts its calls in a `mut` field is refused. `Shared<A>` is
+what that is waiting on.
 
-**D. Say no, and mean it.** Keep the rule, and make a fiber take its
-capabilities as *arguments* rather than captures — the thunk is
-`() -> ()`, so this would mean a spawn form that passes them explicitly and a
-handler built inside the fiber. Honest, and it moves the problem rather than
-solving it: something still has to hand the new fiber a `Ledger`.
+### A type with no body has to say so
 
-## What I would do
+`export type Array<A>;` has no visible fields, and answering "shareable" because
+none can be seen was wrong in the direction that matters. `Array::set` writes.
+`Ptr` points at memory this language did not allocate. A runtime handle may need
+a lock of its own. All three looked safe until this rule existed, and two fibers
+writing one array compiled and raced.
 
-**B, with A as the thing that makes B's default bearable.** The bit belongs in
-the type because that is what it is a property of, and inference can fill it in
-for every lambda so that almost nobody writes it. A and C are each half of B
-arrived at cheaply, and half of a soundness rule is the kind of thing that is
-still there in three years.
+So a declared type with no body is unshareable until `impl Share for T`.
 
-But it is a change to every function type in the language, and the language has
-had one full night of use. It should be decided deliberately, with the HTTP
-server as the case to satisfy, and not at the end of a long session.
+`Share` is a marker: no methods, and implementing it asserts rather than
+provides. It is therefore **not an ordinary impl**, and may only be written
+where there is nothing to check — a type with no body. For anything this
+compiler can see into, the answer is derived and an impl is refused, because the
+only thing it could add is a lie about a record with a `mut` field.
 
-## Until then
+Nobody writes it for a record, a variant or a tuple: those are shareable exactly
+when their contents are, and a `Share` bound is satisfied by looking rather than
+by finding an impl. Derived where derivable, asserted only where it must be.
 
-`std::net::http` serves one connection at a time and says why. That is the only
-place in the standard library the limitation bites today, and it bites
-everything anybody writes on top of it.
+Declared today, each with its reason: `Fibers` and `Region` (both take a lock —
+see below), `Fiber` (every operation is a message to the runtime), and
+`SharedFn`.
+
+### A type the caller chooses has to be required
+
+```khora
+fn launder<A>(v: A) -> Fiber { Fiber::spawn(fn () => sink(v)) }
+```
+
+handed a caller's mutable record to another fiber with nothing to say about it.
+`A` is shareable exactly when the signature wrote `A: Share` — the same bound
+Rust spells `Send`, checked the same way, and the only place in this design
+where a signature has to carry anything.
+
+### `SharedFn` reifies the proof
+
+The router is the case none of the above reaches. Its handlers arrive as a
+parameter of `Router::get`, so by the time the `Route` record is built the
+closure was written somewhere else. The handler cannot borrow the `handler for`
+trick, and the whole router was stuck on one fiber.
+
+```khora
+export type SharedFn<A, B, 'e>;
+impl<A, B, 'e> Share for SharedFn<A, B, 'e> {}
+```
+
+`SharedFn::of` takes a closure written at the call — checked exactly as a
+handler operation is — and returns something that has forgotten it was ever a
+closure. A `Route` holding one is shareable in the ordinary structural way, with
+nothing special said anywhere about routers:
+
+```khora
+Router::new()
+  |> Router::post("/analyze/:id", SharedFn::of(fn request => handle(request)!))
+  |> Router::listen(8080)!
+```
+
+The wrapper does not exist at runtime: `of` returns its argument and `call` is
+an ordinary closure call. The whole of what it does happened in the checker.
+
+The cost is the visible wrapper at the mount site. That is the honest price, and
+it is paid only by the APIs that actually forward a closure across a fiber
+rather than by every container of a function in the language.
+
+### A `_` arm on `catch`
+
+Not a sharing rule, but the server needed it and nothing else could express it.
+A supervisor recovers from work whose failures are the *caller's* choice, so
+there is no constructor to name:
+
+```khora
+Router::answer_on(router, connection) catch { _ => respond_500() }
+```
+
+`_` subtracts the whole row, tail included. Every neighbour has the form
+(`catch_unwind`, `recover`, `catchAll`); this one is checked rather than
+dynamic, and it costs what it should — the arm learns nothing about what went
+wrong, because there is no name to learn it under.
+
+## What the runtime owes
+
+An `impl Share` is a promise the runtime has to keep, so:
+
+- `Region`'s finalizer list and the nursery's child list are behind a `Mutex`.
+  A fiber that acquires a resource wants it released by the scope that outlives
+  it, which is the point of handing a `Scope` across.
+- A fiber handle's join slot is behind a `Mutex`: two fibers may hold one handle
+  and both call `join`, and "take it if it is there" has to happen once.
+- `khora_fibers_wait` drains in **rounds** until a round finds nothing. A child
+  may adopt a fiber of its own while the parent is waiting — that is what a
+  shareable nursery is for — and a single pass would return with a grandchild
+  still running, which is precisely the promise a nursery makes. The lock is
+  never held across a join, or that adoption would deadlock against it.
+
+## What is still open
+
+- **`Shared<A>`**, for the cases the rules above refuse on purpose: a stateful
+  test double, a cache, a counter behind a lock. Its API has to release under a
+  raise and under cancellation, which is what makes it a design rather than a
+  type.
+- **A move-in spawn.** Captures are copied and both fibers keep theirs, so this
+  is `Sync`, not `Send`. A consuming spawn could transfer an otherwise mutable
+  value safely, and would take the pressure off `Shared<A>`.
+- **`Map` cannot cross**, because it mutates its buckets in place. Correct
+  today; a persistent map would simply be shareable, with nothing to declare.
+- **A lambda has no evidence parameters**, so `nursery(fn () => ...)` — a
+  higher-order function that installs a capability *for* its callback — cannot
+  work: a capability is a lexical binding, and the thunk was written before the
+  binding existed. `Router::listen` writes the `with` block out instead.

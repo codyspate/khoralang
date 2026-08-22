@@ -384,6 +384,11 @@ impl Fiber {
 }
 
 export type Fibers;
+export trait Share {}
+/// A nursery is adopted into from more than one fiber; that is what it is for,
+/// and `khora_fibers_adopt` locks. Without this the handler below is refused,
+/// which is the point of the rule — a bodyless type has to say.
+impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
   fn adopt(self, fiber: Fiber) -> ();

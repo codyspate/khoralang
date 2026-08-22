@@ -857,6 +857,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == runtime::FIBERS_TYPE {
                     return self.nursery_intrinsic(&name, args, range);
                 }
+                if owner == runtime::SHARED_FN_TYPE {
+                    return self.shared_fn_intrinsic(site, &name, args, range);
+                }
                 if owner == runtime::ARRAY_TYPE {
                     return self.array_intrinsic(site, &name, args, range);
                 }
@@ -1014,6 +1017,56 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             _ => self.fail(
                 format!("`Region::{name}` is not a region operation the backend knows"),
+                range,
+            ),
+        }
+    }
+
+    /// `SharedFn::of` and `SharedFn::call`.
+    ///
+    /// **The wrapper is not there at runtime.** A `SharedFn<A, B, 'e>` *is* the
+    /// closure — `of` returns its argument untouched and `call` is an ordinary
+    /// closure call — because the whole of what the wrapper does happened in
+    /// the checker, at the one line where the captures were visible. Paying for
+    /// a proof at runtime would be paying twice.
+    ///
+    /// The shape `call` needs is read off the wrapper's own type arguments,
+    /// which monomorphization has already made concrete: `SharedFn<A, B, 'e>`
+    /// says the closure takes an `A`, gives back a `B` and fails with `'e`.
+    fn shared_fn_intrinsic(
+        &mut self,
+        site: ExprId,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        match (name, args) {
+            ("of", [closure]) => Some(self.expr(*closure)?),
+            ("call", [wrapper, argument]) => {
+                let wrapped = self.types.of(*wrapper).clone();
+                let Type::Adt { name: owner, args: parameters } = &wrapped else {
+                    return self.fail(format!("`{wrapped}` is not a `SharedFn`"), range);
+                };
+                if owner != runtime::SHARED_FN_TYPE || parameters.len() < 3 {
+                    return self.fail(format!("`{wrapped}` is not a `SharedFn`"), range);
+                }
+                let signature = FnShape {
+                    params: vec![parameters[0].clone()],
+                    ret: parameters[1].clone(),
+                    // Always empty: a closure captures the capabilities it
+                    // uses, so there is nothing left for a caller to supply.
+                    requires: Type::empty_row(),
+                    raises: parameters[2].clone(),
+                };
+                let closure = self.expr(*wrapper)?.into_pointer_value();
+                let given = vec![self.expr(*argument)?];
+                let invoked =
+                    self.invoke_closure_at(site, *wrapper, closure, &signature, given, range)?;
+                let ret = signature.ret.clone();
+                self.after_invoke(invoked, &ret, range)
+            }
+            _ => self.fail(
+                format!("`SharedFn::{name}` is not an operation the backend knows"),
                 range,
             ),
         }
@@ -3086,12 +3139,28 @@ impl<'ctx> Lower<'_, 'ctx> {
         args: &[ExprId],
         range: TextRange,
     ) -> Flow<'ctx> {
-        let Invoked { raw, fallible } = self.invoke_closure(site, callee, signature, args, range)?;
+        let invoked = self.invoke_closure(site, callee, signature, args, range)?;
+        self.after_invoke(invoked, &signature.ret, range)
+    }
+
+    /// What to do with a closure call that has happened: split its tag if it
+    /// had one, then close the scope holding the closure's reference.
+    ///
+    /// Split out because `SharedFn::call` invokes a closure the source never
+    /// wrote as a call, and two places deciding what a tagged return means is
+    /// how the two come to disagree.
+    fn after_invoke(
+        &mut self,
+        invoked: Invoked<'ctx>,
+        ret: &Type,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let Invoked { raw, fallible } = invoked;
         let result = if fallible {
             let tagged = raw.expect("a fallible closure returns a tagged value");
-            self.split_tagged(tagged, &signature.ret, range)?
+            self.split_tagged(tagged, ret, range)?
         } else {
-            match signature.ret {
+            match ret {
                 Type::Unit => self.be.unit_value(),
                 _ => raw.unwrap_or_else(|| self.be.unit_value()),
             }
