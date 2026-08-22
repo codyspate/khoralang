@@ -1281,3 +1281,145 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "1\n0\n1\n1\n");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- ordering -----------------------------------------------------------
+
+const ORD: &str = "module t;
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
+
+export type Ordering = | Less | Equal | Greater;
+export trait Eq { fn eq(self, other: Self) -> Bool; }
+export trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
+
+export type Version = { major: Int, minor: Int };
+
+impl Eq for Version {
+  fn eq(self, other: Version) -> Bool { self.major == other.major && self.minor == other.minor }
+}
+
+impl Ord for Version {
+  fn cmp(self, other: Version) -> Ordering {
+    if self.major < other.major { Ordering::Less }
+    else if self.major > other.major { Ordering::Greater }
+    else if self.minor < other.minor { Ordering::Less }
+    else if self.minor > other.minor { Ordering::Greater }
+    else { Ordering::Equal }
+  }
+}
+
+fn show(flag: Bool) -> () { khora_print_int(if flag { 1 } else { 0 }); }
+";
+
+/// **`<` on a type with a shape is `Ord::cmp`**, the same bargain `==` makes
+/// with `Eq`. What "less than" means for a type is the type's answer, and
+/// `Ord: Eq` is the trait saying the two have to agree.
+///
+/// One call decides all four operators, which is what the three-way `Ordering`
+/// is for.
+#[test]
+fn ordering_an_adt_calls_its_ord_impl() {
+    let ran = run(
+        "ord_adt",
+        &format!(
+            "{ORD}
+fn main() -> Int {{
+  let early: Version = {{ major: 1, minor: 2 }};
+  let later: Version = {{ major: 1, minor: 9 }};
+  show(early < later);
+  show(later < early);
+  show(early > later);
+  show(later > early);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n0\n0\n1\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `<=` is *not* "less or equal" spelled out; it is "not greater". Two tests
+/// rather than one, the same answer, so the cheaper one wins — and equality is
+/// where it shows.
+#[test]
+fn the_inclusive_operators_are_the_others_negated() {
+    let ran = run(
+        "ord_inclusive",
+        &format!(
+            "{ORD}
+fn main() -> Int {{
+  let same: Version = {{ major: 2, minor: 0 }};
+  let also: Version = {{ major: 2, minor: 0 }};
+  show(same <= also);
+  show(same >= also);
+  show(same < also);
+  show(same > also);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n1\n0\n0\n", "equal is both inclusive and neither strict");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The `Ordering` a comparison produces is a heap object, and it is released.
+/// One allocation per comparison is what phase 9's reuse analysis exists to
+/// remove; leaking one is a different problem and not this one.
+#[test]
+fn comparing_leaves_nothing_behind() {
+    let ran = run(
+        "ord_leaks",
+        &format!(
+            "{ORD}
+fn count_below(limit: Version, at: Int, seen: Int) -> Int {{
+  if at >= 20 {{
+    seen
+  }} else {{
+    let here: Version = {{ major: 1, minor: at }};
+    count_below(limit, at + 1, if here < limit {{ seen + 1 }} else {{ seen }})
+  }}
+}}
+
+fn main() -> Int {{
+  let limit: Version = {{ major: 1, minor: 7 }};
+  khora_print_int(count_below(limit, 0, 0));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "7\n1\n", "twenty comparisons, and only `limit` still alive");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Without an impl there is nothing to call, and the checker says so where the
+/// comparison is.
+#[test]
+fn ordering_without_an_impl_is_refused() {
+    let found = refused(
+        "ord_missing",
+        "module t;
+extern fn khora_print_int(value: Int);
+
+export type Ordering = | Less | Equal | Greater;
+export trait Eq { fn eq(self, other: Self) -> Bool; }
+export trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
+
+export type Version = { major: Int };
+
+fn main() -> Int {
+  let a: Version = { major: 1 };
+  let b: Version = { major: 2 };
+  khora_print_int(if a < b { 1 } else { 0 });
+  0
+}
+",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("no `Ord` impl") && m.contains("impl Ord for Version")),
+        "expected the missing impl to be named, got {found:?}"
+    );
+}

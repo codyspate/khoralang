@@ -957,8 +957,48 @@ can be written before anything needs TLS.
   twelve `cannot find module` errors to six real ones, which is now the list
   phase 8 is working through.
 
-**Exit — met.** The reference application runs and serves a request, pinned by
-`the_reference_application_serves_a_request`. A real socket, a real request
+- **8.9 What a program is told, and what time it is.** `std::env`: arguments,
+  environment variables, and a clock, as two capabilities — `Env` for what the
+  process was handed, `Clock` for the time, because they are different things
+  to deny a dependency and a test usually wants to pin them differently.
+
+  **This is the smallest thing separating a program from a demo.** Until it
+  existed, nothing a Khora program did could depend on anything outside its own
+  source: every path, port and setting was compiled in. Almost all of it is ISO
+  C — `getenv`, `strlen`, `memcpy`, `time` — and the one exception is the
+  argument vector, which no C function returns because it arrives through
+  `main` and is gone. So the generated `main` takes `argc` and `argv` and hands
+  them to the runtime first thing.
+- **8.10 Numbers as text, and order.** `Float::to_string`, which a program
+  could `print` but could not put in a message; **`<` reaching an `Ord` impl**,
+  the same bargain `==` makes with `Eq`, resolved through a bound inside a
+  generic function so `A: Ord` means what it looks like; `Ord for String` by
+  byte order; and `List::sort`, a stable merge sort in Khora.
+
+  The sort was not stable at first. It split by dealing alternately, which is
+  one pass and needs no length — and puts two equal elements at positions 1 and
+  2 into *different* halves with the later one on the left, so a merge that
+  ties towards the left swaps them. The test said so. It counts to the middle
+  now.
+
+- **8.11 JSON.** `std::json`, written in Khora: `encode`, a recursive-descent
+  `parse` reporting a byte offset, and accessors. Complete on escapes both ways
+  including surrogate pairs, because a parser that cannot read an emoji is not
+  one. Numbers accumulate as `Float` throughout — an `Int` accumulator is exact
+  for small values and *traps* on overflow, and a parser that dies on input it
+  was handed is not a parser either.
+
+  It found errata 44: a variant payload narrower than a word was read as an
+  `i64` and stored into its own smaller slot, writing over the frame. A leak in
+  `Option<Bool>` was the symptom and a stack buffer overflow was the cause.
+
+**Exit — the real one.** *You can write a useful program.* The served request
+below is a milestone rather than the criterion: it proved the stack works end
+to end and it measured the compiler, not the library. What the library still
+owes is in "Not yet" at the end of this section.
+
+**Milestone — met.** The reference application runs and serves a request,
+pinned by `the_reference_application_serves_a_request`. A real socket, a real request
 line, `/analyze/:account_id` matched and its parameter bound, the handler run
 with the `ai` and `ledger` capabilities its signature asked for, the ledger
 flagged, and a 200 with a JSON body whose `Content-Length` is its actual
@@ -1070,6 +1110,27 @@ them was in the part anybody was worried about.
   Missing impls are reported where the comparison is, not where the code
   generator gives up. Ordering — `<`, `>` — still does not reach `Ord`; the
   message says so now instead of claiming `==` is refused too.
+
+### Not yet
+
+What still stands between here and a program somebody would use, in the order
+they will be missed:
+
+- **A growable list.** `Array<A>` is fixed and `List<A>` is a chain of
+  allocations. A vector is `{ mut items: Array<A>, mut len: Int }` and a test
+  already writes one; `std` should.
+- **`derive`.** Every `Eq`, `Ord`, `Show` and `Hash` is written out by hand,
+  which is a tax that grows with the program rather than with the language.
+- **A finer clock.** `time` is whole seconds because that is what ISO C offers.
+  Anything that measures itself needs milliseconds, which is per-target.
+- **macOS.** `std::net::socket` has Windows and Linux; a `sockaddr_in` there
+  puts a length byte where the others put half the family.
+- **Processes**, for a program that runs another one, and **randomness**, which
+  every server needs before it needs most of what is above.
+
+None of it needs a decision. All of it is library work over a language that
+came out of phase 8 in good shape — the gaps that phase found were three
+compiler bugs, and they are fixed.
 
 ---
 

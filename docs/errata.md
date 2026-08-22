@@ -1027,3 +1027,53 @@ nothing exercises is a feature nobody has checked**, and the way to find that
 class is to ask what the corpus has never contained. This one was found by an
 HTTP client refusing to parse a response — three layers and a socket away from
 a `trim_matches` call.
+
+## 44. A one-byte slot and an eight-byte store
+
+`Option::Some(true).unwrap_or(false)` leaked an object. `Option::Some(7)` and
+`Option::Some(1.5)` did not. That is a strange enough shape to be worth
+following, and what was underneath it was not a leak.
+
+Binding a variant's payload read the field at the type the *variant declared*.
+`Option::Some(value: A)` declares `A`, and `A` has no machine type, so the read
+fell back to `i64`:
+
+```llvm
+%v = alloca i1, align 1                    ; the binding, one byte
+%field = load i64, ptr %field.ptr          ; the payload, eight
+store i64 %field, ptr %v, align 8          ; seven bytes into the frame
+```
+
+The seven bytes went over whatever the frame had put next, which was the slot
+holding the scrutinee. So the release at the end of the `match` dropped a
+pointer that had been overwritten, and the object was never freed. **The leak
+was the symptom; the bug was a stack buffer overflow**, and it had been there
+for every payload narrower than a word since generics landed.
+
+Nothing caught it because everything else is word-sized *by accident*. `Int` is
+eight bytes and matches. `Float` is eight bytes, so the bits make the round trip
+through an `i64` and come back correct — right for the wrong reason, and a test
+that only checked the value would have passed. `Bool` is the one type where the
+slot is smaller than the store, and `U8` through `I32` would have been too, had
+anything put one in an `Option` yet.
+
+The fix is to stop asking the declaration. The checker already recorded the
+specialized type of every bound local — `v` in `Option::Some(v)` at
+`Option<Bool>` is a `Bool` and the checker knows it — so the binding's own type
+is right there and always exact.
+
+Two rules, and the second is the general one:
+
+**A type parameter has no machine type, and a default is a guess.** Falling back
+to `i64` reads as caution and is not: it is correct for word-sized things and
+silent memory corruption for everything else. Where a type must be known, it has
+to be *looked up*, not assumed.
+
+**An accident that holds for every case you tried is not a rule.** Four of the
+five payload types worked, one of them for a reason that had nothing to do with
+being right. The way to find that class is to ask which case is *shaped*
+differently rather than which case failed — and a narrow integer is shaped
+differently from everything else the language had.
+
+Found by the agent writing `std::json`, from a single stubborn `1` in a live
+count where every other number in the file was `0`.

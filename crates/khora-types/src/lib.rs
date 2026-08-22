@@ -1958,10 +1958,22 @@ impl<'a> Checker<'a> {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 let left = self.infer(lhs);
                 self.expect(rhs, &left, "this comparison");
-                if matches!(op, BinOp::Eq | BinOp::Ne) {
-                    let left = self.unifier.zonk(&left);
-                    if needs_an_eq_impl(&left) {
-                        self.require_eq(site, &left, self.body.range(site));
+                let zonked = self.unifier.zonk(&left);
+                let asks = match op {
+                    BinOp::Eq | BinOp::Ne => needs_an_eq_impl(&zonked),
+                    _ => needs_an_ord_impl(&zonked),
+                };
+                if asks {
+                    let range = self.body.range(site);
+                    match op {
+                        BinOp::Eq | BinOp::Ne => {
+                            self.require_comparison(site, "Eq", "eq", &zonked, range)
+                        }
+                        // Ordering is `Ord::cmp`, for the same reason equality
+                        // is `Eq::eq`: what "less than" means for a type is the
+                        // type's answer, and `Ord: Eq` is the trait saying the
+                        // two have to agree.
+                        _ => self.require_comparison(site, "Ord", "cmp", &zonked, range),
                     }
                 }
                 Type::Bool
@@ -1974,34 +1986,57 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolves the `Eq` impl that `==` on this type will call.
+    /// Resolves the impl that a comparison operator on this type will call.
     ///
     /// **`==` on a scalar is a machine instruction; on anything else it is
-    /// `Eq::eq`.** That keeps one meaning for the operator rather than two: a
-    /// type decides what equality means for it, in Khora, in a function a
-    /// reader can go and look at. `impl Eq for Int` is written *in terms of*
-    /// `==` and not the other way round, which is what stops the rule being
-    /// circular — and is why `Float` can have the operator without the trait.
+    /// `Eq::eq`, and `<` is `Ord::cmp`.** That keeps one meaning for each
+    /// operator rather than two: a type decides what equality and order mean
+    /// for it, in Khora, in a function a reader can go and look at.
+    /// `impl Eq for Int` is written *in terms of* `==` and not the other way
+    /// round, which is what stops the rule being circular — and is why `Float`
+    /// can have the operators without the traits.
     ///
     /// Recorded as an instantiation so that monomorphization emits the impl and
     /// the code generator can find it, exactly as a written `a.eq(b)` would.
-    fn require_eq(&mut self, site: ExprId, ty: &Type, range: TextRange) {
-        const KEY: &str = "Eq::eq";
-        // Reported whether or not the trait is in this file's scope. "There is
-        // no impl" is true either way, and staying quiet here is what let the
-        // reference application reach the code generator before anybody
-        // mentioned that `RiskLevel` cannot be compared.
-        if self.types.traits.find("Eq", ty).is_none() {
+    fn require_comparison(
+        &mut self,
+        site: ExprId,
+        trait_name: &str,
+        method: &str,
+        ty: &Type,
+        range: TextRange,
+    ) {
+        let key = format!("{trait_name}::{method}");
+
+        // Inside a generic function the operand is *rigid*, and the only
+        // comparison it has is the one its bounds promise. Which impl runs is
+        // decided when the function is specialized, exactly as it is for a
+        // written `a.cmp(b)` on a bounded parameter.
+        let available = match ty {
+            Type::Param(param) => self.bounds_on(param).iter().any(|b| b == trait_name),
+            other => self.types.traits.find(trait_name, other).is_some(),
+        };
+        if !available {
+            let advice = match ty {
+                Type::Param(param) => format!("add the bound, as `{param}: {trait_name}`"),
+                other => format!("write `impl {trait_name} for {other}`"),
+            };
+            let operators = if trait_name == "Eq" {
+                "`==` and `!=` have"
+            } else {
+                "`<`, `>`, `<=` and `>=` have"
+            };
             self.error(
-                format!(
-                    "`{ty}` has no `Eq` impl, so `==` has nothing to call. Write \
-                     `impl Eq for {ty}`, or match on it instead"
-                ),
+                format!("`{ty}` has no `{trait_name}` impl, so {operators} nothing to call. {advice}"),
                 range,
             );
             return;
         }
-        let Some(signature) = self.types.signatures.get(KEY).cloned() else { return };
+        // Reported whether or not the trait is in this file's scope. "There is
+        // no impl" is true either way, and staying quiet here is what let the
+        // reference application reach the code generator before anybody
+        // mentioned that `RiskLevel` could not be compared.
+        let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else { return };
 
         // `Self` is the method's first type argument — the same fact
         // `call_signature` relies on — and binding it is what tells
@@ -2011,7 +2046,7 @@ impl<'a> Checker<'a> {
         if let Some(self_arg) = type_args.first() {
             let _ = self.unifier.unify(self_arg, ty);
         }
-        self.instantiations.insert(site, (KEY.to_string(), type_args));
+        self.instantiations.insert(site, (key, type_args));
     }
 
     /// Maps a type's parameters onto the arguments `ty` supplies.
@@ -2093,6 +2128,15 @@ impl<'a> Checker<'a> {
                         );
                     }
                     let (result, mapping) = self.instantiate_adt(&variant.type_name);
+                    // What the constructor is *for* reaches its arguments, by
+                    // way of what it builds: `let b: Option<U8> = Option::Some(200)`
+                    // needs the `200` to be a `U8`, and nothing in
+                    // `Some(value: A)` says so until `Option<A>` has met
+                    // `Option<U8>`. The same rule a call already follows, and
+                    // silent for the same reason — see `hint_at`.
+                    if let Some(hint) = &hint {
+                        self.hint_at(hint, &result, range);
+                    }
                     let borrowed: HashMap<&str, Type> =
                         mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
                     for (arg, declared) in args.iter().zip(&variant.fields) {
@@ -3479,8 +3523,18 @@ fn needs_an_eq_impl(ty: &Type) -> bool {
             | Type::Str
             | Type::Unit
             | Type::Var(_)
-            | Type::Param(_)
             | Type::Never
             | Type::Unknown
     )
+}
+
+/// Whether `<` on this type has to go through an `Ord` impl.
+///
+/// Nearly [`needs_an_eq_impl`], and `String` is the difference. Two strings
+/// compare for *equality* by their bytes, which is one runtime call and the
+/// only answer anybody wants; which of them comes *first* is a different
+/// question with several defensible answers — bytes, code points, a locale —
+/// and the one a program means belongs in an impl it can read.
+fn needs_an_ord_impl(ty: &Type) -> bool {
+    matches!(ty, Type::Str) || needs_an_eq_impl(ty)
 }

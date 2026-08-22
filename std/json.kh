@@ -1,0 +1,713 @@
+module std::json;
+
+import std::core::{Array, Chain, List, Map, Option, Result, Show};
+
+// JSON, written in Khora.
+//
+// Nothing here is an intrinsic and nothing here is foreign: the encoder walks
+// bytes with `String::byte` and the parser is recursive descent over the same.
+// That is the point as much as the module is — if reading a config file needed
+// the compiler's help, so would every format above it.
+//
+// **Runs of ordinary text are copied with `String::slice`, never byte by
+// byte.** A lone continuation byte is not valid UTF-8, so `String::from_bytes`
+// on one stops the program; slicing at an escape is safe because every byte
+// JSON escapes is below 128 and so never appears inside a multi-byte
+// character. Getting that wrong is a crash on the first non-English string,
+// which is exactly the input nobody tests with.
+
+/// A JSON value.
+///
+/// `Number` is a `Float` because that is what JSON has — the specification
+/// says "number" and means a double, and a separate integer case would be a
+/// distinction the format cannot round-trip. A caller who wants an `Int` asks
+/// for one with `Float::to_int`.
+export type Json =
+  | Null
+  | Bool(value: Bool)
+  | Number(value: Float)
+  | Text(value: String)
+  | Array(items: List<Json>)
+  | Object(fields: Map<String, Json>);
+
+/// Where the parser stopped and what it wanted there.
+///
+/// A record rather than a variant, because every failure has both halves and a
+/// variant per expectation would be a list of the parser's internals. The
+/// offset is in **bytes**, which is what `String::byte` counts and what a
+/// caller can slice with.
+export type JsonError = {
+  at: Int,
+  expected: String,
+};
+
+/// One field of an object, in the order `entries` happened to find it.
+export type Field = {
+  name: String,
+  value: Json,
+};
+
+// ---------------------------------------------------------------------------
+// Reaching into a value
+// ---------------------------------------------------------------------------
+
+impl Json {
+  /// The field, if this is an object and it has one.
+  ///
+  /// The one accessor that earns its place twice over: reaching into an object
+  /// is what almost every consumer of a parsed document does, and writing the
+  /// `match` by hand at each step turns three levels of nesting into fifteen
+  /// lines.
+  fn field(self, name: String) -> Option<Json> {
+    match self {
+      Json::Object(fields) => Map::get(fields, name),
+      _ => Option::None,
+    }
+  }
+
+  /// The rest are one per shape, so that a caller can ask "is it what I
+  /// expected" without a `match` whose other arms it does not care about.
+  /// `Option` rather than a failure, because a document being the wrong shape
+  /// is the caller's business to name — this module does not know what the
+  /// field was for.
+  fn text(self) -> Option<String> {
+    match self { Json::Text(value) => Option::Some(value), _ => Option::None }
+  }
+
+  fn number(self) -> Option<Float> {
+    match self { Json::Number(value) => Option::Some(value), _ => Option::None }
+  }
+
+  fn boolean(self) -> Option<Bool> {
+    match self { Json::Bool(value) => Option::Some(value), _ => Option::None }
+  }
+
+  fn items(self) -> Option<List<Json>> {
+    match self { Json::Array(items) => Option::Some(items), _ => Option::None }
+  }
+
+  fn is_null(self) -> Bool {
+    match self { Json::Null => true, _ => false }
+  }
+
+  /// Every field of an object, or the empty list.
+  ///
+  /// **The order is the map's, not the document's.** A `Map` is a hash table
+  /// and forgets the order its keys arrived in, so a parsed document does not
+  /// round-trip field-for-field. That is the same trade every language whose
+  /// JSON object is a hash makes — Go's `map[string]any`, Python before 3.7 —
+  /// and it buys `field` in constant time, which is what consumers actually
+  /// do with a document. A `List<Field>` would keep the order and make every
+  /// lookup a scan.
+  fn entries(self) -> List<Field> {
+    match self {
+      Json::Object(fields) => gather(fields, 0, List::Nil),
+      _ => List::Nil,
+    }
+  }
+}
+
+/// Walks the map's buckets, because `Map` has no iterator of its own.
+///
+/// Reaching into `buckets` couples this module to the map's representation,
+/// which is worth a note: the fix is a `Map::entries` in `std::core`, and this
+/// is the caller that justifies adding one.
+fn gather(fields: Map<String, Json>, at: Int, into: List<Field>) -> List<Field> {
+  if at >= Array::length(fields.buckets) {
+    into
+  } else {
+    gather(fields, at + 1, from_chain(Array::get(fields.buckets, at), into))
+  }
+}
+
+fn from_chain(chain: Chain<String, Json>, into: List<Field>) -> List<Field> {
+  match chain {
+    Chain::Empty => into,
+    Chain::Node(key, value, rest) =>
+    from_chain(rest, List::Cons({ name: key, value: value }, into)),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+/// The value, as JSON text.
+///
+/// Compact: no spaces and no newlines. Pretty-printing is a second function
+/// when something wants one, rather than a flag that doubles every branch
+/// below.
+export fn encode(value: Json) -> String {
+  match value {
+    Json::Null => "null",
+    Json::Bool(flag) => if flag { "true" } else { "false" },
+    Json::Number(number) => Float::to_string(number),
+    Json::Text(text) => quote(text),
+    Json::Array(items) => "[" + encoded_items(items, "") + "]",
+    Json::Object(fields) => "{" + encoded_fields(gather(fields, 0, List::Nil), "") + "}",
+  }
+}
+
+impl Show for Json {
+  fn show(self) -> String { encode(self) }
+}
+
+/// The separator goes *before* each element and starts empty, which is how a
+/// comma lands between every pair and after none of them without a count.
+fn encoded_items(items: List<Json>, separator: String) -> String {
+  match items {
+    List::Nil => "",
+    List::Cons(head, tail) => separator + encode(head) + encoded_items(tail, ","),
+  }
+}
+
+fn encoded_fields(fields: List<Field>, separator: String) -> String {
+  match fields {
+    List::Nil => "",
+    List::Cons(head, tail) =>
+    separator + quote(head.name) + ":" + encode(head.value) + encoded_fields(tail, ","),
+  }
+}
+
+/// A string, quoted and escaped.
+fn quote(text: String) -> String {
+  "\"" + escaped(text, 0, 0) + "\""
+}
+
+/// Copies from `run` forward, emitting an escape wherever one is needed.
+///
+/// `run` is the start of the stretch that needs nothing; `at` is the cursor.
+/// Everything between them is copied in one `slice` when the cursor reaches a
+/// byte that has to be written differently, so ordinary text costs one copy per
+/// escape rather than one per character.
+fn escaped(text: String, run: Int, at: Int) -> String {
+  if at >= String::byte_length(text) {
+    String::slice(text, run, at)
+  } else {
+    match escape_for(U8::to_int(String::byte(text, at))) {
+      Option::None => escaped(text, run, at + 1),
+      Option::Some(escape) =>
+      String::slice(text, run, at) + escape + escaped(text, at + 1, at + 1),
+    }
+  }
+}
+
+/// How a byte has to be written, or `None` if it stands for itself.
+///
+/// The short forms for the five JSON names them, and everything else below a
+/// space goes out as `\u00XX` — a control character written literally is legal
+/// in almost no parser and is the kind of output that fails only at the far
+/// end. `/` is *not* escaped: JSON allows `\/` and nothing requires it, and
+/// escaping it makes every URL in a document unreadable.
+fn escape_for(byte: Int) -> Option<String> {
+  if byte == 34 {
+    Option::Some("\\\"")
+  } else if byte == 92 {
+    Option::Some("\\\\")
+  } else if byte == 10 {
+    Option::Some("\\n")
+  } else if byte == 13 {
+    Option::Some("\\r")
+  } else if byte == 9 {
+    Option::Some("\\t")
+  } else if byte == 8 {
+    Option::Some("\\b")
+  } else if byte == 12 {
+    Option::Some("\\f")
+  } else if byte < 32 {
+    Option::Some("\\u00" + hex_digit(byte / 16) + hex_digit(byte % 16))
+  } else {
+    Option::None
+  }
+}
+
+/// One lowercase hex digit. Lowercase because `` is what every other
+/// encoder writes, and a document that differs only in case reads as changed.
+fn hex_digit(value: Int) -> String {
+  byte_text(if value < 10 { 48 + value } else { 87 + value })
+}
+
+/// A single byte as text.
+///
+/// Only ever called with a byte below 128, where one byte is one character and
+/// `from_bytes` cannot object.
+fn byte_text(value: Int) -> String {
+  let out: Array<U8> = Array::new(1, 0);
+  Array::set(out, 0, U8::of(value));
+  String::from_bytes(out)
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+/// What a parse step produced and where it stopped.
+///
+/// Three of these rather than one generic `Parsed<A>`, because a record with a
+/// type parameter would be the same three fields with a longer name at every
+/// use, and the parser never mixes them up.
+type Value = { json: Json, at: Int };
+type Scanned = { text: String, at: Int };
+type Floated = { number: Float, at: Int };
+type Items = { items: List<Json>, at: Int };
+type Fields = { fields: Map<String, Json>, at: Int };
+
+/// A whole document.
+///
+/// Trailing text is an error rather than ignored: `{"a":1} oops` is a mistake
+/// somebody wants told about, and a parser that stops at the first complete
+/// value hides it.
+export fn parse(text: String) -> Result<Json, JsonError> {
+  match value_at(text, skip_space(text, 0)) {
+    Result::Err(why) => Result::Err(why),
+    Result::Ok(found) => {
+      let end = skip_space(text, found.at);
+      if end >= String::byte_length(text) {
+        Result::Ok(found.json)
+      } else {
+        Result::Err({ at: end, expected: "the end of the document" })
+      }
+    },
+  }
+}
+
+fn value_at(text: String, at: Int) -> Result<Value, JsonError> {
+  if at >= String::byte_length(text) {
+    Result::Err({ at: at, expected: "a value" })
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    if byte == 110 {
+      word_at(text, at, "null", Json::Null)
+    } else if byte == 116 {
+      word_at(text, at, "true", Json::Bool(true))
+    } else if byte == 102 {
+      word_at(text, at, "false", Json::Bool(false))
+    } else if byte == 34 {
+      match string_at(text, at) {
+        Result::Err(why) => Result::Err(why),
+        Result::Ok(found) => Result::Ok({ json: Json::Text(found.text), at: found.at }),
+      }
+    } else if byte == 91 {
+      array_at(text, at)
+    } else if byte == 123 {
+      object_at(text, at)
+    } else if byte == 45 || (byte >= 48 && byte <= 57) {
+      number_at(text, at)
+    } else {
+      Result::Err({ at: at, expected: "a value" })
+    }
+  }
+}
+
+/// `null`, `true` or `false`, matched whole.
+fn word_at(text: String, at: Int, word: String, value: Json) -> Result<Value, JsonError> {
+  let end = at + String::byte_length(word);
+  if String::slice(text, at, end) == word {
+    Result::Ok({ json: value, at: end })
+  } else {
+    Result::Err({ at: at, expected: word })
+  }
+}
+
+fn skip_space(text: String, at: Int) -> Int {
+  if at >= String::byte_length(text) {
+    at
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    // The four JSON calls whitespace, and no others: a vertical tab between
+    // two values is a malformed document rather than a formatting choice.
+    if byte == 32 || byte == 9 || byte == 10 || byte == 13 {
+      skip_space(text, at + 1)
+    } else {
+      at
+    }
+  }
+}
+
+// --- strings ---------------------------------------------------------------
+
+/// A quoted string, starting at its opening quote.
+fn string_at(text: String, at: Int) -> Result<Scanned, JsonError> {
+  if at >= String::byte_length(text) || U8::to_int(String::byte(text, at)) != 34 {
+    Result::Err({ at: at, expected: "a string" })
+  } else {
+    inside_at(text, at + 1, at + 1, "")
+  }
+}
+
+/// The same run-copying as `escaped`, in the other direction.
+fn inside_at(text: String, run: Int, at: Int, done: String) -> Result<Scanned, JsonError> {
+  if at >= String::byte_length(text) {
+    Result::Err({ at: at, expected: "a closing quote" })
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    if byte == 34 {
+      Result::Ok({ text: done + String::slice(text, run, at), at: at + 1 })
+    } else if byte == 92 {
+      let so_far = done + String::slice(text, run, at);
+      match escape_at(text, at + 1) {
+        Result::Err(why) => Result::Err(why),
+        Result::Ok(found) => inside_at(text, found.at, found.at, so_far + found.text),
+      }
+    } else {
+      inside_at(text, run, at + 1, done)
+    }
+  }
+}
+
+/// What one escape stands for, given the position just past its backslash.
+fn escape_at(text: String, at: Int) -> Result<Scanned, JsonError> {
+  if at >= String::byte_length(text) {
+    Result::Err({ at: at, expected: "an escape" })
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    if byte == 34 {
+      Result::Ok({ text: "\"", at: at + 1 })
+    } else if byte == 92 {
+      Result::Ok({ text: "\\", at: at + 1 })
+    } else if byte == 47 {
+      Result::Ok({ text: "/", at: at + 1 })
+    } else if byte == 110 {
+      Result::Ok({ text: "\n", at: at + 1 })
+    } else if byte == 114 {
+      Result::Ok({ text: "\r", at: at + 1 })
+    } else if byte == 116 {
+      Result::Ok({ text: "\t", at: at + 1 })
+    } else if byte == 98 {
+      // Khora's own string literals have no `\b` or `\f`, so these two are
+      // built from their byte rather than written.
+      Result::Ok({ text: byte_text(8), at: at + 1 })
+    } else if byte == 102 {
+      Result::Ok({ text: byte_text(12), at: at + 1 })
+    } else if byte == 117 {
+      unicode_at(text, at + 1)
+    } else {
+      Result::Err({ at: at, expected: "one of \" \\ / b f n r t u" })
+    }
+  }
+}
+
+/// `\uXXXX`, and the surrogate pair that follows it when there is one.
+///
+/// A pair is not optional to support: JSON has no other way to write a
+/// character outside the basic plane, so a parser that stops at the first half
+/// cannot read an emoji — and refusing it while claiming to read JSON would be
+/// the wrong kind of honest.
+fn unicode_at(text: String, at: Int) -> Result<Scanned, JsonError> {
+  match hex4(text, at) {
+    Option::None => Result::Err({ at: at, expected: "four hex digits" }),
+    Option::Some(first) =>
+    if first >= 55296 && first <= 56319 {
+      // A high surrogate. The low half has to be the very next escape.
+      if String::slice(text, at + 4, at + 6) == "\\u" {
+        match hex4(text, at + 6) {
+          Option::None => Result::Err({ at: at + 6, expected: "four hex digits" }),
+          Option::Some(second) =>
+          if second >= 56320 && second <= 57343 {
+            let joined = 65536 + (first - 55296) * 1024 + (second - 56320);
+            Result::Ok({ text: utf8_of(joined), at: at + 10 })
+          } else {
+            Result::Err({ at: at + 6, expected: "the low half of a surrogate pair" })
+          },
+        }
+      } else {
+        Result::Err({ at: at + 4, expected: "the low half of a surrogate pair" })
+      }
+    } else if first >= 56320 && first <= 57343 {
+      Result::Err({ at: at, expected: "a character, not a low surrogate on its own" })
+    } else {
+      Result::Ok({ text: utf8_of(first), at: at + 4 })
+    },
+  }
+}
+
+/// Four hex digits as a number, or `None` if they are not four hex digits.
+fn hex4(text: String, at: Int) -> Option<Int> {
+  if at + 4 > String::byte_length(text) {
+    Option::None
+  } else {
+    hex_run(text, at, 4, 0)
+  }
+}
+
+fn hex_run(text: String, at: Int, left: Int, acc: Int) -> Option<Int> {
+  if left == 0 {
+    Option::Some(acc)
+  } else {
+    match hex_value(U8::to_int(String::byte(text, at))) {
+      Option::None => Option::None,
+      Option::Some(digit) => hex_run(text, at + 1, left - 1, acc * 16 + digit),
+    }
+  }
+}
+
+fn hex_value(byte: Int) -> Option<Int> {
+  if byte >= 48 && byte <= 57 {
+    Option::Some(byte - 48)
+  } else if byte >= 97 && byte <= 102 {
+    Option::Some(byte - 87)
+  } else if byte >= 65 && byte <= 70 {
+    Option::Some(byte - 55)
+  } else {
+    Option::None
+  }
+}
+
+/// A code point, as its UTF-8 bytes.
+///
+/// Written out rather than bound, because the encoding is four lines of
+/// shifting and the alternative is a foreign call for something that has no
+/// platform in it.
+fn utf8_of(point: Int) -> String {
+  if point < 128 {
+    byte_text(point)
+  } else if point < 2048 {
+    two_bytes(192 + Int::shr(point, 6), 128 + Int::and(point, 63))
+  } else if point < 65536 {
+    three_bytes(
+      224 + Int::shr(point, 12),
+      128 + Int::and(Int::shr(point, 6), 63),
+      128 + Int::and(point, 63),
+    )
+  } else {
+    four_bytes(
+      240 + Int::shr(point, 18),
+      128 + Int::and(Int::shr(point, 12), 63),
+      128 + Int::and(Int::shr(point, 6), 63),
+      128 + Int::and(point, 63),
+    )
+  }
+}
+
+fn two_bytes(first: Int, second: Int) -> String {
+  let out: Array<U8> = Array::new(2, 0);
+  Array::set(out, 0, U8::of(first));
+  Array::set(out, 1, U8::of(second));
+  String::from_bytes(out)
+}
+
+fn three_bytes(first: Int, second: Int, third: Int) -> String {
+  let out: Array<U8> = Array::new(3, 0);
+  Array::set(out, 0, U8::of(first));
+  Array::set(out, 1, U8::of(second));
+  Array::set(out, 2, U8::of(third));
+  String::from_bytes(out)
+}
+
+fn four_bytes(first: Int, second: Int, third: Int, fourth: Int) -> String {
+  let out: Array<U8> = Array::new(4, 0);
+  Array::set(out, 0, U8::of(first));
+  Array::set(out, 1, U8::of(second));
+  Array::set(out, 2, U8::of(third));
+  Array::set(out, 3, U8::of(fourth));
+  String::from_bytes(out)
+}
+
+// --- numbers ---------------------------------------------------------------
+
+/// A number: an optional sign, digits, an optional fraction, an optional
+/// exponent.
+///
+/// Accumulated as a `Float` throughout, including the whole part. An `Int`
+/// accumulator would be exact for small numbers and **stop the program** on a
+/// long one, because `*` traps on overflow — and a parser that dies on input
+/// it was handed is not a parser. A float saturates to infinity instead, which
+/// is what the format says a number too large to represent becomes.
+fn number_at(text: String, at: Int) -> Result<Value, JsonError> {
+  let negative = U8::to_int(String::byte(text, at)) == 45;
+  let start = if negative { at + 1 } else { at };
+  let whole = digits_at(text, start, 0.0);
+  if whole.at == start {
+    Result::Err({ at: start, expected: "a digit" })
+  } else {
+    match fraction_at(text, whole.at, whole.number) {
+      Result::Err(why) => Result::Err(why),
+      Result::Ok(with_fraction) => match exponent_at(text, with_fraction.at, with_fraction.number) {
+        Result::Err(why) => Result::Err(why),
+        Result::Ok(done) => Result::Ok({
+            json: Json::Number(if negative { 0.0 - done.number } else { done.number }),
+            at: done.at,
+          }),
+      },
+    }
+  }
+}
+
+fn digits_at(text: String, at: Int, acc: Float) -> Floated {
+  if at >= String::byte_length(text) {
+    { number: acc, at: at }
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    if byte >= 48 && byte <= 57 {
+      digits_at(text, at + 1, acc * 10.0 + Int::to_float(byte - 48))
+    } else {
+      { number: acc, at: at }
+    }
+  }
+}
+
+/// `.` followed by at least one digit, or nothing at all.
+///
+/// `1.` is refused. JSON's grammar requires a digit after the point, and
+/// accepting it would mean this parser reads documents that others reject —
+/// which is worse than strictness, because the difference shows up at the far
+/// end of a pipeline.
+fn fraction_at(text: String, at: Int, whole: Float) -> Result<Floated, JsonError> {
+  if at < String::byte_length(text) && U8::to_int(String::byte(text, at)) == 46 {
+    let found = digits_at(text, at + 1, 0.0);
+    if found.at == at + 1 {
+      Result::Err({ at: at + 1, expected: "a digit after the decimal point" })
+    } else {
+      let places = found.at - (at + 1);
+      Result::Ok({ number: whole + found.number / power_of_ten(places), at: found.at })
+    }
+  } else {
+    Result::Ok({ number: whole, at: at })
+  }
+}
+
+fn exponent_at(text: String, at: Int, mantissa: Float) -> Result<Floated, JsonError> {
+  if at >= String::byte_length(text) {
+    Result::Ok({ number: mantissa, at: at })
+  } else {
+    let marker = U8::to_int(String::byte(text, at));
+    if marker != 101 && marker != 69 {
+      Result::Ok({ number: mantissa, at: at })
+    } else {
+      let sign = sign_at(text, at + 1);
+      let found = digits_at(text, sign.at, 0.0);
+      if found.at == sign.at {
+        Result::Err({ at: sign.at, expected: "a digit in the exponent" })
+      } else {
+        // `to_int` clamps rather than trapping, so `1e999999999999999999` is a
+        // large exponent rather than a stopped program.
+        let places = Float::to_int(found.number);
+        let scale = power_of_ten(places);
+        Result::Ok({
+            number: if sign.number < 0.0 { mantissa / scale } else { mantissa * scale },
+            at: found.at,
+          })
+      }
+    }
+  }
+}
+
+/// `+`, `-`, or neither. `-1.0` and `1.0` stand for the sign so that the
+/// caller can branch on a number rather than on a `Bool` it has to name.
+fn sign_at(text: String, at: Int) -> Floated {
+  if at >= String::byte_length(text) {
+    { number: 1.0, at: at }
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    if byte == 45 {
+      { number: 0.0 - 1.0, at: at + 1 }
+    } else if byte == 43 {
+      { number: 1.0, at: at + 1 }
+    } else {
+      { number: 1.0, at: at }
+    }
+  }
+}
+
+/// Ten to the `n`, saturating.
+///
+/// Capped at 400 because a double runs out at about 1e308 and every exponent
+/// past that is the same infinity — without the cap a document could ask this
+/// to recurse a billion times.
+fn power_of_ten(n: Int) -> Float {
+  if n <= 0 {
+    1.0
+  } else if n > 400 {
+    power_of_ten(400)
+  } else {
+    10.0 * power_of_ten(n - 1)
+  }
+}
+
+// --- arrays and objects ----------------------------------------------------
+
+fn array_at(text: String, at: Int) -> Result<Value, JsonError> {
+  let first = skip_space(text, at + 1);
+  if first < String::byte_length(text) && U8::to_int(String::byte(text, first)) == 93 {
+    Result::Ok({ json: Json::Array(List::Nil), at: first + 1 })
+  } else {
+    match items_at(text, first, List::Nil) {
+      Result::Err(why) => Result::Err(why),
+      Result::Ok(found) =>
+      // Reversed because each item was prepended, which is the cheap end of a
+      // list and the only one worth walking to.
+      Result::Ok({ json: Json::Array(List::reverse(found.items)), at: found.at }),
+    }
+  }
+}
+
+fn items_at(text: String, at: Int, acc: List<Json>) -> Result<Items, JsonError> {
+  match value_at(text, at) {
+    Result::Err(why) => Result::Err(why),
+    Result::Ok(found) => {
+      let with_it = List::Cons(found.json, acc);
+      let next = skip_space(text, found.at);
+      if next >= String::byte_length(text) {
+        Result::Err({ at: next, expected: "a comma or a closing bracket" })
+      } else {
+        let byte = U8::to_int(String::byte(text, next));
+        if byte == 44 {
+          items_at(text, skip_space(text, next + 1), with_it)
+        } else if byte == 93 {
+          Result::Ok({ items: with_it, at: next + 1 })
+        } else {
+          Result::Err({ at: next, expected: "a comma or a closing bracket" })
+        }
+      }
+    },
+  }
+}
+
+fn object_at(text: String, at: Int) -> Result<Value, JsonError> {
+  let first = skip_space(text, at + 1);
+  let empty: Map<String, Json> = Map::new();
+  if first < String::byte_length(text) && U8::to_int(String::byte(text, first)) == 125 {
+    Result::Ok({ json: Json::Object(empty), at: first + 1 })
+  } else {
+    match members_at(text, first, empty) {
+      Result::Err(why) => Result::Err(why),
+      Result::Ok(found) => Result::Ok({ json: Json::Object(found.fields), at: found.at }),
+    }
+  }
+}
+
+/// **A repeated key keeps the last one.** JSON does not say what should
+/// happen, and every parser has to choose; last-wins is what a `Map` does for
+/// free and what the majority of implementations do, so a document that
+/// disagrees disagrees with them too.
+fn members_at(text: String, at: Int, acc: Map<String, Json>) -> Result<Fields, JsonError> {
+  match string_at(text, at) {
+    Result::Err(why) => Result::Err(why),
+    Result::Ok(name) => {
+      let colon = skip_space(text, name.at);
+      if colon >= String::byte_length(text) || U8::to_int(String::byte(text, colon)) != 58 {
+        Result::Err({ at: colon, expected: "a colon" })
+      } else {
+        match value_at(text, skip_space(text, colon + 1)) {
+          Result::Err(why) => Result::Err(why),
+          Result::Ok(found) => {
+            Map::insert(acc, name.text, found.json);
+            let next = skip_space(text, found.at);
+            if next >= String::byte_length(text) {
+              Result::Err({ at: next, expected: "a comma or a closing brace" })
+            } else {
+              let byte = U8::to_int(String::byte(text, next));
+              if byte == 44 {
+                members_at(text, skip_space(text, next + 1), acc)
+              } else if byte == 125 {
+                Result::Ok({ fields: acc, at: next + 1 })
+              } else {
+                Result::Err({ at: next, expected: "a comma or a closing brace" })
+              }
+            }
+          },
+        }
+      }
+    },
+  }
+}

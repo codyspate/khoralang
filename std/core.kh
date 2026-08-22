@@ -110,6 +110,38 @@ impl String {
   }
 }
 
+/// Byte order, which is what `<` on a `String` means here.
+///
+/// Not a locale's order and not code-point order — the first needs a table
+/// nobody has bound and the second differs from this one only above the basic
+/// plane. What it *is* is stable, cheap, and the same on every machine, which
+/// is what sorting for a program's own use wants. A human-facing sort wants a
+/// collation library and should say so.
+impl Ord for String {
+  fn cmp(self, other: String) -> Ordering {
+    String::compare_bytes(self, other, 0)
+  }
+}
+
+impl String {
+  fn compare_bytes(self, other: String, at: Int) -> Ordering {
+    let mine = String::byte_length(self);
+    let theirs = String::byte_length(other);
+    if at >= mine || at >= theirs {
+      // One ran out. The shorter is first, and equal lengths mean equal text.
+      if mine < theirs { Ordering::Less }
+      else if mine > theirs { Ordering::Greater }
+      else { Ordering::Equal }
+    } else {
+      let here = String::byte(self, at);
+      let there = String::byte(other, at);
+      if here < there { Ordering::Less }
+      else if here > there { Ordering::Greater }
+      else { String::compare_bytes(self, other, at + 1) }
+    }
+  }
+}
+
 impl Eq for Ordering {
   fn eq(self, other: Ordering) -> Bool {
     match self {
@@ -194,6 +226,85 @@ impl<A, E> Result<A, E> {
 export type List<A> =
   | Nil
   | Cons(head: A, tail: List<A>);
+
+/// A list split down the middle, for `sort`.
+export type Halves<A> = {
+  left: List<A>,
+  right: List<A>,
+};
+
+impl<A: Ord> List<A> {
+  /// The same elements, in order.
+  ///
+  /// A merge sort, because a linked list is what it was invented for: it needs
+  /// no indexing, no copying into an array and back, and it is stable — equal
+  /// elements keep the order they were given, which is the property a caller
+  /// notices the absence of when sorting by one field and expecting the
+  /// previous sort to survive.
+  ///
+  /// `A: Ord` rather than a comparison function, so that `<` on the elements
+  /// and `sort` on the list cannot disagree. Sorting by something else is
+  /// `sort_by`, which does not exist yet and wants a closure.
+  fn sort(self) -> List<A> {
+    match self {
+      List::Nil => List::Nil,
+      List::Cons(only, rest) => match rest {
+        // One element is sorted, and stopping here is what keeps the split
+        // below from recursing forever on a list it cannot make smaller.
+        List::Nil => List::Cons(only, List::Nil),
+        List::Cons(second, more) => {
+          let halves = List::split(List::Cons(only, List::Cons(second, more)));
+          List::merge(halves.left.sort(), halves.right.sort())
+        }
+      },
+    }
+  }
+
+  /// The first half and the second, each in the order it was given.
+  ///
+  /// **By counting to the middle, not by dealing alternately.** Dealing is one
+  /// pass and needs no length, and it is what this did first — but it is not
+  /// stable, and the test said so. Two equal elements at positions 1 and 2 land
+  /// in *different* halves with the later one on the left, and a merge that
+  /// breaks its tie towards the left then puts them back the wrong way round.
+  ///
+  /// The cost is a length and a reversal, both linear, against a sort that is
+  /// already linearithmic.
+  fn split(self) -> Halves<A> {
+    List::take_first(self, self.length() / 2, List::Nil)
+  }
+
+  fn take_first(self, count: Int, taken: List<A>) -> Halves<A> {
+    if count <= 0 {
+      { left: taken.reverse(), right: self }
+    } else {
+      match self {
+        List::Nil => { left: taken.reverse(), right: List::Nil },
+        List::Cons(head, rest) => List::take_first(rest, count - 1, List::Cons(head, taken)),
+      }
+    }
+  }
+
+  /// Two sorted lists, as one.
+  ///
+  /// `<=` rather than `<` on the tie, which is exactly what makes the sort
+  /// stable: an element from the left half goes first when they are equal, and
+  /// the left half is the earlier one.
+  fn merge(self, other: List<A>) -> List<A> {
+    match self {
+      List::Nil => other,
+      List::Cons(mine, my_rest) => match other {
+        List::Nil => List::Cons(mine, my_rest),
+        List::Cons(theirs, their_rest) =>
+        if mine <= theirs {
+          List::Cons(mine, List::merge(my_rest, List::Cons(theirs, their_rest)))
+        } else {
+          List::Cons(theirs, List::merge(List::Cons(mine, my_rest), their_rest))
+        },
+      },
+    }
+  }
+}
 
 impl<A> List<A> {
   fn is_empty(self) -> Bool { match self { List::Nil => true, List::Cons(h, t) => false } }
@@ -638,7 +749,26 @@ impl String {
   }
 }
 
+/// The shortest text that reads back as the same number.
+///
+/// Bound rather than written: shortest-round-trip formatting is Ryū or Grisu,
+/// a table and a thousand lines, and `docs/design/ecosystem.md` names exactly
+/// this kind of thing as something to bind rather than write twice.
+extern fn khora_float_text(value: Float, into: Ptr, capacity: Int) -> Int;
+
 impl Float {
+  /// The number, written out — `1.5`, `0.1`, `inf`.
+  ///
+  /// The shortest form that reads back as the same number, which is what a
+  /// reader means by "the number" and what `print` on a `Float` already gives.
+  /// Thirty-two bytes is always enough for a double; the call says how many it
+  /// needed, so a longer answer would be caught rather than truncated.
+  fn to_string(self) -> String {
+    let out: Array<U8> = Array::new(32, 0);
+    let written = Array::with_data(out, fn (into, n) => khora_float_text(self, into, n));
+    if written > 32 { "?" } else { String::from_bytes(Array::prefix(out, written)) }
+  }
+
   /// The whole part, with nothing rounded.
   ///
   /// **Truncates toward zero** — `2.9` is `2` and `-2.9` is `-2` — which is

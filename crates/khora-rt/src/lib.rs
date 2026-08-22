@@ -1430,6 +1430,86 @@ pub extern "C" fn khora_print_float(value: f64) {
     let _ = writeln!(out, "{value}");
 }
 
+/// What the process was invoked with, as the C runtime handed it over.
+///
+/// **The one thing a program cannot ask the operating system for.** Every other
+/// piece of its environment has a function — `getenv`, `time`, `fopen` — and
+/// the arguments arrive once, through `main`, and are gone. So the generated
+/// `main` hands them here before it does anything else, and this holds them for
+/// whatever asks later.
+///
+/// `Relaxed` because they are written once, before any Khora code runs, and
+/// only read afterwards; there is no ordering for anything else to depend on.
+static ARG_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ARG_VECTOR: AtomicUsize = AtomicUsize::new(0);
+
+/// Records `argc` and `argv`. Called by generated code, first thing in `main`.
+///
+/// # Safety
+///
+/// `argv` must be the `main` argument of the same name: `argc` pointers to
+/// NUL-terminated strings, live for the process.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_args_set(argc: i32, argv: *const *const u8) {
+    ARG_COUNT.store(argc.max(0) as usize, COUNTER_ORDER);
+    ARG_VECTOR.store(argv as usize, COUNTER_ORDER);
+}
+
+/// How many arguments there were, the program's own name included.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_arg_count() -> i64 {
+    ARG_COUNT.load(COUNTER_ORDER) as i64
+}
+
+/// The `index`th argument, as a pointer to its NUL-terminated bytes.
+///
+/// Null when there is no such argument. What Khora does with it is read its
+/// length with `strlen` and copy it with `memcpy`, both of which are ISO C —
+/// so the only thing that had to be added here is the part C has no function
+/// for.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_arg(index: i64) -> *const u8 {
+    if index < 0 || index >= khora_arg_count() {
+        return std::ptr::null();
+    }
+    let argv = ARG_VECTOR.load(COUNTER_ORDER) as *const *const u8;
+    if argv.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: `argv` came from `main` per `khora_args_set`'s contract, and the
+    // index was just checked against the count recorded with it.
+    unsafe { *argv.add(index as usize) }
+}
+
+/// Writes `value` into `into` as text, and says how many bytes that took.
+///
+/// The shortest form that reads back as the same number, which is Rust's
+/// `{}` and is what a reader means by "the number". Khora cannot produce it
+/// itself: shortest-round-trip formatting is Ryū or Grisu, a table and a
+/// thousand lines, and it is exactly the kind of thing
+/// `docs/design/ecosystem.md` says to bind rather than write twice.
+///
+/// Returns the length needed when `capacity` is too small and writes nothing,
+/// so a caller can size a buffer in two calls rather than guessing. 32 bytes
+/// is always enough for an `f64`, which is why nobody will make the second
+/// call.
+///
+/// # Safety
+///
+/// `into` must address `capacity` writable bytes, or be null with a zero
+/// `capacity`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_float_text(value: f64, into: *mut u8, capacity: i64) -> i64 {
+    let text = format!("{value}");
+    let bytes = text.as_bytes();
+    if capacity < bytes.len() as i64 || into.is_null() {
+        return bytes.len() as i64;
+    }
+    // SAFETY: the contract above, and the length was just checked against it.
+    unsafe { into.copy_from_nonoverlapping(bytes.as_ptr(), bytes.len()) };
+    bytes.len() as i64
+}
+
 /// Reports arithmetic that did not fit, and stops.
 ///
 /// Overflow traps in every build. A program that passes its tests and then

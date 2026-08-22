@@ -1479,6 +1479,59 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(result)
     }
 
+    /// Which of `<`, `>`, `<=`, `>=` an `Ordering` answers.
+    ///
+    /// `Ord::cmp` hands back a three-way answer, because one comparison should
+    /// decide all four operators rather than four calls deciding them
+    /// separately — `docs/design` has the argument at `Ordering`'s
+    /// declaration. Reading it here is a tag comparison.
+    ///
+    /// `<=` is *not* `Less`-or-`Equal` spelled out; it is "not `Greater`". Two
+    /// tests rather than one, and the same answer, so the cheaper one wins.
+    ///
+    /// The `Ordering` is a heap object like any other nullary variant, and it
+    /// is released here — one allocation per comparison, which is exactly what
+    /// phase 9's reuse analysis exists to remove and is not worth a special
+    /// case before then.
+    fn read_ordering(
+        &mut self,
+        op: BinOp,
+        answer: BasicValueEnum<'ctx>,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let ordering = Type::adt("Ordering");
+        let (Some((less, _)), Some((greater, _))) = (
+            self.be.variant_of("Ordering", "Less"),
+            self.be.variant_of("Ordering", "Greater"),
+        ) else {
+            self.drop(answer, &ordering);
+            return self.fail(
+                "`Ord::cmp` produces an `Ordering`, which has `Less`, `Equal` and `Greater`",
+                range,
+            );
+        };
+
+        let tag = runtime::load_tag(self.be.ctx, &self.be.builder, answer.into_pointer_value());
+        let against = self.be.ctx.i32_type().const_int(
+            u64::from(if matches!(op, BinOp::Lt | BinOp::Ge) { less } else { greater }),
+            false,
+        );
+        // `<` is "is Less"; `>=` is "is not Less"; `>` is "is Greater"; `<=` is
+        // "is not Greater". One tag read and one comparison for all four.
+        let predicate = if matches!(op, BinOp::Lt | BinOp::Gt) {
+            IntPredicate::EQ
+        } else {
+            IntPredicate::NE
+        };
+        let decided = self
+            .be
+            .builder
+            .build_int_compare(predicate, tag, against, "ordered")
+            .expect("reading an `Ordering`");
+        self.drop(answer, &ordering);
+        Some(decided.into())
+    }
+
     /// The bytes of an `Array<U8>`, as a pointer and a length.
     ///
     /// Shared by `is_utf8` and `from_bytes`, which want the same three values
@@ -3269,17 +3322,25 @@ impl<'ctx> Lower<'_, 'ctx> {
     ) -> BasicValueEnum<'ctx> {
         let slot = runtime::field_pointer(self.be.ctx, &self.be.builder, object, index as u64);
         match ty {
-            Type::Bool => {
+            // A field slot is a whole word and these are narrower, so the
+            // word is read and cut down. Reading them at their own width would
+            // work on a little-endian machine and quietly not on the other
+            // kind; `store_field` widens for the same reason.
+            Type::Bool | Type::Fixed(_) => {
                 let word = self
                     .be
                     .builder
                     .build_load(self.be.ctx.i64_type(), slot, "field.word")
-                    .expect("reading a Bool field")
+                    .expect("reading a narrow field")
                     .into_int_value();
+                let narrow = match ty {
+                    Type::Fixed(kind) => self.be.int_width(kind.bits.into()),
+                    _ => self.be.ctx.bool_type(),
+                };
                 self.be
                     .builder
-                    .build_int_truncate(word, self.be.ctx.bool_type(), "field")
-                    .expect("narrowing a Bool field")
+                    .build_int_truncate_or_bit_cast(word, narrow, "field")
+                    .expect("narrowing a field")
                     .into()
             }
             // Everything else is read back at whatever `llvm_type` says it
@@ -3525,37 +3586,40 @@ impl<'ctx> Lower<'_, 'ctx> {
             return self.compare_strings(op, left, right);
         }
 
-        // Anything with a shape decides for itself what equality means, in an
-        // `Eq` impl the checker already resolved and monomorphization already
-        // emitted. The operator is one thing whichever type it is used on: a
-        // machine instruction where that is the answer, and a call where the
-        // answer is a question only the type can settle.
-        if matches!(op, BinOp::Eq | BinOp::Ne) {
+        // Anything with a shape decides for itself what comparison means, in an
+        // `Eq` or `Ord` impl the checker already resolved and monomorphization
+        // already emitted. The operator is one thing whichever type it is used
+        // on: a machine instruction where that is the answer, and a call where
+        // the answer is a question only the type can settle.
+        if !matches!(operand_ty, Type::Int | Type::Fixed(_) | Type::Bool | Type::Unit) {
             if let Some(symbol) = self.mono.callee(&self.owner.clone(), site) {
                 let function = match self.be.callee(&symbol) {
                     Ok(function) => function,
                     Err(message) => return self.fail(message, range),
                 };
-                let equal = self
+                let answer = self
                     .be
                     .builder
-                    .build_call(function, &[left.into(), right.into()], "eq")
-                    .expect("calling an `Eq` impl")
+                    .build_call(function, &[left.into(), right.into()], "compare")
+                    .expect("calling a comparison impl")
                     .try_as_basic_value()
                     .basic()
-                    .expect("`eq` returns a Bool")
-                    .into_int_value();
-                // `!=` is `==` negated. Asking a type for both would be asking
-                // it to be consistent about something it cannot get wrong here.
-                return Some(match op {
-                    BinOp::Ne => self
-                        .be
-                        .builder
-                        .build_not(equal, "ne")
-                        .expect("negating an equality")
-                        .into(),
-                    _ => equal.into(),
-                });
+                    .expect("a comparison returns a value");
+
+                return match op {
+                    // `!=` is `==` negated. Asking a type for both would be
+                    // asking it to be consistent about something it cannot get
+                    // wrong here.
+                    BinOp::Eq => Some(answer),
+                    BinOp::Ne => Some(
+                        self.be
+                            .builder
+                            .build_not(answer.into_int_value(), "ne")
+                            .expect("negating an equality")
+                            .into(),
+                    ),
+                    _ => self.read_ordering(op, answer, range),
+                };
             }
         }
 
@@ -4478,7 +4542,26 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let Some((_, info)) = self.variant_of(&resolution) else { return };
                 let object = value.into_pointer_value();
                 for (index, field) in fields.iter().enumerate() {
-                    let field_ty = info.fields.get(index).cloned().unwrap_or(Type::Unknown);
+                    // **The binding's own type, not the variant's declared
+                    // one.** `Option::Some(value: A)` declares `A`, and at
+                    // `Option<Bool>` the declared type is still `A` — which has
+                    // no machine type, so the field came back as an `i64`.
+                    //
+                    // That was right by accident for everything word-sized and
+                    // a *stack overflow* for anything narrower: `v` in
+                    // `Option::Some(v)` at `Bool` is a one-byte slot, and
+                    // storing eight bytes into it wrote over whatever the
+                    // frame put next — which was the scrutinee, so the object
+                    // was never released. Errata 44.
+                    //
+                    // The checker recorded the specialized type of every bound
+                    // local, so the leaf knows exactly what it is. A nested
+                    // pattern keeps the declared type, which is a pointer for
+                    // anything a pattern can descend into.
+                    let field_ty = match self.body.pat(*field) {
+                        Pat::Bind(local) => self.types.local(*local).clone(),
+                        _ => info.fields.get(index).cloned().unwrap_or(Type::Unknown),
+                    };
                     let loaded = self.load_field(object, index, &field_ty);
                     self.bind_pattern(*field, loaded);
                 }

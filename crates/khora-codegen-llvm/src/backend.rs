@@ -1509,14 +1509,40 @@ impl<'ctx> Backend<'ctx> {
 
     /// Emits a `main` that hands every test to the runner.
     ///
+    /// `int main(int argc, char **argv)`, and the call that keeps them.
+    ///
+    /// The arguments a process was started with arrive exactly once, here, and
+    /// are gone. Everything else about a program's environment has a function
+    /// to ask — `getenv`, `time` — so this is the one thing the runtime has to
+    /// hold on to, and the first thing generated code does is hand it over.
+    fn entry_point(&mut self) -> FunctionValue<'ctx> {
+        let i32_type = self.ctx.i32_type();
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        self.module.add_function(
+            "main",
+            i32_type.fn_type(&[i32_type.into(), ptr.into()], false),
+            None,
+        )
+    }
+
+    /// Hands `argc` and `argv` to the runtime before anything else runs.
+    fn remember_arguments(&mut self, main: FunctionValue<'ctx>) {
+        let (Some(argc), Some(argv)) = (main.get_nth_param(0), main.get_nth_param(1)) else {
+            return;
+        };
+        self.builder
+            .build_call(self.rt.args_set, &[argc.into(), argv.into()], "")
+            .expect("recording the command line");
+    }
+
     /// Registration is a loop of calls rather than a table, because a table
     /// would need a layout agreed with the runtime and this needs nothing: the
     /// name is a pointer and a length, and the body is a function pointer.
     fn emit_test_main(&mut self, tests: &[(String, String)]) {
-        let i32_type = self.ctx.i32_type();
-        let main = self.module.add_function("main", i32_type.fn_type(&[], false), None);
+        let main = self.entry_point();
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
+        self.remember_arguments(main);
 
         for (symbol, name) in tests {
             let Some(function) = self.functions.get(symbol).copied() else { continue };
@@ -1594,9 +1620,10 @@ impl<'ctx> Backend<'ctx> {
         let khora_main = self.functions[entry];
         let raises = self.signature_of(entry).is_some_and(|s| can_raise(&s));
         let i32_type = self.ctx.i32_type();
-        let main = self.module.add_function("main", i32_type.fn_type(&[], false), None);
+        let main = self.entry_point();
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
+        self.remember_arguments(main);
 
         let call = self.builder.build_call(khora_main, &[], "result").expect("calling main");
 
