@@ -31,6 +31,23 @@ fn build(name: &str, source: &str) -> Result<PathBuf, Vec<String>> {
     }
 }
 
+struct Ran {
+    stdout: String,
+    code: Option<i32>,
+}
+
+fn run(name: &str, source: &str) -> Ran {
+    let exe = match build(name, source) {
+        Ok(exe) => exe,
+        Err(messages) => panic!("compiling `{name}` failed:\n  {}\n\n{source}", messages.join("\n  ")),
+    };
+    let output = std::process::Command::new(&exe).output().expect("the program should run");
+    Ran {
+        stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        code: output.status.code(),
+    }
+}
+
 fn refused(name: &str, source: &str) -> Vec<String> {
     match build(name, source) {
         Ok(_) => panic!("`{name}` should have been refused at the boundary:\n\n{source}"),
@@ -322,5 +339,195 @@ impl Ptr {
     assert!(
         found.iter().any(|m| m.contains("String::data")),
         "expected `String::data` to be unknown, got {found:?}"
+    );
+}
+
+// --- lending a buffer -------------------------------------------------------
+
+const LEND: &str = "module t;
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export type Array<A>;
+impl<A> Array<A> {
+  fn new(length: Int, fill: A) -> Array<A>;
+  fn length(self) -> Int;
+  fn get(self, index: Int) -> A;
+  fn set(self, index: Int, value: A) -> ();
+  fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
+    with 'c
+    raises 'e;
+}
+
+impl String {
+  fn byte_length(self) -> Int;
+  fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
+    with 'c
+    raises 'e;
+}
+
+impl Ptr {
+  fn null() -> Ptr;
+  fn is_null(self) -> Bool;
+}
+
+impl U8 {
+  fn to_int(self) -> Int;
+}
+
+/// Stands in for a foreign function: it takes what a foreign function takes.
+fn khora_sum_bytes(data: Ptr, len: Int) -> Int;
+";
+
+/// The body is handed a pointer and a count, and the count is the element
+/// count — the same number `length` gives.
+#[test]
+fn a_buffer_is_lent_as_a_pointer_and_a_count() {
+    let ran = run(
+        "lend_array",
+        &format!(
+            "{LEND}
+fn main() -> Int {{
+  let bytes: Array<U8> = Array::new(5, 7);
+  khora_print_int(Array::with_data(bytes, fn (p, n) => n));
+  khora_print_int(Array::with_data(bytes, fn (p, n) => if Ptr::is_null(p) {{ 1 }} else {{ 0 }}));
+  khora_print_int(Array::length(bytes));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "5\n0\n5\n1\n",
+        "five elements, a pointer that is not null, and the array still alive afterwards"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A string lends its bytes, and the count is the byte length.
+#[test]
+fn a_string_lends_its_bytes() {
+    let ran = run(
+        "lend_string",
+        &format!(
+            "{LEND}
+fn main() -> Int {{
+  khora_print_int(String::with_data(\"khora\", fn (p, n) => n));
+  khora_print_int(String::with_data(\"\", fn (p, n) => n));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "5\n0\n0\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The pointer really addresses the elements: a routine reading through it
+/// sees what Khora wrote.
+#[test]
+fn what_is_lent_is_the_actual_data() {
+    let ran = run(
+        "lend_reads",
+        &format!(
+            "{LEND}
+fn main() -> Int {{
+  let bytes: Array<U8> = Array::new(4, 0);
+  Array::set(bytes, 0, 10);
+  Array::set(bytes, 1, 20);
+  Array::set(bytes, 2, 30);
+  Array::set(bytes, 3, 40);
+  khora_print_int(Array::with_data(bytes, fn (p, n) => khora_sum_bytes(p, n)));
+  khora_print_int(String::with_data(\"AB\", fn (p, n) => khora_sum_bytes(p, n)));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "100\n131\n1\n",
+        "10+20+30+40, then the bytes of `AB` which are 65 and 66"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The array outlives the call by construction, and is released afterwards
+/// rather than leaked. Both halves matter: freed too early is a dangling
+/// pointer, freed never is a leak.
+#[test]
+fn what_was_lent_is_released_afterwards() {
+    let ran = run(
+        "lend_releases",
+        &format!(
+            "{LEND}
+fn borrow() -> Int {{
+  let bytes: Array<U8> = Array::new(8, 1);
+  Array::with_data(bytes, fn (p, n) => khora_sum_bytes(p, n))
+}}
+
+fn main() -> Int {{
+  khora_print_int(borrow());
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "8\n0\n", "nothing is left alive once the borrow is over");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// And released on the *error* path too, which is why the array is held by a
+/// scope rather than by a statement after the call. Errata 34, for the third
+/// time.
+#[test]
+fn what_was_lent_is_released_when_the_body_raises() {
+    let ran = run(
+        "lend_raises",
+        &format!(
+            "{LEND}
+export type Oops = | Bad;
+
+fn borrow() -> Int raises Oops {{
+  let bytes: Array<U8> = Array::new(8, 1);
+  Array::with_data(bytes, fn (p, n) => raise Oops::Bad)!
+}}
+
+fn main() -> Int {{
+  khora_print_int(borrow()! catch {{
+    Oops::Bad => 0,
+  }});
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "0\n0\n", "the raise left, and the buffer did not stay behind");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// An array of Khora objects holds reference-counted pointers, and handing
+/// those across is the mistake the whole boundary exists to prevent.
+#[test]
+fn an_array_of_objects_cannot_be_lent() {
+    let found = refused(
+        "lend_boxed",
+        &format!(
+            "{LEND}
+fn main() -> Int {{
+  let names: Array<String> = Array::new(2, \"a\");
+  khora_print_int(Array::with_data(names, fn (p, n) => n));
+  0
+}}
+"
+        ),
+    );
+    assert!(
+        found.iter().any(|m| m.contains("reference-counted objects")),
+        "expected a boundary error about counted elements, got {found:?}"
     );
 }

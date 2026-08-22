@@ -470,6 +470,28 @@ impl<A> Array<A> {
   /// memory is the least useful possible response.
   fn get(self, index: Int) -> A;
   fn set(self, index: Int, value: A) -> ();
+
+  /// Lends the elements to `body` as a pointer and a count, for the duration
+  /// of the call and no longer.
+  ///
+  /// This is how a buffer reaches a foreign function. The count is the number
+  /// of *elements* — the same number `length` gives — so a body that wants
+  /// bytes multiplies by the element's width itself.
+  ///
+  /// **The lifetime is the call, and that is the design rather than a
+  /// limitation.** A plain `data(self) -> Ptr` would be a dangling pointer
+  /// waiting to happen: the array is released at its last use, and that use
+  /// would be the `data` call. No wider scope is right either — the innermost
+  /// one is wrong for a pointer taken in one branch of an `if`, and the
+  /// function's own is wrong for a loop, which would hold one buffer alive per
+  /// iteration.
+  ///
+  /// Only an array of numbers can be lent. An `Array<A>` of Khora objects
+  /// holds reference-counted pointers, and handing those across is the mistake
+  /// the whole boundary exists to prevent. `docs/design/ffi.md`.
+  fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
+    with 'c
+    raises 'e;
 }
 
 /// Arithmetic that does not trap, and the bits underneath it.
@@ -541,6 +563,15 @@ impl String {
   /// A copy rather than a view, because a string is immutable and an array is
   /// not — a view would let one be edited through the other.
   fn bytes(self) -> Array<U8>;
+
+  /// Lends the bytes to `body` as a pointer and a length, for the duration of
+  /// the call and no longer.
+  ///
+  /// See `Array::with_data`, which is the same thing and carries the argument
+  /// for why the lifetime is a call rather than anything wider.
+  fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
+    with 'c
+    raises 'e;
 }
 
 // --- The fixed-width integers ----------------------------------------------

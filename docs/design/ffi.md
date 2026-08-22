@@ -118,6 +118,44 @@ row wrong in a binding and the binding is lying — which is why bindings to the
 operating system belong in the standard library, reviewed once, rather than
 being written afresh in every package.
 
+## 3a. Lending a buffer: the lifetime is the call
+
+`Array::with_data(self, body)` and `String::with_data(self, body)` hand the
+body a `Ptr` and a count, for the duration of the call and no longer.
+
+```khora
+fn read_into(fd: I32, buf: Array<U8>) -> Int {
+  buf.with_data(fn (p, n) => sys_read(fd, p, n))
+}
+```
+
+**The bound is a call because no other bound is right.** The obvious
+`Array::data(self) -> Ptr` is a dangling pointer the compiler creates for you:
+Perceus releases the array at its last *use*, and that use is the `data` call
+itself. Widening it to a scope does not help either — the innermost scope is
+wrong for a pointer taken inside one branch of an `if`, and the function's own
+scope is wrong for a loop, which would hold one live buffer per iteration. A
+body is the only bound that is right in all three.
+
+The array is released by a **scope** rather than by a statement after the call,
+so a body that raises does not leak it. That is errata 34, which has now been
+the answer three times.
+
+The count is the number of *elements*, the same number `Array::length` gives,
+so a body that wants bytes multiplies by the width itself. For an `Array<U8>`
+and for a `String` the two are the same, which is the common case.
+
+**Only an array of numbers can be lent.** An `Array<A>` of Khora objects holds
+reference-counted pointers, and handing those across is the mistake the whole
+boundary exists to prevent; the compiler refuses it by name.
+
+What this does *not* do is stop the pointer escaping — a body can write it into
+a `mut` field and read it afterwards. That is the same line Rust draws:
+obtaining a pointer is safe, and what happens on the far side of the boundary
+is the binding author's responsibility. What the borrow removes is the
+*accidental* case, the one the compiler creates behind your back and nobody
+would think to look for.
+
 ## 4. Foreign resources are counted values
 
 An open file is a Khora object holding the descriptor, whose release calls the
@@ -132,18 +170,6 @@ leaving the scope does.
 
 ## Still open
 
-- **Lending a buffer.** `Ptr` handles opaque handles and stops there, so a
-  foreign function still cannot be given an `Array<U8>` to read or fill. The
-  obvious `Array::data(self) -> Ptr` is a dangling pointer waiting to happen:
-  Perceus releases the array at its last *use*, and that is the `data` call
-  itself, so the array can be freed before the pointer is used.
-
-  A scoped borrow is the shape that cannot go wrong — `Array::with_data(self, f)`,
-  where the array is provably alive across the call, which is what `scoped`
-  and `nursery` already are. What makes it more than an afternoon is the error
-  path: if `f` raises, the array still has to be released, so the borrow has to
-  be a scope rather than a pair of statements. That is errata 34, and it is
-  worth doing deliberately.
 - **Callbacks.** A Khora closure cannot be a C function pointer, but a
   *top-level* Khora function very nearly can: it has a symbol and a machine
   signature. The likely answer is that only a non-capturing, non-raising,

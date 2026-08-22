@@ -849,6 +849,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if let Some(shape) = int_owner(&owner) {
                     return self.int_intrinsic(shape, &owner, &name, args, range);
                 }
+                if owner == "String" && name == "with_data" {
+                    return self.with_data(site, args, range);
+                }
                 if owner == "String" && matches!(name.as_str(), "bytes" | "byte" | "byte_length")
                 {
                     return self.string_intrinsic(&name, args, range);
@@ -1329,6 +1332,118 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(object.into())
     }
 
+    /// `Array::with_data` and `String::with_data`: lend the elements to a body
+    /// as a pointer and a count.
+    ///
+    /// **The lifetime is the call, and that is the whole design.** The obvious
+    /// alternative — `Array::data(self) -> Ptr`, returning a bare pointer — is
+    /// a dangling pointer waiting to happen: Perceus releases the array at its
+    /// last *use*, and that use is the `data` call itself, so the array can be
+    /// freed before the pointer is read. There is no scope that would fix it
+    /// either. The innermost one is wrong for `if c { data(a) } else { data(b) }`,
+    /// and the function's own is wrong for a loop, which would accumulate one
+    /// live buffer per iteration. A body is the only bound that is right in all
+    /// three.
+    ///
+    /// The array is released by a *scope* rather than by a statement after the
+    /// call, so a body that raises does not leak it. That is errata 34, which
+    /// has now been the answer three times.
+    ///
+    /// What this does not do is stop the pointer escaping — a body can write it
+    /// into a `mut` field and read it later. That is the same line Rust draws:
+    /// obtaining a pointer is safe, and what happens on the far side of the
+    /// boundary is the binding author's responsibility. What it removes is the
+    /// *accidental* case, the one the compiler creates behind your back.
+    fn with_data(&mut self, site: ExprId, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+        let [subject, body] = args else {
+            return self.fail("`with_data` takes a body to lend the data to", range);
+        };
+        let subject_ty = self.types.of(*subject).clone();
+        let Some(shape) = FnShape::of(self.types.of(*body)) else {
+            return self.fail("`with_data` takes a function to run", range);
+        };
+
+        // A `String` lends its bytes; an `Array<A>` lends its elements, and the
+        // count is the element count rather than a byte count — the same number
+        // `Array::length` gives, so the two never disagree.
+        let (elements, count) = match &subject_ty {
+            Type::Str => {
+                let object = self.expr(*subject)?.into_pointer_value();
+                let length = self.string_length(object);
+                let bytes = runtime::byte_offset(
+                    self.be.ctx,
+                    &self.be.builder,
+                    object,
+                    runtime::STRING_BYTES_OFFSET,
+                    "str.bytes",
+                );
+                self.scopes.push(vec![Cleanup::Temp(object.into(), Type::Str)]);
+                (bytes, length)
+            }
+            _ => {
+                let element = self.array_element(&subject_ty, range)?;
+                // An array of Khora objects is an array of counted pointers,
+                // and handing those to a foreign function is the mistake the
+                // whole boundary exists to prevent.
+                if is_boxed(&element) {
+                    return self.fail(
+                        format!(
+                            "an `Array<{element}>` holds reference-counted objects, so its \
+                             elements cannot be lent across the C ABI — only an array of \
+                             numbers can. `docs/design/ffi.md`"
+                        ),
+                        range,
+                    );
+                }
+                let object = self.expr(*subject)?.into_pointer_value();
+                let length_slot = runtime::field_pointer(
+                    self.be.ctx,
+                    &self.be.builder,
+                    object,
+                    runtime::ARRAY_LEN_FIELD,
+                );
+                let length = self
+                    .be
+                    .builder
+                    .build_load(self.be.ctx.i64_type(), length_slot, "array.len")
+                    .expect("reading an array's length")
+                    .into_int_value();
+                let elements = runtime::byte_offset(
+                    self.be.ctx,
+                    &self.be.builder,
+                    object,
+                    runtime::FIELD_OFFSET + runtime::ARRAY_HEADER_FIELDS * runtime::FIELD_WORD,
+                    "array.elements",
+                );
+                self.scopes.push(vec![Cleanup::Temp(object.into(), subject_ty.clone())]);
+                (elements, length)
+            }
+        };
+
+        let closure = self.expr(*body)?.into_pointer_value();
+        let Invoked { raw, fallible } = self.invoke_closure_at(
+            site,
+            *body,
+            closure,
+            &shape,
+            vec![elements.into(), count.into()],
+            range,
+        )?;
+        let result = if fallible {
+            let tagged = raw.expect("a fallible body returns a tagged value");
+            self.split_tagged(tagged, &shape.ret, range)?
+        } else {
+            match shape.ret {
+                Type::Unit => self.be.unit_value(),
+                _ => raw.unwrap_or_else(|| self.be.unit_value()),
+            }
+        };
+        // The closure's own scope, then the one holding what was lent.
+        self.leave_scope();
+        self.leave_scope();
+        Some(result)
+    }
+
     /// The two things a `Ptr` can do, which is deliberately all of them.
     ///
     /// A `Ptr` is an opaque machine address that came from the other side of
@@ -1588,6 +1703,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         range: TextRange,
     ) -> Flow<'ctx> {
         match (name, args) {
+            ("with_data", _) => self.with_data(site, args, range),
             ("new", [length, fill]) => {
                 let array_ty = self.types.of(site).clone();
                 let element = self.array_element(&array_ty, range)?;
@@ -2469,18 +2585,47 @@ impl<'ctx> Lower<'_, 'ctx> {
         args: &[ExprId],
         range: TextRange,
     ) -> Option<Invoked<'ctx>> {
-        let FnShape { params, ret, requires, raises } = signature;
+        // The callee before the arguments, which is the order the source is
+        // written in and the order the reference-counting plan was made for.
         let closure = self.expr(callee)?.into_pointer_value();
+        let mut given = Vec::with_capacity(args.len());
+        for arg in args {
+            given.push(self.expr(*arg)?);
+        }
+        self.invoke_closure_at(site, callee, closure, signature, given, range)
+    }
 
-        if args.len() != params.len() {
+    /// The same, given the closure and its arguments as values.
+    ///
+    /// What an intrinsic that calls back into Khora needs: `Array::with_data`
+    /// hands its body a pointer and a length that no expression in the source
+    /// produced. Split out rather than written twice, because two places
+    /// building the same argument list is how the two come to disagree — see
+    /// errata 33.
+    fn invoke_closure_at(
+        &mut self,
+        site: ExprId,
+        callee: ExprId,
+        closure: PointerValue<'ctx>,
+        signature: &FnShape,
+        given: Vec<BasicValueEnum<'ctx>>,
+        range: TextRange,
+    ) -> Option<Invoked<'ctx>> {
+        let FnShape { params, ret, requires, raises } = signature;
+
+        if given.len() != params.len() {
             self.fail(
-                format!("this call takes {} argument(s), but {} were given", params.len(), args.len()),
+                format!(
+                    "this call takes {} argument(s), but {} were given",
+                    params.len(),
+                    given.len()
+                ),
                 range,
             )?;
         }
         let mut values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![closure.into()];
-        for arg in args {
-            values.push(self.expr(*arg)?.into());
+        for value in given {
+            values.push(value.into());
         }
         // Evidence is appended in label order, exactly as a direct call
         // appends it — the closure's shape follows its *type* the way a named

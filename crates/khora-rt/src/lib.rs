@@ -238,6 +238,28 @@ pub extern "C" fn khora_tick() -> i64 {
     TICKS.fetch_add(1, COUNTER_ORDER) as i64 + 1
 }
 
+/// Adds up `len` bytes starting at `data`.
+///
+/// A testing aid, and specifically a *foreign function* one: it is here so that
+/// `Array::with_data` and `String::with_data` can be tested against something
+/// that actually reads through the pointer they lend. A test that only checks
+/// the pointer is non-null would pass just as well if the pointer addressed
+/// the wrong place.
+///
+/// # Safety
+///
+/// `data` must be null with a zero `len`, or address `len` initialized bytes
+/// that stay live for the call — which is exactly what a borrow guarantees.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_sum_bytes(data: *const u8, len: i64) -> i64 {
+    if data.is_null() || len <= 0 {
+        return 0;
+    }
+    // SAFETY: the contract above.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    bytes.iter().map(|b| i64::from(*b)).sum()
+}
+
 /// Resets both counters to zero, for test isolation.
 ///
 /// Call it when nothing is live. Resetting while objects are still allocated

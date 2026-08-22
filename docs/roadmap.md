@@ -778,13 +778,16 @@ rule for what may cross was settled the hard way in errata 35.
   dangling `Ptr` is not something the language can express — every pointer that
   exists came from the other side.
 
-  **Still to do: lending a buffer.** A foreign function cannot yet be given an
-  `Array<U8>` to read or fill, and the obvious `Array::data(self) -> Ptr` is a
-  dangling pointer waiting to happen, since Perceus releases the array at its
-  last *use* — which is the `data` call. A scoped borrow is the shape that
-  cannot go wrong; what makes it more than an afternoon is that a raise inside
-  the borrow still has to release the array, so it must be a scope rather than
-  a pair of statements. Errata 34, and worth doing deliberately.
+  **A buffer is lent by `with_data`**, which hands a body a `Ptr` and a count
+  for the duration of the call and no longer. The bound is a call because no
+  other bound is right: a bare `data(self) -> Ptr` is a dangling pointer the
+  compiler creates for you, since Perceus releases the array at its last use —
+  the `data` call itself — and no scope is right for all of a straight line, a
+  branch and a loop body. The array is released by a scope rather than by a
+  statement after the call, so a body that raises does not leak it; errata 34,
+  for the third time. Only an array of numbers can be lent, because an array of
+  Khora objects holds counted pointers and handing those across is the mistake
+  the boundary exists to prevent.
 - **7.4 Syscalls**: files, sockets, a clock.
 
 **Exit:** read a file and write its contents to a socket, from Khora, with the
