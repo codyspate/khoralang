@@ -1216,10 +1216,14 @@ they will be missed:
 - **`Shared<A>`.** The sharing rules refuse a stateful test double, a cache and
   a counter on purpose. This is what they are refusing them *until*, and its
   API has to release under a raise and under cancellation.
-- **Evidence parameters for a lambda.** A capability is a lexical binding, so a
-  thunk cannot receive one from the function it is passed to:
-  `std::core::nursery` and `scoped` cannot be called, and `Router::listen`
-  writes their `with` block out by hand instead.
+- **Evidence parameters for a lambda**, which is
+  `docs/design/capability-passing.md`. A named function receives what its
+  `with` clause names, so `nursery(serve)` works and is tested; a lambda
+  captures instead and its row is always empty, so `nursery(fn () => serve()!)`
+  is refused. **Eta-expansion changes meaning**, and it taxes every library
+  that installs a capability for a callback — `transaction`,
+  `with_connection`, `with_span`. The rule is decided and the call side is
+  already built; the three missing pieces are in the doc.
 
 The last two need a decision; the rest is library work over a language that
 came out of phase 8 in good shape.
