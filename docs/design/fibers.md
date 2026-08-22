@@ -163,15 +163,39 @@ per fiber, and three things follow:
 
 ## What phase 5.3 builds, in order
 
-1. **A fiber and its handle**: `spawn` on a thread, `join`, `cancel`, and the
-   per-fiber cancellation flag replacing the global one.
-2. **The nursery**, as a region, with the ending-reason question above settled
+1. **A fiber and its handle** — *built*. `spawn` on a thread, `join`, `cancel`,
+   and the per-fiber cancellation flag in place of the global one.
+
+   The structured half came free, and it is worth saying how: **a fiber
+   handle's release joins it.** So a fiber cannot outlive the binding that
+   holds it, on every path out including a raise, because that is what
+   releasing a binding already does. Put a handle in a region and the region
+   waits; put it in a block and the block waits. Nobody has to write `join`,
+   and there is no way to write a fiber that escapes.
+
+2. **A fiber root that can absorb a cancellation** — *not built, and it comes
+   before the nursery.*
+
+   A cancellation reaching a frame with no error channel currently produces the
+   entry point's outcome: finalizers run, the process exits 130. On the
+   program's own computation that is right. On a fiber it is a hole — one
+   child's cancellation should stop that child, not the program — and
+   `khora_cancel_stop` reports it as a hole rather than taking the program down
+   quietly.
+
+   The fix is visible from here. The spawned thunk should be a *fallible*
+   closure, `() -> () raises 'e`, so it returns the tagged pair and the runtime
+   can see how the fiber ended — cancelled, failed, or done. Effect rows on
+   function types (4.5) already make that expressible and callable; what is
+   missing is that a lambda's rows are inferred empty, so the thunk has to be a
+   named function today. Inferring a lambda's rows is the real prerequisite,
+   and it is worth doing for its own sake.
+
+3. **The nursery**, as a region, with the ending-reason question above settled
    first.
-3. **Failure propagation**: a child that raises makes the nursery raise, which
-   needs the tagged return to survive a thread boundary — a value, not a
-   mechanism, so this is bookkeeping rather than design.
-4. **`khora test` across cores**, which is the exit criterion's second half and
-   is a consumer of all three.
+4. **Failure propagation**: a child that raises makes the nursery raise. Falls
+   out of (2), since the tagged return is what carries it.
+5. **`khora test` across cores**, the exit criterion's second half.
 
 Work stealing, stack growth and the coroutine switch itself are phase 6 or
 later, and are not on the path to the exit criterion.

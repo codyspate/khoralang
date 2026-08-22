@@ -454,7 +454,7 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
 
   The flag is process-wide until fibers make it per-fiber; nothing in generated
   code reads it directly, so that is a change inside the runtime.
-- **5.3 Fibers — decided, not yet built.** `docs/design/fibers.md`: a fiber is
+- **5.3 Fibers — decided, and started.** `docs/design/fibers.md`: a fiber is
   a stackful coroutine multiplexed onto worker threads, and the first
   implementation makes each one an operating-system thread. Not a hedge — the
   same argument as D10. A program sees `spawn`, `join`, `cancel` and a nursery,
@@ -465,12 +465,24 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   the one option that would have to be designed into the compiler now, and it
   buys speed at the cost of the property the language is for.
 
-  **A nursery is a region.** A fiber cannot outlive the block that spawned it
-  because the region's finalizers wait for the children on every path out —
-  which is 5.1 paying for itself a second time, with no part of it designed for
-  this. One thing left open and called out in the doc: a region's finalizer
-  cannot yet tell whether it is releasing normally or unwinding, and a nursery
-  wants to wait in the first case and cancel-then-wait in the second.
+  **Built:** `spawn`, `join`, `cancel`, and a cancellation flag that is now one
+  per fiber rather than one per process. The structured half came free —
+  releasing a fiber handle *joins* it, so a fiber cannot outlive the binding
+  that holds it, on every path out including a raise. Nobody writes `join` and
+  nothing can escape. That is 5.1 paying for itself a second time, with no part
+  of it designed for this.
+
+  **Not built, and next:** a fiber root that can absorb a cancellation. One
+  child's cancellation currently reaches a frame with no error channel and
+  produces the *program's* outcome, which is right for the program's own
+  computation and a hole for a fiber; the runtime reports it as a hole rather
+  than exiting quietly. The fix is a fallible spawned thunk, which effect rows
+  on function types already make expressible — what is missing is that a
+  lambda's rows are inferred empty, so inferring them is the real prerequisite.
+
+  Also open: a region's finalizer cannot tell whether it is releasing normally
+  or unwinding, and a nursery wants to wait in the first case and
+  cancel-then-wait in the second.
 - **5.4 `Schedule` policies.** A library, once fibers exist.
 
 **Exit:** a canceled fiber runs every finalizer in scope, verified by test;

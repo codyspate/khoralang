@@ -111,7 +111,9 @@
 #![deny(missing_docs, unsafe_op_in_unsafe_fn)]
 
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
+use std::cell::RefCell;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The header every Khora heap object begins with.
@@ -685,14 +687,30 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
 
 // --- cancellation ----------------------------------------------------------
 
-/// Whether the running computation has been asked to stop.
-///
-/// One flag per program today; one per fiber once fibers exist, at which point
-/// the address of this becomes something the scheduler hands out. Nothing in
-/// the generated code reads it directly — it goes through
-/// [`khora_cancelled`] — so making it per-fiber is a change inside the runtime,
-/// the same shape as the refcount question in `docs/roadmap.md` D10.
-static CANCELLED: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Whether *this* fiber has been asked to stop.
+    ///
+    /// One per fiber, which is what makes cancelling one not cancel the rest.
+    /// The main thread is a fiber too — it gets the flag every thread gets —
+    /// so nothing has to special-case the program's own computation.
+    ///
+    /// Shared rather than owned, because the handle a parent holds has to be
+    /// able to set it from outside.
+    static CANCELLED: RefCell<Arc<AtomicUsize>> =
+        RefCell::new(Arc::new(AtomicUsize::new(0)));
+
+    /// Whether this thread is a spawned fiber rather than the program itself.
+    ///
+    /// Only [`khora_cancel_stop`] asks, and only to tell a program that has
+    /// nowhere left to unwind to from a *fiber* that has nowhere left to
+    /// unwind to. The first is an outcome; the second is a hole.
+    static ON_FIBER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The running fiber's cancellation flag.
+fn cancel_flag() -> Arc<AtomicUsize> {
+    CANCELLED.with(|c| c.borrow().clone())
+}
 
 /// Asks the running computation to stop.
 ///
@@ -703,7 +721,7 @@ static CANCELLED: AtomicUsize = AtomicUsize::new(0);
 /// Idempotent: asking twice is asking once.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_cancel() {
-    CANCELLED.store(1, COUNTER_ORDER);
+    cancel_flag().store(1, COUNTER_ORDER);
 }
 
 /// Whether a cancellation is pending.
@@ -712,27 +730,37 @@ pub extern "C" fn khora_cancel() {
 /// does fallible work. A relaxed load of a word, which is what it costs.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_cancelled() -> u8 {
-    CANCELLED.load(COUNTER_ORDER) as u8
+    cancel_flag().load(COUNTER_ORDER) as u8
 }
 
-/// Stops a cancelled program that has nowhere left to unwind to.
+/// Stops a cancelled computation that has nowhere left to unwind to.
 ///
 /// Reached when a cancellation arrives at a frame with no error channel — a
 /// function that caught every error in its row, so its signature promises a
 /// value it can no longer produce. There is no frame between there and the
-/// entry point that could carry the cancellation, so the entry point's outcome
-/// is produced here instead: the root region's finalizers run, and the process
-/// exits 130.
+/// root that could carry the cancellation.
 ///
-/// This is the pre-fiber shape of "unwind to the fiber root". Once a fiber
-/// root exists it is a frame that *can* carry a cancellation, and ordinary code
-/// stops reaching this.
+/// On the program's own computation that is an *outcome*: the root region's
+/// finalizers run and the process exits 130, which is what the entry point
+/// would have done anyway.
+///
+/// On a spawned fiber it is a *hole*, and this says so rather than taking the
+/// whole program down quietly. A fiber's root should absorb a cancellation and
+/// stop that fiber — which needs the spawned thunk to return a tagged value,
+/// so the runtime can see how it ended. `docs/design/fibers.md` calls this out
+/// as the piece 5.3 has not built yet.
 ///
 /// # Safety
 ///
 /// Must be called with no Khora frame relying on returning: it does not.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_cancel_stop() -> ! {
+    if ON_FIBER.with(|f| f.get()) {
+        fatal(
+            "a cancellation reached a fiber's root, which cannot absorb one yet; \
+             see docs/design/fibers.md",
+        );
+    }
     // SAFETY: nothing returns past this, so no other frame observes the
     // released root.
     unsafe { khora_region_close_root() };
@@ -746,5 +774,169 @@ pub unsafe extern "C" fn khora_cancel_stop() -> ! {
 /// and is about to start another.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_cancel_reset() {
-    CANCELLED.store(0, COUNTER_ORDER);
+    cancel_flag().store(0, COUNTER_ORDER);
+}
+
+// --- fibers ----------------------------------------------------------------
+
+/// A Khora pointer being moved to another fiber.
+///
+/// Raw pointers are not `Send`, and for good reason; this asserts that *these*
+/// ones are safe to move, which they are because reference counts are atomic
+/// (D10) and a spawned closure is handed over rather than shared — the caller
+/// gives up its reference at the `spawn`.
+struct Handed(*mut u8);
+
+// SAFETY: see the type's documentation. The pointer is a Khora object with an
+// atomic refcount, and exactly one fiber owns the reference being moved.
+unsafe impl Send for Handed {}
+
+/// What a fiber handle points at.
+struct FiberState {
+    /// `None` once joined. Joining twice is not an error — the second is a
+    /// no-op — because the handle's release joins whatever `join` did not.
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// The child's flag, shared with the child so a parent can set it.
+    cancel: Arc<AtomicUsize>,
+}
+
+/// The tag every fiber handle carries.
+const FIBER_TAG: u32 = 0;
+
+/// Runs `body` on a fiber of its own, returning a handle to it.
+///
+/// Takes ownership of `body`: the fiber releases it when it finishes, so the
+/// caller hands over a reference of its own.
+///
+/// The fiber is an operating-system thread today and a stackful coroutine
+/// later. `docs/design/fibers.md` decides that, and the decision is that a
+/// program cannot tell which — the handle is the same, and so is everything a
+/// program can do with it.
+///
+/// # Safety
+///
+/// `body` must be a live Khora closure of type `() -> ()` whose drop routine
+/// is `glue`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_spawn(
+    body: *mut u8,
+    glue: Option<extern "C" fn(*mut u8)>,
+) -> *mut u8 {
+    let cancel = Arc::new(AtomicUsize::new(0));
+    let handed = Handed(body);
+    let child_flag = cancel.clone();
+
+    let thread = std::thread::spawn(move || {
+        // Named before it is destructured, so the closure captures the wrapper
+        // rather than the pointer inside it. Rust captures fields precisely,
+        // and a captured `*mut u8` is not `Send` however its container is
+        // declared — the wrapper only helps if the wrapper is what moves.
+        let handed = handed;
+        let Handed(body) = handed;
+        CANCELLED.with(|c| *c.borrow_mut() = child_flag);
+        ON_FIBER.with(|f| f.set(true));
+
+        // SAFETY: the caller guarantees a live `() -> ()` closure, and this
+        // fiber now owns the reference. A closure's first field is its code
+        // pointer; calling one with its own object is the convention generated
+        // code uses.
+        unsafe {
+            let code = *body.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
+            let call: extern "C" fn(*mut u8) = std::mem::transmute(code);
+            call(body);
+            khora_drop(body, glue);
+        }
+    });
+
+    let object = khora_alloc(std::mem::size_of::<*mut FiberState>(), FIBER_TAG);
+    let state: Box<FiberState> = Box::new(FiberState { thread: Some(thread), cancel });
+    // SAFETY: `khora_alloc` returned an object with one field's worth of space,
+    // zeroed and aligned, and nothing else holds this pointer yet.
+    unsafe {
+        object.add(KHORA_FIELD_OFFSET).cast::<*mut FiberState>().write(Box::into_raw(state));
+    }
+    object
+}
+
+/// The state behind a fiber handle, or null if it has been released.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+unsafe fn fiber_state<'a>(fiber: *mut u8) -> Option<&'a mut FiberState> {
+    if fiber.is_null() {
+        return None;
+    }
+    // SAFETY: the caller guarantees a live handle, whose field holds what
+    // `khora_fiber_spawn` wrote there.
+    unsafe { (*fiber.add(KHORA_FIELD_OFFSET).cast::<*mut FiberState>()).as_mut() }
+}
+
+/// Waits for a fiber to finish.
+///
+/// Idempotent: a fiber joined twice was joined once. That matters because the
+/// handle's release joins whatever an explicit `join` did not, which is what
+/// makes a fiber unable to outlive the binding that holds it.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8) {
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
+    if let Some(thread) = state.thread.take() {
+        // A child that panicked has already reported it; there is nothing this
+        // fiber can do with the payload, and turning it into a parent panic
+        // would lose the child's message behind a second one.
+        let _ = thread.join();
+    }
+}
+
+/// Asks a fiber to stop at its next cancellation point.
+///
+/// Returns immediately. The child stops where the source says it can — at a
+/// `!` — and runs every finalizer between there and its root on the way out.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
+    state.cancel.store(1, COUNTER_ORDER);
+}
+
+/// Joins a fiber and frees its handle.
+///
+/// This is a `drop_fields` callback, and it is where structured concurrency
+/// comes from: releasing the last reference to a handle *waits*, so a fiber
+/// cannot outlive the binding that holds it. Put the handle in a region and the
+/// region waits; put it in a block and the block does.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`] whose refcount has
+/// reached zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fiber_release(fiber: *mut u8) {
+    if fiber.is_null() {
+        return;
+    }
+    // SAFETY: the caller guarantees a live handle; the field holds what
+    // `khora_fiber_spawn` wrote, and nothing else reads it after this.
+    unsafe {
+        let slot = fiber.add(KHORA_FIELD_OFFSET).cast::<*mut FiberState>();
+        let state = *slot;
+        if state.is_null() {
+            return;
+        }
+        slot.write(std::ptr::null_mut());
+
+        let mut state = Box::from_raw(state);
+        if let Some(thread) = state.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }

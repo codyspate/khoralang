@@ -811,6 +811,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == runtime::REGION_TYPE {
                     return self.region_intrinsic(&name, args, range);
                 }
+                if owner == runtime::FIBER_TYPE {
+                    return self.fiber_intrinsic(&name, args, range);
+                }
                 match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, site, args, range),
                     None => self.fail(
@@ -933,6 +936,60 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             _ => self.fail(
                 format!("`Region::{name}` is not a region operation the backend knows"),
+                range,
+            ),
+        }
+    }
+
+    /// `Fiber::spawn`, `Fiber::join` and `Fiber::cancel`.
+    ///
+    /// Intrinsics for the same reason the region ones are: `spawn` hands the
+    /// runtime a closure, and the runtime has to be told how to release it
+    /// when the fiber finishes. Everything else about a fiber handle is an
+    /// ordinary reference-counted object — including that releasing it joins,
+    /// which is where structured concurrency comes from.
+    fn fiber_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        match (name, args) {
+            ("spawn", [body]) => {
+                // Handed over, not lent: the fiber releases the closure when
+                // it finishes, so this gives up the reference the plan gave it.
+                let closure = self.expr(*body)?;
+                let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
+                let spawn = self.be.rt.fiber_spawn;
+                let fiber = self
+                    .be
+                    .builder
+                    .build_call(spawn, &[closure.into(), glue.into()], "fiber")
+                    .expect("spawning a fiber")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a fiber handle is a value");
+                Some(fiber)
+            }
+            ("join", [fiber]) | ("cancel", [fiber]) => {
+                let ty = self.types.of(*fiber).clone();
+                let handle = self.expr(*fiber)?;
+                let call = if name == "join" {
+                    self.be.rt.fiber_join
+                } else {
+                    self.be.rt.fiber_cancel
+                };
+                self.be
+                    .builder
+                    .build_call(call, &[handle.into()], "")
+                    .expect("acting on a fiber");
+                // Borrowed, not consumed — the handle is still the caller's,
+                // and the plan handed this frame an owned reference.
+                self.drop(handle, &ty);
+                Some(self.be.unit_value())
+            }
+            _ => self.fail(
+                format!("`Fiber::{name}` is not a fiber operation the backend knows"),
                 range,
             ),
         }
