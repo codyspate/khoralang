@@ -366,7 +366,12 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             }
             walk(&path, out)?;
         } else if path.extension().is_some_and(|e| e == "kh") {
-            out.push(path);
+            // A file whose name carries a target suffix belongs to that target
+            // only — `socket_windows.kh` is not read at all elsewhere, so two
+            // files may declare the same module. `khora_db::selected_for_target`.
+            if khora_db::selected_for_target(&path, khora_db::host_target()) {
+                out.push(path);
+            }
         }
     }
     Ok(())

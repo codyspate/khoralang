@@ -146,3 +146,57 @@ impl salsa::Database for KhoraDatabase {}
 
 #[salsa::db]
 impl Db for KhoraDatabase {}
+
+/// Every target suffix a file name may carry, and which targets it selects.
+///
+/// Ordered longest-first is not needed — the suffixes are disjoint — but they
+/// are listed the way a reader would group them.
+const TARGET_SUFFIXES: [(&str, &[&str]); 4] = [
+    ("_windows", &["windows"]),
+    ("_linux", &["linux"]),
+    ("_macos", &["macos"]),
+    // The two that share almost everything. A file that works on both says so
+    // once rather than existing twice.
+    ("_posix", &["linux", "macos"]),
+];
+
+/// Whether a source file belongs in a build for `target`.
+///
+/// **The rule is in the file's name**, as it is in Go: `socket_windows.kh` is
+/// compiled only on Windows, `socket_posix.kh` only on Linux and macOS, and
+/// `socket.kh` always. Two files may then declare the same module, because at
+/// most one of them is ever in the build.
+///
+/// A name rather than syntax, and deliberately. An `#[if(windows)]` attribute
+/// would put two targets' code in one file, which means every reader reads
+/// both and the compiler parses both — and the moment a third target appears,
+/// so does a nest of conditions. A suffix keeps each target's version whole
+/// and readable on its own, and makes "which files did this build use?" a
+/// question `ls` can answer.
+///
+/// What it does not do is let a *fragment* differ. That is on purpose: if two
+/// targets share ninety per cent of a file, the ten per cent belongs behind a
+/// function they both call, which is what a reader would want anyway.
+pub fn selected_for_target(path: &std::path::Path, target: &str) -> bool {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return true;
+    };
+    match TARGET_SUFFIXES.iter().find(|(suffix, _)| stem.ends_with(suffix)) {
+        Some((_, targets)) => targets.contains(&target),
+        None => true,
+    }
+}
+
+/// The target this compiler is running on, named as a file suffix would be.
+///
+/// Khora generates for the host triple, so the host's name is the target's —
+/// the same assumption the code generator already makes about word size.
+pub fn host_target() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}

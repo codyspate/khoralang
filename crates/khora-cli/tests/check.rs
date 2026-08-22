@@ -72,3 +72,72 @@ fn a_file_that_does_not_parse_reports_only_syntax_errors() {
     assert!(!ok);
     assert!(!output.contains("this function returns"), "{output}");
 }
+
+// --- one target's files at a time -------------------------------------------
+
+/// Two files declaring the same module, one per target, and only one of them
+/// is ever read.
+///
+/// The rule is in the file's name — `khora_db::selected_for_target` — and this
+/// is the test that `khora` itself applies it. Without the rule the two would
+/// be a duplicate-module error; with it they are how a `std::net::socket`
+/// exists on Windows and on POSIX at the same time.
+#[test]
+fn only_this_targets_files_are_read() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("targets");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    for name in ["which_windows.kh", "which_linux.kh", "which_macos.kh"] {
+        let target = name
+            .trim_start_matches("which_")
+            .trim_end_matches(".kh")
+            .to_string();
+        std::fs::write(
+            dir.join(name),
+            format!("module t::which;\nexport fn which() -> Int {{ 1 }} // {target}\n"),
+        )
+        .expect("writing a fixture");
+    }
+    std::fs::write(
+        dir.join("main.kh"),
+        "module t::main;\nimport t::which::{which};\nexport fn main() -> Int { which() }\n",
+    )
+    .expect("writing a fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(&dir)
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "expected success, got:\n{text}");
+    assert!(
+        text.contains("checked 2 file(s)"),
+        "two of the four files belong in this build, got:\n{text}"
+    );
+}
+
+/// A file named on the command line is read whichever target it names. Asking
+/// for a file by name is asking for it, and refusing would leave no way to
+/// check the other target's version at all.
+#[test]
+fn a_file_named_outright_is_read_anyway() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("targets_named");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    // A name that cannot be this host's, whichever host that is.
+    let other = if cfg!(windows) { "linux" } else { "windows" };
+    let path = dir.join(format!("only_{other}.kh"));
+    std::fs::write(&path, "module t;\nexport fn f() -> Int { 1 }\n").expect("a fixture");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("checked 1 file(s)"), "{text}");
+}

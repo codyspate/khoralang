@@ -807,15 +807,31 @@ rule for what may cross was settled the hard way in errata 35.
   Khora string knows its length instead. A copy, necessarily, living exactly as
   long as the call.
 
-  **A socket is not ISO C.** It is Winsock or it is Berkeley sockets, and
-  choosing between them per target needs conditional compilation, which the
-  language does not have. That is a phase 8 problem wearing a phase 7 costume,
-  and it is the one thing standing between here and the exit criterion.
+  **A socket is not ISO C** — it is Winsock or it is Berkeley sockets, and the
+  two do not even agree on what a socket *is*. Choosing between them is no
+  longer the obstacle, though: see 7.5. What remains is writing them, which is
+  a `std::net` and therefore phase 8's.
+- **7.5 One target's files at a time — done.** A source file whose name ends in
+  `_windows`, `_linux`, `_macos` or `_posix` is compiled only on those targets,
+  so two files may declare the same module and at most one is ever in the
+  build.
+
+  Go's rule, for Go's reasons. An `#[if(windows)]` attribute would put two
+  targets' code in one file — every reader reads both, the compiler parses
+  both, and a third target grows a nest of conditions in the middle of
+  otherwise ordinary code. A suffix keeps each target's version whole and
+  readable on its own, and makes *which files did this build use?* a question
+  `ls` can answer. It deliberately cannot make a *fragment* differ: if two
+  targets share ninety per cent of a file, the other ten belongs behind a
+  function they both call.
+
+  A file named outright on the command line is read whichever target it names,
+  because asking for a file by name is asking for it.
 
 **Exit — the file half is met.** Read a file, from Khora, with the file closed
 by the region that opened it, on the error path as well as the ordinary one:
-`tests/files.rs`. Writing it to a *socket* waits for a way to say "this
-declaration on Windows, that one elsewhere".
+`tests/files.rs`. Writing it to a *socket* now waits only on somebody writing
+`std::net`, which is phase 8.
 
 ---
 

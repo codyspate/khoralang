@@ -198,9 +198,31 @@ declarations is the whole of it.
 
 That is most of phase 7's exit criterion. The socket half is missing for a
 reason that is not about the boundary: a socket is not ISO C. It is Winsock or
-it is Berkeley sockets, and choosing between them per target needs conditional
-compilation, which the language does not have. That is a phase 8 problem
-wearing a phase 7 costume.
+it is Berkeley sockets, and the two do not even agree on what a socket *is* — a
+`SOCKET` is a `UINT_PTR` and a file descriptor is an `int`.
+
+**Choosing between them is no longer the obstacle.** A source file whose name
+ends in `_windows`, `_linux`, `_macos` or `_posix` is compiled only on those
+targets, so `socket_windows.kh` and `socket_posix.kh` may both declare
+`module std::net::socket;` and at most one is ever in the build. What remains
+is writing them, which is a `std::net` and therefore phase 8's.
+
+### Why a file name and not an attribute
+
+The rule is Go's, and for Go's reasons. An `#[if(windows)]` attribute puts two
+targets' code in one file, so every reader reads both, the compiler parses
+both, and the arrival of a third target grows a nest of conditions in the
+middle of otherwise ordinary code. A suffix keeps each target's version whole
+and readable on its own, and makes *which files did this build use?* a question
+`ls` can answer.
+
+What it deliberately does not allow is a differing *fragment*. If two targets
+share ninety per cent of a file, the other ten belongs behind a function they
+both call — which is what a reader would want regardless.
+
+A file named outright on the command line is read whichever target it names.
+Asking for a file by name is asking for it, and refusing would leave no way to
+check the other target's version at all.
 
 ## Still open
 
