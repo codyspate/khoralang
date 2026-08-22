@@ -211,3 +211,46 @@ fn a_module_sees_nothing_it_did_not_import() {
         "cannot find `double` in this scope",
     );
 }
+
+/// A method on a type the file never named. `req.params` has type `Params`,
+/// and `req.params.get(..)` has to work whether or not `Params` was imported —
+/// a value can arrive without its type being written down anywhere.
+#[test]
+fn a_method_arrives_on_a_type_that_was_never_imported() {
+    assert_clean(&[
+        (
+            "net.kh",
+            "module net;\n\
+             export type Params = | Of(one: String);\n\
+             impl Params { fn one(self) -> String { match self { Params::Of(s) => s } } }\n\
+             export type Request = { params: Params };\n",
+        ),
+        (
+            "app.kh",
+            "module app;\n\
+             import net::{Request};\n\
+             export fn handle(req: Request) -> String { req.params.one() }\n",
+        ),
+    ]);
+}
+
+/// The same rule for a function reached by path, which is how a constructor of
+/// such a type is written.
+#[test]
+fn a_function_arrives_on_a_type_that_was_never_imported() {
+    assert_clean(&[
+        (
+            "net.kh",
+            "module net;\n\
+             export type Params = | Of(one: String);\n\
+             impl Params { fn empty() -> Params { Params::Of(\"\") } }\n\
+             export type Request = { params: Params };\n",
+        ),
+        (
+            "app.kh",
+            "module app;\n\
+             import net::{Params, Request};\n\
+             export fn blank() -> Params { Params::empty() }\n",
+        ),
+    ]);
+}

@@ -377,6 +377,31 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     map
 }
 
+/// Brings every inherent impl of an imported module into view.
+///
+/// Every one, not only the ones whose type was named in the import. A type's
+/// own methods are part of the type exactly as its constructors are, and a
+/// value can arrive without its type ever being written down: `req.params` has
+/// type `Params`, and `req.params.get(..)` should work whether or not the file
+/// also imported `Params`. There is nothing to shadow either — an inherent
+/// impl is not a name that can be referred to, only a method reached by
+/// having a value — so gating it on an import buys nothing and costs the
+/// obvious call.
+fn import_inherent(exported: &TypeMap, map: &mut TypeMap) {
+    for imp in &exported.traits.inherent {
+        if map.traits.inherent.contains(imp) {
+            continue;
+        }
+        map.traits.inherent.push(imp.clone());
+        let own = format!("#{}::", imp.head);
+        for (key, signature) in &exported.signatures {
+            if key.starts_with(&own) {
+                map.signatures.insert(key.clone(), signature.clone());
+            }
+        }
+    }
+}
+
 /// Copies the declarations a file imported into its own view.
 ///
 /// Reads only the *defining* file's `type_map`, so this stays incremental: a
@@ -399,6 +424,7 @@ fn import_types(
             continue;
         }
         let exported = type_map(db, source);
+        import_inherent(exported, map);
 
         match kind {
             khora_hir::ItemKind::Function => {
@@ -419,18 +445,8 @@ fn import_types(
                 map.variants.extend(
                     exported.variants.iter().filter(|v| &v.type_name == name).cloned(),
                 );
-                // A type's own methods are part of the type, exactly as its
-                // constructors are. Requiring a second import for them would
-                // be ceremony for no decision.
-                map.traits
-                    .inherent
-                    .extend(exported.traits.inherent.iter().filter(|i| &i.head == name).cloned());
-                let own = format!("#{name}::");
-                for (key, signature) in &exported.signatures {
-                    if key.starts_with(&own) {
-                        map.signatures.insert(key.clone(), signature.clone());
-                    }
-                }
+                // A type's own methods come with it — see `import_inherent`,
+                // which brings the whole module's rather than this type's.
             }
             khora_hir::ItemKind::Trait => {
                 if let Some(def) = exported.traits.traits.get(name.as_str()) {
@@ -501,6 +517,21 @@ fn generic_names(params: Option<&ast::TypeParams>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A method key as it was written in the source.
+///
+/// Keys are mangled so the two halves cannot collide with a name a program
+/// chose — `#Router::listen`, `Eq#Int::eq` — and `#` cannot occur in an
+/// identifier, which is exactly why it must not reach a diagnostic either.
+fn as_written(key: &str) -> String {
+    match key.split_once('#') {
+        // `#Head::method`: a type's own function.
+        Some(("", rest)) => rest.to_string(),
+        // `Trait#Head::method`: reached through the type that implements it.
+        Some((_, rest)) => rest.to_string(),
+        None => key.to_string(),
+    }
 }
 
 /// The label an error type carries in a `raises` row: its own name.
@@ -1648,6 +1679,7 @@ impl<'a> Checker<'a> {
     /// makes the message actionable.
     fn check_effects(&mut self) {
         for Demand { clause, row, range, callee, site } in std::mem::take(&mut self.demanded) {
+            let callee = as_written(&callee);
             // Satisfied means *subsumed*, not equal: a caller providing
             // `{ ledger, ai }` can call something needing only `{ ledger }`.
             // Opening the demand is that check — its labels must all be

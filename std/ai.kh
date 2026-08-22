@@ -1,6 +1,6 @@
 module std::ai;
 
-import std::core::{Option};
+import std::core::{List, Option};
 
 export type Device =
   | Cpu
@@ -34,6 +34,18 @@ export type Prompt = {
   messages: List<Message>,
   temperature: Float,
 };
+
+/// Built by piping: `Prompt::new() |> Prompt::system(..) |> Prompt::user(..)`.
+/// Each returns a new prompt rather than mutating one, so a half-built prompt
+/// cannot be shared and then changed underneath its other holder.
+impl Prompt {
+  fn new() -> Prompt;
+  /// Replaces the system instructions; the last one written wins.
+  fn system(self, instructions: String) -> Prompt;
+  fn user(self, message: String) -> Prompt;
+  fn assistant(self, message: String) -> Prompt;
+  fn at_temperature(self, temperature: Float) -> Prompt;
+}
 
 export type ModelError =
   | ContextLengthExceeded(max_tokens: Int)
