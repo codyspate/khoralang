@@ -188,7 +188,12 @@ containers rather than by the effect system.
 
 A handler may itself require capabilities. That is the direct-style equivalent
 of Effect's `Layer<RIn, ROut>`: a service built on top of other services.
-`Handler<E>` is the type; `handler for E { … }` constructs one.
+
+**An effect's name is the type of its handlers.** `handler for Db { … }` has
+type `Db`, so a function that builds one returns `Db`. There is no wrapper
+type: `with { db: Db }` already spells it that way, and an interface naming the
+type of the things that implement it is what a Go or TypeScript reader already
+expects. A wrapper would only add an unwrap between the two spellings.
 
 ```
 export effect Db {
@@ -197,7 +202,7 @@ export effect Db {
 }
 
 // Needs Config to find the connection string and Scope to own the pool.
-export fn postgres_db() -> Handler<Db>
+export fn postgres_db() -> Db
   with { config: Config, scope: Scope }
   raises ConfigError
 {
@@ -214,7 +219,7 @@ export fn postgres_db() -> Handler<Db>
 }
 
 // Ledger is built on Db, and says so.
-export fn sql_ledger() -> Handler<Ledger> with { db: Db } {
+export fn sql_ledger() -> Ledger with { db: Db } {
   handler for Ledger {
     get_history: fn id =>
       db.query("select * from txn where account = $1", [id])!

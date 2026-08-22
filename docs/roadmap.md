@@ -97,7 +97,8 @@ before the phase that depends on it starts.
   exist in direct style; you call `ledger.get_history(x)`.
 - **D7** (effect and handler syntax) is decided in `docs/design/effects.md`:
   `effect` declarations, `with`/`raises` signature clauses, `raise`, `!` on
-  fallible calls, `handler for` and `Handler<E>`, both installation forms,
+  fallible calls, `handler for` (whose value has the effect's own type),
+  both installation forms,
   `catch`, and effect-row variables in generic signatures. Contexts are rows, so
   composing and overriding services is row update — and there is no layer
   memoization to reason about, because sharing is by name.
@@ -369,7 +370,14 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   subtracted and left in. Discriminating them at runtime is what widened the
   tagged return to `{ i32 which, i64 payload }` — see
   `docs/design/effect-runtime.md` §2.
-- **4.4 `Layer` as handler composition**, including merge.
+- **4.4 Handler composition — done.** A service built on other services is a
+  function returning a handler with a `with` clause of its own, which needed
+  nothing new: a handler is a record, so building one is calling a function.
+  Merge is a row with two labels — one `with` block installing both. Building a
+  handler can raise, which is the region's failure rather than the served
+  computation's. `Handler<E>` is gone: an effect's name is the type of its
+  handlers, so `with { db: Db }` and `fn postgres_db() -> Db` agree without a
+  wrapper to unwrap.
 
 **Exit:** the reference application typechecks and serves a request; an
 unhandled capability is rejected with a diagnostic naming the absent label and

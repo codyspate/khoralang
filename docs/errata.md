@@ -587,3 +587,28 @@ about a fact is not enough if they disagree about what to file it under.** A
 map whose keys come from one pass and whose lookups come from another needs
 the key to be part of the interface, not an implementation detail either side
 picked for its own convenience.
+
+## 29. A lifted lambda emitted its enclosing function's calling convention
+
+A `Lower` knew which function it was emitting as `owner`, a symbol it looked
+the signature up by. For a lifted lambda that symbol is the function the lambda
+was *written inside*, because that is what the closure-site table is keyed by —
+so a lambda inside a fallible function asked whether it could raise, was told
+yes, and returned `{ i32, i64 }` from a function whose return type was `i64`.
+
+It surfaced the first time a handler was built inside a function that could
+fail, which is the shape of every real service constructor. Before that, every
+lambda that had ever been lifted happened to live in a function with no
+`raises` clause.
+
+The fix is a `raises: bool` set where the `Lower` is built — `true` from the
+signature for a real function, `false` for a lambda, since a closure type
+carries no error row and a lifted lambda therefore cannot raise at all. With
+the last caller gone, the `signature()` helper went too: it existed only to
+answer a question about `owner` that `owner` was never the right key for.
+
+Entries 24, 26 and 27 are the same shape from different angles. This one adds
+a corner they did not cover: **`owner` was not wrong, the question was.** The
+field means "which function's table do I belong to", and it was read as "which
+function am I", which is the same string for everything except the case that
+matters.

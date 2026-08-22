@@ -471,3 +471,134 @@ fn main() -> Int {{ print(attempt(5)); print(attempt(0 - 5)); 0 }}
 ");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- composition -----------------------------------------------------------
+
+const LAYERED: &str = "module t;
+fn print(value: Int);
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export effect Config { rate: () -> Int, }
+export effect Ledger { balance: (Int) -> Int, }
+export effect Audit { note: (Int) -> Int, }
+
+export fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
+";
+
+/// A service built on another service. `live_ledger` needs `Config` to be
+/// built, and what it returns needs nothing — which is the whole of
+/// `Layer<RIn, ROut>` without a wrapper type: the handler is a value, so a
+/// function that makes one is a function.
+#[test]
+fn a_handler_can_be_built_from_another_capability() {
+    let ran = run(
+        "layer",
+        &format!(
+            "{LAYERED}
+export fn live_ledger() -> Ledger with {{ config: Config }} {{
+  let rate = config.rate();
+  handler for Ledger {{ balance: fn id => id * rate }}
+}}
+
+fn main() -> Int {{
+  with {{ config: handler for Config {{ rate: fn () => 10 }} }} {{
+    with {{ ledger: live_ledger() }} {{ print(report(4)); }}
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Several capabilities installed by one `with`, which is what Effect calls
+/// merging layers. Nothing special: a row with two labels.
+#[test]
+fn one_region_installs_several_capabilities() {
+    let ran = run(
+        "layer_merge",
+        &format!(
+            "{LAYERED}
+export fn audited(id: Int) -> Int with {{ ledger: Ledger, audit: Audit }} {{
+  audit.note(report(id))
+}}
+
+fn main() -> Int {{
+  with {{
+    ledger: handler for Ledger {{ balance: fn id => id * 10 }},
+    audit: handler for Audit {{ note: fn n => n + 1 }},
+  }} {{
+    print(audited(4));
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "41\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A handler built from a capability is still just a value, so the region that
+/// built it releases it and everything it captured.
+#[test]
+fn a_composed_handler_is_released_with_its_region() {
+    let ran = run(
+        "layer_leaks",
+        &format!(
+            "{LAYERED}
+export fn live_ledger() -> Ledger with {{ config: Config }} {{
+  let rate = config.rate();
+  handler for Ledger {{ balance: fn id => id * rate }}
+}}
+
+fn run_it() -> Int {{
+  with {{ config: handler for Config {{ rate: fn () => 10 }} }} {{
+    with {{ ledger: live_ledger() }} {{ report(4) }}
+  }}
+}}
+
+fn main() -> Int {{
+  khora_print_int(run_it());
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Building a service can fail. The `raises` of the builder is the region's,
+/// not the served computation's.
+#[test]
+fn building_a_handler_can_raise() {
+    let ran = run(
+        "layer_raises",
+        &format!(
+            "{LAYERED}
+export type ConfigError = | Missing;
+
+export fn live_ledger() -> Ledger with {{ config: Config }} raises ConfigError {{
+  let rate = config.rate();
+  if rate == 0 {{ raise ConfigError::Missing }}
+  handler for Ledger {{ balance: fn id => id * rate }}
+}}
+
+fn attempt(rate: Int) -> Int raises ConfigError {{
+  with {{ config: handler for Config {{ rate: fn () => rate }} }} {{
+    with {{ ledger: live_ledger()! }} {{ report(4) }}
+  }}
+}}
+
+fn main() -> Int raises ConfigError {{ print(attempt(10)!); print(attempt(0)!); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "40\n", "the second build raises before it can serve");
+    assert_eq!(ran.code, Some(1));
+}

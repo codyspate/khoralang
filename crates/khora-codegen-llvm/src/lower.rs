@@ -75,6 +75,7 @@ pub(crate) fn emit_function<'ctx>(
         function,
         owner: name.to_string(),
         ret: signature.ret.clone(),
+        raises: can_raise(&signature),
         slots: HashMap::new(),
         scopes: Vec::new(),
         loops: Vec::new(),
@@ -123,6 +124,7 @@ pub(crate) fn emit_closure<'ctx>(
         function,
         owner: site.owner.clone(),
         ret: site.ret.clone(),
+        raises: false,
         slots: HashMap::new(),
         scopes: Vec::new(),
         loops: Vec::new(),
@@ -220,6 +222,14 @@ struct Lower<'a, 'ctx> {
     /// closure in every specialization.
     owner: String,
     ret: Type,
+    /// Whether *this* function returns a tagged pair.
+    ///
+    /// Not `can_raise(signature_of(owner))`: a lifted lambda's `owner` is the
+    /// function it was written inside, whose `raises` row is not the lambda's.
+    /// A closure type carries no row, so a lifted lambda cannot raise at all
+    /// — and reading the enclosing signature made it emit its enclosing
+    /// function's calling convention over its own.
+    raises: bool,
     slots: HashMap<LocalId, PointerValue<'ctx>>,
     scopes: Vec<Vec<Cleanup<'ctx>>>,
     loops: Vec<LoopFrame<'ctx>>,
@@ -288,7 +298,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     fn finish(&mut self, value: Flow<'ctx>) {
         // A fallible function always returns the tagged pair, so falling off
         // the end of the body is the *ok* case rather than a bare return.
-        if can_raise(&self.signature()) {
+        if self.raises {
             if let Some(value) = value {
                 self.return_ok(value);
             } else if self.here().get_terminator().is_none() {
@@ -828,7 +838,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         // function with no `raises` clause may still contain a `raise` — as
         // long as something between here and the signature handles it. The
         // checker has already decided that; this only has to agree.
-        if !can_raise(&self.signature()) && self.catches.is_empty() {
+        if !self.raises && self.catches.is_empty() {
             return self.fail(
                 "this function has no `raises` clause, so it cannot raise",
                 range,
@@ -850,18 +860,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         let word = self.be.to_word(value);
         self.leave_with(which, word);
         None
-    }
-
-    /// The signature of the function being emitted.
-    fn signature(&self) -> khora_types::Signature {
-        self.be.signature_of(&self.owner).unwrap_or_else(|| khora_types::Signature {
-            generics: Vec::new(),
-            bounds: Vec::new(),
-            requires: Type::empty_row(),
-            raises: Type::empty_row(),
-            params: Vec::new(),
-            ret: Type::Unit,
-        })
     }
 
     /// Returns a value from a fallible function without raising.
@@ -946,7 +944,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // checker guarantees that combination only arises on a path no
             // error reaches — a total `catch` still emits its fall-through —
             // so this seals the block rather than inventing a return.
-            None if !can_raise(&self.signature()) => {
+            None if !self.raises => {
                 self.be.builder.build_unreachable().expect("sealing an unhandled error");
             }
             None => {
@@ -968,7 +966,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         ret: &Type,
         range: TextRange,
     ) -> Flow<'ctx> {
-        if !can_raise(&self.signature()) && self.catches.is_empty() {
+        if !self.raises && self.catches.is_empty() {
             return self.fail(
                 "this call can leave the function, but the function has no `raises` clause",
                 range,
@@ -1911,7 +1909,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// An early `return` from a fallible function is the ok case: it carries a
     /// value, not an error, and still has to wear the tag.
     fn return_value(&mut self, value: BasicValueEnum<'ctx>) {
-        if can_raise(&self.signature()) {
+        if self.raises {
             self.return_ok(value);
             return;
         }

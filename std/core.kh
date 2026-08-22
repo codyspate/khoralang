@@ -312,13 +312,6 @@ impl Traversable for List {
 /// normally — it raises, diverges, or transfers control to a handler.
 export type Never;
 
-/// A handler for the effect `E`, produced by `handler for E { .. }`.
-///
-/// Handlers are first class so that a service can be built from other services:
-/// a function returning `Handler<Db>` with its own `with` clause is what Effect
-/// spells `Layer<RIn, ROut>`.
-export type Handler<E>;
-
 /// Resource lifetimes.
 ///
 /// A value acquired through a scope is released when the enclosing region

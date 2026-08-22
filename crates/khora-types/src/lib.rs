@@ -1925,7 +1925,18 @@ impl<'a> Checker<'a> {
             let range = self.body.range(at);
             self.error(
                 if self.types.adts.contains_key(owner) {
-                    format!("`{owner}` has no function named `{name}`")
+                    // `Fruit::Red` where `Red` is `Color`'s is the common way
+                    // to get here, and naming the type that does have it is
+                    // the whole of the fix.
+                    match self.types.variants.iter().find(|v| v.name == name) {
+                        Some(elsewhere) => format!(
+                            "`{owner}` has no `{name}`; `{}::{name}` is `{}`'s",
+                            elsewhere.type_name, elsewhere.type_name
+                        ),
+                        None => format!(
+                            "`{owner}` has no constructor or function named `{name}`"
+                        ),
+                    }
                 } else if bounds.is_empty() {
                     format!("`{owner}` is not a trait with a function named `{name}`")
                 } else {

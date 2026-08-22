@@ -303,8 +303,8 @@ fn a_constructor_of_another_type_is_not_reachable() {
     let found: Vec<String> =
         khora_types::diagnostics(&db, file).iter().map(|e| e.message.clone()).collect();
     assert!(
-        found.iter().any(|e| e.contains("cannot resolve `Fruit::Red`")),
-        "expected the path to be rejected, got {found:?}"
+        found.iter().any(|e| e.contains("`Color::Red` is `Color`'s")),
+        "expected the path to be rejected and the right type named, got {found:?}"
     );
 }
 
