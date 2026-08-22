@@ -455,3 +455,62 @@ fn share_can_be_claimed_where_the_type_is_declared() {
         ",
     );
 }
+
+// --- what may go in a cell -------------------------------------------------
+//
+// `docs/design/shared.md`. A `Shared<A>` is shareable because nothing
+// unshareable can go in or come out — which is the whole soundness argument,
+// and is enforced by the `A: Share` bound rather than by anything clever.
+
+const CELLS: &str = "module m;
+                     export trait Share {}
+                     export type Counter = { mut count: Int };
+                     export type Frozen = { total: Int };
+                     export type Shared<A>;
+                     impl<A> Share for Shared<A> {}
+                     impl<A: Share> Shared<A> {
+                       fn of(value: A) -> Shared<A>;
+                       fn get(self) -> A;
+                     }
+";
+
+#[test]
+fn a_cell_holds_something_shareable() {
+    assert_clean(&format!("{CELLS}export fn go(v: Frozen) -> Shared<Frozen> {{ Shared::of(v) }}\n"));
+}
+
+/// The bound is the argument. A cell of something writable would hand two
+/// fibers the same mutable record with the lock protecting nothing that
+/// matters — the pointer swap, not the fields behind it.
+#[test]
+fn a_cell_cannot_hold_something_writable() {
+    assert_reports(
+        &format!("{CELLS}export fn go(c: Counter) -> Shared<Counter> {{ Shared::of(c) }}\n"),
+        "`Counter` does not implement `Share`",
+    );
+}
+
+/// And the cell itself crosses, which is the point of the whole exercise.
+#[test]
+fn a_cell_can_be_handed_to_a_fiber() {
+    assert_clean(&format!(
+        "{CELLS}\
+         export type Fiber;\n\
+         impl Fiber {{ fn spawn<'e>(body: () -> () raises 'e) -> Fiber; }}\n\
+         export fn look(c: Shared<Frozen>) -> () {{ }}\n\
+         export fn go(c: Shared<Frozen>) -> Fiber {{ Fiber::spawn(fn () => look(c)) }}\n"
+    ));
+}
+
+/// A handler may capture one, which is what makes a stateful test double
+/// writable again after the sharing rules refused a `mut` record.
+#[test]
+fn a_handler_may_capture_a_cell() {
+    assert_clean(&format!(
+        "{CELLS}\
+         export effect Counting {{ tick: () -> (), }}\n\
+         export fn peek(c: Shared<Frozen>) -> () {{ }}\n\
+         export fn make(c: Shared<Frozen>) -> Counting {{ \
+         handler for Counting {{ tick: fn () => peek(c) }} }}\n"
+    ));
+}

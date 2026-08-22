@@ -1208,6 +1208,249 @@ impl<K: Hash, V> Chain<K, V> {
 /// The bucket count is always a power of two, which is what lets `slot` mask
 /// instead of dividing. `new` starts at eight and `grow` doubles, so nothing
 /// else has to maintain it.
+/// One key and the value under it.
+export type Pair<K, V> = {
+  key: K,
+  value: V,
+};
+
+/// The smallest entry of a tree, and what is left without it.
+export type Least<K, V> = {
+  key: K,
+  value: V,
+  rest: Dict<K, V>,
+};
+
+/// An ordered map that is never written in place.
+///
+/// `Map` is the other one: a hash table that mutates its buckets, which is fast
+/// and is exactly why it cannot cross a fiber or go in a `Shared`. This is
+/// built out of ordinary variants, so it holds nothing writable and is
+/// shareable in the ordinary structural way — a `Shared<Dict<K, V>>` is how a
+/// cache several fibers use is spelled. `docs/design/shared.md`.
+///
+/// Persistent, so an insert gives back a new map and the old one is still
+/// there. The two share everything the insert did not touch, which is what
+/// makes that affordable: one path from the root is rebuilt, and the rest of
+/// the tree is the same objects with one more reference each.
+///
+/// Weight-balanced (Adams), so every operation is logarithmic in the size and
+/// the recursion here is bounded by the depth rather than by the length — the
+/// distinction that `String::slice` got wrong and paid for.
+export type Dict<K, V> =
+  | Empty
+  | Node(size: Int, key: K, value: V, left: Dict<K, V>, right: Dict<K, V>);
+
+impl<K, V> Dict<K, V> {
+  fn new() -> Dict<K, V> { Dict::Empty }
+
+  /// How many entries. Kept in the node rather than counted, because balancing
+  /// asks for it at every step.
+  fn size(self) -> Int {
+    match self {
+      Dict::Empty => 0,
+      Dict::Node(count, k, v, l, r) => count,
+    }
+  }
+
+  fn is_empty(self) -> Bool { Dict::size(self) == 0 }
+
+  /// A node whose size is computed from its children, and no balancing.
+  ///
+  /// What the rotations build with: they already know the shape is sound, and
+  /// asking `balance` again would recurse.
+  fn node(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
+    Dict::Node(Dict::size(left) + Dict::size(right) + 1, key, value, left, right)
+  }
+
+  /// Rebuilds a node, rotating if one side has outgrown the other.
+  ///
+  /// A side may be at most three times the weight of the other. Three rather
+  /// than two because two is not enough slack to keep a single insert from
+  /// rotating on every level, and much more than three stops bounding the
+  /// depth usefully.
+  fn balance(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
+    let ln = Dict::size(left);
+    let rn = Dict::size(right);
+    if ln + rn <= 1 {
+      Dict::node(key, value, left, right)
+    } else if rn > 3 * ln {
+      Dict::rotate_left(key, value, left, right)
+    } else if ln > 3 * rn {
+      Dict::rotate_right(key, value, left, right)
+    } else {
+      Dict::node(key, value, left, right)
+    }
+  }
+
+  /// The right side is heavy. Which rotation depends on its own shape: a
+  /// single one moves its left subtree across, which only helps if that
+  /// subtree is the lighter half.
+  fn rotate_left(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
+    match right {
+      // Unreachable: an empty side is never the heavy one.
+      Dict::Empty => Dict::node(key, value, left, Dict::Empty),
+      Dict::Node(n, rk, rv, rl, rr) =>
+      if Dict::size(rl) < 2 * Dict::size(rr) {
+        Dict::node(rk, rv, Dict::node(key, value, left, rl), rr)
+      } else {
+        match rl {
+          Dict::Empty => Dict::node(rk, rv, Dict::node(key, value, left, Dict::Empty), rr),
+          Dict::Node(m, rlk, rlv, rll, rlr) =>
+          Dict::node(
+            rlk,
+            rlv,
+            Dict::node(key, value, left, rll),
+            Dict::node(rk, rv, rlr, rr),
+          ),
+        }
+      },
+    }
+  }
+
+  /// The mirror of it.
+  fn rotate_right(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
+    match left {
+      Dict::Empty => Dict::node(key, value, Dict::Empty, right),
+      Dict::Node(n, lk, lv, ll, lr) =>
+      if Dict::size(lr) < 2 * Dict::size(ll) {
+        Dict::node(lk, lv, ll, Dict::node(key, value, lr, right))
+      } else {
+        match lr {
+          Dict::Empty => Dict::node(lk, lv, ll, Dict::node(key, value, Dict::Empty, right)),
+          Dict::Node(m, lrk, lrv, lrl, lrr) =>
+          Dict::node(
+            lrk,
+            lrv,
+            Dict::node(lk, lv, ll, lrl),
+            Dict::node(key, value, lrr, right),
+          ),
+        }
+      },
+    }
+  }
+
+  /// Every entry, smallest key first.
+  fn entries(self) -> List<Pair<K, V>> { Dict::gather(self, List::Nil) }
+
+  /// The right side first, so what comes out is in key order.
+  ///
+  /// An accumulator rather than two lists joined, so nothing is walked twice
+  /// and the recursion is the tree's depth.
+  fn gather(self, after: List<Pair<K, V>>) -> List<Pair<K, V>> {
+    match self {
+      Dict::Empty => after,
+      Dict::Node(n, k, v, l, r) =>
+      Dict::gather(l, List::Cons({ key: k, value: v }, Dict::gather(r, after))),
+    }
+  }
+}
+
+impl<K: Ord, V> Dict<K, V> {
+  /// The value under `key`, if there is one.
+  fn get(self, key: K) -> Option<V> {
+    match self {
+      Dict::Empty => Option::None,
+      Dict::Node(n, nk, nv, l, r) =>
+      if key < nk {
+        Dict::get(l, key)
+      } else if nk < key {
+        Dict::get(r, key)
+      } else {
+        Option::Some(nv)
+      },
+    }
+  }
+
+  fn contains(self, key: K) -> Bool {
+    match Dict::get(self, key) {
+      Option::None => false,
+      Option::Some(found) => true,
+    }
+  }
+
+  /// The map with `key` set to `value`, leaving this one as it was.
+  fn insert(self, key: K, value: V) -> Dict<K, V> {
+    match self {
+      Dict::Empty => Dict::Node(1, key, value, Dict::Empty, Dict::Empty),
+      Dict::Node(n, nk, nv, l, r) =>
+      if key < nk {
+        Dict::balance(nk, nv, Dict::insert(l, key, value), r)
+      } else if nk < key {
+        Dict::balance(nk, nv, l, Dict::insert(r, key, value))
+      } else {
+        // Replacing, so the size does not change and neither side moves.
+        Dict::Node(n, key, value, l, r)
+      },
+    }
+  }
+
+  /// The map without `key`. Removing what is not there is the map unchanged.
+  fn remove(self, key: K) -> Dict<K, V> {
+    match self {
+      Dict::Empty => Dict::Empty,
+      Dict::Node(n, nk, nv, l, r) =>
+      if key < nk {
+        Dict::balance(nk, nv, Dict::remove(l, key), r)
+      } else if nk < key {
+        Dict::balance(nk, nv, l, Dict::remove(r, key))
+      } else {
+        Dict::glue(l, r)
+      },
+    }
+  }
+
+  /// Joins two sides whose node has gone.
+  ///
+  /// The successor moves up: every key on the left is smaller than every key
+  /// on the right, so the smallest of the right is the one that can sit
+  /// between them.
+  fn glue(left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
+    match Dict::least(right) {
+      Option::None => left,
+      Option::Some(taken) => Dict::balance(taken.key, taken.value, left, taken.rest),
+    }
+  }
+
+  /// The smallest entry, and the tree without it.
+  fn least(self) -> Option<Least<K, V>> {
+    match self {
+      Dict::Empty => Option::None,
+      Dict::Node(n, nk, nv, l, r) =>
+      match Dict::least(l) {
+        // Nothing smaller: this node is it, and the right side is what is left.
+        Option::None => Option::Some({ key: nk, value: nv, rest: r }),
+        Option::Some(found) =>
+        Option::Some({
+            key: found.key,
+            value: found.value,
+            rest: Dict::balance(nk, nv, found.rest, r),
+          }),
+      },
+    }
+  }
+
+  /// Builds a map from entries, later ones winning.
+  ///
+  /// A loop rather than a fold, because the recursion would be as deep as the
+  /// list is long — the cliff `String::slice` fell off.
+  fn from_list(entries: List<Pair<K, V>>) -> Dict<K, V> {
+    let mut out = Dict::Empty;
+    let mut rest = entries;
+    let mut going = true;
+    while going {
+      match rest {
+        List::Nil => { going = false; },
+        List::Cons(first, more) => {
+          out = Dict::insert(out, first.key, first.value);
+          rest = more;
+        },
+      }
+    }
+    out
+  }
+}
+
 export type Map<K, V> = {
   mut buckets: Array<Chain<K, V>>,
   mut count: Int,
@@ -1322,6 +1565,48 @@ impl<A, B, 'e> SharedFn<A, B, 'e> {
   fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>;
   /// Calls it. A plain closure call; the wrapper costs nothing at runtime.
   fn call(self, argument: A) -> B raises 'e;
+}
+
+/// A value two fibers may both change.
+///
+/// The sharing rules refuse a mutable record to a second fiber on purpose, and
+/// refuse a handler that captures one, because two fibers writing one value is
+/// a race. This is what they refuse them *until*: a cell holding a value, with
+/// the reads and writes serialized.
+///
+/// **Mutation becomes replacement.** There is no borrow of the inside — a
+/// counter is `Shared::update(count, fn n => n + 1)`, not `count.n = count.n + 1`
+/// — and that is the whole of why this is safe rather than careful. Handing out
+/// the inner value would mean stopping it escaping the critical section, and
+/// without lifetimes there is no way to say that. Nothing unshareable goes in
+/// or comes out, so there is nothing to leak. `docs/design/shared.md`.
+///
+/// The contents must be `Share` for the same reason, which also means a `Map`
+/// cannot go in one: it mutates its buckets in place. `Dict` is the ordered
+/// persistent map, and is what a shared table is made of.
+export type Shared<A>;
+
+/// The lock is what makes this true, and `khora_shared_update` takes it.
+impl<A> Share for Shared<A> {}
+
+impl<A: Share> Shared<A> {
+  /// A cell holding `value`.
+  fn of(value: A) -> Shared<A>;
+  /// What is in it now, as a value of the caller's own.
+  fn get(self) -> A;
+  /// Replaces what is in it.
+  fn set(self, value: A) -> ();
+  /// Reads, transforms and writes as one step, and gives back the new value.
+  ///
+  /// `change` runs once, under the lock. It cannot fail, and that is
+  /// deliberate: a function with no error row has no channel to be cancelled
+  /// on, so nothing can leave the critical section except by returning and
+  /// there is no path on which the lock is still held. Work that can fail
+  /// belongs outside — compute it, then `set` the answer.
+  ///
+  /// Updating the same cell from inside `change` is a deadlock, and stops the
+  /// program with a message rather than waiting for itself.
+  fn update(self, change: (A) -> A) -> A;
 }
 
 export type Fibers;

@@ -72,8 +72,8 @@ was written elsewhere and took its captures with it. Refused for want of
 anything to look at, rather than waved through.
 
 The cost is real and stated: a handler may not capture something writable, so a
-test double that counts its calls in a `mut` field is refused. `Shared<A>` is
-what that is waiting on.
+test double that counts its calls in a `mut` field is refused. It captures a
+`Shared<Int>` instead, which is shareable — `docs/design/shared.md`.
 
 ### A type with no body has to say so
 
@@ -198,15 +198,15 @@ handful of types the backend treats specially. One change, for the whole set.
 
 ## What is still open
 
-- **`Shared<A>`**, for the cases the rules above refuse on purpose: a stateful
-  test double, a cache, a counter behind a lock. Its API has to release under a
-  raise and under cancellation, which is what makes it a design rather than a
-  type.
+- ~~**`Shared<A>`**~~, for the cases the rules above refuse on purpose. Done,
+  and it is a cell rather than a lock over a mutable record:
+  `docs/design/shared.md`.
 - **A move-in spawn.** Captures are copied and both fibers keep theirs, so this
   is `Sync`, not `Send`. A consuming spawn could transfer an otherwise mutable
   value safely, and would take the pressure off `Shared<A>`.
-- **`Map` cannot cross**, because it mutates its buckets in place. Correct
-  today; a persistent map would simply be shareable, with nothing to declare.
+- ~~**`Map` cannot cross**~~, because it mutates its buckets in place. Still
+  true, and no longer a gap: `Dict` is the ordered persistent map, shareable
+  with nothing to declare, and is what a `Shared` table is made of.
 - **A lambda has no evidence parameters.** A higher-order function that
   installs a capability for its callback takes a named function, not a lambda,
   so eta-expansion changes meaning. `docs/design/capability-passing.md`.

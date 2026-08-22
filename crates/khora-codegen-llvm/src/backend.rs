@@ -559,6 +559,8 @@ pub(crate) struct Backend<'ctx> {
     /// Trampolines that take a tagged return apart, by how many arguments the
     /// callee takes. See [`Backend::tagged_trampoline`].
     trampolines: HashMap<usize, FunctionValue<'ctx>>,
+    /// One change shim per value type, keyed by how the type prints.
+    change_shims: HashMap<String, FunctionValue<'ctx>>,
     /// A program-wide id for each error type, assigned on first sight. It is
     /// the `which` of a tagged return, so 1 is the lowest: 0 means the call
     /// did not raise. See `docs/design/effect-runtime.md` §2.
@@ -645,6 +647,7 @@ impl<'ctx> Backend<'ctx> {
             thunks: HashMap::new(),
             pending_thunks: Vec::new(),
             trampolines: HashMap::new(),
+            change_shims: HashMap::new(),
             error_ids: HashMap::new(),
             error_releaser: None,
             errors: Vec::new(),
@@ -1215,6 +1218,57 @@ impl<'ctx> Backend<'ctx> {
     ///
     /// `arity` is how many arguments the callee takes: a test takes none, a
     /// fiber's thunk takes its closure. One shim per arity, not per callee.
+    /// The shim `khora_shared_update` calls the change function through.
+    ///
+    /// The runtime cannot know `A`. It has the value as the one word every
+    /// Khora value fits in, and a closure whose parameter and result are `A` —
+    /// so the conversion happens here, once per `A`, on the side of the
+    /// boundary that knows what `A` is. Only scalars and pointers cross, which
+    /// is the same rule the foreign-function interface follows.
+    ///
+    /// `uint64_t shim(void *code, void *closure, uint64_t value)`.
+    pub fn change_shim(&mut self, value_ty: &Type) -> Option<FunctionValue<'ctx>> {
+        let key = value_ty.to_string();
+        if let Some(f) = self.change_shims.get(&key) {
+            return Some(*f);
+        }
+
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let i64_type = self.ctx.i64_type();
+        let f = self.module.add_function(
+            &format!("kh$change{}", self.change_shims.len()),
+            i64_type.fn_type(&[ptr.into(), ptr.into(), i64_type.into()], false),
+            Some(Linkage::Internal),
+        );
+        self.change_shims.insert(key, f);
+
+        let saved = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+
+        let code = f.get_nth_param(0).expect("a code pointer").into_pointer_value();
+        let closure = f.get_nth_param(1).expect("the closure").into_pointer_value();
+        let word = f.get_nth_param(2).expect("the value").into_int_value();
+
+        let llvm_ty = self.llvm_type(value_ty)?;
+        let given = self.word_to_value(word, value_ty);
+        let callee_type = llvm_ty.fn_type(&[ptr.into(), llvm_ty.into()], false);
+        let produced = self
+            .builder
+            .build_indirect_call(callee_type, code, &[closure.into(), given.into()], "changed")
+            .expect("calling a change function")
+            .try_as_basic_value()
+            .basic()
+            .expect("a change function gives back a value");
+        let back = self.to_word(produced);
+        self.builder.build_return(Some(&back)).expect("handing back the new value");
+
+        if let Some(block) = saved {
+            self.builder.position_at_end(block);
+        }
+        Some(f)
+    }
+
     pub fn tagged_trampoline(&mut self, arity: usize) -> FunctionValue<'ctx> {
         if let Some(f) = self.trampolines.get(&arity) {
             return *f;
@@ -1472,6 +1526,14 @@ impl<'ctx> Backend<'ctx> {
             return self.rt.fibers_release.as_global_value().as_pointer_value();
         }
 
+        // A cell's release lets go of what is in it. The runtime's, because
+        // the value sits behind a lock it owns, and it was told how to release
+        // it when the cell was opened rather than here — generated code cannot
+        // reach through a `Mutex`.
+        if name == runtime::SHARED_TYPE {
+            return self.rt.shared_release.as_global_value().as_pointer_value();
+        }
+
         // An array's release loops over its elements. The loop is the
         // runtime's because the length is a run-time value; what to do with
         // one element is generated, and travels in the object.
@@ -1532,7 +1594,14 @@ impl<'ctx> Backend<'ctx> {
     /// An ADT's variants with this instantiation's arguments substituted in.
     ///
     /// `Box<String>` has a `String` field; the *declaration* only says `A`.
-    fn instantiated_variants(&self, ty: &Type) -> Vec<VariantInfo> {
+    /// A type's variants with its arguments substituted in.
+    ///
+    /// The declared field of a generic type is a parameter, and a parameter is
+    /// never boxed — so anything that reads the declaration instead of this
+    /// sees `V` where the instantiation has a `String`. Drop glue got that
+    /// wrong first and leaked; field access got it wrong second and loaded a
+    /// pointer as an integer.
+    pub(crate) fn instantiated_variants(&self, ty: &Type) -> Vec<VariantInfo> {
         let Type::Adt { name, args } = ty else { return Vec::new() };
         let declared = self.variants_of(name);
         let generics = self.types.adts.get(name).cloned().unwrap_or_default();

@@ -72,6 +72,9 @@ pub const ARRAY_HEADER_FIELDS: u64 = khora_rt::ARRAY_HEADER_FIELDS as u64;
 /// emptied it, so one object means both without being told which happened.
 pub const FIBERS_TYPE: &str = "Fibers";
 
+/// The synchronized cell. `docs/design/shared.md`.
+pub const SHARED_TYPE: &str = "Shared";
+
 /// The certified-closure wrapper, which is a closure and nothing else.
 pub const SHARED_FN_TYPE: &str = khora_types::SHARED_FN_TYPE;
 
@@ -134,6 +137,16 @@ pub struct Runtime<'ctx> {
     pub cancelled: FunctionValue<'ctx>,
     /// `_Noreturn void khora_cancel_stop(void)`
     pub cancel_stop: FunctionValue<'ctx>,
+    /// `void *khora_shared_open(uint64_t value, bool boxed, void (*glue)(void *))`
+    pub shared_open: FunctionValue<'ctx>,
+    /// `uint64_t khora_shared_get(void *cell)`
+    pub shared_get: FunctionValue<'ctx>,
+    /// `void khora_shared_set(void *cell, uint64_t value)`
+    pub shared_set: FunctionValue<'ctx>,
+    /// `uint64_t khora_shared_update(void *cell, void *change, Change call)`
+    pub shared_update: FunctionValue<'ctx>,
+    /// `void khora_shared_release(void *cell)`, a `drop_fields` callback.
+    pub shared_release: FunctionValue<'ctx>,
     /// `void *khora_fiber_spawn(void *body, void (*glue)(void *),
     ///                            uint32_t (*call)(const void *, void *, uint64_t *))`
     pub fiber_spawn: FunctionValue<'ctx>,
@@ -222,6 +235,20 @@ impl<'ctx> Runtime<'ctx> {
             region_root: declare("khora_region_root", ptr.fn_type(&[], false)),
             cancelled: declare("khora_cancelled", i8t.fn_type(&[], false)),
             cancel_stop: declare("khora_cancel_stop", void.fn_type(&[], false)),
+            shared_open: declare(
+                "khora_shared_open",
+                ptr.fn_type(&[i64t.into(), ctx.bool_type().into(), ptr.into()], false),
+            ),
+            shared_get: declare("khora_shared_get", i64t.fn_type(&[ptr.into()], false)),
+            shared_set: declare(
+                "khora_shared_set",
+                void.fn_type(&[ptr.into(), i64t.into()], false),
+            ),
+            shared_update: declare(
+                "khora_shared_update",
+                i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            ),
+            shared_release: declare("khora_shared_release", void.fn_type(&[ptr.into()], false)),
             fiber_spawn: declare(
                 "khora_fiber_spawn",
                 ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),

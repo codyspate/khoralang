@@ -879,6 +879,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == runtime::SHARED_FN_TYPE {
                     return self.shared_fn_intrinsic(site, &name, args, range);
                 }
+                if owner == runtime::SHARED_TYPE {
+                    return self.shared_intrinsic(site, &name, args, range);
+                }
                 if owner == runtime::ARRAY_TYPE {
                     return self.array_intrinsic(site, &name, args, range);
                 }
@@ -1039,6 +1042,125 @@ impl<'ctx> Lower<'_, 'ctx> {
                 range,
             ),
         }
+    }
+
+    /// `Shared::of`, `get`, `set` and `update`.
+    ///
+    /// Intrinsics because the value lives behind a lock the runtime owns, and
+    /// generated code cannot reach through one. What crosses is the value as a
+    /// single word, plus — once, when the cell is opened — how to release it,
+    /// since the runtime cannot know `A`. `docs/design/shared.md`.
+    fn shared_intrinsic(
+        &mut self,
+        site: ExprId,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        match (name, args) {
+            ("of", [value]) => {
+                let value_ty = self.types.of(*value).clone();
+                let held = self.expr(*value)?;
+                let word = self.be.to_word(held);
+                let boxed = self.be.ctx.bool_type().const_int(
+                    u64::from(is_boxed(&value_ty)),
+                    false,
+                );
+                let glue = self.be.drop_glue(&value_ty);
+                let open = self.be.rt.shared_open;
+                Some(
+                    self.be
+                        .builder
+                        .build_call(open, &[word.into(), boxed.into(), glue.into()], "shared")
+                        .expect("opening a shared cell")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("a cell is a value"),
+                )
+            }
+            ("get", [cell]) => {
+                let cell_ty = self.types.of(*cell).clone();
+                let value_ty = self.shared_contents(site, &cell_ty, range)?;
+                let handle = self.expr(*cell)?;
+                let get = self.be.rt.shared_get;
+                let word = self
+                    .be
+                    .builder
+                    .build_call(get, &[handle.into()], "read")
+                    .expect("reading a shared cell")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a read gives back a word")
+                    .into_int_value();
+                self.drop(handle, &cell_ty);
+                Some(self.be.word_to_value(word, &value_ty))
+            }
+            ("set", [cell, value]) => {
+                let cell_ty = self.types.of(*cell).clone();
+                let handle = self.expr(*cell)?;
+                let held = self.expr(*value)?;
+                let word = self.be.to_word(held);
+                let set = self.be.rt.shared_set;
+                self.be
+                    .builder
+                    .build_call(set, &[handle.into(), word.into()], "")
+                    .expect("writing a shared cell");
+                // The value was handed over; the handle was only borrowed.
+                self.drop(handle, &cell_ty);
+                Some(self.be.unit_value())
+            }
+            ("update", [cell, change]) => {
+                let cell_ty = self.types.of(*cell).clone();
+                let value_ty = self.shared_contents(site, &cell_ty, range)?;
+                let change_ty = self.types.of(*change).clone();
+                let handle = self.expr(*cell)?;
+                let closure = self.expr(*change)?;
+                let Some(shim) = self.be.change_shim(&value_ty) else {
+                    return self.fail(
+                        format!("`{value_ty}` has no machine type, so it cannot be shared"),
+                        range,
+                    );
+                };
+                let shim = shim.as_global_value().as_pointer_value();
+                let update = self.be.rt.shared_update;
+                let word = self
+                    .be
+                    .builder
+                    .build_call(update, &[handle.into(), closure.into(), shim.into()], "updated")
+                    .expect("updating a shared cell")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("an update gives back a word")
+                    .into_int_value();
+                // Both were lent for the call and neither was kept.
+                self.drop(closure, &change_ty);
+                self.drop(handle, &cell_ty);
+                Some(self.be.word_to_value(word, &value_ty))
+            }
+            _ => self.fail(
+                format!("`Shared::{name}` is not an operation the backend knows"),
+                range,
+            ),
+        }
+    }
+
+    /// What a `Shared<A>` holds, at this instantiation.
+    fn shared_contents(&mut self, site: ExprId, cell: &Type, range: TextRange) -> Option<Type> {
+        if let Type::Adt { name, args } = cell {
+            if name == runtime::SHARED_TYPE {
+                if let Some(first) = args.first() {
+                    return Some(first.clone());
+                }
+            }
+        }
+        // A `get` whose result type is known even when the receiver's is not:
+        // the two are the same type said twice, so either will do.
+        let result = self.types.of(site).clone();
+        if !matches!(result, Type::Unknown) {
+            return Some(result);
+        }
+        self.fail(format!("`{cell}` is not a shared cell"), range);
+        None
     }
 
     /// `SharedFn::of` and `SharedFn::call`.
@@ -2888,7 +3010,16 @@ impl<'ctx> Lower<'_, 'ctx> {
         let Type::Adt { name, .. } = &owner else {
             return self.fail(format!("`{owner}` has no fields"), range);
         };
-        let Some((_, info)) = self.be.variant_of(name, name) else {
+        // At *this* instantiation, not as declared. A generic record's field
+        // is a parameter, and a parameter is never boxed, so reading the
+        // declaration loads a `Pair<Int, String>`'s `value` as an integer and
+        // hands a pointer-shaped hole to whatever wanted the string.
+        let Some(info) = self
+            .be
+            .instantiated_variants(&owner)
+            .into_iter()
+            .find(|v| v.name == *name)
+        else {
             return self.fail(format!("`{name}` is not a record"), range);
         };
         let Some((index, field_ty)) = info.field(label).map(|(i, t)| (i, t.clone())) else {

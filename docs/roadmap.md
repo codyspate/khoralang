@@ -1066,6 +1066,15 @@ can be written before anything needs TLS.
   switches on it. Pinned by a live-object count of zero after catching an error
   that carried a boxed field.
 
+- **Errata 47 — a generic record's field was read as declared.**
+  `read_field` asked the *declaration* for a field's type, so `Pair<K, V>`'s
+  `value` was a rigid parameter — never boxed — and a `Pair<Int, String>` loaded
+  its string as an integer, then handed it to a `+` that wanted a pointer. Drop
+  glue had already learned this and had `instantiated_variants`; field access
+  had not, and only a generic record whose field is boxed at one instantiation
+  and not another could show it. `Dict` was the first. Both read the fields at
+  the instantiation now.
+
 - **Errata 46 — `Share` was forgeable.** It was recognised by the bare name, so
   any file could declare `trait Share {}`, write `impl<A> Share for Array<A>`,
   and hand two fibers an array that `Array::set` writes. Only the module that
@@ -1204,7 +1213,8 @@ they will be missed:
 
 - **A growable list.** `Array<A>` is fixed and `List<A>` is a chain of
   allocations. A vector is `{ mut items: Array<A>, mut len: Int }` and a test
-  already writes one; `std` should.
+  already writes one; `std` should. Fiber-local, like `Map` — the shareable
+  ordered map is `Dict`, which landed with `Shared<A>`.
 - **`derive`.** Every `Eq`, `Ord`, `Show` and `Hash` is written out by hand,
   which is a tax that grows with the program rather than with the language.
 - **A finer clock.** `time` is whole seconds because that is what ISO C offers.
@@ -1213,9 +1223,13 @@ they will be missed:
   puts a length byte where the others put half the family.
 - **Processes**, for a program that runs another one, and **randomness**, which
   every server needs before it needs most of what is above.
-- **`Shared<A>`.** The sharing rules refuse a stateful test double, a cache and
-  a counter on purpose. This is what they are refusing them *until*, and its
-  API has to release under a raise and under cancellation.
+- ~~**`Shared<A>`.**~~ Done — `docs/design/shared.md`. A cell of shareable
+  values, not a lock over a mutable record: nothing unshareable goes in or
+  comes out, so the escape question Rust answers with lifetimes does not arise.
+  `change` cannot fail, which is what makes the lock safe rather than carefully
+  handled — a function with no error row has no channel to be cancelled on. A
+  stateful test double is a `Shared<Int>` the handler captures, and a shared
+  table is a `Shared<Dict<K, V>>`.
 - ~~**Evidence parameters for a lambda.**~~ Done —
   `docs/design/capability-passing.md`. A lambda resolves a capability lexically
   if it can and requires it if it cannot, so `nursery(fn () => serve()!)` works
@@ -1223,8 +1237,8 @@ they will be missed:
   can require a capability it never mentions, but cannot *mention* one that is
   not in scope, because a bare name is resolved by ordinary lookup.
 
-`Shared<A>` needs a decision; the rest is library work over a language that
-came out of phase 8 in good shape.
+None of it needs a decision now; it is library work over a language that came
+out of phase 8 in good shape.
 
 ---
 
