@@ -979,6 +979,14 @@ impl Clause {
 
 /// One effect a body's call sites asked of the function containing them.
 struct Demand {
+    /// Whether the callee was *known* to be fallible when this was recorded.
+    ///
+    /// Kept because the row does not survive to say so: a `catch` empties it,
+    /// and so does a closure absorbing it, and neither of those excuses the
+    /// mark. The row answers "what can leave"; this answers "was there
+    /// anything to mark", which is a different question the moment something
+    /// discharges the first one.
+    fallible: bool,
     clause: Clause,
     row: Type,
     range: TextRange,
@@ -1308,6 +1316,10 @@ impl<'a> Checker<'a> {
                 let ty = self.unifier.zonk(&ty);
                 if !matches!(ty, Type::Unknown | Type::Var(_)) {
                     self.demanded.push(Demand {
+                        // A `raise` is the mark: there is no call to write `!`
+                        // on, and `site: None` already says the check does not
+                        // apply here.
+                        fallible: false,
                         clause: Clause::Raises,
                         row: Type::row(vec![(label_of(&ty), ty)], None),
                         range,
@@ -1346,13 +1358,28 @@ impl<'a> Checker<'a> {
 
                 // The whole type exists before the body is checked, because a
                 // recursive closure mentions itself inside it. The result is a
-                // variable the body then solves.
+                // variable the body then solves, and so is the error row.
                 let result = self.unifier.fresh();
-                let whole =
-                    Type::func(types, result.clone());
+                let raises = self.unifier.fresh();
+                let whole = Type::Fn {
+                    params: types,
+                    ret: Box::new(result.clone()),
+                    // Always empty. A capability a closure uses is *captured*,
+                    // because a `with` block is a block of `let`s and a
+                    // closure captures the bindings it reads — so there is
+                    // nothing left for a caller to supply. A failure cannot be
+                    // captured, which is why the other row is inferred.
+                    requires: Box::new(Type::empty_row()),
+                    raises: Box::new(raises.clone()),
+                };
                 self.lambdas.push(whole.clone());
                 self.enclosing_lambdas.push((id, Vec::new()));
+
+                let before = self.demanded.len();
                 let ret = self.infer(body);
+                let mine = self.absorb_raises(before);
+                let _ = self.unifier.unify(&raises, &mine);
+
                 if let Some((_, found)) = self.enclosing_lambdas.pop() {
                     self.lambda_captures.insert(id, found);
                 }
@@ -1823,7 +1850,13 @@ impl<'a> Checker<'a> {
             if matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none()) {
                 continue;
             }
+            // A *concrete* non-empty row. A variable is not one yet — a closure
+            // calling itself asks for the row it is in the middle of inferring
+            // — and whether it becomes one is decided later.
+            let known_fallible =
+                matches!(&row, Type::Row { fields, tail } if !fields.is_empty() || tail.is_some());
             self.demanded.push(Demand {
+                fallible: clause == Clause::Raises && known_fallible,
                 clause,
                 row,
                 range,
@@ -1831,6 +1864,40 @@ impl<'a> Checker<'a> {
                 site: callee_site,
             });
         }
+    }
+
+    /// Takes the failures demanded since `before` as a closure's own row.
+    ///
+    /// A closure cannot charge its failures to whoever wrote it — it may be
+    /// called anywhere, and by then that function has returned. So the demands
+    /// its body raised become part of *its* type, and the enclosing function
+    /// is left answering only what it was asked directly.
+    ///
+    /// The demands stay in the list with their rows emptied rather than being
+    /// removed, because they are also what checks that a fallible call wore
+    /// its `!`. A closure does not excuse the mark any more than a `catch`
+    /// does.
+    fn absorb_raises(&mut self, before: usize) -> Type {
+        let window: Vec<Demand> = self.demanded.split_off(before);
+        let mut fields: Vec<(String, Type)> = Vec::new();
+        let mut tail = None;
+
+        let kept: Vec<Demand> = window
+            .into_iter()
+            .map(|mut demand| {
+                if demand.clause == Clause::Raises {
+                    if let Type::Row { fields: raised, tail: rest } = self.unifier.zonk(&demand.row)
+                    {
+                        fields.extend(raised);
+                        tail = tail.take().or(rest.map(|t| *t));
+                        demand.row = Type::empty_row();
+                    }
+                }
+                demand
+            })
+            .collect();
+        self.demanded.extend(kept);
+        Type::row(fields, tail)
     }
 
     /// Records that a lambda uses a capability without naming it.
@@ -1870,8 +1937,21 @@ impl<'a> Checker<'a> {
     /// or it is an error, and reporting it at the call that raised it is what
     /// makes the message actionable.
     fn check_effects(&mut self) {
-        for Demand { clause, row, range, callee, site } in std::mem::take(&mut self.demanded) {
+        for Demand { fallible, clause, row, range, callee, site } in
+            std::mem::take(&mut self.demanded)
+        {
             let callee = as_written(&callee);
+
+            // Zonked before anything is decided: a row recorded as a variable
+            // is only now known to be anything.
+            let row = self.unifier.zonk(&row);
+            let empty =
+                matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none());
+            // Nothing left to satisfy, but possibly still something to mark:
+            // a `catch` discharges the row and does not excuse the `!`.
+            if empty && !fallible {
+                continue;
+            }
             // Satisfied means *subsumed*, not equal: a caller providing
             // `{ ledger, ai }` can call something needing only `{ ledger }`.
             // Opening the demand is that check — its labels must all be
@@ -1904,6 +1984,10 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
+            }
+
+            if empty {
+                continue;
             }
 
             if let Err(why) = self.unifier.unify(&promise, &row) {

@@ -132,7 +132,10 @@ pub(crate) fn emit_closure<'ctx>(
         function,
         owner: site.owner.clone(),
         ret: site.ret.clone(),
-        raises: false,
+        raises: !matches!(
+            &site.raises,
+            Type::Row { fields, tail } if fields.is_empty() && tail.is_none()
+        ),
         slots: HashMap::new(),
         scopes: Vec::new(),
         loops: Vec::new(),
@@ -1526,6 +1529,25 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("loading a closure's code pointer")
             .into_pointer_value();
 
+        // The call site owns a reference to the closure — reading a local
+        // dup'ed it, and a lambda written in place was born owned — and the
+        // callee only borrows it. So it has to be released here, on *every*
+        // way out of this expression, which is what makes it a scope rather
+        // than a line after the call: a fallible callee can leave through the
+        // branch below, and that path never reaches the line.
+        //
+        // A closure calling *itself* is the exception. Its own name is the
+        // argument it was called through, which it borrows; releasing that
+        // would decrement a count this frame never took, and free the closure
+        // out from under the caller still running in it.
+        let owned = !matches!(self.body.expr(callee), Expr::LambdaSelf);
+        let callee_ty = self.types.of(callee).clone();
+        self.scopes.push(if owned && is_boxed(&callee_ty) {
+            vec![Cleanup::Temp(closure.into(), callee_ty)]
+        } else {
+            Vec::new()
+        });
+
         let call = self
             .be
             .builder
@@ -1545,19 +1567,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
         };
 
-        // The call site owns a reference to the closure: reading a local dup'ed
-        // it, and a lambda written in place was born owned. The callee only
-        // borrows it — a lifted body reads its captures without taking a
-        // reference — so the release belongs here, after the call.
-        //
-        // A closure calling *itself* is the exception. Its own name is the
-        // argument it was called through, which it borrows; releasing that
-        // would decrement a count this frame never took, and free the closure
-        // out from under the caller still running in it.
-        if !matches!(self.body.expr(callee), Expr::LambdaSelf) {
-            let callee_ty = self.types.of(callee).clone();
-            self.drop(closure.into(), &callee_ty);
-        }
+        self.leave_scope();
         Some(result)
     }
 

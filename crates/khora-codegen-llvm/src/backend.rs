@@ -248,7 +248,7 @@ fn declare_closures(
 ) {
     for (id, expr) in body.exprs() {
         let khora_hir::body::Expr::Lambda { captures, .. } = expr else { continue };
-        let Type::Fn { params, ret, .. } = types.of(id).clone() else { continue };
+        let Type::Fn { params, ret, raises, .. } = types.of(id).clone() else { continue };
 
         // The names the body mentions, and then the capabilities it uses
         // without mentioning. A `with` block lowers to a block of `let`s, so a
@@ -271,7 +271,7 @@ fn declare_closures(
             .iter()
             .chain(std::iter::once(&*ret))
             .any(|t| matches!(t, Type::Var(_)));
-        if backend.declare_closure(symbol, id, params, *ret, captured).is_none() {
+        if backend.declare_closure(symbol, id, params, *ret, *raises, captured).is_none() {
             backend.error(
                 if unsolved {
                     "the type of this closure was never pinned down; use it somewhere that \
@@ -449,6 +449,11 @@ pub(crate) struct ClosureSite {
     pub expr: khora_hir::body::ExprId,
     pub symbol: String,
     pub ret: Type,
+    /// What the body can raise. A closure cannot charge its failures to
+    /// whoever wrote it — by the time it is called that function has returned
+    /// — so the row is part of its type, and a non-empty one means the lifted
+    /// function returns the tagged pair like any other fallible one.
+    pub raises: Type,
     pub captures: Vec<(khora_hir::body::LocalId, Type)>,
 }
 
@@ -792,6 +797,7 @@ impl<'ctx> Backend<'ctx> {
         expr: khora_hir::body::ExprId,
         params: Vec<Type>,
         ret: Type,
+        raises: Type,
         captures: Vec<(khora_hir::body::LocalId, Type)>,
     ) -> Option<usize> {
         let index = self.closures.len();
@@ -802,9 +808,15 @@ impl<'ctx> Backend<'ctx> {
         for param in &params {
             llvm_params.push(self.llvm_type(param)?.into());
         }
-        let fn_type = match &ret {
-            Type::Unit => self.ctx.void_type().fn_type(&llvm_params, false),
-            other => self.llvm_type(other)?.fn_type(&llvm_params, false),
+        let fallible =
+            matches!(&raises, Type::Row { fields, tail } if !fields.is_empty() || tail.is_some());
+        let fn_type = if fallible {
+            self.tagged_type().fn_type(&llvm_params, false)
+        } else {
+            match &ret {
+                Type::Unit => self.ctx.void_type().fn_type(&llvm_params, false),
+                other => self.llvm_type(other)?.fn_type(&llvm_params, false),
+            }
         };
 
         let f = self.module.add_function(&mangle(&symbol), fn_type, Some(Linkage::Internal));
@@ -816,7 +828,7 @@ impl<'ctx> Backend<'ctx> {
                 generics: Vec::new(),
                 bounds: Vec::new(),
                 requires: Type::empty_row(),
-                raises: Type::empty_row(),
+                raises: raises.clone(),
                 params: params.clone(),
                 ret: ret.clone(),
             },
@@ -827,6 +839,7 @@ impl<'ctx> Backend<'ctx> {
             expr,
             symbol,
             ret,
+            raises,
             captures,
         });
         self.closures_by_owner.entry(owner.to_string()).or_default().push(index);

@@ -728,3 +728,25 @@ can disagree with the truth is a parameter worth deleting.
 Worth saying plainly, because it is the fourth entry of its kind: **when two
 places compute the same list, delete one.** Not "keep them in sync" — the bug
 here was introduced by a change that had no reason to look at the sizing line.
+
+## 34. A reference taken for a call was released after it
+
+Calling a closure reads it — which dups it, because the callee is handed an
+owned reference — and released it on the line after the call. That line is not
+on every path out. A fallible callee leaves through the branch `!` emits, and
+the branch returns before reaching it, so every raise through a closure call
+leaked one reference to the closure.
+
+Invisible until a closure could raise. Before that, a closure call had exactly
+one way out.
+
+The fix is to make it a scope rather than a line: the closure is a temporary of
+a scope opened around the call, so `unwind_to` releases it on the way out and
+`leave_scope` releases it on the way through. That is the same shape `match`
+uses for a temporary scrutinee, and it is the third time the answer to "this
+cleanup is missing on the error path" has been "it was not in a scope".
+
+Worth stating as a rule, because it will come up again: **a reference held
+across a call belongs in a scope, not in a statement after it.** Anything that
+can leave early — a raise, a cancellation, a `return`, a `break` — sees the
+scope and does not see the statement.

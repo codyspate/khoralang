@@ -861,3 +861,96 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "101\n0\n", "the trailing 0 is the live-object count");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- a closure that can fail -----------------------------------------------
+
+/// A closure cannot charge its failures to whoever wrote it — by the time it
+/// is called that function has returned — so the error row is part of its
+/// type, and the lifted function returns the tagged pair like any other
+/// fallible one.
+#[test]
+fn a_closure_can_raise() {
+    let ran = run(
+        "closure_raises",
+        &format!(
+            "{FALLIBLE}
+export fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
+
+fn main() -> Int raises DbError {{
+  print(apply(fn n => halve(n)!, 8)!);
+  print(apply(fn n => halve(n)!, 7)!);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "4\n", "the second call raises before it can print");
+    assert_eq!(ran.code, Some(1));
+}
+
+/// The row is inferred, not declared, so a closure that cannot fail is not
+/// charged for the possibility.
+#[test]
+fn a_closure_that_cannot_fail_has_an_empty_row() {
+    let ran = run(
+        "closure_infallible",
+        &format!(
+            "{FALLIBLE}
+export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+
+fn main() -> Int {{ print(apply(fn n => n * 2, 21)); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "42\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A `raise` written straight into a closure counts the same as one that
+/// arrived through a `!`.
+#[test]
+fn a_closure_can_raise_directly() {
+    let ran = run(
+        "closure_raise_direct",
+        &format!(
+            "{FALLIBLE}
+export fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
+
+fn main() -> Int raises DbError {{
+  print(apply(fn n => if n < 0 {{ raise DbError::Timeout }} else {{ n }}, 5)!);
+  print(apply(fn n => if n < 0 {{ raise DbError::Timeout }} else {{ n }}, 0 - 5)!);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "5\n");
+    assert_eq!(ran.code, Some(1));
+}
+
+/// A raising closure releases what its frame owns on the way out, the same as
+/// any other frame does.
+#[test]
+fn a_raising_closure_leaves_nothing_behind() {
+    let ran = run(
+        "closure_raises_leaks",
+        &format!(
+            "{FALLIBLE}
+export fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
+
+fn attempt(n: Int) -> Int raises DbError {{
+  apply(fn m => {{ let text = \"held\"; halve(m)! }}, n)!
+}}
+
+fn main() -> Int {{
+  let value = attempt(7)! catch {{ DbError::Timeout => 0 - 1, DbError::Refused => 0 - 2 }};
+  khora_print_int(value);
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "-2\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}

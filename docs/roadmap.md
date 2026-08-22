@@ -476,9 +476,8 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   child's cancellation currently reaches a frame with no error channel and
   produces the *program's* outcome, which is right for the program's own
   computation and a hole for a fiber; the runtime reports it as a hole rather
-  than exiting quietly. The fix is a fallible spawned thunk, which effect rows
-  on function types already make expressible — what is missing is that a
-  lambda's rows are inferred empty, so inferring them is the real prerequisite.
+  than exiting quietly. The fix is a fallible spawned thunk — and a closure can
+  now be one, so what remains is the runtime reading the tag.
 
   Also open: a region's finalizer cannot tell whether it is releasing normally
   or unwinding, and a nursery wants to wait in the first case and
