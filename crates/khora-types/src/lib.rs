@@ -2695,6 +2695,10 @@ impl<'a> Checker<'a> {
                     let rest = self.unifier.fresh();
                     Type::row(fields.clone(), Some(rest))
                 }
+                // A bare row *variable* is a row already: `'r` means
+                // `{ | 'r }`. Written out so the two shapes are one shape from
+                // here on.
+                Type::Param(_) => Type::row(Vec::new(), Some(row.clone())),
                 other => other.clone(),
             };
             let promise = match clause {
@@ -2723,6 +2727,22 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
+            // A demand whose tail is a *rigid* variable cannot be opened —
+            // there is no fresh tail to absorb what the promise has extra,
+            // because the demand already stands for "whatever `'r` is". It is
+            // satisfied when the promise carries the same tail and at least the
+            // same labels, which is what subsumption means when neither side
+            // knows what the tail holds.
+            //
+            // This is what a row-polymorphic library function needs the moment
+            // it adds a capability of its own: `listen` promising
+            // `{ 'r | scope: Scope }` and calling something needing `'r` is
+            // ordinary, and unification alone reads it as `'r` being asked to
+            // equal `{ scope: Scope | 'r }`.
+            if self.demand_is_carried(&row, &promise) {
+                continue;
+            }
+
             if let Err(why) = self.unifier.unify(&promise, &row) {
                 self.error(
                     match why {
@@ -2737,6 +2757,33 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+    }
+
+    /// Whether `promise` covers `demand` outright, tails and all.
+    ///
+    /// Only asked of a demand with a rigid tail, where opening it is not
+    /// possible — see the caller. `false` means "not obviously", and the
+    /// ordinary comparison runs and reports whatever it finds; nothing is
+    /// accepted here that unification would have rejected for a reason.
+    fn demand_is_carried(&mut self, demand: &Type, promise: &Type) -> bool {
+        let (Type::Row { fields: wanted, tail: Some(wanted_tail) }, Type::Row { fields: held, tail: Some(held_tail) }) =
+            (self.unifier.zonk(demand), self.unifier.zonk(promise))
+        else {
+            return false;
+        };
+        // Both rigid, and the same one. Two different rigid tails are two
+        // different unknowns and neither covers the other.
+        let (Type::Param(wanted_tail), Type::Param(held_tail)) = (*wanted_tail, *held_tail) else {
+            return false;
+        };
+        if wanted_tail != held_tail {
+            return false;
+        }
+        wanted.iter().all(|(label, ty)| {
+            held.iter().any(|(held_label, held_ty)| {
+                held_label == label && self.unifier.unify(held_ty, ty).is_ok()
+            })
+        })
     }
 
     /// `{ x: 1, y: 2 }`, or the operations of a handler.

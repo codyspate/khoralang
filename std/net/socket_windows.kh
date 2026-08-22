@@ -1,0 +1,101 @@
+module std::net::socket;
+
+import std::core::{Array, Ptr};
+
+// Sockets, on Windows.
+//
+// The Berkeley names with Winsock's differences: `WSAStartup` before anything
+// else, `closesocket` rather than `close`, and a `SOCKET` that is a pointer-
+// sized handle rather than a small `int`. `socket_posix.kh` is the same module
+// for everywhere else, and only one of the two is ever in a build —
+// `docs/design/permissions.md` is unrelated but `khora_db::selected_for_target`
+// is the rule.
+//
+// **No struct crosses the boundary.** `bind` wants a `sockaddr_in`, which is
+// sixteen bytes; those sixteen bytes are laid out here, in an `Array<U8>`, and
+// lent as a `Ptr` for exactly the duration of the call. That is what
+// `docs/design/ffi.md` says a pointer is for, and it is why binding a socket
+// needs nothing added to the runtime.
+
+extern fn WSAStartup(version: U16, data: Ptr) -> I32;
+extern fn socket(family: I32, kind: I32, protocol: I32) -> Int;
+extern fn bind(handle: Int, address: Ptr, length: I32) -> I32;
+extern fn listen(handle: Int, backlog: I32) -> I32;
+extern fn accept(handle: Int, address: Ptr, length: Ptr) -> Int;
+extern fn recv(handle: Int, into: Ptr, length: I32, flags: I32) -> I32;
+extern fn send(handle: Int, from: Ptr, length: I32, flags: I32) -> I32;
+extern fn closesocket(handle: Int) -> I32;
+
+/// `INVALID_SOCKET` is `(SOCKET)~0`, which read as a signed handle is -1.
+export fn invalid_handle() -> Int { 0 - 1 }
+
+/// Winsock has to be told which version of itself to be, once per process.
+///
+/// `MAKEWORD(2, 2)` is 0x0202. The 512 bytes are a `WSADATA`, which the call
+/// fills in and nothing here reads — it is an out-parameter that has to exist.
+export fn start() -> Bool {
+  let data: Array<U8> = Array::new(512, 0);
+  Array::with_data(data, fn (buffer, n) => WSAStartup(U16::of(514), buffer) == I32::of(0))
+}
+
+/// A socket listening on `port`, or [`invalid_handle`].
+export fn listen_on(port: Int) -> Int {
+  // AF_INET, SOCK_STREAM, IPPROTO_TCP.
+  let handle = socket(I32::of(2), I32::of(1), I32::of(6));
+  if handle == invalid_handle() {
+    handle
+  } else {
+    let address = sockaddr_in(port);
+    let bound = Array::with_data(address, fn (bytes, n) => bind(handle, bytes, I32::of(16)));
+    if bound == I32::of(0) && listen(handle, I32::of(16)) == I32::of(0) {
+      handle
+    } else {
+      closesocket(handle);
+      invalid_handle()
+    }
+  }
+}
+
+/// The sixteen bytes of a `sockaddr_in` bound to every interface.
+///
+/// ```text
+/// 0..2   sin_family  AF_INET, native order
+/// 2..4   sin_port    network order, which is big-endian
+/// 4..8   sin_addr    INADDR_ANY, which is zero
+/// 8..16  padding
+/// ```
+///
+/// Written out rather than bound, because a struct cannot cross the C ABI and
+/// sixteen bytes is not worth a runtime function. The port is the only part
+/// that is not a constant, and its two bytes are the one place a reader has to
+/// remember that the network is big-endian and the machine is not.
+fn sockaddr_in(port: Int) -> Array<U8> {
+  let out: Array<U8> = Array::new(16, 0);
+  Array::set(out, 0, 2);
+  Array::set(out, 2, U8::of(Int::and(Int::shr(port, 8), 255)));
+  Array::set(out, 3, U8::of(Int::and(port, 255)));
+  out
+}
+
+/// Waits for a connection. [`invalid_handle`] if the wait failed.
+export fn accept_on(server: Int) -> Int {
+  accept(server, Ptr::null(), Ptr::null())
+}
+
+/// Reads what has arrived into `buffer`, and says how many bytes that was.
+///
+/// Zero means the other end closed; negative means the read failed.
+export fn receive(connection: Int, buffer: Array<U8>) -> Int {
+  Array::with_data(buffer, fn (into, n) =>
+    I32::to_int(recv(connection, into, I32::of(n), I32::of(0))))
+}
+
+/// Writes `text`, and says how many bytes went. Negative if the write failed.
+export fn transmit(connection: Int, text: String) -> Int {
+  String::with_data(text, fn (from, n) =>
+    I32::to_int(send(connection, from, I32::of(n), I32::of(0))))
+}
+
+export fn shut(handle: Int) -> () {
+  closesocket(handle);
+}

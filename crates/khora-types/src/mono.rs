@@ -166,6 +166,18 @@ pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
     })
 }
 
+/// [`select_impl`] against the whole program's traits, then the file's own.
+///
+/// The file first, so that a type with a local impl resolves to it without a
+/// search; the program second, because an impl for a type this file never saw
+/// is the ordinary case for anything generic in a library.
+fn select_impl_in(whole: &Traits, local: &TypeMap, mention: &Instance) -> Option<Instance> {
+    select_impl(local, mention).or_else(|| {
+        let borrowed = TypeMap { traits: whole.clone(), ..local.clone() };
+        select_impl(&borrowed, mention)
+    })
+}
+
 /// Whether a name refers to a trait's own function rather than to an impl's.
 fn is_trait_method(traits: &Traits, name: &str) -> bool {
     match name.split_once("::") {
@@ -269,6 +281,29 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
         })
         .collect();
 
+    // **Which impl a call resolves to is a whole-program question.** A generic
+    // function is compiled once per type it is used at, and the type — with its
+    // impls — is very often in a module the generic has never heard of:
+    // `std::ai`'s `extract<A: Extract>` is specialized at an `AnalysisReport`
+    // declared by the application, and `std::ai` cannot see that impl.
+    //
+    // Looking only in the file the *body* lives in is therefore wrong in the
+    // direction that matters most, and it failed the way a missing impl always
+    // fails here: the trait's own declaration has no body, so the code
+    // generator said there was nothing to call.
+    //
+    // Merged rather than searched unit by unit, because a trait's declaration
+    // and its impls are routinely in different files and `select_impl` needs
+    // both at once.
+    let mut whole = Traits::default();
+    for unit in &units {
+        for (name, def) in &unit.types.traits.traits {
+            whole.traits.entry(name.clone()).or_insert_with(|| def.clone());
+        }
+        whole.impls.extend(unit.types.traits.impls.iter().cloned());
+        whole.inherent.extend(unit.types.traits.inherent.iter().cloned());
+    }
+
     let mut out = Instances::default();
     let mut seen: HashSet<Instance> = HashSet::new();
 
@@ -340,7 +375,7 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
                 function: callee.clone(),
                 args: resolved.clone(),
             };
-            let (name, args) = match select_impl(unit.types, &mention) {
+            let (name, args) = match select_impl_in(&whole, unit.types, &mention) {
                 Some(chosen) => (chosen.function, chosen.args),
                 None => (callee.clone(), resolved),
             };

@@ -998,3 +998,32 @@ collision waiting for the name.** The other keys in that table — `Array`,
 `String`, `Ptr`, `Region`, `Fiber` — were all one standard-library function away
 from the same crash, and none of them had a test for it, because the intrinsics
 and the library are written by the same person on different days.
+
+## 43. `\r\n` was four bytes
+
+The reference application served its first HTTP response and no client could
+read it. The status line arrived as
+
+```text
+HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n...
+```
+
+— one line, with a literal backslash where each carriage return should have
+been. **Khora's string literals did not process escapes at all.** The lowering
+was `text.trim_matches('"')`, so `"\r\n"` was four characters and every one of
+them went on the wire.
+
+Nothing had noticed because nothing had needed one. Every string in the
+standard library, the test corpus and the reference application was plain text
+until a protocol turned up whose separator is not typeable. The one place a
+missing escape would have been caught earlier — a test asserting output with a
+newline in it — always wrote the newline on the *Rust* side.
+
+`trim_matches` was a second bug in the same line, waiting: it strips *every*
+leading and trailing quote, so `""""` lost more than the two it should have.
+
+The lesson is not "handle escapes", which is obvious. It is that **a feature
+nothing exercises is a feature nobody has checked**, and the way to find that
+class is to ask what the corpus has never contained. This one was found by an
+HTTP client refusing to parse a response — three layers and a socket away from
+a `trim_matches` call.

@@ -1,0 +1,91 @@
+module std::net::socket;
+
+import std::core::{Array, Ptr};
+
+// Sockets, on Linux.
+//
+// The same module as `socket_windows.kh`, and only one of the two is ever in a
+// build. The differences are small and all of them are here: there is nothing
+// to start up, the handle is a small `int` rather than a pointer-sized one, and
+// the call that closes it is `close`.
+//
+// **No struct crosses the boundary.** `bind` wants a `sockaddr_in`, which is
+// sixteen bytes; those sixteen bytes are laid out here, in an `Array<U8>`, and
+// lent as a `Ptr` for exactly the duration of the call. `docs/design/ffi.md`.
+//
+// **macOS is deliberately absent.** Its `sockaddr_in` puts a length byte where
+// this one puts the low half of the family, so the layout below is wrong there
+// — and a wrong layout is a `bind` that fails for no visible reason. A build on
+// macOS gets "cannot find module `std::net::socket`", which is a worse outcome
+// to read and a much better one to debug, until somebody with a Mac writes
+// `socket_macos.kh`.
+
+extern fn socket(family: I32, kind: I32, protocol: I32) -> I32;
+extern fn bind(handle: I32, address: Ptr, length: I32) -> I32;
+extern fn listen(handle: I32, backlog: I32) -> I32;
+extern fn accept(handle: I32, address: Ptr, length: Ptr) -> I32;
+extern fn recv(handle: I32, into: Ptr, length: Int, flags: I32) -> Int;
+extern fn send(handle: I32, from: Ptr, length: Int, flags: I32) -> Int;
+extern fn close(handle: I32) -> I32;
+
+/// A failed call returns -1, and a handle is never negative.
+export fn invalid_handle() -> Int { 0 - 1 }
+
+/// Nothing to start. Present so that a caller reads the same on both targets.
+export fn start() -> Bool { true }
+
+/// A socket listening on `port`, or [`invalid_handle`].
+export fn listen_on(port: Int) -> Int {
+  // AF_INET, SOCK_STREAM, IPPROTO_TCP.
+  let handle = socket(I32::of(2), I32::of(1), I32::of(6));
+  if I32::to_int(handle) < 0 {
+    invalid_handle()
+  } else {
+    let address = sockaddr_in(port);
+    let bound = Array::with_data(address, fn (bytes, n) => bind(handle, bytes, I32::of(16)));
+    if bound == I32::of(0) && listen(handle, I32::of(16)) == I32::of(0) {
+      I32::to_int(handle)
+    } else {
+      close(handle);
+      invalid_handle()
+    }
+  }
+}
+
+/// The sixteen bytes of a `sockaddr_in` bound to every interface.
+///
+/// ```text
+/// 0..2   sin_family  AF_INET, native order
+/// 2..4   sin_port    network order, which is big-endian
+/// 4..8   sin_addr    INADDR_ANY, which is zero
+/// 8..16  padding
+/// ```
+fn sockaddr_in(port: Int) -> Array<U8> {
+  let out: Array<U8> = Array::new(16, 0);
+  Array::set(out, 0, 2);
+  Array::set(out, 2, U8::of(Int::and(Int::shr(port, 8), 255)));
+  Array::set(out, 3, U8::of(Int::and(port, 255)));
+  out
+}
+
+/// Waits for a connection. [`invalid_handle`] if the wait failed.
+export fn accept_on(server: Int) -> Int {
+  let taken = accept(I32::of(server), Ptr::null(), Ptr::null());
+  if I32::to_int(taken) < 0 { invalid_handle() } else { I32::to_int(taken) }
+}
+
+/// Reads what has arrived into `buffer`, and says how many bytes that was.
+///
+/// Zero means the other end closed; negative means the read failed.
+export fn receive(connection: Int, buffer: Array<U8>) -> Int {
+  Array::with_data(buffer, fn (into, n) => recv(I32::of(connection), into, n, I32::of(0)))
+}
+
+/// Writes `text`, and says how many bytes went. Negative if the write failed.
+export fn transmit(connection: Int, text: String) -> Int {
+  String::with_data(text, fn (from, n) => send(I32::of(connection), from, n, I32::of(0)))
+}
+
+export fn shut(handle: Int) -> () {
+  close(I32::of(handle));
+}

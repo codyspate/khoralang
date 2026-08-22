@@ -872,6 +872,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == "String" && name == "from_bytes" {
                     return self.string_from_bytes(args, range);
                 }
+                if owner == "Float" && name == "to_int" {
+                    return self.float_to_int(args, range);
+                }
                 if owner == "String" && matches!(name.as_str(), "bytes" | "byte" | "byte_length")
                 {
                     return self.string_intrinsic(&name, args, range);
@@ -1128,6 +1131,18 @@ impl<'ctx> Lower<'_, 'ctx> {
         range: TextRange,
     ) -> Flow<'ctx> {
         // The conversions take one argument; everything else takes two.
+        if name == "to_float" {
+            let [only] = args else {
+                return self.fail(format!("`{owner}::to_float` takes one number"), range);
+            };
+            let value = self.expr(*only)?.into_int_value();
+            let converted = self
+                .be
+                .builder
+                .build_signed_int_to_float(value, self.be.ctx.f64_type(), "to.float")
+                .expect("converting an integer to a float");
+            return Some(converted.into());
+        }
         if matches!(name, "of" | "wrapping" | "to_int" | "wrapping_to_int") {
             let [only] = args else {
                 return self.fail(format!("`{owner}::{name}` takes one argument"), range);
@@ -1708,6 +1723,35 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.leave_scope();
         self.leave_scope();
         Some(result)
+    }
+
+    /// `Float::to_int`: the whole part, and nothing rounded.
+    ///
+    /// **Truncates toward zero**, which is what C, Rust, Go and every machine
+    /// instruction called "convert to integer" do — `2.9` is `2` and `-2.9` is
+    /// `-2`. Rounding is a different question with four defensible answers, and
+    /// a conversion that quietly picked one would be the wrong kind of
+    /// surprise.
+    ///
+    /// A value too large for an `Int`, or a `NaN`, is *undefined* in LLVM. The
+    /// saturating form is what makes it defined, and it is what this uses:
+    /// out of range clamps to the nearest end, and a `NaN` is zero. Slower by
+    /// one instruction and never nonsense.
+    ///
+    /// The other direction, `Int::to_float`, is exact for every integer up to
+    /// 2^53 and rounds beyond it, which is IEEE's business rather than
+    /// Khora's.
+    fn float_to_int(&mut self, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+        let [only] = args else {
+            return self.fail("`Float::to_int` takes one number", range);
+        };
+        let value = self.expr(*only)?.into_float_value();
+        let converted = self
+            .be
+            .builder
+            .build_float_to_signed_int(value, self.be.ctx.i64_type(), "to.int")
+            .expect("converting a float to an integer");
+        Some(converted.into())
     }
 
     /// The two things a `Ptr` can do, which is deliberately all of them.

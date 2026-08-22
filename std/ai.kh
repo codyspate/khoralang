@@ -1,6 +1,6 @@
 module std::ai;
 
-import std::core::{List, Option};
+import std::core::{List, Option, Show};
 
 export type Device =
   | Cpu
@@ -48,15 +48,51 @@ export type Prompt = {
 /// Each returns a new prompt rather than mutating one, so a half-built prompt
 /// cannot be shared and then changed underneath its other holder.
 impl Prompt {
-  fn new() -> Prompt;
+  fn new() -> Prompt {
+    { system_instructions: Option::None, messages: List::Nil, temperature: 1.0 }
+  }
+
   /// Replaces the system instructions; the last one written wins.
-  fn system(self, instructions: String) -> Prompt;
-  fn user(self, message: String) -> Prompt;
-  fn assistant(self, message: String) -> Prompt;
-  fn at_temperature(self, temperature: Float) -> Prompt;
+  fn system(self, instructions: String) -> Prompt {
+    {
+      system_instructions: Option::Some(instructions),
+      messages: self.messages,
+      temperature: self.temperature,
+    }
+  }
+
+  fn user(self, message: String) -> Prompt {
+    Prompt::saying(self, "user", message)
+  }
+
+  fn assistant(self, message: String) -> Prompt {
+    Prompt::saying(self, "assistant", message)
+  }
+
+  fn saying(self, role: String, content: String) -> Prompt {
+    {
+      system_instructions: self.system_instructions,
+      messages: List::Cons({ role: role, content: content }, self.messages),
+      temperature: self.temperature,
+    }
+  }
+
+  fn at_temperature(self, temperature: Float) -> Prompt {
+    {
+      system_instructions: self.system_instructions,
+      messages: self.messages,
+      temperature: temperature,
+    }
+  }
+
   /// The prompt, with a description of what the answer should look like
   /// appended. What `extract` puts between a caller's request and the model.
-  fn describing<S>(self, spec: S) -> Prompt;
+  ///
+  /// `S: Show` because a spec has to reach the model as words, and `Show` is
+  /// how a type already says how it reads.
+  fn describing(self, spec: String) -> Prompt {
+    Prompt::saying(self, "user", "Answer with exactly this shape: " + spec)
+  }
 }
 
 export type ModelError =
@@ -75,6 +111,15 @@ export type ModelError =
 export trait Extract {
   type Spec;
   fn spec() -> Self::Spec;
+
+  /// The spec, as the words that reach the model.
+  ///
+  /// Separate from `spec` because `Spec` is any type at all and something has
+  /// to turn it into text. `type Spec: Show` would say it in one place instead
+  /// — it parses, and the bound does not reach a `Self::Spec` projection, so
+  /// the projection is reported as not implementing `Show` however the trait
+  /// is written. A gap worth closing; until it is, this is the honest spelling.
+  fn described() -> String;
   /// The answer, read back. `ModelError::SchemaExtractionError` when the text
   /// is not what the spec asked for, which is the ordinary case rather than an
   /// exceptional one — a model is allowed to be wrong.
@@ -112,7 +157,7 @@ export fn extract<A: Extract>(prompt: Prompt) -> A
   with { ai: LLMService }
   raises ModelError
 {
-  let described = Prompt::describing(prompt, A::spec());
+  let described = Prompt::describing(prompt, A::described());
   A::parse(ai.complete(described)!)!
 }
 

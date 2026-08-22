@@ -1705,6 +1705,51 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// A string literal's actual bytes.
+///
+/// `"a\nb"` is three characters and a newline, not four characters and a
+/// backslash. Nothing did this until an HTTP response went out with a literal
+/// `\r\n` in it, four bytes where two were meant, and a client that read the
+/// status line as the whole message.
+///
+/// The set is the small one every language has, and an unrecognised escape
+/// keeps its backslash: `\d` stays `\d`, which is what a regular expression
+/// written in a string wants and what the alternative — silently dropping the
+/// backslash — is worst at.
+///
+/// Only the outermost pair of quotes is removed. `trim_matches` took them all,
+/// so `""""` lost more than it should have.
+fn unescape(text: &str) -> String {
+    let inner = text.strip_prefix('"').unwrap_or(text);
+    let inner = inner.strip_suffix('"').unwrap_or(inner);
+
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('0') => out.push('\0'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            // A trailing backslash. The lexer should not produce one, and
+            // keeping it beats losing it.
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 fn literal_of(node: &khora_syntax::SyntaxNode) -> Option<Literal> {
     use khora_syntax::SyntaxKind::*;
     let token = node
@@ -1715,7 +1760,7 @@ fn literal_of(node: &khora_syntax::SyntaxNode) -> Option<Literal> {
     let lit = match token.kind() {
         INT_LIT => Literal::Int(text),
         FLOAT_LIT => Literal::Float(text),
-        STRING_LIT => Literal::Str(text.trim_matches('"').to_string()),
+        STRING_LIT => Literal::Str(unescape(&text)),
         TRUE_KW => Literal::Bool(true),
         FALSE_KW => Literal::Bool(false),
         _ => return None,

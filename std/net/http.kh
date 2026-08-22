@@ -1,10 +1,18 @@
 module std::net::http;
 
-import std::core::{Never, Option, Scope};
+import std::core::{Array, List, Map, Never, Option, Scope, Show, Split};
+import std::net::socket::{accept_on, invalid_handle, listen_on, receive, shut, start, transmit};
 
-// The specification does not define `std::net::http`; these signatures are
-// reconstructed from how the reference application uses them, and are marked
-// provisional in `docs/errata.md`.
+// HTTP/1.1, over the sockets in `std::net::socket`.
+//
+// The specification does not define `std::net::http`; the shape here was
+// reconstructed from how the reference application uses it, and every line
+// below it is Khora over `String::slice`, `String::index_of` and `Map`.
+//
+// Enough of the protocol to serve a request and no more: a request line, the
+// headers skipped, a body, and a response with a length on it. Chunked
+// transfer, keep-alive, TLS and content negotiation are all absent and all
+// deliberate — this is the exit criterion for phase 8, not a web server.
 
 export type Method =
   | Get
@@ -13,24 +21,53 @@ export type Method =
   | Patch
   | Delete;
 
+impl Method {
+  fn of(text: String) -> Option<Method> {
+    if text == "GET" {
+      Option::Some(Method::Get)
+    } else if text == "POST" {
+      Option::Some(Method::Post)
+    } else if text == "PUT" {
+      Option::Some(Method::Put)
+    } else if text == "PATCH" {
+      Option::Some(Method::Patch)
+    } else if text == "DELETE" {
+      Option::Some(Method::Delete)
+    } else {
+      Option::None
+    }
+  }
+
+  fn same(self, other: Method) -> Bool {
+    Method::rank(self) == Method::rank(other)
+  }
+
+  fn rank(self) -> Int {
+    match self {
+      Method::Get => 0,
+      Method::Post => 1,
+      Method::Put => 2,
+      Method::Patch => 3,
+      Method::Delete => 4,
+    }
+  }
+}
+
 /// The path parameters a route matched: `/analyze/:account_id` against
 /// `/analyze/acc_9921` binds `account_id`.
-export type Params;
-
-impl Request {
-  /// A GET request for `path`, with no parameters matched yet. Chiefly for
-  /// tests: a real one arrives from a socket.
-  fn get(path: String) -> Request;
-  fn post(path: String, body: String) -> Request;
-}
+export type Params = {
+  bound: Map<String, String>,
+};
 
 impl Params {
+  fn empty() -> Params { { bound: Map::new() } }
+
   /// `Option::None` when the route did not declare that parameter, which is a
   /// programming error the type makes you notice rather than an empty string.
-  fn get(self, name: String) -> Option<String>;
+  fn get(self, name: String) -> Option<String> {
+    Map::get(self.bound, name)
+  }
 }
-
-export type Json;
 
 export type Request = {
   method: Method,
@@ -39,46 +76,307 @@ export type Request = {
   body: String,
 };
 
+impl Request {
+  /// A GET request for `path`, with no parameters matched yet. Chiefly for
+  /// tests: a real one arrives from a socket.
+  fn get(path: String) -> Request {
+    { method: Method::Get, path: path, params: Params::empty(), body: "" }
+  }
+
+  fn post(path: String, body: String) -> Request {
+    { method: Method::Post, path: path, params: Params::empty(), body: body }
+  }
+}
+
 export type Response = {
   status: Int,
+  body: String,
+  content_type: String,
 };
 
 impl Response {
   /// Serializes `body` and sends it with the given status.
-  fn json<A>(status: Int, body: A) -> Response;
-  fn text(status: Int, body: String) -> Response;
+  ///
+  /// `A: Show` rather than a JSON encoder, because there is no JSON module yet
+  /// and `Show` is the trait a type already uses to say how it reads. When
+  /// there is one, this is where it goes and nothing above it changes.
+  fn json<A: Show>(status: Int, body: A) -> Response {
+    { status: status, body: body.show(), content_type: "application/json" }
+  }
+
+  fn text(status: Int, body: String) -> Response {
+    { status: status, body: body, content_type: "text/plain" }
+  }
+
+  /// The response, as bytes on the wire.
+  fn rendered(self) -> String {
+    "HTTP/1.1 " + Int::to_string(self.status) + " " + Response::reason(self.status) + "\r\n"
+    + "Content-Type: " + self.content_type + "\r\n"
+    + "Content-Length: " + Int::to_string(String::byte_length(self.body)) + "\r\n"
+    + "Connection: close\r\n"
+    + "\r\n"
+    + self.body
+  }
+
+  /// The handful of statuses this server can produce. A number nobody here
+  /// sends gets a name that says so rather than a wrong one.
+  fn reason(status: Int) -> String {
+    if status == 200 {
+      "OK"
+    } else if status == 400 {
+      "Bad Request"
+    } else if status == 404 {
+      "Not Found"
+    } else if status == 500 {
+      "Internal Server Error"
+    } else {
+      "Unknown"
+    }
+  }
 }
 
 export type HttpError =
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
 
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+/// A request read off the wire.
+///
+/// Only the request line and the body are looked at. Headers are skipped
+/// wholesale, which is honest about what this serves: a router that dispatches
+/// on a method and a path needs neither.
+export fn parse(text: String) -> Option<Request> {
+  match String::split_once(text, "\r\n") {
+    Option::None => Option::None,
+    Option::Some(lines) => match parse_request_line(lines.head) {
+      Option::None => Option::None,
+      Option::Some(head) => Option::Some({
+          method: head.method,
+          path: head.path,
+          params: Params::empty(),
+          body: body_of(lines.rest),
+        }),
+    },
+  }
+}
+
+export type RequestLine = {
+  method: Method,
+  path: String,
+};
+
+fn parse_request_line(line: String) -> Option<RequestLine> {
+  match String::split_once(line, " ") {
+    Option::None => Option::None,
+    Option::Some(after_method) => match Method::of(after_method.head) {
+      Option::None => Option::None,
+      Option::Some(method) => match String::split_once(after_method.rest, " ") {
+        // `GET /path` with no version is still a request line worth honouring.
+        Option::None => Option::Some({ method: method, path: after_method.rest }),
+        Option::Some(after_path) => Option::Some({ method: method, path: after_path.head }),
+      },
+    },
+  }
+}
+
+/// Everything after the blank line, or nothing.
+fn body_of(rest: String) -> String {
+  match String::index_of(rest, "\r\n\r\n") {
+    Option::None => "",
+    Option::Some(at) => String::slice(rest, at + 4, String::byte_length(rest)),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Routing
+// ---------------------------------------------------------------------------
+
+/// Whether `path` matches `pattern`, and what its `:name` segments bound.
+///
+/// Segment by segment, because that is what a `:name` matches — one segment,
+/// never a `/`. A pattern and a path of different lengths do not match, which
+/// is what keeps `/a/:b` from swallowing `/a/b/c`.
+export fn matches(pattern: String, path: String) -> Option<Params> {
+  match_segments(pattern, path, Map::new())
+}
+
+fn match_segments(pattern: String, path: String, bound: Map<String, String>) -> Option<Params> {
+  let here = segment(pattern);
+  let mine = segment(path);
+  if String::byte_length(here.head) == 0 && String::byte_length(mine.head) == 0 {
+    if String::byte_length(here.rest) == 0 && String::byte_length(mine.rest) == 0 {
+      Option::Some({ bound: bound })
+    } else {
+      match_segments(here.rest, mine.rest, bound)
+    }
+  } else if String::starts_with(here.head, ":") {
+    if String::byte_length(mine.head) == 0 {
+      Option::None
+    } else {
+      Map::insert(bound, String::slice(here.head, 1, String::byte_length(here.head)), mine.head);
+      finish_match(here.rest, mine.rest, bound)
+    }
+  } else if here.head == mine.head {
+    finish_match(here.rest, mine.rest, bound)
+  } else {
+    Option::None
+  }
+}
+
+fn finish_match(pattern: String, path: String, bound: Map<String, String>) -> Option<Params> {
+  if String::byte_length(pattern) == 0 && String::byte_length(path) == 0 {
+    Option::Some({ bound: bound })
+  } else if String::byte_length(pattern) == 0 || String::byte_length(path) == 0 {
+    Option::None
+  } else {
+    match_segments(pattern, path, bound)
+  }
+}
+
+/// The next `/`-separated piece, and what follows it.
+fn segment(text: String) -> Split {
+  let without_slash =
+  if String::starts_with(text, "/") { String::slice(text, 1, String::byte_length(text)) }
+  else { text };
+  match String::split_once(without_slash, "/") {
+    Option::None => { head: without_slash, rest: "" },
+    Option::Some(parts) => parts,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The router
+// ---------------------------------------------------------------------------
+
+/// One mounted route.
+export type Route<'r, 'e> = {
+  method: Method,
+  pattern: String,
+  handler: (Request) -> Response with 'r raises 'e,
+};
+
 /// A router carries the capabilities its handlers need, so mounting a route
 /// that talks to the database widens the router's own requirement row.
-export type Router<- R, + E>;
+export type Router<'r, 'e> = {
+  routes: List<Route<'r, 'e>>,
+};
 
 /// Mounting is written `router |> Router::post(..)`, so the router is the
 /// first parameter of each. They are the type's own functions rather than free
 /// ones so that the pipeline reads as a chain against `Router` and cannot
 /// collide with another module's `get`.
 impl Router {
-  fn new() -> Router<{}, Never>;
+  fn new<'r, 'e>() -> Router<'r, 'e> { { routes: List::Nil } }
 
-  fn post<'r1, 'r2, 'e1, 'e2>(
-    router: Router<'r1, 'e1>,
+  fn post<'r, 'e>(
+    router: Router<'r, 'e>,
     route: String,
-    handler: Request -> Response with 'r2 raises 'e2
-  ) -> Router<{ 'r1 | 'r2 }, 'e1 + 'e2>;
+    handler: (Request) -> Response with 'r raises 'e
+  ) -> Router<'r, 'e> {
+    { routes: List::Cons({ method: Method::Post, pattern: route, handler: handler }, router.routes) }
+  }
 
-  fn get<'r1, 'r2, 'e1, 'e2>(
-    router: Router<'r1, 'e1>,
+  fn get<'r, 'e>(
+    router: Router<'r, 'e>,
     route: String,
-    handler: Request -> Response with 'r2 raises 'e2
-  ) -> Router<{ 'r1 | 'r2 }, 'e1 + 'e2>;
+    handler: (Request) -> Response with 'r raises 'e
+  ) -> Router<'r, 'e> {
+    { routes: List::Cons({ method: Method::Get, pattern: route, handler: handler }, router.routes) }
+  }
 
-  /// Binding a socket is a scoped resource: the listener is released when the
-  /// enclosing region exits, including under interruption.
+  /// Serves until the process stops.
+  ///
+  /// One connection at a time, read once, answered, closed. A fiber per
+  /// connection is what this wants and `Fiber::spawn` is right there; it is
+  /// left out because a server that can only be stopped by killing it is not
+  /// yet worth making concurrent.
   fn listen<'r, 'e>(router: Router<'r, 'e>, port: Int) -> ()
     with { 'r | scope: Scope }
-    raises 'e + HttpError;
+    raises 'e + HttpError
+  {
+    if start() {
+    } else {
+      raise HttpError::BindFailed(port)
+    };
+    let server = listen_on(port);
+    if server == invalid_handle() {
+      raise HttpError::BindFailed(port)
+    } else {
+      // Announced so that whatever started this knows the port is open. A
+      // caller that wants silence can have a quieter one when there is
+      // something to configure it with.
+      print("listening on " + Int::to_string(port));
+      Router::serve_forever(router, server)!
+    }
+  }
+
+  /// One connection at a time, for as long as the process lives.
+  fn serve_forever<'r, 'e>(router: Router<'r, 'e>, server: Int) -> ()
+    with { 'r | scope: Scope }
+    raises 'e + HttpError
+  {
+    Router::serve_once(router, server)!;
+    Router::serve_forever(router, server)!
+  }
+
+  /// Accepts one connection, answers it, and closes it.
+  fn serve_once<'r, 'e>(router: Router<'r, 'e>, server: Int) -> ()
+    with { 'r | scope: Scope }
+    raises 'e + HttpError
+  {
+    let connection = accept_on(server);
+    if connection == invalid_handle() {
+    } else {
+      let buffer: Array<U8> = Array::new(8192, 0);
+      let read = receive(connection, buffer);
+      let answer =
+      if read <= 0 {
+        Response::text(400, "empty request")
+      } else {
+        Router::answer(router, String::from_bytes(Array::prefix(buffer, read)))!
+      };
+      transmit(connection, Response::rendered(answer));
+      shut(connection);
+    }
+  }
+
+  /// What to send back for this request text.
+  fn answer<'r, 'e>(router: Router<'r, 'e>, text: String) -> Response
+    with 'r
+    raises 'e
+  {
+    match parse(text) {
+      Option::None => Response::text(400, "malformed request"),
+      Option::Some(request) => Router::dispatch(router.routes, request)!,
+    }
+  }
+
+  fn dispatch<'r, 'e>(routes: List<Route<'r, 'e>>, request: Request) -> Response
+    with 'r
+    raises 'e
+  {
+    match routes {
+      List::Nil => Response::text(404, "no route for " + request.path),
+      List::Cons(route, rest) =>
+      if Method::same(route.method, request.method) {
+        match matches(route.pattern, request.path) {
+          Option::Some(params) =>
+          route.handler({
+              method: request.method,
+              path: request.path,
+              params: params,
+              body: request.body,
+            })!,
+          Option::None => Router::dispatch(rest, request)!,
+        }
+      } else {
+        Router::dispatch(rest, request)!
+      },
+    }
+  }
 }
+
+fn print(value: String);

@@ -1,6 +1,6 @@
 module app::main;
 
-import std::core::{Eq, List, Option, Scope, assert, print};
+import std::core::{Eq, List, Option, Scope, Show, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
 import std::ai::{Extract, LLMService, ModelError, Prompt, extract};
 
@@ -50,11 +50,44 @@ export type ReportSpec = {
   fields: String,
 };
 
+impl Show for ReportSpec {
+  fn show(self) -> String { self.fields }
+}
+
+/// What the service sends back. JSON by hand, because there is no JSON module
+/// yet — and because `Show` is what `Response::json` asks for until there is.
+impl Show for AnalysisReport {
+  fn show(self) -> String {
+    "{\"account_id\": \"" + self.account_id + "\", \"risk\": \"" + RiskLevel::show(self.risk)
+    + "\", \"confidence\": " + Int::to_string(self.confidence_percent()) + "}"
+  }
+}
+
+impl AnalysisReport {
+  /// The confidence as a whole number of per cent, because there is no float
+  /// formatting yet and a rounded integer is honest about that.
+  fn confidence_percent(self) -> Int {
+    Float::to_int(self.confidence * 100.0)
+  }
+}
+
+impl Show for RiskLevel {
+  fn show(self) -> String {
+    match self {
+      RiskLevel::Low => "low",
+      RiskLevel::Moderate(reason) => "moderate: " + reason,
+      RiskLevel::Critical(action) => "critical: " + action,
+    }
+  }
+}
+
 impl Extract for AnalysisReport {
   type Spec = ReportSpec;
   fn spec() -> ReportSpec {
     { fields: "account_id: string, risk: low | moderate | critical, confidence: number" }
   }
+
+  fn described() -> String { ReportSpec::show(AnalysisReport::spec()) }
 
   /// Reading the answer back is the type's business too, for the same reason
   /// describing it is: only `AnalysisReport` knows what one looks like. A real
@@ -169,7 +202,12 @@ export context Mock {
   ai: mock_ai,
 }
 
-export fn main() raises HttpError {
+/// `DbError` as well as `HttpError`, because **the router carries its
+/// handlers' failures**: mounting `handle`, which can fail against the ledger,
+/// widens `Router::listen`'s own error row. That is the property the type was
+/// designed for, and it shows up here as one word nobody had to remember to
+/// write — the compiler asked for it.
+export fn main() raises DbError + HttpError {
   with Mock {
     Router::new()
       |> Router::post("/analyze/:account_id", handle)

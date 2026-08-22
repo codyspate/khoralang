@@ -957,10 +957,26 @@ can be written before anything needs TLS.
   twelve `cannot find module` errors to six real ones, which is now the list
   phase 8 is working through.
 
-**Exit:** the reference application runs and serves a request. That is phase
-4's unmet half, and it stays the criterion because it exercises the whole
-stack: capabilities, a fallible service, `catch`, a router carrying its
-handlers' requirements, and now real I/O underneath.
+**Exit — met.** The reference application runs and serves a request, pinned by
+`the_reference_application_serves_a_request`. A real socket, a real request
+line, `/analyze/:account_id` matched and its parameter bound, the handler run
+with the `ai` and `ledger` capabilities its signature asked for, the ledger
+flagged, and a 200 with a JSON body whose `Content-Length` is its actual
+length:
+
+```text
+POST /analyze/acc_9921 HTTP/1.1
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 87
+
+{"account_id": "acc_9921", "risk": "critical: Immediate fund freeze", "confidence": 98}
+```
+
+That is phase 4's unmet half, closed. It was the criterion because it exercises
+the whole stack, and it did: every gap it found is listed above, and none of
+them was in the part anybody was worried about.
 
 - **8.3a The checker will not finish a body it did not understand.** A
   published type of `Unknown` is now an error: `Unknown` is compatible with
@@ -1016,11 +1032,30 @@ handlers' requirements, and now real I/O underneath.
   intrinsic: **a method somebody wrote wins over one the backend implements.**
   `attempt` had the same bug in phase 5 and was fixed one call site at a time.
 
-What stands between here and the exit is now library work only:
+- **8.7 Sockets.** `std::net::socket`, one file per target and only one of
+  them ever in a build. The Berkeley calls are `extern` declarations; the
+  sixteen bytes of a `sockaddr_in` are laid out in an `Array<U8>` and lent as a
+  `Ptr`, because no struct crosses the C ABI and sixteen bytes is not worth a
+  runtime function. Windows and Linux; **macOS is deliberately absent**, since
+  its `sockaddr_in` puts a length byte where the others put half the family and
+  a wrong layout is a `bind` that fails for no visible reason. A build there
+  gets "cannot find module", which is worse to read and much better to debug.
+- **8.8 `std::net::http`.** A request line, headers skipped, a body, and a
+  response with a length on it. The router is a list of routes carrying their
+  handlers' rows, `:name` matches one segment, and `Response::json` asks for
+  `Show` until there is a JSON module. Enough of the protocol to serve a
+  request and no more — chunked transfer, keep-alive and TLS are all absent and
+  all deliberate.
 
-- **`std::net::http` and `std::ai` have signatures with no bodies** —
-  `Router::listen`, `Request::get`, `Params::get`, `Prompt::user`,
-  `Prompt::describing`. Sockets underneath.
+  Three compiler gaps came out of writing it, and each is worth more than the
+  module: **a rigid row variable now subsumes** (a demand of `'r` against a
+  promise of `{ 'r | scope: Scope }` is satisfied rather than a rigidity
+  error — every row-polymorphic library function that adds a capability needed
+  this); **an impl is found anywhere in the program** during monomorphization,
+  not only in the file the generic body lives in, which is what
+  `extract<A: Extract>` in `std::ai` needs when the `AnalysisReport` is the
+  application's; and **string literals process escapes**, which they never had
+  (errata 43).
 - **8.5 `==` reaches an `Eq` impl — done.** A scalar compares with one
   instruction and a `String` by its bytes; **anything with a shape decides for
   itself**, in an `Eq` impl written in Khora. One meaning for the operator

@@ -475,6 +475,27 @@ impl<A> Array<A> {
   /// `String::from_bytes` will accept them. Only an `Array<U8>` has an answer.
   fn is_utf8(self) -> Bool;
 
+  /// The first `count` elements, copied.
+  ///
+  /// What a caller does with a buffer it only partly filled: a socket read
+  /// says how many bytes arrived, and the rest of the buffer is not part of
+  /// the message.
+  fn prefix(self, count: Int) -> Array<A> {
+    let taken = if count < 0 { 0 } else if count > Array::length(self) { Array::length(self) }
+    else { count };
+    let out: Array<A> = Array::new(taken, Array::get(self, 0));
+    Array::copy_into(self, out, taken, 0);
+    out
+  }
+
+  fn copy_into(self, out: Array<A>, count: Int, done: Int) -> () {
+    if done >= count {
+    } else {
+      Array::set(out, done, Array::get(self, done));
+      Array::copy_into(self, out, count, done + 1)
+    }
+  }
+
   /// Lends the elements to `body` as a pointer and a count, for the duration
   /// of the call and no longer.
   ///
@@ -617,7 +638,26 @@ impl String {
   }
 }
 
+impl Float {
+  /// The whole part, with nothing rounded.
+  ///
+  /// **Truncates toward zero** — `2.9` is `2` and `-2.9` is `-2` — which is
+  /// what every machine's "convert to integer" does, and what C, Rust and Go
+  /// all mean by it. Rounding is a different question with four defensible
+  /// answers, so it gets a different function when somebody needs one.
+  ///
+  /// A number too large for an `Int` clamps to the nearest end, and a `NaN` is
+  /// zero. Undefined behaviour is the alternative and is not one.
+  fn to_int(self) -> Int;
+}
+
 impl Int {
+  /// The same number as a `Float`.
+  ///
+  /// Exact up to 2^53 and rounded beyond it, which is IEEE's business rather
+  /// than Khora's.
+  fn to_float(self) -> Float;
+
   /// The number, written out.
   ///
   /// Needed by anything that puts a number in a message — a `Content-Length`,
