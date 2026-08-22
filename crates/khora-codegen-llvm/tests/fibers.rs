@@ -361,3 +361,151 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "1\n2\n");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- nurseries -------------------------------------------------------------
+
+/// `std::core` spells these the same way; they are here so the file stays one
+/// module. `go` is a plain generic function over a monomorphic operation, the
+/// same shape `acquire` has over `defer` — a handler's fields are closures and
+/// a closure cannot be generic, so the polymorphism lives in the function.
+const NURSERY: &str = "module t;
+fn print(value: Int);
+fn khora_live_count() -> Int;
+
+export type Fiber;
+impl Fiber {
+  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
+  fn join(self) -> ();
+  fn cancel(self) -> ();
+}
+
+export type Fibers;
+impl Fibers {
+  fn open() -> Fibers;
+  fn adopt(self, fiber: Fiber) -> ();
+  fn wait(self) -> ();
+}
+
+export effect Nursery { adopt: (Fiber) -> (), }
+
+export type Oops = | Bad;
+fn ok(n: Int) -> Int raises Oops { n }
+
+export fn go<'e1, 'e2>(body: () -> () raises 'e1) -> Fiber
+  with { 'e2 | nursery: Nursery }
+{
+  let f = Fiber::spawn(body);
+  nursery.adopt(f);
+  f
+}
+";
+
+/// The ordinary path: the block waits for every child before it finishes.
+#[test]
+fn a_nursery_waits_for_its_children() {
+    let ran = run(
+        "nursery_wait",
+        &format!(
+            "{NURSERY}
+fn first() -> () raises Oops {{ print(1); }}
+fn second() -> () raises Oops {{ print(2); }}
+
+fn work() -> () {{
+  let crew = Fibers::open();
+  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
+    go(first);
+    go(second);
+  }}
+  Fibers::wait(crew);
+  print(3);
+}}
+
+fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
+"
+        ),
+    );
+    // The children run at the same time, so which prints first is not
+    // something to assert — that they *both* finished before the block
+    // did is the whole claim.
+    assert!(
+        ran.stdout == "1\n2\n3\n0\n" || ran.stdout == "2\n1\n3\n0\n",
+        "both children ran before the block finished: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The failure path, and the whole reason a nursery is a value with a release
+/// rather than a pair of calls. A raise leaving the block cancels the children
+/// and waits — the answers they were computing are no longer wanted — and the
+/// child here would otherwise run forever.
+///
+/// Nobody wrote the cancel. It is what releasing the nursery does, on the one
+/// path that skipped `wait`.
+#[test]
+fn a_raise_out_of_a_nursery_cancels_its_children() {
+    let ran = run(
+        "nursery_raise",
+        &format!(
+            "{NURSERY}
+fn forever() -> () raises Oops {{
+  print(1);
+  loop {{ ok(1)!; }}
+}}
+
+fn boom() -> Int raises Oops {{ raise Oops::Bad }}
+
+fn work() -> Int raises Oops {{
+  let crew = Fibers::open();
+  let value = with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
+    go(forever);
+    boom()!
+  }};
+  Fibers::wait(crew);
+  value
+}}
+
+fn main() -> Int {{
+  let v = work()! catch {{ Oops::Bad => 7 }};
+  print(v);
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n7\n0\n",
+        "the child started, was stopped by the raise leaving, and nothing was left over"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Every child, not just the first one that finishes.
+#[test]
+fn a_nursery_waits_for_all_of_them() {
+    let ran = run(
+        "nursery_all",
+        &format!(
+            "{NURSERY}
+fn one() -> () raises Oops {{ print(1); }}
+fn two() -> () raises Oops {{ print(2); }}
+fn three() -> () raises Oops {{ print(3); }}
+
+fn work() -> () {{
+  let crew = Fibers::open();
+  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
+    Fiber::join(go(one));
+    Fiber::join(go(two));
+    Fiber::join(go(three));
+  }}
+  Fibers::wait(crew);
+}}
+
+fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n2\n3\n0\n");
+    assert_eq!(ran.code, Some(0));
+}

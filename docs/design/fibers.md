@@ -124,26 +124,35 @@ end while a child is still running.
 This is the second time regions have paid for themselves, and it is worth
 noticing that neither use needed the other to be designed for it.
 
-### One thing this shape does not yet answer
+### Two ways to end, without asking which happened
 
 Trio and its descendants distinguish two ways a nursery can end. On the normal
 path it *waits* for its children; on an error it *cancels* them and then waits,
-because the answer they were computing is no longer wanted.
+because the answers they were computing are no longer wanted.
 
-A region's finalizer cannot tell which happened — it is handed a pointer and
-nothing else. Three ways out, in the order they should be considered:
+A release cannot tell which happened — it is handed a pointer and nothing else
+— and the obvious fix is to hand it the reason as well. That turned out not to
+be needed. **The normal path waits explicitly, before the release**, so by the
+time the release runs there is only one case left:
 
-1. Give a region's release the reason it is releasing, which is a second
-   argument on one runtime callback and nothing else. Cheap, and it is
-   information the code generator already has: the release site knows whether
-   it is `leave_scope` or `unwind_to`.
-2. Make the nursery keep the answer itself, which needs a mutable cell and
-   therefore D11.
-3. Ship "always wait" and document it, which is wrong the moment a child loops
-   forever.
+```
+export fn nursery<A, 'e, 'r>(body: ..) -> A with 'e raises 'r {
+  let crew = Fibers::open();
+  let value = with { nursery: .. } { body()! };
+  Fibers::wait(crew);      // only reached when `body` finished
+  value
+}
+```
 
-(1) is almost certainly right and is small. It is called out here rather than
-decided because it should be decided with the code in front of it.
+`Fibers::wait` empties the nursery, so releasing it afterwards finds nothing to
+stop. Every other way out of the block skips that line, and the release cancels
+and then waits. One value means both, and nothing has to be told which happened
+— the control flow already said it by arriving or not.
+
+This is worth noticing beyond the nursery: **a cleanup that differs between the
+normal and the abnormal path can often be written as an abnormal-path cleanup
+plus a normal-path statement that defuses it.** Handing the reason down is a
+generalisation nobody has needed yet.
 
 ## Per-fiber, not per-process
 
@@ -192,10 +201,14 @@ per fiber, and three things follow:
    that goes away with (3), where the error reaches a parent who knows exactly
    what it is.
 
-3. **The nursery**, as a region, with the ending-reason question above settled
-   first.
+3. **The nursery** — *built*, and it is a value whose release stops what is
+   still running. A fiber cannot outlive the block that spawned it, on every
+   path out, and nobody writes the cancel.
+
 4. **Failure propagation**: a child that raises makes the nursery raise. The
-   tag already carries it; what is missing is a parent to give it to.
+   tag already carries it and there is now a parent to give it to; what is
+   missing is somewhere on the parent to put it, which is a mutable cell and
+   therefore D11.
 5. **`khora test` across cores**, the exit criterion's second half.
 
 Work stealing, stack growth and the coroutine switch itself are phase 6 or

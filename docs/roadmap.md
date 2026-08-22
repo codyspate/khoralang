@@ -478,11 +478,15 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   same from a fiber's side as anywhere else: a fiber with no error row has no
   channel to be interrupted on, and runs to its end.
 
-  **Not built, and next:** the nursery, and with it failure propagation — a
-  child's error is reported on stderr today because there is no parent to give
-  it to. A region's finalizer also cannot yet tell whether it is releasing
-  normally or unwinding, and a nursery wants to wait in the first case and
-  cancel-then-wait in the second.
+  **A nursery is a value whose release stops what is still running.** So a
+  fiber cannot outlive the block that spawned it on any path out, and nobody
+  writes the cancel. The two endings — wait for the children, or cancel them
+  and then wait — needed no way to ask which happened: the normal path waits
+  *before* the release, so the release only ever runs on the other one.
+
+  **Not built, and next:** failure propagation. A child's error goes to stderr
+  because the parent has nowhere to put it, which is a mutable cell and
+  therefore D11.
 
   Also open: a region's finalizer cannot tell whether it is releasing normally
   or unwinding, and a nursery wants to wait in the first case and

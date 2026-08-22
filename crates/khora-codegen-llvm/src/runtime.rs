@@ -51,6 +51,13 @@ pub const CANCELLED_EXIT: u64 = 130;
 /// the release *joins*, so a fiber cannot outlive the binding that holds it.
 pub const FIBER_TYPE: &str = "Fiber";
 
+/// The type name of a nursery: the fibers a block is responsible for.
+///
+/// Releasing one cancels its children and waits, which is the answer for a
+/// block that did not finish. On the ordinary path `Fibers::wait` has already
+/// emptied it, so one object means both without being told which happened.
+pub const FIBERS_TYPE: &str = "Fibers";
+
 /// The type name of a region. Not an ADT: it is a handle the runtime owns,
 /// and the only thing generated code does with one is hand it back and let it
 /// be released.
@@ -116,6 +123,14 @@ pub struct Runtime<'ctx> {
     pub fiber_cancel: FunctionValue<'ctx>,
     /// `void khora_fiber_release(void *fiber)` — a `drop_fields` callback.
     pub fiber_release: FunctionValue<'ctx>,
+    /// `void *khora_fibers_open(void)`
+    pub fibers_open: FunctionValue<'ctx>,
+    /// `void khora_fibers_adopt(void *fibers, void *fiber)`
+    pub fibers_adopt: FunctionValue<'ctx>,
+    /// `void khora_fibers_wait(void *fibers)`
+    pub fibers_wait: FunctionValue<'ctx>,
+    /// `void khora_fibers_release(void *fibers)` — a `drop_fields` callback.
+    pub fibers_release: FunctionValue<'ctx>,
     /// `void khora_region_close_root(void)`
     pub region_close_root: FunctionValue<'ctx>,
     /// `llvm.trap`, for a branch that exhaustiveness says cannot be taken.
@@ -172,6 +187,13 @@ impl<'ctx> Runtime<'ctx> {
             fiber_join: declare("khora_fiber_join", void.fn_type(&[ptr.into()], false)),
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),
             fiber_release: declare("khora_fiber_release", void.fn_type(&[ptr.into()], false)),
+            fibers_open: declare("khora_fibers_open", ptr.fn_type(&[], false)),
+            fibers_adopt: declare(
+                "khora_fibers_adopt",
+                void.fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            fibers_wait: declare("khora_fibers_wait", void.fn_type(&[ptr.into()], false)),
+            fibers_release: declare("khora_fibers_release", void.fn_type(&[ptr.into()], false)),
             region_close_root: declare("khora_region_close_root", void.fn_type(&[], false)),
             trap: declare("llvm.trap", void.fn_type(&[], false)),
         }

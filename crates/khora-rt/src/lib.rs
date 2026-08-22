@@ -999,3 +999,132 @@ pub unsafe extern "C" fn khora_fiber_release(fiber: *mut u8) {
         }
     }
 }
+
+// --- nurseries -------------------------------------------------------------
+
+/// [`khora_fiber_release`] as a `drop_fields` callback. See [`release_shim`].
+extern "C" fn fiber_release_shim(fiber: *mut u8) {
+    // SAFETY: only ever reached through `khora_drop`, which calls it with the
+    // object whose last reference it just released.
+    unsafe { khora_fiber_release(fiber) };
+}
+
+/// The fibers a nursery is responsible for.
+///
+/// Held Rust-side for the same reason a region's finalizers are: adopting one
+/// *grows* the list, and nothing in Khora grows a value in place.
+type Crew = Vec<Handed>;
+
+/// The tag every nursery object carries.
+const FIBERS_TAG: u32 = 0;
+
+/// The list behind a nursery handle, or null once it has been released.
+///
+/// # Safety
+///
+/// `fibers` must be a live object from [`khora_fibers_open`].
+unsafe fn crew<'a>(fibers: *mut u8) -> Option<&'a mut Crew> {
+    if fibers.is_null() {
+        return None;
+    }
+    // SAFETY: the caller guarantees a live handle, whose field holds what
+    // `khora_fibers_open` wrote there.
+    unsafe { (*fibers.add(KHORA_FIELD_OFFSET).cast::<*mut Crew>()).as_mut() }
+}
+
+/// Opens a nursery: a set of fibers that ends when the binding holding it does.
+///
+/// Releasing it *cancels then waits*, which is the answer for the path where
+/// the block did not finish — a raise, or a cancellation, passing through. On
+/// the ordinary path [`khora_fibers_wait`] has already emptied it, so the
+/// release finds nothing to stop. That is what lets one object mean both "wait
+/// for the children" and "the answer is no longer wanted" without ever being
+/// told which happened.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_fibers_open() -> *mut u8 {
+    let object = khora_alloc(std::mem::size_of::<*mut Crew>(), FIBERS_TAG);
+    let list: Box<Crew> = Box::default();
+    // SAFETY: `khora_alloc` returned an object with one field's worth of
+    // space, zeroed and aligned, and nothing else holds this pointer yet.
+    unsafe {
+        object.add(KHORA_FIELD_OFFSET).cast::<*mut Crew>().write(Box::into_raw(list));
+    }
+    object
+}
+
+/// Makes `fiber` this nursery's responsibility, taking its reference.
+///
+/// # Safety
+///
+/// `fibers` must be live from [`khora_fibers_open`] and `fiber` live from
+/// [`khora_fiber_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
+    // SAFETY: the caller guarantees a live nursery.
+    let Some(list) = (unsafe { crew(fibers) }) else {
+        fatal("adopting a fiber into a nursery that has already ended");
+    };
+    list.push(Handed(fiber));
+}
+
+/// Waits for every fiber in the nursery, oldest first, and empties it.
+///
+/// Oldest first because there is no reason to prefer otherwise and an order
+/// that is stated is easier to reason about than one that is not. Every child
+/// is waited for regardless: a nursery that returned after the first one
+/// finished would not be structured at all.
+///
+/// # Safety
+///
+/// `fibers` must be a live object from [`khora_fibers_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) {
+    // SAFETY: the caller guarantees a live nursery.
+    let Some(list) = (unsafe { crew(fibers) }) else { return };
+    for Handed(fiber) in std::mem::take(list) {
+        // SAFETY: each handle was live when adopted and this list has held the
+        // only reference since.
+        unsafe {
+            khora_fiber_join(fiber);
+            khora_drop(fiber, Some(fiber_release_shim));
+        }
+    }
+}
+
+/// Cancels every fiber in the nursery, then waits for all of them.
+///
+/// This is a `drop_fields` callback, and it is the whole of structured
+/// concurrency's failure case: the block is leaving without finishing, so the
+/// answers its children were computing are no longer wanted. Cancelled *first*
+/// and in one pass, so the children stop concurrently rather than one waiting
+/// out the next.
+///
+/// # Safety
+///
+/// `fibers` must be a live object from [`khora_fibers_open`] whose refcount has
+/// reached zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
+    if fibers.is_null() {
+        return;
+    }
+    // SAFETY: the caller guarantees a live nursery; the field holds what
+    // `khora_fibers_open` wrote, and nothing else reads it after this.
+    unsafe {
+        let slot = fibers.add(KHORA_FIELD_OFFSET).cast::<*mut Crew>();
+        let list = *slot;
+        if list.is_null() {
+            return;
+        }
+        slot.write(std::ptr::null_mut());
+
+        let list = Box::from_raw(list);
+        for Handed(fiber) in list.iter() {
+            khora_fiber_cancel(*fiber);
+        }
+        for Handed(fiber) in list.into_iter() {
+            khora_fiber_join(fiber);
+            khora_drop(fiber, Some(fiber_release_shim));
+        }
+    }
+}

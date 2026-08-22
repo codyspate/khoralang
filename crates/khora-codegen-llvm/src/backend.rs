@@ -1060,6 +1060,11 @@ impl<'ctx> Backend<'ctx> {
             return self.rt.fiber_release.as_global_value().as_pointer_value();
         }
 
+        // A nursery's release cancels its children and waits for them.
+        if name == runtime::FIBERS_TYPE {
+            return self.rt.fibers_release.as_global_value().as_pointer_value();
+        }
+
         let key = ty.to_string();
 
         if let Some(cached) = self.drop_glue.get(&key) {

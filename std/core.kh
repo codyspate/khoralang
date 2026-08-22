@@ -386,6 +386,64 @@ impl Fiber {
   fn cancel(self) -> ();
 }
 
+/// The fibers a block is responsible for.
+///
+/// Releasing one *cancels its children and waits*, which is the answer for a
+/// block that did not finish — a raise, or a cancellation, passing through. On
+/// the ordinary path `nursery` has already waited, so the release finds
+/// nothing to stop. That is how one value means both "wait for the children"
+/// and "the answers are no longer wanted" without ever being told which
+/// happened.
+export type Fibers;
+
+impl Fibers {
+  fn open() -> Fibers;
+  fn adopt(self, fiber: Fiber) -> ();
+  /// Waits for every child, oldest first, and empties the nursery.
+  fn wait(self) -> ();
+}
+
+/// Where a spawned fiber goes.
+///
+/// The operation takes a fiber rather than a thunk, so that `spawn` below can
+/// be generic in what the thunk raises — a handler's fields are closures and a
+/// closure cannot be generic. The same split as `Scope::defer` and `acquire`.
+export effect Nursery {
+  adopt: (Fiber) -> (),
+}
+
+/// Runs `body` on a fiber the enclosing nursery is responsible for.
+///
+/// The handle comes back, so a caller that wants to wait for this one in
+/// particular can. Nobody has to: the nursery waits for all of them.
+export fn spawn<'e1, 'e2>(body: () -> () raises 'e1) -> Fiber
+  with { 'e2 | nursery: Nursery }
+{
+  let fiber = Fiber::spawn(body);
+  nursery.adopt(fiber);
+  fiber
+}
+
+/// Runs `body` with a nursery, and does not return until its children are done.
+///
+/// Structured concurrency, and the structure is the region's: a fiber cannot
+/// outlive this block, because leaving it — at the end, on a `return`, or with
+/// a raise passing through — releases the nursery, and releasing a nursery
+/// stops what is still running.
+export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
+  with 'e
+  raises 'r
+{
+  let crew = Fibers::open();
+  let value = with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
+    body()!
+  };
+  // Only reached when `body` finished: waiting for children that are still
+  // wanted. The other way out releases `crew`, which cancels them first.
+  Fibers::wait(crew);
+  value
+}
+
 /// Runs `body` in a fresh region, discharging its `scope` requirement.
 ///
 /// Row subtraction made concrete: `scope` is present in the body's requirement

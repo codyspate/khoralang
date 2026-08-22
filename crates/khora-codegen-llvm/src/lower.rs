@@ -817,6 +817,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == runtime::FIBER_TYPE {
                     return self.fiber_intrinsic(&name, args, range);
                 }
+                if owner == runtime::FIBERS_TYPE {
+                    return self.nursery_intrinsic(&name, args, range);
+                }
                 match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, site, args, range),
                     None => self.fail(
@@ -1005,6 +1008,63 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             _ => self.fail(
                 format!("`Fiber::{name}` is not a fiber operation the backend knows"),
+                range,
+            ),
+        }
+    }
+
+    /// `Fibers::open`, `Fibers::adopt` and `Fibers::wait`.
+    ///
+    /// A nursery holds fiber handles, and adopting one grows the list — which
+    /// is why the list lives in the runtime and this is an intrinsic rather
+    /// than an extern. `adopt` takes the handle's reference; the nursery
+    /// releases it once the fiber has been waited for.
+    fn nursery_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        match (name, args) {
+            ("open", []) => {
+                let open = self.be.rt.fibers_open;
+                let fibers = self
+                    .be
+                    .builder
+                    .build_call(open, &[], "fibers")
+                    .expect("opening a nursery")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a nursery is a value");
+                Some(fibers)
+            }
+            ("adopt", [nursery, fiber]) => {
+                let nursery_ty = self.types.of(*nursery).clone();
+                let handle = self.expr(*nursery)?;
+                let child = self.expr(*fiber)?;
+                let adopt = self.be.rt.fibers_adopt;
+                self.be
+                    .builder
+                    .build_call(adopt, &[handle.into(), child.into()], "")
+                    .expect("adopting a fiber");
+                // The nursery keeps the fiber's reference and only borrows its
+                // own, so exactly one of the two is given back.
+                self.drop(handle, &nursery_ty);
+                Some(self.be.unit_value())
+            }
+            ("wait", [nursery]) => {
+                let nursery_ty = self.types.of(*nursery).clone();
+                let handle = self.expr(*nursery)?;
+                let wait = self.be.rt.fibers_wait;
+                self.be
+                    .builder
+                    .build_call(wait, &[handle.into()], "")
+                    .expect("waiting for a nursery");
+                self.drop(handle, &nursery_ty);
+                Some(self.be.unit_value())
+            }
+            _ => self.fail(
+                format!("`Fibers::{name}` is not a nursery operation the backend knows"),
                 range,
             ),
         }
