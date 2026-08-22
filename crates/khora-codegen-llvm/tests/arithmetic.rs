@@ -185,3 +185,97 @@ fn main() -> Int {{
     );
     assert_eq!(ran.code, Some(0));
 }
+
+// --- floats ----------------------------------------------------------------
+
+const FLOAT: &str = "module t;
+fn print(value: Float);
+fn khora_print_int(value: Int);
+";
+
+/// IEEE, which is what every reader expects and is why `Float` implements
+/// neither `Eq` nor `Ord` — see `docs/design/numbers.md`.
+#[test]
+fn float_arithmetic_is_ieee() {
+    let ran = run(
+        "float_ieee",
+        &format!(
+            "{FLOAT}
+fn main() -> Int {{
+  print(0.1 + 0.2);
+  print(3.0 * 2.5);
+  print(1.0 / 4.0);
+  print(1.5 - 2.0);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "0.30000000000000004\n7.5\n0.25\n-0.5\n",
+        "the first one is the whole point: 0.1 + 0.2 is not 0.3"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+#[test]
+fn floats_compare_by_ieee_rules() {
+    let ran = run(
+        "float_compare",
+        &format!(
+            "{FLOAT}
+fn main() -> Int {{
+  khora_print_int(if 0.1 + 0.2 == 0.3 {{ 1 }} else {{ 0 }});
+  khora_print_int(if 0.5 == 0.5 {{ 1 }} else {{ 0 }});
+  khora_print_int(if 2.5 < 3.0 {{ 1 }} else {{ 0 }});
+  khora_print_int(if 2.5 >= 2.5 {{ 1 }} else {{ 0 }});
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "0\n1\n1\n1\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Floats do not overflow — they reach infinity — so there is nothing to trap
+/// on and nothing to check. The opposite of the integer rule, and for a reason
+/// rather than an oversight.
+#[test]
+fn floats_do_not_trap() {
+    let ran = run(
+        "float_no_trap",
+        &format!(
+            "{FLOAT}
+fn main() -> Int {{
+  let huge = 179769313486231570000000000000000000000.0;
+  print(huge * huge * huge * huge * huge * huge * huge * huge * huge);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "inf\n", "reached infinity rather than stopping");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// No mixing and no promotion. `1 + 2.0` is an error rather than a silent
+/// conversion, which is what stops a rounding surprise from being invisible.
+#[test]
+fn an_int_and_a_float_do_not_mix() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float_mix");
+    std::fs::create_dir_all(&dir).expect("a workspace");
+
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(
+        &db,
+        dir.join("main.kh"),
+        format!("{FLOAT}fn main() -> Int {{ print(1 + 2.0); 0 }}\n"),
+    );
+    let root = SourceRoot::new(&db, vec![file]);
+
+    let errors = khora_codegen_llvm::compile(&db, root, &dir.join("program"))
+        .expect_err("mixing an Int and a Float should be refused");
+    let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+    assert!(messages.iter().any(|m| m.contains("arithmetic")), "{messages:?}");
+}

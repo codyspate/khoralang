@@ -127,6 +127,7 @@ impl ImplDef {
 pub fn head_of(ty: &Type) -> Option<String> {
     match ty {
         Type::Int => Some("Int".to_string()),
+        Type::Float => Some("Float".to_string()),
         Type::Bool => Some("Bool".to_string()),
         Type::Str => Some("String".to_string()),
         Type::Unit => Some("()".to_string()),

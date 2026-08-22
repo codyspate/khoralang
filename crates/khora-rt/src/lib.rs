@@ -1343,6 +1343,17 @@ pub extern "C" fn khora_array_new(
     object
 }
 
+/// Writes a float and a newline.
+///
+/// Rust's shortest round-tripping form, which is what a reader wants: `0.1`
+/// prints as `0.1` rather than as the seventeen digits that are literally
+/// stored, and any two distinct doubles still print differently.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_print_float(value: f64) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{value}");
+}
+
 /// Reports arithmetic that did not fit, and stops.
 ///
 /// Overflow traps in every build. A program that passes its tests and then

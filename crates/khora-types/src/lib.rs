@@ -26,6 +26,14 @@ use usefulness::{ColumnType, Ctor, FieldType, Pattern};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
+    /// IEEE-754 double precision.
+    ///
+    /// Note what does *not* follow: `Float` implements neither `Eq` nor `Ord`.
+    /// `==` and `<` on floats are primitive and mean what IEEE says they mean,
+    /// which is what every reader expects — and exactly why the *traits* are
+    /// withheld, since `NaN == NaN` is false and a law-abiding `Eq` cannot say
+    /// so. `docs/design/numbers.md`.
+    Float,
     Bool,
     Str,
     Unit,
@@ -102,6 +110,7 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Int => write!(f, "Int"),
+            Type::Float => write!(f, "Float"),
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "()"),
@@ -862,6 +871,7 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
 
             match name.as_str() {
                 "Int" => Type::Int,
+                "Float" => Type::Float,
                 "Bool" => Type::Bool,
                 "String" => Type::Str,
                 "" => Type::Unknown,
@@ -1314,7 +1324,7 @@ impl<'a> Checker<'a> {
             Expr::Unit => Type::Unit,
             Expr::Literal(lit) => match lit {
                 Literal::Int(_) => Type::Int,
-                Literal::Float(_) => Type::Unknown,
+                Literal::Float(_) => Type::Float,
                 Literal::Str(_) => Type::Str,
                 Literal::Bool(_) => Type::Bool,
             },
@@ -1523,10 +1533,17 @@ impl<'a> Checker<'a> {
                     self.expect(rhs, &Type::Str, "string concatenation");
                     return Type::Str;
                 }
+                // Arithmetic is over `Int` or over `Float`, and the left
+                // operand says which. No mixing and no promotion: `1 + 2.0` is
+                // an error rather than a silent conversion, which is what Go
+                // and Rust both do and what stops a rounding surprise from
+                // being invisible.
+                let left = self.unifier.zonk(&left);
+                let expected = if matches!(left, Type::Float) { Type::Float } else { Type::Int };
                 let lhs_range = self.body.range(lhs);
-                self.require(&Type::Int, &left, "arithmetic", lhs_range);
-                self.expect(rhs, &Type::Int, "arithmetic");
-                Type::Int
+                self.require(&expected, &left, "arithmetic", lhs_range);
+                self.expect(rhs, &expected, "arithmetic");
+                expected
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 let left = self.infer(lhs);
@@ -2444,6 +2461,7 @@ impl<'a> Checker<'a> {
         // and `Int`'s is `Int` however the type was spelled.
         let self_ty = match owner {
             "Int" => Type::Int,
+            "Float" => Type::Float,
             "Bool" => Type::Bool,
             "String" => Type::Str,
             other => Type::adt(other),

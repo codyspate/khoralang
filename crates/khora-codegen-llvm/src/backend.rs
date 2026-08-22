@@ -569,6 +569,7 @@ impl<'ctx> Backend<'ctx> {
     pub fn llvm_type(&self, ty: &Type) -> Option<BasicTypeEnum<'ctx>> {
         match ty {
             Type::Int | Type::Unit => Some(self.ctx.i64_type().into()),
+            Type::Float => Some(self.ctx.f64_type().into()),
             Type::Bool => Some(self.ctx.bool_type().into()),
             // A closure is a heap object holding its function pointer and its
             // captures, so a value of function type is a pointer to one.

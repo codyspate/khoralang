@@ -111,6 +111,8 @@ pub struct Runtime<'ctx> {
     pub drop: FunctionValue<'ctx>,
     /// `void khora_print_int(int64_t)`
     pub print_int: FunctionValue<'ctx>,
+    /// `void khora_print_float(double)`
+    pub print_float: FunctionValue<'ctx>,
     /// `void khora_print_bool(_Bool)`
     pub print_bool: FunctionValue<'ctx>,
     /// `void khora_print_str(const uint8_t *, size_t)`
@@ -187,6 +189,10 @@ impl<'ctx> Runtime<'ctx> {
             // null and passing a routine are the same call shape.
             drop: declare("khora_drop", void.fn_type(&[ptr.into(), ptr.into()], false)),
             print_int: declare("khora_print_int", void.fn_type(&[i64t.into()], false)),
+            print_float: declare(
+                "khora_print_float",
+                void.fn_type(&[ctx.f64_type().into()], false),
+            ),
             // C `_Bool`, so exactly one byte holding 0 or 1. Generated code
             // zero-extends its `i1`; any other bit pattern in that byte is
             // undefined behavior rather than a merely surprising result.

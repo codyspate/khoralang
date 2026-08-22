@@ -347,6 +347,7 @@ impl Unifier {
             ) => self.unify_rows(f1, t1.as_deref(), f2, t2.as_deref()),
 
             (Type::Int, Type::Int)
+            | (Type::Float, Type::Float)
             | (Type::Bool, Type::Bool)
             | (Type::Str, Type::Str)
             | (Type::Unit, Type::Unit) => Ok(()),

@@ -601,8 +601,28 @@ argument that settled A6.
   **Still to do:** the fixed-width types themselves. `Int` is the only integer
   there is, so there are still no bytes, and `Array<U8>` is what a string index
   and every wire format need.
-- **6.3 Floats.** Not in the backend and not in `Type`. `std::ai` promises
-  tensors and the reference application cannot compile without them.
+- **6.3 Floats — done.** `Float` is IEEE-754 double precision: `f64` in the
+  backend, a decimal literal in the grammar, `+ - * /` and the six comparisons.
+  No overflow trap, because IEEE arithmetic reaches infinity rather than
+  wrapping — the opposite of the integer rule, for a reason rather than by
+  oversight.
+
+  **`Float` implements neither `Eq` nor `Ord`, and that was decided rather than
+  asked.** `==` and `<` are *primitive* on floats and mean what IEEE says, which
+  is what every reader coming from Go, Rust or TypeScript expects; but `Eq` in
+  `std::core` is an equivalence, and `NaN == NaN` being false means a
+  law-abiding `Eq` cannot include `Float`. The operator is primitive; the trait
+  is for lawful equality. Khora can afford the split without Rust's second trait
+  because `==` never went through `Eq` to begin with. The cost is real and
+  intended: no `Float` keys in anything that hashes.
+
+  **No implicit promotion.** `1 + 2.0` is an error — the left operand decides
+  which arithmetic is happening and the right must match. Go and Rust both do
+  this, and it is what stops a rounding surprise from being invisible.
+
+  `docs/design/numbers.md` carries the reasoning for this and for the overflow
+  rule above. `Float32` is not here; one float type is enough until `std::ai`
+  needs the other.
 - **6.4 Arrays — done**, and taken before 6.2 and 6.3 because the phase's exit
   is a hash map and arrays are what block it. Contiguous, fixed-length,
   bounds-checked; `List` is a linked list, which is the wrong shape for almost
@@ -626,10 +646,11 @@ removals leave the live-object count at zero —
 `a_round_trip_of_inserts_and_removals_leaves_nothing` in
 `crates/khora-codegen-llvm/tests/hashmap.rs`.
 
-Two things the map is honest about, both waiting on 6.2. Its hash is the key's
-magnitude modulo the bucket count, because a good one wants multiplication that
-may overflow and bits to shift. And its keys are `Int`, because hashing a
-string means walking its bytes and there are no bytes yet.
+One thing the map is still honest about, waiting on 6.2: its keys are `Int`,
+because hashing a string means walking its bytes and there are no bytes yet.
+The hash itself is no longer an apology — once wrapping multiplication and the
+bit operations landed, `Map::slot` became a Fibonacci multiply and an xor-shift,
+which is what a hash is supposed to look like.
 
 ---
 

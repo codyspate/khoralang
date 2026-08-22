@@ -136,7 +136,7 @@ pub struct TestItem {
 /// `impl Int { .. }` is as legitimate as `impl User { .. }`, so a path whose
 /// owner is one of these names an item the same way — the resolver only has to
 /// know that the owner is a type, and for these three nobody wrote it down.
-pub const BUILTIN_TYPES: [&str; 3] = ["Int", "Bool", "String"];
+pub const BUILTIN_TYPES: [&str; 4] = ["Int", "Float", "Bool", "String"];
 
 /// What every test's key begins with. `#` cannot occur in a Khora identifier,
 /// so this can never collide with a name a program chose.

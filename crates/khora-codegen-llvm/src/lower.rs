@@ -671,8 +671,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                 Some(self.be.ctx.bool_type().const_int(value as u64, false).into())
             }
             Literal::Str(text) => self.string_literal(&text),
-            Literal::Float(_) => {
-                self.fail("floating point is not part of the phase 2 subset", range)
+            Literal::Float(text) => {
+                let Ok(value) = text.parse::<f64>() else {
+                    return self.fail(format!("`{text}` is not a number this target can hold"), range);
+                };
+                Some(self.be.ctx.f64_type().const_float(value).into())
             }
         }
     }
@@ -1578,6 +1581,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let print = self.be.rt.print_int;
                 self.be.builder.build_call(print, &[value.into()], "").expect("printing an Int");
             }
+            Type::Float => {
+                let print = self.be.rt.print_float;
+                self.be.builder.build_call(print, &[value.into()], "").expect("printing a Float");
+            }
             Type::Bool => {
                 let byte = self
                     .be
@@ -2416,6 +2423,21 @@ impl<'ctx> Lower<'_, 'ctx> {
                     range,
                 )
             }
+            // IEEE arithmetic does not overflow — it reaches infinity — so
+            // there is nothing to trap on and nothing to check.
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
+                if matches!(operand_ty, Type::Float) =>
+            {
+                let (l, r) = (left.into_float_value(), right.into_float_value());
+                let b = &self.be.builder;
+                let value = match op {
+                    BinOp::Add => b.build_float_add(l, r, "fadd"),
+                    BinOp::Sub => b.build_float_sub(l, r, "fsub"),
+                    BinOp::Mul => b.build_float_mul(l, r, "fmul"),
+                    _ => b.build_float_div(l, r, "fdiv"),
+                };
+                Some(value.expect("floating-point arithmetic").into())
+            }
             BinOp::Add | BinOp::Sub | BinOp::Mul => {
                 let (l, r) = (left.into_int_value(), right.into_int_value());
                 let (intrinsic, what) = match op {
@@ -2523,6 +2545,37 @@ impl<'ctx> Lower<'_, 'ctx> {
             BinOp::Ge if signed => IntPredicate::SGE,
             _ => IntPredicate::UGE,
         };
+
+        // IEEE comparison, which is what every reader expects `==` on floats
+        // to mean and exactly why `Float` implements neither `Eq` nor `Ord`:
+        // `NaN == NaN` is false, and a law-abiding equivalence cannot say so.
+        // The *operator* is primitive; the *trait* is for lawful equality.
+        // `docs/design/numbers.md`.
+        if matches!(operand_ty, Type::Float) {
+            use inkwell::FloatPredicate;
+            // Ordered, so every comparison involving a NaN is false — `<`, and
+            // `==` too. `!=` is the one that is unordered, so that `x != x` is
+            // true for a NaN, which is the other half of the same convention.
+            let predicate = match op {
+                BinOp::Eq => FloatPredicate::OEQ,
+                BinOp::Ne => FloatPredicate::UNE,
+                BinOp::Lt => FloatPredicate::OLT,
+                BinOp::Gt => FloatPredicate::OGT,
+                BinOp::Le => FloatPredicate::OLE,
+                _ => FloatPredicate::OGE,
+            };
+            let value = self
+                .be
+                .builder
+                .build_float_compare(
+                    predicate,
+                    left.into_float_value(),
+                    right.into_float_value(),
+                    "fcmp",
+                )
+                .expect("comparing two floats");
+            return Some(value.into());
+        }
 
         // Strings compare by their bytes, not by their address: two `"a"`
         // literals are separate allocations and a pointer comparison would call
