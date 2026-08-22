@@ -115,7 +115,13 @@ pub struct Local {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    Let { pat: PatId, init: Option<ExprId> },
+    Let {
+        pat: PatId,
+        /// The annotation, when one was written. Checked against the
+        /// initializer rather than ignored — see [`TypeRef`].
+        ty: Option<TypeRef>,
+        init: Option<ExprId>,
+    },
     Expr(ExprId),
 }
 
@@ -242,6 +248,69 @@ pub enum Expr {
         captures: Vec<LocalId>,
     },
     Unit,
+}
+
+/// A type as *written*, kept for the places a body needs one.
+///
+/// A `let` annotation is the only one so far, and until this existed it was
+/// parsed and then dropped on the floor — `let x: Bool = 5` compiled clean,
+/// which is errata 36 and the reason this is here.
+///
+/// An echo of `ast::Type` rather than a `khora_types::Type`, because HIR sits
+/// below the type system and cannot name one. It is deliberately *not* a
+/// second interpreter: `khora_types` resolves this through the same
+/// `named_type` that resolves the syntax, so a name means one thing however it
+/// arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeRef {
+    /// `Map<String, Int>`, `Int`, `T`, `T::Item`.
+    Named { name: String, args: Vec<TypeRef> },
+    Tuple(Vec<TypeRef>),
+    Unit,
+    /// A bare integer in type position: the `3` in `Matrix<3, 4>`.
+    Const(i64),
+    /// A shape this echo does not carry — a function type with effect
+    /// clauses, so far. Checked as `Unknown`, which is to say not checked,
+    /// which is what every annotation used to get.
+    Opaque,
+}
+
+impl TypeRef {
+    /// Reads one off the syntax, or `Opaque` for a shape not carried yet.
+    pub fn of_syntax(ty: &ast::Type) -> TypeRef {
+        match ty {
+            ast::Type::Unit(_) => TypeRef::Unit,
+            ast::Type::Paren(p) => {
+                p.inner().as_ref().map_or(TypeRef::Opaque, TypeRef::of_syntax)
+            }
+            ast::Type::Literal(l) => l.value().map_or(TypeRef::Opaque, TypeRef::Const),
+            ast::Type::Tuple(t) => {
+                TypeRef::Tuple(t.elements().map(|e| TypeRef::of_syntax(&e)).collect())
+            }
+            ast::Type::Path(p) => {
+                // A bare `'r` is one token with no `Path` under it. Reading it
+                // as the empty name is errata 30, and once was enough.
+                if let Some(row_var) = p.row_var() {
+                    return TypeRef::Named { name: row_var.text().to_string(), args: Vec::new() };
+                }
+                TypeRef::Named {
+                    name: p.path().map(|p| p.text_path()).unwrap_or_default(),
+                    args: p
+                        .type_args()
+                        .map(|a| a.args().map(|t| TypeRef::of_syntax(&t)).collect())
+                        .unwrap_or_default(),
+                }
+            }
+            // A function type carries `with` and `raises` rows, and an echo of
+            // those is a second row interpreter. Left opaque until something
+            // needs it, which is honest rather than half-right.
+            ast::Type::Fn(_)
+            | ast::Type::Record(_)
+            | ast::Type::Union(_)
+            | ast::Type::Variant(_)
+            | ast::Type::Forall(_) => TypeRef::Opaque,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -675,7 +744,8 @@ impl<'a> Ctx<'a> {
                         Some(p) => self.lower_pat(&p, let_decl.is_mut()),
                         None => self.add_pat(Pat::Missing),
                     };
-                    stmts.push(Stmt::Let { pat, init });
+                    let ty = let_decl.ty().as_ref().map(TypeRef::of_syntax);
+                    stmts.push(Stmt::Let { pat, ty, init });
                 }
                 ast::Stmt::Expr(expr_stmt) => {
                     if let Some(e) = expr_stmt.expr() {
@@ -1171,7 +1241,7 @@ impl<'a> Ctx<'a> {
 
         self.add_expr(
             Expr::Block {
-                stmts: vec![Stmt::Let { pat: state_pat, init: Some(iter) }],
+                stmts: vec![Stmt::Let { pat: state_pat, ty: None, init: Some(iter) }],
                 tail: Some(repeat),
             },
             range,
@@ -1252,7 +1322,7 @@ impl<'a> Ctx<'a> {
                 }
                 None => self.add_pat(Pat::Wildcard),
             };
-            stmts.push(Stmt::Let { pat, init: Some(value) });
+            stmts.push(Stmt::Let { pat, ty: None, init: Some(value) });
         }
 
         let tail = body.map(|b| self.lower_expr(b));

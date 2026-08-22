@@ -603,7 +603,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         let range = self.body.range(id);
         match self.body.expr(id).clone() {
             Expr::Unit => Some(self.be.unit_value()),
-            Expr::Literal(lit) => self.literal(lit, range),
+            Expr::Literal(lit) => {
+                let ty = self.types.of(id).clone();
+                self.literal(lit, &ty, range)
+            }
             Expr::Local(local) => self.read_local(id, local, range),
             Expr::Path(resolution) => self.path(id, &resolution, range),
             Expr::Call { callee, args } => self.call(id, callee, &args, range),
@@ -656,14 +659,21 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
-    fn literal(&mut self, lit: Literal, range: TextRange) -> Flow<'ctx> {
+    /// A literal, at the width the checker gave it.
+    ///
+    /// `ty` matters because an integer literal is not always an `Int`: the
+    /// checker types it from context, so the `56` in `U8::wrapping_add(b, 56)`
+    /// is a `U8` and has to be an `i8` here. Emitting `i64` regardless is a
+    /// mismatch LLVM catches and the checker never would.
+    fn literal(&mut self, lit: Literal, ty: &Type, range: TextRange) -> Flow<'ctx> {
         match lit {
             Literal::Int(text) => match parse_int(&text) {
                 Some(value) => {
+                    let bits = Self::int_shape(ty).map_or(64, |(bits, _)| bits);
                     // `sign_extend` is false because `value` is already the
                     // exact bit pattern; LLVM would otherwise re-extend a
                     // negative literal that has none of its bits to spare.
-                    Some(self.be.ctx.i64_type().const_int(value as u64, false).into())
+                    Some(self.be.int_width(bits).const_int(value as u64, false).into())
                 }
                 None => self.fail(format!("`{text}` does not fit in an `Int`"), range),
             },
@@ -836,8 +846,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == runtime::ARRAY_TYPE {
                     return self.array_intrinsic(site, &name, args, range);
                 }
-                if owner == "Int" {
-                    return self.int_intrinsic(&name, args, range);
+                if let Some(shape) = int_owner(&owner) {
+                    return self.int_intrinsic(shape, &owner, &name, args, range);
                 }
                 match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, site, args, range),
@@ -1060,9 +1070,44 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// `checked_arithmetic`. A hash, a checksum and a PRNG are the places that
     /// genuinely want the other behaviour, and asking for it by name is how
     /// the trap stays the default without being in the way.
-    fn int_intrinsic(&mut self, name: &str, args: &[ExprId], range: TextRange) -> Flow<'ctx> {
+    /// The primitive integer operations, at whatever width the owner is.
+    ///
+    /// Three families, and the reason each exists:
+    ///
+    /// - **Wrapping arithmetic**, because ordinary arithmetic *traps* — see
+    ///   `checked_arithmetic`. A hash, a checksum and a PRNG are the places
+    ///   that genuinely want the other behaviour, and asking for it by name is
+    ///   how the trap stays the default without being in the way.
+    /// - **Bit operations**, which are what a hash is made of and what a wire
+    ///   format is written in.
+    /// - **Conversions**, which are always explicit, because there is no
+    ///   implicit widening anywhere in the language and a narrowing that
+    ///   happens on its own is how a length becomes 44.
+    ///
+    /// Every conversion goes through `Int`: `U8::of` and `U8::to_int` rather
+    /// than a method for each of the forty-two ordered pairs. `U8` to `U32` is
+    /// two steps, which is more to type and never wrong — and the pairs that
+    /// deserve one step can be given one later without changing what these
+    /// mean.
+    fn int_intrinsic(
+        &mut self,
+        (bits, signed): (u32, bool),
+        owner: &str,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        // The conversions take one argument; everything else takes two.
+        if matches!(name, "of" | "wrapping" | "to_int" | "wrapping_to_int") {
+            let [only] = args else {
+                return self.fail(format!("`{owner}::{name}` takes one argument"), range);
+            };
+            let value = self.expr(*only)?.into_int_value();
+            return self.convert(value, (bits, signed), owner, name, range);
+        }
+
         let [left, right] = args else {
-            return self.fail(format!("`Int::{name}` takes two arguments"), range);
+            return self.fail(format!("`{owner}::{name}` takes two arguments"), range);
         };
         let l = self.expr(*left)?.into_int_value();
         let r = self.expr(*right)?.into_int_value();
@@ -1074,30 +1119,121 @@ impl<'ctx> Lower<'_, 'ctx> {
             "xor" => b.build_xor(l, r, "xor"),
             "and" => b.build_and(l, r, "and"),
             "or" => b.build_or(l, r, "or"),
-            // Shifting by 64 or more is undefined in LLVM, so the count is
-            // masked to the width. Silently, and deliberately: every shift
-            // would otherwise need a branch, and there is no answer for
-            // `x << 64` that is more right than any other.
+            // Shifting by the width or more is undefined in LLVM, so the count
+            // is masked. Silently, and deliberately: every shift would
+            // otherwise need a branch, and there is no answer for `x << 8` on
+            // a `U8` that is more right than any other.
             "shl" | "shr" => {
-                let mask = self.be.ctx.i64_type().const_int(63, false);
+                let mask = self.be.int_width(bits).const_int(u64::from(bits - 1), false);
                 let count = b.build_and(r, mask, "shift.count").expect("masking a shift");
                 if name == "shl" {
                     b.build_left_shift(l, count, "shl")
                 } else {
-                    // Arithmetic, so a negative number stays negative. A
-                    // logical shift is what `Int` cannot express and what
-                    // fixed-width unsigned types will.
-                    b.build_right_shift(l, count, true, "shr")
+                    // Arithmetic for a signed type, so a negative number stays
+                    // negative; logical for an unsigned one, which is what a
+                    // hash wants and what `Int` could never express.
+                    b.build_right_shift(l, count, signed, "shr")
                 }
             }
             _ => {
                 return self.fail(
-                    format!("`Int::{name}` is not an integer operation the backend knows"),
+                    format!("`{owner}::{name}` is not an integer operation the backend knows"),
                     range,
                 )
             }
         };
         Some(value.expect("an integer operation").into())
+    }
+
+    /// One of the four conversions, between `Int` and a fixed-width type.
+    ///
+    /// `of` and `to_int` stop the program when the value does not fit, for the
+    /// same reason `+` does: a number that silently becomes a different number
+    /// is found in production rather than in a test. `wrapping` and
+    /// `wrapping_to_int` are how to ask for truncation by name.
+    fn convert(
+        &mut self,
+        value: IntValue<'ctx>,
+        (bits, signed): (u32, bool),
+        owner: &str,
+        name: &str,
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let i64_type = self.be.ctx.i64_type();
+        let narrow = self.be.int_width(bits);
+        let b = &self.be.builder;
+        match name {
+            // Into the fixed-width type, truncating.
+            "wrapping" => {
+                Some(b.build_int_truncate_or_bit_cast(value, narrow, "wrapping").ok()?.into())
+            }
+            // Out of it, widening — which for everything but `U64` is exact,
+            // and needs no check.
+            "wrapping_to_int" => {
+                let wide = if signed {
+                    b.build_int_s_extend_or_bit_cast(value, i64_type, "to.int")
+                } else {
+                    b.build_int_z_extend_or_bit_cast(value, i64_type, "to.int")
+                };
+                Some(wide.ok()?.into())
+            }
+            "to_int" => {
+                let wide = if signed {
+                    b.build_int_s_extend_or_bit_cast(value, i64_type, "to.int")
+                } else {
+                    b.build_int_z_extend_or_bit_cast(value, i64_type, "to.int")
+                }
+                .expect("widening to Int");
+                // Only `U64` can hold a number `Int` cannot, and it does so
+                // exactly when the same bits read as signed are negative.
+                if !signed && bits == 64 {
+                    let zero = i64_type.const_zero();
+                    let ok = self
+                        .be
+                        .builder
+                        .build_int_compare(IntPredicate::SGE, wide, zero, "fits.int")
+                        .expect("range-checking a U64");
+                    self.guard(ok, &format!("converting {owner} to Int"));
+                }
+                Some(wide.into())
+            }
+            // Into the fixed-width type, checked. The check is a round trip:
+            // narrow it, widen it back the way the target's signedness says,
+            // and require the same number. That is one rule for all fourteen
+            // combinations rather than fourteen bounds written by hand.
+            _ => {
+                let narrowed = b
+                    .build_int_truncate_or_bit_cast(value, narrow, "narrowed")
+                    .expect("narrowing to a fixed-width integer");
+                let back = if signed {
+                    self.be.builder.build_int_s_extend_or_bit_cast(narrowed, i64_type, "back")
+                } else {
+                    self.be.builder.build_int_z_extend_or_bit_cast(narrowed, i64_type, "back")
+                }
+                .expect("widening back");
+                let ok = self
+                    .be
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, back, value, "fits")
+                    .expect("comparing the round trip");
+                self.guard(ok, &format!("converting Int to {owner}"));
+                let _ = range;
+                Some(narrowed.into())
+            }
+        }
+    }
+
+    /// Continues only if `ok`; otherwise stops the program saying `what`.
+    fn guard(&mut self, ok: IntValue<'ctx>, what: &str) {
+        let good = self.block("in.range");
+        let bad = self.block("out.of.range");
+        self.be
+            .builder
+            .build_conditional_branch(ok, good, bad)
+            .expect("branching on a range check");
+        self.at(bad);
+        self.trap(what);
+        self.at(good);
     }
 
     /// The element type of the `Array<A>` this call is about.
@@ -1400,15 +1536,50 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// Trapping in *every* build is the decision: a program that passes its
     /// tests and then wraps in production is the failure worth this branch, and
     /// two behaviours put the difference where it is most expensive to find.
+    /// The width and signedness of an integer type, or `None` if it is not one.
+    ///
+    /// Every arithmetic instruction needs both: LLVM's types carry the width
+    /// but not the sign, so `U8` and `I8` are the same `i8` and differ only in
+    /// which `div`, `shr`, overflow intrinsic and ordering predicate is asked
+    /// for. Getting that wrong is silent, which is why it is read from one
+    /// place.
+    fn int_shape(ty: &Type) -> Option<(u32, bool)> {
+        match ty {
+            Type::Int => Some((64, true)),
+            Type::Fixed(kind) => Some((kind.bits.into(), kind.signed)),
+            _ => None,
+        }
+    }
+
+    /// Stops the program, saying what did not fit.
+    ///
+    /// The tail of an overflow check and of a narrowing conversion, which want
+    /// the same three instructions and the same wording.
+    fn trap(&mut self, what: &str) {
+        let text = self
+            .be
+            .builder
+            .build_global_string_ptr(what, "overflow.what")
+            .expect("naming the operation")
+            .as_pointer_value();
+        let len = self.be.ctx.i64_type().const_int(what.len() as u64, false);
+        let report = self.be.rt.overflow;
+        self.be
+            .builder
+            .build_call(report, &[text.into(), len.into()], "")
+            .expect("reporting an overflow");
+        self.be.builder.build_unreachable().expect("sealing after an overflow");
+    }
+
     fn checked_arithmetic(
         &mut self,
         intrinsic: &str,
+        bits: u32,
         what: &str,
         left: IntValue<'ctx>,
         right: IntValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        let i64_type = self.be.ctx.i64_type();
-        let checked = self.be.overflow_intrinsic(intrinsic);
+        let checked = self.be.overflow_intrinsic(intrinsic, bits);
         let pair = self
             .be
             .builder
@@ -1438,19 +1609,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("branching on the overflow flag");
 
         self.at(bad);
-        let text = self
-            .be
-            .builder
-            .build_global_string_ptr(what, "overflow.what")
-            .expect("naming the operation")
-            .as_pointer_value();
-        let len = i64_type.const_int(what.len() as u64, false);
-        let report = self.be.rt.overflow;
-        self.be
-            .builder
-            .build_call(report, &[text.into(), len.into()], "")
-            .expect("reporting an overflow");
-        self.be.builder.build_unreachable().expect("sealing after an overflow");
+        self.trap(what);
 
         self.at(good);
         value
@@ -2440,22 +2599,33 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul => {
                 let (l, r) = (left.into_int_value(), right.into_int_value());
-                let (intrinsic, what) = match op {
-                    BinOp::Add => ("llvm.sadd.with.overflow.i64", "addition"),
-                    BinOp::Sub => ("llvm.ssub.with.overflow.i64", "subtraction"),
-                    _ => ("llvm.smul.with.overflow.i64", "multiplication"),
+                let (bits, signed) =
+                    Self::int_shape(&operand_ty).expect("arithmetic on an integer");
+                // A `U8` addition traps at 255, not at 2^63: the check is only
+                // worth anything if it is the *type's* range being checked.
+                let sign = if signed { 's' } else { 'u' };
+                let (verb, what) = match op {
+                    BinOp::Add => ("add", "addition"),
+                    BinOp::Sub => ("sub", "subtraction"),
+                    _ => ("mul", "multiplication"),
                 };
-                Some(self.checked_arithmetic(intrinsic, what, l, r))
+                let intrinsic = format!("llvm.{sign}{verb}.with.overflow.i{bits}");
+                let what = format!("{operand_ty} {what}");
+                Some(self.checked_arithmetic(&intrinsic, bits, &what, l, r))
             }
             BinOp::Div | BinOp::Rem => {
                 let (l, r) = (left.into_int_value(), right.into_int_value());
-                // Signed division by zero faults rather than trapping
-                // politely, and `Int::MIN / -1` overflows. Both want the error
-                // channel rather than a hardware fault; `raises` exists now, so
-                // this is a gap to close rather than one to explain away.
-                let value = match op {
-                    BinOp::Div => self.be.builder.build_int_signed_div(l, r, "div"),
-                    _ => self.be.builder.build_int_signed_rem(l, r, "rem"),
+                let (_, signed) = Self::int_shape(&operand_ty).expect("arithmetic on an integer");
+                // Division by zero faults rather than trapping politely, and
+                // `Int::MIN / -1` overflows. Both want the error channel rather
+                // than a hardware fault; `raises` exists now, so this is a gap
+                // to close rather than one to explain away.
+                let b = &self.be.builder;
+                let value = match (op, signed) {
+                    (BinOp::Div, true) => b.build_int_signed_div(l, r, "div"),
+                    (BinOp::Div, false) => b.build_int_unsigned_div(l, r, "div"),
+                    (_, true) => b.build_int_signed_rem(l, r, "rem"),
+                    (_, false) => b.build_int_unsigned_rem(l, r, "rem"),
                 };
                 Some(value.expect("integer arithmetic").into())
             }
@@ -2531,8 +2701,13 @@ impl<'ctx> Lower<'_, 'ctx> {
         range: TextRange,
     ) -> Flow<'ctx> {
         // `Bool` is an `i1`, where "less than" means `false < true`, so its
-        // ordering is unsigned. Signing an `i1` comparison inverts it.
-        let signed = !matches!(operand_ty, Type::Bool);
+        // ordering is unsigned — signing an `i1` comparison inverts it — and an
+        // unsigned integer is unsigned for the obvious reason. `255 < 0` being
+        // true is exactly the bug this prevents.
+        let signed = match Self::int_shape(operand_ty) {
+            Some((_, signed)) => signed,
+            None => !matches!(operand_ty, Type::Bool),
+        };
         let predicate = match op {
             BinOp::Eq => IntPredicate::EQ,
             BinOp::Ne => IntPredicate::NE,
@@ -2584,7 +2759,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             return self.compare_strings(op, left, right);
         }
 
-        if !matches!(operand_ty, Type::Int | Type::Bool | Type::Unit) {
+        if !matches!(operand_ty, Type::Int | Type::Fixed(_) | Type::Bool | Type::Unit) {
             self.drop(left, operand_ty);
             self.drop(right, operand_ty);
             return self.fail(
@@ -2700,7 +2875,7 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         for stmt in stmts {
             let reached = match stmt {
-                Stmt::Let { pat, init } => self.lower_let(*pat, *init),
+                Stmt::Let { pat, init, .. } => self.lower_let(*pat, *init),
                 Stmt::Expr(e) => {
                     let ty = self.types.of(*e).clone();
                     match self.expr(*e) {
@@ -3521,4 +3696,15 @@ fn parse_int(text: &str) -> Option<i64> {
         _ => (10, cleaned.as_str()),
     };
     i64::from_str_radix(digits, radix).ok()
+}
+
+/// The width and signedness of an integer type named as a path owner.
+///
+/// `Int` and `I64` are the same 64-bit signed integer, so `I64::to_u8` has to
+/// resolve exactly as `Int::to_u8` does — see `IntKind`.
+fn int_owner(owner: &str) -> Option<(u32, bool)> {
+    match owner {
+        "Int" | "I64" => Some((64, true)),
+        other => khora_types::IntKind::parse(other).map(|k| (k.bits.into(), k.signed)),
+    }
 }

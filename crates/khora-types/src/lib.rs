@@ -23,9 +23,89 @@ use text_size::TextRange;
 use unify::{Mismatch, Unifier};
 use usefulness::{ColumnType, Ctor, FieldType, Pattern};
 
+/// A fixed-width integer type: `U8`, `I32`, and the rest.
+///
+/// **`Int` is not one of these.** `Int` is the 64-bit signed integer, and
+/// `I64` is a second spelling of it rather than a distinct type — two
+/// different 64-bit signed integers would mean a conversion between them that
+/// can never fail and never does anything, which is a tax with no payer.
+///
+/// Everything else is here because `Int` alone cannot describe a byte, and a
+/// byte is what a wire format, a file and a string are made of.
+/// `docs/design/numbers.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IntKind {
+    pub signed: bool,
+    /// 8, 16, 32 or 64. A `signed` 64 never appears: that is `Type::Int`.
+    pub bits: u8,
+}
+
+impl IntKind {
+    /// The type as written in source, which is also how it prints.
+    pub fn name(self) -> String {
+        format!("{}{}", if self.signed { 'I' } else { 'U' }, self.bits)
+    }
+
+    /// Reads one back from its name, or `None` if that is not one.
+    ///
+    /// `I64` is deliberately absent — it is `Type::Int`, resolved before this
+    /// is reached.
+    pub fn parse(name: &str) -> Option<Self> {
+        let (signed, rest) = match name.split_at_checked(1)? {
+            ("U", rest) => (false, rest),
+            ("I", rest) => (true, rest),
+            _ => return None,
+        };
+        let bits = match rest {
+            "8" => 8,
+            "16" => 16,
+            "32" => 32,
+            "64" => 64,
+            _ => return None,
+        };
+        (!(signed && bits == 64)).then_some(IntKind { signed, bits })
+    }
+
+    /// The largest value the type can hold, and the smallest.
+    ///
+    /// Both fit in an `i128` because the widest type here is 64 bits, which is
+    /// exactly why the range check can be a comparison rather than an argument.
+    pub fn range(self) -> (i128, i128) {
+        if self.signed {
+            let half = 1i128 << (self.bits - 1);
+            (-half, half - 1)
+        } else {
+            (0, (1i128 << self.bits) - 1)
+        }
+    }
+
+    /// Whether every value of `self` is also a value of `wider` — that is,
+    /// whether the conversion is the one that cannot fail.
+    pub fn fits_in(self, wider: IntKind) -> bool {
+        let (lo, hi) = self.range();
+        let (wide_lo, wide_hi) = wider.range();
+        wide_lo <= lo && hi <= wide_hi
+    }
+}
+
+/// Every fixed-width integer, in the order they are declared in `std::core`.
+pub const INT_KINDS: [IntKind; 7] = [
+    IntKind { signed: false, bits: 8 },
+    IntKind { signed: false, bits: 16 },
+    IntKind { signed: false, bits: 32 },
+    IntKind { signed: false, bits: 64 },
+    IntKind { signed: true, bits: 8 },
+    IntKind { signed: true, bits: 16 },
+    IntKind { signed: true, bits: 32 },
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
+    /// The 64-bit signed integer, spelled `Int` or `I64`.
     Int,
+    /// One of the other integers: `U8`, `U16`, `U32`, `U64`, `I8`, `I16`,
+    /// `I32`. See [`IntKind`] for why `I64` is not among them.
+    Fixed(IntKind),
     /// IEEE-754 double precision.
     ///
     /// Note what does *not* follow: `Float` implements neither `Eq` nor `Ord`.
@@ -110,6 +190,7 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Int => write!(f, "Int"),
+            Type::Fixed(kind) => write!(f, "{}", kind.name()),
             Type::Float => write!(f, "Float"),
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
@@ -844,12 +925,6 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
             if items.is_empty() { Type::Unit } else { Type::Tuple(items) }
         }
         ast::Type::Path(p) => {
-            let name = p.path().map(|p| p.text_path()).unwrap_or_default();
-            let args: Vec<Type> = p
-                .type_args()
-                .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics)).collect())
-                .unwrap_or_default();
-
             // A bare `'r`. It has no `Path` of its own — it is one token — so
             // without this it read as the empty name and became `Unknown`,
             // which then absorbed whatever it was unified with and made every
@@ -857,38 +932,75 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
             if let Some(row_var) = p.row_var() {
                 return Type::Param(row_var.text().to_string());
             }
-
-            // `T::Item` where `T` is a parameter in scope is a projection, not
-            // a type whose name happens to contain `::`.
-            if let Some((owner, assoc)) = name.split_once("::") {
-                if generics.iter().any(|g| g == owner) {
-                    return Type::Assoc {
-                        owner: Box::new(Type::Param(owner.to_string())),
-                        name: assoc.to_string(),
-                    };
-                }
-            }
-
-            match name.as_str() {
-                "Int" => Type::Int,
-                "Float" => Type::Float,
-                "Bool" => Type::Bool,
-                "String" => Type::Str,
-                "" => Type::Unknown,
-                other if generics.iter().any(|g| g == other) => {
-                    if args.is_empty() {
-                        Type::Param(other.to_string())
-                    } else {
-                        Type::Applied {
-                            head: Box::new(Type::Param(other.to_string())),
-                            args,
-                        }
-                    }
-                }
-                other => Type::Adt { name: other.to_string(), args },
-            }
+            let name = p.path().map(|p| p.text_path()).unwrap_or_default();
+            let args: Vec<Type> = p
+                .type_args()
+                .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics)).collect())
+                .unwrap_or_default();
+            named_type(&name, args, generics)
         }
         _ => Type::Unknown,
+    }
+}
+
+/// A type written as a name and some arguments, resolved against the type
+/// parameters in scope.
+///
+/// The single place a type *name* means something. Reached from the syntax
+/// above and from a [`TypeRef`] below, because two interpreters of one name is
+/// how the two come to disagree — and the disagreement is silent.
+fn named_type(name: &str, args: Vec<Type>, generics: &[String]) -> Type {
+    // `T::Item` where `T` is a parameter in scope is a projection, not a type
+    // whose name happens to contain `::`.
+    if let Some((owner, assoc)) = name.split_once("::") {
+        if generics.iter().any(|g| g == owner) {
+            return Type::Assoc {
+                owner: Box::new(Type::Param(owner.to_string())),
+                name: assoc.to_string(),
+            };
+        }
+    }
+
+    match name {
+        "Int" | "I64" => Type::Int,
+        "Float" => Type::Float,
+        "Bool" => Type::Bool,
+        "String" => Type::Str,
+        "" => Type::Unknown,
+        other if IntKind::parse(other).is_some() => {
+            Type::Fixed(IntKind::parse(other).expect("just checked"))
+        }
+        other if generics.iter().any(|g| g == other) => {
+            if args.is_empty() {
+                Type::Param(other.to_string())
+            } else {
+                Type::Applied { head: Box::new(Type::Param(other.to_string())), args }
+            }
+        }
+        other => Type::Adt { name: other.to_string(), args },
+    }
+}
+
+/// The same, for a type a *body* wrote down: a `let` annotation.
+///
+/// [`TypeRef::Opaque`] becomes `Unknown`, which unifies with everything and so
+/// checks nothing — the shapes it stands for are the ones the echo does not
+/// carry yet, and saying nothing about them is what every annotation used to
+/// get.
+pub fn type_of_ref(ty: &khora_hir::body::TypeRef, generics: &[String]) -> Type {
+    use khora_hir::body::TypeRef;
+    match ty {
+        TypeRef::Unit => Type::Unit,
+        TypeRef::Const(value) => Type::Const(*value),
+        TypeRef::Opaque => Type::Unknown,
+        TypeRef::Tuple(items) => {
+            let items: Vec<Type> = items.iter().map(|t| type_of_ref(t, generics)).collect();
+            if items.is_empty() { Type::Unit } else { Type::Tuple(items) }
+        }
+        TypeRef::Named { name, args } => {
+            let args = args.iter().map(|t| type_of_ref(t, generics)).collect();
+            named_type(name, args, generics)
+        }
     }
 }
 
@@ -1020,6 +1132,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
             installed: Vec::new(),
+            hint: None,
             marked: Vec::new(),
             errors: Vec::new(),
         };
@@ -1157,6 +1270,19 @@ struct Checker<'a> {
     /// signature. That is row subtraction: `with` *discharges* a requirement
     /// rather than forwarding it.
     installed: Vec<String>,
+    /// The type the surrounding expression is asking for, when there is one.
+    ///
+    /// Only integer literals read it, and only to decide which integer they
+    /// are: `let b: U8 = 65` has to work, and 65 on its own is an `Int`. This
+    /// is a *hint*, not a demand — `require` still runs afterwards, so a wrong
+    /// hint changes which error is reported and never whether one is.
+    ///
+    /// Consumed by the first `infer` that sees it, and re-armed only where a
+    /// type flows through unchanged: the branches of an `if`, the tail of a
+    /// block, the arms of a `match`. Anywhere else it would leak into a
+    /// subexpression that means something different — the `0` in `array[0]`
+    /// is an index, not a `U8`, however the result is being used.
+    hint: Option<Type>,
     /// Calls written with `!`.
     ///
     /// A call that can leave the function has to say so at the call site —
@@ -1266,10 +1392,58 @@ impl<'a> Checker<'a> {
 
     /// Infers `id` and requires it to fit `expected`.
     fn expect(&mut self, id: ExprId, expected: &Type, context: &str) -> Type {
+        // Armed for the literal case and cleared by the `infer` below whatever
+        // it turns out to be, so it can never be read by an unrelated later
+        // expression.
+        self.hint = Some(self.unifier.zonk(expected));
         let actual = self.infer(id);
         let range = self.body.range(id);
         self.require(expected, &actual, context, range);
         actual
+    }
+
+    /// Reports a literal that cannot be the fixed-width integer being asked of
+    /// it.
+    ///
+    /// A compile-time version of the overflow trap, and the same reasoning:
+    /// `let b: U8 = 300` is a mistake with one right answer, and truncating it
+    /// silently to 44 is the kind of thing that is found in production.
+    fn check_literal_fits(&mut self, text: &str, kind: IntKind, range: TextRange) {
+        let cleaned = text.replace('_', "");
+        let Ok(value) = cleaned.parse::<i128>() else {
+            // Too wide for even an i128, so certainly too wide for this. The
+            // `Int` path reports its own version of this.
+            self.error(format!("`{text}` does not fit in `{}`", kind.name()), range);
+            return;
+        };
+        let (lo, hi) = kind.range();
+        if value < lo || value > hi {
+            self.error(
+                format!(
+                    "`{text}` does not fit in `{}`, which holds {lo} to {hi}",
+                    kind.name()
+                ),
+                range,
+            );
+        }
+    }
+
+    /// Unifies two types for the information, not for the verdict.
+    ///
+    /// Used to push an expected type into a call before its arguments are
+    /// checked. A failure is dropped: the caller is speculating, and the real
+    /// check happens where the expectation came from.
+    ///
+    /// The deferred-projection bookkeeping still has to happen, because
+    /// `settle_projections` pairs the unifier's deferred list with
+    /// `self.projections` by position — leaving one out slides every later
+    /// diagnostic onto the wrong range.
+    fn hint_at(&mut self, expected: &Type, found: &Type, range: TextRange) {
+        let before = self.unifier.deferred_len();
+        let _ = self.unifier.unify(expected, found);
+        for _ in before..self.unifier.deferred_len() {
+            self.projections.push((range, "this call".to_string()));
+        }
     }
 
     /// Requires two types to be equal, reporting `context` if they are not.
@@ -1319,11 +1493,24 @@ impl<'a> Checker<'a> {
 
     fn infer_uncached(&mut self, id: ExprId) -> Type {
         let range = self.body.range(id);
+        let hint = self.hint.take();
         match self.body.expr(id).clone() {
             Expr::Missing | Expr::Unresolved(_) => Type::Unknown,
             Expr::Unit => Type::Unit,
             Expr::Literal(lit) => match lit {
-                Literal::Int(_) => Type::Int,
+                // An integer literal is an `Int` unless something is asking
+                // for a narrower one, in which case it is that — and has to
+                // fit it. There is no widening anywhere else in the language,
+                // so this is the only way to write a `U8` that is not a
+                // conversion, and without it every byte in a table would be
+                // `Int::to_u8(65)`.
+                Literal::Int(text) => match hint {
+                    Some(Type::Fixed(kind)) => {
+                        self.check_literal_fits(&text, kind, range);
+                        Type::Fixed(kind)
+                    }
+                    _ => Type::Int,
+                },
                 Literal::Float(_) => Type::Float,
                 Literal::Str(_) => Type::Str,
                 Literal::Bool(_) => Type::Bool,
@@ -1347,29 +1534,32 @@ impl<'a> Checker<'a> {
                 UnOp::Neg => self.expect(operand, &Type::Int, "negation"),
                 UnOp::Not => self.expect(operand, &Type::Bool, "`!`"),
             },
-            Expr::Binary { op, lhs, rhs } => self.infer_binary(op, lhs, rhs),
+            Expr::Binary { op, lhs, rhs } => self.infer_binary(op, lhs, rhs, hint),
             Expr::Assign { target, value } => {
                 let target_ty = self.infer(target);
                 self.check_writable(target, range);
                 self.expect(value, &target_ty, "this assignment");
                 Type::Unit
             }
-            Expr::Call { callee, args } => self.infer_call(callee, &args, range),
+            Expr::Call { callee, args } => self.infer_call(callee, &args, hint, range),
             Expr::Block { stmts, tail } => {
                 // A `with` block lowered to an ordinary one, and its labels
                 // are supplied to everything inside it.
                 let supplied = self.body.installs.get(&id).cloned().unwrap_or_default();
                 let depth = self.installed.len();
                 self.installed.extend(supplied);
+                self.hint = hint;
                 let ty = self.infer_block(&stmts, tail);
                 self.installed.truncate(depth);
                 ty
             }
             Expr::If { condition, then_branch, else_branch } => {
                 self.expect(condition, &Type::Bool, "an `if` condition");
+                self.hint = hint.clone();
                 let then_ty = self.infer(then_branch);
                 match else_branch {
                     Some(else_id) => {
+                        self.hint = hint;
                         let else_ty = self.infer(else_id);
                         if !self.require(&then_ty, &else_ty, "`if` branches disagree", range) {
                             return Type::Unknown;
@@ -1434,7 +1624,10 @@ impl<'a> Checker<'a> {
                 let types: Vec<Type> = items.iter().map(|i| self.infer(*i)).collect();
                 if types.is_empty() { Type::Unit } else { Type::Tuple(types) }
             }
-            Expr::Match { scrutinee, arms } => self.infer_match(scrutinee, &arms, range),
+            Expr::Match { scrutinee, arms } => {
+                self.hint = hint;
+                self.infer_match(scrutinee, &arms, range)
+            }
             Expr::Record { owner, fields } => self.infer_record(owner, &fields, range),
 
             // `raise e` leaves the function, so it stands wherever an
@@ -1523,9 +1716,22 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn infer_binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId) -> Type {
+    fn infer_binary(
+        &mut self,
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        hint: Option<Type>,
+    ) -> Type {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                // The left operand decides which arithmetic this is, so the
+                // hint goes to it and to nothing else: `let b: U8 = 1 + 2`
+                // needs the `1` to know, and once it does the `2` is told by
+                // the `expect` below rather than by guessing again.
+                if matches!(hint, Some(Type::Fixed(_))) {
+                    self.hint = hint;
+                }
                 // `+` is also string concatenation, which the reference
                 // program relies on.
                 let left = self.infer(lhs);
@@ -1539,7 +1745,11 @@ impl<'a> Checker<'a> {
                 // and Rust both do and what stops a rounding surprise from
                 // being invisible.
                 let left = self.unifier.zonk(&left);
-                let expected = if matches!(left, Type::Float) { Type::Float } else { Type::Int };
+                let expected = match left {
+                    Type::Float => Type::Float,
+                    Type::Fixed(kind) => Type::Fixed(kind),
+                    _ => Type::Int,
+                };
                 let lhs_range = self.body.range(lhs);
                 self.require(&expected, &left, "arithmetic", lhs_range);
                 self.expect(rhs, &expected, "arithmetic");
@@ -1592,7 +1802,13 @@ impl<'a> Checker<'a> {
         (Type::Adt { name: name.to_string(), args }, mapping)
     }
 
-    fn infer_call(&mut self, callee: ExprId, args: &[ExprId], range: TextRange) -> Type {
+    fn infer_call(
+        &mut self,
+        callee: ExprId,
+        args: &[ExprId],
+        hint: Option<Type>,
+        range: TextRange,
+    ) -> Type {
         // Checked after the arguments, because a lambda's implicit captures are
         // only known once it has been inferred.
         let spawning = matches!(
@@ -1601,14 +1817,20 @@ impl<'a> Checker<'a> {
                 if owner == FIBER_TYPE && name == "spawn"
         );
         if spawning {
-            let result = self.infer_call_inner(callee, args, range);
+            let result = self.infer_call_inner(callee, args, hint, range);
             self.check_spawnable(args, range);
             return result;
         }
-        self.infer_call_inner(callee, args, range)
+        self.infer_call_inner(callee, args, hint, range)
     }
 
-    fn infer_call_inner(&mut self, callee: ExprId, args: &[ExprId], range: TextRange) -> Type {
+    fn infer_call_inner(
+        &mut self,
+        callee: ExprId,
+        args: &[ExprId],
+        hint: Option<Type>,
+        range: TextRange,
+    ) -> Type {
         // A constructor call builds its ADT.
         if let Expr::Path(resolution) = self.body.expr(callee).clone() {
             if let Some((owner, case)) = variant_case(&resolution) {
@@ -1644,7 +1866,7 @@ impl<'a> Checker<'a> {
             let owner = self.infer(base);
             let owner = self.unifier.shallow(&owner);
             if self.record_field(&owner, &name).is_some() {
-                return self.apply(Some(callee), args, range);
+                return self.apply(Some(callee), args, hint, range);
             }
             if let Some(ty) = self.infer_method_call(callee, base, &name, args, range) {
                 return ty;
@@ -1654,7 +1876,7 @@ impl<'a> Checker<'a> {
         // Resolved first: a callee's type is often a *variable solved to* a
         // function rather than a function, and matching the shape without
         // following the variable silently treats it as uncallable.
-        self.apply(Some(callee), args, range)
+        self.apply(Some(callee), args, hint, range)
     }
 
     /// Checks a call whose callee is an ordinary value of function type.
@@ -1664,7 +1886,13 @@ impl<'a> Checker<'a> {
     /// name, which is what makes calling an effectful function through a
     /// variable — or a parameter, or a field — check the same as calling it
     /// directly.
-    fn apply(&mut self, callee: Option<ExprId>, args: &[ExprId], range: TextRange) -> Type {
+    fn apply(
+        &mut self,
+        callee: Option<ExprId>,
+        args: &[ExprId],
+        hint: Option<Type>,
+        range: TextRange,
+    ) -> Type {
         let inferred = match callee {
             Some(callee) => self.infer(callee),
             None => Type::Unknown,
@@ -1691,6 +1919,19 @@ impl<'a> Checker<'a> {
                 range,
             );
         }
+        // What the call is *for* reaches its arguments, by way of its result.
+        // `let cells: Array<U8> = Array::new(4, 0)` needs the `0` to be a `U8`,
+        // and nothing in `Array::new(length, fill)` says so until `Array<A>` has
+        // met `Array<U8>`. Solving the return first is what carries it.
+        //
+        // Silently, because a hint that does not fit is not itself the error —
+        // whoever wrote the annotation is about to be told about it by the
+        // `require` that asked for the hint, and reporting it twice, once here
+        // against the wrong range, is worse than not reporting it at all.
+        if let Some(hint) = hint {
+            self.hint_at(&hint, &ret, range);
+        }
+
         for (arg, expected) in args.iter().zip(&params) {
             self.expect(*arg, expected, "this argument");
         }
@@ -1914,8 +2155,24 @@ impl<'a> Checker<'a> {
         let mut diverged = false;
         for stmt in stmts {
             match stmt {
-                Stmt::Let { pat, init } => {
-                    let ty = init.map(|e| self.infer(e)).unwrap_or(Type::Unknown);
+                Stmt::Let { pat, ty: declared, init } => {
+                    // An annotation is checked against the initializer and
+                    // then *is* the binding's type. Until errata 36 it was
+                    // parsed and dropped, so `let x: Bool = 5` compiled clean
+                    // — an annotation that is only a comment is worse than no
+                    // annotation, because it is believed.
+                    let declared = declared
+                        .as_ref()
+                        .map(|t| type_of_ref(t, &self.signature.generics));
+                    let ty = match (declared, init) {
+                        (Some(declared), Some(e)) => {
+                            self.expect(*e, &declared, "this binding");
+                            declared
+                        }
+                        (Some(declared), None) => declared,
+                        (None, Some(e)) => self.infer(*e),
+                        (None, None) => Type::Unknown,
+                    };
                     diverged |= matches!(ty, Type::Never);
                     self.bind_pattern(*pat, &ty);
                 }
@@ -2460,11 +2717,14 @@ impl<'a> Checker<'a> {
         // is all `inherent_method` looks at — it compares head constructors,
         // and `Int`'s is `Int` however the type was spelled.
         let self_ty = match owner {
-            "Int" => Type::Int,
+            "Int" | "I64" => Type::Int,
             "Float" => Type::Float,
             "Bool" => Type::Bool,
             "String" => Type::Str,
-            other => Type::adt(other),
+            other => match IntKind::parse(other) {
+                Some(kind) => Type::Fixed(kind),
+                None => Type::adt(other),
+            },
         };
         if let Some(own) = self.types.traits.inherent_method(&self_ty, name) {
             let key = traits::method_key("", &own.head, name);

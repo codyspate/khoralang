@@ -570,6 +570,11 @@ impl<'ctx> Backend<'ctx> {
         match ty {
             Type::Int | Type::Unit => Some(self.ctx.i64_type().into()),
             Type::Float => Some(self.ctx.f64_type().into()),
+            // A `U8` is an `i8`, so an array of them is packed rather than one
+            // byte per word. Signedness is not in the LLVM type — it is in the
+            // instruction — so `U8` and `I8` share this and differ at every
+            // `div`, `shr` and ordering comparison.
+            Type::Fixed(kind) => Some(self.int_width(kind.bits.into()).into()),
             Type::Bool => Some(self.ctx.bool_type().into()),
             // A closure is a heap object holding its function pointer and its
             // captures, so a value of function type is a pointer to one.
@@ -926,15 +931,29 @@ impl<'ctx> Backend<'ctx> {
     ///
     /// Each returns `{ i64, i1 }` — the result and whether it wrapped — so the
     /// check is a branch on a flag the same instruction already produced.
-    pub fn overflow_intrinsic(&mut self, name: &str) -> FunctionValue<'ctx> {
+    /// The LLVM integer type of a given width.
+    ///
+    /// Only four widths exist, so this is a match rather than
+    /// `custom_width_int_type` — which takes a `NonZero` and hands back a
+    /// `Result` for a question that cannot fail here.
+    pub fn int_width(&self, bits: u32) -> inkwell::types::IntType<'ctx> {
+        match bits {
+            8 => self.ctx.i8_type(),
+            16 => self.ctx.i16_type(),
+            32 => self.ctx.i32_type(),
+            _ => self.ctx.i64_type(),
+        }
+    }
+
+    pub fn overflow_intrinsic(&mut self, name: &str, bits: u32) -> FunctionValue<'ctx> {
         if let Some(f) = self.module.get_function(name) {
             return f;
         }
-        let i64_type = self.ctx.i64_type();
-        let pair = self.ctx.struct_type(&[i64_type.into(), self.ctx.bool_type().into()], false);
+        let width = self.int_width(bits);
+        let pair = self.ctx.struct_type(&[width.into(), self.ctx.bool_type().into()], false);
         self.module.add_function(
             name,
-            pair.fn_type(&[i64_type.into(), i64_type.into()], false),
+            pair.fn_type(&[width.into(), width.into()], false),
             Some(Linkage::External),
         )
     }

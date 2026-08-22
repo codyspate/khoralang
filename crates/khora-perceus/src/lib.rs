@@ -213,7 +213,7 @@ impl<'a> Planner<'a> {
                 let mut declared = Vec::new();
                 for stmt in &stmts {
                     match stmt {
-                        Stmt::Let { pat, init } => {
+                        Stmt::Let { pat, init, .. } => {
                             if let Some(init) = init {
                                 self.walk(*init);
                             }

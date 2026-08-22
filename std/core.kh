@@ -446,6 +446,236 @@ impl Int {
   fn shr(self, other: Int) -> Int;
 }
 
+// --- The fixed-width integers ----------------------------------------------
+//
+// A table, and it reads like one. Seven types, each with the same ten
+// operations, because `Int` alone cannot describe a byte and a byte is what
+// every file, socket and string is made of. `docs/design/numbers.md`.
+//
+// `I64` is not here: it is a second spelling of `Int`, so `impl Int` above is
+// its impl too. Two different 64-bit signed integers would mean a conversion
+// between them that can never fail and never does anything.
+//
+// Every conversion goes through `Int` — `U8::of` and `U8::to_int` rather than
+// a method for each of the forty-two ordered pairs. `U8` to `U32` is two
+// steps, which is more to type and never wrong.
+
+/// An unsigned byte: 0 to 255.
+///
+/// The one every other type here is in service of — a wire format, a file and
+/// a string are all made of these.
+impl U8 {
+  /// The same number as a `U8`, or a stopped program if it does not fit.
+  ///
+  /// Explicit, like every conversion in Khora: there is no implicit narrowing
+  /// anywhere, because a number that silently becomes a different number is
+  /// found in production rather than in a test.
+  fn of(value: Int) -> U8;
+
+  /// The low bits of `value`, whatever they are. The way to ask for
+  /// truncation by name, for the wire formats that mean it.
+  fn wrapping(value: Int) -> U8;
+
+  /// Every `U8` is an `Int`, so this cannot fail and costs one
+  /// instruction.
+  fn to_int(self) -> Int;
+
+  fn wrapping_add(self, other: U8) -> U8;
+  fn wrapping_sub(self, other: U8) -> U8;
+  fn wrapping_mul(self, other: U8) -> U8;
+  fn xor(self, other: U8) -> U8;
+  fn and(self, other: U8) -> U8;
+  fn or(self, other: U8) -> U8;
+  fn shl(self, other: U8) -> U8;
+  /// Logical, because the type is unsigned: the vacated bits are zeros
+  /// and a large value stays large.
+  fn shr(self, other: U8) -> U8;
+}
+
+/// An unsigned 16-bit integer: 0 to 65,535.
+impl U16 {
+  /// The same number as a `U16`, or a stopped program if it does not fit.
+  ///
+  /// Explicit, like every conversion in Khora: there is no implicit narrowing
+  /// anywhere, because a number that silently becomes a different number is
+  /// found in production rather than in a test.
+  fn of(value: Int) -> U16;
+
+  /// The low bits of `value`, whatever they are. The way to ask for
+  /// truncation by name, for the wire formats that mean it.
+  fn wrapping(value: Int) -> U16;
+
+  /// Every `U16` is an `Int`, so this cannot fail and costs one
+  /// instruction.
+  fn to_int(self) -> Int;
+
+  fn wrapping_add(self, other: U16) -> U16;
+  fn wrapping_sub(self, other: U16) -> U16;
+  fn wrapping_mul(self, other: U16) -> U16;
+  fn xor(self, other: U16) -> U16;
+  fn and(self, other: U16) -> U16;
+  fn or(self, other: U16) -> U16;
+  fn shl(self, other: U16) -> U16;
+  /// Logical, because the type is unsigned: the vacated bits are zeros
+  /// and a large value stays large.
+  fn shr(self, other: U16) -> U16;
+}
+
+/// An unsigned 32-bit integer: 0 to 4,294,967,295.
+impl U32 {
+  /// The same number as a `U32`, or a stopped program if it does not fit.
+  ///
+  /// Explicit, like every conversion in Khora: there is no implicit narrowing
+  /// anywhere, because a number that silently becomes a different number is
+  /// found in production rather than in a test.
+  fn of(value: Int) -> U32;
+
+  /// The low bits of `value`, whatever they are. The way to ask for
+  /// truncation by name, for the wire formats that mean it.
+  fn wrapping(value: Int) -> U32;
+
+  /// Every `U32` is an `Int`, so this cannot fail and costs one
+  /// instruction.
+  fn to_int(self) -> Int;
+
+  fn wrapping_add(self, other: U32) -> U32;
+  fn wrapping_sub(self, other: U32) -> U32;
+  fn wrapping_mul(self, other: U32) -> U32;
+  fn xor(self, other: U32) -> U32;
+  fn and(self, other: U32) -> U32;
+  fn or(self, other: U32) -> U32;
+  fn shl(self, other: U32) -> U32;
+  /// Logical, because the type is unsigned: the vacated bits are zeros
+  /// and a large value stays large.
+  fn shr(self, other: U32) -> U32;
+}
+
+/// An unsigned 64-bit integer: 0 to 18,446,744,073,709,551,615.
+///
+/// The only type here that holds numbers `Int` cannot, which is why it is the
+/// only one whose `to_int` can stop the program.
+impl U64 {
+  /// The same number as a `U64`, or a stopped program if it does not fit.
+  ///
+  /// Explicit, like every conversion in Khora: there is no implicit narrowing
+  /// anywhere, because a number that silently becomes a different number is
+  /// found in production rather than in a test.
+  fn of(value: Int) -> U64;
+
+  /// The low bits of `value`, whatever they are. The way to ask for
+  /// truncation by name, for the wire formats that mean it.
+  fn wrapping(value: Int) -> U64;
+
+  /// `Int` cannot hold every `U64`, so this stops the program above
+  /// `Int`'s maximum. `U64::wrapping_to_int` is how to reinterpret the bits
+  /// instead.
+  fn to_int(self) -> Int;
+
+  /// The same bits read as a signed `Int`, so a `U64` above `Int`'s maximum
+  /// comes back negative rather than stopping.
+  fn wrapping_to_int(self) -> Int;
+
+  fn wrapping_add(self, other: U64) -> U64;
+  fn wrapping_sub(self, other: U64) -> U64;
+  fn wrapping_mul(self, other: U64) -> U64;
+  fn xor(self, other: U64) -> U64;
+  fn and(self, other: U64) -> U64;
+  fn or(self, other: U64) -> U64;
+  fn shl(self, other: U64) -> U64;
+  /// Logical, because the type is unsigned: the vacated bits are zeros
+  /// and a large value stays large.
+  fn shr(self, other: U64) -> U64;
+}
+
+/// A signed 8-bit integer: -128 to 127.
+impl I8 {
+  /// The same number as a `I8`, or a stopped program if it does not fit.
+  ///
+  /// Explicit, like every conversion in Khora: there is no implicit narrowing
+  /// anywhere, because a number that silently becomes a different number is
+  /// found in production rather than in a test.
+  fn of(value: Int) -> I8;
+
+  /// The low bits of `value`, whatever they are. The way to ask for
+  /// truncation by name, for the wire formats that mean it.
+  fn wrapping(value: Int) -> I8;
+
+  /// Every `I8` is an `Int`, so this cannot fail and costs one
+  /// instruction.
+  fn to_int(self) -> Int;
+
+  fn wrapping_add(self, other: I8) -> I8;
+  fn wrapping_sub(self, other: I8) -> I8;
+  fn wrapping_mul(self, other: I8) -> I8;
+  fn xor(self, other: I8) -> I8;
+  fn and(self, other: I8) -> I8;
+  fn or(self, other: I8) -> I8;
+  fn shl(self, other: I8) -> I8;
+  /// Arithmetic, because the type is signed: a negative number stays
+  /// negative.
+  fn shr(self, other: I8) -> I8;
+}
+
+/// A signed 16-bit integer: -32,768 to 32,767.
+impl I16 {
+  /// The same number as a `I16`, or a stopped program if it does not fit.
+  ///
+  /// Explicit, like every conversion in Khora: there is no implicit narrowing
+  /// anywhere, because a number that silently becomes a different number is
+  /// found in production rather than in a test.
+  fn of(value: Int) -> I16;
+
+  /// The low bits of `value`, whatever they are. The way to ask for
+  /// truncation by name, for the wire formats that mean it.
+  fn wrapping(value: Int) -> I16;
+
+  /// Every `I16` is an `Int`, so this cannot fail and costs one
+  /// instruction.
+  fn to_int(self) -> Int;
+
+  fn wrapping_add(self, other: I16) -> I16;
+  fn wrapping_sub(self, other: I16) -> I16;
+  fn wrapping_mul(self, other: I16) -> I16;
+  fn xor(self, other: I16) -> I16;
+  fn and(self, other: I16) -> I16;
+  fn or(self, other: I16) -> I16;
+  fn shl(self, other: I16) -> I16;
+  /// Arithmetic, because the type is signed: a negative number stays
+  /// negative.
+  fn shr(self, other: I16) -> I16;
+}
+
+/// A signed 32-bit integer: -2,147,483,648 to 2,147,483,647.
+///
+/// A C `int`, which is why it is the one a foreign function usually wants.
+impl I32 {
+  /// The same number as a `I32`, or a stopped program if it does not fit.
+  ///
+  /// Explicit, like every conversion in Khora: there is no implicit narrowing
+  /// anywhere, because a number that silently becomes a different number is
+  /// found in production rather than in a test.
+  fn of(value: Int) -> I32;
+
+  /// The low bits of `value`, whatever they are. The way to ask for
+  /// truncation by name, for the wire formats that mean it.
+  fn wrapping(value: Int) -> I32;
+
+  /// Every `I32` is an `Int`, so this cannot fail and costs one
+  /// instruction.
+  fn to_int(self) -> Int;
+
+  fn wrapping_add(self, other: I32) -> I32;
+  fn wrapping_sub(self, other: I32) -> I32;
+  fn wrapping_mul(self, other: I32) -> I32;
+  fn xor(self, other: I32) -> I32;
+  fn and(self, other: I32) -> I32;
+  fn or(self, other: I32) -> I32;
+  fn shl(self, other: I32) -> I32;
+  /// Arithmetic, because the type is signed: a negative number stays
+  /// negative.
+  fn shr(self, other: I32) -> I32;
+}
+
 /// One bucket's worth of entries: the keys that hashed to the same slot.
 ///
 /// Separate chaining rather than open addressing, because a chain is an

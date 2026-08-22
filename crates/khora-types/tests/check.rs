@@ -318,3 +318,127 @@ fn a_pattern_names_its_own_types_cases() {
          fn f(s: Second) -> Int { match s { Second::B => 1, Second::A => 2 } }\n",
     );
 }
+
+// --- annotations, and what they are for ------------------------------------
+
+/// Errata 36. A `let` annotation was parsed and then dropped on the floor, so
+/// this compiled clean — and an annotation that is only a comment is worse
+/// than no annotation, because it is believed.
+#[test]
+fn a_let_annotation_is_checked_against_its_initializer() {
+    assert_reports(
+        "module m;\nfn f() -> Int { let x: Bool = 5; 0 }\n",
+        "this binding: expected `Bool`, found `Int`",
+    );
+    assert_clean("module m;\nfn f() -> Int { let x: Int = 5; x }\n");
+}
+
+/// And it is the binding's type afterwards, not merely a check.
+#[test]
+fn a_let_annotation_decides_the_bindings_type() {
+    assert_reports(
+        "module m;\nfn f(flag: Bool) -> Int { let x: Int = 5; if x { 1 } else { 0 } }\n",
+        "an `if` condition",
+    );
+}
+
+/// An annotation reaches the *arguments* of the call that fills it, by way of
+/// the call's result. Without this, `Array::new(4, 0)` decides `A := Int` from
+/// its own literal before ever hearing about the `U8`.
+#[test]
+fn an_annotation_reaches_a_generic_calls_arguments() {
+    assert_clean(
+        "module m;
+export type Box<A> = | Full(value: A) | Empty;
+fn make<A>(value: A) -> Box<A> { Box::Full(value) }
+fn f() -> Int { let b: Box<U8> = make(200); 0 }
+",
+    );
+    assert_reports(
+        "module m;
+export type Box<A> = | Full(value: A) | Empty;
+fn make<A>(value: A) -> Box<A> { Box::Full(value) }
+fn f() -> Int { let b: Box<U8> = make(300); 0 }
+",
+        "does not fit in `U8`",
+    );
+}
+
+/// The hint stops at the literal it was meant for. An index is an `Int` however
+/// the element is going to be used, and a hint that leaks into one is a wrong
+/// answer rather than a missing one.
+#[test]
+fn an_annotation_does_not_leak_past_the_value_it_describes() {
+    assert_clean(
+        "module m;
+export type Array<A>;
+impl<A> Array<A> {
+  fn new(length: Int, fill: A) -> Array<A>;
+  fn get(self, index: Int) -> A;
+}
+fn f(cells: Array<U8>) -> Int { let byte: U8 = Array::get(cells, 0); 0 }
+",
+    );
+}
+
+/// Pushing an expected type into a call solves variables earlier than the
+/// arguments do, and an error row's entry is labelled by *its type's* name — so
+/// an entry whose variable had just been solved was still called `_`, matched
+/// nothing on the other side, and reported a label nobody was missing.
+///
+/// A latent bug rather than a new one: any solution arriving from outside the
+/// row unification would have done it.
+#[test]
+fn a_row_entry_solved_from_outside_is_still_the_same_entry() {
+    assert_clean(
+        "module m;
+export type Result<A, E> = | Ok(value: A) | Err(error: E);
+export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
+
+export fn twice<A, E, 'e>(body: () -> A with 'e raises E) -> Int with 'e {
+  let mut outcome = attempt(body);
+  outcome = attempt(body);
+  0
+}
+",
+    );
+}
+
+// --- the fixed-width integers ----------------------------------------------
+
+/// There is no implicit widening anywhere, so two integer types are as
+/// different as `Int` and `Bool`.
+#[test]
+fn two_integer_types_do_not_mix() {
+    assert_reports(
+        "module m;\nfn f(a: U8, b: U16) -> U8 { a + b }\n",
+        "arithmetic: expected `U8`, found `U16`",
+    );
+    assert_reports(
+        "module m;\nfn f(a: U8) -> Int { a }\n",
+        "this function returns `Int`, but its body has type `U8`",
+    );
+}
+
+/// `I64` is a second spelling of `Int` rather than another type, so no
+/// conversion stands between them.
+#[test]
+fn i64_is_int() {
+    assert_clean("module m;\nfn f(a: I64) -> Int { a + 1 }\n");
+}
+
+/// A literal that cannot be the type being asked of it is a mistake with one
+/// right answer, and truncating it silently to 44 is the kind of thing that is
+/// found in production.
+#[test]
+fn a_literal_must_fit_the_type_it_is_asked_to_be() {
+    assert_reports(
+        "module m;\nfn f() -> Int { let b: U8 = 300; 0 }\n",
+        "`300` does not fit in `U8`, which holds 0 to 255",
+    );
+    assert_reports(
+        "module m;\nfn f() -> Int { let b: I8 = 200; 0 }\n",
+        "`200` does not fit in `I8`, which holds -128 to 127",
+    );
+    assert_clean("module m;\nfn f() -> Int { let b: U8 = 255; 0 }\n");
+}

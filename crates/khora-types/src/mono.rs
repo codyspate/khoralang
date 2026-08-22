@@ -78,6 +78,7 @@ impl Instance {
 fn mangle(ty: &Type) -> String {
     match ty {
         Type::Int => "Int".to_string(),
+        Type::Fixed(kind) => kind.name(),
         Type::Bool => "Bool".to_string(),
         Type::Str => "String".to_string(),
         Type::Unit => "Unit".to_string(),

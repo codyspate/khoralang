@@ -346,6 +346,11 @@ impl Unifier {
                 Type::Row { fields: f2, tail: t2 },
             ) => self.unify_rows(f1, t1.as_deref(), f2, t2.as_deref()),
 
+            // A fixed-width integer unifies only with the same one: there is
+            // no implicit widening, so `U8` and `U16` are as different as
+            // `Int` and `Bool`. `docs/design/numbers.md`.
+            (Type::Fixed(x), Type::Fixed(y)) if x == y => Ok(()),
+
             (Type::Int, Type::Int)
             | (Type::Float, Type::Float)
             | (Type::Bool, Type::Bool)
@@ -443,6 +448,21 @@ impl Unifier {
         f2: &[(String, Type)],
         t2: Option<&Type>,
     ) -> Result<(), Mismatch> {
+        // An error row labels each entry by its type's own name, so an entry
+        // whose type was still a variable was labelled with the variable —
+        // which prints as `_`. Once the variable is solved the entry has a real
+        // name, and reading it back is not optional: an entry still called `_`
+        // does not match the identical entry called `E` on the other side, both
+        // rows then look short, and a closed row that cannot grow reports a
+        // label nobody is actually missing.
+        //
+        // `zonk` has always done this. Unification has to as well, because it
+        // compares rows *before* anything zonks them — and the variable may
+        // have been solved by something else entirely, which is exactly what
+        // pushing an expected type into a call now does.
+        let f1 = &self.relabel(f1);
+        let f2 = &self.relabel(f2);
+
         // Labels both sides carry must agree on what they carry.
         for (label, left) in f1 {
             if let Some((_, right)) = f2.iter().find(|(l, _)| l == label) {
@@ -508,6 +528,22 @@ impl Unifier {
     /// variable's rendering — which is what makes it an error-row entry whose
     /// type nobody has decided. A capability's label is a name someone wrote,
     /// and stays itself however its type is solved.
+    /// Re-reads the label of every entry whose type has been solved since the
+    /// row was built. See `unify_rows` for why.
+    fn relabel(&self, fields: &[(String, Type)]) -> Vec<(String, Type)> {
+        fields
+            .iter()
+            .map(|(label, ty)| {
+                let solved = self.shallow(ty);
+                if label == &row_label(ty) && !matches!(solved, Type::Var(_)) {
+                    (row_label(&solved), solved)
+                } else {
+                    (label.clone(), ty.clone())
+                }
+            })
+            .collect()
+    }
+
     fn is_nameless(&self, label: &str, ty: &Type) -> bool {
         matches!(self.shallow(ty), Type::Var(_)) && label == row_label(ty)
     }
@@ -647,6 +683,8 @@ fn head_name(ty: &Type) -> Option<String> {
     match ty {
         Type::Adt { name, .. } => Some(name.clone()),
         Type::Int => Some("Int".to_string()),
+        Type::Float => Some("Float".to_string()),
+        Type::Fixed(kind) => Some(kind.name()),
         Type::Bool => Some("Bool".to_string()),
         Type::Str => Some("String".to_string()),
         _ => None,
