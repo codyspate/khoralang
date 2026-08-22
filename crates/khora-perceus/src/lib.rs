@@ -242,6 +242,21 @@ impl<'a> Planner<'a> {
                     self.walk(arm.body);
                 }
             }
+            // Same shape as `match`, over the error rather than a scrutinee.
+            // The error object itself is owned by the catching frame — the
+            // raising one moved it into the return — so code generation drops
+            // it after the arm; see `lower_catch`.
+            Expr::Catch { inner, arms } => {
+                self.walk(inner);
+                for arm in &arms {
+                    let mut ignored = Vec::new();
+                    self.bind(arm.pat, &mut ignored);
+                    if let Some(guard) = arm.guard {
+                        self.walk(guard);
+                    }
+                    self.walk(arm.body);
+                }
+            }
             Expr::Call { callee, args } => {
                 self.walk(callee);
                 for arg in args {
@@ -287,7 +302,6 @@ impl<'a> Planner<'a> {
             // self-reference this design exists to avoid.
             | Expr::LambdaSelf
             | Expr::Missing
-            | Expr::Unsupported(_)
             | Expr::Unresolved(_) => {}
         }
     }

@@ -207,18 +207,22 @@ fn operators_and_control_flow_lower() {
     assert!(has(|e| matches!(e, Expr::Binary { op: BinOp::Gt, .. })), "no comparison");
 }
 
-/// Syntax outside the phase 2 subset must be reported and marked, never
-/// silently dropped — a later phase finds every site by one variant.
+/// There is no longer any expression form that lowering refuses. `catch` was
+/// the last one, and with it went `Expr::Unsupported` — so what this now pins
+/// is that the form arrives whole, arms and all, rather than as a hole.
 #[test]
-fn syntax_outside_the_subset_is_marked_not_dropped() {
+fn catch_lowers_with_its_arms() {
     let db = KhoraDatabase::new();
-    let body = only_body(&db, "module m;\nfn f() -> Int { g() catch { E::A(_) => 1, } }\n");
+    let body = only_body(&db, "module m;
+fn f() -> Int { g() catch { E::A(_) => 1, } }
+");
 
-    assert!(
-        body.exprs().any(|(_, e)| matches!(e, Expr::Unsupported(_))),
-        "`catch` was dropped instead of marked"
-    );
-    assert!(errors(&body).iter().any(|e| e.contains("catch")), "{:?}", errors(&body));
+    let arms = body.exprs().find_map(|(_, e)| match e {
+        Expr::Catch { arms, .. } => Some(arms.len()),
+        _ => None,
+    });
+    assert_eq!(arms, Some(1), "`catch` did not lower");
+    assert!(!body.exprs().any(|(_, e)| matches!(e, Expr::Missing)), "a hole was left");
 }
 
 /// Closures and record literals used to be in the list above. Both lower for

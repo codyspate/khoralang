@@ -419,6 +419,10 @@ pub(crate) struct Backend<'ctx> {
     /// Adapters declared but not yet given a body, for the same reason
     /// `pending_glue` exists.
     pending_thunks: Vec<String>,
+    /// A program-wide id for each error type, assigned on first sight. It is
+    /// the `which` of a tagged return, so 1 is the lowest: 0 means the call
+    /// did not raise. See `docs/design/effect-runtime.md` §2.
+    error_ids: HashMap<String, u32>,
     pub errors: Vec<HirError>,
 }
 
@@ -466,6 +470,7 @@ impl<'ctx> Backend<'ctx> {
             closures_by_owner: HashMap::new(),
             thunks: HashMap::new(),
             pending_thunks: Vec::new(),
+            error_ids: HashMap::new(),
             errors: Vec::new(),
         }
     }
@@ -520,9 +525,29 @@ impl<'ctx> Backend<'ctx> {
         }
     }
 
-    /// `{ i1 raised, i64 payload }` — what a fallible function returns.
+    /// `{ i32 which, i64 payload }` — what a fallible function returns.
+    ///
+    /// `which` is 0 for an ordinary return and otherwise the error's type id,
+    /// so one field carries both "did this raise" and "raise of what". A bare
+    /// bit would answer the first question and leave `catch` unable to handle
+    /// part of a row.
     pub fn tagged_type(&self) -> inkwell::types::StructType<'ctx> {
-        self.ctx.struct_type(&[self.ctx.bool_type().into(), self.ctx.i64_type().into()], false)
+        self.ctx.struct_type(&[self.ctx.i32_type().into(), self.ctx.i64_type().into()], false)
+    }
+
+    /// The id of an error type, assigning one if this is the first sight of it.
+    ///
+    /// Encounter order within a single whole-program module, which is
+    /// deterministic for a given program and never crosses a module boundary
+    /// — there is no separate compilation yet, and when there is, this becomes
+    /// a link-time numbering rather than a lazy one.
+    pub fn error_id(&mut self, name: &str) -> u32 {
+        if let Some(id) = self.error_ids.get(name) {
+            return *id;
+        }
+        let id = self.error_ids.len() as u32 + 1;
+        self.error_ids.insert(name.to_string(), id);
+        id
     }
 
     /// A value as the one word a tagged return carries it in.
@@ -1180,11 +1205,20 @@ impl<'ctx> Backend<'ctx> {
                 .basic()
                 .expect("a fallible main returns a tagged value")
                 .into_struct_value();
-            let flag = self
+            let which = self
                 .builder
-                .build_extract_value(tagged, 0, "raised")
+                .build_extract_value(tagged, 0, "which")
                 .expect("reading the tag")
                 .into_int_value();
+            let flag = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    which,
+                    self.ctx.i32_type().const_zero(),
+                    "raised",
+                )
+                .expect("testing the tag");
             let word = self
                 .builder
                 .build_extract_value(tagged, 1, "payload")

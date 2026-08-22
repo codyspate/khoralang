@@ -1031,7 +1031,7 @@ impl<'a> Checker<'a> {
     fn infer_uncached(&mut self, id: ExprId) -> Type {
         let range = self.body.range(id);
         match self.body.expr(id).clone() {
-            Expr::Missing | Expr::Unsupported(_) | Expr::Unresolved(_) => Type::Unknown,
+            Expr::Missing | Expr::Unresolved(_) => Type::Unknown,
             Expr::Unit => Type::Unit,
             Expr::Literal(lit) => match lit {
                 Literal::Int(_) => Type::Int,
@@ -1176,6 +1176,7 @@ impl<'a> Checker<'a> {
                 }
                 self.infer(inner)
             }
+            Expr::Catch { inner, arms } => self.infer_catch(inner, &arms, range),
             Expr::Lambda { params, body, .. } => {
                 // A parameter with no annotation gets a variable, so the type
                 // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
@@ -2002,6 +2003,130 @@ impl<'a> Checker<'a> {
 
         self.check_match_coverage(&scrutinee_ty, arms, range);
         result.unwrap_or(Type::Unknown)
+    }
+
+    /// `f()! catch { .. }` — handles part of the error row.
+    ///
+    /// The subtraction is by error *type*, named by the arms' constructors. So
+    /// this is not a `match` on a result: the arms do not see a value the
+    /// operand produced, they see the error it left with, and the ones they
+    /// name stop being the enclosing function's problem.
+    fn infer_catch(
+        &mut self,
+        inner: ExprId,
+        arms: &[khora_hir::body::MatchArm],
+        range: TextRange,
+    ) -> Type {
+        // Demands raised *inside* the operand are the ones this `catch` is in
+        // a position to handle. Remembering where the list stood draws that
+        // window: a demand from an enclosing expression is not in it, and a
+        // nested `catch` has already narrowed its own.
+        let before = self.demanded.len();
+        let value = self.infer(inner);
+
+        // Each arm is matched against its own error type rather than against
+        // one scrutinee, which is the other way this differs from `match`.
+        let mut caught: Vec<String> = Vec::new();
+        let mut result: Option<Type> = None;
+        for arm in arms {
+            let owner = match self.body.pat(arm.pat) {
+                Pat::Path(r) | Pat::TupleStruct { resolution: r, .. } => variant_case(r).map(|(t, _)| t),
+                _ => None,
+            };
+            let Some(owner) = owner else {
+                // Silent when the pattern named a constructor that did not
+                // resolve: that is already reported, and saying it twice buries
+                // the message that can actually be acted on.
+                if !matches!(
+                    self.body.pat(arm.pat),
+                    Pat::Path(_) | Pat::TupleStruct { .. } | Pat::Missing
+                ) {
+                    self.error(
+                        "a `catch` arm has to name an error constructor, since it is the \
+                         constructor's type that says which errors are handled here"
+                            .to_string(),
+                        self.body.range(arm.body),
+                    );
+                }
+                continue;
+            };
+            if !caught.contains(&owner) {
+                caught.push(owner.clone());
+            }
+            self.bind_pattern(arm.pat, &Type::adt(&owner));
+            if let Some(guard) = arm.guard {
+                self.expect(guard, &Type::Bool, "a match guard");
+            }
+            let arm_ty = self.infer(arm.body);
+            match result.clone() {
+                None => result = Some(arm_ty),
+                Some(expected) => {
+                    let range = self.body.range(arm.body);
+                    if self.require(&expected, &arm_ty, "catch arms disagree", range) {
+                        if matches!(expected, Type::Never) {
+                            result = Some(arm_ty);
+                        }
+                    } else {
+                        result = Some(Type::Unknown);
+                    }
+                }
+            }
+        }
+
+        // Naming a type commits to all of it. A partially handled type would
+        // have to stay in the row *and* divert some of its variants, so the
+        // signature would say it can still leave while the reader sees it
+        // handled — the subtraction is only honest if it is total.
+        for owner in &caught {
+            let mine: Vec<khora_hir::body::MatchArm> = arms
+                .iter()
+                .filter(|a| {
+                    matches!(self.body.pat(a.pat),
+                        Pat::Path(r) | Pat::TupleStruct { resolution: r, .. }
+                            if variant_case(r).is_some_and(|(t, _)| &t == owner))
+                })
+                .cloned()
+                .collect();
+            self.check_match_coverage(&Type::adt(owner), &mine, range);
+        }
+
+        // The bodies stand in for the operand's value, so the whole expression
+        // has one type whichever way it went.
+        if let Some(handled) = result.clone() {
+            self.require(&value, &handled, "a `catch` arm", range);
+        }
+
+        // Subtract. The demand stays even when nothing is left of its row: it
+        // is also what checks that the call wore its `!`, and a `catch` does
+        // not excuse the mark — control still leaves the operand.
+        let window: Vec<Demand> = self.demanded.split_off(before);
+        let mut names = Vec::new();
+        let kept: Vec<Demand> = window
+            .into_iter()
+            .map(|mut demand| {
+                if demand.clause == Clause::Raises {
+                    if let Type::Row { fields, tail } = &demand.row {
+                        names.extend(fields.iter().map(|(l, _)| l.clone()));
+                        let left: Vec<(String, Type)> =
+                            fields.iter().filter(|(l, _)| !caught.contains(l)).cloned().collect();
+                        demand.row = Type::row(left, tail.as_deref().cloned());
+                    }
+                }
+                demand
+            })
+            .collect();
+        self.demanded.extend(kept);
+
+        for owner in &caught {
+            if !names.contains(owner) {
+                self.error(
+                    format!("nothing in this expression raises `{owner}`"),
+                    range,
+                );
+            }
+        }
+
+        value
     }
 
     fn check_match_coverage(

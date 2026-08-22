@@ -361,6 +361,14 @@ type **— met**, see `a_for_loop_iterates_a_user_defined_type`.
   entry point is a failing exit. A fallible call *must* be marked, so the
   branch is always where the source says it is. No tables, no personality
   routine, no unwinder — a raise is a return with a tag.
+- **4.3c `catch` — done.** `f()! catch { .. }` handles part of the error row
+  and subtracts exactly the error *types* its arms name. It is not a `match` on
+  a result: it compiles to the branch `!` already emits, with the named types
+  diverted to the arms and the rest returned onward. Naming a type commits to
+  all of its variants, since a half-handled type would have to be both
+  subtracted and left in. Discriminating them at runtime is what widened the
+  tagged return to `{ i32 which, i64 payload }` — see
+  `docs/design/effect-runtime.md` §2.
 - **4.4 `Layer` as handler composition**, including merge.
 
 **Exit:** the reference application typechecks and serves a request; an

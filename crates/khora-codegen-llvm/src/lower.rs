@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use inkwell::basic_block::BasicBlock;
 use inkwell::module::Linkage;
 use inkwell::types::{BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 
 use khora_hir::body::{
@@ -78,6 +78,7 @@ pub(crate) fn emit_function<'ctx>(
         slots: HashMap::new(),
         scopes: Vec::new(),
         loops: Vec::new(),
+        catches: Vec::new(),
         aborted: false,
     };
 
@@ -125,6 +126,7 @@ pub(crate) fn emit_closure<'ctx>(
         slots: HashMap::new(),
         scopes: Vec::new(),
         loops: Vec::new(),
+        catches: Vec::new(),
         aborted: false,
     };
 
@@ -179,6 +181,22 @@ enum Cleanup<'ctx> {
     Temp(BasicValueEnum<'ctx>, Type),
 }
 
+/// A `catch` whose operand is being lowered.
+///
+/// While one of these is on the stack, an error leaving a `!` inside the
+/// operand goes to `handler` instead of out of the function. The two phis
+/// collect it, one incoming edge per `!` — the operand may contain several,
+/// and they are all the same branch as far as the arms are concerned.
+struct CatchFrame<'ctx> {
+    handler: BasicBlock<'ctx>,
+    which: inkwell::values::PhiValue<'ctx>,
+    word: inkwell::values::PhiValue<'ctx>,
+    /// Scopes above this index were opened inside the operand, so they are
+    /// released on the way to the handler. Scopes below it belong to the
+    /// enclosing function, which the error is no longer leaving.
+    scope_depth: usize,
+}
+
 /// A loop that `break` and `continue` can target.
 struct LoopFrame<'ctx> {
     continue_to: BasicBlock<'ctx>,
@@ -205,6 +223,7 @@ struct Lower<'a, 'ctx> {
     slots: HashMap<LocalId, PointerValue<'ctx>>,
     scopes: Vec<Vec<Cleanup<'ctx>>>,
     loops: Vec<LoopFrame<'ctx>>,
+    catches: Vec<CatchFrame<'ctx>>,
     /// Set once something could not be lowered. Everything after is skipped:
     /// the module is discarded anyway, and continuing would build IR against
     /// values that were never produced.
@@ -271,10 +290,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         // the end of the body is the *ok* case rather than a bare return.
         if can_raise(&self.signature()) {
             if let Some(value) = value {
-                self.return_tagged(false, value);
+                self.return_ok(value);
             } else if self.here().get_terminator().is_none() {
                 let zero = self.be.ctx.i64_type().const_zero();
-                self.return_tagged(false, zero.into());
+                self.return_ok(zero.into());
             }
             return;
         }
@@ -477,6 +496,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.lower_if(id, condition, then_branch, else_branch)
             }
             Expr::Match { scrutinee, arms } => self.lower_match(id, scrutinee, &arms, range),
+            Expr::Catch { inner, arms } => self.lower_catch(id, inner, &arms, range),
             Expr::While { condition, body } => self.lower_while(condition, body),
             Expr::Loop { body } => self.lower_loop(body),
             Expr::Break(value) => self.lower_break(value, range),
@@ -501,7 +521,6 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Field { base, name } => self.read_field(base, &name, range),
             Expr::List(_) => self.fail("list literals are not supported yet", range),
             Expr::Tuple(_) => self.fail("tuple literals are not supported yet", range),
-            Expr::Unsupported(what) => self.fail(format!("{what} are not supported yet"), range),
             // The checker already rejected these, so reaching one means
             // `compile` ran with diagnostics it should have refused.
             Expr::Missing | Expr::Unresolved(_) => {
@@ -805,15 +824,31 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// Everything the frame owns is released first, exactly as an early
     /// `return` releases it. A raise *is* a return, with a tag.
     fn lower_raise(&mut self, error: ExprId, range: TextRange) -> Flow<'ctx> {
-        if !can_raise(&self.signature()) {
+        // An enclosing `catch` is the other place an error can go, so a
+        // function with no `raises` clause may still contain a `raise` — as
+        // long as something between here and the signature handles it. The
+        // checker has already decided that; this only has to agree.
+        if !can_raise(&self.signature()) && self.catches.is_empty() {
             return self.fail(
                 "this function has no `raises` clause, so it cannot raise",
                 range,
             );
         }
+        // Which error type this is comes from the checker's record, not from
+        // the expression's shape: `raise e` may raise a bound variable whose
+        // type only inference knows.
+        let which = match self.types.of(error) {
+            Type::Adt { name, .. } => self.be.error_id(&name.clone()),
+            other => {
+                let other = other.clone();
+                return self
+                    .fail(format!("`{other}` is not an error type, so it cannot be raised"), range);
+            }
+        };
         let value = self.expr(error)?;
-        self.unwind_to(0);
-        self.return_tagged(true, value);
+        let which = self.be.ctx.i32_type().const_int(u64::from(which), false);
+        let word = self.be.to_word(value);
+        self.leave_with(which, word);
         None
     }
 
@@ -829,16 +864,25 @@ impl<'ctx> Lower<'_, 'ctx> {
         })
     }
 
-    /// Returns `{ raised, payload }` from a fallible function.
-    fn return_tagged(&mut self, raised: bool, payload: BasicValueEnum<'ctx>) {
+    /// Returns a value from a fallible function without raising.
+    fn return_ok(&mut self, payload: BasicValueEnum<'ctx>) {
+        let none = self.be.ctx.i32_type().const_zero();
+        self.return_tagged(none, payload);
+    }
+
+    /// Returns `{ which, payload }` from a fallible function.
+    ///
+    /// `which` is 0 to return normally and otherwise the error's type id. It
+    /// is a value rather than a constant because propagating an error onward
+    /// passes through whatever id arrived, which no frame in the middle knows.
+    fn return_tagged(&mut self, which: IntValue<'ctx>, payload: BasicValueEnum<'ctx>) {
         let tagged = self.be.tagged_type();
         let word = self.be.to_word(payload);
-        let flag = self.be.ctx.bool_type().const_int(u64::from(raised), false);
 
         let value = self
             .be
             .builder
-            .build_insert_value(tagged.get_undef(), flag, 0, "tagged.flag")
+            .build_insert_value(tagged.get_undef(), which, 0, "tagged.which")
             .expect("setting the tag");
         let value = self
             .be
@@ -849,6 +893,68 @@ impl<'ctx> Lower<'_, 'ctx> {
             .builder
             .build_return(Some(&value.into_struct_value()))
             .expect("returning a tagged value");
+    }
+
+    /// Takes a tagged return apart into its `which` and its payload word.
+    fn read_tagged(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let aggregate = result.into_struct_value();
+        let which = self
+            .be
+            .builder
+            .build_extract_value(aggregate, 0, "which")
+            .expect("reading the tag")
+            .into_int_value();
+        let word = self
+            .be
+            .builder
+            .build_extract_value(aggregate, 1, "payload")
+            .expect("reading the payload")
+            .into_int_value();
+        (which, word)
+    }
+
+    /// Whether a `which` says the call raised — that is, whether it is not 0.
+    fn raised(&mut self, which: IntValue<'ctx>) -> IntValue<'ctx> {
+        let none = self.be.ctx.i32_type().const_zero();
+        self.be
+            .builder
+            .build_int_compare(IntPredicate::NE, which, none, "raised")
+            .expect("testing the tag")
+    }
+
+    /// Sends an error on from the block it was found in.
+    ///
+    /// Out of the function, releasing the whole frame — or, inside a `catch`,
+    /// into that `catch`'s handler, releasing only what the operand opened.
+    /// The frame stays alive in the second case, which is the entire
+    /// difference between handling an error and propagating one.
+    fn leave_with(&mut self, which: IntValue<'ctx>, word: IntValue<'ctx>) {
+        match self.catches.last() {
+            Some(frame) => {
+                let (handler, depth) = (frame.handler, frame.scope_depth);
+                let (which_phi, word_phi) = (frame.which, frame.word);
+                self.unwind_to(depth);
+                let from = self.here();
+                which_phi.add_incoming(&[(&which, from)]);
+                word_phi.add_incoming(&[(&word, from)]);
+                self.br(handler);
+            }
+            // Nowhere left: no enclosing `catch` and no `raises` clause. The
+            // checker guarantees that combination only arises on a path no
+            // error reaches — a total `catch` still emits its fall-through —
+            // so this seals the block rather than inventing a return.
+            None if !can_raise(&self.signature()) => {
+                self.be.builder.build_unreachable().expect("sealing an unhandled error");
+            }
+            None => {
+                self.unwind_to(0);
+                let error = self.be.word_to_value(word, &Type::Str);
+                self.return_tagged(which, error);
+            }
+        }
     }
 
     /// Splits a fallible call's result: propagate the error, or take the value.
@@ -862,38 +968,25 @@ impl<'ctx> Lower<'_, 'ctx> {
         ret: &Type,
         range: TextRange,
     ) -> Flow<'ctx> {
-        if !can_raise(&self.signature()) {
+        if !can_raise(&self.signature()) && self.catches.is_empty() {
             return self.fail(
                 "this call can leave the function, but the function has no `raises` clause",
                 range,
             );
         }
 
-        let aggregate = result.into_struct_value();
-        let flag = self
-            .be
-            .builder
-            .build_extract_value(aggregate, 0, "raised")
-            .expect("reading the tag")
-            .into_int_value();
-        let word = self
-            .be
-            .builder
-            .build_extract_value(aggregate, 1, "payload")
-            .expect("reading the payload")
-            .into_int_value();
+        let (which, word) = self.read_tagged(result);
 
         let propagate = self.block("raised");
         let continue_to = self.block("ok");
+        let raised = self.raised(which);
         self.be
             .builder
-            .build_conditional_branch(flag, propagate, continue_to)
+            .build_conditional_branch(raised, propagate, continue_to)
             .expect("branching on the tag");
 
         self.at(propagate);
-        self.unwind_to(0);
-        let error = self.be.word_to_value(word, &Type::Str);
-        self.return_tagged(true, error);
+        self.leave_with(which, word);
 
         self.at(continue_to);
         Some(self.be.word_to_value(word, ret))
@@ -1819,7 +1912,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// value, not an error, and still has to wear the tag.
     fn return_value(&mut self, value: BasicValueEnum<'ctx>) {
         if can_raise(&self.signature()) {
-            self.return_tagged(false, value);
+            self.return_ok(value);
             return;
         }
         match self.ret {
@@ -1883,7 +1976,185 @@ impl<'ctx> Lower<'_, 'ctx> {
         let result_ty = self.types.of(id).clone();
         let slot = self.result_slot(&result_ty);
         let merge = self.block("match.end");
+        let reached = self.emit_arms(arms, value, &scrutinee_ty, slot, merge, range);
 
+        let scope = self.scopes.pop().unwrap_or_default();
+        self.at(merge);
+        if reached == 0 {
+            self.be.builder.build_unreachable().expect("sealing an unreachable join");
+            return None;
+        }
+        for cleanup in scope.into_iter().rev() {
+            self.release(cleanup);
+        }
+        Some(self.load_result(slot, &result_ty))
+    }
+
+    /// `f()! catch { .. }` — the same branch `!` already emits, with the
+    /// handled error types diverted to arms instead of returned onward.
+    ///
+    /// The dispatch is two levels. `which` says which error *type* arrived, and
+    /// a type nobody named falls through to the ordinary propagate path, so a
+    /// partial `catch` costs one extra `switch` and nothing else. Within a
+    /// named type the arms dispatch on the object tag exactly as a `match`
+    /// does, which is why they share `emit_arms`.
+    fn lower_catch(
+        &mut self,
+        id: ExprId,
+        inner: ExprId,
+        arms: &[MatchArm],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let result_ty = self.types.of(id).clone();
+        let slot = self.result_slot(&result_ty);
+        let merge = self.block("catch.end");
+
+        // The phis have to exist before the operand is lowered, because each
+        // `!` inside it adds an edge as it is emitted.
+        let entry = self.here();
+        let handler = self.block("catch.raised");
+        self.at(handler);
+        let which = self
+            .be
+            .builder
+            .build_phi(self.be.ctx.i32_type(), "which")
+            .expect("the error type that arrived");
+        let word = self
+            .be
+            .builder
+            .build_phi(self.be.ctx.i64_type(), "error")
+            .expect("the error that arrived");
+        self.at(entry);
+
+        let depth = self.scopes.len();
+        self.catches.push(CatchFrame { handler, which, word, scope_depth: depth });
+        let value = self.expr(inner);
+        self.catches.pop();
+
+        let mut reached = 0;
+        if let Some(value) = value {
+            self.store_result(slot, value);
+            self.br(merge);
+            reached += 1;
+        }
+
+        // An operand that cannot raise leaves the handler with no way in. The
+        // checker reports that as an error of its own, so this only has to
+        // emit something a verifier will accept.
+        if which.count_incoming() == 0 {
+            self.at(handler);
+            self.be.builder.build_unreachable().expect("sealing an unreachable handler");
+            return self.join(merge, reached, slot, &result_ty);
+        }
+
+        // Group the arms by the error type they name, keeping written order so
+        // the emitted blocks read in the order the source does.
+        let mut caught: Vec<(String, Vec<MatchArm>)> = Vec::new();
+        for arm in arms {
+            let Some(owner) = self.owner_of(arm.pat) else { continue };
+            match caught.iter_mut().find(|(name, _)| name == &owner) {
+                Some((_, mine)) => mine.push(arm.clone()),
+                None => caught.push((owner, vec![arm.clone()])),
+            }
+        }
+
+        let onward = self.block("catch.onward");
+        let cases: Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)> = caught
+            .iter()
+            .map(|(owner, _)| {
+                let id = self.be.error_id(owner);
+                let tag = self.be.ctx.i32_type().const_int(u64::from(id), false);
+                (tag, self.block(&format!("catch.{owner}")))
+            })
+            .collect();
+
+        self.at(handler);
+        let which = which.as_basic_value().into_int_value();
+        let word = word.as_basic_value().into_int_value();
+        self.be
+            .builder
+            .build_switch(which, onward, &cases)
+            .expect("dispatching on the error type");
+
+        // Not ours: release the frame and hand it to whoever is next. Nested
+        // `catch`es chain here, since `leave_with` looks at the stack again
+        // and this runs with the inner frame already popped.
+        self.at(onward);
+        self.leave_with(which, word);
+
+        for ((owner, mine), (_, block)) in caught.iter().zip(&cases) {
+            self.at(*block);
+            let error_ty = Type::adt(owner);
+            let error = self.be.word_to_value(word, &error_ty);
+
+            // The raising frame moved the error into its return, so this frame
+            // owns it. The arms borrow their bindings out of it, exactly as a
+            // `match` borrows out of a temporary scrutinee, and it is released
+            // on the way to the join.
+            let released = self.block(&format!("catch.{owner}.done"));
+            self.scopes.push(vec![Cleanup::Temp(error, error_ty.clone())]);
+            let reached_here = self.emit_arms(mine, error, &error_ty, slot, released, range);
+            let scope = self.scopes.pop().unwrap_or_default();
+
+            self.at(released);
+            if reached_here == 0 {
+                self.be.builder.build_unreachable().expect("sealing a diverging handler");
+                continue;
+            }
+            for cleanup in scope.into_iter().rev() {
+                self.release(cleanup);
+            }
+            self.br(merge);
+            reached += 1;
+        }
+
+        self.join(merge, reached, slot, &result_ty)
+    }
+
+    /// Arrives at a join block, or seals it if nothing reaches it.
+    fn join(
+        &mut self,
+        merge: BasicBlock<'ctx>,
+        reached: usize,
+        slot: Option<PointerValue<'ctx>>,
+        ty: &Type,
+    ) -> Flow<'ctx> {
+        self.at(merge);
+        if reached == 0 {
+            self.be.builder.build_unreachable().expect("sealing an unreachable join");
+            return None;
+        }
+        Some(self.load_result(slot, ty))
+    }
+
+    /// The error type a `catch` arm names, by its constructor.
+    fn owner_of(&self, pat: khora_hir::body::PatId) -> Option<String> {
+        match self.body.pat(pat) {
+            khora_hir::body::Pat::Path(r)
+            | khora_hir::body::Pat::TupleStruct { resolution: r, .. } => match r {
+                khora_hir::Resolution::Variant { type_name, .. } => Some(type_name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Emits the arms of a `match` or a `catch` over `value` and returns how
+    /// many of them reach `merge`.
+    ///
+    /// Shared because a `catch` arm is a `match` arm in every respect except
+    /// what it is matching on: one error type's variants rather than a
+    /// scrutinee's. None is zero if every arm diverges, and the caller has to
+    /// seal `merge` rather than join to it.
+    fn emit_arms(
+        &mut self,
+        arms: &[MatchArm],
+        value: BasicValueEnum<'ctx>,
+        ty: &Type,
+        slot: Option<PointerValue<'ctx>>,
+        merge: BasicBlock<'ctx>,
+        range: TextRange,
+    ) -> usize {
         // One pair of blocks per arm: bindings and guard first, then the body,
         // so a failing guard can jump on without the body ever being entered.
         let mut binds = Vec::with_capacity(arms.len());
@@ -1893,7 +2164,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             bodies.push(self.block(&format!("arm{index}.body")));
         }
 
-        self.dispatch(arms, value, &scrutinee_ty, &binds, range);
+        self.dispatch(arms, value, ty, &binds, range);
 
         let mut reached = 0;
         for (index, arm) in arms.iter().enumerate() {
@@ -1939,17 +2210,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 reached += 1;
             }
         }
-
-        let scope = self.scopes.pop().unwrap_or_default();
-        self.at(merge);
-        if reached == 0 {
-            self.be.builder.build_unreachable().expect("sealing an unreachable join");
-            return None;
-        }
-        for cleanup in scope.into_iter().rev() {
-            self.release(cleanup);
-        }
-        Some(self.load_result(slot, &result_ty))
+        reached
     }
 
     /// Branches to the first arm whose pattern applies.

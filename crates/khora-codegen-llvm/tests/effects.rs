@@ -291,3 +291,183 @@ fn main() -> Int raises DbError {{
     assert_eq!(ran.stdout, "3\n0\n", "the ok path leaves nothing behind either");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- catch -----------------------------------------------------------------
+
+/// A `catch` that names the only error type takes the row to empty, so the
+/// function needs no `raises` clause of its own.
+#[test]
+fn a_catch_handles_the_whole_row() {
+    let ran = run(
+        "catch_all",
+        &format!(
+            "{FALLIBLE}
+fn safe(n: Int) -> Int {{
+  halve(n)! catch {{
+    DbError::Timeout => 0 - 1,
+    DbError::Refused => 0 - 2,
+  }}
+}}
+fn main() -> Int {{ print(safe(8)); print(safe(7)); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "4
+-2
+");
+    assert_eq!(ran.code, Some(0));
+}
+
+const TWO_ERRORS: &str = "module t;
+fn print(value: Int);
+fn khora_print_int(value: Int);
+fn khora_live_count() -> Int;
+
+export type DbError = | Timeout | Refused;
+export type ModelError = | RateLimited(ms: Int) | TooLong;
+
+fn fetch(n: Int) -> Int raises DbError + ModelError {
+  if n == 1 { raise DbError::Timeout }
+  if n == 2 { raise ModelError::RateLimited(500) }
+  if n == 3 { raise ModelError::TooLong }
+  n
+}
+";
+
+/// Half a row. `ModelError` is handled here and gone from the signature;
+/// `DbError` is not named, so it leaves through the same `!` it always did.
+#[test]
+fn a_catch_handles_part_of_the_row() {
+    let ran = run(
+        "catch_partial",
+        &format!(
+            "{TWO_ERRORS}
+fn attempt(n: Int) -> Int raises DbError {{
+  fetch(n)! catch {{
+    ModelError::RateLimited(ms) => ms,
+    ModelError::TooLong => 0 - 1,
+  }}
+}}
+fn main() -> Int raises DbError {{
+  print(attempt(2)!);
+  print(attempt(3)!);
+  print(attempt(9)!);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "500
+-1
+9
+");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The unhandled half of the same row still leaves the function, and still
+/// reaches the entry point as a failing exit.
+#[test]
+fn an_unnamed_error_type_passes_through_a_catch() {
+    let ran = run(
+        "catch_passthrough",
+        &format!(
+            "{TWO_ERRORS}
+fn attempt(n: Int) -> Int raises DbError {{
+  fetch(n)! catch {{
+    ModelError::RateLimited(ms) => ms,
+    ModelError::TooLong => 0 - 1,
+  }}
+}}
+fn main() -> Int raises DbError {{ print(attempt(1)!); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "", "the `DbError` was not diverted into the arms");
+    assert_eq!(ran.code, Some(1));
+}
+
+/// An arm reads the error's payload, so the error object has to survive until
+/// the arm is done with it — and be released afterwards, since the raising
+/// frame moved it here and nobody else will.
+#[test]
+fn a_caught_error_is_released_after_its_arm() {
+    let ran = run(
+        "catch_leaks",
+        &format!(
+            "{TWO_ERRORS}
+fn attempt(n: Int) -> Int raises DbError {{
+  fetch(n)! catch {{
+    ModelError::RateLimited(ms) => ms,
+    ModelError::TooLong => 0 - 1,
+  }}
+}}
+fn main() -> Int raises DbError {{
+  khora_print_int(attempt(2)!);
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "500
+0
+", "the trailing 0 is the live-object count");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Two `catch`es, one inside the other. What the inner one does not name goes
+/// to the outer one rather than out of the function.
+#[test]
+fn an_outer_catch_takes_what_the_inner_one_left() {
+    let ran = run(
+        "catch_nested",
+        &format!(
+            "{TWO_ERRORS}
+fn attempt(n: Int) -> Int {{
+  (fetch(n)! catch {{
+    ModelError::RateLimited(ms) => ms,
+    ModelError::TooLong => 0 - 1,
+  }}) catch {{
+    DbError::Timeout => 0 - 100,
+    DbError::Refused => 0 - 200,
+  }}
+}}
+fn main() -> Int {{
+  print(attempt(1));
+  print(attempt(2));
+  print(attempt(9));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "-100
+500
+9
+");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A `raise` written directly inside a `catch`'s operand is caught by it, the
+/// same as one that arrived through a `!`. There is no third mechanism.
+#[test]
+fn a_catch_takes_a_raise_from_its_own_operand() {
+    let ran = run(
+        "catch_direct",
+        &format!(
+            "{TWO_ERRORS}
+fn attempt(n: Int) -> Int {{
+  (if n < 0 {{ raise DbError::Refused }} else {{ n }}) catch {{
+    DbError::Timeout => 0 - 1,
+    DbError::Refused => 0 - 2,
+  }}
+}}
+fn main() -> Int {{ print(attempt(5)); print(attempt(0 - 5)); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "5
+-2
+");
+    assert_eq!(ran.code, Some(0));
+}

@@ -97,6 +97,26 @@ is real.
 runs the drops it was going to run anyway. That keeps the story portable and
 keeps foreign frames out of it (§7).
 
+**The tag is the error's type, not a bit.** `{ i32 which, i64 payload }`:
+`which` is 0 when the call returned normally, and otherwise a program-wide id
+for the error's *type*. The payload is one word because every Khora value is
+word-sized. Two registers, the same as a bare bit would have cost.
+
+The id has to be there because `catch` handles *part* of a row. A function
+raising `DbError + ModelError` whose caller catches only `ModelError` needs to
+know at runtime which of the two arrived, and the heap object cannot say: a
+`tag` in the header is a variant index within one type, so `DbError::Timeout`
+and `ModelError::RateLimited` are both tag 0.
+
+Two alternatives were rejected. Indexing into the callee's row is smaller but
+does not survive an open row `'r`, where the index is not known at the raise
+and would have to be renumbered at every frame the error crosses. Stealing
+high bits of the header `tag` costs nothing at the call but makes every
+ordinary `match` mask, taxing code that never raises. A whole-program compiler
+already knows every error type, so a program-wide id is free to assign and
+never needs remapping — an error crossing a frame carries the same `which` it
+was raised with, whatever the rows in between look like.
+
 ### Suspension belongs to fibers
 
 Async I/O and generators need a computation to stop and continue later. That is

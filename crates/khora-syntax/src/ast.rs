@@ -911,6 +911,17 @@ impl TryExpr {
     }
 }
 
+impl CatchExpr {
+    /// The computation whose errors are being handled.
+    pub fn operand(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+    /// One arm per error constructor handled.
+    pub fn arms(&self) -> impl Iterator<Item = MatchArm> {
+        children(&self.0)
+    }
+}
+
 impl WithExpr {
     /// The computation the handlers serve: `analyze(id) with { .. }`.
     ///

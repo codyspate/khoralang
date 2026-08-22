@@ -161,3 +161,105 @@ fn one_label_cannot_carry_two_types() {
         "Ai",
     );
 }
+
+// --- catch -----------------------------------------------------------------
+
+const ERRORS: &str = "module m;
+                      export type DbError = | Timeout | Refused;
+                      export type ModelError = | RateLimited(ms: Int) | TooLong;
+                      fn fetch(id: Int) -> Int raises DbError + ModelError;
+                      fn only_db(id: Int) -> Int raises DbError;
+";
+
+/// Naming every error type takes the row to empty, so the function needs no
+/// `raises` clause at all. This is the whole point of the feature.
+#[test]
+fn a_total_catch_empties_the_row() {
+    assert_clean(&format!(
+        "{ERRORS}         export fn safe(id: Int) -> Int {{ only_db(id)! catch {{          DbError::Timeout => 0, DbError::Refused => 1, }} }}
+"
+    ));
+}
+
+/// What the arms did not name is still the enclosing function's problem.
+#[test]
+fn an_unnamed_error_type_stays_in_the_row() {
+    assert_clean(&format!(
+        "{ERRORS}         export fn half(id: Int) -> Int raises DbError {{ fetch(id)! catch {{          ModelError::RateLimited(ms) => ms, ModelError::TooLong => 0, }} }}
+"
+    ));
+}
+
+#[test]
+fn what_a_catch_leaves_behind_still_has_to_be_declared() {
+    assert_reports(
+        &format!(
+            "{ERRORS}             export fn half(id: Int) -> Int {{ fetch(id)! catch {{              ModelError::RateLimited(ms) => ms, ModelError::TooLong => 0, }} }}
+"
+        ),
+        "`fetch` needs `DbError`",
+    );
+}
+
+/// Naming a type commits to all of it: a `catch` that handles one variant and
+/// not the other would have to both subtract the type and leave it in.
+#[test]
+fn naming_an_error_type_means_handling_all_of_it() {
+    assert_reports(
+        &format!(
+            "{ERRORS}             export fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => 0, }} }}
+"
+        ),
+        "Refused",
+    );
+}
+
+/// The arms have to say which errors they handle, and a wildcard cannot: the
+/// subtraction is by type name and `_` names nothing.
+#[test]
+fn a_catch_arm_has_to_name_a_constructor() {
+    assert_reports(
+        &format!("{ERRORS}export fn safe(id: Int) -> Int {{ only_db(id)! catch {{ _ => 0, }} }}
+"),
+        "name an error constructor",
+    );
+}
+
+/// Catching something the operand cannot raise is dead code, and much more
+/// likely a typo in the type name.
+#[test]
+fn catching_an_error_nothing_raises_is_an_error() {
+    assert_reports(
+        &format!(
+            "{ERRORS}             export fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => 0, DbError::Refused => 1,              ModelError::TooLong => 2, ModelError::RateLimited(ms) => ms, }} }}
+"
+        ),
+        "nothing in this expression raises `ModelError`",
+    );
+}
+
+/// An arm stands in for the value the operand would have produced, so it has
+/// to be that type.
+#[test]
+fn a_catch_arm_produces_what_the_operand_would_have() {
+    assert_reports(
+        &format!(
+            "{ERRORS}             export fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => \"nope\", DbError::Refused => 1, }} }}
+"
+        ),
+        "catch arms disagree",
+    );
+}
+
+/// A `catch` does not excuse the mark. Control still leaves the operand, and
+/// `!` is where the reader is owed a sign of it.
+#[test]
+fn a_catch_still_needs_the_mark() {
+    assert_reports(
+        &format!(
+            "{ERRORS}             export fn safe(id: Int) -> Int {{ only_db(id) catch {{              DbError::Timeout => 0, DbError::Refused => 1, }} }}
+"
+        ),
+        "needs `!`",
+    );
+}

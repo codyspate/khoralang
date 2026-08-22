@@ -153,6 +153,20 @@ export fn analyze_or_defer(id: String) -> Report
 
 `ModelError` is gone from the signature; `DbError` passes through untouched.
 
+Two rules the arms have to follow, both of them consequences of subtracting by
+type rather than by variant:
+
+- **Naming a type commits to all of it.** Handling `RateLimited` and not
+  `TooLong` would leave `ModelError` both subtracted and still able to leave,
+  and a signature cannot say both. So the arms for a named type have to be
+  exhaustive over it, checked the same way a `match` is.
+- **There is no wildcard arm.** `_` names no type, so it cannot say what the
+  row loses. With an open row `'r` it could not even mean "everything" — there
+  is no everything to enumerate.
+
+The `!` is still required. A `catch` changes where control goes, not whether it
+leaves the operand, and the mark is what tells the reader to look.
+
 ## Effect polymorphism
 
 Function types carry effect rows, so higher-order functions are polymorphic in

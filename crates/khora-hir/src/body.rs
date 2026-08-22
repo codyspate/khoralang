@@ -23,10 +23,11 @@
 //!
 //! # Scope
 //!
-//! The phase 2 subset: no effects, rows, generics, closures or records. Syntax
-//! outside it lowers to [`Expr::Unsupported`] with a diagnostic rather than
-//! being silently dropped, so a later phase can find every site by grepping for
-//! one variant.
+//! Every expression form in the grammar lowers. There used to be an
+//! `Expr::Unsupported` for the ones that did not — the point of it was that a
+//! later phase could find every hole by grepping for one variant — and `catch`
+//! was the last of them. [`Expr::Missing`] still marks a hole a *parse* error
+//! left, which is a different thing and always will be.
 
 use khora_db::{Db, SourceFile};
 use khora_syntax::ast::{self, AstNode};
@@ -131,8 +132,6 @@ pub enum Expr {
     /// with anything, so one syntax error does not cascade into ten type
     /// errors.
     Missing,
-    /// Recognized syntax outside the phase 2 subset.
-    Unsupported(&'static str),
     Literal(Literal),
     /// A resolved local binding.
     Local(LocalId),
@@ -198,6 +197,18 @@ pub enum Expr {
     /// justifies the mark on readability; `docs/design/effect-runtime.md` §2
     /// notes it is also exactly where the check belongs.
     Try(ExprId),
+    /// `f()! catch { .. }` — handles part of the error row.
+    ///
+    /// The arms are patterns over error *values*, and the set of error types
+    /// their constructors belong to is exactly what the row loses: an error
+    /// type nobody matched still leaves through the `!`. So this is not sugar
+    /// for a `match` on a `Result`; the branch it compiles to is the one `!`
+    /// already emits, with the handled types diverted to the arms instead of
+    /// returned onward.
+    Catch {
+        inner: ExprId,
+        arms: Vec<MatchArm>,
+    },
     /// The closure currently executing, inside its own body.
     ///
     /// `let go = fn n => .. go(n - 1) ..` reads as a capture and would be one:
@@ -821,7 +832,14 @@ impl<'a> Ctx<'a> {
                     .unwrap_or_default();
                 self.add_expr(Expr::Record { owner, fields }, range)
             }
-            ast::Expr::Catch(_) => self.unsupported("`catch`", range),
+            ast::Expr::Catch(e) => {
+                let inner = match e.operand() {
+                    Some(inner) => self.lower_expr(&inner),
+                    None => self.add_expr(Expr::Missing, range),
+                };
+                let arms = self.lower_arms(e.arms(), range);
+                self.add_expr(Expr::Catch { inner, arms }, range)
+            }
             // `with { ledger: h } { body }` and `body with { ledger: h }`
             // are one thing: a region in which the labels are bound. That is
             // an ordinary block of `let`s, which is why installation needs no
@@ -835,11 +853,6 @@ impl<'a> Ctx<'a> {
                 self.lower_installation(e.row().as_ref(), body.as_ref(), range)
             }
         }
-    }
-
-    fn unsupported(&mut self, what: &'static str, range: TextRange) -> ExprId {
-        self.error(format!("{what} are not supported yet"), range);
-        self.add_expr(Expr::Unsupported(what), range)
     }
 
     fn lower_path_expr(&mut self, e: &ast::PathExpr, range: TextRange) -> ExprId {
@@ -1328,26 +1341,33 @@ impl<'a> Ctx<'a> {
             None => self.add_expr(Expr::Missing, range),
         };
 
-        let arms = e
-            .arms()
-            .map(|arm| {
-                // Each arm's bindings are scoped to that arm.
-                self.scopes.push(Vec::new());
-                let pat = match arm.pat() {
-                    Some(p) => self.lower_pat(&p, false),
-                    None => self.add_pat(Pat::Missing),
-                };
-                let guard = arm.guard().and_then(|g| g.condition()).map(|c| self.lower_expr(&c));
-                let body = match arm.body() {
-                    Some(b) => self.lower_expr(&b),
-                    None => self.add_expr(Expr::Missing, range),
-                };
-                self.scopes.pop();
-                MatchArm { pat, guard, body }
-            })
-            .collect();
-
+        let arms = self.lower_arms(e.arms(), range);
         self.add_expr(Expr::Match { scrutinee, arms }, range)
+    }
+
+    /// The arms of a `match` or a `catch`, which are the same thing: a pattern,
+    /// an optional guard, and a body, with the pattern's bindings scoped to
+    /// that arm alone.
+    fn lower_arms(
+        &mut self,
+        arms: impl Iterator<Item = ast::MatchArm>,
+        range: TextRange,
+    ) -> Vec<MatchArm> {
+        arms.map(|arm| {
+            self.scopes.push(Vec::new());
+            let pat = match arm.pat() {
+                Some(p) => self.lower_pat(&p, false),
+                None => self.add_pat(Pat::Missing),
+            };
+            let guard = arm.guard().and_then(|g| g.condition()).map(|c| self.lower_expr(&c));
+            let body = match arm.body() {
+                Some(b) => self.lower_expr(&b),
+                None => self.add_expr(Expr::Missing, range),
+            };
+            self.scopes.pop();
+            MatchArm { pat, guard, body }
+        })
+        .collect()
     }
 }
 
