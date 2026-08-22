@@ -253,7 +253,77 @@ recommendation is:
 
 `memory.md` is corrected to match.
 
-## 10. What phase 4 builds, in order
+## 10. A region is an ordinary counted value
+
+Phase 5 promises that a resource acquired in a region is released when the
+region ends, *however* it ends. The mechanism is the one §5 already described,
+used once more.
+
+**A region is a reference-counted object whose release runs its finalizers.**
+That is the whole design. Every path that ends a region is a path that releases
+a binding, and code generation already emits all of them: `leave_scope` at the
+end of a block, `unwind_to` at an early `return`, and `unwind_to` again when a
+raise passes through. No new rule about unwinding, and no second notion of a
+scope living beside the one Perceus has.
+
+Two consequences worth stating.
+
+**Finalizers run in reverse.** A finalizer deferred later may depend on one
+deferred earlier — a transaction rolled back before the connection it ran on is
+closed — so the last acquired is the first released.
+
+**The root region ends after `main` returns**, on the failing path as well as
+the ordinary one. A finalizer that runs only when nothing went wrong is not a
+finalizer, and an uncaught raise is exactly when closing a file matters.
+
+### The operation is not generic; the function on top of it is
+
+`std::core` used to declare `acquire: forall <A> . (A, A -> ()) -> A` as the
+operation of `Scope`. It cannot be one. A handler's fields are ordinary
+closures, and a closure is monomorphic — its captures have a machine layout —
+so an operation that quantifies over a type has no representation.
+
+It does not need one. The operation is
+
+```
+export effect Scope {
+  defer: (() -> ()) -> (),
+}
+```
+
+and the polymorphism moves to an ordinary generic function:
+
+```
+export fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
+  with { 'e | scope: Scope }
+{
+  scope.defer(fn () => release(value));
+  value
+}
+```
+
+This is the better factoring regardless of what closures can represent. The
+effect declares the one thing a handler has to decide — *where finalizers go* —
+and everything else is a library function anyone could have written.
+
+### Where the runtime is involved, and why
+
+Two places, both because deferring *grows* a list and nothing in Khora grows a
+value in place.
+
+The finalizers live Rust-side, behind a pointer in the region object's single
+field, and the region's `drop_fields` callback is the runtime's rather than one
+generated from a field layout. Everything else about a region is ordinary: it
+is allocated by `khora_alloc`, counted like anything else, and released by the
+same `khora_drop` every other object goes through.
+
+And `Region::defer` is a code-generation intrinsic rather than an extern,
+because the runtime has to be handed the closure's *drop routine* alongside the
+closure. A closure's routine is generated — one shared function switching on
+the site tag — so nothing but the code generator knows the pointer, and a Khora
+declaration has nowhere to write it.
+
+## 11. What phase 4 built, in order
 
 1. **Rows in the type system** (4.2): `Type::Row`, unification with reordering
    and tail extension, subtraction when a `with` discharges a requirement, and

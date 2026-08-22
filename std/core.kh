@@ -322,38 +322,75 @@ export type Never;
 
 /// Resource lifetimes.
 ///
-/// A value acquired through a scope is released when the enclosing region
-/// exits, including when the region is left by a raise or by interruption.
+/// A finalizer registered with a scope runs when the enclosing region ends,
+/// however it ends: falling off the end, an early `return`, or a raise passing
+/// through.
+///
+/// The operation takes only a thunk. A handler's fields are ordinary closures
+/// and a closure is monomorphic, so an operation cannot be generic — and it
+/// need not be: `acquire` below is an ordinary generic function that closes
+/// over the value and the release, which is where the polymorphism belongs.
 export effect Scope {
-  acquire: forall <A> . (A, A -> ()) -> A,
+  defer: (() -> ()) -> (),
+}
+
+/// A region, and the finalizers deferred to it.
+///
+/// The type is here rather than hidden because `scoped` is written in Khora
+/// and has to name it. Reference counted like everything else — which is the
+/// whole mechanism: releasing the last reference runs the finalizers, and the
+/// paths that release a binding are already the paths a region has to end on.
+export type Region;
+
+impl Region {
+  fn open() -> Region;
+  fn defer(self, finalizer: () -> ()) -> ();
+  /// The region that ends when the program does, released by the entry point
+  /// after `main` returns — on the failing path as well as the ordinary one.
+  fn root() -> Region;
 }
 
 impl Scope {
-  /// The outermost region: the one that ends when the program does.
+  /// The outermost scope: the one that ends when the program does.
   ///
   /// An entry point has to get a `Scope` from somewhere, and there is nothing
   /// above it to ask. Everything else should take one rather than reach for
   /// this — a library that roots its own scope has decided its caller's
   /// lifetimes for it.
-  fn root() -> Scope;
+  fn root() -> Scope {
+    let region = Region::root();
+    handler for Scope { defer: fn f => Region::defer(region, f) }
+  }
 }
 
 /// Runs `body` in a fresh region, discharging its `scope` requirement.
 ///
-/// This is row subtraction made concrete: `scope` is present in the body's
-/// requirement row and absent from the result's.
+/// Row subtraction made concrete: `scope` is present in the body's requirement
+/// row and absent from the result's. The region is an ordinary binding of this
+/// function, so it ends when this function does — including when `body` raises
+/// and the error passes straight through.
 export fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A
   with 'e
-  raises 'r;
+  raises 'r
+{
+  let region = Region::open();
+  with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
+    body()!
+  }
+}
+
+/// Acquires a value and registers its release in one step.
+///
+/// The generic half of `Scope`, kept out of the effect so the operation can
+/// stay a plain closure. `release` is called with `value` when the region ends.
+export fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
+  with { 'e | scope: Scope }
+{
+  scope.defer(fn () => release(value));
+  value
+}
 
 /// Converts a raise into a value, for callers that would rather branch than
 /// handle. The error row of `body` is discharged.
 export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
   with 'e;
-
-/// Runs every finalizer registered in the current scope, then re-raises.
-///
-/// Exposed for handler authors; ordinary code gets this behavior from
-/// `scoped` without asking.
-export fn on_exit<'e>(finalizer: () -> () with 'e) -> ()
-  with { 'e | scope: Scope };

@@ -31,6 +31,11 @@ pub const TAG_OFFSET: u64 = std::mem::offset_of!(KhoraHeader, tag) as u64;
 /// Byte offset of the first field from an object pointer.
 pub const FIELD_OFFSET: u64 = KHORA_FIELD_OFFSET as u64;
 
+/// The type name of a region. Not an ADT: it is a handle the runtime owns,
+/// and the only thing generated code does with one is hand it back and let it
+/// be released.
+pub const REGION_TYPE: &str = "Region";
+
 /// The tag given to a `String`.
 ///
 /// Strings are not an ADT, so no variant index competes for the value. Zero is
@@ -71,6 +76,16 @@ pub struct Runtime<'ctx> {
     pub print_str: FunctionValue<'ctx>,
     /// `_Bool khora_str_eq(const uint8_t *, size_t, const uint8_t *, size_t)`
     pub str_eq: FunctionValue<'ctx>,
+    /// `void *khora_region_open(void)`
+    pub region_open: FunctionValue<'ctx>,
+    /// `void khora_region_defer(void *region, void *closure, void (*glue)(void *))`
+    pub region_defer: FunctionValue<'ctx>,
+    /// `void khora_region_release(void *region)` — a `drop_fields` callback.
+    pub region_release: FunctionValue<'ctx>,
+    /// `void *khora_region_root(void)`
+    pub region_root: FunctionValue<'ctx>,
+    /// `void khora_region_close_root(void)`
+    pub region_close_root: FunctionValue<'ctx>,
     /// `llvm.trap`, for a branch that exhaustiveness says cannot be taken.
     pub trap: FunctionValue<'ctx>,
 }
@@ -106,6 +121,17 @@ impl<'ctx> Runtime<'ctx> {
                 "khora_str_eq",
                 i8t.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false),
             ),
+            region_open: declare("khora_region_open", ptr.fn_type(&[], false)),
+            region_defer: declare(
+                "khora_region_defer",
+                void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            ),
+            // Declared with the `drop_fields` shape, because that is what it
+            // is: `khora_drop` calls it when the last reference to a region
+            // goes, and the finalizers run there.
+            region_release: declare("khora_region_release", void.fn_type(&[ptr.into()], false)),
+            region_root: declare("khora_region_root", ptr.fn_type(&[], false)),
+            region_close_root: declare("khora_region_close_root", void.fn_type(&[], false)),
             trap: declare("llvm.trap", void.fn_type(&[], false)),
         }
     }

@@ -1018,6 +1018,17 @@ impl<'ctx> Backend<'ctx> {
             return self.closure_glue();
         }
         let Type::Adt { name, .. } = ty else { return self.null_pointer() };
+
+        // A region's release is the runtime's, not one generated from a field
+        // layout: its finalizers live Rust-side because deferring grows the
+        // list, and nothing in Khora grows a value in place. Everything else
+        // about a region is ordinary — reference counted, released by the same
+        // `khora_drop` every other object goes through — which is what makes
+        // its finalizers run on the paths that already release a local.
+        if name == runtime::REGION_TYPE {
+            return self.rt.region_release.as_global_value().as_pointer_value();
+        }
+
         let key = ty.to_string();
 
         if let Some(cached) = self.drop_glue.get(&key) {
@@ -1159,6 +1170,16 @@ impl<'ctx> Backend<'ctx> {
     // Entry point
     // -----------------------------------------------------------------------
 
+    /// Ends the region that lasts as long as the program does.
+    ///
+    /// On the failing path too: a finalizer that runs only when nothing went
+    /// wrong is not a finalizer, and an uncaught raise is exactly when closing
+    /// a file matters.
+    fn close_root_region(&mut self) {
+        let close = self.rt.region_close_root;
+        self.builder.build_call(close, &[], "").expect("closing the root region");
+    }
+
     /// Emits the C `main` the operating system actually starts.
     ///
     /// Khora's `main` is an ordinary Khora function; this is the shim that
@@ -1241,6 +1262,7 @@ impl<'ctx> Backend<'ctx> {
             self.builder.build_conditional_branch(flag, failed, ok).expect("branching on the tag");
 
             self.builder.position_at_end(failed);
+            self.close_root_region();
             let one = i32_type.const_int(1, false);
             self.builder.build_return(Some(&one)).expect("exiting on an uncaught raise");
 
@@ -1270,6 +1292,7 @@ impl<'ctx> Backend<'ctx> {
                 i32_type.const_zero()
             }
         };
+        self.close_root_region();
         self.builder.build_return(Some(&code)).expect("returning from main");
     }
 

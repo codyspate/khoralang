@@ -799,7 +799,10 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Path(khora_hir::Resolution::Variant { type_name, name, .. }) => {
                 self.construct(&type_name, &name, args, range)
             }
-            Expr::Path(khora_hir::Resolution::TraitItem { name, .. }) => {
+            Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
+                if owner == runtime::REGION_TYPE {
+                    return self.region_intrinsic(&name, args, range);
+                }
                 match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, site, args, range),
                     None => self.fail(
@@ -853,6 +856,75 @@ impl<'ctx> Lower<'_, 'ctx> {
             _ => self.fail(
                 "only a named function or a constructor can be called; there are no function \
                  values until closures land",
+                range,
+            ),
+        }
+    }
+
+    /// `Region::open` and `Region::defer`.
+    ///
+    /// Intrinsics rather than externs for one reason: `defer` has to hand the
+    /// runtime the closure's *drop routine* alongside the closure. A closure's
+    /// routine is generated — one shared function switching on the site tag —
+    /// so nothing but the code generator knows the pointer, and a Khora
+    /// declaration has nowhere to write it. Everything else about a region is
+    /// an ordinary reference-counted object.
+    fn region_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        match (name, args) {
+            // The program's own region. A reference, like any other: the
+            // binding that takes it releases it, and the entry point releases
+            // the one the runtime keeps once `main` has returned.
+            ("root", []) => {
+                let root = self.be.rt.region_root;
+                let region = self
+                    .be
+                    .builder
+                    .build_call(root, &[], "region.root")
+                    .expect("taking the root region")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a region is a value");
+                Some(region)
+            }
+            ("open", []) => {
+                let open = self.be.rt.region_open;
+                let region = self
+                    .be
+                    .builder
+                    .build_call(open, &[], "region")
+                    .expect("opening a region")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a region is a value");
+                Some(region)
+            }
+            ("defer", [region_arg, finalizer]) => {
+                let region_ty = self.types.of(*region_arg).clone();
+                let region = self.expr(*region_arg)?;
+                let closure = self.expr(*finalizer)?;
+
+                // Both arrive owned, because the reference-counting plan reads
+                // this as the ordinary call it is written as. The runtime keeps
+                // the closure — it releases it after calling it — and only
+                // borrows the region, so the region's reference is given back
+                // here rather than leaked. Getting this backwards is a region
+                // whose count never reaches zero and finalizers that never run.
+                let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
+                let defer = self.be.rt.region_defer;
+                self.be
+                    .builder
+                    .build_call(defer, &[region.into(), closure.into(), glue.into()], "")
+                    .expect("deferring a finalizer");
+                self.drop(region, &region_ty);
+                Some(self.be.unit_value())
+            }
+            _ => self.fail(
+                format!("`Region::{name}` is not a region operation the backend knows"),
                 range,
             ),
         }

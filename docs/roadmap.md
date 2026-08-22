@@ -419,10 +419,35 @@ bare `'r` in type position parsed as no name.
 ## Phase 5 — Structured concurrency
 
 Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
-`Schedule` policies. Shares continuation machinery with Phase 4.
+`Schedule` policies.
+
+- **5.1 Regions and finalizers — done.** A region is a reference-counted object
+  whose release runs its finalizers, in reverse. That makes every path that
+  ends a region a path that releases a binding, and code generation already
+  emits all of them — the end of a block, an early `return`, a raise passing
+  through. No new rule about unwinding, and no second notion of a scope beside
+  the one Perceus has. The root region ends after `main` returns, on the
+  failing path too. `docs/design/effect-runtime.md` §10.
+
+  `Scope`'s operation became `defer: (() -> ()) -> ()`, with `acquire` an
+  ordinary generic function on top. A handler's fields are closures and a
+  closure is monomorphic, so an operation cannot quantify over a type — and it
+  should not: the effect decides where finalizers go, and the rest is a library
+  function anyone could have written.
+- **5.2 Cancellation as an injected raise.** §6 says cancellation is a raise the
+  runtime injects at the next `!`, which is the property worth promising:
+  **a computation can only be interrupted where the source says it can be.**
+  Needs a per-fiber flag and a check at the mark.
+- **5.3 Fibers.** The one genuinely new subsystem, and the one that needs a
+  decision doc first: a fiber suspends a whole stack, and Khora has no
+  continuation machinery because §3 deliberately declined to build any. D10
+  (atomic reference counts) comes due here as well.
+- **5.4 `Schedule` policies.** A library, once fibers exist.
 
 **Exit:** a canceled fiber runs every finalizer in scope, verified by test;
-`khora test` runs isolated fibers across cores.
+`khora test` runs isolated fibers across cores. The finalizer half is met for
+regions — see `crates/khora-codegen-llvm/tests/regions.rs` — and waits on 5.2
+and 5.3 for the "canceled fiber" half.
 
 ---
 
