@@ -8,8 +8,8 @@
 //! # Why the parser holds the source text
 //!
 //! It borrows the source for one purpose: recognizing **contextual keywords**.
-//! `handler`, `for`, `context`, `test` and `bench` are lexed as `IDENT` so they
-//! remain usable as parameter names, fields, locals and types; the parser reads
+//! `handler`, `for`, `context`, `test`, `bench` and `derive` are lexed as
+//! `IDENT` so they remain usable as parameter names, fields, locals and types; the parser reads
 //! their spelling in the one position where each is a keyword and remaps the
 //! token with [`Parser::bump_contextual`].
 //!
@@ -135,6 +135,7 @@ impl<'a> Parser<'a> {
             || self.at_contextual(CONTEXT_KW)
             || self.at_contextual(TEST_KW)
             || self.at_contextual(BENCH_KW)
+            || self.at_contextual(DERIVE_KW)
     }
 
     // --- contextual keywords ----------------------------------------------

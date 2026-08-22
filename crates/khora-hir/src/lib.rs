@@ -22,6 +22,7 @@
 //! guessed at, which keeps the rule intact for when they arrive.
 
 pub mod body;
+pub mod derive;
 
 use khora_db::{Db, SourceFile};
 use khora_syntax::ast::{self, AstNode};

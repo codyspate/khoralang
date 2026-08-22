@@ -169,15 +169,26 @@ pub(super) fn type_args(p: &mut Parser<'_>) {
 ///
 /// One node whatever the count, so a reader of the tree never has to handle
 /// "one bound" and "several bounds" as different shapes.
+/// `T: Ord + Show` — one or more traits, separated by `+`.
+///
+/// **`primary_type` per bound, not `type_`.** `type_` is the general type
+/// parser, and to it `+` is the union that writes an error row: `Ord + Show`
+/// came back as one `UNION_TYPE`, `bound_names` only understands a path, and
+/// so a parameter with two bounds silently ended up with *none* — every method
+/// of both traits reported missing, and a diagnostic that said "add the bound,
+/// as `T: Ord`" about a signature already saying exactly that.
+///
+/// Nothing here can be a union or a function type. A bound is a trait, and a
+/// trait is a path.
 pub(super) fn bounds(p: &mut Parser<'_>) {
     let m = p.start();
-    type_(p);
+    primary_type(p);
     while p.at(PLUS) {
         p.bump(PLUS);
         if !p.tick() {
             break;
         }
-        type_(p);
+        primary_type(p);
     }
     m.complete(p, TYPE_BOUNDS);
 }

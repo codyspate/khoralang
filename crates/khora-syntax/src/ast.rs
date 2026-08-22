@@ -91,6 +91,7 @@ ast_node!(ImportList, IMPORT_LIST);
 ast_node!(ImportItem, IMPORT_ITEM);
 ast_node!(ImportGlob, IMPORT_GLOB);
 ast_node!(TypeDecl, TYPE_DECL);
+ast_node!(DeriveClause, DERIVE_CLAUSE);
 ast_node!(TraitDecl, TRAIT_DECL);
 ast_node!(ImplDecl, IMPL_DECL);
 ast_node!(AssocTypeDecl, ASSOC_TYPE_DECL);
@@ -332,6 +333,20 @@ impl TypeDecl {
     /// `None` for an opaque declaration such as `pub type Effect<+A, -R, +E>;`.
     pub fn definition(&self) -> Option<Type> {
         child(&self.0)
+    }
+    /// `derive(Eq, Ord)`, when the declaration asked for one.
+    pub fn derive_clause(&self) -> Option<DeriveClause> {
+        child(&self.0)
+    }
+}
+
+impl DeriveClause {
+    /// The traits named, in the order written.
+    ///
+    /// Nothing here says whether they exist or can be derived: the clause is a
+    /// list of words until a pass that knows what a trait is looks at it.
+    pub fn traits(&self) -> impl Iterator<Item = NameRef> {
+        children(&self.0)
     }
 }
 

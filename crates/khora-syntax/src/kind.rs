@@ -25,10 +25,10 @@ pub enum SyntaxKind {
 
     // --- keywords -------------------------------------------------------
     //
-    // `HANDLER_KW`, `FOR_KW`, `CONTEXT_KW`, `TEST_KW` and `BENCH_KW` are
-    // *contextual*: the lexer never produces them, the parser remaps an `IDENT`
-    // to one of them in the single position where the word is a keyword. See
-    // `CONTEXTUAL_KEYWORDS` below.
+    // `HANDLER_KW`, `FOR_KW`, `CONTEXT_KW`, `TEST_KW`, `BENCH_KW` and
+    // `DERIVE_KW` are *contextual*: the lexer never produces them, the parser
+    // remaps an `IDENT` to one of them in the single position where the word is
+    // a keyword. See `CONTEXTUAL_KEYWORDS` below.
     MODULE_KW,
     IMPORT_KW,
     TYPE_KW,
@@ -56,6 +56,7 @@ pub enum SyntaxKind {
     CATCH_KW,
     TEST_KW,
     BENCH_KW,
+    DERIVE_KW,
     WHILE_KW,
     LOOP_KW,
     BREAK_KW,
@@ -112,6 +113,10 @@ pub enum SyntaxKind {
     IMPORT_ITEM,
     IMPORT_GLOB,
     TYPE_DECL,
+    /// `derive(Eq, Ord)` — the traits a `type` asks the compiler to write for
+    /// it. A child of the `TYPE_DECL` it introduces, not a declaration of its
+    /// own: there is nothing to say about a `derive` apart from the type.
+    DERIVE_CLAUSE,
     TRAIT_DECL,
     IMPL_DECL,
     /// `type Item;` inside a trait or an impl.
@@ -238,9 +243,9 @@ impl SyntaxKind {
     /// Reserved words that can begin a top-level declaration; used for error
     /// recovery.
     ///
-    /// `context`, `test` and `bench` also begin declarations but are contextual
-    /// keywords, so they arrive as `IDENT` and cannot be recognized by kind
-    /// alone — the parser's `at_decl_start` covers those.
+    /// `context`, `test`, `bench` and `derive` also begin declarations but are
+    /// contextual keywords, so they arrive as `IDENT` and cannot be recognized
+    /// by kind alone — the parser's `at_decl_start` covers those.
     pub fn is_decl_start(self) -> bool {
         matches!(
             self,
@@ -360,6 +365,14 @@ contextual_keywords! {
     "context" => CONTEXT_KW,
     "test" => TEST_KW,
     "bench" => BENCH_KW,
+    // `derive(..)` only, and only immediately before `type`. Rust spells it as
+    // an attribute, `#[derive(Eq)]`, and Khora has no attribute syntax and no
+    // reason to invent one for a single feature — so the word stands on its own
+    // line above the declaration, which is where a Rust reader already looks
+    // for it. Contextual because `derive` is an ordinary thing to call a
+    // function or a local, and reserving it would be a tax on every program
+    // that never derives anything.
+    "derive" => DERIVE_KW,
     // `extern fn` only, and every other language that has the word spells it
     // as a hard keyword. Contextual anyway, for the reason above: it costs
     // nothing here, and adding it cannot break a program that already uses the

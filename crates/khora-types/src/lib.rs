@@ -8,6 +8,7 @@
 //! Row unification for effects arrives in phase 4; the shape [`Type`] needs for
 //! it is noted where it will go.
 
+pub mod derive;
 pub mod mono;
 pub mod traits;
 pub mod unify;
@@ -825,6 +826,27 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     map.signatures.extend(traits::impl_signatures(&parse.source_file()));
     map.traits = traits::collect(&parse.source_file());
 
+    // The impls this file's `derive` clauses expanded to, read by the same two
+    // functions that just read the written ones. Nothing downstream of here
+    // can tell the difference, which is the whole design: see the module
+    // comment on `khora_hir::derive`.
+    //
+    // They are appended rather than prepended so that a type which both
+    // derives `Eq` and writes one gets the duplicate reported against the
+    // `derive` — the shorter of the two things to delete, and the one whose
+    // author probably did not realize the other existed.
+    let expanded = khora_hir::derive::derived(db, file);
+    map.signatures.extend(traits::impl_signatures(&expanded.source_file()));
+    let mut generated = traits::collect(&expanded.source_file());
+    debug_assert_eq!(generated.impls.len(), expanded.impls.len());
+    for (imp, from) in generated.impls.iter_mut().zip(&expanded.impls) {
+        // The range it was collected with is an offset into generated text and
+        // means nothing here. `khora_hir::derive` explains why the `derive` is
+        // the right thing to point at instead.
+        imp.range = from.at;
+    }
+    map.traits.impls.append(&mut generated.impls);
+
     // What this file imported, under the names it uses for them. Without this
     // a cross-module call resolves and then type checks against nothing, which
     // is a *false pass* — strictly worse than the unresolved-name error it
@@ -915,32 +937,55 @@ fn import_types(
                 map.variants.extend(
                     exported.variants.iter().filter(|v| &v.type_name == name).cloned(),
                 );
-                // **`Share` travels with the type, not with the trait.** An
-                // impl normally arrives when its trait is imported, which is
-                // right for `Show` — you ask for the trait, you get the impls.
-                // `Share` is not asked for: it is a property the compiler reads
-                // when a value crosses a fiber, and a file that never mentions
-                // it still needs the answer. Without this, importing `SharedFn`
-                // without also importing `Share` made it silently unshareable.
-                for shared in exported.traits.impls.iter().filter(|i| {
-                    i.trait_name == SHARE && i.head().as_deref() == Some(name.as_str())
-                }) {
+                // **An impl travels with its type as well as with its
+                // trait.** Importing a trait brings the impls that satisfy it,
+                // which is right: you ask for `Show`, you get the instances.
+                // But it was the *only* way one arrived, so `impl Eq for Point`
+                // written beside `Point` was invisible to any file that
+                // imported `Point` — and `Eq` from `std::core` was already in
+                // scope there. That is the ordinary shape of a program, and it
+                // made a derived impl useless outside the module it came from.
+                //
+                // So: visible if either half is. `Share` needed this first and
+                // needed it most, being a property nobody asks for by name,
+                // but nothing about the rule was ever specific to it.
+                for extra in exported
+                    .traits
+                    .impls
+                    .iter()
+                    .filter(|i| i.head().as_deref() == Some(name.as_str()))
+                {
                     let known = map
                         .traits
                         .impls
                         .iter()
-                        .any(|i| i.trait_name == SHARE && i.head() == shared.head());
+                        .any(|i| i.trait_name == extra.trait_name && i.head() == extra.head());
                     if known {
-                        // Imported twice under two names is still one impl, and
-                        // the duplicate check downstream would call it two.
+                        // Imported twice — under two names, or from both sides
+                        // at once — is still one impl, and the coherence check
+                        // downstream would call it two.
                         continue;
                     }
-                    let mut shared = shared.clone();
-                    shared.local = false;
-                    map.traits.impls.push(shared);
-                    // The declaration too, or the impl is an impl of nothing.
-                    if let Some(def) = exported.traits.traits.get(SHARE) {
-                        map.traits.traits.entry(SHARE.to_string()).or_insert_with(|| def.clone());
+                    let mut extra = extra.clone();
+                    extra.local = false;
+                    let trait_name = extra.trait_name.clone();
+                    map.traits.impls.push(extra);
+
+                    // The declaration too, or it is an impl of nothing.
+                    if let Some(def) = exported.traits.traits.get(&trait_name) {
+                        map.traits
+                            .traits
+                            .entry(trait_name.clone())
+                            .or_insert_with(|| def.clone());
+                    }
+                    // And the methods, filed under `Trait#Head::method`.
+                    // Without them the call resolves and then has no signature
+                    // to be checked against.
+                    let own = format!("{trait_name}#{name}::");
+                    for (key, signature) in &exported.signatures {
+                        if key.starts_with(&own) {
+                            map.signatures.insert(key.clone(), signature.clone());
+                        }
                     }
                     if let Some(kind) = exported.kinds.get(name.as_str()) {
                         map.kinds.entry(local.clone()).or_insert_with(|| kind.clone());
@@ -955,13 +1000,24 @@ fn import_types(
                 }
                 // A trait's impls travel with it: an imported `Show` is useless
                 // if the impls that satisfy it stayed behind.
-                map.traits.impls.extend(
-                    exported.traits.impls.iter().filter(|i| &i.trait_name == name).map(|i| {
-                        let mut imported = i.clone();
-                        imported.local = false;
-                        imported
-                    }),
-                );
+                //
+                // Skipping what is already here, because since an impl also
+                // travels with its *type* the same one can arrive twice — a
+                // file importing both `Iterator` and `Range` was told that
+                // `Iterator` is already implemented for `Range`, by itself.
+                for imported in
+                    exported.traits.impls.iter().filter(|i| &i.trait_name == name)
+                {
+                    let known = map.traits.impls.iter().any(|i| {
+                        i.trait_name == imported.trait_name && i.head() == imported.head()
+                    });
+                    if known {
+                        continue;
+                    }
+                    let mut imported = imported.clone();
+                    imported.local = false;
+                    map.traits.impls.push(imported);
+                }
                 for (key, signature) in &exported.signatures {
                     if key.starts_with(&format!("{name}::"))
                         || key.starts_with(&format!("{name}#"))
@@ -1374,6 +1430,12 @@ pub struct Checked {
 pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
     let types = type_map(db, file);
     let mut out = Checked::default();
+    // Derived bodies whose `derive` was already refused. They are still
+    // inferred — code generation needs the types, and an unpredicted failure
+    // in one is a bug in the expander that has to stay visible — but what they
+    // have to say is dropped: `derive_report` has said it at the same place,
+    // naming the field instead of the expression the field turned into.
+    let refused = &derive::derive_report(db, file).refused;
     // A file that did not parse has holes in it, and a hole is an `Unknown`
     // that nothing in *this* pass reported. The syntax error is the message
     // worth reading; see `Checker::check_unknowns`.
@@ -1425,7 +1487,10 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         if parsed {
             checker.check_unknowns();
         }
-        out.errors.extend(checker.errors);
+        let reported = std::mem::take(&mut checker.errors);
+        if !refused.contains(name) {
+            out.errors.extend(reported);
+        }
         // Published types are zonked: a consumer should never see a variable,
         // and code generation cannot do anything with one.
         let exprs = checker.exprs.iter().map(|(k, v)| (*k, checker.unifier.zonk(v))).collect();
@@ -1906,7 +1971,7 @@ impl<'a> Checker<'a> {
                     // Silent for a type that is not known yet: `Unknown` is
                     // downstream of an error already reported.
                     if !matches!(owner, Type::Unknown | Type::Var(_) | Type::Never) {
-                        self.error(format!("`{owner}` has no field `{name}`"), range);
+                        self.error(self.why_no_field(&owner, &name), range);
                     }
                     return Type::Unknown;
                 };
@@ -3045,6 +3110,33 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Why a field read did not find its field.
+    ///
+    /// Usually the plain answer, but not always. A type name is written into a
+    /// signature whether or not the file imported it — `type_of_syntax` reads
+    /// the syntax and does not check that anything answers to the name — while
+    /// its *fields* arrive only with the import. So a file annotating
+    /// `List<Pair<K, V>>` without importing `Pair` type checked the annotation
+    /// and then reported that `Pair` has no field `key`, which is a sentence
+    /// about the wrong thing: the fields are not missing, the type is.
+    ///
+    /// The two halves should agree — an unimported name has no business
+    /// resolving in an annotation either — and until they do, this at least
+    /// says which of the two went wrong.
+    fn why_no_field(&self, owner: &Type, name: &str) -> String {
+        if let Type::Adt { name: type_name, .. } = owner {
+            if !self.types.adts.contains_key(type_name)
+                && !self.types.variants.iter().any(|v| &v.type_name == type_name)
+            {
+                return format!(
+                    "`{type_name}` is not in scope here, so nothing is known about its fields \
+                     — add it to an `import`"
+                );
+            }
+        }
+        format!("`{owner}` has no field `{name}`")
+    }
+
     /// Whether an assignment's target may be written.
     ///
     /// Lowering already rejects the targets that are wrong on their face — a
@@ -3961,6 +4053,11 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     // An import that resolved to nothing is the most useful thing to say about
     // a file full of "cannot find" errors downstream of it.
     all.extend(khora_hir::file_scope(db, file).errors.iter().cloned());
+    // What the `derive` clauses asked for, before what they expanded to. A
+    // `derive` that cannot be honoured makes everything after it about the
+    // impl the compiler wrote rather than the line the reader wrote.
+    all.extend(khora_hir::derive::derived(db, file).errors.iter().cloned());
+    all.extend(derive::derive_report(db, file).errors.iter().cloned());
     for (_, body) in khora_hir::body::bodies(db, file) {
         all.extend(body.errors.iter().cloned());
     }

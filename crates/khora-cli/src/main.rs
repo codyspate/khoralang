@@ -367,6 +367,27 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for root in &roots {
         gather(root, &mut out)?;
+        // **An entry point names where the program starts, not everything it
+        // is made of.** `khora build src/main.kh` has to compile the package
+        // that file belongs to, or a program stops being buildable the moment
+        // it grows a second module — which is every real program, and it
+        // failed with `cannot find module` rather than with anything a reader
+        // could act on.
+        //
+        // The package is the manifest's directory, and `walk` already declines
+        // to look in `target`. Deduplication below handles the entry file
+        // arriving twice.
+        if root.is_file() {
+            if let Some(manifest) = nearest_manifest(root) {
+                // An empty parent is the manifest in the working directory,
+                // which is `.` rather than nowhere.
+                let package = match manifest.parent() {
+                    Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+                    _ => PathBuf::from("."),
+                };
+                gather(&package, &mut out)?;
+            }
+        }
     }
 
     for root in &roots {

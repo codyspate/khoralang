@@ -817,3 +817,67 @@ fn a_projection_off_a_rigid_parameter_is_still_rigid() {
         "NumSpec",
     );
 }
+
+// --- more than one bound ---------------------------------------------------
+//
+// `T: Ord + Show` used to leave `T` with *no* bounds at all. The bound parser
+// called the general type parser, to which `+` is the union that writes an
+// error row, so both traits came back as one `UNION_TYPE`; `bound_names` only
+// understands a path, so it yielded nothing. The result was every method of
+// both traits reported missing, under a diagnostic reading "add the bound, as
+// `T: Ord`" about a signature that already said exactly that.
+
+const TWO: &str = "module m;\n\
+                   export trait Show { fn show(self) -> String; }\n\
+                   export trait Tag { fn tag(self) -> Int; }\n\
+                   impl Show for Int { fn show(self) -> String { \"i\" } }\n\
+                   impl Tag for Int { fn tag(self) -> Int { 1 } }\n";
+
+#[test]
+fn two_bounds_are_both_kept() {
+    assert_clean(&format!(
+        "{TWO}export fn both<T: Show + Tag>(v: T) -> String {{ v.show() }}\n"
+    ));
+}
+
+/// The second one is not swallowed by the first.
+#[test]
+fn the_later_bound_is_kept_too() {
+    assert_clean(&format!(
+        "{TWO}export fn both<T: Show + Tag>(v: T) -> Int {{ v.tag() }}\n"
+    ));
+}
+
+/// And a method of a trait that was *not* named is still refused, so the fix
+/// did not turn the bound list into "everything".
+#[test]
+fn a_trait_left_out_of_the_bounds_is_still_missing() {
+    assert_reports(
+        &format!("{TWO}export fn one<T: Show>(v: T) -> Int {{ v.tag() }}\n"),
+        // The message names the bounds the parameter does have, which is only
+        // worth reading now that the list is accurate.
+        "no method `tag` on `T`, whose bounds are `Show`",
+    );
+}
+
+/// Three, to check the loop rather than the pair.
+#[test]
+fn three_bounds_are_all_kept() {
+    assert_clean(
+        "module m;\n\
+         export trait A { fn a(self) -> Int; }\n\
+         export trait B { fn b(self) -> Int; }\n\
+         export trait C { fn c(self) -> Int; }\n\
+         export fn all<T: A + B + C>(v: T) -> Int { v.a() + v.b() + v.c() }\n",
+    );
+}
+
+/// A supertrait list is the same production, so it had the same hole.
+#[test]
+fn two_supertraits_are_both_kept() {
+    assert_clean(&format!(
+        "{TWO}\
+         export trait Both: Show + Tag {{ fn both(self) -> Int; }}\n\
+         export fn use_it<T: Both>(v: T) -> Int {{ v.tag() }}\n"
+    ));
+}

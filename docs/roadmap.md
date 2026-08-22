@@ -715,10 +715,13 @@ argument that settled A6.
   bounds-checked; `List` is a linked list, which is the wrong shape for almost
   everything and the wrong shape for reuse analysis to pay off on.
 
-  Fixed length because growing is a *library* question. A vector is
-  `{ mut items: Array<A>, mut len: Int }` and can be written in Khora now that
-  a field can be written — `a_vector_can_be_written_in_khora` does exactly
-  that, and it is the first non-trivial data structure the language has held.
+  Fixed length because growing is a *library* question, and it turned out to
+  be one with a wrinkle. `Vector<A>` is in `std::core` now, but it is
+  `{ mut items: Array<A>, mut len: Int, mut wanted: Int }` — `Array::new`
+  wants a value to fill with and an empty vector has none, so the backing
+  array could not be made at all until `Array::empty()` was added beside it.
+  The third field is what keeps `with_capacity`'s promise in the meantime. See
+  the "Not yet" entry, which carries the mistake that came first.
 
   Allocation and release are runtime calls, because both need the length at run
   time. Reading an element is a bounds check and a load, because the layout is
@@ -1211,18 +1214,68 @@ them was in the part anybody was worried about.
 What still stands between here and a program somebody would use, in the order
 they will be missed:
 
-- **A growable list.** `Array<A>` is fixed and `List<A>` is a chain of
-  allocations. A vector is `{ mut items: Array<A>, mut len: Int }` and a test
-  already writes one; `std` should. Fiber-local, like `Map` — the shareable
-  ordered map is `Dict`, which landed with `Shared<A>`.
-- **`derive`.** Every `Eq`, `Ord`, `Show` and `Hash` is written out by hand,
-  which is a tax that grows with the program rather than with the language.
-- **A finer clock.** `time` is whole seconds because that is what ISO C offers.
-  Anything that measures itself needs milliseconds, which is per-target.
-- **macOS.** `std::net::socket` has Windows and Linux; a `sockaddr_in` there
-  puts a length byte where the others put half the family.
-- **Processes**, for a program that runs another one, and **randomness**, which
-  every server needs before it needs most of what is above.
+- ~~**A growable list.**~~ Done — `Vector<A>` in `std::core`, contiguous,
+  indexed in constant time and appended to in amortised constant time.
+  Fiber-local, like `Map`: the `mut` fields that make `push` cheap are exactly
+  what the sharing rules refuse to a second fiber, and the shareable sequence
+  is a `Shared<List<A>>` or a `Shared<Dict<K, V>>`.
+
+  It is `{ mut items: Array<A>, mut len: Int, mut wanted: Int }`, and the third
+  field is the interesting part. `Array::new(length, fill)` demands a value to
+  fill with and `Vector::new()` has no `A` in its hands, so there was no way to
+  make the backing array at all — the first attempt made the cells `Option<A>`,
+  which type checked, passed its tests, read perfectly well, and cost a heap
+  allocation per element: a hundred integers were a hundred and three live
+  objects. `Array::empty()` closes the real gap — a zero-length array needs
+  nothing to fill — the first `push` allocates using the element being pushed,
+  and `wanted` is what keeps `with_capacity`'s promise until there is a value
+  to keep it with. A thousand integers are two objects.
+- ~~**`derive`.**~~ Done. `derive(Eq, Ord, Show, Hash)` above a `type`, with
+  `derive` a contextual keyword so a program that already has a field called
+  `derive` keeps it. Expanded source-to-source into ordinary impls before the
+  checker runs, so nothing downstream — inference, exhaustiveness, Perceus,
+  monomorphization, the backend — learns that it exists, and every range in a
+  generated body points at the `derive` clause the author wrote.
+
+  Structural, and refusing rather than guessing: a field whose type lacks the
+  trait is named. `Ord` and `Hash` require `Eq` rather than implying it, read
+  off the trait's declared supertraits. Field and declaration order decide
+  comparison order. A derived `Hash` and a derived `Eq` read the same fields in
+  the same order, so equal values hash equal by construction, and both operands
+  are reduced at every step because `*` and `+` trap on overflow and
+  `Hash for Int` is the identity. Generic types get the bound: `derive(Eq)` on
+  `Box<A>` is `impl<A: Eq> Eq for Box<A>`.
+
+  Converting `std`'s hand-written impls is the follow-up.
+- ~~**A finer clock.**~~ Done. `Clock` gained `unix_millis` and
+  `monotonic_millis`, and `unix_seconds` is now derived from the first rather
+  than from `time`, so the two can never straddle a tick. They are separate
+  operations on purpose: a wall clock jumps backwards when something corrects
+  it, so a difference of two readings is not a duration, and a monotonic clock
+  has no epoch anyone outside the process can name, so it is never a
+  timestamp. One `millis` would have been the wrong one about half the time.
+- **macOS sockets.** `std::net::socket` has Windows and Linux; a `sockaddr_in`
+  there puts a length byte where the others put half the family. Processes are
+  already covered — `std/process_posix.kh` is named for the family rather than
+  for Linux, because `popen` and a wait status are the same on both — but it
+  has never been run, and neither has the Linux half.
+- ~~**Processes**~~ and ~~**randomness**~~, both done.
+
+  `std::process` is a capability with `status` and `capture`. A non-zero exit
+  is not an error — it ran, and its status is the answer — so only
+  `checked_output` promotes one. It goes through a shell, which means the
+  caller is writing a command line and the usual quoting and injection
+  concerns are theirs; an argv-based `spawn` wants `CreateProcess` and
+  `posix_spawn`, which take structs the C ABI rule forbids, so it is a runtime
+  function and the follow-up.
+
+  `std::random` is a capability too, and for a sharper reason than most:
+  `Random::seeded(n)` is what makes a test that draws reproducible instead of
+  passing ninety-nine runs in a hundred. Its state is a `Shared<Int>`, so two
+  fibers drawing at once are serialized by the same cell every other shared
+  value uses. It is splitmix64 and says loudly that it is not cryptographic —
+  a token wants a differently-named capability, so that a program says which
+  one it needed.
 - ~~**`Shared<A>`.**~~ Done — `docs/design/shared.md`. A cell of shareable
   values, not a lock over a mutable record: nothing unshareable goes in or
   comes out, so the escape question Rust answers with lifetimes does not arise.
@@ -1237,7 +1290,7 @@ they will be missed:
   can require a capability it never mentions, but cannot *mention* one that is
   not in scope, because a bare name is resolved by ordinary lookup.
 
-None of it needs a decision now; it is library work over a language that came
+What is left needs no decision; it is library work over a language that came
 out of phase 8 in good shape.
 
 ---

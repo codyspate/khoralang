@@ -374,6 +374,17 @@ pub struct Body {
 }
 
 impl Body {
+    /// Points every range in this body at `at`.
+    ///
+    /// For a body the compiler wrote rather than read. See the note in
+    /// [`bodies`]: the ranges it was lowered with belong to a generated string
+    /// and mean nothing in the file the reader has open.
+    fn blame(&mut self, at: TextRange) {
+        self.expr_ranges.iter_mut().for_each(|range| *range = at);
+        self.locals.iter_mut().for_each(|local| local.range = at);
+        self.errors.iter_mut().for_each(|error| error.range = at);
+    }
+
     pub fn expr(&self, id: ExprId) -> &Expr {
         &self.exprs[id.index()]
     }
@@ -480,6 +491,26 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
             _ => Vec::new(),
         })
         .collect();
+
+    // The impls a `derive` clause expanded to. Lowered here, with this file's
+    // items and scope, so that a derived body resolves `Ordering::Less` and
+    // `self.x.eq(..)` through exactly the same machinery a written one does —
+    // which is the point of expanding to source in the first place.
+    //
+    // Every range in them is then rewritten to the `derive` that asked for
+    // them. The offsets a generated body carries are offsets into a string
+    // that is not this file, so a diagnostic holding one would underline an
+    // arbitrary span of the source, or a span past its end. The `derive` is
+    // both a safe place to point and the right one: it is the line whose
+    // author has something to change.
+    for (imp, from) in crate::derive::derived(db, file).declarations() {
+        for (key, mut body) in
+            methods(map, scope, &contexts, &constants, &impl_key(&imp), imp.functions())
+        {
+            body.blame(from.at);
+            out.push((key, body));
+        }
+    }
 
     // A test's body is a function body like any other: it is checked, it is
     // reference counted, and `khora test` compiles it. Numbered by position

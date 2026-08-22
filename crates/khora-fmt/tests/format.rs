@@ -162,6 +162,14 @@ fn is_formatted_agrees_with_format() {
     assert!(!is_formatted("module m;\nfn f() {    1 }\n").unwrap());
 }
 
+/// `derive(Eq)`, not `derive (Eq)`: the argument list belongs to the word, the
+/// same way an impl's parameters belong to `impl`.
+#[test]
+fn a_derive_clause_hugs_its_traits() {
+    let src = "module m;\n\nderive(Eq, Ord)\nexport type Point = { x: Int, y: Int };\n";
+    assert_eq!(format(src).unwrap(), src);
+}
+
 #[test]
 fn a_file_with_only_a_module_declaration_formats() {
     assert_eq!(format("module m;").unwrap(), "module m;\n");
