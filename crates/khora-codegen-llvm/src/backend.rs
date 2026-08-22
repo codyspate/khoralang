@@ -206,6 +206,10 @@ fn build(
         crate::lower::emit_closure(&mut backend, &site, body, Some(&plan), owner_types, mono);
     }
 
+    // After every body and every lifted closure, because lowering is what
+    // assigns error ids and the last one compiled may add another.
+    backend.emit_error_releaser();
+
     match entry_point {
         Entry::Main => {
             let entry =
@@ -558,6 +562,10 @@ pub(crate) struct Backend<'ctx> {
     /// the `which` of a tagged return, so 1 is the lowest: 0 means the call
     /// did not raise. See `docs/design/effect-runtime.md` §2.
     error_ids: HashMap<String, u32>,
+    /// The releaser a wildcard `catch` calls, declared on first use.
+    ///
+    /// `khora.release_error(which, word)`. See [`Backend::release_error`].
+    error_releaser: Option<FunctionValue<'ctx>>,
     pub errors: Vec<HirError>,
 }
 
@@ -612,6 +620,7 @@ impl<'ctx> Backend<'ctx> {
             pending_thunks: Vec::new(),
             trampolines: HashMap::new(),
             error_ids: HashMap::new(),
+            error_releaser: None,
             errors: Vec::new(),
         }
     }
@@ -689,6 +698,80 @@ impl<'ctx> Backend<'ctx> {
     /// deterministic for a given program and never crosses a module boundary
     /// — there is no separate compilation yet, and when there is, this becomes
     /// a link-time numbering rather than a lazy one.
+    /// Releases an error whose type is not known where it is caught.
+    ///
+    /// `catch { _ => .. }` handles the whole row, tail and all, so the arm has
+    /// no static type to select drop glue from — and the row may be `'e`, which
+    /// nothing at this point in the pipeline can enumerate either. Dropping the
+    /// object with a null callback would free the object and leak every boxed
+    /// field inside it, once per caught error, which on a server's failure path
+    /// is a leak per request rather than a bounded one.
+    ///
+    /// So the dispatch is deferred to a function emitted once, at the end,
+    /// when every error type in the program has an id: a `switch` on `which`
+    /// whose cases each release the word as the type that id belongs to. The
+    /// caller only has to know the id, which is the one thing it does know.
+    ///
+    /// [`Backend::emit_error_releaser`] is the definition.
+    pub fn release_error(&mut self) -> FunctionValue<'ctx> {
+        if let Some(existing) = self.error_releaser {
+            return existing;
+        }
+        let signature = self.ctx.void_type().fn_type(
+            &[self.ctx.i32_type().into(), self.ctx.i64_type().into()],
+            false,
+        );
+        let function = self.module.add_function("khora.release_error", signature, None);
+        self.error_releaser = Some(function);
+        function
+    }
+
+    /// Defines the releaser, if anything asked for it.
+    ///
+    /// Emitted after every function and every lifted closure, because lowering
+    /// is what assigns error ids and one more may be assigned by the last body
+    /// compiled.
+    pub fn emit_error_releaser(&mut self) {
+        let Some(function) = self.error_releaser else { return };
+        let entry = self.ctx.append_basic_block(function, "entry");
+        let done = self.ctx.append_basic_block(function, "done");
+
+        let which = function.get_nth_param(0).expect("which").into_int_value();
+        let word = function.get_nth_param(1).expect("word").into_int_value();
+
+        // By id, so the switch reads in the order the ids were handed out and
+        // two compilations of the same program emit the same function.
+        let mut known: Vec<(String, u32)> =
+            self.error_ids.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        known.sort_by_key(|(_, id)| *id);
+
+        let mut cases = Vec::with_capacity(known.len());
+        for (name, id) in &known {
+            let block = self.ctx.append_basic_block(function, &format!("release.{name}"));
+            self.builder.position_at_end(block);
+            let ty = Type::adt(name);
+            if is_boxed(&ty) {
+                let value = self.word_to_value(word, &ty);
+                let glue = self.drop_glue(&ty);
+                let drop = self.rt.drop;
+                self.builder
+                    .build_call(drop, &[value.into(), glue.into()], "")
+                    .expect("releasing a caught error");
+            }
+            self.builder.build_unconditional_branch(done).expect("leaving a release case");
+            cases.push((self.ctx.i32_type().const_int(u64::from(*id), false), block));
+        }
+
+        self.builder.position_at_end(entry);
+        self.builder.build_switch(which, done, &cases).expect("dispatching on the error type");
+
+        // Anything with no id owns nothing this function knows how to release.
+        // A cancellation reaches here only if a caller passed one on purpose;
+        // it carries no payload, so doing nothing is right.
+        self.builder.position_at_end(done);
+        self.builder.build_return(None).expect("returning from the releaser");
+    }
+
     pub fn error_id(&mut self, name: &str) -> u32 {
         if let Some(id) = self.error_ids.get(name) {
             return *id;

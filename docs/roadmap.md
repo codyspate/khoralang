@@ -1048,6 +1048,36 @@ can be written before anything needs TLS.
   The HTTP server answers on a fiber per connection, pinned by a client that
   connects and says nothing while another is served past it.
 
+- **Errata 45 — a wildcard `catch` was checked but not generated.**
+  `lower_catch` grouped arms by the error type they name; `_` names none, so it
+  was skipped and the switch's default still propagated. The checker said the
+  function could not fail while the code took the unhandled path, and a program
+  with no `raises` clause walked into `unreachable` — `catch { _ => -1 }` around
+  a raise printed nothing and exited 130. `std`'s own `serve_connection` was
+  built on it, so a failing handler would have killed the fiber rather than
+  answering 500.
+
+  The arm takes the fall-through now, with cancellation and a test failure kept
+  on the propagate path by explicit cases: a `_` that stopped a cancellation
+  would break every nursery. Releasing what it caught needed a new piece — the
+  arm binds nothing and has no static type, and the row may be `'e`, which
+  nothing at that point can enumerate. `Backend::emit_error_releaser` emits one
+  function at the end of compilation, when every error type has an id, and
+  switches on it. Pinned by a live-object count of zero after catching an error
+  that carried a boxed field.
+
+- **Errata 46 — `Share` was forgeable.** It was recognised by the bare name, so
+  any file could declare `trait Share {}`, write `impl<A> Share for Array<A>`,
+  and hand two fibers an array that `Array::set` writes. Only the module that
+  declares a type may assert its shareability now, and an imported impl is
+  skipped rather than re-judged.
+
+  What remains is identity: `Share`, `Fiber`, `SharedFn` and the rest are still
+  matched by name rather than by where they were declared, so a file declaring
+  its own `Array` gets the array intrinsics. Not new and not reachable by
+  accident, but it is what stands between this and calling `Share` a boundary.
+  It wants compiler-known identity for the whole set at once.
+
 **Exit — the real one.** *You can write a useful program.* The served request
 below is a milestone rather than the criterion: it proved the stack works end
 to end and it measured the compiler, not the library. What the library still

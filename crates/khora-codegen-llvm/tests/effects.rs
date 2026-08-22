@@ -1423,3 +1423,143 @@ fn main() -> Int {
         "expected the missing impl to be named, got {found:?}"
     );
 }
+
+// --- a wildcard arm --------------------------------------------------------
+//
+// `_` subtracts the whole row, tail included. It was type-checked before it
+// was code-generated: `lower_catch` grouped the arms by the error type they
+// name, a wildcard names none, so the switch's default still propagated while
+// the checker said the function could not fail — and a program with no
+// `raises` clause then walked into `unreachable`. These pin it.
+
+/// Every concrete error in the row, taken by the one arm.
+#[test]
+fn a_wildcard_arm_catches_a_concrete_error() {
+    let ran = run(
+        "catch_wild_concrete",
+        &format!(
+            "{TWO_ERRORS}
+fn safe(n: Int) -> Int {{ fetch(n)! catch {{ _ => 0 - 1, }} }}
+fn main() -> Int {{
+  print(safe(1));
+  print(safe(2));
+  print(safe(3));
+  print(safe(9));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "-1\n-1\n-1\n9\n",
+        "both error types went to the one arm, and success still came back"
+    );
+    assert_eq!(ran.code, Some(0), "the function really cannot fail now");
+}
+
+/// The row the *caller* chose. `'e` is rigid inside `supervise`, so there is no
+/// constructor to name and no set of error types to enumerate — the case a
+/// wildcard exists for, and the one with no static type to take drop glue
+/// from.
+#[test]
+fn a_wildcard_arm_catches_a_row_the_caller_chose() {
+    let ran = run(
+        "catch_wild_generic",
+        &format!(
+            "{TWO_ERRORS}
+fn supervise<'e>(work: () -> Int raises 'e) -> Int {{ work()! catch {{ _ => 0 - 1, }} }}
+fn main() -> Int {{
+  print(supervise(fn () => fetch(1)!));
+  print(supervise(fn () => fetch(2)!));
+  print(supervise(fn () => fetch(9)!));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "-1\n-1\n9\n",
+        "a supervisor recovered from failures it cannot name"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// An error type carrying something boxed.
+const BOXED_ERRORS: &str = "module t;
+fn print(value: Int);
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
+
+export type Node = | Of(value: Int);
+export type Heavy = | Detail(node: Node) | Plain;
+export type DbError = | Timeout | Refused;
+
+fn fetch(n: Int) -> Int raises Heavy + DbError {
+  if n == 1 { raise Heavy::Detail(Node::Of(7)) }
+  if n == 2 { raise Heavy::Plain }
+  if n == 3 { raise DbError::Timeout }
+  n
+}
+";
+
+/// The hard half. A wildcard arm binds nothing — there is no name to bind
+/// under — so the arm is the only place the error can be let go of, and it has
+/// no static type to select drop glue from. Releasing the object with a null
+/// callback would free it and leak every boxed field inside, once per caught
+/// error, which on a server's failure path is a leak per request.
+#[test]
+fn a_wildcard_arm_releases_what_it_caught() {
+    let ran = run(
+        "catch_wild_release",
+        &format!(
+            "{BOXED_ERRORS}
+fn safe(n: Int) -> Int {{ fetch(n)! catch {{ _ => 0 - 1, }} }}
+fn main() -> Int {{
+  khora_print_int(safe(1));
+  khora_print_int(safe(2));
+  khora_print_int(safe(3));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "-1\n-1\n-1\n0\n",
+        "the trailing 0 is the live-object count: the `Node` inside the caught \
+         `Heavy::Detail` went with it"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A named arm and a wildcard in one `catch`: the named one still gets its
+/// own error, and the wildcard takes what is left including the row's tail.
+#[test]
+fn a_named_arm_and_a_wildcard_share_one_catch() {
+    let ran = run(
+        "catch_wild_mixed",
+        &format!(
+            "{TWO_ERRORS}
+fn safe(n: Int) -> Int {{
+  fetch(n)! catch {{
+    ModelError::RateLimited(ms) => ms,
+    ModelError::TooLong => 0 - 2,
+    _ => 0 - 1,
+  }}
+}}
+fn main() -> Int {{
+  print(safe(1));
+  print(safe(2));
+  print(safe(3));
+  print(safe(9));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "-1\n500\n-2\n9\n",
+        "the `DbError` fell to `_` while `ModelError` kept its own arms"
+    );
+    assert_eq!(ran.code, Some(0));
+}

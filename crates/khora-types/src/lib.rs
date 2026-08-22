@@ -407,6 +407,11 @@ pub struct TypeMap {
     /// The kind of every named type, so an impl can be checked against the
     /// kind its trait requires.
     pub kinds: HashMap<String, traits::Kind>,
+    /// The type names this file declares itself, before any import.
+    ///
+    /// The one question an orphan rule needs, and `adts` cannot answer it: an
+    /// imported type is in there too. `docs/design/sharing.md`.
+    pub declared_here: HashSet<String>,
     /// The names declared with `effect` rather than `type`.
     ///
     /// An effect is a record of function types, which would make every one of
@@ -469,6 +474,15 @@ impl TypeMap {
     /// A declared type with no body cannot be looked into, which is the one
     /// place `impl Share` is allowed to speak. Everything else — a record, a
     /// variant, a tuple, a primitive — answers for itself.
+    /// Whether this file is the one that declares `ty`.
+    pub fn declares(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Applied { head, .. } => self.declares(head),
+            Type::Adt { name, .. } => self.declared_here.contains(name),
+            _ => false,
+        }
+    }
+
     pub fn is_opaque(&self, ty: &Type) -> bool {
         match ty {
             Type::Applied { head, .. } => self.is_opaque(head),
@@ -729,6 +743,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     fields.push(type_of_syntax(op.ty().as_ref(), &generics));
                 }
                 map.effects.insert(name.clone());
+                map.declared_here.insert(name.clone());
                 map.variants.push(VariantInfo {
                     type_name: name.clone(),
                     name,
@@ -748,6 +763,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     .unwrap_or_default();
                 consts.insert(type_name.clone(), is_const);
                 map.adts.insert(type_name.clone(), generics.clone());
+                map.declared_here.insert(type_name.clone());
                 // `type Point = { x: Int, y: Int }` is one variant carrying
                 // named fields — the same shape a constructor already has, so
                 // field access, construction and drop glue are all reused.
@@ -919,7 +935,9 @@ fn import_types(
                         // the duplicate check downstream would call it two.
                         continue;
                     }
-                    map.traits.impls.push(shared.clone());
+                    let mut shared = shared.clone();
+                    shared.local = false;
+                    map.traits.impls.push(shared);
                     // The declaration too, or the impl is an impl of nothing.
                     if let Some(def) = exported.traits.traits.get(SHARE) {
                         map.traits.traits.entry(SHARE.to_string()).or_insert_with(|| def.clone());
@@ -937,9 +955,13 @@ fn import_types(
                 }
                 // A trait's impls travel with it: an imported `Show` is useless
                 // if the impls that satisfy it stayed behind.
-                map.traits
-                    .impls
-                    .extend(exported.traits.impls.iter().filter(|i| &i.trait_name == name).cloned());
+                map.traits.impls.extend(
+                    exported.traits.impls.iter().filter(|i| &i.trait_name == name).map(|i| {
+                        let mut imported = i.clone();
+                        imported.local = false;
+                        imported
+                    }),
+                );
                 for (key, signature) in &exported.signatures {
                     if key.starts_with(&format!("{name}::"))
                         || key.starts_with(&format!("{name}#"))
@@ -1445,7 +1467,13 @@ pub fn check_file(db: &dyn Db, file: SourceFile) -> &Vec<HirError> {
 #[salsa::tracked(returns(ref))]
 pub fn trait_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     let types = type_map(db, file);
-    traits::check(&types.traits, &types.kinds, &types.signatures, &|ty| types.is_opaque(ty))
+    traits::check(
+        &types.traits,
+        &types.kinds,
+        &types.signatures,
+        &|ty| types.is_opaque(ty),
+        &|ty| types.declares(ty),
+    )
 }
 
 /// Which clause a requirement came from.

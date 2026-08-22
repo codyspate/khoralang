@@ -86,10 +86,18 @@ writing one array compiled and raced.
 So a declared type with no body is unshareable until `impl Share for T`.
 
 `Share` is a marker: no methods, and implementing it asserts rather than
-provides. It is therefore **not an ordinary impl**, and may only be written
-where there is nothing to check — a type with no body. For anything this
-compiler can see into, the answer is derived and an impl is refused, because the
-only thing it could add is a lie about a record with a `mut` field.
+provides. It is therefore **not an ordinary impl**, and may be written in one
+place only: the module that declares the type, and only for a type with no body.
+
+The orphan half is not decoration. Without it the marker is forgeable by
+anyone — declare a trait of your own spelled `Share`, write
+`impl<A> Share for Array<A>`, and an array becomes something two fibers may
+hold. That compiled, and raced. The author of a type is the only one who knows
+what the compiler cannot, so they are the only one who may say.
+
+For anything this compiler *can* see into, the answer is derived and an impl is
+refused outright, because the only thing one could add is a lie about a record
+with a `mut` field.
 
 Nobody writes it for a record, a variant or a tuple: those are shareable exactly
 when their contents are, and a `Share` bound is satisfied by looking rather than
@@ -155,6 +163,14 @@ Router::answer_on(router, connection) catch { _ => respond_500() }
 dynamic, and it costs what it should — the arm learns nothing about what went
 wrong, because there is no name to learn it under.
 
+Two things it must not take. A **cancellation** travels the same channel and is
+in nobody's row, so a `_` that stopped one would break every nursery; it keeps
+the propagate path by an explicit case, and so does a test failure. And what
+the arm *did* take has to be released with no static type to take drop glue
+from — `Backend::emit_error_releaser` switches on the error id instead, in a
+function emitted once at the end when every id is known. Errata 45 is what
+happens without either.
+
 ## What the runtime owes
 
 An `impl Share` is a promise the runtime has to keep, so:
@@ -170,6 +186,16 @@ An `impl Share` is a promise the runtime has to keep, so:
   still running, which is precisely the promise a nursery makes. The lock is
   never held across a join, or that adoption would deadlock against it.
 
+## What `Share` is not yet
+
+**A boundary.** The compiler recognises `Share`, `Fiber`, `SharedFn` and the
+rest by their bare names, so a file that declares its own `Array` gets the
+array intrinsics, and a compiler-special concept can be entered by spelling.
+The orphan rule closes the reachable forgery; calling any of this a safety
+property needs compiler-known identity — a sealed `Share` that is *the* one
+from `std::core` rather than any trait spelled that way, and the same for the
+handful of types the backend treats specially. One change, for the whole set.
+
 ## What is still open
 
 - **`Shared<A>`**, for the cases the rules above refuse on purpose: a stateful
@@ -181,7 +207,6 @@ An `impl Share` is a promise the runtime has to keep, so:
   value safely, and would take the pressure off `Shared<A>`.
 - **`Map` cannot cross**, because it mutates its buckets in place. Correct
   today; a persistent map would simply be shareable, with nothing to declare.
-- **A lambda has no evidence parameters**, so `nursery(fn () => ...)` — a
-  higher-order function that installs a capability *for* its callback — cannot
-  work: a capability is a lexical binding, and the thunk was written before the
-  binding existed. `Router::listen` writes the `with` block out instead.
+- **A lambda has no evidence parameters.** A higher-order function that
+  installs a capability for its callback takes a named function, not a lambda,
+  so eta-expansion changes meaning. `docs/design/capability-passing.md`.

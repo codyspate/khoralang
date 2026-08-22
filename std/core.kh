@@ -1361,6 +1361,23 @@ export effect Nursery {
 /// outlive this block, because leaving it — at the end, on a `return`, or with
 /// a raise passing through — releases the nursery, and releasing a nursery
 /// stops what is still running.
+///
+/// **Pass a named function, not a lambda.** A named function receives what its
+/// `with` clause names as evidence parameters, so it can be handed here and
+/// called with the nursery this function installs:
+///
+/// ```khora
+/// fn serve<'e>() -> () with { 'e | nursery: Nursery } { .. }
+/// nursery(serve)!
+/// ```
+///
+/// A lambda cannot, and `nursery(fn () => serve()!)` is refused: a lambda's
+/// requirement row is always empty, because it *captures* the capabilities it
+/// uses rather than receiving them — and this thunk was written before the
+/// binding existed, so there is nothing to capture.
+///
+/// Which makes eta-expansion change meaning, and it should not.
+/// `docs/design/capability-passing.md` decides what to do about that.
 export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
   with 'e
   raises 'r
@@ -1382,8 +1399,7 @@ export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises
 /// function, so it ends when this function does — including when `body` raises
 /// and the error passes straight through.
 ///
-/// **Cannot be called yet**, for the reason on `nursery`: a thunk cannot
-/// receive a capability from the function it is passed to.
+/// **Pass a named function, not a lambda**, for the reason on `nursery`.
 export fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A
   with 'e
   raises 'r

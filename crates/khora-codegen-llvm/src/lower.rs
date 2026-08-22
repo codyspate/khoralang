@@ -4138,6 +4138,20 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// partial `catch` costs one extra `switch` and nothing else. Within a
     /// named type the arms dispatch on the object tag exactly as a `match`
     /// does, which is why they share `emit_arms`.
+    ///
+    /// **A `_` arm takes the fall-through instead.** It has no error type, so
+    /// grouping the arms by the type they name skipped it entirely and the
+    /// switch's default still propagated — the checker said the function could
+    /// not fail while the code still took the unhandled path, which for a
+    /// program with no `raises` clause meant walking into `unreachable`.
+    ///
+    /// Two things it must not swallow. A **cancellation** is not an error and
+    /// is in nobody's row, so it keeps the propagate path by an explicit case;
+    /// a `_` that stopped one would break every nursery. A **test failure**
+    /// travels the same channel to the runner, and goes the same way.
+    ///
+    /// Releasing what it caught is [`Backend::release_error`]: there is no
+    /// static type here to take drop glue from, so the id does it at runtime.
     fn lower_catch(
         &mut self,
         id: ExprId,
@@ -4190,8 +4204,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         // Group the arms by the error type they name, keeping written order so
         // the emitted blocks read in the order the source does.
         let mut caught: Vec<(String, Vec<MatchArm>)> = Vec::new();
+        let mut everything: Option<MatchArm> = None;
         for arm in arms {
-            let Some(owner) = self.owner_of(arm.pat) else { continue };
+            let Some(owner) = self.owner_of(arm.pat) else {
+                if matches!(self.body.pat(arm.pat), khora_hir::body::Pat::Wildcard) {
+                    everything = Some(arm.clone());
+                }
+                continue;
+            };
             match caught.iter_mut().find(|(name, _)| name == &owner) {
                 Some((_, mine)) => mine.push(arm.clone()),
                 None => caught.push((owner, vec![arm.clone()])),
@@ -4208,12 +4228,28 @@ impl<'ctx> Lower<'_, 'ctx> {
             })
             .collect();
 
+        // Where anything the arms did not name goes. Without a `_` that is
+        // still the propagate path; with one it is the arm, and the two things
+        // that travel this channel without being errors are routed back to
+        // propagating by name.
+        let (fallthrough, mut escapes) = match &everything {
+            None => (onward, Vec::new()),
+            Some(_) => (
+                self.block("catch.rest"),
+                vec![runtime::CANCELLED_WHICH, runtime::FAILED_WHICH],
+            ),
+        };
+        let mut cases = cases;
+        for escape in escapes.drain(..) {
+            cases.push((self.be.ctx.i32_type().const_int(escape, false), onward));
+        }
+
         self.at(handler);
         let which = which.as_basic_value().into_int_value();
         let word = word.as_basic_value().into_int_value();
         self.be
             .builder
-            .build_switch(which, onward, &cases)
+            .build_switch(which, fallthrough, &cases)
             .expect("dispatching on the error type");
 
         // Not ours: release the frame and hand it to whoever is next. Nested
@@ -4246,6 +4282,29 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             self.br(merge);
             reached += 1;
+        }
+
+        if let Some(arm) = everything {
+            self.at(fallthrough);
+            // Released first, by id, because after this there is no handle on
+            // it: the arm binds nothing — a `_` has no name to bind under —
+            // so this is the only place the error can be let go of.
+            let releaser = self.be.release_error();
+            self.be
+                .builder
+                .build_call(releaser, &[which.into(), word.into()], "")
+                .expect("releasing a caught error of unknown type");
+            if let Some(guard) = arm.guard {
+                // A guard on a `_` would need somewhere to send a false, and
+                // the error has been released by now. The checker does not
+                // offer one; this is here so a future one is not silent.
+                let _ = guard;
+            }
+            if let Some(value) = self.expr(arm.body) {
+                self.store_result(slot, value);
+                self.br(merge);
+                reached += 1;
+            }
         }
 
         self.join(merge, reached, slot, &result_ty)

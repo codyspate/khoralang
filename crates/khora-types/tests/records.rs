@@ -418,3 +418,40 @@ fn a_capability_can_be_handed_to_a_fiber() {
          export fn f(c: Counting) -> Fiber {{ Fiber::spawn(fn () => use_it(c)) }}\n"
     ));
 }
+
+/// `Share` is a trusted assertion, so it has to be unforgeable.
+///
+/// It was not: the compiler recognised any trait spelled `Share`, and any file
+/// could implement it for any opaque type. Declare a trait of your own, write
+/// `impl<A> Share for Array<A>`, and an array — which `Array::set` writes —
+/// became something two fibers may hold. It compiled, and it raced.
+///
+/// The author of a type is the only one who knows what the compiler cannot, so
+/// they are the only one who may say.
+#[test]
+fn share_cannot_be_claimed_for_a_type_from_another_module() {
+    let found = errors(
+        "module m;
+         import std::core::{Array};
+         trait Share {}
+         impl<A> Share for Array<A> {}
+        ",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("only the module that declares a type")),
+        "expected the orphan rule to refuse it, got {found:?}"
+    );
+}
+
+/// And the module that does declare it may, which is what `std::core` does for
+/// the handful of runtime types that take a lock.
+#[test]
+fn share_can_be_claimed_where_the_type_is_declared() {
+    assert_clean(
+        "module m;
+         export trait Share {}
+         export type Handle;
+         impl Share for Handle {}
+        ",
+    );
+}

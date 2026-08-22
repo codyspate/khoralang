@@ -522,3 +522,52 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
     assert!(ran.stdout.ends_with("0\n"), "nothing left over: {:?}", ran.stdout);
     assert_eq!(ran.code, Some(0));
 }
+
+/// A wildcard `catch` must not swallow a cancellation.
+///
+/// A cancellation travels the same tagged channel an error does and is in
+/// nobody's row, so `catch { _ => .. }` taking the switch's default would stop
+/// one dead — and a nursery whose children cannot be cancelled is not
+/// structured concurrency at all. It keeps the propagate path by an explicit
+/// case on its `which`.
+///
+/// The fiber cancels itself, so the test is deterministic: the mark inside the
+/// `catch` is the first one it reaches afterwards.
+#[test]
+fn a_wildcard_catch_does_not_swallow_a_cancellation() {
+    let ran = run(
+        "fiber_cancel_wildcard",
+        &format!(
+            "{CANCELLABLE}
+fn worker() -> () raises Oops {{
+  let region = Region::open();
+  Region::defer(region, fn () => print(99));
+  print(1);
+  khora_cancel();
+  // If the arm caught the cancellation, `ok(1)!` would come back as -1 and
+  // `2` would print. It stops here instead, and the finalizer still runs.
+  print(ok(1)! catch {{ _ => 0 - 1, }});
+  print(2);
+}}
+
+fn run_it() -> () {{
+  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::join(f);
+}}
+
+fn main() -> Int {{
+  run_it();
+  print(3);
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n99\n3\n0\n",
+        "the cancellation went past the arm, the region was released, and the \
+         parent carried on"
+    );
+    assert_eq!(ran.code, Some(0));
+}

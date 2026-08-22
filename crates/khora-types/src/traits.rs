@@ -112,6 +112,13 @@ pub struct ImplDef {
     pub methods: Vec<String>,
     pub assoc_types: Vec<(String, Type)>,
     pub range: TextRange,
+    /// Whether this file wrote the impl, or imported it.
+    ///
+    /// An imported impl has already been checked where it was written, and
+    /// checking it again here asks the wrong question — `impl Share for Fibers`
+    /// is legitimate in `std::core` and would be a forgery anywhere else, so
+    /// the same impl has two answers depending on which file is looking.
+    pub local: bool,
 }
 
 impl ImplDef {
@@ -306,6 +313,7 @@ pub fn collect(source: &ast::SourceFile) -> Traits {
                     methods,
                     assoc_types,
                     range: i.syntax().text_range(),
+                    local: true,
                 });
             }
             _ => {}
@@ -631,6 +639,7 @@ pub fn check(
     kinds: &HashMap<String, Kind>,
     signatures: &HashMap<String, Signature>,
     opaque: &dyn Fn(&Type) -> bool,
+    declares: &dyn Fn(&Type) -> bool,
 ) -> Vec<HirError> {
     let mut errors = Vec::new();
 
@@ -692,7 +701,29 @@ pub fn check(
         // field is the lie: writing `impl Share` for one would hand two fibers
         // a value they can both write, with the compiler's blessing and no
         // diagnostic anywhere.
-        if imp.trait_name == crate::SHARE && !opaque(&imp.self_type) {
+        // **Only the file that declares a type may assert its shareability.**
+        // Without this the marker is forgeable by anyone: declare a trait of
+        // your own spelled `Share`, write `impl<A> Share for Array<A>`, and an
+        // array — which `Array::set` writes — becomes something two fibers may
+        // hold. That compiled, and raced.
+        //
+        // The author of a type is the only one who knows what the compiler
+        // cannot, so they are the only one who may say. An imported impl is
+        // skipped entirely rather than re-judged: it was checked where it was
+        // written, and asking again from here would answer differently.
+        if imp.trait_name == crate::SHARE && imp.local && !declares(&imp.self_type) {
+            let what = imp.head().unwrap_or_else(|| "this type".to_string());
+            errors.push(HirError {
+                message: format!(
+                    "`Share` cannot be implemented for `{what}` here: it is declared in \
+                     another module, and only the module that declares a type may \
+                     assert that two fibers may hold it"
+                ),
+                range: imp.range,
+            });
+            continue;
+        }
+        if imp.trait_name == crate::SHARE && imp.local && !opaque(&imp.self_type) {
             let what = imp.head().unwrap_or_else(|| "this type".to_string());
             errors.push(HirError {
                 message: format!(
