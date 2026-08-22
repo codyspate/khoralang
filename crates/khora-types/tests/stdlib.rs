@@ -128,6 +128,20 @@ fn the_standard_library_declares_what_it_promises() {
         "export trait Traversable: Functor",
         "impl Traversable for Option",
         "impl Traversable for List",
+        // The scalars show, which is what a derived `Show` on a record of them
+        // calls. Without these `derive(Show)` was correctly refused everywhere.
+        "impl Show for Int",
+        "impl Show for Bool",
+        "impl Show for String",
+        // Shared state, and the ordered map that can go in it.
+        "export type Shared<A>",
+        "export type Dict<K, V>",
+        "export type Pair<K, V>",
+        // The growable one. `Array::empty` is what made it possible to hold an
+        // `Array<A>` rather than an `Array<Option<A>>`, and a hundred integers
+        // two objects rather than a hundred and three.
+        "export type Vector<A>",
+        "fn empty() -> Array<A>",
     ] {
         assert!(text.contains(expected), "std/core.kh no longer declares `{expected}`");
     }

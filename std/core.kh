@@ -57,6 +57,34 @@ export trait Show {
   fn show(self) -> String;
 }
 
+/// The scalars, so that `derive(Show)` on a record of them has something to
+/// call.
+///
+/// One line each, and each deferring to a `to_string` that already existed.
+/// The two have to agree — `Show` is what a *generic* function asks for and
+/// `to_string` is what a caller reaches for directly — and they agree here by
+/// one being written in terms of the other rather than by anyone remembering.
+///
+/// A `String` shows as itself, unquoted. A derived `Show` is for reading, not
+/// for parsing back: `User { name: alice }` is what a person wants in a log
+/// line, and a caller who needs the quotes is writing a serializer, which is
+/// `std::json`'s job and not this trait's.
+impl Show for Int {
+  fn show(self) -> String { Int::to_string(self) }
+}
+
+impl Show for Float {
+  fn show(self) -> String { Float::to_string(self) }
+}
+
+impl Show for Bool {
+  fn show(self) -> String { if self { "true" } else { "false" } }
+}
+
+impl Show for String {
+  fn show(self) -> String { self }
+}
+
 /// Two fibers may hold this at once.
 ///
 /// A marker: no methods, and implementing it asserts rather than provides.
@@ -607,6 +635,16 @@ impl Fiber {
 export type Array<A>;
 
 impl<A> Array<A> {
+  /// No elements at all.
+  ///
+  /// `new` needs a value to fill with and a generic container has none to give
+  /// until something has been put in it, so without this there is no way to
+  /// write down an empty `Array<A>` — `Array::new(0, fill)` still demands the
+  /// `fill` it will never write. That gap is what `Vector<A>` is built on: its
+  /// storage starts here and is allocated for real by the first `push`, which
+  /// is also the first moment there is a value of `A` to fill with.
+  fn empty() -> Array<A>;
+
   /// `length` elements, every one of them `fill`.
   fn new(length: Int, fill: A) -> Array<A>;
   fn length(self) -> Int;
@@ -634,7 +672,8 @@ impl<A> Array<A> {
     // new array with. `Array::new` needs a value of `A`, and the only one to
     // hand is `self`'s first element, which an empty array does not have.
     // Returning `self` is exact: it is already the empty array of the right
-    // type.
+    // type. `Array::empty` would serve now that it exists, and would allocate
+    // a second header to say the same thing; this stays as it is.
     if length == 0 {
       self
     } else {
@@ -1493,6 +1532,99 @@ impl<K: Hash, V> Map<K, V> {
     }
   }
 
+  /// Every entry, as a list.
+  ///
+  /// **In no particular order.** A hash table forgets the order its keys
+  /// arrived in, and the order this does report is not even stable across
+  /// inserts: growing rehashes everything into twice as many buckets and moves
+  /// roughly half of it. A caller that wants an order sorts what comes back,
+  /// or uses `Dict`, whose `entries` is in key order because the tree already
+  /// is.
+  ///
+  /// Without this, iterating a map means reaching into `buckets` and matching
+  /// on `Chain`, which is what `std::json` had to do to write an object back
+  /// out — a module coupled to the table's representation for want of six
+  /// lines here.
+  ///
+  /// Two loops rather than two recursions. A table with a million entries has
+  /// a million buckets to visit, and a stack frame each is the mistake
+  /// `String::slice` made per byte. The inner walk is a loop too, for a less
+  /// obvious reason: a chain is only short while the `Hash` is good, and a bad
+  /// one puts every entry in a single bucket. The price of that should be a
+  /// slow walk, not a smashed stack.
+  fn entries(self) -> List<Pair<K, V>> {
+    let mut out: List<Pair<K, V>> = List::Nil;
+    // Backwards, and prepending, so the list comes out in bucket order with no
+    // reversing pass at the end — `List::reverse` would be a second walk and a
+    // second allocation per entry, to arrange an order that is arbitrary
+    // anyway.
+    let mut at = Array::length(self.buckets);
+    while at > 0 {
+      at = at - 1;
+      let mut chain = Array::get(self.buckets, at);
+      let mut walking = true;
+      while walking {
+        match chain {
+          Chain::Empty => { walking = false; },
+          Chain::Node(k, v, rest) => {
+            out = List::Cons({ key: k, value: v }, out);
+            chain = rest;
+          },
+        }
+      }
+    }
+    out
+  }
+
+  /// The keys, in the reverse of the order `entries` reports them — which is
+  /// to say in no particular order either.
+  ///
+  /// Built by walking `entries` rather than the buckets a second time. The
+  /// pairs it allocates and throws away are the price of having one place
+  /// where the traversal is written; a map big enough for that to matter wants
+  /// `entries` itself, which allocates the pairs the caller was going to keep.
+  ///
+  /// Not `List::map`, which recurses once per element and would put a ceiling
+  /// on the size of map this can be called on.
+  ///
+  /// `keys` and `values` walk the same list the same way, so the two line up
+  /// position for position. That is the only thing worth promising about the
+  /// order of either.
+  fn keys(self) -> List<K> {
+    let mut out: List<K> = List::Nil;
+    let mut rest = Map::entries(self);
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(first, more) => {
+          out = List::Cons(first.key, out);
+          rest = more;
+        },
+      }
+    }
+    out
+  }
+
+  /// The values, one per entry — duplicates included, because two keys may
+  /// well hold the same value and dropping one would make `values` disagree
+  /// with `len`.
+  fn values(self) -> List<V> {
+    let mut out: List<V> = List::Nil;
+    let mut rest = Map::entries(self);
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(first, more) => {
+          out = List::Cons(first.value, out);
+          rest = more;
+        },
+      }
+    }
+    out
+  }
+
   /// Which bucket a key belongs in.
   ///
   /// Knuth's multiplicative constant, then a shift-xor so that the high bits —
@@ -1524,6 +1656,279 @@ impl<K: Hash, V> Map<K, V> {
         Map::rehash(self, rest);
       },
     };
+  }
+}
+
+/// A sequence that grows: an array, the part of it that is in use, and a
+/// reallocation when those two meet.
+///
+/// The container to accumulate into. `Array<A>` is fixed at the length it was
+/// allocated with, so a caller that does not know the count in advance cannot
+/// use one; `List<A>` grows, but at the front, one allocation and one pointer
+/// chase per element, and indexing it is a walk. This is contiguous, indexed
+/// in constant time, appended to in amortised constant time, and — the point
+/// of the whole exercise — *a constant number of allocations for any number of
+/// elements*.
+///
+/// Fiber-local, like `Map` and for the same reason: the `mut` fields are what
+/// make `push` cheap, and they are exactly what the sharing rules refuse to a
+/// second fiber. A sequence several fibers write is a `Shared<List<A>>`, which
+/// is slower and says so. `docs/design/sharing.md`.
+///
+/// **The obstacle, and what it cost to get around it wrongly.** `Array::new`
+/// needs a value to fill with, and there is no value of an arbitrary `A` to be
+/// had: `Vector::new()` has nothing in its hands, and neither has
+/// `with_capacity`, whose whole purpose is to allocate *before* there is
+/// anything to put in it. The first version of this type answered that by
+/// holding `Array<Option<A>>` — every cell could then be `Option::None` — and
+/// that answer was wrong in a way worth recording, because it type checked,
+/// passed its tests and read perfectly well. It allocates a `Some` for every
+/// element. A hundred integers pushed into a vector were a hundred and three
+/// live objects, where they are two now, at that length and at every other:
+/// the vector and its array. Allocating per element is precisely the property
+/// a vector exists to *not* have, and it is the reason to reach for one over a
+/// `List`. The other way out is a `new` that takes a seed element, which is
+/// C++'s value-initialisation: it turns "give me somewhere to collect results"
+/// into "produce a result first", and a type with no cheap value has to
+/// fabricate one.
+///
+/// The answer is `Array::empty`, which is a zero-length array and needs no
+/// fill because it has no cells. The storage starts there and costs nothing;
+/// the first `push` allocates for real, and it can, because *the element being
+/// pushed is the value to fill with*. Every cell of a fresh array holds that
+/// element until a later push overwrites it, which for a boxed `A` is one
+/// reference count per cell rather than one allocation per cell, and for an
+/// `Int` is nothing at all.
+///
+/// `with_capacity` is the field that falls out of this: it cannot allocate
+/// when it is called, so it records what was asked for in `wanted` and the
+/// first `push` honours it. **A capacity is a promise here, not storage** —
+/// `capacity` answers with what is really allocated, so a vector that has been
+/// asked for a thousand cells and pushed to zero times still reports nought.
+/// The alternative, reporting the promise, would be a number no memory
+/// corresponds to.
+///
+/// What this costs against the `Option` cells is eager release. There is no
+/// "empty" to write into a cell a `pop` vacated, so `pop` writes the vector's
+/// first element there instead — a value of `A` it is guaranteed to have —
+/// which releases the popped one just as promptly and costs a reference count.
+/// Popping the last element and `clear` both drop the array outright, which
+/// releases everything at once and is why neither keeps the storage; `wanted`
+/// remembers the size, so refilling reallocates exactly once.
+export type Vector<A> = {
+  mut items: Array<A>,
+  mut len: Int,
+  /// How big the first allocation should be. Meaningless once there is one.
+  mut wanted: Int,
+};
+
+impl<A> Vector<A> {
+  /// Empty, holding no storage at all.
+  ///
+  /// Eight is what the first `push` will ask for, matching `Map::new`'s eight
+  /// buckets — enough that a small vector never reallocates, small enough that
+  /// a vector which is made and never pushed to, as a field on a record or an
+  /// accumulator on the branch that turned out to have nothing to accumulate,
+  /// has cost two objects and no cells: itself, and the empty array's header.
+  fn new() -> Vector<A> {
+    let items: Array<A> = Array::empty();
+    { items: items, len: 0, wanted: 8 }
+  }
+
+  /// Room for `capacity` elements, from the first `push` onwards.
+  ///
+  /// Nothing is allocated here — there is no value of `A` to fill an array
+  /// with yet — so this records the size and the first `push` allocates it.
+  /// The saving is real either way: what `with_capacity` buys is that filling
+  /// it reallocates once instead of a dozen times, and that is a property of
+  /// the first allocation's size, not of when it happens.
+  ///
+  /// A capacity that is not positive is no opinion at all, and gets the same
+  /// eight `new` would have. `Array::new` would trap on a negative length, and
+  /// rightly, but a capacity is a hint about a size that is often computed —
+  /// `expected - already_have` — and being wrong about a hint is not the same
+  /// kind of mistake as indexing off the end of an array.
+  fn with_capacity(capacity: Int) -> Vector<A> {
+    let items: Array<A> = Array::empty();
+    { items: items, len: 0, wanted: if capacity < 1 { 8 } else { capacity } }
+  }
+
+  /// How many elements are in it.
+  fn length(self) -> Int { self.len }
+
+  fn is_empty(self) -> Bool { self.len == 0 }
+
+  /// How many elements fit before the next reallocation — allocated cells, not
+  /// promised ones, so this is nought until the first `push`.
+  ///
+  /// Worth exposing because growth is the only thing about a vector that is
+  /// not visible from the outside, and a test that means to exercise it has to
+  /// be able to see it.
+  fn capacity(self) -> Int { Array::length(self.items) }
+
+  /// Adds an element at the end.
+  ///
+  /// The element goes to `grow` as well when the array is full, because it is
+  /// the fill: the only value of `A` anyone here has.
+  fn push(self, item: A) -> () {
+    if self.len == Array::length(self.items) { Vector::grow(self, item); }
+    Array::set(self.items, self.len, item);
+    self.len = self.len + 1;
+  }
+
+  /// Twice the room, or `wanted` if there was none, with `seed` in every cell.
+  ///
+  /// **Doubling, not a fixed increment**, which is the whole reason `push` is
+  /// amortised constant: growing by a constant makes filling a vector
+  /// quadratic in its length, and that is the bug that turns a working program
+  /// into a slow one only once the input gets big. Two rather than the 1.5
+  /// some allocators are tuned for, because reusing the freed blocks needs an
+  /// allocator that coalesces them and this runtime hands them straight to
+  /// `malloc`; the smaller factor would buy nothing and copy more often.
+  ///
+  /// The cells past `len` hold `seed` — a copy of the element being pushed,
+  /// because there is nothing else of type `A` to put there. They are
+  /// overwritten by the pushes that follow, and until then a boxed `A` is held
+  /// by that many references rather than that many objects.
+  ///
+  /// The one visible consequence: a vector that grew and was then popped back
+  /// down keeps that element alive, because the cells above the length were
+  /// never written over. It is a single object however long the vector is —
+  /// all of those cells hold the same one — and it goes at the next growth or
+  /// with the array. Blanking them would need a value of `A` to blank them
+  /// *with*, which is the same wall this whole type is built around.
+  fn grow(self, seed: A) -> () {
+    let old = self.items;
+    let was = Array::length(old);
+    let room = if was == 0 { self.wanted } else { was * 2 };
+    let bigger: Array<A> = Array::new(if room < 1 { 8 } else { room }, seed);
+    let mut i = 0;
+    while i < self.len {
+      Array::set(bigger, i, Array::get(old, i));
+      i = i + 1;
+    }
+    self.items = bigger;
+  }
+
+  /// Removes the last element and hands it back.
+  ///
+  /// `Option::None` from an empty vector rather than a trap: draining one is
+  /// `match Vector::pop(v)` until it answers `None`, which makes empty a loop
+  /// condition rather than a mistake. That is the opposite call from
+  /// `Array::get`, and deliberately — an index is a claim about a length the
+  /// caller believes it knows, while popping is a question.
+  ///
+  /// The cell that is left over has to hold *something* of type `A`, so it is
+  /// given the first element. That is not tidiness: without it the array would
+  /// go on holding the element that was just removed, and a vector popped down
+  /// and then kept would be indistinguishable from a leak. Popping the last
+  /// element has no first element to use and needs none — the array goes, all
+  /// at once, and `wanted` keeps its size for the next fill.
+  fn pop(self) -> Option<A> {
+    if self.len == 0 {
+      Option::None
+    } else {
+      let last = self.len - 1;
+      let taken = Array::get(self.items, last);
+      self.len = last;
+      if last == 0 {
+        self.wanted = Array::length(self.items);
+        self.items = Array::empty();
+      } else {
+        Array::set(self.items, last, Array::get(self.items, 0));
+      }
+      Option::Some(taken)
+    }
+  }
+
+  /// The element at `index`, or `Option::None` if there is none there.
+  ///
+  /// Soft where `Array::get` traps, and not only for symmetry with `pop`: an
+  /// array's length is fixed and known where it was allocated, while a
+  /// vector's is whatever the pushes left it at, so a caller reading one is
+  /// far more often asking than asserting.
+  ///
+  /// Bounded by `len` and never by `Array::length`. The cells in between are
+  /// not empty — they hold the fill, or an element a `pop` left behind — and
+  /// handing one of those back would be a phantom element rather than an
+  /// error.
+  fn get(self, index: Int) -> Option<A> {
+    if index < 0 || index >= self.len {
+      Option::None
+    } else {
+      Option::Some(Array::get(self.items, index))
+    }
+  }
+
+  /// Replaces the element at `index`. Answers whether there was one to
+  /// replace.
+  ///
+  /// A write past the end is not a question with an answer — there is no
+  /// element there — so this reports rather than inventing one or growing to
+  /// fit. Growing would have to fill the gap between, and the gap is exactly
+  /// what there is no value of `A` for; `push` is how a vector gets longer.
+  fn set(self, index: Int, value: A) -> Bool {
+    if index < 0 || index >= self.len {
+      false
+    } else {
+      Array::set(self.items, index, value);
+      true
+    }
+  }
+
+  /// Empties it.
+  ///
+  /// The array goes rather than being kept and blanked, because there is
+  /// nothing to blank a cell *with*: keeping it would keep every element in it
+  /// alive until something was pushed over that cell, and a cleared vector
+  /// holding its contents is the bug this method is usually called to avoid.
+  /// `wanted` remembers how big it was, so the next fill reallocates once and
+  /// arrives back where it started.
+  fn clear(self) -> () {
+    let held = Array::length(self.items);
+    if held > 0 { self.wanted = held; }
+    let empty: Array<A> = Array::empty();
+    self.items = empty;
+    self.len = 0;
+  }
+
+  /// The elements, first to last.
+  ///
+  /// Backwards through the array, prepending, so the list comes out in order
+  /// without a reversing pass — the same trick `Map::entries` uses, and a loop
+  /// for the same reason: one frame per element is what `String::slice`
+  /// overflowed the stack with.
+  fn to_list(self) -> List<A> {
+    let mut out: List<A> = List::Nil;
+    let mut i = self.len;
+    while i > 0 {
+      i = i - 1;
+      out = List::Cons(Array::get(self.items, i), out);
+    }
+    out
+  }
+
+  /// A vector of the list's elements, in the same order.
+  ///
+  /// Pushed one at a time into an empty vector rather than sized up front with
+  /// `List::length`: that walk recurses once per element, so a list long
+  /// enough to be worth pre-sizing for is a list long enough to overflow the
+  /// stack being measured. Doubling costs a handful of reallocations and no
+  /// stack at all.
+  fn from_list(items: List<A>) -> Vector<A> {
+    let out: Vector<A> = Vector::new();
+    let mut rest = items;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(first, more) => {
+          Vector::push(out, first);
+          rest = more;
+        },
+      }
+    }
+    out
   }
 }
 

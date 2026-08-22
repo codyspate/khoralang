@@ -2247,7 +2247,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         )
     }
 
-    /// `Array::new`, `Array::length`, `Array::get` and `Array::set`.
+    /// `Array::empty`, `Array::new`, `Array::length`, `Array::get` and
+    /// `Array::set`.
     ///
     /// Allocation and release are runtime calls because both need the length
     /// at run time; reading and writing an element are generated, so an array
@@ -2262,6 +2263,45 @@ impl<'ctx> Lower<'_, 'ctx> {
         match (name, args) {
             ("with_data", _) => self.with_data(site, args, range),
             ("is_utf8", [array]) => self.is_utf8(*array, range),
+            // `new` with the fill left out, because a zero-length array has
+            // nothing to fill.
+            //
+            // It closes a real gap rather than saving an argument. `new` wants
+            // a value of the element type, and a generic container has none to
+            // give until something has been put in it — so before this there
+            // was no way to write down an empty `Array<A>` at all, and
+            // `std`'s `Vector<A>` had to hold `Array<Option<A>>` and pay an
+            // allocation per element for the emptiness.
+            //
+            // The element type still decides the stride, the boxed flag and
+            // the drop glue. Nothing is stored yet, but the array is released
+            // like any other, and a header that lied about its elements would
+            // be a wild free the day one is written.
+            ("empty", []) => {
+                let array_ty = self.types.of(site).clone();
+                let element = self.array_element(&array_ty, range)?;
+                let boxed = is_boxed(&element);
+                let glue = if boxed { self.be.drop_glue(&element) } else { self.be.null_pointer() };
+                let len = self.be.ctx.i64_type().const_zero();
+                // The fill is written once per slot, and there are no slots.
+                let fill = self.be.ctx.i64_type().const_zero();
+                let flag = self.be.ctx.i8_type().const_int(u64::from(boxed), false);
+                let stride = self.be.ctx.i8_type().const_int(Self::stride(&element), false);
+                let new = self.be.rt.array_new;
+                let array = self
+                    .be
+                    .builder
+                    .build_call(
+                        new,
+                        &[len.into(), fill.into(), stride.into(), flag.into(), glue.into()],
+                        "array.empty",
+                    )
+                    .expect("allocating an empty array")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("an array is a value");
+                Some(array)
+            }
             ("new", [length, fill]) => {
                 let array_ty = self.types.of(site).clone();
                 let element = self.array_element(&array_ty, range)?;
