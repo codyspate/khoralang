@@ -31,6 +31,21 @@ pub const TAG_OFFSET: u64 = std::mem::offset_of!(KhoraHeader, tag) as u64;
 /// Byte offset of the first field from an object pointer.
 pub const FIELD_OFFSET: u64 = KHORA_FIELD_OFFSET as u64;
 
+/// The `which` a cancellation travels under.
+///
+/// Outside the range error-type ids are assigned from — they start at 1 and
+/// count up — so no `catch` can name it and none will accidentally match it.
+/// A cancellation is not an error the program declared; it is the runtime
+/// asking the computation to stop, and only the entry point absorbs it.
+pub const CANCELLED_WHICH: u64 = u32::MAX as u64;
+
+/// The exit status of a program that was cancelled and never stopped being.
+///
+/// 128 + SIGINT, which is what a shell already means by "interrupted". A
+/// program that raises and does not handle it exits 1; these are different
+/// outcomes and worth telling apart from outside.
+pub const CANCELLED_EXIT: u64 = 130;
+
 /// The type name of a region. Not an ADT: it is a handle the runtime owns,
 /// and the only thing generated code does with one is hand it back and let it
 /// be released.
@@ -84,6 +99,10 @@ pub struct Runtime<'ctx> {
     pub region_release: FunctionValue<'ctx>,
     /// `void *khora_region_root(void)`
     pub region_root: FunctionValue<'ctx>,
+    /// `uint8_t khora_cancelled(void)`
+    pub cancelled: FunctionValue<'ctx>,
+    /// `_Noreturn void khora_cancel_stop(void)`
+    pub cancel_stop: FunctionValue<'ctx>,
     /// `void khora_region_close_root(void)`
     pub region_close_root: FunctionValue<'ctx>,
     /// `llvm.trap`, for a branch that exhaustiveness says cannot be taken.
@@ -131,6 +150,8 @@ impl<'ctx> Runtime<'ctx> {
             // goes, and the finalizers run there.
             region_release: declare("khora_region_release", void.fn_type(&[ptr.into()], false)),
             region_root: declare("khora_region_root", ptr.fn_type(&[], false)),
+            cancelled: declare("khora_cancelled", i8t.fn_type(&[], false)),
+            cancel_stop: declare("khora_cancel_stop", void.fn_type(&[], false)),
             region_close_root: declare("khora_region_close_root", void.fn_type(&[], false)),
             trap: declare("llvm.trap", void.fn_type(&[], false)),
         }

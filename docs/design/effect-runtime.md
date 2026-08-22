@@ -203,6 +203,50 @@ between two statements that do not mention it. That is a stronger and far more
 explainable guarantee than "interruption can happen anywhere", which is what
 thread cancellation usually means, and the reader can see the points.
 
+### What it is, precisely
+
+**A cancellation travels on the same tagged return an error does, under a
+`which` no error type can be assigned.** Error-type ids start at 1 and count
+up; a cancellation is `u32::MAX`. Three things follow, and all three are the
+behavior wanted rather than a consequence to work around:
+
+- **`catch` cannot swallow it.** A `catch` dispatches on the error type id and
+  a cancellation matches no case, so it falls through to the same path an
+  unhandled error takes. Nothing a program can write names it, because it is
+  not an error the program declared.
+- **It is not in any row.** No signature mentions it, no `raises` clause grows
+  because of it, and the type system is untouched. Cancellation is the runtime
+  asking a computation to stop, not a failure it can have.
+- **The unwinding is the unwinding that already exists.** Every frame between
+  the mark and the root runs its drops on the way out, which is how a region's
+  finalizers run — see §10.
+
+**The check comes before the call**, not after: a cancelled computation should
+stop rather than do work it is about to throw away, and checking before the
+arguments are evaluated leaves nothing half-built to leak.
+
+### A cancellation point is a `!` in a function that can raise
+
+The check is emitted where the tagged return exists to carry the answer. A
+function whose `raises` row is empty has no error channel, so it cannot report
+a cancellation — and does not need to. The flag is the state of record, and the
+caller's next cancellation point sees it. The interruption is delayed to the
+next mark that can carry it, never lost.
+
+One case remains: a cancellation *arriving* at a frame with no error channel,
+which happens when a function catches every error in a row and so promises a
+value it can no longer produce. There is no frame between there and the entry
+point that could carry it, so the entry point's outcome is produced there
+instead — the root region's finalizers run and the process exits 130. This is
+the pre-fiber shape of "unwind to the fiber root"; once a fiber root exists it
+is a frame that *can* carry a cancellation, and ordinary code stops reaching
+it.
+
+**130, not 1.** A program that raised and did not handle it exits 1; one that
+was interrupted exits 130, which is 128 + SIGINT and what a shell already means
+by interrupted. They are different outcomes and worth telling apart from
+outside.
+
 The cost is the flip side: a loop with no `!` in it is not interruptible.
 Whether long pure loops need an implicit yield is a phase 5 question, logged
 there rather than decided here.

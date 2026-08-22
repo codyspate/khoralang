@@ -352,3 +352,171 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "3\n2\n1\n");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- cancellation ----------------------------------------------------------
+
+/// A cancellation is not an error the program declared, so nothing here
+/// declares one. It travels on the same tagged return an error does, under a
+/// `which` no error type can be assigned, and only the entry point absorbs it.
+const CANCEL: &str = "module t;
+fn print(value: Int);
+fn khora_cancel();
+fn khora_cancel_reset();
+fn khora_live_count() -> Int;
+
+export type Region;
+impl Region {
+  fn open() -> Region;
+  fn root() -> Region;
+  fn defer(self, finalizer: () -> ()) -> ();
+}
+
+export type Oops = | Bad;
+fn ok(n: Int) -> Int raises Oops { n }
+";
+
+/// The whole promise: a cancelled computation stops at the next `!`, and 130
+/// is what a shell means by interrupted.
+#[test]
+fn a_cancelled_computation_stops_at_the_next_mark() {
+    let ran = run(
+        "cancel_stops",
+        &format!(
+            "{CANCEL}
+fn work() -> Int raises Oops {{
+  print(1);
+  khora_cancel();
+  print(2);
+  let n = ok(3)!;
+  print(n);
+  n
+}}
+
+fn main() -> Int raises Oops {{ print(work()!); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n2\n", "everything up to the mark ran, and nothing after");
+    assert_eq!(ran.code, Some(130));
+}
+
+/// Nothing is torn down between two statements that do not mention a `!`.
+/// This is the property worth promising out loud, and it is what makes
+/// interruption explainable rather than something that can happen anywhere.
+#[test]
+fn nothing_is_interrupted_between_unmarked_statements() {
+    let ran = run(
+        "cancel_points",
+        &format!(
+            "{CANCEL}
+fn work() -> Int raises Oops {{
+  khora_cancel();
+  print(1);
+  print(2);
+  print(3);
+  0
+}}
+
+fn main() -> Int raises Oops {{ work()!; print(4); ok(5)!; print(6); 0 }}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n2\n3\n4\n",
+        "the body runs to its end, and the caller runs to its next mark"
+    );
+    assert_eq!(ran.code, Some(130), "which is where it stops");
+}
+
+/// The exit criterion. A cancellation unwinds by the same path an error does,
+/// so every region between the mark and the root runs its finalizers.
+#[test]
+fn a_cancelled_computation_runs_every_finalizer_in_scope() {
+    let ran = run(
+        "cancel_finalizers",
+        &format!(
+            "{CANCEL}
+fn inner() -> Int raises Oops {{
+  let region = Region::open();
+  Region::defer(region, fn () => print(11));
+  Region::defer(region, fn () => print(12));
+  khora_cancel();
+  ok(1)!
+}}
+
+fn outer() -> Int raises Oops {{
+  let region = Region::open();
+  Region::defer(region, fn () => print(21));
+  inner()!
+}}
+
+fn main() -> Int raises Oops {{ outer()!; 0 }}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "12\n11\n21\n",
+        "the inner region's finalizers in reverse, then the outer one's"
+    );
+    assert_eq!(ran.code, Some(130));
+}
+
+/// And leaves nothing behind while doing it. The count is printed by a
+/// finalizer of the root region, because a cancelled program never reaches the
+/// statement after the mark — which is the point.
+#[test]
+fn a_cancelled_computation_leaks_nothing() {
+    let ran = run(
+        "cancel_leaks",
+        &format!(
+            "{CANCEL}
+fn inner() -> Int raises Oops {{
+  let region = Region::open();
+  let text = \"held\";
+  Region::defer(region, fn () => print(1));
+  khora_cancel();
+  ok(1)!
+}}
+
+fn main() -> Int raises Oops {{
+  let root = Region::root();
+  Region::defer(root, fn () => print(khora_live_count()));
+  inner()!
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout,
+        "1\n2\n",
+        "the cancelled frame's finalizer, then the root region and the closure reading it"
+    );
+    assert_eq!(ran.code, Some(130));
+}
+
+/// `catch` handles errors the program declared. A cancellation is not one, so
+/// it passes straight through a `catch` that names every error in the row.
+#[test]
+fn a_catch_does_not_swallow_a_cancellation() {
+    let ran = run(
+        "cancel_uncatchable",
+        &format!(
+            "{CANCEL}
+fn inner() -> Int raises Oops {{
+  khora_cancel();
+  ok(1)!
+}}
+
+fn work() -> Int raises Oops {{
+  let n = inner()! catch {{ Oops::Bad => 99 }};
+  print(n);
+  n
+}}
+
+fn main() -> Int raises Oops {{ work()!; 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "", "the arm did not run");
+    assert_eq!(ran.code, Some(130));
+}

@@ -662,3 +662,69 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
         }
     }
 }
+
+// --- cancellation ----------------------------------------------------------
+
+/// Whether the running computation has been asked to stop.
+///
+/// One flag per program today; one per fiber once fibers exist, at which point
+/// the address of this becomes something the scheduler hands out. Nothing in
+/// the generated code reads it directly — it goes through
+/// [`khora_cancelled`] — so making it per-fiber is a change inside the runtime,
+/// the same shape as the refcount question in `docs/roadmap.md` D10.
+static CANCELLED: AtomicUsize = AtomicUsize::new(0);
+
+/// Asks the running computation to stop.
+///
+/// It stops at the next *cancellation point*, which is a `!` in a function
+/// that can raise — never between two statements that do not mention one. See
+/// `docs/design/effect-runtime.md` §6 for why that is the promise worth making.
+///
+/// Idempotent: asking twice is asking once.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_cancel() {
+    CANCELLED.store(1, COUNTER_ORDER);
+}
+
+/// Whether a cancellation is pending.
+///
+/// Read at every cancellation point, so it is on the hot path of any loop that
+/// does fallible work. A relaxed load of a word, which is what it costs.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_cancelled() -> u8 {
+    CANCELLED.load(COUNTER_ORDER) as u8
+}
+
+/// Stops a cancelled program that has nowhere left to unwind to.
+///
+/// Reached when a cancellation arrives at a frame with no error channel — a
+/// function that caught every error in its row, so its signature promises a
+/// value it can no longer produce. There is no frame between there and the
+/// entry point that could carry the cancellation, so the entry point's outcome
+/// is produced here instead: the root region's finalizers run, and the process
+/// exits 130.
+///
+/// This is the pre-fiber shape of "unwind to the fiber root". Once a fiber
+/// root exists it is a frame that *can* carry a cancellation, and ordinary code
+/// stops reaching this.
+///
+/// # Safety
+///
+/// Must be called with no Khora frame relying on returning: it does not.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_cancel_stop() -> ! {
+    // SAFETY: nothing returns past this, so no other frame observes the
+    // released root.
+    unsafe { khora_region_close_root() };
+    let _ = std::io::stdout().flush();
+    std::process::exit(130)
+}
+
+/// Clears a pending cancellation.
+///
+/// For tests, and for a supervisor that has finished unwinding one computation
+/// and is about to start another.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_cancel_reset() {
+    CANCELLED.store(0, COUNTER_ORDER);
+}

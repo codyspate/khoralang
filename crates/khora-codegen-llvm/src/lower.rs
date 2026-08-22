@@ -612,7 +612,15 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Raise(error) => self.lower_raise(error, range),
             // `!` is the identity on values. The branch it stands for is
             // emitted by the call underneath, which knows it is marked.
-            Expr::Try(inner) => self.expr(inner),
+            // `!` is a cancellation point as well as an error branch. The
+            // check comes *before* the call, so a cancelled computation stops
+            // rather than doing work it is about to throw away — and before
+            // the arguments are evaluated, so there is nothing half-built to
+            // leak on the way out.
+            Expr::Try(inner) => {
+                self.check_cancellation(range);
+                self.expr(inner)
+            }
             Expr::Lambda { captures, .. } => self.make_closure(id, &captures, range),
             // Parameter 0 of a lifted lambda *is* the closure, and it is live
             // for the duration of the call because the caller holds it. No
@@ -1089,6 +1097,52 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("testing the tag")
     }
 
+    /// Leaves at a cancellation point if a cancellation is pending.
+    ///
+    /// Emitted only where this function can return a tagged value, because
+    /// that is the only channel a cancellation can travel on. A function with
+    /// no error channel cannot report one and does not need to: the flag is
+    /// the state of record, and the caller's next cancellation point sees it.
+    /// `docs/design/effect-runtime.md` §6.
+    fn check_cancellation(&mut self, range: TextRange) {
+        if !self.raises || self.aborted {
+            return;
+        }
+        let _ = range;
+
+        let asked = self
+            .be
+            .builder
+            .build_call(self.be.rt.cancelled, &[], "cancelled")
+            .expect("reading the cancellation flag")
+            .try_as_basic_value()
+            .basic()
+            .expect("a flag is a value")
+            .into_int_value();
+        let zero = self.be.ctx.i8_type().const_zero();
+        let pending = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::NE, asked, zero, "cancel.pending")
+            .expect("testing the cancellation flag");
+
+        let stop = self.block("cancel.stop");
+        let carry_on = self.block("cancel.no");
+        self.be
+            .builder
+            .build_conditional_branch(pending, stop, carry_on)
+            .expect("branching on the cancellation flag");
+
+        // The same way out an error takes: release what this frame owns — the
+        // regions among it, so their finalizers run — and hand the tag on.
+        self.at(stop);
+        let which = self.be.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
+        let none = self.be.ctx.i64_type().const_zero();
+        self.leave_with(which, none);
+
+        self.at(carry_on);
+    }
+
     /// Sends an error on from the block it was found in.
     ///
     /// Out of the function, releasing the whole frame — or, inside a `catch`,
@@ -1106,11 +1160,35 @@ impl<'ctx> Lower<'_, 'ctx> {
                 word_phi.add_incoming(&[(&word, from)]);
                 self.br(handler);
             }
-            // Nowhere left: no enclosing `catch` and no `raises` clause. The
-            // checker guarantees that combination only arises on a path no
-            // error reaches — a total `catch` still emits its fall-through —
-            // so this seals the block rather than inventing a return.
+            // Nowhere left: no enclosing `catch` and no `raises` clause.
+            //
+            // For an *error* the checker guarantees this is unreachable — a
+            // total `catch` still emits its fall-through, and that is the only
+            // way to get here. For a *cancellation* it is reachable, because a
+            // cancellation is not in any row and so nothing the checker looked
+            // at ruled it out. There is no frame between here and the entry
+            // point that could carry it, so the entry point's outcome is
+            // produced here instead. `docs/design/effect-runtime.md` §6.
             None if !self.raises => {
+                let cancelled = self.be.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
+                let is_cancel = self
+                    .be
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, which, cancelled, "cancelled")
+                    .expect("testing for a cancellation");
+                let stop = self.block("cancel.nowhere");
+                let sealed = self.block("error.impossible");
+                self.be
+                    .builder
+                    .build_conditional_branch(is_cancel, stop, sealed)
+                    .expect("branching on the tag");
+
+                self.at(stop);
+                let cancel_stop = self.be.rt.cancel_stop;
+                self.be.builder.build_call(cancel_stop, &[], "").expect("stopping");
+                self.be.builder.build_unreachable().expect("sealing after a stop");
+
+                self.at(sealed);
                 self.be.builder.build_unreachable().expect("sealing an unhandled error");
             }
             None => {

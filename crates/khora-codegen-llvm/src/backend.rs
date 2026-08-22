@@ -1263,8 +1263,31 @@ impl<'ctx> Backend<'ctx> {
 
             self.builder.position_at_end(failed);
             self.close_root_region();
-            let one = i32_type.const_int(1, false);
-            self.builder.build_return(Some(&one)).expect("exiting on an uncaught raise");
+            // A cancellation that reached the entry point and an error that
+            // did are different outcomes, and worth telling apart from
+            // outside: 130 is 128 + SIGINT, which is what a shell already
+            // means by "interrupted".
+            let cancelled_which =
+                self.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
+            let was_cancelled = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    which,
+                    cancelled_which,
+                    "cancelled",
+                )
+                .expect("testing for a cancellation");
+            let status = self
+                .builder
+                .build_select(
+                    was_cancelled,
+                    i32_type.const_int(runtime::CANCELLED_EXIT, false),
+                    i32_type.const_int(1, false),
+                    "status",
+                )
+                .expect("choosing an exit status");
+            self.builder.build_return(Some(&status)).expect("exiting on an uncaught raise");
 
             self.builder.position_at_end(ok);
             Some(word.into())

@@ -434,10 +434,17 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
   closure is monomorphic, so an operation cannot quantify over a type — and it
   should not: the effect decides where finalizers go, and the rest is a library
   function anyone could have written.
-- **5.2 Cancellation as an injected raise.** §6 says cancellation is a raise the
-  runtime injects at the next `!`, which is the property worth promising:
-  **a computation can only be interrupted where the source says it can be.**
-  Needs a per-fiber flag and a check at the mark.
+- **5.2 Cancellation as an injected raise — done.** A cancellation travels on
+  the same tagged return an error does, under a `which` no error type can be
+  assigned, so `catch` cannot swallow it, no row grows because of it, and the
+  unwinding is the unwinding that already existed. The promise holds: **a
+  computation can only be interrupted at a point the source marks with `!`**,
+  and every region between the mark and the root runs its finalizers on the way
+  out. A cancellation reaching the entry point exits 130, which is what a shell
+  already means by interrupted. `docs/design/effect-runtime.md` §6.
+
+  The flag is process-wide until fibers make it per-fiber; nothing in generated
+  code reads it directly, so that is a change inside the runtime.
 - **5.3 Fibers.** The one genuinely new subsystem, and the one that needs a
   decision doc first: a fiber suspends a whole stack, and Khora has no
   continuation machinery because §3 deliberately declined to build any. D10
@@ -445,9 +452,10 @@ Fibers, cancellation that runs finalizers, `Scope`-bound resource lifetimes,
 - **5.4 `Schedule` policies.** A library, once fibers exist.
 
 **Exit:** a canceled fiber runs every finalizer in scope, verified by test;
-`khora test` runs isolated fibers across cores. The finalizer half is met for
-regions — see `crates/khora-codegen-llvm/tests/regions.rs` — and waits on 5.2
-and 5.3 for the "canceled fiber" half.
+`khora test` runs isolated fibers across cores. The first half is met for a
+cancelled *computation* — `a_cancelled_computation_runs_every_finalizer_in_scope`
+in `crates/khora-codegen-llvm/tests/regions.rs` — and becomes the criterion as
+written once 5.3 gives it a fiber to be. The second half waits on 5.3.
 
 ---
 
