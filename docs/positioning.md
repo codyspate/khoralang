@@ -156,7 +156,11 @@ anything below it.
   it yet.
 - Dependable HTTP, TLS, database, messaging and serialization libraries.
   HTTP, JSON and TLS exist. **A database driver does not**, and that is now the
-  gap of this kind that matters most — almost every service is one.
+  gap of this kind that matters most — almost every service is one. Decided:
+  SQLite in `std`, because it is embedded and a program that cannot persist
+  anything is a demo; Postgres as a package, because pooling, authentication
+  and version compatibility are things an application should pin.
+  `docs/design/ecosystem.md`.
 - Straightforward interoperability with existing Rust and C libraries.
 - Load, soak, cancellation, recovery and malformed-input testing.
 

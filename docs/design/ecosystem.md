@@ -117,6 +117,18 @@ while":
 | Compression | Decades of tuned code behind an API with nothing to improve. |
 | The operating system | It *is* the C ABI. There is no alternative. |
 | Numeric kernels (BLAS and similar) | `std::ai` promises tensors; nobody hand-writes GEMM. |
+| An embedded database | SQLite, compiled into the runtime the way `rustls` is. A storage engine is a specialist matter for the same reason crypto is, and a program that cannot persist anything is a demo. |
+
+**A database goes in `std` only if it is embedded.** SQLite belongs there: it is
+a file format and a library, it has no wire protocol, no authentication and no
+server to be a version behind. Postgres is a package — it brings connection
+pooling, an authentication mechanism that is itself crypto (SCRAM-SHA-256), and
+a compatibility surface that moves on somebody else's schedule. Those are
+decisions an application should be able to pin, which is what a package is for.
+
+Note also which half of that is *written* rather than bound: a wire protocol is
+a protocol, so a Postgres driver's framing belongs in Khora beside HTTP and
+JSON, with only the crypto bound.
 
 Note what is *not* on that list: HTTP, JSON, and collections. Those are a few
 weeks each and they would be better in Khora, because they can be generic over
