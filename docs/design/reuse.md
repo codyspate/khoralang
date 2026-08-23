@@ -49,32 +49,43 @@ read inside a loop is read on every iteration. A `break` out of a loop leaves
 scopes early, and `raise` leaves several at once — `unwind_to` already knows
 how to release along that path and will need to release a different set.
 
-**A first step is in**, and it is worth reading for what it found rather than
-for what it bought. Where a binding is a `String`, every read of it is
-unconditional, and the body cannot unwind, the last read takes the binding's
-reference instead of copying it and the block no longer releases it.
+**A first step is in, and a second one paid for it.**
 
-That removes **7% of the reference-count operations** in an HTTP parse — 677 to
-630 — and does not move the clock at all, which is what 12% of 7% looks like.
-The restriction is why: *every read unconditional* excludes almost all real
-code, because almost every read in a parser is inside a `while` or an `if`. The
-value is in the version that handles those, which is the rest of this section.
+*The last-use move.* Where every read of a binding is unconditional and the
+body cannot unwind, the last read takes the binding's reference instead of
+copying it. Worth 7% of the reference-count operations in an HTTP parse and no
+measurable time, because "every read unconditional" excludes almost every read
+in real code — in a parser they sit inside a `while` or an `if`.
 
-Two things it did find, both by failing a test:
+*Borrowed parameters.* `Region::defer` does not keep the region, `Shared::get`
+does not keep the cell, `String::byte` does not keep the string. Each was handed
+an owned reference and dropped it — two atomic operations to pass something the
+callee only reads. Naming them is worth far more, because **a borrow applies
+inside a loop**:
+
+    parsing an 80-byte request    2,440 ns -> 2,165 ns
+    parsing a browser's request  14,560 ns -> 10,210 ns
+    lowercasing a 4-byte header     310 ns ->     90 ns
+
+Three things this found, all from tests:
 
 - **`&&` and `||` short-circuit**, so the right-hand side is a branch that does
-  not look like one. Treating it as straight-line leaked exactly one object.
-- **Releasing is only invisible when releasing does nothing but free.** A
-  `Region` runs its deferred finalizers when released, so moving a region's
-  reference to its last use printed `2` before `1` in a program whose whole
-  point was the order. Not a leak and not a double free — a different program.
-  `docs/design/compatibility.md` now carries the exception, and *when a region
-  ends* is on its "not decided here" list, because that is a language question
-  rather than an optimizer's.
+  not look like one. Treating it as straight-line leaked one object.
+- **A borrowed read is still a read.** Leaving borrows out of the last-use list
+  meant `f(s)` followed by `String::byte(s, 0)` moved the binding into `f` and
+  then read the freed object. A borrow cannot take ownership; it can certainly
+  come after the read that would have.
+- **Only a bodyless declaration may be borrowed.** A Khora function owns its
+  parameters, so promising its caller a borrow is a use after free.
+  `Array::prefix` and `String::matches_at` are written in Khora and were briefly
+  on the list.
 
-The optimization is therefore limited to `String`, whose release can reach
-nothing. Widening it needs an answer about regions and a way to ask whether an
-ADT's fields transitively hold one.
+And the diagnosis that borrows corrected. Moving a `Region` to its last use ran
+its finalizers early, which looked like "some types have an observable release"
+and produced a restriction to `String`. The real cause was that `defer` borrows
+and the plan said it consumed. With borrows named, a region passed to `defer`
+keeps its reference and ends with its scope, and the last-use move applies to
+every type.
 
 This is the whole of the risk. Getting it wrong is a double free or a use after
 free, and both present as a crash somewhere unrelated. It wants:
