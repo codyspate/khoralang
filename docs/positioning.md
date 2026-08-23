@@ -133,24 +133,48 @@ complexity than Rust.
 
 A financial institution will not adopt Khora because its effect system is
 elegant. Adoption requires an engineer to become productive quickly and an
-operations team to trust what that engineer deploys. Production readiness
-therefore includes:
+operations team to trust what that engineer deploys.
 
-- familiar surface syntax and documentation that does not require type theory;
-- excellent diagnostics, formatting, editor support, debugging and profiling;
-- stable editions and a clear compatibility policy;
-- reproducible package management;
-- dependable HTTP, TLS, database, messaging and serialization libraries;
-- logging, metrics and distributed tracing;
-- straightforward interoperability with existing Rust and C libraries;
-- conventional container and cloud deployment;
-- load, soak, cancellation, recovery and malformed-input testing.
+The list below is ordered by **what it would cost to be wrong about**, not by
+effort. The first group are claims the project already makes; a gap there is a
+credibility problem rather than a missing feature, and costs more than
+anything below it.
+
+**Claims that must be true before they are repeated**
+
+- The manifest is not a sandbox until package identity closes the `extern`
+  hole. Designed, partly enforced, not a guarantee. `docs/design/permissions.md`.
+- A type must know which declaration it came from. Two modules that each
+  declare a `Point` are currently one type. Errata 46.
+- Numbers must name their workload and machine. `bench/README.md` does; anyone
+  quoting them must too.
+
+**Load-bearing for a first real user**
+
+- Reproducible package management, and the compatibility policy it enforces.
+  The policy is decided — `docs/design/compatibility.md` — and nothing applies
+  it yet.
+- Dependable HTTP, **TLS**, database, messaging and serialization libraries.
+  HTTP and JSON exist; TLS does not, and no operations team deploys without it.
+- Straightforward interoperability with existing Rust and C libraries.
+- Load, soak, cancellation, recovery and malformed-input testing.
+
+**Everything else, which is ordinary work**
+
+- Familiar surface syntax and documentation that does not require type theory.
+- Editor support, debugging, profiling. Diagnostics and formatting exist and
+  are held to a standard from phase 2 by decision A7.
+- Logging, metrics and distributed tracing.
+- Conventional container and cloud deployment.
+- Editions, when something first needs one.
 
 An important onboarding test is whether a competent Go, Rust or TypeScript
 engineer can build, test and deploy a small Khora service after one day with
 the documentation. If that is difficult, the language or its tooling still has
 work to do. Engineers should not need to understand row unification, effect
-evidence or Perceus before writing useful programs.
+evidence or Perceus before writing useful programs. **That test cannot be run
+yet** — there is no package manager and no installable toolchain — and until it
+can, every claim about adoption on this page is a prediction.
 
 ## The goal
 
