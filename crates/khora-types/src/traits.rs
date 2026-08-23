@@ -645,7 +645,7 @@ pub fn check(
     traits: &Traits,
     kinds: &HashMap<String, Kind>,
     signatures: &HashMap<String, Signature>,
-    opaque: &dyn Fn(&Type) -> bool,
+    may_vouch_for: &dyn Fn(&Type) -> bool,
     declares: &dyn Fn(&Type) -> bool,
 ) -> Vec<HirError> {
     let mut errors = Vec::new();
@@ -703,11 +703,15 @@ pub fn check(
         // where there is nothing to check — a type declared with no body, whose
         // behaviour lives in the runtime or across the C ABI.
         //
-        // For every other type the answer is derived from what the compiler can
-        // see, and an impl is either redundant or a lie. A record with a `mut`
-        // field is the lie: writing `impl Share` for one would hand two fibers
-        // a value they can both write, with the compiler's blessing and no
-        // diagnostic anywhere.
+        // **Or one whose only obstacle is a `Ptr`**, which belongs here for the
+        // same reason. A `mut` field is something the compiler can *see*, so an
+        // assertion would be overriding knowledge — that is the lie: writing
+        // `impl Share` for a record with a `mut` field hands two fibers a value
+        // they can both write, with the compiler's blessing and no diagnostic
+        // anywhere. Foreign memory is the opposite. The `false` there is a
+        // conservative default rather than a finding, and the module that put
+        // the pointer across the ABI is the only thing that knows what is
+        // behind it.
         // **Only the file that declares a type may assert its shareability.**
         // Without this the marker is forgeable by anyone: declare a trait of
         // your own spelled `Share`, write `impl<A> Share for Array<A>`, and an
@@ -730,14 +734,14 @@ pub fn check(
             });
             continue;
         }
-        if imp.trait_name == crate::SHARE && imp.local && !opaque(&imp.self_type) {
+        if imp.trait_name == crate::SHARE && imp.local && !may_vouch_for(&imp.self_type) {
             let what = imp.head().unwrap_or_else(|| "this type".to_string());
             errors.push(HirError {
                 message: format!(
                     "`Share` cannot be implemented for `{what}`: this compiler can see \
                      what `{what}` holds, so it decides for itself whether two fibers may \
-                     have it. An impl is only for a type declared with no body, where \
-                     there is nothing to look at"
+                     have it. An impl is for a type declared with no body, or one whose \
+                     only obstacle is a `Ptr` — foreign memory nothing here can judge"
                 ),
                 range: imp.range,
             });

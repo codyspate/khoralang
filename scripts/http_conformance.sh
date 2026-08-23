@@ -108,6 +108,13 @@ check "a 3 KB header is read whole" "200" \
     "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Filler: $long" "$base/health")"
 
 # Over the limit is a refusal rather than a crash or a hang.
+#
+# **This one used to flake, and finding out why fixed a real defect.** The
+# server answers 413 as soon as the buffer is full, while the client is still
+# writing the ninth kilobyte — and a bare `closesocket` sends an RST, which
+# discards the response the client had not read yet. curl reported `000`, under
+# load, sometimes. `std::net::socket::shut` shuts the writing half and drains
+# before closing now.
 huge=$(printf 'x%.0s' $(seq 1 9000))
 check "a 9 KB header is refused, not fatal" "413" \
     "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Filler: $huge" "$base/health")"

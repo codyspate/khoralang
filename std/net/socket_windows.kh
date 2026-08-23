@@ -25,6 +25,7 @@ extern fn accept(handle: Int, address: Ptr, length: Ptr) -> Int;
 extern fn recv(handle: Int, into: Ptr, length: I32, flags: I32) -> I32;
 extern fn send(handle: Int, from: Ptr, length: I32, flags: I32) -> I32;
 extern fn closesocket(handle: Int) -> I32;
+extern fn shutdown(handle: Int, how: I32) -> I32;
 extern fn setsockopt(handle: Int, level: I32, name: I32, value: Ptr, length: I32) -> I32;
 
 /// `INVALID_SOCKET` is `(SOCKET)~0`, which read as a signed handle is -1.
@@ -122,26 +123,34 @@ export fn transmit(connection: Int, text: String) -> Int {
     I32::to_int(send(connection, from, I32::of(n), I32::of(0))))
 }
 
-/// Closes a connection.
+/// Closes a connection, letting the other end finish first.
 ///
-/// **A hard close, and that is a defect worth knowing about.** A server that
-/// answers and closes while the client is still writing sends an RST, and the
-/// answer the client had not read yet is lost with it — which is exactly what
-/// happens when an oversized request is refused with a 413. It shows up as a
-/// client reporting no response at all, under load, sometimes.
+/// **A bare close is a lost answer.** Closing while the peer is still writing
+/// sends an RST, and an RST discards whatever the peer had not read yet —
+/// including the response just written to it. It surfaces as a client reporting
+/// no answer at all, only under load, only sometimes: exactly what refusing an
+/// oversized request with a 413 does, because the server decides at eight
+/// kilobytes and the client is still sending the ninth.
 ///
-/// The fix is to shut the writing half, drain what is still arriving, and then
-/// close. `scripts/http_conformance.sh` names the check that catches it.
-/// Closes a connection.
+/// So: say there is nothing more coming, read off what is still arriving until
+/// the peer stops, and only then close. `SD_SEND` is 1.
 ///
-/// **A hard close, and that is a defect worth knowing about.** A server that
-/// answers and closes while the client is still writing sends an RST, and the
-/// answer the client had not read yet goes with it — which is what happens when
-/// an oversized request is refused with a 413. It shows up as a client
-/// reporting no response at all, under load, sometimes.
-///
-/// The fix is to shut the writing half, drain what is still arriving, and only
-/// then close. `scripts/http_conformance.sh` names the check that catches it.
+/// The drain is bounded rather than a loop to end-of-stream. A peer that never
+/// stops talking must not hold the fiber, and the receive deadline the server
+/// already set is doing the real work — this only has to outlast the bytes that
+/// were in flight.
 export fn shut(handle: Int) -> () {
+  shutdown(handle, I32::of(1));
+  drain(handle, 8);
   closesocket(handle);
+}
+
+/// Reads and discards what is still arriving, at most `rounds` times.
+fn drain(handle: Int, rounds: Int) -> () {
+  if rounds <= 0 {
+  } else {
+    let leftovers: Array<U8> = Array::new(1024, 0);
+    let read = receive(handle, leftovers);
+    if read <= 0 {} else { drain(handle, rounds - 1) }
+  }
 }

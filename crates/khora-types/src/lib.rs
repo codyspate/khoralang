@@ -742,6 +742,67 @@ impl TypeMap {
     }
 
     fn shareable(&self, ty: &Type, visiting: &mut Vec<String>, bounded: &[String]) -> bool {
+        self.shareable_with(ty, visiting, bounded, false)
+    }
+
+    /// Whether this module may *assert* that two fibers can hold `ty`.
+    ///
+    /// **A `Ptr` is refused because the compiler cannot know, and that is
+    /// exactly when a declaring module may say.** The rule used to be "opaque
+    /// types only", on the argument that an impl may only be written where
+    /// there is nothing to check. That argument is about a `mut` field — where
+    /// the compiler *can* see, and an assertion would be overriding knowledge —
+    /// and it does not reach foreign memory, where the compiler's `false` is a
+    /// conservative default rather than a finding.
+    ///
+    /// So: opaque, as before, or a type whose only obstacle is a pointer. A
+    /// `mut` field still refuses, a closure field still refuses, and a field of
+    /// somebody else's unshareable type still refuses — the vouch is only for
+    /// what this module put across the ABI itself.
+    ///
+    /// `std::net::tls` needed it. A `rustls` configuration behind an `Arc` is
+    /// immutable and safe for any number of readers, and a server that cannot
+    /// be handed to the fiber answering a connection is not a server. It was
+    /// smuggled across as an `Int` for a while, which is worse in every way:
+    /// same sharing, no review, no diagnostic if it were wrong.
+    pub fn may_vouch_for(&self, ty: &Type) -> bool {
+        if self.is_opaque(ty) {
+            return true;
+        }
+        // Both questions are asked of the *structure*, ignoring any impl on
+        // `ty` itself — that is the thing being judged, and consulting it would
+        // let anything vouch for itself.
+        //
+        // Blocked only by a pointer, and not already shareable without one. The
+        // second half keeps the original rule's other edge: an assertion on a
+        // type the compiler can already see is fine is not harmless, it is a
+        // reader being told something is dangerous when it is not.
+        self.structurally_shareable(ty, true) && !self.structurally_shareable(ty, false)
+    }
+
+    /// Whether `ty`'s *contents* allow sharing, ignoring any assertion on `ty`.
+    fn structurally_shareable(&self, ty: &Type, pointers_ok: bool) -> bool {
+        let Type::Adt { name, args, .. } = ty else { return false };
+        let parameters = self.adts.get(name).cloned().unwrap_or_default();
+        let mapping: HashMap<&str, Type> =
+            parameters.iter().map(String::as_str).zip(args.iter().cloned()).collect();
+        let mut visiting = vec![name.clone()];
+        self.variants.iter().filter(|v| &v.type_name == name).all(|v| {
+            !v.has_mutable_field()
+                && v.fields.iter().all(|t| {
+                    let t = unify::substitute(t, &mapping);
+                    self.shareable_with(&t, &mut visiting, &[], pointers_ok)
+                })
+        })
+    }
+
+    fn shareable_with(
+        &self,
+        ty: &Type,
+        visiting: &mut Vec<String>,
+        bounded: &[String],
+        pointers_ok: bool,
+    ) -> bool {
         match ty {
             // A row variable is not a value and carries none: `'e` is how a
             // function fails, and nobody hands a failure to a fiber. Only a
@@ -749,10 +810,14 @@ impl TypeMap {
             Type::Param(name) if name.starts_with('\'') => true,
             Type::Param(name) => bounded.iter().any(|b| b == name),
             Type::Fn { .. } => false,
-            Type::Tuple(items) => items.iter().all(|t| self.shareable(t, visiting, bounded)),
+            Type::Tuple(items) => {
+                items.iter().all(|t| self.shareable_with(t, visiting, bounded, pointers_ok))
+            }
             Type::Applied { head, args } => {
-                self.shareable(head, visiting, bounded)
-                    && args.iter().all(|t| self.shareable(t, visiting, bounded))
+                self.shareable_with(head, visiting, bounded, pointers_ok)
+                    && args
+                        .iter()
+                        .all(|t| self.shareable_with(t, visiting, bounded, pointers_ok))
             }
             Type::Adt { name, args, .. } => {
                 // The trusted answer comes first, arguments included. A type
@@ -763,10 +828,18 @@ impl TypeMap {
                 // thing the wrapper exists to allow. An impl asserts for every
                 // instantiation, which is what makes it a thing you have to be
                 // trusted to write.
-                if self.is_opaque(ty) {
-                    return self.traits.find(SHARE, ty).is_some();
+                // A trusted assertion answers for any type whose module was
+                // allowed to write one — opaque, or blocked only by a pointer.
+                // `traits::check` refuses the rest, and a refused program is
+                // not compiled, so trusting the impl here cannot outlive the
+                // diagnostic.
+                if self.traits.find(SHARE, ty).is_some() {
+                    return true;
                 }
-                if !args.iter().all(|t| self.shareable(t, visiting, bounded)) {
+                if self.is_opaque(ty) {
+                    return false;
+                }
+                if !args.iter().all(|t| self.shareable_with(t, visiting, bounded, pointers_ok)) {
                     return false;
                 }
                 // A type may contain itself, so an in-progress name answers
@@ -815,7 +888,7 @@ impl TypeMap {
                         !v.has_mutable_field()
                             && v.fields.iter().all(|t| {
                                 let t = unify::substitute(t, &mapping);
-                                self.shareable(&t, visiting, bounded)
+                                self.shareable_with(&t, visiting, bounded, pointers_ok)
                             })
                     });
                 visiting.pop();
@@ -824,7 +897,12 @@ impl TypeMap {
             // Foreign memory. Nothing on this side of the ABI knows what is
             // behind it or who else is writing there, and a pointer is exactly
             // the value whose whole purpose is to be written through.
-            Type::Ptr => false,
+            //
+            // `pointers_ok` is set only by `may_vouch_for`, which is asking a
+            // different question: not "is this shareable" but "is a pointer the
+            // *only* reason it is not", which is the one case where the
+            // declaring module knows something the compiler cannot.
+            Type::Ptr => pointers_ok,
             _ => true,
         }
     }
@@ -1817,7 +1895,7 @@ pub fn trait_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
         &types.traits,
         &types.kinds,
         &types.signatures,
-        &|ty| types.is_opaque(ty),
+        &|ty| types.may_vouch_for(ty),
         &|ty| types.declares(ty),
     )
 }

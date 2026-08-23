@@ -27,6 +27,7 @@ extern fn accept(handle: I32, address: Ptr, length: Ptr) -> I32;
 extern fn recv(handle: I32, into: Ptr, length: Int, flags: I32) -> Int;
 extern fn send(handle: I32, from: Ptr, length: Int, flags: I32) -> Int;
 extern fn close(handle: I32) -> I32;
+extern fn shutdown(handle: I32, how: I32) -> I32;
 extern fn setsockopt(handle: I32, level: I32, name: I32, value: Ptr, length: I32) -> I32;
 
 /// A failed call returns -1, and a handle is never negative.
@@ -112,6 +113,23 @@ export fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) => send(I32::of(connection), from, n, I32::of(0)))
 }
 
+/// Closes a connection, letting the other end finish first.
+///
+/// The same reasoning as the Windows file, and the same shape: closing while
+/// the peer is still writing sends an RST, which discards the answer the peer
+/// had not read yet. `SHUT_WR` is 1 here too.
 export fn shut(handle: Int) -> () {
+  shutdown(I32::of(handle), I32::of(1));
+  drain(handle, 8);
   close(I32::of(handle));
+}
+
+/// Reads and discards what is still arriving, at most `rounds` times.
+fn drain(handle: Int, rounds: Int) -> () {
+  if rounds <= 0 {
+  } else {
+    let leftovers: Array<U8> = Array::new(1024, 0);
+    let read = receive(handle, leftovers);
+    if read <= 0 {} else { drain(handle, rounds - 1) }
+  }
 }
