@@ -1142,7 +1142,39 @@ pub extern "C" fn khora_fibers_open() -> *mut u8 {
     object
 }
 
+/// Whether a fiber has already run to its end.
+///
+/// Asked without joining, so a nursery can let go of a child that has finished
+/// without waiting on one that has not.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`].
+unsafe fn fiber_finished(fiber: *mut u8) -> bool {
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else { return true };
+    let thread = state.thread.lock().unwrap_or_else(|e| e.into_inner());
+    match thread.as_ref() {
+        Some(handle) => handle.is_finished(),
+        // Already joined by somebody, so there is nothing left to wait for.
+        None => true,
+    }
+}
+
 /// Makes `fiber` this nursery's responsibility, taking its reference.
+///
+/// **Children that have finished are let go of first**, and that sweep is not
+/// housekeeping — without it a nursery only ever grows. A server adopts one
+/// fiber per connection into a nursery it drains when it stops accepting,
+/// which is never, so every answered request left its handle in the list: three
+/// thousand requests, three thousand operating-system handles, none of them
+/// pointing at a running thread. Measured on the link shortener, which is what
+/// it took to see it.
+///
+/// The sweep is O(n) in the children still held, which is O(1) amortised in the
+/// children that have *been* held — the whole point being that the first number
+/// stays small. A nursery over genuinely concurrent long-lived work pays a scan
+/// per adoption and keeps everything, which is what it is for.
 ///
 /// # Safety
 ///
@@ -1154,9 +1186,33 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
     let Some(list) = (unsafe { crew(fibers) }) else {
         fatal("adopting a fiber into a nursery that has already ended");
     };
-    // Locked: a nursery exists to be adopted into from more than one fiber, so
-    // this is the one place contention is expected rather than incidental.
-    list.lock().unwrap_or_else(|e| e.into_inner()).push(Handed(fiber));
+
+    let done: Vec<Handed> = {
+        // Locked: a nursery exists to be adopted into from more than one fiber,
+        // so this is the one place contention is expected rather than
+        // incidental.
+        let mut held = list.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: every handle in the list was live when adopted and this list
+        // has held the only reference since.
+        let (done, keep) =
+            std::mem::take(&mut *held).into_iter().partition(|Handed(f)| unsafe {
+                fiber_finished(*f)
+            });
+        *held = keep;
+        held.push(Handed(fiber));
+        done
+    };
+
+    // Released outside the lock. Joining a thread that has already ended
+    // returns at once, but a drop routine can reach another nursery, and a lock
+    // held across one of those is a lock ordering nobody agreed to.
+    for Handed(spent) in done {
+        // SAFETY: as above; this is the last reference to each.
+        unsafe {
+            khora_fiber_join(spent);
+            khora_drop(spent, Some(fiber_release_shim));
+        }
+    }
 }
 
 /// Waits for every fiber in the nursery, oldest first, and empties it.
