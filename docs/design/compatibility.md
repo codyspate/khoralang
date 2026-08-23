@@ -185,10 +185,9 @@ Stating the policy is not meeting it. 1.0 is blocked on at least:
   package" cannot be said, the orphan rule cannot be enforced, and the
   `extern` allow-list that makes `[permissions]` a guarantee rather than an
   account cannot be written. `docs/design/permissions.md`.
-- **Declaration identity** (roadmap 8.5.2, errata 46). A type is a bare name
-  today, so two modules that each declare a `Point` are one type. A
-  compatibility promise about "a public type" is not sayable until a type
-  knows what it is.
+- ~~**Declaration identity.**~~ Done: a type carries the module that declares
+  it, so "a public type" is now a thing that can be said. Roadmap 8.5.2,
+  errata 46.
 - **The `std` audit.** Every public item in `std` is a promise at 1.0, and the
   set has never been reviewed with that in mind — several exist because a
   reference application needed them at the time.

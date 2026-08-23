@@ -764,9 +764,9 @@ impl<'ctx> Lower<'_, 'ctx> {
             // tag, and a tag lives in a header. Interning the nullary cases
             // would need the refcount to be saturating, which is a phase 6
             // conversation.
-            khora_hir::Resolution::Variant { type_name, name, .. } => {
-                let (owner, case) = (type_name.clone(), name.clone());
-                self.construct(&owner, &case, &[], range)
+            khora_hir::Resolution::Variant { module, type_name, name } => {
+                let (home, owner, case) = (module.clone(), type_name.clone(), name.clone());
+                self.construct(Some(&home), &owner, &case, &[], range)
             }
             // A named function used as a value becomes a closure that
             // captures nothing and forwards to it.
@@ -806,8 +806,8 @@ impl<'ctx> Lower<'_, 'ctx> {
         range: TextRange,
     ) -> Flow<'ctx> {
         match self.body.expr(callee).clone() {
-            Expr::Path(khora_hir::Resolution::Variant { type_name, name, .. }) => {
-                self.construct(&type_name, &name, args, range)
+            Expr::Path(khora_hir::Resolution::Variant { module, type_name, name }) => {
+                self.construct(Some(&module), &type_name, &name, args, range)
             }
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
                 // **A method somebody wrote wins over one the backend
@@ -2798,7 +2798,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         let Type::Adt { name: type_name, .. } = owner_ty.clone() else {
             return self.fail("only a record's field can be assigned to", range);
         };
-        let Some((_, info)) = self.be.variant_of(&type_name, &type_name).map(|(t, i)| (t, i.clone()))
+        // By identity: a file that declares a `Point` and imports another
+        // module's would otherwise write through whichever was recorded first.
+        let Some(info) =
+            self.be.variants_for(&owner_ty).into_iter().find(|v| v.name == type_name)
         else {
             return self.fail(format!("`{type_name}` is not a record"), range);
         };
@@ -3334,10 +3337,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         fields: &[(String, ExprId)],
         range: TextRange,
     ) -> Flow<'ctx> {
-        let Type::Adt { name, .. } = self.types.of(id).clone() else {
+        let Type::Adt { name, home, .. } = self.types.of(id).clone() else {
             return self.fail("this record has no type, which is a compiler bug", range);
         };
-        let Some((tag, info)) = self.be.variant_of(&name, &name) else {
+        let Some((tag, info)) = self.be.variant_in(home.as_ref(), &name, &name) else {
             return self.fail(format!("`{name}` is not a record"), range);
         };
 
@@ -3809,12 +3812,13 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// before that happens is unreachable and unfreed.
     fn construct(
         &mut self,
+        home: Option<&khora_hir::ModulePath>,
         owner: &str,
         case: &str,
         args: &[ExprId],
         range: TextRange,
     ) -> Flow<'ctx> {
-        let Some((tag, info)) = self.be.variant_of(owner, case) else {
+        let Some((tag, info)) = self.be.variant_in(home, owner, case) else {
             return self.fail(format!("`{owner}::{case}` is not a constructor"), range);
         };
         if args.len() != info.fields.len() {
@@ -5040,8 +5044,8 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     fn tag_of(&self, resolution: &khora_hir::Resolution) -> Option<u32> {
         match resolution {
-            khora_hir::Resolution::Variant { type_name, name, .. } => {
-                self.be.variant_of(type_name, name).map(|(tag, _)| tag)
+            khora_hir::Resolution::Variant { module, type_name, name } => {
+                self.be.variant_in(Some(module), type_name, name).map(|(tag, _)| tag)
             }
             _ => None,
         }
@@ -5222,8 +5226,8 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     fn variant_of(&self, resolution: &khora_hir::Resolution) -> Option<(u32, VariantInfo)> {
         match resolution {
-            khora_hir::Resolution::Variant { type_name, name, .. } => {
-                self.be.variant_of(type_name, name)
+            khora_hir::Resolution::Variant { module, type_name, name } => {
+                self.be.variant_in(Some(module), type_name, name)
             }
             _ => None,
         }

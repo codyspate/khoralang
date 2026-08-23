@@ -1164,18 +1164,34 @@ throughout: `adts`, `variants`, `signatures`, `kinds`, `declared_here`, and the
 head of every impl. That is a coherent design for a single module and it has no
 way to express "the `Point` from over there".
 
-What is done here is a **guard, not a fix**: a name the compiler already means
-may not be given a *definition*, so the memory corruption becomes a diagnostic
-that names the type and says to rename it. Declaring one without a right-hand
-side stays legal, because that is not a competing definition — it is how the
-builtin is named, and it is what `std::core` and every backend test already
-write. The other two problems remain, and `identity.rs` has a test asserting
-the collision *still happens*, which will fail when it is fixed and say so.
+**The fix, and then the guard that outlived it.**
 
-The fix is for a type to carry the declaration it resolved to rather than a
-name — canonical, module-qualified, and settled at the one place a type name
-means something. It changes how every type in the program is keyed, so it is
-its own piece of work rather than a correction to make in passing.
+A `Type::Adt` carries the module that declares it now, resolved at
+`named_type` — the one place a type name has ever meant something, which is
+what made this tractable. Two modules may each declare a `Point` and they are
+two types; an alias resolves to the declared name, so `Point as Other` is the
+type it renames rather than a new one. Unification compares the module, a
+mangled symbol carries it, and every lookup driven by a `Type` — a field read,
+a field write, a record literal, a constructor, a tag — asks by declaration
+rather than by spelling.
+
+Four places had to learn it beyond the obvious. `Resolution::Variant` carried
+the module of the file *mentioning* a constructor rather than the one declaring
+it, so `List::Nil` written in `std::ai` claimed `List` was declared there — a
+lie nothing had read closely enough to mind. The backend's `merged_types`
+deduplicated variants by `(type_name, name)`, keeping whichever module merged
+first and dropping the other. And record construction and field access each
+kept their own lookup by name, which is why the first version compiled and then
+segfaulted: the literal stored nothing, because the layout it was matched
+against had no such field, and the read found garbage.
+
+**The guard from before stays, and is no longer a workaround.** A name the
+compiler already means may not be given a definition. Identity fixed the
+general collision but the *backend* still recognises `Array`, `Shared`, `Fiber`
+and the rest by bare name — a smaller and more contained thing than the type
+system did, and one that will only go when those declarations get an identity
+the code generator can ask about. Until then a `type Array = { .. }` would
+still be handed the runtime's layout, so it is still refused.
 
 The rule this belongs to is not "`Unknown` is a silence" but its neighbour:
 **an identifier is not an identity.** Entry 45 said a benchmark off by a

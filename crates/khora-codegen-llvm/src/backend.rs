@@ -256,11 +256,15 @@ fn merged_types(db: &dyn Db, files: &[SourceFile]) -> TypeMap {
             out.signatures.entry(name.clone()).or_insert_with(|| signature.clone());
         }
         for variant in &map.variants {
-            if !out
-                .variants
-                .iter()
-                .any(|v| v.type_name == variant.type_name && v.name == variant.name)
-            {
+            // Keyed by the *declaration*, not by the spelling. Deduplicating on
+            // `(type_name, name)` alone kept whichever module was merged first
+            // and silently dropped the other, so a program with two `Point`s
+            // compiled one of them twice. Errata 46.
+            if !out.variants.iter().any(|v| {
+                v.type_name == variant.type_name
+                    && v.name == variant.name
+                    && v.home == variant.home
+            }) {
                 out.variants.push(variant.clone());
             }
         }
@@ -945,8 +949,34 @@ impl<'ctx> Backend<'ctx> {
     /// which is what `match` switches on and what a constructor stores. It is
     /// declaration order because `khora_types::type_map` pushes variants as it
     /// reads them, and nothing between here and there sorts them.
-    pub fn variants_of(&self, type_name: &str) -> Vec<VariantInfo> {
-        self.types.variants.iter().filter(|v| v.type_name == type_name).cloned().collect()
+    /// The same, for a caller that knows which declaration it means.
+    ///
+    /// A `home` of `None` asks by name, which is all a caller holding a bare
+    /// spelling can do. Anything holding a [`Type`] should use
+    /// [`Backend::variants_for`] instead: two modules may each declare a
+    /// `Point`, and by name they are one. Errata 46.
+    pub fn variants_in(
+        &self,
+        home: Option<&khora_hir::ModulePath>,
+        type_name: &str,
+    ) -> Vec<VariantInfo> {
+        self.types
+            .variants
+            .iter()
+            .filter(|v| {
+                v.type_name == type_name
+                    && home.is_none_or(|wanted| v.home.as_ref() == Some(wanted))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The variants of the declaration this type *is*.
+    pub fn variants_for(&self, ty: &Type) -> Vec<VariantInfo> {
+        match ty {
+            Type::Adt { name, home, .. } => self.variants_in(home.as_ref(), name),
+            _ => Vec::new(),
+        }
     }
 
     /// A constructor's tag, and the fields it carries.
@@ -957,7 +987,21 @@ impl<'ctx> Backend<'ctx> {
     /// silently returns another type's tag — which is a `match` taking the
     /// wrong arm rather than a diagnostic.
     pub fn variant_of(&self, type_name: &str, case: &str) -> Option<(u32, VariantInfo)> {
-        let variants = self.variants_of(type_name);
+        self.variant_in(None, type_name, case)
+    }
+
+    /// The same, told which declaration it means.
+    ///
+    /// A tag is an index into *one* type's variant list, so asking by name
+    /// where two modules declare the same one returns the other type's tag —
+    /// a `match` taking the wrong arm, or a record built to the wrong layout.
+    pub fn variant_in(
+        &self,
+        home: Option<&khora_hir::ModulePath>,
+        type_name: &str,
+        case: &str,
+    ) -> Option<(u32, VariantInfo)> {
+        let variants = self.variants_in(home, type_name);
         let tag = variants.iter().position(|v| v.name == case)?;
         Some((tag as u32, variants[tag].clone()))
     }
@@ -1807,7 +1851,7 @@ impl<'ctx> Backend<'ctx> {
     /// pointer as an integer.
     pub(crate) fn instantiated_variants(&self, ty: &Type) -> Vec<VariantInfo> {
         let Type::Adt { name, args, .. } = ty else { return Vec::new() };
-        let declared = self.variants_of(name);
+        let declared = self.variants_for(ty);
         let generics = self.types.adts.get(name).cloned().unwrap_or_default();
         if args.is_empty() || generics.is_empty() {
             return declared;

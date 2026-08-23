@@ -398,6 +398,16 @@ impl Signature {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantInfo {
     pub type_name: String,
+    /// The module that declares `type_name`.
+    ///
+    /// Without it, a file that declares a `Point` and imports another module's
+    /// `Point` has one key for two declarations, and whichever arrived first
+    /// answers for both — which is how the importer was told its own type had
+    /// no field `label`. Errata 46.
+    ///
+    /// `None` for a declaration whose module is not known, which is only the
+    /// compiler's own.
+    pub home: Option<khora_hir::ModulePath>,
     pub name: String,
     pub fields: Vec<Type>,
     /// What each field is called, where it has a name.
@@ -549,8 +559,22 @@ pub struct TypeMap {
 }
 
 impl TypeMap {
-    fn variants_of(&self, type_name: &str) -> Vec<&VariantInfo> {
-        self.variants.iter().filter(|v| v.type_name == type_name).collect()
+    /// Whether a recorded variant is the one being asked about.
+    ///
+    /// A `home` of `None` asks by name alone, which is what a caller holding
+    /// only a spelling can do — the compiler's own types, and the backend,
+    /// which works on names monomorphization has already made unique. A
+    /// `Some` asks exactly, and every lookup driven by a [`Type`] does.
+    fn is_the_same_type(v: &VariantInfo, home: Option<&khora_hir::ModulePath>, name: &str) -> bool {
+        v.type_name == name && home.is_none_or(|wanted| v.home.as_ref() == Some(wanted))
+    }
+
+    fn variants_of(
+        &self,
+        home: Option<&khora_hir::ModulePath>,
+        type_name: &str,
+    ) -> Vec<&VariantInfo> {
+        self.variants.iter().filter(|v| Self::is_the_same_type(v, home, type_name)).collect()
     }
 
     /// A constructor, found by the type it belongs to *and* its own name.
@@ -560,8 +584,24 @@ impl TypeMap {
     /// type for exactly this reason. Looking one up by its bare name resolves
     /// `Maybe::Some` to `Option::Some` whenever `Option` was declared first,
     /// which is a wrong tag rather than an error.
-    pub fn variant_of(&self, type_name: &str, case: &str) -> Option<&VariantInfo> {
-        self.variants.iter().find(|v| v.type_name == type_name && v.name == case)
+    pub fn variant_of(
+        &self,
+        home: Option<&khora_hir::ModulePath>,
+        type_name: &str,
+        case: &str,
+    ) -> Option<&VariantInfo> {
+        self.variants
+            .iter()
+            .find(|v| v.name == case && Self::is_the_same_type(v, home, type_name))
+    }
+
+    /// The variant a type's own record shape is recorded as, found by identity.
+    ///
+    /// The lookup every field access wants: a `Type` knows its module, so
+    /// there is no reason for it to ask by spelling.
+    pub fn record_of(&self, ty: &Type) -> Option<&VariantInfo> {
+        let Type::Adt { name, home, .. } = ty else { return None };
+        self.variant_of(home.as_ref(), name, name)
     }
 
     /// Whether a value of this type may be handed to another fiber.
@@ -798,6 +838,9 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     // them is read: a type is a declaration rather than a spelling, and this is
     // the only thing that knows which declaration. Errata 46.
     let homes = type_homes(db, file);
+    // Everything this file declares is declared here, which is the home every
+    // `VariantInfo` below is recorded under.
+    let here = khora_hir::item_map(db, file).module.clone();
     let mut map = TypeMap { homes: homes.clone(), ..TypeMap::default() };
     // Which of each type's parameters are const, so `Matrix<const R, const C>`
     // gets the kind `Int -> Int -> *` rather than `* -> * -> *`.
@@ -876,6 +919,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 map.declared_here.insert(name.clone());
                 map.variants.push(VariantInfo {
                     type_name: name.clone(),
+                    home: here.clone(),
                     name,
                     fields,
                     labels,
@@ -902,6 +946,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                     let mutable = r.fields().map(|f| f.is_mut()).collect();
                     map.variants.push(VariantInfo {
                         type_name: type_name.clone(),
+                        home: here.clone(),
                         name: type_name.clone(),
                         fields,
                         labels,
@@ -940,6 +985,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                             .unwrap_or_default();
                         map.variants.push(VariantInfo {
                             type_name: type_name.clone(),
+                            home: here.clone(),
                             name,
                             fields,
                             labels,
@@ -1948,7 +1994,7 @@ impl<'a> Checker<'a> {
             }
             Pat::TupleStruct { resolution, fields } => {
                 let variant = variant_case(&resolution)
-                    .and_then(|(t, n)| self.types.variant_of(&t, &n))
+                    .and_then(|(h, t, n)| self.types.variant_of(h.as_ref(), &t, &n))
                     .cloned();
                 // Field types are declared against the type's own parameters,
                 // so they have to be read at the scrutinee's instantiation:
@@ -2136,7 +2182,10 @@ impl<'a> Checker<'a> {
                         let outer = self.unifier.zonk(expected);
                         let whole = self.unifier.zonk(found);
                         let head =
-                            Mismatch::Types { expected: outer.clone(), found: whole.clone() };
+                            Mismatch::Types {
+                            expected: Box::new(outer.clone()),
+                            found: Box::new(whole.clone()),
+                        };
                         let detail = disagreement((&outer, &whole), (&inner, &got));
                         format!("{context}: {head}{detail}")
                     }
@@ -2683,8 +2732,9 @@ impl<'a> Checker<'a> {
     ) -> Type {
         // A constructor call builds its ADT.
         if let Expr::Path(resolution) = self.body.expr(callee).clone() {
-            if let Some((owner, case)) = variant_case(&resolution) {
-                if let Some(variant) = self.types.variant_of(&owner, &case).cloned() {
+            if let Some((home, owner, case)) = variant_case(&resolution) {
+                if let Some(variant) = self.types.variant_of(home.as_ref(), &owner, &case).cloned()
+                {
                     if args.len() != variant.fields.len() {
                         self.error(
                             format!(
@@ -3397,14 +3447,14 @@ impl<'a> Checker<'a> {
         let Expr::Field { base, name } = self.body.expr(target).clone() else { return };
         let owner = self.infer(base);
         let owner = self.unifier.zonk(&owner);
-        let Type::Adt { name: type_name, .. } = &owner else { return };
-        let Some(variant) = self.types.variant_of(type_name, type_name) else { return };
+        let Some(variant) = self.types.record_of(&owner) else { return };
         if variant.field(&name).is_none() || variant.is_mut(&name) {
             return;
         }
         self.error(
             format!(
-                "cannot assign to `{name}`, which `{type_name}` does not declare `mut`"
+                "cannot assign to `{name}`, which `{}` does not declare `mut`",
+                variant.type_name
             ),
             range,
         );
@@ -3700,11 +3750,10 @@ impl<'a> Checker<'a> {
         // the type's own name. `type User = | Of(age: Int)` is a sum that
         // happens to have one case, and its payload is reached by matching:
         // `Of` is a constructor, not a field, and the two must not blur.
-        let record = self
-            .types
-            .variants
-            .iter()
-            .find(|v| &v.type_name == name && v.name == v.type_name)?;
+        // By identity, not by spelling. Finding it by name alone is how a file
+        // that declares a `Point` and imports another module's `Point` was told
+        // its own type had no field `label`. Errata 46.
+        let record = self.types.record_of(owner)?;
         let (index, declared) = record.field(label).map(|(i, t)| (i, t.clone()))?;
 
         let mapping = self.substitution_for(name, owner);
@@ -3942,10 +3991,10 @@ impl<'a> Checker<'a> {
                     None => Type::Unknown,
                 }
             }
-            khora_hir::Resolution::Variant { type_name, name, .. } => {
+            khora_hir::Resolution::Variant { module, type_name, name } => {
                 // A nullary constructor is a value; one with a payload is
                 // reached through a call, handled in `infer_call`.
-                match self.types.variant_of(type_name, name) {
+                match self.types.variant_of(Some(module), type_name, name) {
                     Some(_) => self.instantiate_adt(type_name).0,
                     None => Type::Unknown,
                 }
@@ -4026,7 +4075,9 @@ impl<'a> Checker<'a> {
         let mut everything = false;
         for arm in arms {
             let owner = match self.body.pat(arm.pat) {
-                Pat::Path(r) | Pat::TupleStruct { resolution: r, .. } => variant_case(r).map(|(t, _)| t),
+                Pat::Path(r) | Pat::TupleStruct { resolution: r, .. } => {
+                    variant_case(r).map(|(_, t, _)| t)
+                }
                 _ => None,
             };
             if owner.is_none() && matches!(self.body.pat(arm.pat), Pat::Wildcard) {
@@ -4103,7 +4154,7 @@ impl<'a> Checker<'a> {
                 .filter(|a| {
                     matches!(self.body.pat(a.pat),
                         Pat::Path(r) | Pat::TupleStruct { resolution: r, .. }
-                            if variant_case(r).is_some_and(|(t, _)| &t == owner))
+                            if variant_case(r).is_some_and(|(_, t, _)| &t == owner))
                 })
                 .cloned()
                 .collect();
@@ -4225,7 +4276,9 @@ impl<'a> Checker<'a> {
                     }
                     _ => Vec::new(),
                 };
-                match variant_case(resolution).and_then(|(t, n)| self.types.variant_of(&t, &n)) {
+                match variant_case(resolution)
+                    .and_then(|(h, t, n)| self.types.variant_of(h.as_ref(), &t, &n))
+                {
                     Some(v) => Pattern::Constructor { ctor: ctor_for(self.types, v), fields: sub },
                     None => Pattern::Wildcard,
                 }
@@ -4259,8 +4312,8 @@ fn column_type(types: &TypeMap, ty: &Type) -> ColumnType {
     match ty {
         Type::Bool => ColumnType::Finite(vec![Ctor::Bool(true), Ctor::Bool(false)]),
         Type::Int | Type::Str => ColumnType::Unbounded,
-        Type::Adt { name, .. } => {
-            let variants = types.variants_of(name);
+        Type::Adt { name, home, .. } => {
+            let variants = types.variants_of(home.as_ref(), name);
             if variants.is_empty() {
                 ColumnType::Unknown
             } else {
@@ -4283,10 +4336,15 @@ const BOOL_TYPE: &str = "bool";
 ///
 /// Always prefer this to [`variant_name`] when looking a constructor up: the
 /// name alone is ambiguous across types.
-fn variant_case(resolution: &khora_hir::Resolution) -> Option<(String, String)> {
+fn variant_case(
+    resolution: &khora_hir::Resolution,
+) -> Option<(Option<khora_hir::ModulePath>, String, String)> {
     match resolution {
-        khora_hir::Resolution::Variant { type_name, name, .. } => {
-            Some((type_name.clone(), name.clone()))
+        // The module comes along. The resolver has already decided which
+        // declaration this is, and dropping that here was how two `Point`s
+        // became one again three lines later.
+        khora_hir::Resolution::Variant { module, type_name, name } => {
+            Some((Some(module.clone()), type_name.clone(), name.clone()))
         }
         _ => None,
     }

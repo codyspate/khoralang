@@ -773,6 +773,28 @@ impl<'a> Ctx<'a> {
             .find_map(|scope| scope.iter().rev().find(|(n, _)| n == name).map(|(_, id)| *id))
     }
 
+    /// The module that *declares* `type_name`, not the one mentioning it.
+    ///
+    /// A constructor resolution carries a module, and it used to carry this
+    /// file's — so `List::Nil` written in `std::ai` claimed `List` was declared
+    /// in `std::ai`. Nothing read it closely enough to mind until a type became
+    /// an identity rather than a name, at which point every imported
+    /// constructor resolved to a type that did not exist. Errata 46.
+    ///
+    /// A declaration here wins over an import, which is what shadowing means.
+    fn home_of_type(&self, type_name: &str) -> crate::ModulePath {
+        let here = || self.map.module.clone().unwrap_or_else(|| crate::ModulePath::new(vec![]));
+        if self.map.item(type_name).is_some() {
+            return here();
+        }
+        self.scope
+            .origins
+            .iter()
+            .find(|o| o.local == type_name)
+            .map(|o| o.module.clone())
+            .unwrap_or_else(here)
+    }
+
     fn error(&mut self, message: impl Into<String>, range: TextRange) {
         self.body.errors.push(HirError { message: message.into(), range });
     }
@@ -882,7 +904,7 @@ impl<'a> Ctx<'a> {
                 .find(|v| &v.name == case)
             {
                 return crate::Resolution::Variant {
-                    module: self.map.module.clone().unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                    module: self.home_of_type(type_name),
                     type_name: v.type_name.clone(),
                     name: v.name.clone(),
                 };
@@ -1173,11 +1195,7 @@ impl<'a> Ctx<'a> {
             {
                 return self.add_expr(
                     Expr::Path(crate::Resolution::Variant {
-                        module: self
-                            .map
-                            .module
-                            .clone()
-                            .unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                        module: self.home_of_type(type_name),
                         type_name: v.type_name.clone(),
                         name: v.name.clone(),
                     }),
@@ -1334,7 +1352,7 @@ impl<'a> Ctx<'a> {
             .find(|v| v.name == case)
         {
             Some(v) => crate::Resolution::Variant {
-                module: self.map.module.clone().unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                module: self.home_of_type("Step"),
                 type_name: v.type_name.clone(),
                 name: v.name.clone(),
             },

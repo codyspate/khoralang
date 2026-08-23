@@ -107,31 +107,71 @@ fn an_ordinary_name_is_left_alone() {
     }
 }
 
-/// **Still broken, and recorded so it is not mistaken for fixed.**
+/// **Two modules may each declare a `Point`, and they are two types.**
 ///
-/// Two modules that each declare a `Point` are one type to the checker, so the
-/// importer's fields are the wrong ones. This is the same defect the guard
-/// above works around for the handful of names the compiler already means, and the reason the guard is a
-/// guard: identity is a name, and a name is not unique.
-///
-/// When a type carries the declaration it resolved to, this test starts failing
-/// and should be inverted — the `label` field will be found and the program
-/// will check.
+/// This asserted the opposite when it was written, because they were one: the
+/// importer looked its fields up by spelling, found its own declaration, and
+/// was told its value had no field `label`. Errata 46.
 #[test]
-fn two_modules_that_declare_one_name_still_collide() {
+fn two_modules_may_declare_one_name() {
     let found = errors_in_user(
-        "module library;\n\
-         export type Point = { label: String };\n\
-         export fn make() -> Point { { label: \"theirs\" } }\n",
-        "module app;\n\
-         import library::{make};\n\
-         type Point = { x: Int };\n\
-         fn read() -> String { make().label }\n\
-         fn main() -> Int { 0 }\n",
+        "module library;
+         export type Point = { label: String };
+         export fn make() -> Point { { label: \"theirs\" } }
+",
+        "module app;
+         import library::{Point as Theirs, make};
+         type Point = { x: Int };
+         fn mine() -> Point { { x: 1 } }
+         fn read() -> String { let it: Theirs = make(); it.label }
+         fn count() -> Int { mine().x }
+         fn main() -> Int { 0 }
+",
+    );
+    assert!(found.is_empty(), "each `Point` should keep its own fields: {found:?}");
+}
+
+/// The alias is a second spelling, not a second type.
+///
+/// It used to be both: the import was keyed under the local name, so `Theirs`
+/// and `library::Point` would not unify and a rename invented a type.
+#[test]
+fn an_alias_is_the_type_it_renames() {
+    let found = errors_in_user(
+        "module library;
+         export type Point = { label: String };
+         export fn make() -> Point { { label: \"theirs\" } }
+         export fn take(p: Point) -> String { p.label }
+",
+        "module app;
+         import library::{Point as Theirs, make, take};
+         fn round(p: Theirs) -> String { take(p) }
+         fn go() -> String { round(make()) }
+         fn main() -> Int { 0 }
+",
+    );
+    assert!(found.is_empty(), "an alias should unify with the type it names: {found:?}");
+}
+
+/// **A type has to be imported before its fields are.** Unchanged by any of
+/// this, and worth pinning beside the two above so the difference is on the
+/// record: a name in an annotation resolves whether or not the file imported
+/// it, while its *fields* arrive only with the import. The diagnostic says so.
+#[test]
+fn using_a_type_without_importing_it_says_to_import_it() {
+    let found = errors_in_user(
+        "module library;
+         export type Point = { label: String };
+         export fn make() -> Point { { label: \"theirs\" } }
+",
+        "module app;
+         import library::{make};
+         fn read() -> String { make().label }
+         fn main() -> Int { 0 }
+",
     );
     assert!(
-        found.iter().any(|m| m.contains("has no field `label`")),
-        "this collision appears to be fixed — invert this test and delete the guard \
-         it justifies. Got {found:?}"
+        found.iter().any(|m| m.contains("add it to an `import`")),
+        "the fix should be named: {found:?}"
     );
 }

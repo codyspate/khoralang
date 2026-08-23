@@ -29,7 +29,13 @@ pub type TypeVar = u32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mismatch {
     /// Two concrete types that are simply different.
-    Types { expected: Type, found: Type },
+    ///
+    /// Boxed because this is the largest thing `unify` can return and `unify`
+    /// returns `Ok` on nearly every call. A `Type` grew when it started
+    /// carrying the module that declares it, which pushed the `Result` past
+    /// the size where every caller pays for the error's width on the path that
+    /// does not take it.
+    Types { expected: Box<Type>, found: Box<Type> },
     /// A variable would have to contain itself: `a = List<a>`. Without this
     /// check, unification builds an infinite type and the compiler hangs.
     Infinite { var: TypeVar, ty: Type },
@@ -367,7 +373,7 @@ impl Unifier {
                 // are two types, and comparing the spelling alone is what made
                 // them one. Errata 46.
                 if n1 != n2 || h1 != h2 {
-                    return Err(Mismatch::Types { expected: a.clone(), found: b.clone() });
+                    return Err(Mismatch::Types { expected: Box::new(a.clone()), found: Box::new(b.clone()) });
                 }
                 if a1.len() != a2.len() {
                     return Err(Mismatch::Arity { expected: a1.len(), found: a2.len() });
@@ -413,7 +419,7 @@ impl Unifier {
 
             (Type::Tuple(x), Type::Tuple(y)) => {
                 if x.len() != y.len() {
-                    return Err(Mismatch::Types { expected: a.clone(), found: b.clone() });
+                    return Err(Mismatch::Types { expected: Box::new(a.clone()), found: Box::new(b.clone()) });
                 }
                 for (p, q) in x.iter().zip(y) {
                     self.unify(p, q)?;
@@ -440,7 +446,7 @@ impl Unifier {
                 self.unify(e1, e2)
             }
 
-            _ => Err(Mismatch::Types { expected: a.clone(), found: b.clone() }),
+            _ => Err(Mismatch::Types { expected: Box::new(a.clone()), found: Box::new(b.clone()) }),
         }
     }
 

@@ -78,9 +78,9 @@ before the phase that depends on it starts.
   exist as code until something calls it at a type, so there is nothing to link
   against. A package ships source; the only stable ABI is C's, at `extern`.
 
-  1.0 is blocked on package identity (10.2), declaration identity (8.5.2,
-  errata 46), and an audit of everything `std` exports — each of which the
-  document names rather than assumes.
+  1.0 is blocked on package identity (10.2) and an audit of everything `std`
+  exports — each of which the document names rather than assumes. Declaration
+  identity was the third and landed in 8.5.2.
 
 - **D4** (what `[permissions]` enforces) is decided in
   `docs/design/permissions.md`: **the manifest decides what capabilities a
@@ -1386,30 +1386,27 @@ promise. It does not add another execution model or widen the language.
   as objects. Variants have one documented stable representation. A decoding
   failure retains the path to the field or payload that disagreed. The backend
   does not learn that JSON derivation exists.
-- **8.5.2 Compiler-known declaration identity — guarded, not solved.** The
-  hole was worse than the item assumed. A user type called `Array` did not
+- **8.5.2 Compiler-known declaration identity — done, and it was two things.**
+  The hole was worse than the item assumed. A user type called `Array` did not
   merely receive an intrinsic it should not have: it was given the runtime's
   array layout, and dropping one read a garbage element width and aborted the
   process. Errata 46.
 
-  What is done: a name the compiler already means may no longer be given a
-  *definition* — `Array`, `Shared`, `Fiber`, `SharedFn`, `Fibers`, and the
-  builtin spellings `named_type` answers before it consults the file at all.
-  Declaring one opaquely is still allowed, because that names the builtin
-  rather than competing with it, and it is what `std::core` and every backend
-  test write. The corruption is now a diagnostic that names the declaration and
-  says to rename it; `khora-types/tests/identity.rs` pins every case.
+  **A type carries its declaring module now.** Resolved at `named_type`,
+  compared by unification, carried into the mangled symbol, and asked for by
+  every lookup a `Type` drives. Two modules may each declare a `Point`; an
+  alias is the type it renames. Three further places had been storing the
+  wrong module or deduplicating by the right name and the wrong key —
+  `Resolution::Variant`, the backend's `merged_types`, and the two field
+  lookups code generation keeps of its own.
 
-  What is not: recognition *by declaration*. A `Type::Adt` carries a bare
-  `String`, so two modules that each declare a `Point` are still one type to
-  the checker, and an alias still splits one type into two. Both are the same
-  defect as the refused case and neither is fixed by refusing a name. The real
-  answer is a canonical, module-qualified identity settled where a type name is
-  interpreted, which rekeys `adts`, `variants`, `signatures`, `kinds`,
-  `declared_here` and every impl head — its own piece of work, not a correction
-  to make in passing. `identity.rs` asserts the collision still happens so that
-  fixing it fails a test rather than passing silently. Package identity extends
-  this in 10.2.
+  **The guard stays.** A name the compiler already means still may not be given
+  a definition, because the *backend* recognises `Array`, `Shared`, `Fiber` and
+  the rest by bare name. That is a smaller, more contained version of the same
+  problem, and it goes when those declarations get an identity the code
+  generator can ask about rather than when the type system does. Package
+  identity extends this in 10.2.
+
 - **8.5.3 Decide D12 — done.** `docs/design/compatibility.md`, and the
   open-question table records it. Pre-1.0 and 1.0 are written separately:
   before 1.0 the promise is procedural — anything may change, every change that
@@ -1463,7 +1460,7 @@ general formatter cleanup. Those remain Phase 10 or ordinary maintenance. The
 point of 8.5 is to make the foundation honest before optimizing it, not to make
 the whole product complete before Phase 9 can begin.
 
-**Exit — met, with 8.5.2 short of its own wording.** A native round-trip test
+**Exit — met.** A native round-trip test
 covers derived records and variants and a negative test names a nested decode
 path. `docs/design/compatibility.md` closes D12 and the open-question table
 records it. Public claims match the measured implementation. The full corpus
@@ -1471,12 +1468,11 @@ checks and formats, the test suite is green, the applications run, ordinary
 HTTP clients conform, the benchmark is reproducible in `bench/`, and clippy is
 clean under `-D warnings`.
 
-The exception is the regression tests for lookalike declarations. They prove
-that a lookalike is **refused**, which is not the same as proving it receives no
-privilege — a `Type::Adt` is a bare name, so there is nothing downstream that
-could tell two declarations apart. The memory corruption is gone and the
-remaining defect is pinned by a test that asserts it still happens. See 8.5.2
-and errata 46.
+8.5.2 met its own wording in the end, though not in one go: the guard landed
+first and identity followed. A `Type::Adt` knows the declaration it came from,
+and `khora-types/tests/identity.rs` pins both halves — two modules declaring one
+name, an alias unifying with what it renames, and the lookalike definitions that
+are still refused because the backend has not caught up.
 
 ---
 
