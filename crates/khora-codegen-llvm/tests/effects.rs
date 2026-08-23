@@ -31,6 +31,16 @@ fn refused(name: &str, source: &str) -> Vec<String> {
     let db = KhoraDatabase::new();
     let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
     let root = SourceRoot::new(&db, vec![file]);
+
+    // The parser first, then the backend — the order the CLI uses, because a
+    // file that did not parse has no tree worth compiling. `compile` alone
+    // never sees a syntax error, so a test that only called it would report
+    // "should have been refused" about source the compiler does refuse.
+    let parse = khora_db::parse(&db, file);
+    if !parse.errors().is_empty() {
+        return parse.errors().iter().map(|e| e.message.clone()).collect();
+    }
+
     match khora_codegen_llvm::compile(&db, root, &exe) {
         Ok(()) => panic!("`{name}` should have been refused:
 
@@ -996,12 +1006,12 @@ export fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
 /// — and the first sign was the code generator saying it could not represent a
 /// binding whose type nobody had worked out. Errata 40.
 #[test]
-fn a_module_level_let_is_a_constant() {
+fn a_module_level_const_is_a_constant() {
     let ran = run(
         "const_let",
         &format!(
             "{CONST}
-let mock = handler for Ledger {{ balance: fn id => id * 10 }};
+const mock = handler for Ledger {{ balance: fn id => id * 10 }};
 
 fn main() -> Int {{
   with {{ ledger: mock }} {{ khora_print_int(report(4)); }}
@@ -1022,7 +1032,7 @@ fn a_context_can_name_a_constant() {
         "const_context",
         &format!(
             "{CONST}
-let mock = handler for Ledger {{ balance: fn id => id * 10 }};
+const mock = handler for Ledger {{ balance: fn id => id * 10 }};
 
 export context Mock {{ ledger: mock, }}
 
@@ -1046,7 +1056,7 @@ fn two_mentions_are_two_values() {
         "const_twice",
         &format!(
             "{CONST}
-let mock = handler for Ledger {{ balance: fn id => id * 10 }};
+const mock = handler for Ledger {{ balance: fn id => id * 10 }};
 
 fn main() -> Int {{
   with {{ ledger: mock }} {{ khora_print_int(report(1)); }}
@@ -1068,8 +1078,8 @@ fn a_constant_can_be_any_expression() {
         "const_value",
         &format!(
             "{CONST}
-let answer = 6 * 7;
-let greeting = \"kh\" + \"ora\";
+const answer = 6 * 7;
+const greeting = \"kh\" + \"ora\";
 
 impl String {{ fn byte_length(self) -> Int; }}
 
@@ -1093,8 +1103,8 @@ fn a_constant_defined_in_terms_of_itself_is_refused() {
         "const_cycle",
         &format!(
             "{CONST}
-let a = b;
-let b = a;
+const a = b;
+const b = a;
 
 fn main() -> Int {{ khora_print_int(a); 0 }}
 "
@@ -1115,15 +1125,36 @@ fn a_mutable_global_is_refused() {
         "const_mut",
         &format!(
             "{CONST}
-let mut counter = 0;
+const mut counter = 0;
 
 fn main() -> Int {{ khora_print_int(counter); 0 }}
 "
         ),
     );
     assert!(
-        found.iter().any(|m| m.contains("mutable global")),
+        found.iter().any(|m| m.contains("cannot be `mut`")),
         "expected the reason to be named, got {found:?}"
+    );
+}
+
+/// A `let` where a `const` belongs is the mistake somebody carrying the habit
+/// over from inside a function will make, so it gets its own sentence rather
+/// than "expected a declaration".
+#[test]
+fn a_let_at_module_level_says_to_write_const() {
+    let found = refused(
+        "module_let",
+        &format!(
+            "{CONST}
+let counter = 0;
+
+fn main() -> Int {{ khora_print_int(counter); 0 }}
+"
+        ),
+    );
+    assert!(
+        found.iter().any(|m| m.contains("is a `const`, not a `let`")),
+        "expected the right word to be named, got {found:?}"
     );
 }
 

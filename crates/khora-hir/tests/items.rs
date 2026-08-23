@@ -22,7 +22,8 @@ fn collects_every_kind_of_declaration() {
          export effect Ledger { record: Int -> () }\n\
          export fn analyze() -> Int { 1 }\n\
          fn private_helper() -> Int { 2 }\n\
-         let cache = 1;\n",
+         const cache = 1;\n\
+         export const shared_cache = 2;\n",
     );
 
     let map = item_map(&db, f);
@@ -32,10 +33,15 @@ fn collects_every_kind_of_declaration() {
     assert_eq!(map.item("Risk").unwrap().kind, ItemKind::Type);
     assert_eq!(map.item("Ledger").unwrap().kind, ItemKind::Effect);
     assert_eq!(map.item("analyze").unwrap().kind, ItemKind::Function);
-    assert_eq!(map.item("cache").unwrap().kind, ItemKind::Let);
+    assert_eq!(map.item("cache").unwrap().kind, ItemKind::Const);
+    assert_eq!(map.item("shared_cache").unwrap().kind, ItemKind::Const);
 
     assert!(map.item("analyze").unwrap().is_public);
     assert!(!map.item("private_helper").unwrap().is_public, "visibility not tracked");
+    // A constant is exported like anything else. This used to be hard-coded to
+    // private, so `export const` parsed and then did not export.
+    assert!(map.item("shared_cache").unwrap().is_public);
+    assert!(!map.item("cache").unwrap().is_public);
 }
 
 /// Constructors are reached through their type, so they are recorded against it
@@ -209,7 +215,7 @@ fn a_glob_import_brings_public_items_into_scope() {
 fn a_local_in_a_path_is_a_category_error() {
     let db = KhoraDatabase::new();
     let f = file(&db, "a.kh", "module m;
-let xs = 1;
+const xs = 1;
 ");
     let root = SourceRoot::new(&db, vec![f]);
 

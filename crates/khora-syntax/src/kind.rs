@@ -129,6 +129,13 @@ pub enum SyntaxKind {
     BENCH_DECL,
     FN_DECL,
     LET_DECL,
+    /// A named constant at module level: `const alphabet = "bcd..";`.
+    ///
+    /// Separate from `LET_DECL` because it is a different thing that happens to
+    /// read alike. A `let` is a binding inside a body, evaluated once where it
+    /// is written; a `const` is a named expression, lowered afresh at each
+    /// mention, with no initialization order and nothing to release at exit.
+    CONST_DECL,
     PARAM_LIST,
     PARAM,
     /// `with { ledger: Ledger }` on a signature or a function type.
@@ -254,6 +261,11 @@ impl SyntaxKind {
                 | TRAIT_KW
                 | IMPL_KW
                 | FN_KW
+                | CONST_KW
+                // `let` cannot start a declaration — that is `const` — but it
+                // is listed so recovery stops at one rather than swallowing it
+                // into the declaration above, which is what makes the "did you
+                // mean `const`" diagnostic land on the right line.
                 | LET_KW
                 | MODULE_KW
                 | IMPORT_KW

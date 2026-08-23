@@ -917,6 +917,12 @@ global is exactly the thing `memory.md` §5a will not let cross) and one guard
 against `let a = b; let b = a;`, which inlining would otherwise turn into a
 stack overflow.
 
+*Later:* the spelling caught up with the decision. A module-level binding is
+written `const` now, because calling it `let` left one word covering two
+different constructs and no way to tell them apart except by indentation. The
+semantics here are unchanged — this entry is what they are. See
+`docs/design/keywords.md`.
+
 The rule is the fourth entry to say it, and this is the plainest case yet:
 **`Unknown` is a silence, not a type.** Entries 24, 26, 27 and 30 are the same
 sentence about different holes. What is new here is the *distance*: the other

@@ -98,11 +98,11 @@ fn import_without_a_selection() {
 fn caret_lands_correctly_after_non_ascii_text() {
     // The offending token must sit *after* multi-byte characters on the same
     // line, or this proves nothing: the two accented letters are two bytes
-    // each, so byte counting would report column 25 where character counting
-    // correctly reports 23.
-    let source = "module m;\nlet s = \"héllo wörld\" ~ 1;\n";
+    // each, so byte counting would report column 27 where character counting
+    // correctly reports 25.
+    let source = "module m;\nconst s = \"héllo wörld\" ~ 1;\n";
     let rendered = render(source);
-    assert!(rendered.contains(":2:23"), "column counted in bytes, not chars:\n{rendered}");
+    assert!(rendered.contains(":2:25"), "column counted in bytes, not chars:\n{rendered}");
     assert_snapshot("non_ascii_line", &rendered);
 }
 

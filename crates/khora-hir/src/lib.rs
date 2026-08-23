@@ -54,7 +54,7 @@ pub enum ItemKind {
     Trait,
     Effect,
     Function,
-    Let,
+    Const,
     Context,
 }
 
@@ -65,7 +65,7 @@ impl ItemKind {
             ItemKind::Trait => "trait",
             ItemKind::Effect => "effect",
             ItemKind::Function => "function",
-            ItemKind::Let => "binding",
+            ItemKind::Const => "constant",
             ItemKind::Context => "context",
         }
     }
@@ -297,12 +297,12 @@ fn collect_decl(decl: &ast::Decl, map: &mut ItemMap) {
             (c.name(), ItemKind::Context, c.is_exported(), c.syntax().text_range())
         }
         ast::Decl::Fn(f) => (f.name(), ItemKind::Function, f.is_exported(), f.syntax().text_range()),
-        ast::Decl::Let(l) => {
-            let name = match l.pat() {
+        ast::Decl::Const(c) => {
+            let name = match c.pat() {
                 Some(ast::Pat::Ident(p)) => p.name(),
                 _ => None,
             };
-            (name, ItemKind::Let, false, l.syntax().text_range())
+            (name, ItemKind::Const, c.is_exported(), c.syntax().text_range())
         }
         // Tests and benches are not nameable, so they are not items.
         ast::Decl::Test(_) | ast::Decl::Bench(_) => return,
@@ -642,7 +642,7 @@ pub fn resolve_path(
     // A local in a `::` path is a category error, and saying so beats
     // reporting that its last segment could not be found.
     if let Some(local) = map.item(first) {
-        if matches!(local.kind, ItemKind::Let | ItemKind::Function) {
+        if matches!(local.kind, ItemKind::Const | ItemKind::Function) {
             return Err(HirError {
                 message: format!(
                     "`{first}` is a {}, not a module or a type; use `.` to project from a value",

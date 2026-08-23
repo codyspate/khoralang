@@ -37,7 +37,7 @@ nothing else* is what question 3 is for.
 | `trait` | a nominal, explicitly implemented set of operations | `interface` is more familiar and structural in both Go and TypeScript, so it would promise automatic satisfaction. See `docs/design/typeclasses.md` §1. |
 | `impl` | attaches implementations to a type | `impl Eq for Int` reads as the sentence it is. `implement` is longer and no clearer; Go has no equivalent construct to borrow from. |
 | `as` | renames an import | TypeScript and Python both spell it this way. |
-| `const` | a compile-time integer type parameter | Only ever appears inside `<>`, where its position disambiguates it from a binding. |
+| `const` | a named constant at module level, and a compile-time integer type parameter | Both positions read the way Rust's do, and they cannot be confused: one is inside `<>` and the other begins a declaration. See "`const` for a module-level constant" below. |
 | `Self` | the implementing type | The weakest item here: it differs from the receiver `self` by capitalization alone. Rust and Swift both do this and both audiences that have the concept read it correctly; TypeScript's `this` is used for *both* the value and the type, which is worse. No better option found. |
 
 ### Kept, because the rule is silent
@@ -86,10 +86,49 @@ thinking. `pub` paired with nothing in the language and was Rust-specific
 jargon. The behavior is identical either way, so this was question 3: the same
 accuracy, better coherence.
 
-This is the only rename the audit produced. Everything else in the tables above
-was examined and kept, which is the expected outcome — the point of the pass was
-to find the places where a word promises the wrong thing, not to relabel the
-language.
+This is the only rename the audit produced from the tables above; the one below
+came later, from somebody reading the code rather than the list.
+
+### `const` for a module-level constant — done
+
+A binding at module level was spelled `let`, and it never was one. A `let` is a
+place inside a body, evaluated once where it is written. A module-level binding
+is a *named expression*, lowered afresh at every mention — Rust's `const` rather
+than its `static`, chosen so there is no initialization order to get wrong, no
+global to release at exit, and no shared state for two fibers to reach. The
+implementation had said so in a comment since it was written. The surface said
+`let`.
+
+That is question 1 rather than question 3: not two spellings of one idea, but
+one spelling covering two different ideas, so a reader had no way to tell which
+they were looking at except by the indentation.
+
+The obvious objection is the section above, which rejected `const` for immutable
+locals. It does not apply. That proposal was `const x = 1` *inside a function*,
+where it would compete with `let` and mispredict for a Rust reader; this is a
+declaration position where `let` no longer appears at all. Rust makes exactly
+this distinction with exactly these two words.
+
+`const mut` is refused where it is written, because a constant is not a place:
+
+```text
+error: a `const` cannot be `mut` — it is a named expression rather than a place,
+       and there is no mutable global to make it one. A value that changes and is
+       reached from more than one fiber is a `Shared`
+```
+
+So is a `let` that should be a `const`, since carrying the habit in from inside
+a function is the mistake worth catching by name:
+
+```text
+error: a binding at module level is a `const`, not a `let`
+```
+
+**A constant's type is inferred**, like everything else — `const alphabet =
+"bcdfghjkmnpqrstvwxyz23456789";` needs no annotation, and one can be written
+when it helps. Nothing else about the construct changed: `export const` exports
+it, which it had not actually done before, because visibility was hard-coded to
+private on the one declaration kind nobody had revisited.
 
 ### A type can now have a method without a trait — done
 

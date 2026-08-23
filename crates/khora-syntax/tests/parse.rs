@@ -295,7 +295,7 @@ fn f() { let x = g()!; raise DbError::Unavailable; }
 #[test]
 fn handler_and_catch_parse() {
     let src = "module m;
-let h = handler for Ledger { get_history: fn id => \"x\" };
+const h = handler for Ledger { get_history: fn id => \"x\" };
 fn f() { g()! catch { E::A(_) => 1, } }
 ";
     let parse = parse(src);
@@ -414,7 +414,7 @@ fn f(handler: Request -> Response) { let context = 1; test(context) }
 fn contextual_keywords_still_parse_as_keywords() {
     let src = "module m;
 export context Production { ledger: h }
-let live = handler for Ledger { get_history: fn id => \"x\" };
+const live = handler for Ledger { get_history: fn id => \"x\" };
 test \"it works\" { assert(1 == 1); }
 bench \"fast\" { f() }
 ";
@@ -462,7 +462,7 @@ test \"the test names a test\" {
 /// promoted it, as the test it replaces predicted.
 #[test]
 fn for_is_a_hard_keyword() {
-    let installed = parse("module m;\nlet h = handler for Ledger { get: fn i => 1 };\n");
+    let installed = parse("module m;\nconst h = handler for Ledger { get: fn i => 1 };\n");
     assert!(installed.errors().is_empty(), "{:?}", installed.errors());
     assert!(installed.debug_tree().contains("FOR_KW"), "`for` was not read as a keyword");
 

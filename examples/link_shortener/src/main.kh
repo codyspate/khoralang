@@ -82,9 +82,9 @@ export type Store = {
 ///
 /// No vowels, so a drawn code cannot spell something the operator has to
 /// apologise for, and no `0`/`O` or `1`/`l`, so one read aloud arrives intact.
-fn alphabet() -> String { "bcdfghjkmnpqrstvwxyz23456789" }
+const alphabet = "bcdfghjkmnpqrstvwxyz23456789";
 
-fn code_length() -> Int { 6 }
+const code_length = 6;
 
 /// A code nothing else is using.
 ///
@@ -108,10 +108,10 @@ fn fresh_code(taken: Dict<String, Link>) -> String
 fn draw_code() -> String
   with { random: Random }
 {
-  let letters = alphabet();
+  let letters = alphabet;
   let mut out = "";
   let mut i = 0;
-  while i < code_length() {
+  while i < code_length {
     let at = random.in_range(0, String::byte_length(letters));
     out = out + String::slice(letters, at, at + 1);
     i = i + 1;

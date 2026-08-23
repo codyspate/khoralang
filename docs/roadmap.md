@@ -1154,6 +1154,9 @@ them was in the part anybody was worried about.
   release at exit, and no shared state for two fibers to reach. `let mut` at
   module level is refused for that last reason.
 
+  It is also *spelled* `const` now — that came later, and only the word
+  changed. See `docs/design/keywords.md`.
+
   This was five of the six things standing between the reference application
   and a binary.
 

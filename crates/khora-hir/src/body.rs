@@ -450,19 +450,19 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
         })
         .collect();
 
-    // A `let` at module level is a **constant**: a named expression, lowered
-    // wherever it is mentioned. Rust's `const` rather than its `static`, and
+    // A `const` is a named expression, lowered wherever it is mentioned.
+    // Rust's `const` rather than its `static`, and
     // for the same reasons — there is no initialization order to get wrong, no
     // global to release at exit, and no shared state for two fibers to reach.
     //
     // Collected once here rather than searched for at each mention, exactly as
     // the contexts above are.
-    let constants: Vec<(String, ast::LetDecl)> = parse
+    let constants: Vec<(String, ast::ConstDecl)> = parse
         .source_file()
         .decls()
         .filter_map(|d| match d {
-            ast::Decl::Let(l) => match l.pat()? {
-                ast::Pat::Ident(p) => Some((p.name()?.ident()?, l)),
+            ast::Decl::Const(c) => match c.pat()? {
+                ast::Pat::Ident(p) => Some((p.name()?.ident()?, c)),
                 _ => None,
             },
             _ => None,
@@ -529,7 +529,7 @@ fn lower_test(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
     contexts: &[(String, ast::ContextDecl)],
-    constants: &[(String, ast::LetDecl)],
+    constants: &[(String, ast::ConstDecl)],
     block: &ast::Block,
 ) -> Body {
     let mut ctx = Ctx {
@@ -586,7 +586,7 @@ fn methods(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
     contexts: &[(String, ast::ContextDecl)],
-    constants: &[(String, ast::LetDecl)],
+    constants: &[(String, ast::ConstDecl)],
     owner: &str,
     functions: impl Iterator<Item = ast::FnDecl>,
 ) -> Vec<(String, Body)> {
@@ -606,7 +606,7 @@ fn lower_function(
     map: &crate::ItemMap,
     scope: &crate::FileScope,
     contexts: &[(String, ast::ContextDecl)],
-    constants: &[(String, ast::LetDecl)],
+    constants: &[(String, ast::ConstDecl)],
     decl: &ast::FnDecl,
     block: &ast::Block,
 ) -> Body {
@@ -690,7 +690,7 @@ struct Ctx<'a> {
     /// The `let` declarations of this file, by name. A mention of one is
     /// lowered into the initializer, so a module-level `let` is a constant
     /// rather than a global.
-    constants: &'a [(String, ast::LetDecl)],
+    constants: &'a [(String, ast::ConstDecl)],
     /// The constants currently being expanded, innermost last.
     ///
     /// `let a = b; let b = a;` is a cycle, and inlining is what turns a cycle
@@ -1382,7 +1382,7 @@ impl<'a> Ctx<'a> {
     fn expand_constant(&mut self, name: &str, range: TextRange) -> Option<ExprId> {
         let decl = self.constants.iter().find(|(n, _)| n == name).map(|(_, d)| d.clone())?;
 
-        // `let a = b; let b = a;` would otherwise be a stack overflow, and a
+        // `const a = b; const b = a;` would otherwise be a stack overflow, and a
         // stack overflow is not a diagnostic.
         if self.expanding.iter().any(|n| n == name) {
             let loop_ = self.expanding.join("` -> `");
@@ -1393,20 +1393,10 @@ impl<'a> Ctx<'a> {
             return Some(self.add_expr(Expr::Missing, range));
         }
 
-        // A mutable global is shared state that two fibers could reach, which
-        // is the one thing `docs/design/memory.md` §5a does not allow to cross.
-        // A constant has no such question to answer.
-        if decl.is_mut() {
-            self.error(
-                format!(
-                    "`{name}` is a `let mut` at module level, which would be a mutable global \
-                     — shared state two fibers could reach. Make it a `let`, or move it inside \
-                     a function"
-                ),
-                range,
-            );
-            return Some(self.add_expr(Expr::Missing, range));
-        }
+        // A mutable global would be shared state two fibers could reach, which
+        // `docs/design/memory.md` §5a does not allow to cross. The check that
+        // used to be here is now in the parser, where `const mut` is rejected
+        // as it is written — a constant has no `mut` to ask about.
 
         let Some(initializer) = decl.initializer() else {
             self.error(format!("`{name}` has no value to stand for"), range);

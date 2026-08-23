@@ -181,7 +181,7 @@ export fn handle(req: Request) -> Response
   Response::json(200, report)
 }
 
-let mock_ledger = handler for Ledger {
+const mock_ledger = handler for Ledger {
   get_history: fn id => "Transaction: $50000 to offshore entity",
   flag_account: fn (id, risk) => (),
 };
@@ -189,7 +189,7 @@ let mock_ledger = handler for Ledger {
 /// One line each, because the effect is two small things. This used to have to
 /// fabricate a whole `AnalysisReport`, which tests the mock rather than the
 /// code under it.
-let mock_ai = handler for LLMService {
+const mock_ai = handler for LLMService {
   complete: fn _ => "a critical assessment",
   embed_raw: fn _ => List::Nil,
 };

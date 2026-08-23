@@ -34,7 +34,14 @@ fn declaration(p: &mut Parser<'_>) {
         IMPL_KW => impl_decl(p),
         EFFECT_KW => effect_decl(p),
         FN_KW => fn_decl(p),
-        LET_KW => let_decl(p),
+        CONST_KW => const_decl(p),
+        // A `let` here is almost always a constant written with the word for a
+        // local binding. Saying so beats "expected a declaration", which is
+        // true and unhelpful.
+        LET_KW => {
+            p.error("a binding at module level is a `const`, not a `let`");
+            const_decl(p);
+        }
         IDENT if p.at_contextual(CONTEXT_KW) => context_decl(p),
         IDENT if p.at_contextual(TEST_KW) || p.at_contextual(BENCH_KW) => test_decl(p),
         IDENT if p.at_contextual(EXTERN_KW) => fn_decl(p),
@@ -44,11 +51,15 @@ fn declaration(p: &mut Parser<'_>) {
             TRAIT_KW => trait_decl(p),
             EFFECT_KW => effect_decl(p),
             FN_KW => fn_decl(p),
-            LET_KW => let_decl(p),
+            CONST_KW => const_decl(p),
+            LET_KW => {
+                p.error("a binding at module level is a `const`, not a `let`");
+                const_decl(p);
+            }
             IDENT if p.nth_at_contextual(1, CONTEXT_KW) => context_decl(p),
             IDENT if p.nth_at_contextual(1, EXTERN_KW) => fn_decl(p),
             _ => p.err_recover(
-                "expected `type`, `trait`, `effect`, `context`, `fn`, `extern` or `let` \
+                "expected `type`, `trait`, `effect`, `context`, `fn`, `extern` or `const` \
                  after `export`",
                 Parser::at_decl_start,
             ),
@@ -458,4 +469,42 @@ pub(super) fn let_decl(p: &mut Parser<'_>) {
     }
     p.expect(SEMICOLON);
     m.complete(p, LET_DECL);
+}
+
+/// `export? const Pattern (":" Type)? "=" Expr ";"`
+///
+/// The same shape as a `let` and a different word, because it is a different
+/// thing: a constant is a named expression lowered wherever it is mentioned,
+/// which is why there is no initialization order to get wrong and nothing to
+/// release when the program ends. Spelling both `let` made the two look like
+/// one feature that happened to work at two levels.
+///
+/// `const` is already reserved for a const-generic parameter — `<const N: Int>`
+/// — and reading it here is unambiguous for the reason it is in Rust: the two
+/// positions cannot be confused.
+pub(super) fn const_decl(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.eat(EXPORT_KW);
+    // Whichever word got us here. A `let` only reaches this from the recovery
+    // path in `declaration`, which has already said what the right one is.
+    p.bump_any();
+    if p.at(MUT_KW) {
+        // Worth its own message rather than a parse error: somebody writing it
+        // wants a mutable global, and the answer is that Khora does not have
+        // one, not that the word is in the wrong place.
+        p.err_and_bump(
+            "a `const` cannot be `mut` — it is a named expression rather than a place, and \
+             there is no mutable global to make it one. A value that changes and is reached \
+             from more than one fiber is a `Shared`",
+        );
+    }
+    pattern(p);
+    if p.eat(COLON) {
+        type_(p);
+    }
+    if p.expect(EQ) && expr(p).is_none() {
+        p.error("expected an initializer expression");
+    }
+    p.expect(SEMICOLON);
+    m.complete(p, CONST_DECL);
 }

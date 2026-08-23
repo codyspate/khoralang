@@ -110,6 +110,7 @@ ast_node!(WithExpr, WITH_EXPR);
 ast_node!(WithBlock, WITH_BLOCK);
 ast_node!(FnDecl, FN_DECL);
 ast_node!(LetDecl, LET_DECL);
+ast_node!(ConstDecl, CONST_DECL);
 ast_node!(ParamList, PARAM_LIST);
 ast_node!(Param, PARAM);
 
@@ -122,7 +123,7 @@ ast_enum!(Decl {
     Test(TestDecl),
     Bench(BenchDecl),
     Fn(FnDecl),
-    Let(LetDecl),
+    Const(ConstDecl),
 });
 
 // --- names ---------------------------------------------------------------
@@ -478,6 +479,24 @@ impl LetDecl {
     }
     pub fn initializer(&self) -> Option<Expr> {
         child(&self.0)
+    }
+}
+
+impl ConstDecl {
+    /// No `is_mut`, and there is no accessor to add: a constant is a named
+    /// expression rather than a place, so there is nothing for `mut` to mean.
+    /// The parser says so where somebody writes it.
+    pub fn pat(&self) -> Option<Pat> {
+        child(&self.0)
+    }
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.0)
+    }
+    pub fn initializer(&self) -> Option<Expr> {
+        child(&self.0)
+    }
+    pub fn is_exported(&self) -> bool {
+        token(&self.0, EXPORT_KW).is_some()
     }
 }
 

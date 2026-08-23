@@ -1,11 +1,11 @@
 error: expected `;`
- --> src/main.kh:2:23
+ --> src/main.kh:2:25
   |
-2 | let s = "héllo wörld" ~ 1;
-  |                       ^
+2 | const s = "héllo wörld" ~ 1;
+  |                         ^
 
 error: expected a declaration
- --> src/main.kh:2:23
+ --> src/main.kh:2:25
   |
-2 | let s = "héllo wörld" ~ 1;
-  |                       ^
+2 | const s = "héllo wörld" ~ 1;
+  |                         ^
