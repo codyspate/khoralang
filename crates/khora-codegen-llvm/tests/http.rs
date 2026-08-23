@@ -273,9 +273,23 @@ fn the_server_reads_what_a_client_actually_sends() {
 
     // --- `Content-Length` is a promise about what is coming, not an
     //     instruction to allocate
+    //
+    // Four gigabytes is more than the buffer, so it is refused on the spot —
+    // and *on the spot* is the point. The reader waits for a body that was
+    // promised, so a promise it can never satisfy has to be recognised rather
+    // than waited out, or one lying client holds a connection for the whole
+    // ten-second deadline.
+    //
+    // This asserted `200` with a body of `9` until the reader learned to wait:
+    // the server read the nine bytes that came, stopped because the read was
+    // short, and answered about them. That was the short-read heuristic
+    // showing through rather than a decision — a request claiming four
+    // gigabytes is too large, and 413 is what that is called.
     let answer = ask(b"POST /size HTTP/1.1\r\nContent-Length: 4000000000\r\n\r\nnine byte");
-    assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
-    assert_eq!(body_of(&answer), "9", "what arrived, not what was promised: {answer}");
+    assert!(
+        answer.starts_with("HTTP/1.1 413 Payload Too Large\r\n"),
+        "a promise past the buffer is refused, not waited for: {answer}"
+    );
 
     // --- a route nobody mounted
     let answer = ask(b"GET /nowhere HTTP/1.1\r\n\r\n");
@@ -321,7 +335,61 @@ fn the_server_reads_what_a_client_actually_sends() {
     silent.read_to_string(&mut late).expect("reading the late answer");
     assert_eq!(body_of(&late), "tagged", "the connection that waited was answered too: {late}");
 
+    // --- a body that arrives after its headers
+    //
+    // A client is allowed to write the two separately, and most do — .NET's
+    // `HttpClient` does, and so does anything setting a body from a stream.
+    // The reader used to stop at the first read shorter than its buffer, so
+    // the pause between them read as the end of the request and the server
+    // answered `400` about a body that had not arrived yet, *before* the
+    // client had finished sending it. curl never showed it, because curl
+    // writes a small request in one go.
+    let mut split = connect().expect("could not reach the server");
+    split
+        .write_all(b"POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\n\r\n")
+        .expect("the headers");
+    split.flush().expect("flush");
+    // Long enough that the server has certainly returned from its first read.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    split.write_all(b"nine byte").expect("the body, late");
+    split.flush().expect("flush");
+    let mut late = String::new();
+    split.read_to_string(&mut late).expect("reading the answer");
+    assert!(late.starts_with("HTTP/1.1 200 OK\r\n"), "{late}");
+    assert_eq!(body_of(&late), "9", "the whole body arrived: {late}");
+
     // --- and it is still serving after all of that
     let answer = ask(b"GET /tagged HTTP/1.1\r\n\r\n");
     assert_eq!(body_of(&answer), "tagged", "the server survived every one of those");
+
+    // --- the deadline that makes reading-until-complete safe
+    //
+    // Reading until the request is complete and reading forever are the same
+    // loop when a client stops talking, so a connection that promises a body
+    // and never sends it has to be let go of rather than parking a fiber for
+    // the life of the process.
+    //
+    // Last, and slow on purpose: the timeout `serve_connection` sets is ten
+    // seconds, and the alternative to waiting for it is not testing the thing
+    // that keeps a server up.
+    let mut silent = connect().expect("could not reach the server");
+    silent
+        .write_all(b"POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 99\r\n\r\n")
+        .expect("the headers and no body");
+    silent.flush().expect("flush");
+    let started = std::time::Instant::now();
+    let mut gave_up = String::new();
+    let _ = silent.read_to_string(&mut gave_up);
+    let waited = started.elapsed();
+    assert!(
+        waited >= std::time::Duration::from_secs(8),
+        "the deadline should have held the connection open: {waited:?}"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(25),
+        "the deadline should have let it go: {waited:?}"
+    );
+
+    let answer = ask(b"GET /tagged HTTP/1.1\r\n\r\n");
+    assert_eq!(body_of(&answer), "tagged", "the server outlived the silent client");
 }

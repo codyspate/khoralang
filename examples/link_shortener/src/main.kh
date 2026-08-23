@@ -1,6 +1,6 @@
 module main;
 
-import std::core::{Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
+import std::core::{Changed, Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
 import std::env::{Clock, Env, variable_or};
 import std::fs::{Fs, IoError, read_text, write_text};
 import std::json::{Json, parse};
@@ -70,6 +70,7 @@ impl Link {
 /// writer replaces the cell's contents in one step.
 export type Store = {
   links: Shared<Dict<String, Link>>,
+  /// On the monotonic clock, which is the one whose differences are durations.
   started: Int,
 };
 
@@ -132,49 +133,58 @@ fn create(store: Store, request: Request) -> Response
     if!absolute(url) {
       problem(400, "`url` must be absolute, as `https://example.com/x`")
     } else {
-      // Read, transform and write as one step: two fibers shortening at the
-      // same moment cannot both draw against the same snapshot and have one
-      // of them lose. `Shared::update` gives back what it left in the cell.
-      let made = Shared::update(store.links, fn table => {
+      // Drawing the code, inserting under it, and learning which code it was
+      // are one step. `modify` rather than `update` because `update` can only
+      // answer with the new table, and finding this request's link in it
+      // afterwards is a guess — two fibers shortening in the same second
+      // produce links that are indistinguishable by anything but their code.
+      let made = Shared::modify(store.links, fn table => {
           let code = fresh_code(table);
-          Dict::insert(table, code, { created: clock.unix_seconds(), code: code, url: url, hits: 0 })
+          let link: Link = { created: clock.unix_seconds(), code: code, url: url, hits: 0 };
+          { state: Dict::insert(table, code, link), result: link }
         });
-      // Whatever the update settled on, read back by the code it chose. The
-      // draw happens inside the lock, so this is the only way out with it.
-      match newest(made) {
-        Option::None => problem(500, "the link went missing between writing and reading it"),
-        Option::Some(link) => {
-          save(made)! catch {
-            // A link that is served but not written down comes back as one
-            // that never existed, and the client already has the code. Worth
-            // saying out loud, not worth failing the request over.
-            _ => print("warning: could not write the link file"),
-          };
-          Response::json(201, link.as_json())
-        },
-      }
+      save(store.links)! catch {
+        // A link that is served but not written down comes back as one that
+        // never existed, and the client already has the code. Worth saying out
+        // loud, not worth failing the request over.
+        _ => print("warning: could not write the link file"),
+      };
+      Response::json(201, made.as_json())
     },
   }
 }
 
 /// `GET /l/:code` — follow a link, and count that it was followed.
-fn follow(store: Store, request: Request) -> Response {
+fn follow(store: Store, request: Request) -> Response
+  with { fs: Fs, env: Env }
+{
   match Params::get(request.params, "code") {
     Option::None => problem(404, "no code in the path"),
     Option::Some(code) => {
       // The count and the lookup are one step, so a hit cannot be lost to a
-      // reader that started before it.
-      let after = Shared::update(store.links, fn table =>
+      // reader that started before it — and the answer is the link as it was
+      // counted rather than a second read that another fiber could get
+      // between.
+      let found = Shared::modify(store.links, fn table =>
         match Dict::get(table, code) {
-          Option::None => table,
-          Option::Some(found) =>
-          Dict::insert(table, code, { created: found.created, code: found.code,
-              url: found.url, hits: found.hits + 1 }),
+          Option::None => { state: table, result: Option::None },
+          Option::Some(link) => {
+            let bumped: Link = { created: link.created, code: link.code,
+              url: link.url, hits: link.hits + 1 };
+            { state: Dict::insert(table, code, bumped), result: Option::Some(bumped) }
+          },
         });
-      match Dict::get(after, code) {
+      match found {
         Option::None => problem(404, "no link with that code"),
-        Option::Some(found) =>
-        Response::text(302, "") |> Response::with_header("Location", found.url),
+        Option::Some(link) => {
+          // Counted on disk too, or a restart forgets every hit. A write per
+          // redirect is the wrong shape for a busy service — it wants a
+          // periodic flush, or an append-only log with the count derived —
+          // and it is the right shape for a program whose point is to be
+          // read.
+          save(store.links)! catch { _ => print("warning: could not write the link file") };
+          Response::text(302, "") |> Response::with_header("Location", link.url)
+        },
       }
     },
   }
@@ -208,7 +218,11 @@ fn health(store: Store, request: Request) -> Response
 {
   let fields = Map::new();
   Map::insert(fields, "status", Json::Text("ok"));
-  Map::insert(fields, "uptime_ms", Json::Number(Int::to_float(clock.monotonic_millis())));
+  Map::insert(
+    fields,
+    "uptime_ms",
+    Json::Number(Int::to_float(clock.monotonic_millis() - store.started)),
+  );
   Map::insert(fields, "links", Json::Number(Int::to_float(Dict::size(Shared::get(store.links)))));
   Response::json(200, Json::Object(fields))
 }
@@ -246,27 +260,6 @@ fn url_of(body: String) -> Option<String> {
   }
 }
 
-/// The most recently created link in the table.
-fn newest(table: Dict<String, Link>) -> Option<Link> {
-  let mut best: Option<Link> = Option::None;
-  let mut rest = values_of(table);
-  let mut going = true;
-  while going {
-    match rest {
-      List::Nil => { going = false; },
-      List::Cons(first, more) => {
-        best = match best {
-          Option::None => Option::Some(first),
-          Option::Some(so_far) =>
-          if so_far.created <= first.created { Option::Some(first) } else { Option::Some(so_far) },
-        };
-        rest = more;
-      },
-    }
-  };
-  best
-}
-
 fn values_of(table: Dict<String, Link>) -> List<Link> {
   let mut out = List::Nil;
   let mut rest = Dict::entries(table);
@@ -300,12 +293,21 @@ fn links_file() -> String
 /// at startup, so the format that matters is the one that appends cheaply and
 /// survives a half-written last line. A tab cannot appear in a code, and a URL
 /// containing one was already not a URL.
-fn save(table: Dict<String, Link>) -> ()
+/// **Reads the cell rather than taking a snapshot**, because a caller's
+/// snapshot is already old. Two fibers that both changed something race to
+/// write, and whichever lands last wins — with this, the loser wrote a subset
+/// of the winner and nothing is lost. Passing a snapshot in meant the loser
+/// could be the one holding the *newer* table.
+///
+/// It is still last-writer-wins on a file, which is fine for one process and
+/// wrong for two. A service that needed better would write ahead of the
+/// change rather than after it.
+fn save(links: Shared<Dict<String, Link>>) -> ()
   with { fs: Fs, env: Env }
   raises IoError
 {
   let mut text = "";
-  let mut rest = Dict::entries(table);
+  let mut rest = Dict::entries(Shared::get(links));
   let mut going = true;
   while going {
     match rest {
@@ -411,7 +413,7 @@ fn port() -> Int
 
 export fn main() raises HttpError {
   with { env: Env::real(), clock: Clock::real(), fs: Fs::real(), random: Random::real() } {
-    let store: Store = { links: Shared::of(load()), started: clock.unix_seconds() };
+    let store: Store = { links: Shared::of(load()), started: clock.monotonic_millis() };
     print("restored " + Int::to_string(Dict::size(Shared::get(store.links))) + " link(s)");
 
     // `SharedFn::of` at each mount is what lets the whole router cross into

@@ -2030,6 +2030,16 @@ impl<A, B, 'e> SharedFn<A, B, 'e> {
 /// The contents must be `Share` for the same reason, which also means a `Map`
 /// cannot go in one: it mutates its buckets in place. `Dict` is the ordered
 /// persistent map, and is what a shared table is made of.
+/// A new state, and something to hand back that is not the state.
+///
+/// What `Shared::modify` asks its change function for. A record rather than a
+/// tuple because a tuple literal has no expression form yet, and named halves
+/// read better than positional ones at the call anyway.
+export type Changed<A, B> = {
+  state: A,
+  result: B,
+};
+
 export type Shared<A>;
 
 /// The lock is what makes this true, and `khora_shared_update` takes it.
@@ -2053,6 +2063,25 @@ impl<A: Share> Shared<A> {
   /// Updating the same cell from inside `change` is a deadlock, and stops the
   /// program with a message rather than waiting for itself.
   fn update(self, change: (A) -> A) -> A;
+
+  /// The same, for a change that has something to say beyond the new state.
+  ///
+  /// `update` can only answer with what it left in the cell, which is not
+  /// always what the caller needs to know. A handler inserting a record under a
+  /// generated key has to get *that* key back, and searching the new state for
+  /// it afterwards is a guess — a wrong one the moment two fibers insert
+  /// records that look alike:
+  ///
+  /// ```khora
+  /// let code = Shared::modify(links, fn table => {
+  ///   let drawn = fresh_code(table);
+  ///   { state: Dict::insert(table, drawn, made), result: drawn }
+  /// });
+  /// ```
+  ///
+  /// Both halves are installed and handed back under the one lock, so the
+  /// answer belongs to the state it was produced with.
+  fn modify<B>(self, change: (A) -> Changed<A, B>) -> B;
 }
 
 export type Fibers;

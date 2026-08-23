@@ -1478,6 +1478,68 @@ pub unsafe extern "C" fn khora_shared_update(
     produced
 }
 
+/// How generated code hands over a change function that also answers.
+///
+/// Two words come back where [`Change`] has one, and only scalars cross here,
+/// so the new state is returned and the answer is written through the pointer
+/// — the same shape the tagged-return trampolines use for the same reason.
+type Modify = extern "C" fn(*const u8, *mut u8, u64, *mut u64) -> u64;
+
+/// Reads, transforms, writes, and gives back something that is not the state.
+///
+/// [`khora_shared_update`] can only answer with what it left in the cell, and
+/// that is not always what the caller needs to know. A handler that inserts a
+/// record under a generated key has to get *that* key back; searching the new
+/// state for it afterwards is a guess, and a wrong one as soon as two fibers
+/// insert records that look alike.
+///
+/// So the change function returns both, and both are installed and handed back
+/// under the one lock.
+///
+/// # Safety
+///
+/// `cell` must be live, `change` a live Khora closure borrowed for the call,
+/// `call` the shim matching it, and `answer` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_shared_modify(
+    cell: *mut u8,
+    change: *mut u8,
+    call: Modify,
+    answer: *mut u64,
+) -> u64 {
+    let Some(held) = (unsafe { held_of(cell) }) else {
+        fatal("updating a shared cell that has already been released");
+    };
+
+    let me = deny_reentry(held, "update");
+    let mut cell = held.cell.lock().unwrap_or_else(|e| e.into_inner());
+    held.holder.store(me, COUNTER_ORDER);
+    let (boxed, glue) = (cell.boxed, cell.glue);
+
+    if boxed {
+        // SAFETY: the cell has held a reference to this since it was stored.
+        unsafe { khora_dup(cell.value as *mut u8) };
+    }
+
+    let mut produced_answer: u64 = 0;
+    // SAFETY: the caller guarantees a live closure and a matching shim.
+    let produced = unsafe {
+        let code = *change.add(KHORA_FIELD_OFFSET).cast::<*const u8>();
+        call(code, change, cell.value, &raw mut produced_answer)
+    };
+
+    let old = std::mem::replace(&mut cell.value, produced);
+    held.holder.store(0, COUNTER_ORDER);
+    drop(cell);
+
+    // SAFETY: the cell owned this and has just given it up. Outside the lock,
+    // because a drop routine can reach a cell of its own.
+    unsafe { release_word(old, boxed, glue) };
+    // SAFETY: the caller guarantees `answer` is writable.
+    unsafe { *answer = produced_answer };
+    produced
+}
+
 /// Releases a cell and the value in it.
 ///
 /// This is a `drop_fields` callback: [`khora_drop`] calls it when the last

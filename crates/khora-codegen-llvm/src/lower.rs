@@ -1137,6 +1137,44 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.drop(handle, &cell_ty);
                 Some(self.be.word_to_value(word, &value_ty))
             }
+            ("modify", [cell, change]) => {
+                let cell_ty = self.types.of(*cell).clone();
+                let value_ty = self.shared_contents(site, &cell_ty, range)?;
+                let answer_ty = self.types.of(site).clone();
+                let change_ty = self.types.of(*change).clone();
+                let handle = self.expr(*cell)?;
+                let closure = self.expr(*change)?;
+                let Some(shim) = self.be.modify_shim(&value_ty, &answer_ty) else {
+                    return self.fail(
+                        format!("`{answer_ty}` has no machine type, so it cannot be handed back"),
+                        range,
+                    );
+                };
+                let shim = shim.as_global_value().as_pointer_value();
+                let slot = self
+                    .be
+                    .builder
+                    .build_alloca(self.be.ctx.i64_type(), "answer")
+                    .expect("somewhere for the answer");
+                let modify = self.be.rt.shared_modify;
+                self.be
+                    .builder
+                    .build_call(
+                        modify,
+                        &[handle.into(), closure.into(), shim.into(), slot.into()],
+                        "modified",
+                    )
+                    .expect("modifying a shared cell");
+                let word = self
+                    .be
+                    .builder
+                    .build_load(self.be.ctx.i64_type(), slot, "answer")
+                    .expect("reading the answer")
+                    .into_int_value();
+                self.drop(closure, &change_ty);
+                self.drop(handle, &cell_ty);
+                Some(self.be.word_to_value(word, &answer_ty))
+            }
             _ => self.fail(
                 format!("`Shared::{name}` is not an operation the backend knows"),
                 range,

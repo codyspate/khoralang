@@ -561,6 +561,8 @@ pub(crate) struct Backend<'ctx> {
     trampolines: HashMap<usize, FunctionValue<'ctx>>,
     /// One change shim per value type, keyed by how the type prints.
     change_shims: HashMap<String, FunctionValue<'ctx>>,
+    /// The same, for the pair of types `Shared::modify` moves.
+    modify_shims: HashMap<String, FunctionValue<'ctx>>,
     /// A program-wide id for each error type, assigned on first sight. It is
     /// the `which` of a tagged return, so 1 is the lowest: 0 means the call
     /// did not raise. See `docs/design/effect-runtime.md` §2.
@@ -648,6 +650,7 @@ impl<'ctx> Backend<'ctx> {
             pending_thunks: Vec::new(),
             trampolines: HashMap::new(),
             change_shims: HashMap::new(),
+            modify_shims: HashMap::new(),
             error_ids: HashMap::new(),
             error_releaser: None,
             errors: Vec::new(),
@@ -1267,6 +1270,95 @@ impl<'ctx> Backend<'ctx> {
             self.builder.position_at_end(block);
         }
         Some(f)
+    }
+
+    /// The shim `khora_shared_modify` calls its change function through.
+    ///
+    /// [`Backend::change_shim`] with one more thing to do. The change function
+    /// gives back a `Changed<A, B>` — one heap object holding the new state and
+    /// the answer — and the runtime cannot take a Khora record apart, so it is
+    /// taken apart here, where the layout is known. Two words come out where
+    /// only one can be returned, so the answer goes through a pointer.
+    ///
+    /// The record itself is released: it was built to carry two values across
+    /// one call and nothing holds it afterwards.
+    ///
+    /// `uint64_t shim(void *code, void *closure, uint64_t value, uint64_t *answer)`.
+    pub fn modify_shim(&mut self, state: &Type, answer: &Type) -> Option<FunctionValue<'ctx>> {
+        let key = format!("{state}=>{answer}");
+        if let Some(f) = self.modify_shims.get(&key) {
+            return Some(*f);
+        }
+
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let i64_type = self.ctx.i64_type();
+        let f = self.module.add_function(
+            &format!("kh$modify{}", self.modify_shims.len()),
+            i64_type.fn_type(&[ptr.into(), ptr.into(), i64_type.into(), ptr.into()], false),
+            Some(Linkage::Internal),
+        );
+        self.modify_shims.insert(key, f);
+
+        let saved = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+
+        let code = f.get_nth_param(0).expect("a code pointer").into_pointer_value();
+        let closure = f.get_nth_param(1).expect("the closure").into_pointer_value();
+        let word = f.get_nth_param(2).expect("the value").into_int_value();
+        let out = f.get_nth_param(3).expect("somewhere for the answer").into_pointer_value();
+
+        let state_ty = self.llvm_type(state)?;
+        let given = self.word_to_value(word, state);
+        let callee_type = ptr.fn_type(&[ptr.into(), state_ty.into()], false);
+        let pair = self
+            .builder
+            .build_indirect_call(callee_type, code, &[closure.into(), given.into()], "changed")
+            .expect("calling a change function")
+            .try_as_basic_value()
+            .basic()
+            .expect("a change function gives back a record")
+            .into_pointer_value();
+
+        // Field order is declaration order, and `Changed` declares `state`
+        // first. Both are duplicated out of the record before it goes.
+        let next = self.read_from(pair, 0, state);
+        let result = self.read_from(pair, 1, answer);
+        let glue = self.drop_glue(&Type::adt("Changed"));
+        self.builder
+            .build_call(self.rt.drop, &[pair.into(), glue.into()], "")
+            .expect("releasing the carrier");
+
+        let result = self.to_word(result);
+        self.builder.build_store(out, result).expect("handing back the answer");
+        let next = self.to_word(next);
+        self.builder.build_return(Some(&next)).expect("handing back the new state");
+
+        if let Some(block) = saved {
+            self.builder.position_at_end(block);
+        }
+        Some(f)
+    }
+
+    /// One field of a record, with a reference of its own.
+    ///
+    /// The shims are outside `Lower`, which is where the ordinary field read
+    /// lives, so this is the small part of it they need.
+    fn read_from(
+        &mut self,
+        object: PointerValue<'ctx>,
+        index: u64,
+        ty: &Type,
+    ) -> BasicValueEnum<'ctx> {
+        let slot = runtime::field_pointer(self.ctx, &self.builder, object, index);
+        let llvm = self.llvm_type(ty).unwrap_or_else(|| self.ctx.i64_type().into());
+        let value = self.builder.build_load(llvm, slot, "field").expect("loading a field");
+        if is_boxed(ty) {
+            self.builder
+                .build_call(self.rt.dup, &[value.into()], "")
+                .expect("keeping a field past its record");
+        }
+        value
     }
 
     pub fn tagged_trampoline(&mut self, arity: usize) -> FunctionValue<'ctx> {

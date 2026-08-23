@@ -145,6 +145,9 @@ pub struct Runtime<'ctx> {
     pub shared_set: FunctionValue<'ctx>,
     /// `uint64_t khora_shared_update(void *cell, void *change, Change call)`
     pub shared_update: FunctionValue<'ctx>,
+    /// `uint64_t khora_shared_modify(void *cell, void *change, Modify call,
+    ///                               uint64_t *answer)`
+    pub shared_modify: FunctionValue<'ctx>,
     /// `void khora_shared_release(void *cell)`, a `drop_fields` callback.
     pub shared_release: FunctionValue<'ctx>,
     /// `void *khora_fiber_spawn(void *body, void (*glue)(void *),
@@ -247,6 +250,10 @@ impl<'ctx> Runtime<'ctx> {
             shared_update: declare(
                 "khora_shared_update",
                 i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            ),
+            shared_modify: declare(
+                "khora_shared_modify",
+                i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
             ),
             shared_release: declare("khora_shared_release", void.fn_type(&[ptr.into()], false)),
             fiber_spawn: declare(

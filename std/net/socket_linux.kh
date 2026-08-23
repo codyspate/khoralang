@@ -27,6 +27,7 @@ extern fn accept(handle: I32, address: Ptr, length: Ptr) -> I32;
 extern fn recv(handle: I32, into: Ptr, length: Int, flags: I32) -> Int;
 extern fn send(handle: I32, from: Ptr, length: Int, flags: I32) -> Int;
 extern fn close(handle: I32) -> I32;
+extern fn setsockopt(handle: I32, level: I32, name: I32, value: Ptr, length: I32) -> I32;
 
 /// A failed call returns -1, and a handle is never negative.
 export fn invalid_handle() -> Int { 0 - 1 }
@@ -72,6 +73,31 @@ fn sockaddr_in(port: Int) -> Array<U8> {
 export fn accept_on(server: Int) -> Int {
   let taken = accept(I32::of(server), Ptr::null(), Ptr::null());
   if I32::to_int(taken) < 0 { invalid_handle() } else { I32::to_int(taken) }
+}
+
+/// How long a read will wait before giving up, in milliseconds.
+///
+/// See the note on the Windows one for why a server cannot do without it. The
+/// difference here is the shape of the value: Berkeley takes a
+/// `struct timeval`, two 64-bit words on this target, where Winsock takes a
+/// single `DWORD` of milliseconds.
+export fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
+  let value: Array<U8> = Array::new(16, 0);
+  write_word(value, 0, millis / 1000);
+  write_word(value, 8, (millis % 1000) * 1000);
+  // SOL_SOCKET is 1 and SO_RCVTIMEO is 20, which are Berkeley's numbers.
+  let outcome = Array::with_data(value, fn (from, n) =>
+    I32::to_int(setsockopt(I32::of(handle), I32::of(1), I32::of(20), from, I32::of(n))));
+  outcome == 0
+}
+
+/// A 64-bit value, least significant byte first, which is this target's order.
+fn write_word(into: Array<U8>, at: Int, value: Int) -> () {
+  let mut i = 0;
+  while i < 8 {
+    Array::set(into, at + i, U8::of(Int::and(Int::shr(value, i * 8), 255)));
+    i = i + 1;
+  }
 }
 
 /// Reads what has arrived into `buffer`, and says how many bytes that was.

@@ -1,7 +1,7 @@
 module std::net::http;
 
 import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, SharedFn, Show, Split, nursery};
-import std::net::socket::{accept_on, invalid_handle, listen_on, receive, shut, start, transmit};
+import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 
 // HTTP/1.1, over the sockets in `std::net::socket`.
 //
@@ -562,37 +562,48 @@ fn chunk() -> Int { 4096 }
 /// Reads one request into `into`, and says how many bytes arrived.
 ///
 /// Stops at whichever comes first: the body is as long as `Content-Length`
-/// promised, the peer closed, the buffer filled, or a read came back short.
-/// One `recv` and hope was what this used to be, and it worked only because
-/// every body so far fitted in one packet — which stops being true the first
-/// time anything real is posted.
+/// promised, the peer closed, the buffer filled, or the read deadline passed.
 ///
-/// **A short read ends the request**, and that rule is doing more work than it
-/// looks. `receive` blocks, and `std::net::socket` offers no timeout, so a
-/// client that promises four gigabytes and sends nine bytes would otherwise
-/// deadlock the server: it waits for a body that is not coming while the
-/// client waits for an answer. Neither side moves, and one bad `Content-Length`
-/// takes the whole process out.
+/// **It used to stop on a short read as well, and that was a real interop
+/// failure.** A client is allowed to write its headers and its body separately
+/// — .NET's `HttpClient` does, and so does anything that sets a body from a
+/// stream — and the pause between the two reads as the end of the request. The
+/// server then answered `400` about a body that had not arrived yet, *before*
+/// the client had finished sending it. Reproduced with a socket and a
+/// three-hundred-millisecond sleep; curl never showed it, because curl writes
+/// small requests in one go.
 ///
-/// The cost is a client that sends its headers, pauses, and then sends the
-/// body: that pause reads as the end and the handler sees a short body. Every
-/// blocking server without a receive timeout has this trade, and the honest
-/// fix is a timeout on `receive` rather than a cleverer rule here.
+/// The rule was there for a reason, which is why it survived: `receive` blocks,
+/// so "keep reading until the request is complete" and "keep reading forever"
+/// are the same loop when the client stops talking. What makes the honest
+/// version safe is the deadline `serve_connection` sets before calling this —
+/// a client that goes quiet gets its socket closed instead of parking a fiber
+/// for the life of the process.
 fn read_request(connection: Int, into: Array<U8>) -> Int {
   let scratch: Array<U8> = Array::new(chunk(), 0);
   let mut filled = 0;
   // Negative until the headers are complete, then the whole request's length.
   let mut want = 0 - 1;
-  // Whether the last read filled its buffer, which is the only evidence
-  // available that the client has more to say.
-  let mut brimming = true;
+  // Whether `Content-Length` promised more than the buffer holds.
+  let mut oversized = false;
   let mut going = true;
   while going {
     if want >= 0 && filled >= want {
       going = false;
+    } else if want > Array::length(into) {
+      // A promise bigger than the buffer cannot be kept, so there is nothing
+      // to wait for: the answer is 413 whatever else arrives. Deciding it here
+      // rather than after the deadline is what keeps a client claiming four
+      // gigabytes from holding a connection open for ten seconds — which is
+      // exactly what it did the first time this loop was allowed to wait.
+      oversized = true;
+      going = false;
     } else if filled >= Array::length(into) {
       going = false;
-    } else if brimming {
+    } else {
+      // Zero is the peer closing, negative is the read failing — and with a
+      // deadline set, "failing" includes "nothing arrived in time", which is
+      // what stops this waiting on a client that has gone away.
       let read = receive(connection, scratch);
       if read <= 0 {
         going = false;
@@ -601,16 +612,17 @@ fn read_request(connection: Int, into: Array<U8>) -> Int {
         let taken = if read > room { room } else { read };
         copy_at(scratch, into, taken, filled);
         filled = filled + taken;
-        brimming = read >= chunk();
         if want < 0 {
           want = wanted(into, filled);
         }
       }
-    } else {
-      going = false;
     }
   }
-  filled
+  // A full buffer is how `answer_bytes` recognises a request that is too big,
+  // and a promise too big to keep means the same thing — so it is reported the
+  // same way rather than by a second channel. Nothing reads the buffer on that
+  // path; the 413 is decided before anything is parsed.
+  if oversized { Array::length(into) } else { filled }
 }
 
 fn copy_at(from: Array<U8>, into: Array<U8>, count: Int, offset: Int) -> () {
@@ -851,6 +863,12 @@ impl Router {
   /// one thing naming constructors cannot express, and the reason a total
   /// wildcard arm exists at all.
   fn serve_connection<'e>(router: Router<'e>, connection: Int) -> () {
+    // Before anything is read. `read_request` keeps reading until the request
+    // is complete, which is the only correct thing to do and is also how a
+    // fiber gets parked forever by a client that stops talking. Ten seconds is
+    // long enough that no real client notices and short enough that a
+    // half-open connection is not a leak.
+    set_receive_timeout(connection, 10000);
     Router::answer_on(router, connection) catch {
       _ => {
         transmit(connection, Response::rendered(Response::text(500, "handler failed")));

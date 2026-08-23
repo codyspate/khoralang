@@ -25,6 +25,7 @@ extern fn accept(handle: Int, address: Ptr, length: Ptr) -> Int;
 extern fn recv(handle: Int, into: Ptr, length: I32, flags: I32) -> I32;
 extern fn send(handle: Int, from: Ptr, length: I32, flags: I32) -> I32;
 extern fn closesocket(handle: Int) -> I32;
+extern fn setsockopt(handle: Int, level: I32, name: I32, value: Ptr, length: I32) -> I32;
 
 /// `INVALID_SOCKET` is `(SOCKET)~0`, which read as a signed handle is -1.
 export fn invalid_handle() -> Int { 0 - 1 }
@@ -80,6 +81,31 @@ fn sockaddr_in(port: Int) -> Array<U8> {
 /// Waits for a connection. [`invalid_handle`] if the wait failed.
 export fn accept_on(server: Int) -> Int {
   accept(server, Ptr::null(), Ptr::null())
+}
+
+/// How long a read will wait before giving up, in milliseconds.
+///
+/// **A server needs this or it has no way to stop listening to a client that
+/// has stopped talking.** Reading until the request is complete is the only
+/// correct thing to do — a client is allowed to send its headers and its body
+/// in separate writes, and most do — but "until complete" and "forever" are
+/// the same loop without a deadline, and a fiber parked in `recv` is a fiber
+/// that never comes back.
+///
+/// Windows takes a `DWORD` of milliseconds here, where Berkeley takes a
+/// `struct timeval`. Same option, two shapes, which is why this lives beside
+/// the other target-specific pieces rather than next to `receive`.
+export fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
+  let value: Array<U8> = Array::new(4, 0);
+  Array::set(value, 0, U8::of(Int::and(millis, 255)));
+  Array::set(value, 1, U8::of(Int::and(Int::shr(millis, 8), 255)));
+  Array::set(value, 2, U8::of(Int::and(Int::shr(millis, 16), 255)));
+  Array::set(value, 3, U8::of(Int::and(Int::shr(millis, 24), 255)));
+  // SOL_SOCKET is 0xffff and SO_RCVTIMEO is 0x1006, which are Winsock's
+  // numbers and not Berkeley's — the same names mean 1 and 20 on Linux.
+  let outcome = Array::with_data(value, fn (from, n) =>
+    I32::to_int(setsockopt(handle, I32::of(65535), I32::of(4102), from, I32::of(n))));
+  outcome == 0
 }
 
 /// Reads what has arrived into `buffer`, and says how many bytes that was.
