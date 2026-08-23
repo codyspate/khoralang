@@ -818,8 +818,8 @@ impl<'ctx> Backend<'ctx> {
 
     /// A value as the one word a tagged return carries it in.
     ///
-    /// Every Khora value fits: an `Int` is already one, a `Bool` widens, and
-    /// everything boxed is a pointer.
+    /// Every Khora value fits: an `Int` is already one, a `Bool` widens, a
+    /// `Float` preserves its IEEE-754 bits, and everything boxed is a pointer.
     pub fn to_word(&self, value: BasicValueEnum<'ctx>) -> inkwell::values::IntValue<'ctx> {
         match value {
             BasicValueEnum::PointerValue(p) => self
@@ -831,6 +831,11 @@ impl<'ctx> Backend<'ctx> {
                 .build_int_z_extend(i, self.ctx.i64_type(), "word")
                 .expect("widening to a word"),
             BasicValueEnum::IntValue(i) => i,
+            BasicValueEnum::FloatValue(f) => self
+                .builder
+                .build_bit_cast(f, self.ctx.i64_type(), "float.word")
+                .expect("a float as a word")
+                .into_int_value(),
             other => other.into_int_value(),
         }
     }
@@ -852,6 +857,10 @@ impl<'ctx> Backend<'ctx> {
                 .build_int_truncate(word, i, "unword")
                 .expect("narrowing from a word")
                 .into(),
+            Some(BasicTypeEnum::FloatType(f)) => self
+                .builder
+                .build_bit_cast(word, f, "word.float")
+                .expect("a word as a float"),
             _ => word.into(),
         }
     }
@@ -865,6 +874,7 @@ impl<'ctx> Backend<'ctx> {
         match self.llvm_type(ty) {
             Some(BasicTypeEnum::PointerType(p)) => p.const_null().into(),
             Some(BasicTypeEnum::IntType(i)) => i.const_zero().into(),
+            Some(BasicTypeEnum::FloatType(f)) => f.const_zero().into(),
             _ => self.ctx.i64_type().const_zero().into(),
         }
     }

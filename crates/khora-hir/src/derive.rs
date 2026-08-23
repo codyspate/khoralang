@@ -1,4 +1,5 @@
-//! `derive(Eq, Ord, Show, Hash)`, expanded into ordinary impls.
+//! `derive(Eq, Ord, Show, Hash, ToJson, FromJson)`, expanded into ordinary
+//! impls.
 //!
 //! # Why this is a source-to-source expansion
 //!
@@ -41,11 +42,11 @@ use crate::HirError;
 
 /// The traits the compiler knows how to write.
 ///
-/// Four, and not extensible. Every one of them is *structural* — the answer is
+/// Six, and not extensible. Every one of them is *structural* — the answer is
 /// determined by the fields and nothing else — which is the property that makes
 /// generating the code better than writing it. A trait whose implementation is
 /// a decision (`Default`, `Iterator`) has nothing here to generate.
-pub const DERIVABLE: [&str; 4] = ["Eq", "Ord", "Show", "Hash"];
+pub const DERIVABLE: [&str; 6] = ["Eq", "Ord", "Show", "Hash", "ToJson", "FromJson"];
 
 /// The prime the derived `Hash` reduces by at every step.
 ///
@@ -83,7 +84,12 @@ impl DerivedImpl {
     /// impl has one key. Spelled the way `khora_hir::body::impl_key` spells
     /// it, because it *is* that key: the body was lowered by the same code.
     pub fn body_key(&self) -> String {
-        format!("{}#{}::{}", self.trait_name, self.type_name, method_of(&self.trait_name))
+        format!(
+            "{}#{}::{}",
+            self.trait_name,
+            self.type_name,
+            method_of(&self.trait_name)
+        )
     }
 }
 
@@ -100,6 +106,8 @@ pub fn method_of(trait_name: &str) -> &'static str {
         "Ord" => "cmp",
         "Show" => "show",
         "Hash" => "hash",
+        "ToJson" => "to_json",
+        "FromJson" => "from_json",
         _ => "",
     }
 }
@@ -165,7 +173,7 @@ enum Shape {
     /// A record's fields, in declaration order — which is also comparison
     /// order, because that is what every language does and what someone
     /// reordering two fields expects to change.
-    Record(Vec<String>),
+    Record(Vec<String>, Vec<String>),
     /// A variant's cases, in declaration order — which decides which one is
     /// `Less`, again because that is the only ordering the reader can see.
     Variant(Vec<Case>),
@@ -177,6 +185,10 @@ struct Case {
     /// alike here: Khora builds and matches both positionally, so a derive has
     /// no reason to tell them apart.
     arity: usize,
+    /// Payload types as the author wrote them. JSON decoding uses these in
+    /// generated annotations so the checker never has to infer a generic
+    /// decoder's result backwards through a constructor.
+    field_types: Vec<String>,
 }
 
 /// Expands every `derive` in a source file. Pure, so it can be tested without
@@ -188,9 +200,13 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
 
     for decl in source.decls() {
         let ast::Decl::Type(t) = decl else { continue };
-        let Some(clause) = t.derive_clause() else { continue };
+        let Some(clause) = t.derive_clause() else {
+            continue;
+        };
         let at = clause.syntax().text_range();
-        let Some(type_name) = t.name().and_then(|n| n.ident()) else { continue };
+        let Some(type_name) = t.name().and_then(|n| n.ident()) else {
+            continue;
+        };
 
         let mut wanted: Vec<String> = Vec::new();
         for named in clause.traits() {
@@ -220,14 +236,23 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
             continue;
         }
 
-        let Some(shape) = shape_of(&t, &type_name, at, &mut errors) else { continue };
-        let Some(params) = parameters_of(&t, &type_name, at, &mut errors) else { continue };
+        let Some(shape) = shape_of(&t, &type_name, at, &mut errors) else {
+            continue;
+        };
+        let Some(params) = parameters_of(&t, &type_name, at, &mut errors) else {
+            continue;
+        };
 
-        let is_record = matches!(shape, Shape::Record(_));
+        let is_record = matches!(shape, Shape::Record(_, _));
         for trait_name in wanted {
             text.push_str(&write_impl(&trait_name, &type_name, &params, &shape));
             text.push('\n');
-            impls.push(DerivedImpl { trait_name, type_name: type_name.clone(), at, is_record });
+            impls.push(DerivedImpl {
+                trait_name,
+                type_name: type_name.clone(),
+                at,
+                is_record,
+            });
         }
     }
 
@@ -257,7 +282,12 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
             errors,
         };
     }
-    Derived { text, parse, impls, errors }
+    Derived {
+        text,
+        parse,
+        impls,
+        errors,
+    }
 }
 
 /// What the declaration holds, or `None` with the reason recorded.
@@ -281,25 +311,48 @@ fn shape_of(
     match t.definition() {
         Some(ast::Type::Record(r)) => {
             if r.row_tail().is_some() {
-                return refuse(errors, "its row is open, so what it holds is not fixed here");
+                return refuse(
+                    errors,
+                    "its row is open, so what it holds is not fixed here",
+                );
             }
             let mut fields = Vec::new();
+            let mut field_types = Vec::new();
             for field in r.fields() {
-                let Some(name) = field.name().and_then(|n| n.ident()) else { continue };
+                let Some(name) = field.name().and_then(|n| n.ident()) else {
+                    continue;
+                };
+                let Some(ty) = field.ty() else {
+                    continue;
+                };
                 fields.push(name);
+                field_types.push(ty.syntax().text().to_string());
             }
-            Some(Shape::Record(fields))
+            Some(Shape::Record(fields, field_types))
         }
         Some(ast::Type::Variant(v)) => {
             let mut cases = Vec::new();
             for case in v.cases() {
-                let Some(name) = case.name().and_then(|n| n.ident()) else { continue };
-                let arity = case
-                    .fields()
-                    .map(|list| list.fields().count())
-                    .or_else(|| case.tuple_fields().map(|list| list.types().count()))
-                    .unwrap_or(0);
-                cases.push(Case { name, arity });
+                let Some(name) = case.name().and_then(|n| n.ident()) else {
+                    continue;
+                };
+                let field_types: Vec<String> = if let Some(list) = case.fields() {
+                    list.fields()
+                        .filter_map(|field| field.ty())
+                        .map(|ty| ty.syntax().text().to_string())
+                        .collect()
+                } else if let Some(list) = case.tuple_fields() {
+                    list.types()
+                        .map(|ty| ty.syntax().text().to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                cases.push(Case {
+                    name,
+                    arity: field_types.len(),
+                    field_types,
+                });
             }
             if cases.is_empty() {
                 return refuse(errors, "it has no cases");
@@ -325,7 +378,9 @@ fn parameters_of(
     at: TextRange,
     errors: &mut Vec<HirError>,
 ) -> Option<Vec<String>> {
-    let Some(params) = t.type_params() else { return Some(Vec::new()) };
+    let Some(params) = t.type_params() else {
+        return Some(Vec::new());
+    };
     let mut names = Vec::new();
     for param in params.params() {
         if param.is_const() || param.row_var().is_some() {
@@ -338,7 +393,9 @@ fn parameters_of(
             });
             return None;
         }
-        let Some(name) = param.name().and_then(|n| n.ident()) else { continue };
+        let Some(name) = param.name().and_then(|n| n.ident()) else {
+            continue;
+        };
         names.push(name);
     }
     Some(names)
@@ -355,7 +412,10 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
     let header = if params.is_empty() {
         String::new()
     } else {
-        let bounded: Vec<String> = params.iter().map(|p| format!("{p}: {trait_name}")).collect();
+        let bounded: Vec<String> = params
+            .iter()
+            .map(|p| format!("{p}: {trait_name}"))
+            .collect();
         format!("<{}>", bounded.join(", "))
     };
     let self_type = if params.is_empty() {
@@ -365,7 +425,7 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
     };
 
     let method = match (trait_name, shape) {
-        ("Eq", Shape::Record(fields)) => format!(
+        ("Eq", Shape::Record(fields, _)) => format!(
             "fn eq(self, other: {self_type}) -> Bool {{ {} }}",
             all_equal(&projections(fields))
         ),
@@ -373,7 +433,7 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
             "fn eq(self, other: {self_type}) -> Bool {{ {} }}",
             variant_eq(type_name, cases)
         ),
-        ("Ord", Shape::Record(fields)) => format!(
+        ("Ord", Shape::Record(fields, _)) => format!(
             "fn cmp(self, other: {self_type}) -> Ordering {{ {} }}",
             compare_in_turn(&projections(fields))
         ),
@@ -381,20 +441,43 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
             "fn cmp(self, other: {self_type}) -> Ordering {{ {} }}",
             variant_cmp(type_name, cases)
         ),
-        ("Hash", Shape::Record(fields)) => {
-            let parts: Vec<String> =
-                fields.iter().map(|f| format!("self.{f}.hash()")).collect();
+        ("Hash", Shape::Record(fields, _)) => {
+            let parts: Vec<String> = fields.iter().map(|f| format!("self.{f}.hash()")).collect();
             format!("fn hash(self) -> Int {{ {} }}", hash_mix(0, &parts))
         }
         ("Hash", Shape::Variant(cases)) => {
-            format!("fn hash(self) -> Int {{ {} }}", variant_hash(type_name, cases))
+            format!(
+                "fn hash(self) -> Int {{ {} }}",
+                variant_hash(type_name, cases)
+            )
         }
-        ("Show", Shape::Record(fields)) => {
-            format!("fn show(self) -> String {{ {} }}", record_show(type_name, fields))
+        ("Show", Shape::Record(fields, _)) => {
+            format!(
+                "fn show(self) -> String {{ {} }}",
+                record_show(type_name, fields)
+            )
         }
         ("Show", Shape::Variant(cases)) => {
-            format!("fn show(self) -> String {{ {} }}", variant_show(type_name, cases))
+            format!(
+                "fn show(self) -> String {{ {} }}",
+                variant_show(type_name, cases)
+            )
         }
+        ("ToJson", Shape::Record(fields, _)) => {
+            format!("fn to_json(self) -> Json {{ {} }}", record_to_json(fields))
+        }
+        ("ToJson", Shape::Variant(cases)) => format!(
+            "fn to_json(self) -> Json {{ {} }}",
+            variant_to_json(type_name, cases)
+        ),
+        ("FromJson", Shape::Record(fields, field_types)) => format!(
+            "fn from_json(value: Json) -> {self_type} raises DecodeError {{ {} }}",
+            record_from_json(fields, field_types)
+        ),
+        ("FromJson", Shape::Variant(cases)) => format!(
+            "fn from_json(value: Json) -> {self_type} raises DecodeError {{ {} }}",
+            variant_from_json(type_name, cases)
+        ),
         _ => unreachable!("`{trait_name}` is not derivable and should have been refused"),
     };
 
@@ -403,7 +486,10 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
 
 /// `(self.x, other.x), (self.y, other.y)` — the pairs a record compares.
 fn projections(fields: &[String]) -> Vec<(String, String)> {
-    fields.iter().map(|f| (format!("self.{f}"), format!("other.{f}"))).collect()
+    fields
+        .iter()
+        .map(|f| (format!("self.{f}"), format!("other.{f}")))
+        .collect()
 }
 
 /// `a.eq(b) && c.eq(d)`, or `true` for nothing to compare.
@@ -414,7 +500,11 @@ fn all_equal(pairs: &[(String, String)]) -> String {
     if pairs.is_empty() {
         return "true".to_string();
     }
-    pairs.iter().map(|(l, r)| format!("{l}.eq({r})")).collect::<Vec<_>>().join(" && ")
+    pairs
+        .iter()
+        .map(|(l, r)| format!("{l}.eq({r})"))
+        .collect::<Vec<_>>()
+        .join(" && ")
 }
 
 /// Compares pairs in order, stopping at the first that is not `Equal`.
@@ -468,12 +558,18 @@ fn case_shape(type_name: &str, case: &Case) -> String {
     if case.arity == 0 {
         return format!("{type_name}::{}", case.name);
     }
-    format!("{type_name}::{}({})", case.name, vec!["_"; case.arity].join(", "))
+    format!(
+        "{type_name}::{}({})",
+        case.name,
+        vec!["_"; case.arity].join(", ")
+    )
 }
 
 /// The pairs of binders two matched-up occurrences of one case bind.
 fn case_pairs(case: &Case) -> Vec<(String, String)> {
-    (0..case.arity).map(|i| (format!("a{i}"), format!("b{i}"))).collect()
+    (0..case.arity)
+        .map(|i| (format!("a{i}"), format!("b{i}")))
+        .collect()
 }
 
 /// Whether an inner `match` on `other` needs a catch-all.
@@ -491,8 +587,11 @@ fn variant_eq(type_name: &str, cases: &[Case]) -> String {
             let mine = case_pattern(type_name, case, "a");
             let theirs = case_pattern(type_name, case, "b");
             let answer = all_equal(&case_pairs(case));
-            let fallback =
-                if needs_catch_all(cases) { ", _ => false".to_string() } else { String::new() };
+            let fallback = if needs_catch_all(cases) {
+                ", _ => false".to_string()
+            } else {
+                String::new()
+            };
             format!("{mine} => match other {{ {theirs} => {answer}{fallback} }}")
         })
         .collect();
@@ -550,8 +649,7 @@ fn variant_hash(type_name: &str, cases: &[Case]) -> String {
         .enumerate()
         .map(|(i, case)| {
             let pattern = case_pattern(type_name, case, "a");
-            let parts: Vec<String> =
-                (0..case.arity).map(|n| format!("a{n}.hash()")).collect();
+            let parts: Vec<String> = (0..case.arity).map(|n| format!("a{n}.hash()")).collect();
             format!("{pattern} => {}", hash_mix(i, &parts))
         })
         .collect();
@@ -570,7 +668,11 @@ fn record_show(type_name: &str, fields: &[String]) -> String {
     }
     let mut parts = Vec::new();
     for (i, field) in fields.iter().enumerate() {
-        let lead = if i == 0 { format!("{type_name} {{ ") } else { ", ".to_string() };
+        let lead = if i == 0 {
+            format!("{type_name} {{ ")
+        } else {
+            ", ".to_string()
+        };
         parts.push(format!("\"{lead}{field}: \""));
         parts.push(format!("self.{field}.show()"));
     }
@@ -604,4 +706,115 @@ fn variant_show(type_name: &str, cases: &[Case]) -> String {
         })
         .collect();
     format!("match self {{ {} }}", arms.join(", "))
+}
+
+/// `List::Cons(a, List::Cons(b, List::Nil))` — the list the helpers take.
+///
+/// **Written out rather than as `[a, b]`**, because a list literal parses and
+/// then does nothing: the checker gives `Expr::List` no type and the backend
+/// refuses it outright. Generated code cannot be the first user of a construct
+/// the language has not finished, and settling what `[..]` should *mean* — a
+/// `List`, an `Array`, something inferred from context — is a language
+/// decision rather than a detail of this expansion.
+///
+/// `List` is in scope because `file_scope` brings it along with the other
+/// names a derived body borrows from the trait's home module.
+fn cons_chain(items: impl IntoIterator<Item = String>) -> String {
+    items
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .fold("List::Nil".to_string(), |rest, item| format!("List::Cons({item}, {rest})"))
+}
+
+/// A record is its JSON object: declaration names become field names and the
+/// field values choose their own representation through `ToJson`.
+fn record_to_json(fields: &[String]) -> String {
+    let bindings = fields
+        .iter()
+        .map(|field| format!("let {field}: Json = self.{field}.to_json();"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let encoded = fields
+        .iter()
+        .map(|field| format!("member(\"{field}\", {field})"));
+    format!("{bindings} object({})", cons_chain(encoded))
+}
+
+/// Every record field is required. Unknown fields are deliberately ignored by
+/// `field_as`, which lets an older reader accept a document written by a newer
+/// producer that only added data.
+fn record_from_json(fields: &[String], field_types: &[String]) -> String {
+    let decoded: Vec<String> = fields
+        .iter()
+        .zip(field_types)
+        .map(|(field, ty)| format!("let {field}: {ty} = field_as(value, \"{field}\")!;"))
+        .collect();
+    let initialized = fields
+        .iter()
+        .map(|field| format!("{field}: {field}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} {{ {initialized} }}", decoded.join(" "))
+}
+
+/// Variants use one adjacent-tag shape, including payload-free cases:
+/// `{ "case": "Circle", "fields": [3] }`.
+fn variant_to_json(type_name: &str, cases: &[Case]) -> String {
+    let arms: Vec<String> = cases
+        .iter()
+        .map(|case| {
+            let pattern = case_pattern(type_name, case, "a");
+            let bindings = (0..case.arity)
+                .map(|i| format!("let field{i}: Json = a{i}.to_json();"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let fields = (0..case.arity).map(|i| format!("field{i}"));
+            format!(
+                "{pattern} => {{ {bindings} variant(\"{}\", {}) }}",
+                case.name,
+                cons_chain(fields)
+            )
+        })
+        .collect();
+    format!("match self {{ {} }}", arms.join(", "))
+}
+
+/// The tag decides the case, so this is a lookup keyed by a string.
+///
+/// **An `if` chain rather than a `match` on the tag**, which is what it wants
+/// to be: matching a `String` literal parses and then reaches a backend that
+/// says it "needs a runtime comparison the backend does not generate yet". `==`
+/// on two strings does generate one, so the chain is the same comparisons in a
+/// spelling that compiles. Revisit when the decision tree learns to test by
+/// equality; nothing else here has to change.
+fn variant_from_json(type_name: &str, cases: &[Case]) -> String {
+    let expected = cases
+        .iter()
+        .map(|case| format!("`{}`", case.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut chain = format!("unknown_variant(case, \"one of {expected}\")!");
+    for case in cases.iter().rev() {
+        let constructor = if case.arity == 0 {
+            format!("{type_name}::{}", case.name)
+        } else {
+            let fields: Vec<String> = case
+                .field_types
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| format!("let field{i}: {ty} = variant_field(value, {i})!;"))
+                .collect();
+            let arguments =
+                (0..case.arity).map(|i| format!("field{i}")).collect::<Vec<_>>().join(", ");
+            format!("{} {type_name}::{}({arguments})", fields.join(" "), case.name)
+        };
+        chain = format!(
+            "if case == \"{}\" {{ variant_arity(value, {})!; {constructor} }} else {{ {chain} }}",
+            case.name, case.arity
+        );
+    }
+    format!("let case = variant_case(value)!; {chain}")
 }

@@ -26,29 +26,53 @@ fn run(name: &str, main: &str) -> String {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
-    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let exe = dir.join(if cfg!(windows) {
+        "program.exe"
+    } else {
+        "program"
+    });
     let _ = std::fs::remove_file(&exe);
 
     let db = KhoraDatabase::new();
+    let main_file = SourceFile::new(&db, dir.join("main.kh"), main.to_string());
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("json.kh"), std_source("json.kh")),
-        SourceFile::new(&db, dir.join("main.kh"), main.to_string()),
+        main_file,
     ];
     let root = SourceRoot::new(&db, files);
     if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
-        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
-        panic!("compiling `{name}` failed:\n  {}", messages.join("\n  "));
+        let messages: Vec<String> = errors
+            .into_iter()
+            .map(|e| format!("{:?}: {}", e.range, e.message))
+            .collect();
+        let mut unknowns = Vec::new();
+        let bodies = khora_hir::body::bodies(&db, main_file);
+        for ((name, body), (_, types)) in bodies.iter().zip(khora_types::body_types(&db, main_file)) {
+            for (id, expr) in body.exprs() {
+                if matches!(types.of(id), khora_types::Type::Unknown) {
+                    unknowns.push(format!("{name}: {expr:?}"));
+                }
+            }
+        }
+        panic!(
+            "compiling `{name}` failed:\n  {}\n\nunknowns:\n  {}\n\ngenerated:\n{}",
+            messages.join("\n  "),
+            unknowns.join("\n  "),
+            khora_hir::derive::derived(&db, main_file).source()
+        );
     }
 
-    let out = std::process::Command::new(&exe).output().expect("the program should run");
+    let out = std::process::Command::new(&exe)
+        .output()
+        .expect("the program should run");
     assert_eq!(out.status.code(), Some(0), "`{name}` did not exit cleanly");
     String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
 }
 
 const HEAD: &str = "module demo::main;
 import std::core::{List, Map, Option, Result};
-import std::json::{Json, JsonError, encode, parse};
+import std::json::{DecodeError, FromJson, Json, JsonError, ToJson, decode, encode, parse};
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -221,8 +245,7 @@ fn main() -> Int {{
         ),
     );
     assert_eq!(
-        out,
-        "[]\n{}\n[1,2,3]\n[1,[2,[3]]]\n{\"a\":1}\n[{\"a\":[true,null]}]\n0\n",
+        out, "[]\n{}\n[1,2,3]\n[1,[2,[3]]]\n{\"a\":1}\n[{\"a\":[true,null]}]\n0\n",
         "whitespace is skipped and the order of an array is kept"
     );
 }
@@ -339,5 +362,133 @@ fn main() -> Int {{
     assert_eq!(
         out,
         "[1,\"two\",true,null,[],{}]\n{\"only\":[{\"deep\":-2.5}]}\n\"tab\\there\"\n0\n"
+    );
+}
+
+/// A derived record is an ordinary JSON object, including nested generic
+/// containers, and the value that comes back is the one that went in.
+#[test]
+fn a_record_derives_json_in_both_directions() {
+    let out = run(
+        "json_derive_record",
+        &format!(
+            "{HEAD}
+derive(ToJson, FromJson)
+type Account = {{ name: String, active: Bool, scores: List<Int>, note: Option<String> }};
+
+/// The round trip in its own scope, so the count below is about what the
+/// derived code *left behind* rather than what is still in scope. Counting
+/// beside live locals reports them as leaks, which is a test bug and not a
+/// finding.
+fn round_trip() -> () raises DecodeError {{
+  let original: Account = {{
+    name: \"ada\", active: true,
+    scores: List::Cons(7, List::Cons(9, List::Nil)),
+    note: Option::Some(\"kept\"),
+  }};
+  let document = original.to_json();
+  let restored: Account = decode(document)!;
+  print(restored.name);
+  print(if restored.active {{ \"active\" }} else {{ \"inactive\" }});
+  khora_print_int(List::length(restored.scores));
+  print(restored.note.unwrap_or(\"missing\"))
+}}
+
+fn main() -> Int raises DecodeError {{
+  round_trip()!;
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(out, "ada\nactive\n2\nkept\n0\n", "the trailing 0 is the live-object count");
+}
+
+/// Cases are adjacent-tagged uniformly, then recovered by tag and positional
+/// payload. A nullary case uses the same shape as one carrying values.
+#[test]
+fn a_variant_derives_json_in_both_directions() {
+    let out = run(
+        "json_derive_variant",
+        &format!(
+            "{HEAD}
+derive(ToJson, FromJson)
+type Shape = | Dot | Circle(radius: Int) | Label(String, Bool);
+
+fn describe(shape: Shape) -> String {{
+  match shape {{
+    Shape::Dot => \"dot\",
+    Shape::Circle(radius) => \"circle \" + Int::to_string(radius),
+    Shape::Label(text, flag) => text + if flag {{ \" yes\" }} else {{ \" no\" }},
+  }}
+}}
+
+/// Scoped for the reason the record's round trip is: the count belongs after
+/// the values, not beside them.
+fn round_trip() -> () raises DecodeError {{
+  let a: Shape = decode(Shape::Dot.to_json())!;
+  let b: Shape = decode(Shape::Circle(3).to_json())!;
+  let c: Shape = decode(Shape::Label(\"tag\", true).to_json())!;
+  print(describe(a));
+  print(describe(b));
+  print(describe(c))
+}}
+
+fn main() -> Int raises DecodeError {{
+  round_trip()!;
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(out, "dot\ncircle 3\ntag yes\n0\n", "the trailing 0 is the live-object count");
+}
+
+/// A decoder error retains the complete route to the value that disagreed.
+/// That is the difference between a useful API error and "invalid JSON".
+#[test]
+fn a_derived_decode_names_the_nested_field() {
+    let out = run(
+        "json_derive_path",
+        &format!(
+            "{HEAD}
+derive(FromJson)
+type Inner = {{ amount: Int }};
+derive(FromJson)
+type Outer = {{ entry: Inner }};
+
+fn path_text(path: List<String>) -> String {{
+  match path {{
+    List::Nil => \"\",
+    List::Cons(head, List::Nil) => head,
+    List::Cons(head, tail) => head + \".\" + path_text(tail),
+  }}
+}}
+
+fn main() -> Int {{
+  match parse(\"{{\\\"entry\\\":{{\\\"amount\\\":\\\"many\\\"}}}}\") {{
+    Result::Err(_) => print(\"parse failed\"),
+    Result::Ok(document) => {{
+      let _: Outer = decode(document)! catch {{
+        DecodeError::At(path, expected, found) => {{
+          print(path_text(path));
+          print(expected);
+          print(found);
+          {{ entry: {{ amount: 0 }} }}
+        }},
+      }};
+    }},
+  }};
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        "entry.amount\nwhole number in the range of Int\nstring\n0\n"
     );
 }

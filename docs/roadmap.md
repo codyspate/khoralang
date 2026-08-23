@@ -57,7 +57,9 @@ before the phase that depends on it starts.
 
 | # | Question | Blocks |
 | --- | --- | --- |
-| D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Nothing in this roadmap owns this today, which is the failure mode errata entry 20 names. | 8.x |
+| D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Phase 8.5 owns the decision, before optimization or publication turns an accident into a promise. | 8.5 |
+| D13 | **What `[a, b, c]` denotes.** The literal parses today and means nothing: the checker gives `Expr::List` no type at all and the backend refuses it, so every use is either an inscrutable "type was never worked out" or a hard error. It has to become a `List`, an `Array`, or a thing chosen by its expected type — and if the answer is `List`, whether writing one requires `List` to be in scope. Found by `derive(ToJson)`, whose expansion tried to be its first user. Until it is decided, generated code writes `List::Cons` chains. | any phase that lets a program write one |
+| D14 | **Whether `match` tests by equality.** Matching a `String` or float literal parses, checks, and reaches a backend that says it "needs a runtime comparison the backend does not generate yet" — so `match tag { "circle" => .. }` is a hard error at the end of the pipeline rather than a refusal at the start. Either the decision tree grows an equality test (`khora_str_eq` already exists and `==` compiles fine) or the pattern is refused where it is written. Silently accepting it through two phases and failing in the third is the one option that is wrong. | any phase that lets a program write one |
 **Closed:**
 
 - **D4** (what `[permissions]` enforces) is decided in
@@ -1344,6 +1346,68 @@ out of phase 8 in good shape.
 
 ---
 
+## Phase 8.5 — Correctness and credibility
+
+The language can run useful programs. Before optimizing those programs, close
+the gaps in claims already made about the surface they use. A safety boundary
+that depends on spelling and a compatibility promise nobody has written are
+more expensive than an allocation Phase 9 has not removed yet.
+
+This phase is deliberately bounded. It adds one piece of application-facing
+library surface that was already requested, makes existing compiler-special
+rules identify the declarations they mean, and decides what future releases
+promise. It does not add another execution model or widen the language.
+
+- **8.5.1 `derive(ToJson, FromJson)`.** Ordinary traits in `std::json`, with
+  source-expanded impls like the existing structural derives. Records encode
+  as objects. Variants have one documented stable representation. A decoding
+  failure retains the path to the field or payload that disagreed. The backend
+  does not learn that JSON derivation exists.
+- **8.5.2 Compiler-known declaration identity.** `Share`, `Fiber`, `SharedFn`,
+  `Array` and every other type or trait with compiler-special treatment are
+  recognized by the declaration they resolve to, not by a bare name. A user
+  type with the same spelling receives no intrinsic and satisfies no special
+  rule. Package identity will extend this mechanism in 10.2; it is not needed
+  to distinguish declarations inside the current source root.
+- **8.5.3 Decide D12.** Write the pre-1.0 policy and the eventual 1.0 promise
+  separately. Pre-1.0 must preserve room to correct the language, with changes
+  called out and editions available when source migration is needed. The 1.0
+  policy must name observable semantics, source and package compatibility,
+  public ABI, versioning, editions, and which changes a minor release may make.
+  Deciding the policy does not declare the present implementation stable.
+- **8.5.4 Audit claims against the executable repository.** The README,
+  positioning, vision and design notes must agree about what is implemented,
+  what is only designed, and what is explicitly bounded. In particular: the
+  manifest is not called a sandbox before 10.2 enforces the foreign boundary;
+  fibers are OS threads today; performance numbers name their workload and
+  machine; and a reference application is evidence of composition rather than
+  a claim of production completeness. Effect remains a headline comparison in
+  the positioning because it is half of the language's thesis, not an
+  implementation detail.
+- **8.5.5 Establish the correctness baseline Phase 9 must preserve.** Run the
+  native suite, corpus check and formatter, clippy, both reference
+  applications, an ordinary-client HTTP conformance check, and the recorded
+  throughput workload. Fix failures that reveal wrong behavior; record missing
+  product surface in the phase that owns it rather than silently expanding
+  this one.
+
+Explicitly out of scope here: TLS, macOS and cross-targets, package resolution,
+permission enforcement that depends on package identity, the linter, LSP, and
+general formatter cleanup. Those remain Phase 10 or ordinary maintenance. The
+point of 8.5 is to make the foundation honest before optimizing it, not to make
+the whole product complete before Phase 9 can begin.
+
+**Exit:** a native round-trip test covers derived records and variants and a
+negative test names a nested decode path; regression tests prove lookalike
+`Share`, `Fiber`, `SharedFn` and `Array` declarations receive no compiler
+privilege; `docs/design/compatibility.md` closes D12 and the open-question table
+records it as decided; public claims match the measured implementation. The
+full corpus checks and formats, the test suite is green, both applications run,
+ordinary HTTP clients conform, the benchmark is reproducible, and clippy is
+clean.
+
+---
+
 ## Phase 9 — Perceus reuse and FBIP
 
 Reuse analysis, drop specialization, borrowed parameters. Also the escape
@@ -1363,8 +1427,8 @@ by a counting-allocator test.
 
 Ordered by value, not by §6's numbering.
 
-- **10.1 Decide D12** — what Khora promises not to break. It comes due here
-  because publishing a package is the first act that makes a promise.
+- **10.1 Apply D12 at publication.** Phase 8.5 decides the policy; this is where
+  package metadata, the resolver and release tooling begin enforcing it.
 - **10.2 `khora-pkg`**: `khora.lock` with SHA-256 hashes, content-addressed
   cache, DAG task runner. Also what finally lets the orphan rule be *enforced*,
   which needs cross-package resolution — and the `extern` allow-list from D4,

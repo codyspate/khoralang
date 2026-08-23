@@ -567,7 +567,122 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
         }
     }
 
+    // Source-expanded JSON derives use these ordinary helpers. Pull them from
+    // the trait's declaring module, just as `Ord` above pulls `Ordering`, so
+    // the generated body does not depend on hidden hard-coded module paths.
+    if derives_trait(db, file, "ToJson") {
+        bring_derive_companions(
+            db,
+            graph,
+            file,
+            &mut out,
+            "ToJson",
+            &["Json", "Field", "List", "member", "object", "variant"],
+        );
+    }
+    if derives_trait(db, file, "FromJson") {
+        bring_derive_companions(
+            db,
+            graph,
+            file,
+            &mut out,
+            "FromJson",
+            &[
+                "Json",
+                "DecodeError",
+                "List",
+                "field_as",
+                "variant_case",
+                "variant_arity",
+                "variant_field",
+                "unknown_variant",
+            ],
+        );
+    }
+
     out
+}
+
+/// Brings the names a source-expanded derive writes into the deriving file.
+///
+/// Same reasoning as `Ordering` above, and the same rule about where to look:
+/// from the module that declares the *trait*, so a program with its own
+/// `ToJson` gets its own helpers rather than `std::json`'s.
+///
+/// Two places are searched there, because a generated body borrows its home
+/// module's whole vocabulary rather than only what that module declared.
+/// `object` and `member` are `std::json`'s own; `List` is one `std::json`
+/// itself imported, and a generated `List::Cons` chain needs it just as much.
+/// Looking through the home module's scope is what makes the second kind
+/// reachable without naming `std::core` here — this file should not know which
+/// module a list happens to live in.
+///
+/// Nothing is brought that the file already has, so an author who imported
+/// `List` under an alias keeps their spelling and their alias.
+fn bring_derive_companions(
+    db: &dyn Db,
+    graph: &ModuleGraph,
+    file: SourceFile,
+    scope: &mut FileScope,
+    trait_name: &str,
+    wanted: &[&str],
+) {
+    let Some(home) =
+        scope.origins.iter().find(|o| o.local == trait_name).map(|o| o.module.clone())
+    else {
+        return;
+    };
+    let Some(source) = graph.file(&home) else { return };
+    // A module deriving a trait it declares itself already has every name in
+    // hand, and asking for its own scope here would be a query cycle.
+    if source == file {
+        return;
+    }
+
+    let declared = item_map(db, source);
+    // `file_scope` rather than `item_map`, so a name the home module imported
+    // is as reachable as one it wrote. Terminates because the branch above
+    // stops a module from asking about itself.
+    let inherited = file_scope(db, source);
+
+    for name in wanted {
+        if scope.names.iter().any(|(present, _)| present == name) {
+            continue;
+        }
+
+        if let Some(item) = declared.item(name).filter(|item| item.is_public) {
+            let resolution = Resolution::Item {
+                module: home.clone(),
+                name: (*name).to_string(),
+                kind: item.kind,
+            };
+            scope.names.push(((*name).to_string(), resolution));
+            scope.origins.push(Origin {
+                local: (*name).to_string(),
+                module: home.clone(),
+                name: (*name).to_string(),
+                kind: item.kind,
+            });
+            if item.kind == ItemKind::Type {
+                scope.variants.extend(declared.variants_of(name).cloned());
+            }
+            continue;
+        }
+
+        // Not declared there, so it was imported there. Carry the resolution
+        // across unchanged: it already names the module that defines the item.
+        if let Some((_, resolution)) =
+            inherited.names.iter().find(|(present, _)| present == name)
+        {
+            scope.names.push(((*name).to_string(), resolution.clone()));
+            if let Some(origin) = inherited.origins.iter().find(|o| &o.local == name) {
+                scope.origins.push(origin.clone());
+            }
+            scope.variants.extend(
+                inherited.variants.iter().filter(|v| &v.type_name == name).cloned(),
+            );
+        }
+    }
 }
 
 /// Whether any type in this file asks for a derived `Ord`.
@@ -576,10 +691,14 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
 /// declares and not what each declaration asked to have written for it. One
 /// walk of the declarations, and only when a scope is being built.
 fn derives_ord(db: &dyn Db, file: SourceFile) -> bool {
+    derives_trait(db, file, "Ord")
+}
+
+fn derives_trait(db: &dyn Db, file: SourceFile, wanted: &str) -> bool {
     khora_db::parse(db, file).source_file().decls().any(|decl| {
         let ast::Decl::Type(t) = decl else { return false };
         t.derive_clause().is_some_and(|c| {
-            c.traits().filter_map(|n| n.ident()).any(|name| name == "Ord")
+            c.traits().filter_map(|n| n.ident()).any(|name| name == wanted)
         })
     })
 }
