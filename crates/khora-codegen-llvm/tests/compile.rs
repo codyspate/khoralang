@@ -296,6 +296,105 @@ fn main() -> Int {
     assert_eq!(ran.code, Some(0));
 }
 
+/// **D14.** A `String` or float literal in a pattern is an equality test.
+///
+/// This parsed, type-checked, and then failed in the backend with "needs a
+/// runtime comparison the backend does not generate yet" — accepted through two
+/// phases and refused in the third, which is the one behaviour that was clearly
+/// wrong. `khora_str_eq` already existed and `==` already compiled.
+#[test]
+fn a_string_literal_pattern_tests_by_equality() {
+    let ran = run(
+        "match_string_literal",
+        "module t;
+fn print(value: Int);
+
+fn area(tag: String, n: Int) -> Int {
+  match tag {
+    \"circle\" => 3 * n * n,
+    \"square\" => n * n,
+    _ => 0,
+  }
+}
+
+fn main() -> Int {
+  print(area(\"circle\", 2));
+  print(area(\"square\", 3));
+  print(area(\"blob\", 4));
+  // The scrutinee is borrowed by the test, not consumed, so the same binding
+  // can be matched on twice.
+  let tag = \"square\";
+  print(area(tag, 5));
+  print(area(tag, 6));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "12
+9
+0
+25
+36
+");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A float literal pattern is *ordered* equality, so `NaN` matches nothing —
+/// including a `NaN` literal. The same answer `==` gives, and IEEE 754's; a
+/// pattern that disagreed with the operator would be worse than either.
+#[test]
+fn a_float_literal_pattern_tests_by_equality() {
+    let ran = run(
+        "match_float_literal",
+        "module t;
+fn print(value: Int);
+
+fn near(x: Float) -> Int {
+  match x {
+    0.0 => 1,
+    1.5 => 2,
+    _ => 3,
+  }
+}
+
+fn main() -> Int {
+  print(near(0.0));
+  print(near(1.5));
+  print(near(9.25));
+  print(near(0.0 / 0.0));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "1
+2
+3
+3
+", "a NaN scrutinee matches no literal");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Literal patterns do not make a `match` exhaustive, and the checker already
+/// knew that before the backend could compile one.
+#[test]
+fn literal_patterns_still_need_a_catch_all() {
+    let found = errors(
+        "match_literal_exhaustive",
+        "module t;
+fn area(tag: String) -> Int {
+  match tag {
+    \"circle\" => 1,
+    \"square\" => 2,
+  }
+}
+",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("not exhaustive") && e.contains("`_`")),
+        "a literal match with no catch-all must be refused: {found:?}"
+    );
+}
+
 /// A guard makes the `match` fall through to the next arm, which a `switch` on
 /// the tag cannot express — the backend takes its sequential path instead.
 #[test]

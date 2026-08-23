@@ -58,8 +58,23 @@ before the phase that depends on it starts.
 | # | Question | Blocks |
 | --- | --- | --- |
 | D13 | **What `[a, b, c]` denotes.** The literal parses today and means nothing: the checker gives `Expr::List` no type at all and the backend refuses it, so every use is either an inscrutable "type was never worked out" or a hard error. It has to become a `List`, an `Array`, or a thing chosen by its expected type — and if the answer is `List`, whether writing one requires `List` to be in scope. Found by `derive(ToJson)`, whose expansion tried to be its first user. Until it is decided, generated code writes `List::Cons` chains. | any phase that lets a program write one |
-| D14 | **Whether `match` tests by equality.** Matching a `String` or float literal parses, checks, and reaches a backend that says it "needs a runtime comparison the backend does not generate yet" — so `match tag { "circle" => .. }` is a hard error at the end of the pipeline rather than a refusal at the start. Either the decision tree grows an equality test (`khora_str_eq` already exists and `==` compiles fine) or the pattern is refused where it is written. Silently accepting it through two phases and failing in the third is the one option that is wrong. | any phase that lets a program write one |
 **Closed:**
+
+- **D14** (whether `match` tests by equality) is **yes**: a `String` or float
+  literal in a pattern compiles to an equality test. It had parsed and
+  type-checked for some time and then failed in the backend — accepted through
+  two phases and refused in the third, which was the one available answer that
+  was clearly wrong. `khora_str_eq` already existed and `==` already compiled.
+
+  Two details are decided with it. A string test **borrows** both sides: the
+  scrutinee belongs to the `match` and the literal is a static, so releasing
+  either would be wrong in one direction and pointless in the other. And a
+  float test is *ordered* equality, so a `NaN` scrutinee matches no literal
+  including a `NaN` one — the same answer `==` gives, because a pattern
+  disagreeing with the operator would be worse than either answer alone.
+
+  Literal patterns still do not make a `match` exhaustive, which the checker
+  already knew before the backend could compile one.
 
 - **D12** (what Khora promises not to break) is decided in
   `docs/design/compatibility.md`: **before 1.0, change carefully and say so;

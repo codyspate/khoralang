@@ -783,12 +783,11 @@ fn variant_to_json(type_name: &str, cases: &[Case]) -> String {
 
 /// The tag decides the case, so this is a lookup keyed by a string.
 ///
-/// **An `if` chain rather than a `match` on the tag**, which is what it wants
-/// to be: matching a `String` literal parses and then reaches a backend that
-/// says it "needs a runtime comparison the backend does not generate yet". `==`
-/// on two strings does generate one, so the chain is the same comparisons in a
-/// spelling that compiles. Revisit when the decision tree learns to test by
-/// equality; nothing else here has to change.
+/// **A `match` on the tag**, which is what it always wanted to be. It was an
+/// `if` chain for as long as matching a `String` literal parsed, type-checked
+/// and then failed in the backend — the same comparisons in a spelling that
+/// compiled. D14 decided that a literal pattern is an equality test, so the
+/// chain became the workaround it had always been described as.
 fn variant_from_json(type_name: &str, cases: &[Case]) -> String {
     let expected = cases
         .iter()
@@ -796,8 +795,8 @@ fn variant_from_json(type_name: &str, cases: &[Case]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let mut chain = format!("unknown_variant(case, \"one of {expected}\")!");
-    for case in cases.iter().rev() {
+    let mut arms: Vec<String> = Vec::with_capacity(cases.len() + 1);
+    for case in cases {
         let constructor = if case.arity == 0 {
             format!("{type_name}::{}", case.name)
         } else {
@@ -811,10 +810,15 @@ fn variant_from_json(type_name: &str, cases: &[Case]) -> String {
                 (0..case.arity).map(|i| format!("field{i}")).collect::<Vec<_>>().join(", ");
             format!("{} {type_name}::{}({arguments})", fields.join(" "), case.name)
         };
-        chain = format!(
-            "if case == \"{}\" {{ variant_arity(value, {})!; {constructor} }} else {{ {chain} }}",
+        arms.push(format!(
+            "\"{}\" => {{ variant_arity(value, {})!; {constructor} }}",
             case.name, case.arity
-        );
+        ));
     }
-    format!("let case = variant_case(value)!; {chain}")
+    // A literal pattern does not make a `match` exhaustive, and this one is
+    // genuinely not: the tag came out of somebody else's JSON and may say
+    // anything at all. Naming what was expected is the whole value of the
+    // error, so the catch-all is where the message lives.
+    arms.push(format!("_ => unknown_variant(case, \"one of {expected}\")!"));
+    format!("let case = variant_case(value)!; match case {{ {} }}", arms.join(", "))
 }

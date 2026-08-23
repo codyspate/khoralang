@@ -4288,6 +4288,37 @@ impl<'ctx> Lower<'_, 'ctx> {
         left: BasicValueEnum<'ctx>,
         right: BasicValueEnum<'ctx>,
     ) -> Flow<'ctx> {
+        let equal = self.strings_equal(left, right);
+
+        self.drop(left, &Type::Str);
+        self.drop(right, &Type::Str);
+
+        // The runtime answers in a C `_Bool`, one byte; Khora's `Bool` is an
+        // `i1`, so the answer is narrowed by asking whether the byte is set.
+        let zero = self.be.ctx.i8_type().const_zero();
+        let predicate = match op {
+            BinOp::Eq => IntPredicate::NE,
+            _ => IntPredicate::EQ,
+        };
+        Some(
+            self.be
+                .builder
+                .build_int_compare(predicate, equal, zero, "str.cmp")
+                .expect("narrowing a C boolean")
+                .into(),
+        )
+    }
+
+    /// `khora_str_eq` over two strings, as the C `_Bool` the runtime returns.
+    ///
+    /// **Borrows both**, unlike [`Self::compare_strings`], which owns them.
+    /// A literal pattern compares against a scrutinee the `match` still holds
+    /// and a static literal nothing owns, so neither may be released here.
+    fn strings_equal(
+        &mut self,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+    ) -> IntValue<'ctx> {
         let mut parts = Vec::with_capacity(4);
         for value in [left, right] {
             let object = value.into_pointer_value();
@@ -4309,32 +4340,14 @@ impl<'ctx> Lower<'_, 'ctx> {
             parts.push(length.into());
         }
 
-        let equal = self
-            .be
+        self.be
             .builder
             .build_call(self.be.rt.str_eq, &parts, "str.eq")
             .expect("comparing two strings")
             .try_as_basic_value()
             .basic()
             .expect("khora_str_eq returns a _Bool")
-            .into_int_value();
-
-        self.drop(left, &Type::Str);
-        self.drop(right, &Type::Str);
-
-        // The runtime answers in a C `_Bool`, one byte; Khora's `Bool` is an
-        // `i1`, so the answer is narrowed by asking whether the byte is set.
-        let zero = self.be.ctx.i8_type().const_zero();
-        let predicate = match op {
-            BinOp::Eq => IntPredicate::NE,
-            _ => IntPredicate::EQ,
-        };
-        let value = self
-            .be
-            .builder
-            .build_int_compare(predicate, equal, zero, "str.cmp")
-            .expect("narrowing a _Bool");
-        Some(value.into())
+            .into_int_value()
     }
 
     fn compare(
@@ -5459,12 +5472,54 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let expected = self.be.ctx.bool_type().const_int(expected as u64, false);
                 self.branch_on_equal(value.into_int_value(), expected, success, failure);
             }
-            Pat::Literal(_) => {
-                self.fail(
-                    "matching a `String` or a float literal needs a runtime comparison the \
-                     backend does not generate yet",
-                    range,
-                );
+            // **A literal pattern is an equality test**, which is what D14
+            // decided. It parsed, it type-checked, and then it failed here —
+            // accepted through two phases and refused in the third, which is
+            // the one behaviour that was clearly wrong. `khora_str_eq` already
+            // existed and `==` already compiled; the decision tree simply had
+            // no case for it.
+            Pat::Literal(Literal::Str(text)) => {
+                let Some(expected) = self.string_literal(&text) else { return };
+                // Borrowed on both sides. The scrutinee belongs to the `match`
+                // and the literal is a static with an immortal count, so a test
+                // that released either would be wrong in one direction and
+                // pointless in the other.
+                let equal = self.strings_equal(value, expected);
+                let zero = self.be.ctx.i8_type().const_zero();
+                let test = self
+                    .be
+                    .builder
+                    .build_int_compare(IntPredicate::NE, equal, zero, "matches")
+                    .expect("narrowing a C boolean");
+                self.be
+                    .builder
+                    .build_conditional_branch(test, success, failure)
+                    .expect("a string pattern test");
+            }
+            Pat::Literal(Literal::Float(text)) => {
+                let Ok(literal) = text.parse::<f64>() else {
+                    self.fail(format!("`{text}` is not a number this target can hold"), range);
+                    return;
+                };
+                // Ordered equality, so a `NaN` scrutinee matches no literal —
+                // including a `NaN` one. That is what `==` on floats already
+                // does here and what IEEE 754 says; a pattern behaving
+                // differently from the operator would be worse than either.
+                let expected = self.be.ctx.f64_type().const_float(literal);
+                let test = self
+                    .be
+                    .builder
+                    .build_float_compare(
+                        inkwell::FloatPredicate::OEQ,
+                        value.into_float_value(),
+                        expected,
+                        "matches",
+                    )
+                    .expect("a float pattern test");
+                self.be
+                    .builder
+                    .build_conditional_branch(test, success, failure)
+                    .expect("a float pattern branch");
             }
             Pat::Path(resolution) => {
                 let Some(tag) = self.tag_of(&resolution) else {
