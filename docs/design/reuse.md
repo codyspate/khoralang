@@ -9,12 +9,13 @@ and what has to be true before a `map` over a list can allocate nothing.
 
 ## Where things stand
 
-`khora-perceus` inserts reference counting that is *correct* and deliberately
-not *minimal*. A local owns one reference for its whole scope, reading it
-`dup`s, and the block releases what it declared on the way out.
+`khora-perceus` inserts reference counting that is *correct* and, until §1
+below, deliberately not *minimal*. A local owned one reference for its whole
+scope, reading it `dup`ed, and the block released what it declared on the way
+out.
 
-That scheme is why nothing can be reused today, and the reason is worth being
-precise about, because it is not "the fusion has not been written yet":
+Nothing can be reused today, and the reason is worth being precise about,
+because it is not "the fusion has not been written yet":
 
 ```khora
 fn increment(xs: List<Int>) -> List<Int> {
@@ -25,12 +26,20 @@ fn increment(xs: List<Int>) -> List<Int> {
 }
 ```
 
-At the `List::Cons(..)` in the second arm, the cell that was matched is held
-twice — once by the parameter binding `xs`, which is not released until the
-function's outermost block ends, and once by the `dup` the read of `xs`
-performed. A uniqueness test at that point sees two references and correctly
-declines to reuse. Adding a reuse primitive without changing the analysis would
-produce a program that allocates exactly as much as it does now.
+At the `List::Cons(..)` in the second arm, the cell that was matched is still
+held. §1 has since dealt with the two references that used to hold it — the read
+of `xs` now takes the binding's reference rather than copying it — but one
+remains, and it belongs to the `match` itself: `lower_match` puts the scrutinee
+in a `Cleanup::Temp` for the duration of the arms, because something has to
+release it and an arm is not guaranteed to. A uniqueness test at the constructor
+sees that reference and correctly declines to reuse.
+
+So §2's problem is now a single, well-located one: **release the scrutinee
+before the arm's constructor rather than after the arm**, on the arms that reach
+a constructor of the same shape. That is a smaller and more tractable thing than
+what this paragraph used to describe, and it is the whole of what stands between
+here and reuse. Adding a reuse primitive without it produces a program that
+allocates exactly as much as it does now.
 
 ## What has to change
 
@@ -49,13 +58,15 @@ read inside a loop is read on every iteration. A `break` out of a loop leaves
 scopes early, and `raise` leaves several at once — `unwind_to` already knows
 how to release along that path and will need to release a different set.
 
-**A first step is in, and a second one paid for it.**
+**Done, for a body that cannot unwind.**
 
-*The last-use move.* Where every read of a binding is unconditional and the
-body cannot unwind, the last read takes the binding's reference instead of
-copying it. Worth 7% of the reference-count operations in an HTTP parse and no
-measurable time, because "every read unconditional" excludes almost every read
-in real code — in a parser they sit inside a `while` or an `if`.
+*The last-use move.* A backward liveness pass over the body: `live` is the set
+of bindings still needed after the point being looked at, and a read of a
+binding that is not in it takes the reference rather than copying it. This began
+as a forward pass that could only settle a binding all of whose reads were
+unconditional, which was worth 7% of the reference-count operations in an HTTP
+parse and no measurable time — in a parser almost every read sits inside a
+`while` or an `if`.
 
 *Borrowed parameters.* `Region::defer` does not keep the region, `Shared::get`
 does not keep the cell, `String::byte` does not keep the string. Each was handed
@@ -87,20 +98,66 @@ and the plan said it consumed. With borrows named, a region passed to `defer`
 keeps its reference and ends with its scope, and the last-use move applies to
 every type.
 
-This is the whole of the risk. Getting it wrong is a double free or a use after
-free, and both present as a crash somewhere unrelated. It wants:
+*Branches.* A branch **consumes** a binding when every path through it does. So
+where one arm takes the reference, each arm that does not is given a release —
+and the only place on exactly the right set of paths is the arm's head, which is
+why the rule is narrow: an arm may be given one only if it never mentions the
+binding at all. An arm that merely reads it would be reading freed memory, and
+that branch settles nothing; its reads go back to copying and its block releases
+as before.
 
-- a per-expression **liveness** result, computed backwards over the body;
-- the existing conservative plan kept as an oracle, so a differential test can
-  assert that the two agree on *what* is released, and differ only on *where*;
+That second half is where the value is. Together: 314 reference-count operations
+in an HTTP parse down to 278, and 1,955ns to 1,855ns. Measured with a throwaway
+counter in `khora_dup` and `khora_drop` — not kept, because an unconditional
+atomic in the hot path perturbs the thing being measured.
+
+Three rules earn their keep, and each was found by a double free rather than by
+thinking about it:
+
+- **A `match` arm's bindings own nothing.** They are projections of the
+  scrutinee's payload — no block releases one, which is what
+  `match_arm_bindings_are_not_released_by_the_arm` asserts — so a read of one
+  has to copy. There is no reference sitting in the binding to hand over.
+  Taking one freed the list node the recursion was standing on.
+- **Only an arm that never mentions the binding may release at its head.** An
+  arm that borrows it reads after the free. Stated above; it is repeated here
+  because the tempting generalization is "an arm that does not take it", which
+  is wrong.
+- **A binding an arm introduces itself is not the branch's to settle.** It does
+  not exist on the other paths, so a release at their head reads a slot nothing
+  ever wrote. Excluded by name: an arm's own pattern bindings, and anything a
+  `let` inside an arm declares.
+
+**A body that can unwind keeps the conservative plan entirely**, and that is the
+piece still owing. `raise`, `!`, `catch` and `return` leave a frame from the
+middle, and what is still owned there depends on how far execution got.
+`lower.rs` holds cleanups in `scopes: Vec<Vec<Cleanup>>` and unwinds by walking
+it, so the set it releases is fixed at each lowering position and cannot be made
+path-dependent without changing that representation. The analysis above is
+already written to answer the question; the code generator cannot yet act on the
+answer.
+
+What made the change survivable, and is worth keeping for 9.2:
+
 - the object-count assertions the suite already carries, which is what makes
-  the change observable at all. `docs/design/compatibility.md` says allocation
+  this observable at all. `docs/design/compatibility.md` says allocation
   behaviour is not part of the language's promise — those tests are the
-  compiler's own instrument, not a contract with anybody.
+  compiler's own instrument, not a contract with anybody;
+- the runtime's refusal to decrement a count that is already zero, which turns
+  every one of the three rules above from a silent corruption into a message
+  naming the program that did it.
 
 ### 2. Reuse tokens
 
-Once a scrutinee is uniquely held at the point an arm allocates:
+The reference standing in the way is now exactly one, and it is the `match`'s
+own: `lower_match` pushes `Cleanup::Temp(scrutinee)` before the arms and leaves
+that scope after them. What §2 needs first is to move that release *into* the
+arms — each arm releasing the scrutinee itself, at its head — which changes
+nothing about when it happens but puts it somewhere an arm can replace it with a
+`drop_reuse`. Arms that bind out of the payload must dup what they bind before
+that release, which they already do.
+
+Then, where an arm reaches a constructor of a shape the matched cell would fit:
 
 ```
 token = khora_drop_reuse(xs, drop_glue)   // null unless uniquely held

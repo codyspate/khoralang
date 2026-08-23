@@ -1499,12 +1499,33 @@ much less than over the arrays phase 6 brings.
   to 5, an HTTP request parse from 61 to 55, a JSON round trip from 142 to 128.
   Server throughput did not move, which is worth saying plainly — the parser's
   cost is strings and hashing.
-- **9.1 Ownership at the last use — begun.** A binding whose reads are all
-  unconditional, in a body that cannot unwind, hands its reference to its last
-  read. Seven per cent of the reference-count operations in an HTTP parse and no
-  measurable time, because "all reads unconditional" excludes nearly every read
-  in real code. The rest — every path, including `break` and `raise` — is where
-  the value is, and is still the whole of the risk. `docs/design/reuse.md` §1.
+- **9.1 Ownership at the last use — done for bodies that cannot unwind.** A
+  backward liveness pass: a read the binding does not outlive takes its
+  reference instead of copying it, and a branch that takes on one path is
+  balanced by a release at the head of the arms that do not. That second half is
+  what makes it worth anything — "all reads unconditional", which is what this
+  was before, excludes nearly every read in real code. 314 reference-count
+  operations in an HTTP parse down to 278, and 1,955ns to 1,855ns.
+
+  Three rules earn their keep, each of them found by a double free rather than
+  by thinking:
+
+  - A `match` arm's bindings are projections of the scrutinee and own nothing,
+    so their reads always copy. Taking one freed a list node its own recursion
+    was standing on.
+  - An arm release goes at the arm's *head*, so only an arm that never mentions
+    the binding may be given one. An arm that borrows it would read freed
+    memory; that branch consumes nothing and its block releases as before.
+  - A binding an arm introduces itself is not the branch's to settle — it does
+    not exist on the other paths, where the release would read a slot nothing
+    ever wrote.
+
+  **What is left is the whole of the remaining risk:** a body that can unwind
+  keeps the conservative plan entirely. `raise`, `!`, `catch` and `return` leave
+  a frame from the middle, and the code generator's cleanup stack is positional
+  — it cannot express a live set that depends on how far execution got. Making
+  it able to is 9.1's last piece and wants a change to `lower.rs`'s scope
+  representation rather than to the analysis. `docs/design/reuse.md` §1.
 - **9.4a Borrowed parameters — done, and it was the one that paid.** The calls
   that already borrowed and said otherwise: `Region::defer`, `Shared::get` and
   friends, `String::byte`, `Array::get`. Each took an owned reference and

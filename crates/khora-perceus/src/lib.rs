@@ -23,6 +23,14 @@
 //! is the analysis, and it is the part that turns a wrong answer into a double
 //! free rather than a slow program.
 //!
+//! `settle_last_uses` is that analysis as far as it goes: a backward liveness
+//! pass over a body that cannot unwind, which turns a read the binding does not
+//! outlive into a take, and balances a branch that takes on one path with a
+//! release at the head of the arms that do not. What it does not do is the
+//! paths that leave a frame early — `raise`, `!`, `catch`, `return` — because
+//! the code generator's cleanup stack is positional and cannot describe a set
+//! of live values that depends on how far execution got.
+//!
 //! `docs/design/reuse.md` has the design.
 //!
 //! # The scheme
@@ -32,8 +40,10 @@
 //!
 //! - A local holding a boxed value **owns** one reference.
 //! - Reading such a local yields a value that outlives the read, so the read
-//!   `dup`s.
-//! - A block `drop`s every boxed local it declared, on the way out.
+//!   `dup`s — unless the binding is not needed afterwards, in which case the
+//!   read takes the binding's own reference and nothing is copied.
+//! - A block `drop`s every boxed local it declared and nothing took, on the way
+//!   out.
 //! - Parameters are owned by the callee, so they are dropped like locals.
 //!
 //! # Why the scheme balances
@@ -61,7 +71,7 @@
 use std::collections::{HashMap, HashSet};
 
 use khora_db::{Db, SourceFile};
-use khora_hir::body::{Body, Expr, ExprId, LocalId, Pat, PatId, Stmt};
+use khora_hir::body::{BinOp, Body, Expr, ExprId, LocalId, Pat, PatId, Stmt};
 use khora_types::Type;
 
 /// Where reference-counting operations belong in one function body.
@@ -81,6 +91,18 @@ pub struct RcPlan {
     /// reference and immediately drop it — a `dup` and a `drop` that cancel,
     /// two atomic operations to pass a value the callee only looks at.
     pub borrowed: HashSet<ExprId>,
+    /// Locals to release at the *head* of a branch arm, keyed by the arm's body.
+    ///
+    /// A branch consumes a binding when every path through it does. Where one
+    /// arm takes the reference and another never mentions the binding at all,
+    /// the second arm has to release it, and the head of that arm is the only
+    /// place that is on exactly the paths that need it.
+    ///
+    /// An arm that merely *reads* the binding is not given one — releasing at
+    /// the head would free something the arm is about to use. Such a branch
+    /// does not consume the binding at all, and its block releases it as
+    /// before.
+    pub arm_drops: HashMap<ExprId, Vec<LocalId>>,
     /// Locals whose reference was handed to their last read rather than
     /// released by their block.
     ///
@@ -98,6 +120,11 @@ impl RcPlan {
 
     pub fn drops_for(&self, block: ExprId) -> &[LocalId] {
         self.drops.get(&block).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Locals to release on entering this branch arm.
+    pub fn arm_drops_for(&self, arm: ExprId) -> &[LocalId] {
+        self.arm_drops.get(&arm).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn is_boxed(&self, local: LocalId) -> bool {
@@ -188,7 +215,7 @@ pub fn plan(body: &Body, types: &khora_types::BodyTypes) -> RcPlan {
         plan: RcPlan::default(),
         types,
         reads: Vec::new(),
-        branching: 0,
+        unowned: HashSet::new(),
         unwinds: false,
     };
     planner.plan_function();
@@ -220,12 +247,13 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
         .collect()
 }
 
+/// Bindings still needed at a point in the backward pass.
+type Live = HashSet<LocalId>;
+
 /// One read of a counted binding, as the walk saw it.
 struct Read {
     local: LocalId,
     at: ExprId,
-    /// Somewhere that might not run: a branch, a loop, a lambda.
-    conditional: bool,
     /// The callee only looks at it, so no reference was made for this read.
     ///
     /// **Still a use.** Leaving borrowed reads out of this list entirely was a
@@ -243,11 +271,13 @@ struct Planner<'a> {
     types: &'a khora_types::BodyTypes,
     /// Every read of a boxed local, in program order.
     reads: Vec<Read>,
-    /// How many conditional or repeated constructs enclose the walk.
+    /// Bindings that hold a reference belonging to somebody else.
     ///
-    /// A read inside an `if` arm, a `match` arm, a loop or a lambda may run
-    /// zero times or many, so it cannot be *the* last use of anything.
-    branching: usize,
+    /// A `match` arm's bindings are projections of the scrutinee's payload: the
+    /// arm never made a reference for them, which is why no block releases one
+    /// — see `match_arm_bindings_are_not_released_by_the_arm`. Reading one has
+    /// to copy, always, because there is no reference there to hand over.
+    unowned: HashSet<LocalId>,
     /// Whether this body can leave a frame early.
     ///
     /// A `!` or a `raise` unwinds, and unwinding releases what the frame's
@@ -287,67 +317,479 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// Hands a binding's reference to its last read instead of copying it.
+    /// Hands a binding's reference to its last use instead of copying it.
     ///
     /// The conservative scheme gives every read its own reference and releases
-    /// the binding's where the block ends, so a value read once costs a `dup`,
-    /// the consumer's `drop`, and the block's `drop`. Three operations to move
-    /// one value. Counted across a workload the ratio is stark: parsing one
-    /// HTTP request performs 677 reference-count operations against 55
-    /// allocations, and a hundred failed `Map::get` calls perform 5,704
-    /// against 5. `docs/design/reuse.md`.
+    /// the binding where its block ends, so moving one value costs a `dup`, the
+    /// consumer's `drop`, and the block's `drop`. Counted across a workload the
+    /// ratio is stark: parsing one HTTP request performed 677 reference-count
+    /// operations against 55 allocations. `docs/design/reuse.md`.
     ///
-    /// So: where a binding's *last* read is unambiguous, that read takes the
-    /// binding's reference rather than making one, and the block no longer
-    /// releases it. Two operations become none.
+    /// This is a backward pass. Walking from the end, `live` is the set of
+    /// bindings still needed *after* the point being looked at; a read of a
+    /// binding that is not in it is that binding's last use, and takes the
+    /// reference rather than copying it.
     ///
-    /// **The conditions are what make this safe, and they are deliberately
-    /// crude.** This is the first step of `reuse.md` §1, not the whole of it.
-    ///
-    /// - **The body cannot unwind.** A `!`, a `raise`, a `catch` or a `return`
-    ///   leaves a frame from the middle, and what is still owned then depends
-    ///   on how far execution got. Making the release set path-dependent is the
-    ///   hard half of §1; a body that can unwind keeps the conservative plan
-    ///   entirely.
-    /// - **No read may be inside a branch, a loop, or a lambda.** Those run
-    ///   zero times, or many, so no read within them is *the* last one.
-    /// - **The binding must be read at least once**, or there is nothing to
-    ///   move the reference to and the block still has to release it.
-    ///
-    /// A parameter counts as a binding here, released by the outermost block
-    /// like any other.
+    /// **A body that can unwind keeps the conservative plan entirely.** A `!`,
+    /// a `raise`, a `catch` or a `return` leaves a frame from the middle, and
+    /// what is still owned there depends on how far execution got — the code
+    /// generator's cleanup stack is positional, so it can only be right if
+    /// nothing between two points changes what is owned. Making that set
+    /// path-dependent is the rest of `reuse.md` §1 and is not attempted here.
     fn settle_last_uses(&mut self) {
         if self.unwinds {
             return;
         }
+        let Some(root) = self.body.root else { return };
+        self.unowned = self.projected_bindings(root);
+        self.live_before(root, &Live::new());
 
-        let mut moved: Vec<LocalId> = Vec::new();
-        for local in self.plan.boxed.clone() {
-            let mut mine = self.reads.iter().filter(|read| read.local == local).peekable();
-            if mine.peek().is_none() {
-                continue;
-            }
-            if self.reads.iter().any(|read| read.local == local && read.conditional) {
-                continue;
-            }
-            // In program order, because `walk` visits in it.
-            let Some(last) = self.reads.iter().rfind(|read| read.local == local) else {
-                continue;
-            };
-            // A borrow cannot take the reference, so a binding whose last use
-            // is one still has to be released by its block — after the borrow.
-            if last.borrowed {
-                continue;
-            }
-            self.plan.dups.remove(&last.at);
-            self.plan.moved.insert(local);
-            moved.push(local);
-        }
-
+        // Whoever took the reference releases it. This has to sweep every list
+        // rather than only the declaring block's: a `match` arm's bindings are
+        // registered against the arm, and a parameter against the outermost
+        // block, so a per-block sweep leaves those to be released twice.
+        let taken = self.plan.moved.clone();
         for releases in self.plan.drops.values_mut() {
-            releases.retain(|local| !moved.contains(local));
+            releases.retain(|local| !taken.contains(local));
         }
         self.plan.drops.retain(|_, releases| !releases.is_empty());
+    }
+
+    /// What is live *before* `id`, given what is live after it.
+    ///
+    /// Every read encountered is decided on the way past: kept as a copy if the
+    /// binding is needed later, turned into a take if it is not.
+    fn live_before(&mut self, id: ExprId, after: &Live) -> Live {
+        match self.body.expr(id).clone() {
+            Expr::Local(local) => {
+                let mut live = after.clone();
+                if self.plan.boxed.contains(&local) {
+                    if self.plan.borrowed.contains(&id) {
+                        // A borrow takes no reference and ends nothing.
+                    } else if self.unowned.contains(&local) {
+                        // Nothing here to hand over; the copy is the reference.
+                    } else if after.contains(&local) {
+                        // Needed later, so this read needs one of its own.
+                    } else {
+                        self.plan.dups.remove(&id);
+                        self.plan.moved.insert(local);
+                    }
+                    live.insert(local);
+                }
+                live
+            }
+
+            Expr::Block { stmts, tail } => {
+                let mut live = match tail {
+                    Some(tail) => self.live_before(tail, after),
+                    None => after.clone(),
+                };
+                for stmt in stmts.iter().rev() {
+                    match stmt {
+                        Stmt::Expr(e) => live = self.live_before(*e, &live),
+                        Stmt::Let { pat, init, .. } => {
+                            // Backwards, a binding goes out of scope here.
+                            for local in self.bound_by(*pat) {
+                                live.remove(&local);
+                            }
+                            if let Some(init) = init {
+                                live = self.live_before(*init, &live);
+                            }
+                        }
+                    }
+                }
+                live
+            }
+
+            // **The right-hand side of `&&` and `||` may not run**, so nothing
+            // in it can be anybody's last use. Same shape as a branch with an
+            // arm that does nothing, and not worth the machinery.
+            Expr::Binary { op: BinOp::And | BinOp::Or, lhs, rhs } => {
+                let mut live = after.clone();
+                live.extend(self.reads_in(rhs));
+                self.live_before(lhs, &live)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                let live = self.live_before(rhs, after);
+                self.live_before(lhs, &live)
+            }
+
+            Expr::If { condition, then_branch, else_branch } => {
+                let Some(otherwise) = else_branch else {
+                    // No `else` is an arm with nothing in it to hold a release.
+                    let mut live = after.clone();
+                    live.extend(self.reads_in(then_branch));
+                    return self.live_before(condition, &live);
+                };
+                let live = self.across_arms(&[then_branch, otherwise], &[], after);
+                self.live_before(condition, &live)
+            }
+
+            Expr::Match { scrutinee, arms } => {
+                let bodies: Vec<ExprId> = arms.iter().map(|arm| arm.body).collect();
+                let bound: Vec<LocalId> =
+                    arms.iter().flat_map(|arm| self.bound_by(arm.pat)).collect();
+                let live = self.across_arms(&bodies, &bound, after);
+                self.live_before(scrutinee, &live)
+            }
+
+            // A loop's body may run many times, so a read in it is never a last
+            // use — the next turn may want the value again.
+            Expr::While { condition, body } => {
+                let mut live = after.clone();
+                live.extend(self.reads_in(condition));
+                live.extend(self.reads_in(body));
+                live
+            }
+            Expr::Loop { body } => {
+                let mut live = after.clone();
+                live.extend(self.reads_in(body));
+                live
+            }
+
+            // A closure's body runs when it is called, which is not here.
+            Expr::Lambda { captures, body, .. } => {
+                let mut live = after.clone();
+                live.extend(captures.iter().filter(|c| self.plan.boxed.contains(c)));
+                live.extend(self.reads_in(body));
+                live
+            }
+
+            // A write is not a read, and the value written is evaluated first.
+            Expr::Assign { target, value } => {
+                let mut live = after.clone();
+                live.extend(self.reads_in(target));
+                self.live_before(value, &live)
+            }
+
+            Expr::Call { callee, args } => {
+                let mut live = after.clone();
+                for arg in args.iter().rev() {
+                    live = self.live_before(*arg, &live);
+                }
+                self.live_before(callee, &live)
+            }
+            Expr::Record { fields, .. } => {
+                let mut live = after.clone();
+                for (_, value) in fields.iter().rev() {
+                    live = self.live_before(*value, &live);
+                }
+                live
+            }
+            Expr::List(items) | Expr::Tuple(items) => {
+                let mut live = after.clone();
+                for item in items.iter().rev() {
+                    live = self.live_before(*item, &live);
+                }
+                live
+            }
+            Expr::Field { base, .. } => self.live_before(base, after),
+            Expr::Unary { operand, .. } => self.live_before(operand, after),
+            Expr::Break(Some(v)) => self.live_before(v, after),
+
+            // Unreachable while `unwinds` guards this pass, and conservative if
+            // that ever changes.
+            Expr::Raise(_) | Expr::Try(_) | Expr::Return(_) | Expr::Catch { .. } => {
+                let mut live = after.clone();
+                live.extend(self.reads_in(id));
+                live
+            }
+
+            _ => after.clone(),
+        }
+    }
+
+    /// The arms of a branch, and the releases the ones that do not consume owe.
+    ///
+    /// A branch consumes a binding only when *every* path through it does. Where
+    /// one arm takes a binding and another never mentions it, the second arm
+    /// releases it at its head. Where another arm merely reads it, the branch
+    /// consumes nothing — releasing at the head would free a value that arm is
+    /// about to use, and releasing at the end is what the block already does.
+    fn across_arms(&mut self, arms: &[ExprId], arm_bound: &[LocalId], after: &Live) -> Live {
+        let before: Vec<Live> = arms
+            .iter()
+            .map(|arm| {
+                let taken_before = self.plan.moved.clone();
+                let live = self.live_before(*arm, after);
+                let _ = taken_before;
+                live
+            })
+            .collect();
+
+        // What each arm did with each binding, worked out from the reads it
+        // holds rather than from the pass above — the pass shares one `moved`
+        // set across arms and cannot say which arm did the taking.
+        let mut consumed: Vec<LocalId> = Vec::new();
+        let uses: Vec<Live> = arms.iter().map(|arm| self.reads_in(*arm)).collect();
+        let takes: Vec<Live> = arms.iter().map(|arm| self.takes_in(*arm)).collect();
+
+        // Only a binding that outlives the branch can be settled by it. One an
+        // arm introduces itself — through its pattern, or a `let` inside it —
+        // does not exist in the other arms, and a release at their head would
+        // be reading a slot that was never written on that path. Such a
+        // binding is taken and released entirely within its own arm, which
+        // needs nothing from here.
+        let mut inside: Live = arm_bound.iter().copied().collect();
+        for arm in arms {
+            inside.extend(self.bindings_in(*arm));
+        }
+        let mut candidates: Live = Live::new();
+        for take in &takes {
+            candidates.extend(take.iter().copied());
+        }
+        candidates.retain(|local| !inside.contains(local));
+        for local in candidates {
+            // Every arm either takes it, or does not touch it at all.
+            let settled = takes
+                .iter()
+                .zip(&uses)
+                .all(|(take, use_)| take.contains(&local) || !use_.contains(&local));
+            if !settled {
+                // Some arm reads it without taking it. Put the copies back and
+                // leave the binding to its block.
+                for arm in arms {
+                    self.restore_dups(*arm, local);
+                }
+                self.plan.moved.remove(&local);
+                continue;
+            }
+            for (arm, take) in arms.iter().zip(&takes) {
+                if !take.contains(&local) {
+                    self.plan.arm_drops.entry(*arm).or_default().push(local);
+                }
+            }
+            consumed.push(local);
+        }
+
+        let mut live = Live::new();
+        for arm in before {
+            live.extend(arm);
+        }
+        for local in consumed {
+            live.insert(local);
+        }
+        live.extend(after.iter().copied());
+        live
+    }
+
+    /// Every binding a `match` or `catch` arm projects out of its scrutinee.
+    fn projected_bindings(&self, id: ExprId) -> Live {
+        let mut found = Live::new();
+        self.collect_projected(id, &mut found);
+        found
+    }
+
+    fn collect_projected(&self, id: ExprId, found: &mut Live) {
+        if let Expr::Match { arms, .. } | Expr::Catch { arms, .. } = self.body.expr(id) {
+            for arm in arms {
+                found.extend(self.bound_by(arm.pat));
+            }
+        }
+        self.each_child(id, &mut |child| self.collect_projected(child, found));
+    }
+
+    /// Every binding introduced anywhere inside `id`.
+    fn bindings_in(&self, id: ExprId) -> Live {
+        let mut found = Live::new();
+        self.collect_bindings(id, &mut found);
+        found
+    }
+
+    fn collect_bindings(&self, id: ExprId, found: &mut Live) {
+        match self.body.expr(id) {
+            Expr::Block { stmts, .. } => {
+                for stmt in stmts {
+                    if let Stmt::Let { pat, .. } = stmt {
+                        found.extend(self.bound_by(*pat));
+                    }
+                }
+            }
+            Expr::Match { arms, .. } | Expr::Catch { arms, .. } => {
+                for arm in arms {
+                    found.extend(self.bound_by(arm.pat));
+                }
+            }
+            Expr::Lambda { params, .. } => {
+                for param in params.clone() {
+                    found.extend(self.bound_by(param));
+                }
+            }
+            _ => {}
+        }
+        self.each_child(id, &mut |child| self.collect_bindings(child, found));
+    }
+
+    /// Every boxed binding read anywhere inside `id`.
+    fn reads_in(&self, id: ExprId) -> Live {
+        let mut found = Live::new();
+        self.collect_reads(id, &mut found);
+        found
+    }
+
+    /// Every boxed binding whose reference is *taken* inside `id`.
+    fn takes_in(&self, id: ExprId) -> Live {
+        let mut found = Live::new();
+        for read in &self.reads {
+            if !self.plan.dups.contains(&read.at)
+                && !read.borrowed
+                && self.within(id, read.at)
+            {
+                found.insert(read.local);
+            }
+        }
+        found
+    }
+
+    /// Whether `needle` is `haystack` or somewhere inside it.
+    fn within(&self, haystack: ExprId, needle: ExprId) -> bool {
+        if haystack == needle {
+            return true;
+        }
+        let mut found = false;
+        self.each_child(haystack, &mut |child| {
+            found = found || self.within(child, needle);
+        });
+        found
+    }
+
+    /// Puts back the copies a take removed, for a binding a branch cannot
+    /// consume after all.
+    fn restore_dups(&mut self, arm: ExprId, local: LocalId) {
+        let places: Vec<ExprId> = self
+            .reads
+            .iter()
+            .filter(|read| read.local == local && !read.borrowed && self.within(arm, read.at))
+            .map(|read| read.at)
+            .collect();
+        for at in places {
+            self.plan.dups.insert(at);
+        }
+        // A branch nested inside may have granted an arm release for this
+        // binding on the strength of a take that is now a copy again. Left in
+        // place it would release something the block still releases.
+        let inner: Vec<ExprId> = self
+            .plan
+            .arm_drops
+            .keys()
+            .copied()
+            .filter(|at| self.within(arm, *at))
+            .collect();
+        for at in inner {
+            if let Some(releases) = self.plan.arm_drops.get_mut(&at) {
+                releases.retain(|held| *held != local);
+            }
+        }
+        self.plan.arm_drops.retain(|_, releases| !releases.is_empty());
+    }
+
+    fn collect_reads(&self, id: ExprId, found: &mut Live) {
+        if let Expr::Local(local) = self.body.expr(id) {
+            if self.plan.boxed.contains(local) {
+                found.insert(*local);
+            }
+        }
+        self.each_child(id, &mut |child| self.collect_reads(child, found));
+    }
+
+    /// Every expression `id` immediately contains.
+    fn each_child(&self, id: ExprId, visit: &mut dyn FnMut(ExprId)) {
+        match self.body.expr(id) {
+            Expr::Block { stmts, tail } => {
+                for stmt in stmts {
+                    match stmt {
+                        Stmt::Expr(e) => visit(*e),
+                        Stmt::Let { init, .. } => {
+                            if let Some(init) = init {
+                                visit(*init);
+                            }
+                        }
+                    }
+                }
+                if let Some(tail) = tail {
+                    visit(*tail);
+                }
+            }
+            Expr::Call { callee, args } => {
+                visit(*callee);
+                for arg in args {
+                    visit(*arg);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                visit(*lhs);
+                visit(*rhs);
+            }
+            Expr::Assign { target, value } => {
+                visit(*target);
+                visit(*value);
+            }
+            Expr::Unary { operand, .. } => visit(*operand),
+            Expr::Field { base, .. } => visit(*base),
+            Expr::If { condition, then_branch, else_branch } => {
+                visit(*condition);
+                visit(*then_branch);
+                if let Some(otherwise) = else_branch {
+                    visit(*otherwise);
+                }
+            }
+            Expr::While { condition, body } => {
+                visit(*condition);
+                visit(*body);
+            }
+            Expr::Loop { body } => visit(*body),
+            Expr::Match { scrutinee, arms } => {
+                visit(*scrutinee);
+                for arm in arms {
+                    if let Some(guard) = arm.guard {
+                        visit(guard);
+                    }
+                    visit(arm.body);
+                }
+            }
+            Expr::Catch { inner, arms } => {
+                visit(*inner);
+                for arm in arms {
+                    if let Some(guard) = arm.guard {
+                        visit(guard);
+                    }
+                    visit(arm.body);
+                }
+            }
+            Expr::Lambda { body, .. } => visit(*body),
+            Expr::Record { fields, .. } => {
+                for (_, value) in fields {
+                    visit(*value);
+                }
+            }
+            Expr::List(items) | Expr::Tuple(items) => {
+                for item in items {
+                    visit(*item);
+                }
+            }
+            Expr::Raise(inner) | Expr::Try(inner) => visit(*inner),
+            Expr::Break(Some(v)) | Expr::Return(Some(v)) => visit(*v),
+            _ => {}
+        }
+    }
+
+    /// The locals a pattern binds.
+    fn bound_by(&self, pat: PatId) -> Vec<LocalId> {
+        let mut found = Vec::new();
+        self.gather_bound(pat, &mut found);
+        found
+    }
+
+    fn gather_bound(&self, pat: PatId, found: &mut Vec<LocalId>) {
+        match self.body.pat(pat) {
+            Pat::Bind(local) => found.push(*local),
+            Pat::TupleStruct { fields, .. } | Pat::Tuple(fields) => {
+                for field in fields.clone() {
+                    self.gather_bound(field, found);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Records a read that takes no reference of its own.
@@ -358,7 +800,6 @@ impl<'a> Planner<'a> {
             self.reads.push(Read {
                 local,
                 at,
-                conditional: self.branching > 0,
                 borrowed: true,
             });
         }
@@ -403,7 +844,6 @@ impl<'a> Planner<'a> {
                     self.reads.push(Read {
                         local,
                         at: id,
-                        conditional: self.branching > 0,
                         borrowed: false,
                     });
                 }
@@ -441,9 +881,7 @@ impl<'a> Planner<'a> {
                 let _ = owned;
                 // A lambda's body runs when the closure is called, which is not
                 // here and may be never.
-                self.branching += 1;
                 self.walk(body);
-                self.branching -= 1;
             }
             Expr::Block { stmts, tail } => {
                 let mut declared = Vec::new();
@@ -467,7 +905,6 @@ impl<'a> Planner<'a> {
             }
             Expr::Match { scrutinee, arms } => {
                 self.walk(scrutinee);
-                self.branching += 1;
                 for arm in &arms {
                     // Arm bindings borrow out of the scrutinee, which the arm
                     // does not own, so they are recorded but not dropped.
@@ -478,7 +915,6 @@ impl<'a> Planner<'a> {
                     }
                     self.walk(arm.body);
                 }
-                self.branching -= 1;
             }
             // Same shape as `match`, over the error rather than a scrutinee.
             // The error object itself is owned by the catching frame — the
@@ -487,7 +923,6 @@ impl<'a> Planner<'a> {
             Expr::Catch { inner, arms } => {
                 self.unwinds = true;
                 self.walk(inner);
-                self.branching += 1;
                 for arm in &arms {
                     let mut ignored = Vec::new();
                     self.bind(arm.pat, &mut ignored);
@@ -496,7 +931,6 @@ impl<'a> Planner<'a> {
                     }
                     self.walk(arm.body);
                 }
-                self.branching -= 1;
             }
             // `xs.length()` — the receiver is the callee's base rather than an
             // argument, and it is how most of these are written. Reading only
@@ -535,21 +969,9 @@ impl<'a> Planner<'a> {
                     self.walk(*arg);
                 }
             }
-            Expr::Binary { op, lhs, rhs } => {
+            Expr::Binary { lhs, rhs, .. } => {
                 self.walk(lhs);
-                // **`&&` and `||` short-circuit**, so the right side is a
-                // branch even though it does not look like one. Missing this
-                // leaked exactly one object in a derived `Bool` method whose
-                // body is three comparisons joined by `||`: the value read on
-                // the right was never released when the left answered first.
-                let skippable = matches!(op, khora_hir::body::BinOp::And | khora_hir::body::BinOp::Or);
-                if skippable {
-                    self.branching += 1;
-                }
                 self.walk(rhs);
-                if skippable {
-                    self.branching -= 1;
-                }
             }
             Expr::Assign { target, value } => {
                 // Walking the target records a *read* of the local, and a write
@@ -565,26 +987,20 @@ impl<'a> Planner<'a> {
             Expr::Field { base, .. } => self.walk(base),
             Expr::If { condition, then_branch, else_branch } => {
                 self.walk(condition);
-                self.branching += 1;
                 self.walk(then_branch);
                 if let Some(e) = else_branch {
                     self.walk(e);
                 }
-                self.branching -= 1;
             }
             Expr::While { condition, body } => {
                 // The condition runs at least once and the body may run many
                 // times; both are inside the repetition as far as a last use is
                 // concerned.
-                self.branching += 1;
                 self.walk(condition);
                 self.walk(body);
-                self.branching -= 1;
             }
             Expr::Loop { body } => {
-                self.branching += 1;
                 self.walk(body);
-                self.branching -= 1;
             }
             Expr::Break(Some(v)) => self.walk(v),
             // A `return` leaves the frame from the middle, which makes what is

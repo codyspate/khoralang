@@ -584,6 +584,19 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// Releases what this branch arm owes on entry.
+    ///
+    /// Where one arm of a branch takes a binding's reference, every other arm
+    /// has to release it, or the count never reaches zero on those paths. The
+    /// planner grants an arm release only to an arm that does not mention the
+    /// binding at all, so the head of the arm is a safe place for it — see
+    /// `RcPlan::arm_drops`.
+    fn release_at_arm(&mut self, arm: ExprId) {
+        for local in self.plan.arm_drops_for(arm).to_vec() {
+            self.release(Cleanup::Local(local));
+        }
+    }
+
     fn release(&mut self, cleanup: Cleanup<'ctx>) {
         match cleanup {
             Cleanup::Local(local) => {
@@ -4470,6 +4483,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         let mut reached = 0;
 
         self.at(then_block);
+        self.release_at_arm(then_branch);
         if let Some(value) = self.expr(then_branch) {
             self.store_result(slot, value);
             self.br(merge);
@@ -4478,7 +4492,10 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         self.at(else_block);
         let value = match else_branch {
-            Some(else_branch) => self.expr(else_branch),
+            Some(else_branch) => {
+                self.release_at_arm(else_branch);
+                self.expr(else_branch)
+            }
             // An `if` without `else` is `()` on the missing side, which the
             // checker has already required of the other side too.
             None => Some(self.be.unit_value()),
@@ -4948,6 +4965,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
 
             self.at(bodies[index]);
+            self.release_at_arm(arm.body);
             if let Some(value) = self.expr(arm.body) {
                 self.store_result(slot, value);
                 self.br(merge);

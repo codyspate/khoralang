@@ -83,19 +83,42 @@ fn a_chain_of_single_uses_costs_nothing() {
     assert_eq!(p.moved.len(), 2, "both bindings moved: {p:?}");
 }
 
-/// A read that might not happen cannot be anybody's last use, so the
-/// conservative plan stands: the read copies and the block releases.
+/// A branch where one arm takes the binding and the other never mentions it
+/// consumes it on every path: the read moves, and the arm that did not take it
+/// releases at its head.
 #[test]
-fn a_read_inside_a_branch_keeps_its_dup() {
+fn a_branch_that_takes_on_one_path_releases_on_the_other() {
     let db = KhoraDatabase::new();
     let p = plan(
         &db,
         "module m;\nfn f(s: String, yes: Bool) -> String { if yes { s } else { \"\" } }\n",
         "f",
     );
-    assert_eq!(p.dups.len(), 1, "a conditional read still copies: {p:?}");
+    assert!(p.dups.is_empty(), "the taken read needs no copy: {p:?}");
+    let released: Vec<_> = p.drops.values().flatten().collect();
+    assert!(released.is_empty(), "the block no longer releases it: {p:?}");
+    let at_arms: Vec<_> = p.arm_drops.values().flatten().collect();
+    assert_eq!(at_arms.len(), 1, "the other arm releases instead: {p:?}");
+}
+
+/// An arm that *borrows* the binding without taking it blocks the whole branch
+/// from consuming it. An arm release goes at the arm's head, which is before
+/// the borrow, so granting one here would free a value the arm is about to
+/// read. The conservative plan stands: the taking read copies after all, and
+/// the block releases.
+#[test]
+fn a_branch_with_a_borrowing_arm_keeps_its_dups() {
+    let db = KhoraDatabase::new();
+    let p = plan(
+        &db,
+        "module m;\nfn f(s: String, yes: Bool) -> Int {\n  \
+         if yes { String::byte_length(s) } else { String::byte_length(s + \"!\") }\n}\n",
+        "f",
+    );
+    assert_eq!(p.dups.len(), 1, "a branch it cannot consume still copies: {p:?}");
     let released: Vec<_> = p.drops.values().flatten().collect();
     assert_eq!(released.len(), 1, "and the block still releases: {p:?}");
+    assert!(p.arm_drops.is_empty(), "no arm releases it: {p:?}");
 }
 
 #[test]
