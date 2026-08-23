@@ -135,7 +135,6 @@ impl<'a> Parser<'a> {
             || self.at_contextual(CONTEXT_KW)
             || self.at_contextual(TEST_KW)
             || self.at_contextual(BENCH_KW)
-            || self.at_contextual(DERIVE_KW)
     }
 
     // --- contextual keywords ----------------------------------------------

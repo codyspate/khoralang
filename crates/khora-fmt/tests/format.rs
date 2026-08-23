@@ -162,11 +162,14 @@ fn is_formatted_agrees_with_format() {
     assert!(!is_formatted("module m;\nfn f() {    1 }\n").unwrap());
 }
 
-/// `derive(Eq)`, not `derive (Eq)`: the argument list belongs to the word, the
-/// same way an impl's parameters belong to `impl`.
+/// The trailing clause is one space from the body, and its traits are one
+/// comma apart like every other list.
 #[test]
-fn a_derive_clause_hugs_its_traits() {
-    let src = "module m;\n\nderive(Eq, Ord)\nexport type Point = { x: Int, y: Int };\n";
+fn a_trailing_impl_clause_formats() {
+    let src = "module m;
+
+export type Point = { x: Int, y: Int } impl Eq, Ord;
+";
     assert_eq!(format(src).unwrap(), src);
 }
 

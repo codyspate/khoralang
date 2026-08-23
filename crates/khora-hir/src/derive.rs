@@ -1,4 +1,4 @@
-//! `derive(Eq, Ord, Show, Hash)`, expanded into ordinary impls.
+//! A type's trailing `impl Eq, Ord, Show, Hash`, expanded into real impls.
 //!
 //! # Why this is a source-to-source expansion
 //!
@@ -18,7 +18,7 @@
 //!
 //! What it costs is that the generated text has ranges of its own, belonging to
 //! no file. That is handled by *blaming the `derive`*: every range in a derived
-//! impl is rewritten to the range of the `derive(..)` clause that asked for it,
+//! impl is rewritten to the range of the clause that asked for it,
 //! so a diagnostic can only ever point at something the author wrote. It is
 //! also the right place to point. A derived impl that does not check is either
 //! the author's fault — a field whose type lacks the trait — or the compiler's,
@@ -66,7 +66,7 @@ pub struct DerivedImpl {
     pub trait_name: String,
     /// The type as declared: `Point`, or `Box` for `Box<A>`.
     pub type_name: String,
-    /// Where the `derive(..)` clause is, in the *file*. Everything a derived
+    /// Where the clause is, in the *file*. Everything a derived
     /// impl can be blamed for is blamed here.
     pub at: TextRange,
     /// Whether the type is a record. Whoever reads this does not otherwise

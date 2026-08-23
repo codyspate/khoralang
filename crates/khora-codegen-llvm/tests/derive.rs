@@ -90,11 +90,9 @@ impl Ordering {
 
 fn yes(answer: Bool) -> String { if answer { "yes" } else { "no" } }
 
-derive(Eq, Ord, Show, Hash)
-export type Point = { x: Int, y: Int };
+export type Point = { x: Int, y: Int } impl Eq, Ord, Show, Hash;
 
-derive(Eq, Ord, Show, Hash)
-export type Shape = | Dot | Circle(r: Int) | Rect(w: Int, h: Int);
+export type Shape = | Dot | Circle(r: Int) | Rect(w: Int, h: Int) impl Eq, Ord, Show, Hash;
 "#;
 
 /// The format a test can assert on, and the reason to pin it: change it and

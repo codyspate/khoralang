@@ -191,15 +191,6 @@
           }
         },
         {
-          "comment": "`derive(Eq, Ord)` only, and only at the start of a declaration, where the next line is the `type` it introduces. A call to a function named `derive` is left alone.",
-          "match": "^\\s*(derive)\\b(?=\\s*\\()",
-          "captures": {
-            "1": {
-              "name": "keyword.declaration.khora"
-            }
-          }
-        },
-        {
           "comment": "`extern fn` only: the word is a keyword when it is what a `fn` declaration begins with.",
           "match": "^\\s*(?:export\\s+)?(extern)\\b(?=\\s+fn\\b)",
           "captures": {

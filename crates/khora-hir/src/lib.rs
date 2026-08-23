@@ -528,7 +528,60 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             }
         }
     }
+    // **A derived `Ord` returns an `Ordering`, and nobody wrote that down.**
+    //
+    // `export type Point = { .. } impl Ord;` expands to a `cmp` whose arms are
+    // `Ordering::Less` and friends, so without this the author is told that
+    // `Ordering::Less` is not a constructor — about a line they did not write,
+    // naming a type they never mentioned. The clause is the mention.
+    //
+    // Taken from wherever `Ord` itself came from rather than from `std::core`
+    // by name, so a program that defines its own comparison hierarchy gets its
+    // own answer type. Nothing happens if `Ordering` is already in scope, or
+    // if `Ord` is not.
+    if derives_ord(db, file) && !out.names.iter().any(|(n, _)| n == "Ordering") {
+        if let Some(home) =
+            out.origins.iter().find(|o| o.local == "Ord").map(|o| o.module.clone())
+        {
+            if let Some(source) = graph.file(&home) {
+                let exported = item_map(db, source);
+                if let Some(item) = exported.item("Ordering").filter(|i| i.is_public) {
+                    out.names.push((
+                        "Ordering".to_string(),
+                        Resolution::Item {
+                            module: home.clone(),
+                            name: "Ordering".to_string(),
+                            kind: item.kind,
+                        },
+                    ));
+                    out.origins.push(Origin {
+                        local: "Ordering".to_string(),
+                        module: home,
+                        name: "Ordering".to_string(),
+                        kind: item.kind,
+                    });
+                    out.variants
+                        .extend(exported.variants_of("Ordering").cloned().collect::<Vec<_>>());
+                }
+            }
+        }
+    }
+
     out
+}
+
+/// Whether any type in this file asks for a derived `Ord`.
+///
+/// Read from the syntax rather than from `ItemMap`, which records what a file
+/// declares and not what each declaration asked to have written for it. One
+/// walk of the declarations, and only when a scope is being built.
+fn derives_ord(db: &dyn Db, file: SourceFile) -> bool {
+    khora_db::parse(db, file).source_file().decls().any(|decl| {
+        let ast::Decl::Type(t) = decl else { return false };
+        t.derive_clause().is_some_and(|c| {
+            c.traits().filter_map(|n| n.ident()).any(|name| name == "Ord")
+        })
+    })
 }
 
 /// What a name resolved to.

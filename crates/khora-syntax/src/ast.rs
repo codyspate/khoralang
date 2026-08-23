@@ -334,7 +334,7 @@ impl TypeDecl {
     pub fn definition(&self) -> Option<Type> {
         child(&self.0)
     }
-    /// `derive(Eq, Ord)`, when the declaration asked for one.
+    /// The trailing `impl Eq, Ord`, when the declaration carries one.
     pub fn derive_clause(&self) -> Option<DeriveClause> {
         child(&self.0)
     }

@@ -1230,12 +1230,24 @@ they will be missed:
   nothing to fill — the first `push` allocates using the element being pushed,
   and `wanted` is what keeps `with_capacity`'s promise until there is a value
   to keep it with. A thousand integers are two objects.
-- ~~**`derive`.**~~ Done. `derive(Eq, Ord, Show, Hash)` above a `type`, with
-  `derive` a contextual keyword so a program that already has a field called
-  `derive` keeps it. Expanded source-to-source into ordinary impls before the
-  checker runs, so nothing downstream — inference, exhaustiveness, Perceus,
-  monomorphization, the backend — learns that it exists, and every range in a
-  generated body points at the `derive` clause the author wrote.
+- ~~**`derive`.**~~ Done, and spelled as a trailing clause:
+
+  ```khora
+  export type Point = { x: Int, y: Int } impl Eq, Ord, Show;
+  ```
+
+  `impl` rather than a word of its own, because it already means "here are
+  implementations for this type" — so the feature costs the language no
+  keyword at all, not even a contextual one, and reads as the short form of
+  what it expands into. It was `derive(Eq, Ord)` on the line above for a day;
+  that went because it was *attribute-shaped* in a language with no
+  attributes, which made it the one place in the grammar hinting at a syntax
+  family that does not exist.
+
+  Expanded source-to-source into ordinary impls before the checker runs, so
+  nothing downstream — inference, exhaustiveness, Perceus, monomorphization,
+  the backend — learns that it exists, and every range in a generated body
+  points at the clause the author wrote.
 
   Structural, and refusing rather than guessing: a field whose type lacks the
   trait is named. `Ord` and `Hash` require `Eq` rather than implying it, read
@@ -1243,7 +1255,7 @@ they will be missed:
   comparison order. A derived `Hash` and a derived `Eq` read the same fields in
   the same order, so equal values hash equal by construction, and both operands
   are reduced at every step because `*` and `+` trap on overflow and
-  `Hash for Int` is the identity. Generic types get the bound: `derive(Eq)` on
+  `Hash for Int` is the identity. Generic types get the bound: `impl Eq` on
   `Box<A>` is `impl<A: Eq> Eq for Box<A>`.
 
   Converting `std`'s hand-written impls is the follow-up.
