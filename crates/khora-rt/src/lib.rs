@@ -133,9 +133,18 @@ pub struct KhoraHeader {
     /// Number of live references. An object is freed when this reaches zero.
     ///
     /// Atomic, and the same width a plain `usize` would be — see the module
-    /// documentation. Generated code never touches it; every change goes
-    /// through [`khora_dup`] and [`khora_drop`], which is what made D10 a
-    /// runtime question rather than a language one.
+    /// documentation.
+    ///
+    /// **The first field, and generated code relies on that.** This said that
+    /// generated code never touches it and that every change goes through
+    /// [`khora_dup`] and [`khora_drop`]. It no longer does: the call was a
+    /// large fraction of what reference counting cost, so the backend emits the
+    /// add and the subtract inline against offset zero and only the last
+    /// reference calls [`khora_drop_last`]. `docs/design/reuse.md` §3.
+    ///
+    /// So moving this field is not a layout change the runtime can make on its
+    /// own. The two functions below remain the C ABI for anything else linking
+    /// against `khora-rt`, and are still what drop glue calls.
     pub refcount: AtomicUsize,
     /// Which variant of its ADT the object is. Opaque to the runtime.
     pub tag: u32,
@@ -556,6 +565,50 @@ pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: usize, tag: u32
     }
     LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
     token
+}
+
+/// The slow half of a drop the caller decremented itself.
+///
+/// Generated code decrements the refcount inline and calls this only when the
+/// reference it released looks like the last one — see `docs/design/reuse.md`
+/// §3. `previous` is what the decrement returned, so that the already-zero
+/// check happens here rather than in the emitted code, where it would be a
+/// branch on every drop in the program to catch a bug that must not happen.
+///
+/// The fence, the field-dropping callback and the deallocation are all here,
+/// which is the point: the common case is a decrement and a not-taken branch,
+/// and only the last reference pays for a call.
+///
+/// # Safety
+///
+/// `ptr` must be a live object whose refcount the caller has just decremented
+/// with [`Ordering::Release`], `previous` must be what that decrement returned,
+/// and `drop_fields` must match the object's layout.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_drop_last(
+    ptr: *mut u8,
+    drop_fields: Option<extern "C" fn(*mut u8)>,
+    previous: usize,
+) {
+    if previous == 0 {
+        fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
+    }
+
+    // Acquire, pairing with every other thread's release, so their writes are
+    // visible before the fields are read and the memory is freed. The matching
+    // release is the caller's decrement.
+    std::sync::atomic::fence(Ordering::Acquire);
+
+    // SAFETY: still allocated — this thread took the count to zero and holds
+    // the only claim on it.
+    let layout = object_layout(unsafe { (*ptr.cast::<KhoraHeader>()).field_bytes });
+    if let Some(drop_fields) = drop_fields {
+        drop_fields(ptr);
+    }
+    // SAFETY: as `khora_drop`. The count is zero, nothing else refers to it,
+    // and the callback has released everything the object owned.
+    unsafe { dealloc(ptr, layout) };
+    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
 }
 
 /// Frees a token nothing spent.

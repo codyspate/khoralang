@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use inkwell::basic_block::BasicBlock;
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
-use inkwell::{AddressSpace, IntPredicate};
+use inkwell::{AddressSpace, AtomicOrdering, AtomicRMWBinOp, IntPredicate};
 
 use khora_hir::body::{
     BinOp, Body, Expr, ExprId, Literal, LocalId, MatchArm, Pat, PatId, Stmt, UnOp,
@@ -568,21 +568,117 @@ impl<'ctx> Lower<'_, 'ctx> {
     // Reference counting
     // -----------------------------------------------------------------------
 
-    /// `khora_dup(value)`, for a value that must outlive the expression that
+    /// Adds a reference, for a value that must outlive the expression that
     /// produced it.
+    ///
+    /// **Emitted inline rather than called.** The refcount is the first word of
+    /// the header, so this is a null test and one atomic add — against a call
+    /// into `khora_dup`, which does exactly that and nothing else. An HTTP
+    /// request parse performs 280 reference-count operations against 50
+    /// allocations, so the call was a large fraction of what counting cost.
+    /// `docs/design/reuse.md` §3.
+    ///
+    /// The runtime's `khora_dup` stays, because `khora-rt` is a C ABI anything
+    /// may link against, and it is still what a hand-written extern uses.
     fn dup(&mut self, value: BasicValueEnum<'ctx>) {
-        let dup = self.be.rt.dup;
-        self.be.builder.build_call(dup, &[value.into()], "").expect("a dup");
+        let object = value.into_pointer_value();
+        let bump = self.block("dup.bump");
+        let done = self.block("dup.done");
+        let null = self.be.ctx.ptr_type(AddressSpace::default()).const_null();
+        let is_null = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, object, null, "dup.null")
+            .expect("testing a pointer for null");
+        self.be
+            .builder
+            .build_conditional_branch(is_null, done, bump)
+            .expect("a dup's null guard");
+
+        self.at(bump);
+        // Relaxed: the caller already owns a reference, so the object cannot be
+        // freed underneath this and nothing is being published. Ordering is
+        // only needed on the last release. The same argument `khora_dup` makes.
+        self.be
+            .builder
+            .build_atomicrmw(
+                AtomicRMWBinOp::Add,
+                object,
+                self.be.ctx.i64_type().const_int(1, false),
+                AtomicOrdering::Monotonic,
+            )
+            .expect("an inline dup");
+        self.br(done);
+        self.at(done);
     }
 
-    /// `khora_drop(value, drop_fields_for(ty))`. A no-op for a machine word.
+    /// Releases a reference. A no-op for a machine word.
+    ///
+    /// The decrement is inline like [`Self::dup`]'s add, and only the *last*
+    /// reference pays for a call — to `khora_drop_last`, which holds the fence,
+    /// the field-dropping callback and the deallocation. The common case is a
+    /// decrement and a branch that is not taken.
     fn drop(&mut self, value: BasicValueEnum<'ctx>, ty: &Type) {
         if !is_boxed(ty) {
             return;
         }
         let glue = self.be.drop_glue(ty);
-        let drop = self.be.rt.drop;
-        self.be.builder.build_call(drop, &[value.into(), glue.into()], "").expect("a drop");
+        let object = value.into_pointer_value();
+        let release = self.block("drop.release");
+        let last = self.block("drop.last");
+        let done = self.block("drop.done");
+
+        let null = self.be.ctx.ptr_type(AddressSpace::default()).const_null();
+        let is_null = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, object, null, "drop.null")
+            .expect("testing a pointer for null");
+        self.be
+            .builder
+            .build_conditional_branch(is_null, done, release)
+            .expect("a drop's null guard");
+
+        self.at(release);
+        // Release, so that everything this thread did to the object happens
+        // before whichever thread takes the count to zero sees it. The matching
+        // acquire is the fence inside `khora_drop_last`.
+        let previous = self
+            .be
+            .builder
+            .build_atomicrmw(
+                AtomicRMWBinOp::Sub,
+                object,
+                self.be.ctx.i64_type().const_int(1, false),
+                AtomicOrdering::Release,
+            )
+            .expect("an inline drop");
+        // Zero goes to the slow path too, which is where the already-zero abort
+        // lives: a second branch here would be paid by every drop in the
+        // program to catch something that must never happen.
+        let survives = self
+            .be
+            .builder
+            .build_int_compare(
+                IntPredicate::UGT,
+                previous,
+                self.be.ctx.i64_type().const_int(1, false),
+                "drop.survives",
+            )
+            .expect("comparing a refcount");
+        self.be
+            .builder
+            .build_conditional_branch(survives, done, last)
+            .expect("a drop's last-reference branch");
+
+        self.at(last);
+        let drop_last = self.be.rt.drop_last;
+        self.be
+            .builder
+            .build_call(drop_last, &[object.into(), glue.into(), previous.into()], "")
+            .expect("releasing the last reference");
+        self.br(done);
+        self.at(done);
     }
 
     /// Releases everything owned by scopes at or above `depth`, innermost

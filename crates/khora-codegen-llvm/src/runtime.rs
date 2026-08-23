@@ -115,6 +115,10 @@ pub struct Runtime<'ctx> {
     pub dup: FunctionValue<'ctx>,
     /// `void khora_drop(void *object, void (*drop_fields)(void *))`
     pub drop: FunctionValue<'ctx>,
+    /// `void khora_drop_last(void *object, void (*drop_fields)(void *), size_t previous)`
+    ///
+    /// The slow half of a drop generated code decremented itself.
+    pub drop_last: FunctionValue<'ctx>,
     /// `void *khora_drop_reuse(void *object, void (*drop_fields)(void *))`
     ///
     /// `khora_drop`, but the last reference keeps the memory and hands it back
@@ -228,6 +232,10 @@ impl<'ctx> Runtime<'ctx> {
             // opaque pointers a function pointer is just `ptr`, so passing
             // null and passing a routine are the same call shape.
             drop: declare("khora_drop", void.fn_type(&[ptr.into(), ptr.into()], false)),
+            drop_last: declare(
+                "khora_drop_last",
+                void.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),
+            ),
             drop_reuse: declare(
                 "khora_drop_reuse",
                 ptr.fn_type(&[ptr.into(), ptr.into()], false),

@@ -246,13 +246,41 @@ that reuse pays where a program walks a structure and rebuilds it, and that a
 request parser mostly does not — it builds strings and hashes them. The list
 walk is not a toy chosen to flatter it, but it is the shape reuse is for.
 
-### 3. Drop specialization
+### 3. Drop specialization — done, and it was not the cheapest
 
-A drop whose object type is known statically does not need the runtime's
-generic path: the field count, the glue and the layout are all compile-time
-constants. This is the cheapest of the four and the least interesting, and it
-should be measured before it is written — errata 45's rule applies, and two of
-the four optimisations in the throughput work were worth nothing.
+Written expecting nothing. It was the second largest win in the phase.
+
+The claim here used to be that a drop whose object type is known statically does
+not need the runtime's generic path — the field count, the glue and the layout
+are compile-time constants — and that it was "the cheapest of the four and the
+least interesting". The reasoning was about the *work* the runtime does. What
+actually cost was the **call**: an HTTP parse performs 280 reference-count
+operations against 50 allocations, and 230 of those calls did nothing but add or
+subtract one from a word.
+
+The refcount is the first field of the header, so the pointer generated code
+already holds is a pointer to it. A `dup` is now a null test and one relaxed
+atomic add, emitted inline. A `drop` is a null test, one release atomic
+subtract, and a branch that is not taken — only the *last* reference calls
+`khora_drop_last`, which holds the fence, the field-dropping callback and the
+deallocation. The already-zero abort lives there too, rather than being a second
+branch every drop in the program pays for to catch something that must not
+happen.
+
+    parse, 80-byte request       1,770 ns -> 1,670
+    parse, browser request       8,935 ns -> 8,360
+
+`khora_dup` and `khora_drop` stay in the runtime. `khora-rt` is a C ABI anything
+may link against, drop glue still calls them for the fields it releases, and the
+module documentation's claim that "generated code never touches the refcount" is
+the one thing here that had to be retracted rather than refined.
+
+**How the measurement nearly went wrong.** The first attempt at an envelope was
+a throwaway runtime with `khora_dup` and `khora_drop` returning immediately. It
+measured *slower* — nothing is ever freed, so the working set grows without
+bound and the allocator loses its cache. A no-op runtime does not measure what
+reference counting costs; it measures a program with a leak. The number above
+came from building the thing and comparing.
 
 ### 4. Borrowed parameters, and D10's escape analysis
 

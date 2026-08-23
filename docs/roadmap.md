@@ -1561,7 +1561,24 @@ much less than over the arrays phase 6 brings.
   to 1,770ns, `bench/service` from 507k to 548k req/s. Reuse pays where a
   program walks a structure and rebuilds it; a request parser mostly builds
   strings and hashes them, and mostly does not.
-- **9.3 Drop specialization**, measured before it is written.
+- **9.3 Drop specialization — done, and it was not the cheapest.** Written
+  expecting nothing; the second largest win in the phase.
+
+  The entry here used to call it "the cheapest of the four and the least
+  interesting", reasoning about the work the runtime does. What cost was the
+  **call**. An HTTP parse performs 280 reference-count operations against 50
+  allocations, and 230 of those calls did nothing but add or subtract one from a
+  word. The refcount is the first field of the header, so a `dup` is now a null
+  test and one relaxed atomic add emitted inline, and a `drop` is a null test, a
+  release atomic subtract and a branch that is not taken — only the last
+  reference calls into the runtime. 1,770ns to 1,670ns on an HTTP parse, 8,935
+  to 8,360 on a browser's.
+
+  The first attempt to *measure* it before writing it went wrong in a way worth
+  recording: a throwaway runtime with `dup` and `drop` returning immediately ran
+  **slower**, because nothing is ever freed and the working set stops fitting in
+  cache. A no-op runtime measures a program with a leak, not what counting
+  costs.
 - **9.4 Borrowed parameters and D10's escape analysis — priced at 12%.** The
   claim here used to be "the largest single win available, because every `dup`
   in a single-threaded program is a lock-free atomic". A throwaway build with
