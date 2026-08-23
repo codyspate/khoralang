@@ -103,6 +103,37 @@ pub struct RcPlan {
     /// does not consume the binding at all, and its block releases it as
     /// before.
     pub arm_drops: HashMap<ExprId, Vec<LocalId>>,
+    /// Locals a `match` arm's pattern binds and the arm's body reads, to `dup`
+    /// on entering the arm, keyed by the arm's body.
+    ///
+    /// **This is what makes an arm's bindings ordinary.** `bind_pattern` stores
+    /// the loaded field straight into the slot, so without this a binding is a
+    /// borrowed view into the scrutinee's payload and only stays valid while
+    /// the `match` holds the scrutinee. Copying once on the way in makes the
+    /// arm an owner, which is what lets the scrutinee be released at the arm's
+    /// head — the prerequisite for handing its memory to the arm's own
+    /// constructor. `docs/design/reuse.md` §2.
+    ///
+    /// The count does not move: the copy that used to happen at each read now
+    /// happens once at the head, and the reads that remain are settled by the
+    /// last-use pass like any other. A binding the body never reads is left
+    /// out, because owning it would cost a copy and a release for nothing.
+    pub arm_binds: HashMap<ExprId, Vec<LocalId>>,
+    /// `match` arms that may build their result in the cell they matched,
+    /// keyed by the arm's body and naming the constructor that may take it.
+    ///
+    /// The pair is `khora_drop_reuse` at the arm's head and
+    /// `khora_alloc_reuse` at the constructor: releasing the scrutinee hands
+    /// the memory back when nobody else held it, and the constructor writes
+    /// the new object into it. A ten-element `map` over a list nothing else
+    /// holds then allocates nothing at all, which is phase 9's exit criterion.
+    ///
+    /// **A token has no owner, so it must be spent on every path.** That is why
+    /// the rule is as narrow as it is: the arm's body has to *be* the
+    /// constructor, and nothing inside it may leave the frame early. There is
+    /// then exactly one path from the release to the allocation and no way to
+    /// take it. `docs/design/reuse.md` §2.
+    pub reuse: HashMap<ExprId, ExprId>,
     /// Locals whose reference was handed to their last read rather than
     /// released by their block.
     ///
@@ -125,6 +156,16 @@ impl RcPlan {
     /// Locals to release on entering this branch arm.
     pub fn arm_drops_for(&self, arm: ExprId) -> &[LocalId] {
         self.arm_drops.get(&arm).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Locals to `dup` on entering this `match` arm, which the arm then owns.
+    pub fn arm_binds_for(&self, arm: ExprId) -> &[LocalId] {
+        self.arm_binds.get(&arm).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// The constructor this arm may build in the cell it matched, if any.
+    pub fn reuse_site(&self, arm: ExprId) -> Option<ExprId> {
+        self.reuse.get(&arm).copied()
     }
 
     pub fn is_boxed(&self, local: LocalId) -> bool {
@@ -220,6 +261,7 @@ pub fn plan(body: &Body, types: &khora_types::BodyTypes) -> RcPlan {
     };
     planner.plan_function();
     planner.settle_last_uses();
+    planner.plan_reuse();
     planner.plan
 }
 
@@ -584,7 +626,82 @@ impl<'a> Planner<'a> {
         live
     }
 
-    /// Every binding a `match` or `catch` arm projects out of its scrutinee.
+    /// Finds the `match` arms that may build their result in the matched cell.
+    ///
+    /// Deliberately syntactic. The token `khora_drop_reuse` hands back is
+    /// memory with no owner — nothing will free it and no counter is watching
+    /// it — so the one thing that must be true is that the constructor is
+    /// reached. Requiring the arm's body to *be* the constructor makes that
+    /// visible in one place, which is what `docs/design/reuse.md` §2 asks for.
+    ///
+    /// Everything this declines is a missed optimization. Everything it
+    /// wrongly accepted would be a leak.
+    fn plan_reuse(&mut self) {
+        let Some(root) = self.body.root else { return };
+        let mut found = Vec::new();
+        self.collect_reuse(root, &mut found);
+        for (arm, site) in found {
+            self.plan.reuse.insert(arm, site);
+        }
+    }
+
+    fn collect_reuse(&self, id: ExprId, found: &mut Vec<(ExprId, ExprId)>) {
+        if let Expr::Match { arms, .. } = self.body.expr(id) {
+            for arm in arms {
+                if let Some(site) = self.reusable_site(arm.body) {
+                    found.push((arm.body, site));
+                }
+            }
+        }
+        self.each_child(id, &mut |child| self.collect_reuse(child, found));
+    }
+
+    /// The constructor an arm may build in the matched cell, if this arm may.
+    fn reusable_site(&self, body: ExprId) -> Option<ExprId> {
+        let builds = match self.body.expr(body) {
+            Expr::Record { .. } => true,
+            Expr::Call { callee, .. } => {
+                matches!(self.body.expr(*callee), Expr::Path(khora_hir::Resolution::Variant { .. }))
+            }
+            _ => false,
+        };
+        if !builds || self.may_leave_early(body) {
+            return None;
+        }
+        Some(body)
+    }
+
+    /// Whether anything inside `id` can leave the frame without reaching the
+    /// end of it.
+    ///
+    /// `!` and `raise` unwind, `return` leaves, and `break` and `continue` jump
+    /// past whatever follows. Each of them is a path from the arm's head that
+    /// never reaches the arm's constructor, and a token on such a path is
+    /// leaked memory.
+    fn may_leave_early(&self, id: ExprId) -> bool {
+        if matches!(
+            self.body.expr(id),
+            Expr::Raise(_)
+                | Expr::Try(_)
+                | Expr::Return(_)
+                | Expr::Break(_)
+                | Expr::Continue
+                | Expr::Catch { .. }
+        ) {
+            return true;
+        }
+        let mut found = false;
+        self.each_child(id, &mut |child| found = found || self.may_leave_early(child));
+        found
+    }
+
+    /// Every binding that holds a reference belonging to somebody else.
+    ///
+    /// A `match` arm's are no longer among them — `arm_binds` gives the arm a
+    /// copy of what its body reads, so those are ordinary owning locals. A
+    /// binding the body does not read gets no copy and stays borrowed, and so
+    /// does everything a `catch` arm binds: the error object is released by
+    /// `lower_catch` by its runtime type, not by a plan.
     fn projected_bindings(&self, id: ExprId) -> Live {
         let mut found = Live::new();
         self.collect_projected(id, &mut found);
@@ -592,10 +709,21 @@ impl<'a> Planner<'a> {
     }
 
     fn collect_projected(&self, id: ExprId, found: &mut Live) {
-        if let Expr::Match { arms, .. } | Expr::Catch { arms, .. } = self.body.expr(id) {
-            for arm in arms {
-                found.extend(self.bound_by(arm.pat));
+        match self.body.expr(id) {
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    let owned = self.plan.arm_binds_for(arm.body);
+                    found.extend(
+                        self.bound_by(arm.pat).into_iter().filter(|l| !owned.contains(l)),
+                    );
+                }
             }
+            Expr::Catch { arms, .. } => {
+                for arm in arms {
+                    found.extend(self.bound_by(arm.pat));
+                }
+            }
+            _ => {}
         }
         self.each_child(id, &mut |child| self.collect_projected(child, found));
     }
@@ -917,14 +1045,26 @@ impl<'a> Planner<'a> {
             Expr::Match { scrutinee, arms } => {
                 self.walk(scrutinee);
                 for arm in &arms {
-                    // Arm bindings borrow out of the scrutinee, which the arm
-                    // does not own, so they are recorded but not dropped.
-                    let mut ignored = Vec::new();
-                    self.bind(arm.pat, &mut ignored);
+                    let mut bound = Vec::new();
+                    self.bind(arm.pat, &mut bound);
                     if let Some(guard) = arm.guard {
                         self.walk(guard);
                     }
                     self.walk(arm.body);
+                    // The arm owns what its body actually reads: one copy on
+                    // the way in, and the arm releases it. A binding the body
+                    // never touches is left borrowed, because owning it would
+                    // be a copy and a release for nothing.
+                    //
+                    // A read in the *guard* does not count. A guard runs before
+                    // the arm is committed to, so the copy has not happened
+                    // yet; those reads copy out of the payload the scrutinee
+                    // still holds, exactly as they always did.
+                    let read = self.reads_in(arm.body);
+                    bound.retain(|local| read.contains(local));
+                    if !bound.is_empty() {
+                        self.plan.arm_binds.insert(arm.body, bound);
+                    }
                 }
             }
             // Same shape as `match`, over the error rather than a scrutinee.

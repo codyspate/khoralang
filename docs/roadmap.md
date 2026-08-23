@@ -1538,8 +1538,29 @@ much less than over the arrays phase 6 brings.
   finalizers early, which read as "some types have an observable release" and
   produced a restriction to `String`; the real cause was that `defer` borrows
   and the plan said it consumed. The restriction is gone.
-- **9.2 Reuse tokens.** `khora_drop_reuse` and `khora_alloc_reuse`, once 9.1
-  makes a matched cell uniquely held at the arm's constructor.
+- **9.2 Reuse tokens — done, and the phase's exit criterion with them.** A
+  ten-element `map` over a list nothing else holds now allocates nothing.
+
+  9.1 removed two of the three references holding a matched cell at the arm's
+  constructor. The third was the `match`'s own — `lower_match` held the
+  scrutinee in a scope cleanup across the arms — and moving it could not be done
+  by moving a line, because an arm's bindings did not own what they pointed at.
+  `bind_pattern` stores the loaded field into the slot and reads of it copy, so
+  releasing the scrutinee at the arm's head would have freed the payload out
+  from under every binding. So the order became the ordinary owning one: copy
+  the bindings the body reads at the arm's head, release the scrutinee there,
+  and let their reads be settled by 9.1 like any others.
+
+  Then `khora_drop_reuse` at the arm's head, `khora_alloc_reuse` at its
+  constructor. A token is memory with no owner, so the rule for taking one is
+  syntactic and narrow: the arm's body must **be** the constructor, and nothing
+  inside it may leave the frame early. The shapes are compared at run time out
+  of the header, so an arm need not prove what it is about to build.
+
+  Beyond the exit criterion: an HTTP parse from 54 allocations to 50 and 1,855ns
+  to 1,770ns, `bench/service` from 507k to 548k req/s. Reuse pays where a
+  program walks a structure and rebuilds it; a request parser mostly builds
+  strings and hashes them, and mostly does not.
 - **9.3 Drop specialization**, measured before it is written.
 - **9.4 Borrowed parameters and D10's escape analysis — priced at 12%.** The
   claim here used to be "the largest single win available, because every `dup`
@@ -1553,10 +1574,11 @@ much less than over the arrays phase 6 brings.
   perform 5,704 of them. Not performing an operation is worth more than making
   it cheaper, which is 9.1's argument and is stronger than reuse's.
 
-**Exit:** `map` over a uniquely-owned list performs zero allocations, asserted
-by a counting-allocator test. Written already, as an ignored test in
-`crates/khora-codegen-llvm/tests/reuse.rs`, beside a record of what the same
-walk costs today.
+**Exit: met.** `map` over a uniquely-owned list performs zero allocations,
+asserted by `a_uniquely_owned_walk_allocates_nothing` in
+`crates/khora-codegen-llvm/tests/reuse.rs` — written before the work, and no
+longer ignored. What remains in the phase is 9.3 and 9.4, both of which are
+optimizations over a scheme that now works rather than parts of it.
 
 ---
 

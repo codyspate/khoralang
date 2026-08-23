@@ -115,6 +115,18 @@ pub struct Runtime<'ctx> {
     pub dup: FunctionValue<'ctx>,
     /// `void khora_drop(void *object, void (*drop_fields)(void *))`
     pub drop: FunctionValue<'ctx>,
+    /// `void *khora_drop_reuse(void *object, void (*drop_fields)(void *))`
+    ///
+    /// `khora_drop`, but the last reference keeps the memory and hands it back
+    /// as a token. Null on any other outcome.
+    pub drop_reuse: FunctionValue<'ctx>,
+    /// `void khora_free_reuse(void *token)` — the safety net for one nothing
+    /// spent.
+    pub free_reuse: FunctionValue<'ctx>,
+    /// `void *khora_alloc_reuse(void *token, size_t field_bytes, uint32_t tag)`
+    ///
+    /// `khora_alloc`, but spends a token from `khora_drop_reuse` when it fits.
+    pub alloc_reuse: FunctionValue<'ctx>,
     /// `void khora_print_int(int64_t)`
     pub print_int: FunctionValue<'ctx>,
     /// `void khora_print_float(double)`
@@ -216,6 +228,15 @@ impl<'ctx> Runtime<'ctx> {
             // opaque pointers a function pointer is just `ptr`, so passing
             // null and passing a routine are the same call shape.
             drop: declare("khora_drop", void.fn_type(&[ptr.into(), ptr.into()], false)),
+            drop_reuse: declare(
+                "khora_drop_reuse",
+                ptr.fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            free_reuse: declare("khora_free_reuse", void.fn_type(&[ptr.into()], false)),
+            alloc_reuse: declare(
+                "khora_alloc_reuse",
+                ptr.fn_type(&[ptr.into(), i64t.into(), i32t.into()], false),
+            ),
             print_int: declare("khora_print_int", void.fn_type(&[i64t.into()], false)),
             print_float: declare(
                 "khora_print_float",

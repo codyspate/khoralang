@@ -1,19 +1,14 @@
 #![cfg(feature = "llvm")]
 
-//! Phase 9's target, and the measurement of how far away it is.
+//! Phase 9's target: `map` over a uniquely-owned list allocates nothing.
 //!
-//! The exit criterion is that `map` over a uniquely-owned list allocates
-//! nothing: the cell being matched is dead the moment the arm has its fields,
-//! so the cell the arm builds can be the same memory. Nothing does that today,
-//! and `docs/design/reuse.md` explains why it is the *analysis* rather than the
-//! fusion that is missing — at the constructor, the matched cell is still held
-//! by its binding and by the `dup` the read made, so a uniqueness test
-//! correctly declines.
-//!
-//! So `reuse_is_not_implemented_yet` records what a walk costs now, and
-//! `#[ignore]`s the assertion that phase 9 has to make true. Written before the
-//! work rather than after it, because a criterion first evaluated once the
-//! change is in is a criterion fitted to the result.
+//! The cell being matched is dead the moment the arm has its fields, so the
+//! cell the arm builds can be the same memory. The assertion below was written
+//! before the work rather than after it — a criterion first evaluated once the
+//! change is in is a criterion fitted to the result — and sat `#[ignore]`d
+//! beside a `reuse_is_not_implemented_yet` recording the ten allocations a walk
+//! cost instead. Deleting that one was its own instruction for the day it
+//! failed.
 //!
 //! Allocation counts are the compiler's own instrument and not a promise to
 //! anybody — `docs/design/compatibility.md` decides that when memory is
@@ -108,36 +103,17 @@ export fn main() -> () {
 }
 ";
 
-/// What a ten-element walk costs today: one fresh cell per `Cons`, and nothing
-/// for the `Nil`.
-///
-/// It was eleven when this was written. The `List::Nil` at the end of the walk
-/// was a heap allocation, because every field-less constructor was — a value
-/// entirely described by its tag, given twenty-four bytes and a pair of atomic
-/// reference-count operations. Those are static singletons now, which is the
-/// first thing phase 9 took.
-///
-/// This is a *record*, not a requirement. When reuse lands it should fail, and
-/// the right response is to delete it and un-ignore the one below.
-#[test]
-fn reuse_is_not_implemented_yet() {
-    let out = run("reuse_walk_today", WALK);
-    let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines[0], "65", "the walk should sum 2..=11");
-    assert_eq!(
-        lines[1], "10",
-        "a ten-element walk allocates ten cells today. If this changed, phase 9 has \
-         started and `a_uniquely_owned_walk_allocates_nothing` is the test that matters"
-    );
-}
-
 /// **Phase 9's exit criterion.** `docs/design/reuse.md`.
 ///
 /// Every cell the walk consumes is uniquely held by the time its fields are
 /// out, so every cell it builds can be that memory. Ten in, ten out, nothing
 /// allocated.
+///
+/// The number was eleven when this file was written and ten when reuse landed:
+/// the `List::Nil` closing the walk stopped being an allocation once a
+/// field-less constructor became one static object for the whole program, which
+/// was phase 9.0.
 #[test]
-#[ignore = "phase 9: reuse analysis is not written; see docs/design/reuse.md"]
 fn a_uniquely_owned_walk_allocates_nothing() {
     let out = run("reuse_walk_target", WALK);
     let lines: Vec<&str> = out.trim().lines().collect();

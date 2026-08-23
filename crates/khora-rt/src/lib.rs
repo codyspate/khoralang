@@ -65,6 +65,9 @@
 //! void *khora_alloc(size_t size, uint32_t tag);
 //! void  khora_dup(void *object);
 //! void  khora_drop(void *object, void (*drop_fields)(void *object));
+//! void *khora_drop_reuse(void *object, void (*drop_fields)(void *object));
+//! void *khora_alloc_reuse(void *token, size_t size, uint32_t tag);
+//! void  khora_free_reuse(void *token);
 //! size_t khora_refcount(const void *object);
 //! void  khora_print_int(int64_t value);
 //! void  khora_print_bool(_Bool value);
@@ -446,6 +449,137 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     unsafe { dealloc(ptr, layout) };
 
     LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+}
+
+/// Releases a reference and, if it was the last, keeps the memory.
+///
+/// The first half of reuse. This is [`khora_drop`] with one difference: on the
+/// last reference it runs the field-dropping routine and returns the object's
+/// memory **without freeing it**, so the caller can build the next object in
+/// the same cell. On any other outcome — a shared object, a null pointer — it
+/// behaves exactly as `khora_drop` does and returns null.
+///
+/// The value returned is a *token*, and the caller owes it to
+/// [`khora_alloc_reuse`] on every path. It is memory with no owner: nothing
+/// will free it and no counter is tracking it. `docs/design/reuse.md` §2 is
+/// where the code generator's rule for guaranteeing that lives — the token may
+/// only be taken where the arm reaches its constructor unconditionally.
+///
+/// The live-object counter goes down here rather than in `khora_alloc_reuse`,
+/// so that a program observing it between the two sees the object gone. It is
+/// the same object either way; what reuse saves is the allocator, not the
+/// bookkeeping.
+///
+/// # Safety
+///
+/// As [`khora_drop`]: `ptr` must be null or live, the caller must own the
+/// reference being released, and `drop_fields` must match the layout.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_drop_reuse(
+    ptr: *mut u8,
+    drop_fields: Option<extern "C" fn(*mut u8)>,
+) -> *mut u8 {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let header = ptr.cast::<KhoraHeader>();
+
+    // SAFETY: live per the contract, so the header is initialized.
+    let refcount = unsafe { (*header).refcount.fetch_sub(1, Ordering::Release) };
+    if refcount == 0 {
+        fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
+    }
+    if refcount > 1 {
+        // Somebody else still holds it, so there is nothing to hand over and
+        // the caller's `khora_alloc_reuse` will allocate as usual.
+        return std::ptr::null_mut();
+    }
+
+    std::sync::atomic::fence(Ordering::Acquire);
+    if let Some(drop_fields) = drop_fields {
+        drop_fields(ptr);
+    }
+    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    ptr
+}
+
+/// Builds an object, in the memory a token carries when it fits.
+///
+/// The second half of reuse, and the only place a token from
+/// [`khora_drop_reuse`] may be spent. Three cases, and the counters stay
+/// honest in all of them:
+///
+/// - a null token allocates, exactly as [`khora_alloc`] would;
+/// - a token whose cell is the right size is rewritten in place with the new
+///   tag and a refcount of one — no allocator call at all;
+/// - a token of the wrong size is freed and replaced, because a `Cons` cell
+///   cannot hold a bigger variant and writing one there would run off the end.
+///
+/// The last case is why a caller may hand over a token without first proving
+/// the shapes agree: the size lives in the header, so the check is one
+/// comparison here rather than a static analysis there.
+///
+/// # Safety
+///
+/// `token` must be null or memory from [`khora_drop_reuse`] that has not been
+/// spent, and `size` must not exceed [`MAX_FIELD_BYTES`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: usize, tag: u32) -> *mut u8 {
+    if token.is_null() {
+        return khora_alloc(size, tag);
+    }
+    if size > MAX_FIELD_BYTES {
+        fatal("allocation exceeds the maximum object size");
+    }
+    let field_bytes = size as u32;
+
+    // SAFETY: the token is memory from `khora_drop_reuse`, whose header is
+    // still readable — it read the layout out of it itself.
+    let held = unsafe { (*token.cast::<KhoraHeader>()).field_bytes };
+    if held != field_bytes {
+        // SAFETY: the token owns this memory and nothing else refers to it; the
+        // layout is rebuilt from the header the allocation used.
+        unsafe { dealloc(token, object_layout(held)) };
+        return khora_alloc(size, tag);
+    }
+
+    // SAFETY: as above. The fields are about to be written by the caller, which
+    // is the same contract `khora_alloc` leaves them under — except that they
+    // are not zeroed here, because the caller writes every one of them before
+    // anything can read them. `khora_alloc`'s zeroing exists for the window
+    // between allocation and the first store, and a reused cell's window is
+    // covered by `drop_fields` having already run.
+    unsafe {
+        token
+            .cast::<KhoraHeader>()
+            .write(KhoraHeader { refcount: AtomicUsize::new(1), tag, field_bytes });
+    }
+    LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
+    token
+}
+
+/// Frees a token nothing spent.
+///
+/// A safety net rather than part of the design. The code generator only takes
+/// a token where the arm reaches its constructor unconditionally, so nothing
+/// should ever reach this — but "should" and "does" differ by one unforeseen
+/// lowering path, and the difference between them is a silent leak. Emitting
+/// this at the end of an arm makes that case cost an extra call instead.
+///
+/// # Safety
+///
+/// `token` must be null or unspent memory from [`khora_drop_reuse`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_free_reuse(token: *mut u8) {
+    if token.is_null() {
+        return;
+    }
+    // SAFETY: the token owns this memory, its header is still readable, and
+    // its fields were released by `khora_drop_reuse`.
+    unsafe {
+        let held = (*token.cast::<KhoraHeader>()).field_bytes;
+        dealloc(token, object_layout(held));
+    }
 }
 
 /// Where `needle` first occurs in `hay`, or -1.

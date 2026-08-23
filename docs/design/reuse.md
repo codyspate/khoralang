@@ -147,9 +147,13 @@ What made the change survivable, and is worth keeping for 9.2:
   every one of the three rules above from a silent corruption into a message
   naming the program that did it.
 
-### 2. Reuse tokens
+### 2. Reuse tokens — done
 
-The reference standing in the way is now exactly one, and it is the `match`'s
+**A ten-element `map` over a list nothing else holds allocates nothing**, which
+is phase 9's exit criterion and is asserted by
+`a_uniquely_owned_walk_allocates_nothing`. Two steps got there.
+
+The reference standing in the way was exactly one, and it is the `match`'s
 own: `lower_match` pushes `Cleanup::Temp(scrutinee)` before the arms and leaves
 that scope after them. §2 needs that release to happen *at the arm's head*
 instead, where an arm can replace it with a `drop_reuse`.
@@ -161,8 +165,8 @@ payload, valid only for as long as the match holds the scrutinee. Releasing the
 scrutinee at the arm's head would free the payload out from under every one of
 them.
 
-So the order has to become the ordinary owning one, and this is the real content
-of §2's first step:
+So the order had to become the ordinary owning one, and this was §2's first
+step:
 
 1. at the arm's head, `dup` each boxed binding the pattern introduced, so the
    arm owns them;
@@ -176,14 +180,23 @@ dup and a drop either way. What changes is *when* — the scrutinee's count
 reaches zero before the arm's constructor rather than after it, which is the
 entire prerequisite for handing its memory over.
 
-`RcPlan` will have to say which bindings a pattern owns, since it is the thing
-the code generator asks. Note that this makes `unowned` in `settle_last_uses`
-empty for arms handled this way, and it must stay populated for any that are
-not — a partial rollout of this is a use after free.
+`RcPlan::arm_binds` says which bindings a pattern owns, and it holds only the
+ones the arm's *body* reads — owning one the body never touches would be a copy
+and a release for nothing. `unowned` in `settle_last_uses` keeps the rest, and a
+`catch` arm's bindings entirely: a partial rollout of this is a use after free,
+so the two sets are complements by construction rather than by intention.
 
-Then, where an arm reaches a constructor of a shape the matched cell would fit:
+Two paths needed saying out loud, and neither is the arm:
 
-Then, where an arm reaches a constructor of a shape the matched cell would fit:
+- **A guard runs before any of it.** The `match` still pushes the scrutinee as a
+  scope cleanup, because a guard that raises, breaks or continues unwinds
+  through there. `emit_arms` empties that scope level for the length of each
+  arm's body, which is the only stretch where the release has already happened.
+- **A guard on the last arm can fail**, and then no arm ran and nothing
+  released. That edge gets a block of its own that releases and joins, rather
+  than going straight to the join.
+
+Then, where an arm reaches a constructor:
 
 ```
 token = khora_drop_reuse(xs, drop_glue)   // null unless uniquely held
@@ -200,10 +213,38 @@ matches writes the new tag and a refcount of one into the memory it was given,
 and a token of the wrong size is freed and replaced. The live-object counter
 stays honest in all three cases, which matters because the tests read it.
 
-**Every token must be consumed on every path**, or the memory leaks — a token
-is an allocation with no owner. The conservative rule for the first version is
-to emit `drop_reuse` only where the arm unconditionally constructs, so that the
-pairing is syntactic and visible in one place.
+**Every token must be spent on every path**, or the memory leaks — a token is an
+allocation with no owner, which no counter is watching and nothing will free.
+That single requirement decides the whole shape of the rule, and the rule is
+deliberately syntactic: an arm qualifies when its body **is** the constructor
+and nothing inside it can leave the frame early — no `!`, `raise`, `return`,
+`break`, `continue` or `catch`. There is then one path from the release to the
+allocation and no way to take another. Everything this declines is a missed
+optimization; anything it wrongly accepted would be a leak.
+
+Two details that make the rule cheaper than it looks:
+
+- **The shapes are compared at run time, not compile time.** The size is in the
+  header, so `khora_alloc_reuse` needs one comparison rather than the analysis a
+  static answer would want. An arm may hand over a token without proving
+  anything about what it is going to build.
+- **The token is matched by expression id.** A constructor's *arguments* can
+  contain constructors of their own, and the arm promised this one in
+  particular — `Tree::Node(Tree::Leaf(1), t)` must not let the inner one take
+  the cell.
+
+And a safety net that is not part of the design: `khora_free_reuse`, emitted at
+the end of every arm that took a token, freeing one nothing spent. The rule
+above says it is unreachable. "Unreachable" and "unreached" differ by one
+lowering path nobody foresaw, and the difference between them is memory nothing
+owns.
+
+What it is worth, beyond the exit criterion. On an HTTP request parse, 54
+allocations to 50 and 1,855ns to 1,770ns; `bench/service` 507k to 548k req/s,
+which is at the edge of the 8% that benchmark varies by. The honest reading is
+that reuse pays where a program walks a structure and rebuilds it, and that a
+request parser mostly does not — it builds strings and hashes them. The list
+walk is not a toy chosen to flatter it, but it is the shape reuse is for.
 
 ### 3. Drop specialization
 

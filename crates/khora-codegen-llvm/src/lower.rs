@@ -77,6 +77,7 @@ pub(crate) fn emit_function<'ctx>(
         raises: can_raise(&signature),
         slots: HashMap::new(),
         scopes: Vec::new(),
+        reuse: None,
         loops: Vec::new(),
         catches: Vec::new(),
         incoming: HashMap::new(),
@@ -137,6 +138,7 @@ pub(crate) fn emit_closure<'ctx>(
         ),
         slots: HashMap::new(),
         scopes: Vec::new(),
+        reuse: None,
         loops: Vec::new(),
         catches: Vec::new(),
         incoming: HashMap::new(),
@@ -209,8 +211,21 @@ pub(crate) fn emit_closure<'ctx>(
 enum Cleanup<'ctx> {
     /// A local whose slot owns a reference.
     Local(LocalId),
-    /// An owned temporary: a `match` scrutinee, which the arms borrow out of.
+    /// An owned temporary: a `match` scrutinee, held while the guards run.
     Temp(BasicValueEnum<'ctx>, Type),
+}
+
+/// The value a set of arms is dispatching on, and who releases it.
+///
+/// A `match` releases it at the head of each arm, so that the count can reach
+/// zero before the arm's own constructor — `docs/design/reuse.md` §2. A `catch`
+/// does not: it has no static type for the error and releases by the runtime
+/// tag once the arms are done, in `lower_catch`.
+#[derive(Clone)]
+struct Scrutinee<'ctx> {
+    value: BasicValueEnum<'ctx>,
+    ty: Type,
+    released_by_arms: bool,
 }
 
 /// A closure call that has happened, before anything is decided about its tag.
@@ -314,6 +329,14 @@ struct Lower<'a, 'ctx> {
     raises: bool,
     slots: HashMap<LocalId, PointerValue<'ctx>>,
     scopes: Vec<Vec<Cleanup<'ctx>>>,
+    /// A cell a `match` arm was handed back, and the constructor it is for.
+    ///
+    /// Set at the head of an arm that reaches a constructor unconditionally,
+    /// spent by that exact expression, and empty everywhere else. There is
+    /// never more than one outstanding: an arm nested inside another arm's
+    /// constructor arguments would be a second, and `reuse_site` declines to
+    /// promise one while a promise is already open.
+    reuse: Option<(ExprId, PointerValue<'ctx>)>,
     loops: Vec<LoopFrame<'ctx>>,
     catches: Vec<CatchFrame<'ctx>>,
     /// The evidence this function was handed, by label.
@@ -779,7 +802,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             // conversation.
             khora_hir::Resolution::Variant { module, type_name, name } => {
                 let (home, owner, case) = (module.clone(), type_name.clone(), name.clone());
-                self.construct(Some(&home), &owner, &case, &[], range)
+                self.construct(id, Some(&home), &owner, &case, &[], range)
             }
             // A named function used as a value becomes a closure that
             // captures nothing and forwards to it.
@@ -820,7 +843,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     ) -> Flow<'ctx> {
         match self.body.expr(callee).clone() {
             Expr::Path(khora_hir::Resolution::Variant { module, type_name, name }) => {
-                self.construct(Some(&module), &type_name, &name, args, range)
+                self.construct(site, Some(&module), &type_name, &name, args, range)
             }
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
                 // **A method somebody wrote wins over one the backend
@@ -3383,7 +3406,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             values.push((label.clone(), self.expr(*value)?));
         }
 
-        let object = self.allocate(info.fields.len(), tag, &name);
+        let object = self.allocate_at(id, info.fields.len(), tag, &name);
         for (label, value) in values {
             let Some((index, field_ty)) = info.field(&label).map(|(i, t)| (i, t.clone())) else {
                 continue;
@@ -3844,6 +3867,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// before that happens is unreachable and unfreed.
     fn construct(
         &mut self,
+        site: ExprId,
         home: Option<&khora_hir::ModulePath>,
         owner: &str,
         case: &str,
@@ -3881,7 +3905,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             values.push(self.expr(*arg)?);
         }
 
-        let object = self.allocate(info.fields.len(), tag, case);
+        let object = self.allocate_at(site, info.fields.len(), tag, case);
 
         for (index, (value, field_ty)) in values.into_iter().zip(&info.fields).enumerate() {
             // A boxed argument is *moved* into the object: no dup here, and no
@@ -3895,6 +3919,57 @@ impl<'ctx> Lower<'_, 'ctx> {
     // -----------------------------------------------------------------------
     // Fields
     // -----------------------------------------------------------------------
+
+    /// An object for the expression `site`, in reused memory where there is
+    /// some.
+    ///
+    /// A `match` arm that reaches its constructor unconditionally released the
+    /// scrutinee with `khora_drop_reuse` at its head, which handed back the
+    /// cell if nobody else held it. Spending that token here is the whole of
+    /// reuse: same memory, new tag, no allocator. `docs/design/reuse.md` §2.
+    ///
+    /// The token is matched by expression id rather than simply taken, because
+    /// a constructor's *arguments* may contain constructors of their own and
+    /// the arm promised this one in particular.
+    fn allocate_at(
+        &mut self,
+        site: ExprId,
+        fields: usize,
+        tag: u32,
+        name: &str,
+    ) -> PointerValue<'ctx> {
+        let Some(token) = self.take_reuse_token(site) else {
+            return self.allocate(fields, tag, name);
+        };
+        let alloc_reuse = self.be.rt.alloc_reuse;
+        self.be
+            .builder
+            .build_call(
+                alloc_reuse,
+                &[
+                    token.into(),
+                    self.be.ctx.i64_type().const_int(FIELD_WORD * fields as u64, false).into(),
+                    self.be.ctx.i32_type().const_int(tag as u64, false).into(),
+                ],
+                &format!("{name}.reused"),
+            )
+            .expect("reusing an object")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_alloc_reuse returns a pointer")
+            .into_pointer_value()
+    }
+
+    /// Hands over the reuse token if it was promised to this expression.
+    fn take_reuse_token(&mut self, site: ExprId) -> Option<PointerValue<'ctx>> {
+        match self.reuse {
+            Some((promised, token)) if promised == site => {
+                self.reuse = None;
+                Some(token)
+            }
+            _ => None,
+        }
+    }
 
     /// A fresh heap object with room for `fields` words, under `tag`.
     fn allocate(&mut self, fields: usize, tag: u32, name: &str) -> PointerValue<'ctx> {
@@ -4669,6 +4744,16 @@ impl<'ctx> Lower<'_, 'ctx> {
         let scrutinee_ty = self.types.of(scrutinee).clone();
         let value = self.expr(scrutinee)?;
 
+        // **The scrutinee is released at the head of each arm**, not here, so
+        // that its count can reach zero before the arm's own constructor —
+        // which is the whole prerequisite for handing that memory over.
+        // `docs/design/reuse.md` §2.
+        //
+        // The scope is still pushed and still holds it, because a *guard* runs
+        // before any of that: a guard that raises, breaks or continues unwinds
+        // through here and has to release it. `emit_arms` empties this level
+        // for the length of each arm's body, which is the only stretch where
+        // the release has already happened.
         self.scopes.push(if is_boxed(&scrutinee_ty) {
             vec![Cleanup::Temp(value, scrutinee_ty.clone())]
         } else {
@@ -4678,16 +4763,20 @@ impl<'ctx> Lower<'_, 'ctx> {
         let result_ty = self.types.of(id).clone();
         let slot = self.result_slot(&result_ty);
         let merge = self.block("match.end");
-        let reached = self.emit_arms(arms, value, &scrutinee_ty, slot, merge, range);
+        let on = Scrutinee {
+            value,
+            ty: scrutinee_ty.clone(),
+            released_by_arms: true,
+        };
+        let reached = self.emit_arms(arms, &on, slot, merge, range);
 
-        let scope = self.scopes.pop().unwrap_or_default();
+        // Popped, not released: every edge that reaches the join released the
+        // scrutinee itself.
+        self.scopes.pop();
         self.at(merge);
         if reached == 0 {
             self.be.builder.build_unreachable().expect("sealing an unreachable join");
             return None;
-        }
-        for cleanup in scope.into_iter().rev() {
-            self.release(cleanup);
         }
         Some(self.load_result(slot, &result_ty))
     }
@@ -4831,7 +4920,12 @@ impl<'ctx> Lower<'_, 'ctx> {
             // on the way to the join.
             let released = self.block(&format!("catch.{owner}.done"));
             self.scopes.push(vec![Cleanup::Temp(error, error_ty.clone())]);
-            let reached_here = self.emit_arms(mine, error, &error_ty, slot, released, range);
+            let on = Scrutinee {
+                value: error,
+                ty: error_ty.clone(),
+                released_by_arms: false,
+            };
+            let reached_here = self.emit_arms(mine, &on, slot, released, range);
             let scope = self.scopes.pop().unwrap_or_default();
 
             self.at(released);
@@ -4910,12 +5004,13 @@ impl<'ctx> Lower<'_, 'ctx> {
     fn emit_arms(
         &mut self,
         arms: &[MatchArm],
-        value: BasicValueEnum<'ctx>,
-        ty: &Type,
+        on: &Scrutinee<'ctx>,
         slot: Option<PointerValue<'ctx>>,
         merge: BasicBlock<'ctx>,
         range: TextRange,
     ) -> usize {
+        let Scrutinee { value, ty, released_by_arms: releases_scrutinee } = on;
+        let (value, releases_scrutinee) = (*value, *releases_scrutinee);
         // One pair of blocks per arm: bindings and guard first, then the body,
         // so a failing guard can jump on without the body ever being entered.
         let mut binds = Vec::with_capacity(arms.len());
@@ -4927,6 +5022,25 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         self.dispatch(arms, value, ty, &binds, range);
 
+        // The scope holding the scrutinee, which each arm body empties while it
+        // runs. See `lower_match`.
+        let held = self.scopes.len().saturating_sub(1);
+
+        // **A guard on the last arm can fail**, and then no arm ran and so no
+        // arm released. That edge gets a block of its own rather than going
+        // straight to the join.
+        let unguarded = if releases_scrutinee && arms.last().is_some_and(|a| a.guard.is_some()) {
+            let current = self.here();
+            let block = self.block("match.unguarded");
+            self.at(block);
+            self.drop(value, ty);
+            self.br(merge);
+            self.at(current);
+            block
+        } else {
+            merge
+        };
+
         let mut reached = 0;
         for (index, arm) in arms.iter().enumerate() {
             self.at(binds[index]);
@@ -4935,7 +5049,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 Some(guard) => {
                     // A guard is checked with the bindings in scope and, if it
                     // fails, hands the value to the next arm untouched.
-                    let next = binds.get(index + 1).copied().unwrap_or(merge);
+                    let next = binds.get(index + 1).copied().unwrap_or(unguarded);
                     match self.expr(guard) {
                         Some(test) => {
                             self.be
@@ -4966,13 +5080,105 @@ impl<'ctx> Lower<'_, 'ctx> {
 
             self.at(bodies[index]);
             self.release_at_arm(arm.body);
-            if let Some(value) = self.expr(arm.body) {
+            self.own_arm_bindings(arm.body);
+            // Copies taken, so the scrutinee can go. From here to the end of
+            // the arm it is no longer this frame's to release, which is what
+            // emptying its scope level says to anything that unwinds out.
+            let holding = if releases_scrutinee {
+                let holding = std::mem::take(&mut self.scopes[held]);
+                self.release_scrutinee(value, ty, arm.body);
+                holding
+            } else {
+                Vec::new()
+            };
+            let produced = self.expr(arm.body);
+            if releases_scrutinee {
+                self.scopes[held] = holding;
+                self.discard_unspent_token();
+            }
+            if let Some(value) = produced {
                 self.store_result(slot, value);
+                self.leave_scope();
                 self.br(merge);
                 reached += 1;
+            } else {
+                // The arm diverged, so nothing reaches the release. Whatever
+                // left the frame released along its own path.
+                self.scopes.pop();
             }
         }
         reached
+    }
+
+    /// Releases the scrutinee at an arm's head, keeping the cell if the arm
+    /// can build its result there.
+    ///
+    /// An ordinary `khora_drop` unless the planner promised this arm a reuse,
+    /// in which case `khora_drop_reuse` does the same release and hands back
+    /// the memory when the reference it dropped was the last one. Null when it
+    /// was not, and then the constructor allocates as usual — the decision is
+    /// one comparison at run time rather than a proof at compile time, which
+    /// is what makes it worth trying at all. `docs/design/reuse.md` §2.
+    fn release_scrutinee(&mut self, value: BasicValueEnum<'ctx>, ty: &Type, arm: ExprId) {
+        let Some(site) = self.plan.reuse_site(arm).filter(|_| is_boxed(ty)) else {
+            self.drop(value, ty);
+            return;
+        };
+        let glue = self.be.drop_glue(ty);
+        let drop_reuse = self.be.rt.drop_reuse;
+        let token = self
+            .be
+            .builder
+            .build_call(drop_reuse, &[value.into(), glue.into()], "reuse.token")
+            .expect("releasing a scrutinee for reuse")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_drop_reuse returns a pointer")
+            .into_pointer_value();
+        self.reuse = Some((site, token));
+    }
+
+    /// Frees a token the arm did not spend.
+    ///
+    /// Unreachable by the planner's rule — the arm's body *is* the constructor
+    /// — and emitted anyway, because the failure mode of being wrong about
+    /// that is memory nothing owns and no counter is watching.
+    fn discard_unspent_token(&mut self) {
+        let Some((_, token)) = self.reuse.take() else { return };
+        let free_reuse = self.be.rt.free_reuse;
+        self.be
+            .builder
+            .build_call(free_reuse, &[token.into()], "")
+            .expect("discarding an unspent reuse token");
+    }
+
+    /// Gives a `match` arm ownership of what its pattern bound.
+    ///
+    /// `bind_pattern` stores the loaded field straight into the slot, so until
+    /// this runs the binding is a borrowed view into the scrutinee's payload
+    /// and is only valid while the `match` holds the scrutinee. One copy on the
+    /// way in makes the arm an owner, and the scope pushed here releases what
+    /// the body did not hand on.
+    ///
+    /// Pushes a scope in every case, so the caller can pop unconditionally.
+    fn own_arm_bindings(&mut self, body: ExprId) {
+        let mut cleanups = Vec::new();
+        for local in self.plan.arm_binds_for(body).to_vec() {
+            let ty = self.types.local(local).clone();
+            let Some(slot) = self.slots.get(&local).copied() else { continue };
+            let Some(llvm_ty) = self.be.llvm_type(&ty) else { continue };
+            let value = self
+                .be
+                .builder
+                .build_load(llvm_ty, slot, "arm.bound")
+                .expect("loading an arm binding to copy");
+            self.dup(value);
+            // A binding the body hands on is released by whoever took it.
+            if !self.plan.moved.contains(&local) {
+                cleanups.push(Cleanup::Local(local));
+            }
+        }
+        self.scopes.push(cleanups);
     }
 
     /// Branches to the first arm whose pattern applies.
