@@ -855,6 +855,47 @@ impl Float {
 }
 
 impl Int {
+  /// The number a string spells, or nothing.
+  ///
+  /// An `Option` rather than a trap, because the text almost always came from
+  /// outside — an environment variable, a header, a path segment, a form field
+  /// — and "somebody typed it wrong" is a thing to answer with a 400 rather
+  /// than to stop the program over.
+  ///
+  /// Leading `-` and nothing else: no `+`, no underscores, no spaces, no
+  /// hexadecimal. A parser that accepts more than the caller expected is how a
+  /// configuration value ends up meaning something nobody wrote.
+  ///
+  /// **Refuses rather than overflows.** `*` and `+` trap in this language, so
+  /// a long enough run of digits would have stopped the program — which for
+  /// text off a socket is a denial of service with extra steps. The running
+  /// total is checked before it is grown instead.
+  fn of_string(text: String) -> Option<Int> {
+    let length = String::byte_length(text);
+    let negative = length > 0 && U8::to_int(String::byte(text, 0)) == 45;
+    let start = if negative { 1 } else { 0 };
+    if start >= length {
+      Option::None
+    } else {
+      // A tenth of `Int`'s maximum: past this, one more digit cannot fit.
+      let ceiling = 922337203685477580;
+      let mut at = start;
+      let mut total = 0;
+      let mut ok = true;
+      while at < length {
+        let digit = U8::to_int(String::byte(text, at)) - 48;
+        if digit < 0 || digit > 9 || total > ceiling {
+          ok = false;
+          at = length;
+        } else {
+          total = total * 10 + digit;
+          at = at + 1;
+        }
+      };
+      if ok { Option::Some(if negative { 0 - total } else { total }) } else { Option::None }
+    }
+  }
+
   /// The same number as a `Float`.
   ///
   /// Exact up to 2^53 and rounded beyond it, which is IEEE's business rather

@@ -1,0 +1,23 @@
+[package]
+name = "link_shortener"
+version = "0.1.0"
+edition = "2026"
+
+# What this program may reach outside itself.
+#
+# Every one of these is a capability the program takes as a requirement rather
+# than reaches for, so this table and the signatures agree by construction: a
+# handler it cannot be given is a program that does not compile.
+# `docs/design/permissions.md`.
+[permissions]
+network = ["0.0.0.0:8080"]
+env = ["PORT", "LINKS_FILE"]
+
+[permissions.fs]
+read = ["./links.txt"]
+write = ["./links.txt"]
+
+[fmt]
+indent-style = "space"
+indent-width = 2
+explicit-semicolons = true

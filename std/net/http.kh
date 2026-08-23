@@ -203,11 +203,39 @@ impl Response {
     }
   }
 
-  /// The handful of statuses this server can produce. A number nobody here
-  /// sends gets a name that says so rather than a wrong one.
+  /// The reason phrase for a status.
+  ///
+  /// The ones a service actually sends, which turned out to be more than the
+  /// five this had: the link shortener answered a redirect and got
+  /// `HTTP/1.1 302 Unknown` on the wire. A phrase is advisory — every client
+  /// reads the number — but one that says `Unknown` about a status the server
+  /// deliberately chose reads as a bug to whoever is holding the packet
+  /// capture, and it was.
   fn reason(status: Int) -> String {
     if status == 200 {
       "OK"
+    } else if status == 201 {
+      "Created"
+    } else if status == 204 {
+      "No Content"
+    } else if status == 301 {
+      "Moved Permanently"
+    } else if status == 302 {
+      "Found"
+    } else if status == 304 {
+      "Not Modified"
+    } else if status == 401 {
+      "Unauthorized"
+    } else if status == 403 {
+      "Forbidden"
+    } else if status == 405 {
+      "Method Not Allowed"
+    } else if status == 409 {
+      "Conflict"
+    } else if status == 422 {
+      "Unprocessable Content"
+    } else if status == 429 {
+      "Too Many Requests"
     } else if status == 400 {
       "Bad Request"
     } else if status == 404 {

@@ -5,3 +5,9 @@ Cargo.lock.bak
 
 # Built locally by editors/vscode/install.ps1
 *.vsix
+
+# What a compiled Khora program leaves beside its source, and what the link
+# shortener writes while it runs.
+examples/**/src/*.exe
+examples/**/src/*.o
+examples/**/links.txt

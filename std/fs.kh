@@ -62,6 +62,18 @@ impl Fs {
   }
 }
 
+/// Writes text to a file, replacing whatever was there.
+///
+/// The other half of [`read_text`], and here for the same reason: `Fs` traffics
+/// in bytes because a file is bytes, and every caller that has a `String`
+/// should not have to remember which way round `String::bytes` goes.
+export fn write_text(path: String, text: String) -> ()
+  with { fs: Fs }
+  raises IoError
+{
+  fs.write(path, String::bytes(text))!
+}
+
 /// The bytes of a file, as text.
 ///
 /// A convenience over `read`, and the reason `Fs` traffics in bytes rather

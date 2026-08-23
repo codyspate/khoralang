@@ -1,0 +1,430 @@
+module main;
+
+import std::core::{Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
+import std::env::{Clock, Env, variable_or};
+import std::fs::{Fs, IoError, read_text, write_text};
+import std::json::{Json, parse};
+import std::net::http::{HttpError, Params, Request, Response, Router};
+import std::random::{Random};
+
+// A link shortener, and the second program in this repository that is meant to
+// be *run* rather than to demonstrate a feature.
+//
+// It exists because everything under it is new this week and none of it had
+// been used together: a router answering on a fiber per connection, a store
+// several of those fibers write, an ordered map that can go in one, generated
+// comparisons, drawn codes, a clock, and a file that survives a restart. Each
+// worked on its own. The interesting question was whether they compose, and
+// the honest answer is what this file is.
+//
+// What it does:
+//
+//   POST /links      {"url": "https://..."}   -> {"code": "k3f9x2", ...}
+//   GET  /l/:code                             -> 302, and the hit is counted
+//   GET  /links                               -> every link, newest first
+//   GET  /health                              -> uptime and how many are stored
+//
+// What it does not: authentication, deletion, expiry, or a second process
+// reading the same file. Each is absent because it would add a shape already
+// exercised somewhere else, not because it would be hard.
+
+// ---------------------------------------------------------------------------
+// What a link is
+// ---------------------------------------------------------------------------
+
+/// One shortened link.
+///
+/// `impl Eq, Ord, Show` is the whole of the boilerplate this used to need.
+/// `Ord` is what `List::sort` asks for and orders by `created` first, because
+/// that is the field written first — declaration order is comparison order,
+/// which is the rule every language has and the reason the fields are in this
+/// order rather than alphabetical.
+export type Link = {
+  created: Int,
+  code: String,
+  url: String,
+  hits: Int,
+} impl Eq, Ord, Show;
+
+impl Link {
+  /// The JSON a client sees. Written out rather than derived, because
+  /// `impl Show` gives `Link { created: 1, .. }` — which is for reading, and
+  /// this is for parsing.
+  fn as_json(self) -> Json {
+    let fields = Map::new();
+    Map::insert(fields, "code", Json::Text(self.code));
+    Map::insert(fields, "url", Json::Text(self.url));
+    Map::insert(fields, "hits", Json::Number(Int::to_float(self.hits)));
+    Map::insert(fields, "created", Json::Number(Int::to_float(self.created)));
+    Json::Object(fields)
+  }
+}
+
+/// Everything the service knows, and the only thing the fibers share.
+///
+/// A `Shared<Dict<..>>` rather than a `Map`: a `Map` mutates its buckets in
+/// place, which is exactly why it is not `Share` and cannot cross into the
+/// fiber answering a connection. The `Dict` is persistent, so a reader holds a
+/// whole map rather than a view of one being edited underneath it, and a
+/// writer replaces the cell's contents in one step.
+export type Store = {
+  links: Shared<Dict<String, Link>>,
+  started: Int,
+};
+
+// ---------------------------------------------------------------------------
+// Codes
+// ---------------------------------------------------------------------------
+
+/// The alphabet a code is drawn from.
+///
+/// No vowels, so a drawn code cannot spell something the operator has to
+/// apologise for, and no `0`/`O` or `1`/`l`, so one read aloud arrives intact.
+fn alphabet() -> String { "bcdfghjkmnpqrstvwxyz23456789" }
+
+fn code_length() -> Int { 6 }
+
+/// A code nothing else is using.
+///
+/// Drawing again on a collision rather than counting up, because a code that
+/// is one more than the last one is a code that leaks how many there are. Ten
+/// attempts is not a real limit: at twenty-eight characters and six places
+/// there are more than four hundred million, and a service holding enough of
+/// them to collide twice has bigger news than this loop.
+fn fresh_code(taken: Dict<String, Link>) -> String
+  with { random: Random }
+{
+  let mut code = draw_code();
+  let mut tries = 0;
+  while Dict::contains(taken, code) && tries < 10 {
+    code = draw_code();
+    tries = tries + 1;
+  };
+  code
+}
+
+fn draw_code() -> String
+  with { random: Random }
+{
+  let letters = alphabet();
+  let mut out = "";
+  let mut i = 0;
+  while i < code_length() {
+    let at = random.in_range(0, String::byte_length(letters));
+    out = out + String::slice(letters, at, at + 1);
+    i = i + 1;
+  };
+  out
+}
+
+// ---------------------------------------------------------------------------
+// The handlers
+// ---------------------------------------------------------------------------
+
+/// `POST /links` — shorten a URL.
+fn create(store: Store, request: Request) -> Response
+  with { random: Random, clock: Clock, fs: Fs, env: Env }
+{
+  match url_of(request.body) {
+    Option::None => problem(400, "the body must be an object with a `url` string"),
+    Option::Some(url) =>
+    if!absolute(url) {
+      problem(400, "`url` must be absolute, as `https://example.com/x`")
+    } else {
+      // Read, transform and write as one step: two fibers shortening at the
+      // same moment cannot both draw against the same snapshot and have one
+      // of them lose. `Shared::update` gives back what it left in the cell.
+      let made = Shared::update(store.links, fn table => {
+          let code = fresh_code(table);
+          Dict::insert(table, code, { created: clock.unix_seconds(), code: code, url: url, hits: 0 })
+        });
+      // Whatever the update settled on, read back by the code it chose. The
+      // draw happens inside the lock, so this is the only way out with it.
+      match newest(made) {
+        Option::None => problem(500, "the link went missing between writing and reading it"),
+        Option::Some(link) => {
+          save(made)! catch {
+            // A link that is served but not written down comes back as one
+            // that never existed, and the client already has the code. Worth
+            // saying out loud, not worth failing the request over.
+            _ => print("warning: could not write the link file"),
+          };
+          Response::json(201, link.as_json())
+        },
+      }
+    },
+  }
+}
+
+/// `GET /l/:code` — follow a link, and count that it was followed.
+fn follow(store: Store, request: Request) -> Response {
+  match Params::get(request.params, "code") {
+    Option::None => problem(404, "no code in the path"),
+    Option::Some(code) => {
+      // The count and the lookup are one step, so a hit cannot be lost to a
+      // reader that started before it.
+      let after = Shared::update(store.links, fn table =>
+        match Dict::get(table, code) {
+          Option::None => table,
+          Option::Some(found) => Dict::insert(table, code, counted(found)),
+        });
+      match Dict::get(after, code) {
+        Option::None => problem(404, "no link with that code"),
+        Option::Some(found) =>
+        Response::text(302, "") |> Response::with_header("Location", found.url),
+      }
+    },
+  }
+}
+
+/// The same link, followed once more.
+fn counted(link: Link) -> Link {
+  { created: link.created, code: link.code, url: link.url, hits: link.hits + 1 }
+}
+
+/// `GET /links` — everything, newest first.
+fn listing(store: Store, request: Request) -> Response {
+  let table = Shared::get(store.links);
+  // Into a `Vector` and back out, which is the shape a listing wants: the
+  // entries arrive in key order and have to come out in time order, and
+  // sorting a list means walking it twice anyway.
+  let ordered = List::sort(values_of(table));
+  let mut items = List::Nil;
+  let mut rest = List::reverse(ordered);
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => { going = false; },
+      List::Cons(first, more) => {
+        items = List::Cons(Link::as_json(first), items);
+        rest = more;
+      },
+    }
+  };
+  Response::json(200, Json::Array(List::reverse(items)))
+}
+
+/// `GET /health` — how long, and how many.
+fn health(store: Store, request: Request) -> Response
+  with { clock: Clock }
+{
+  let fields = Map::new();
+  Map::insert(fields, "status", Json::Text("ok"));
+  Map::insert(fields, "uptime_ms", Json::Number(Int::to_float(clock.monotonic_millis())));
+  Map::insert(fields, "links", Json::Number(Int::to_float(Dict::size(Shared::get(store.links)))));
+  Response::json(200, Json::Object(fields))
+}
+
+// ---------------------------------------------------------------------------
+// Odds and ends the handlers lean on
+// ---------------------------------------------------------------------------
+
+/// A problem, as JSON, because a client parsing successes should not have to
+/// parse something else for failures.
+fn problem(status: Int, detail: String) -> Response {
+  let fields = Map::new();
+  Map::insert(fields, "error", Json::Text(detail));
+  Response::json(status, Json::Object(fields))
+}
+
+/// Whether a URL names a scheme, which is the whole of the validation: a
+/// redirect to `/somewhere` is a redirect back to this service.
+fn absolute(url: String) -> Bool {
+  match String::index_of(url, "://") {
+    Option::None => false,
+    Option::Some(at) => at > 0,
+  }
+}
+
+/// The `url` of a JSON object, if the body was one and it had a string there.
+fn url_of(body: String) -> Option<String> {
+  match parse(body) {
+    Result::Err(why) => Option::None,
+    Result::Ok(value) =>
+    match Json::field(value, "url") {
+      Option::None => Option::None,
+      Option::Some(found) => Json::text(found),
+    },
+  }
+}
+
+/// The most recently created link in the table.
+fn newest(table: Dict<String, Link>) -> Option<Link> {
+  let mut best: Option<Link> = Option::None;
+  let mut rest = values_of(table);
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => { going = false; },
+      List::Cons(first, more) => {
+        best = match best {
+          Option::None => Option::Some(first),
+          Option::Some(so_far) =>
+          if so_far.created <= first.created { Option::Some(first) } else { Option::Some(so_far) },
+        };
+        rest = more;
+      },
+    }
+  };
+  best
+}
+
+fn values_of(table: Dict<String, Link>) -> List<Link> {
+  let mut out = List::Nil;
+  let mut rest = Dict::entries(table);
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => { going = false; },
+      List::Cons(first, more) => {
+        out = List::Cons(first.value, out);
+        rest = more;
+      },
+    }
+  };
+  out
+}
+
+// ---------------------------------------------------------------------------
+// Surviving a restart
+// ---------------------------------------------------------------------------
+
+/// Where the links are kept between runs.
+fn links_file() -> String
+  with { env: Env }
+{
+  variable_or("LINKS_FILE", "./links.txt")
+}
+
+/// One link per line, tab separated.
+///
+/// Not JSON, deliberately: this file is written on every create and read once
+/// at startup, so the format that matters is the one that appends cheaply and
+/// survives a half-written last line. A tab cannot appear in a code, and a URL
+/// containing one was already not a URL.
+fn save(table: Dict<String, Link>) -> ()
+  with { fs: Fs, env: Env }
+  raises IoError
+{
+  let mut text = "";
+  let mut rest = Dict::entries(table);
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => { going = false; },
+      List::Cons(first, more) => {
+        let link = first.value;
+        text = text + link.code + "\t" + Int::to_string(link.created) + "\t"
+        + Int::to_string(link.hits) + "\t" + link.url + "\n";
+        rest = more;
+      },
+    }
+  };
+  write_text(links_file(), text)!
+}
+
+/// What the last run left, or nothing at all.
+///
+/// A missing file is the ordinary first run, not a failure. A *malformed* line
+/// is skipped rather than fatal, because the alternative is a service that
+/// will not start until somebody edits a file by hand.
+fn load() -> Dict<String, Link>
+  with { fs: Fs, env: Env }
+{
+  let mut left = read_text(links_file())! catch { _ => "" };
+  let mut table = Dict::new();
+  let mut going = true;
+  while going {
+    match String::split_once(left, "\n") {
+      // No newline left: whatever remains is the last line, if it is anything.
+      Option::None => {
+        table = took(table, left);
+        going = false;
+      },
+      Option::Some(halves) => {
+        table = took(table, halves.head);
+        left = halves.rest;
+      },
+    }
+  };
+  table
+}
+
+/// The table with `line` in it, or the table unchanged.
+///
+/// A malformed line is skipped rather than fatal: the alternative is a service
+/// that will not start until somebody edits a file by hand, and the file is
+/// written by a process that can be killed halfway through a line.
+fn took(table: Dict<String, Link>, line: String) -> Dict<String, Link> {
+  match parse_line(line) {
+    Option::None => table,
+    Option::Some(link) => Dict::insert(table, link.code, link),
+  }
+}
+
+fn parse_line(line: String) -> Option<Link> {
+  match String::split_once(line, "\t") {
+    Option::None => Option::None,
+    Option::Some(a) =>
+    match String::split_once(a.rest, "\t") {
+      Option::None => Option::None,
+      Option::Some(b) =>
+      match String::split_once(b.rest, "\t") {
+        Option::None => Option::None,
+        Option::Some(c) =>
+        match Int::of_string(b.head) {
+          Option::None => Option::None,
+          Option::Some(created) =>
+          match Int::of_string(c.head) {
+            Option::None => Option::None,
+            Option::Some(hits) =>
+            if String::byte_length(a.head) == 0 || String::byte_length(c.rest) == 0 {
+              Option::None
+            } else {
+              Option::Some({ created: created, code: a.head, url: c.rest, hits: hits })
+            },
+          },
+        },
+      },
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+/// The port, which is an operator's decision rather than a programmer's.
+fn port() -> Int
+  with { env: Env }
+{
+  // A `PORT` that is not a number is the operator's mistake and worth saying
+  // so about, but not worth refusing to start over: the default is a port,
+  // and a service that came up somewhere findable beats one that did not come
+  // up at all.
+  match Int::of_string(variable_or("PORT", "8080")) {
+    Option::Some(chosen) => chosen,
+    Option::None => {
+      print("PORT is not a number; using 8080");
+      8080
+    },
+  }
+}
+
+export fn main() raises HttpError {
+  with { env: Env::real(), clock: Clock::real(), fs: Fs::real(), random: Random::real() } {
+    let store: Store = { links: Shared::of(load()), started: clock.unix_seconds() };
+    print("restored " + Int::to_string(Dict::size(Shared::get(store.links))) + " link(s)");
+
+    // `SharedFn::of` at each mount is what lets the whole router cross into
+    // the fiber answering a connection: a closure's captures are not in its
+    // type, so the certificate is made here, where they are visible.
+    // `docs/design/sharing.md`.
+    Router::new()
+      |> Router::post("/links", SharedFn::of(fn request => create(store, request)))
+      |> Router::get("/l/:code", SharedFn::of(fn request => follow(store, request)))
+      |> Router::get("/links", SharedFn::of(fn request => listing(store, request)))
+      |> Router::get("/health", SharedFn::of(fn request => health(store, request)))
+      |> Router::listen(port())!
+  }
+}
