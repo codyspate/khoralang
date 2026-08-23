@@ -151,11 +151,37 @@ What made the change survivable, and is worth keeping for 9.2:
 
 The reference standing in the way is now exactly one, and it is the `match`'s
 own: `lower_match` pushes `Cleanup::Temp(scrutinee)` before the arms and leaves
-that scope after them. What §2 needs first is to move that release *into* the
-arms — each arm releasing the scrutinee itself, at its head — which changes
-nothing about when it happens but puts it somewhere an arm can replace it with a
-`drop_reuse`. Arms that bind out of the payload must dup what they bind before
-that release, which they already do.
+that scope after them. §2 needs that release to happen *at the arm's head*
+instead, where an arm can replace it with a `drop_reuse`.
+
+Which cannot be done by moving one line, because **an arm's bindings do not own
+what they point at**. `bind_pattern` stores the loaded field straight into the
+slot and reads of it `dup`; the binding is a borrowed view into the scrutinee's
+payload, valid only for as long as the match holds the scrutinee. Releasing the
+scrutinee at the arm's head would free the payload out from under every one of
+them.
+
+So the order has to become the ordinary owning one, and this is the real content
+of §2's first step:
+
+1. at the arm's head, `dup` each boxed binding the pattern introduced, so the
+   arm owns them;
+2. then release the scrutinee — the point that later becomes `drop_reuse`;
+3. reads of those bindings stop `dup`ing, because they are now ordinary owning
+   locals, and the last-use pass in §1 applies to them like any other;
+4. the arm's block releases whatever it did not hand on.
+
+The operation count does not move: `Cons(h, t) => Cons(h + 1, f(t))` performs a
+dup and a drop either way. What changes is *when* — the scrutinee's count
+reaches zero before the arm's constructor rather than after it, which is the
+entire prerequisite for handing its memory over.
+
+`RcPlan` will have to say which bindings a pattern owns, since it is the thing
+the code generator asks. Note that this makes `unowned` in `settle_last_uses`
+empty for arms handled this way, and it must stay populated for any that are
+not — a partial rollout of this is a use after free.
+
+Then, where an arm reaches a constructor of a shape the matched cell would fit:
 
 Then, where an arm reaches a constructor of a shape the matched cell would fit:
 
