@@ -11,10 +11,16 @@
 //! certificate crosses as bytes, that a socket changes hands exactly once, and
 //! that a connection is released when its scope ends.
 //!
-//! The certificate in `tests/fixtures` is self-signed, valid for `localhost`
-//! and expires in 2126. It is a **test** certificate with its private key
-//! beside it in a public repository; anything using it in earnest deserves what
-//! it gets.
+//! `tests/fixtures` holds a small chain: a CA, and a leaf for `localhost`
+//! signed by it. A chain rather than one self-signed certificate because that
+//! is what a real deployment has, and because the self-signed one this started
+//! with was a *CA* certificate — `openssl req -x509` makes one by default —
+//! which `rustls` correctly refuses as a server's leaf with
+//! `CaUsedAsEndEntity`. Nothing caught it until a client actually verified,
+//! which is the argument for having a client at all.
+//!
+//! They are **test** certificates with their private keys beside them in a
+//! public repository. Anything using them in earnest deserves what it gets.
 
 mod harness;
 
@@ -171,6 +177,61 @@ export fn main() -> () raises TlsError {{
     assert_eq!(heard, "you said: hello over tls");
 }
 
+/// **Both ends, ours.** A Khora client connects to a Khora server, verifies its
+/// certificate, and reads the answer.
+///
+/// Verification is real. The client is given the test certificate as an extra
+/// root and reaches the server as `localhost`, which is the name that
+/// certificate is for. Nothing here turns checking off, because `std::net::tls`
+/// offers nothing to turn it off with.
+///
+/// It also exercises the reason `TlsClient` is `Share`: the configuration
+/// crosses into the fiber that does the calling.
+#[test]
+fn a_khora_client_verifies_a_khora_server() {
+    let said = run_and_read("tls_both_ends", BOTH_ENDS, 18973);
+    assert!(
+        said.contains("you said: hello from khora"),
+        "the client should have read the server's answer, got: {said}"
+    );
+}
+
+/// A name the certificate is not for is refused, which is the whole point of
+/// checking one.
+///
+/// `127.0.0.1` reaches the very same server as `localhost` and is not what the
+/// certificate says. It is the closest a test gets to staging a man in the
+/// middle without one.
+#[test]
+fn a_certificate_for_the_wrong_name_is_refused() {
+    let said = run_and_read("tls_wrong_name", WRONG_NAME, 18974);
+    assert!(
+        said.contains("refused: 127.0.0.1"),
+        "a name the certificate does not cover must fail: {said}"
+    );
+}
+
+/// Fills in the port and the certificate, runs it, and returns what it printed
+/// after "ready".
+fn run_and_read(name: &str, source: &str, port: u16) -> String {
+    let program = source
+        .replace("PORT", &port.to_string())
+        .replace("CERT_PEM", &format!("{:?}", fixture("localhost.cert.pem")))
+        .replace("KEY_PEM", &format!("{:?}", fixture("localhost.key.pem")))
+        .replace("CA_PEM", &format!("{:?}", fixture("ca.cert.pem")));
+
+    let mut child = start(name, &program);
+    let reader = wait_for_ready(&mut child);
+    let mut said = String::new();
+    for line in reader.lines() {
+        said.push_str(&line.expect("a line"));
+        said.push('\n');
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    said
+}
+
 /// A client that is not speaking TLS is refused, and the server survives it.
 ///
 /// This is the ordinary case on a public port — a scanner, or somebody typing
@@ -202,6 +263,7 @@ export fn main() -> () raises TlsError {{
         TlsError::Handshake => print(\"refused the handshake\"),
         TlsError::BadCertificate => print(\"bad certificate, which is wrong\"),
         TlsError::BadKey => print(\"bad key, which is wrong\"),
+        TlsError::Unreachable(_) => print(\"unreachable, which is wrong\"),
       }},
     }}
   }}
@@ -247,6 +309,7 @@ export fn main() -> () {
         TlsError::BadCertificate => print(\"refused the certificate\"),
         TlsError::BadKey => print(\"bad key\"),
         TlsError::Handshake => print(\"handshake\"),
+        TlsError::Unreachable(_) => print(\"unreachable\"),
       },
     }
   }
@@ -262,3 +325,112 @@ export fn main() -> () {
     let _ = child.wait();
     assert!(said.contains("refused the certificate"), "the program said: {said}");
 }
+
+const BOTH_ENDS: &str = r#"module main;
+
+import std::core::{Array, Fiber, Result, Scope, attempt, print};
+import std::net::socket::{accept_on, invalid_handle, listen_on, start};
+import std::net::tls::{
+  TlsClient, TlsError, TlsServer, connect, receive, secure, server, shut, transmit, trusting,
+};
+
+const certificate = CERT_PEM;
+const key = KEY_PEM;
+const authority = CA_PEM;
+
+/// The client half, run on a fiber.
+///
+/// `caller` crosses into it, which is what `impl Share for TlsClient` is for: a
+/// `rustls` configuration behind an `Arc` is safe for any number of readers,
+/// and a client that could not reach the fiber doing the calling would not be
+/// much of a client.
+/// Answers for itself, because a fiber's body cannot raise — whatever went
+/// wrong has nobody left to tell.
+fn call(caller: TlsClient) -> () {
+  match attempt(fn () => connect(caller, "localhost", PORT)!) {
+    Result::Err(_) => print("the client could not connect"),
+    Result::Ok(connection) => {
+      transmit(connection, "hello from khora");
+      let buffer: Array<U8> = Array::new(4096, 0);
+      let read = receive(connection, buffer);
+      if read > 0 {
+        print(String::from_bytes(Array::prefix(buffer, read)));
+      } else {
+        print("the server said nothing");
+      };
+      shut(connection)
+    },
+  }
+}
+
+fn answer(settings: TlsServer, socket: Int) -> () raises TlsError {
+  let connection = secure(settings, socket)!;
+  let buffer: Array<U8> = Array::new(4096, 0);
+  let read = receive(connection, buffer);
+  if read > 0 {
+    transmit(connection, "you said: " + String::from_bytes(Array::prefix(buffer, read)));
+  } else {
+  };
+  shut(connection)
+}
+
+export fn main() -> () raises TlsError {
+  with { scope: Scope::root() } {
+    start();
+    let settings = server(certificate, key)!;
+    let listener = listen_on(PORT);
+    // The test certificate is not one this machine trusts, so it is handed over
+    // as an extra root. That is the whole of the difference from calling a
+    // public server, and a great deal better than a switch that stops checking.
+    let caller = trusting(authority)!;
+    print("ready");
+
+    let calling = Fiber::spawn(fn () => call(caller));
+    let taken = accept_on(listener);
+    if taken == invalid_handle() { } else { answer(settings, taken)! };
+    Fiber::join(calling)
+  }
+}
+"#;
+
+const WRONG_NAME: &str = r#"module main;
+
+import std::core::{Array, Fiber, Result, Scope, attempt, print};
+import std::net::socket::{accept_on, invalid_handle, listen_on, start};
+import std::net::tls::{
+  TlsClient, TlsError, TlsServer, connect, secure, server, shut, trusting,
+};
+
+const certificate = CERT_PEM;
+const key = KEY_PEM;
+const authority = CA_PEM;
+
+/// Reaches the same server by an address the certificate does not name.
+fn call(caller: TlsClient) -> () {
+  match attempt(fn () => connect(caller, "127.0.0.1", PORT)!) {
+    Result::Ok(connection) => { print("connected, which is wrong"); shut(connection) },
+    Result::Err(why) => match why {
+      TlsError::Unreachable(host) => print("refused: " + host),
+      TlsError::Handshake => print("handshake"),
+      TlsError::BadCertificate => print("bad certificate"),
+      TlsError::BadKey => print("bad key"),
+    },
+  }
+}
+
+export fn main() -> () raises TlsError {
+  with { scope: Scope::root() } {
+    start();
+    let settings = server(certificate, key)!;
+    let listener = listen_on(PORT);
+    let caller = trusting(authority)!;
+    print("ready");
+    let calling = Fiber::spawn(fn () => call(caller));
+    let taken = accept_on(listener);
+    // The handshake fails on the client's side, so this one fails too and that
+    // is fine — the point is what the caller was told.
+    if taken == invalid_handle() { } else { let _ = attempt(fn () => secure(settings, taken)!); };
+    Fiber::join(calling)
+  }
+}
+"#;

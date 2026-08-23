@@ -32,12 +32,46 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
+};
 
 /// A handshaken connection, and the socket underneath it.
-struct Secured {
-    stream: StreamOwned<ServerConnection, TcpStream>,
+///
+/// Two shapes, because `rustls` has two connection types and they share no
+/// trait worth naming. Everything past the handshake — read, write, close — is
+/// the same on both, which is why the Khora side has one `TlsConnection` and
+/// not two.
+enum Secured {
+    Serving(StreamOwned<ServerConnection, TcpStream>),
+    Calling(StreamOwned<ClientConnection, TcpStream>),
+}
+
+impl Secured {
+    fn stream(&mut self) -> &mut dyn Talking {
+        match self {
+            Secured::Serving(stream) => stream,
+            Secured::Calling(stream) => stream,
+        }
+    }
+}
+
+/// What either side needs once the handshake is done.
+trait Talking: Read + Write {
+    fn say_goodbye(&mut self);
+}
+
+impl Talking for StreamOwned<ServerConnection, TcpStream> {
+    fn say_goodbye(&mut self) {
+        self.conn.send_close_notify();
+    }
+}
+
+impl Talking for StreamOwned<ClientConnection, TcpStream> {
+    fn say_goodbye(&mut self) {
+        self.conn.send_close_notify();
+    }
 }
 
 /// Turns a raw handle into the `TcpStream` that owns it.
@@ -156,7 +190,119 @@ pub unsafe extern "C" fn khora_tls_accept(server: *mut u8, socket: i64) -> *mut 
         // `stream` owns the socket and closing it is what dropping it does.
         return std::ptr::null_mut();
     }
-    Box::into_raw(Box::new(Secured { stream: StreamOwned::new(connection, stream) })).cast()
+    Box::into_raw(Box::new(Secured::Serving(StreamOwned::new(connection, stream)))).cast()
+}
+
+/// A client's trust: the machine's roots, plus `extra` if any is given.
+///
+/// **The operating system's store rather than a list compiled in here.** A
+/// program should trust what its machine trusts — a corporate CA is the
+/// ordinary case, not an exotic one — and a bundled root list is a snapshot
+/// that goes stale between releases without saying so.
+///
+/// `extra` is PEM and may be empty. It is for an internal CA the machine does
+/// not know about, and for a test. The alternative every other library offers
+/// is a switch that turns verification off, which solves the same problem by
+/// removing the point of the exercise.
+///
+/// Null if `extra` is unreadable, or if there are no roots at all — a client
+/// that trusts nothing fails every connection later, and failing here says why.
+///
+/// # Safety
+///
+/// `extra` must address `extra_len` readable bytes, or be null with a length of
+/// zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_tls_client_open(extra: *const u8, extra_len: usize) -> *mut u8 {
+    let mut roots = RootCertStore::empty();
+    for certificate in rustls_native_certs::load_native_certs().certs {
+        // A store may hold one the parser dislikes; the rest are still good.
+        let _ = roots.add(certificate);
+    }
+
+    if !extra.is_null() && extra_len > 0 {
+        // SAFETY: the caller guarantees the length is readable.
+        let mut pem = unsafe { std::slice::from_raw_parts(extra, extra_len) };
+        let parsed: Result<Vec<CertificateDer<'static>>, _> =
+            rustls_pemfile::certs(&mut pem).collect();
+        let Ok(added) = parsed else { return std::ptr::null_mut() };
+        if added.is_empty() {
+            return std::ptr::null_mut();
+        }
+        for certificate in added {
+            if roots.add(certificate).is_err() {
+                return std::ptr::null_mut();
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+    Box::into_raw(Box::new(Arc::new(config))).cast()
+}
+
+/// Releases a client's configuration.
+///
+/// # Safety
+///
+/// `client` must be null or have come from [`khora_tls_client_open`], and must
+/// not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_tls_client_close(client: *mut u8) {
+    if client.is_null() {
+        return;
+    }
+    // SAFETY: per the contract above.
+    drop(unsafe { Box::from_raw(client.cast::<Arc<ClientConfig>>()) });
+}
+
+/// Connects to `host:port` and handshakes, verifying the certificate names
+/// `host`.
+///
+/// **The TCP connection is made here too**, which is not scope creep: it needs
+/// a name resolved, and `getaddrinfo` across `extern fn` would be a `struct
+/// addrinfo` crossing the ABI — which errata 35 forbids, and which nobody
+/// should hand-roll twice. `TcpStream::connect` takes a name and a port.
+///
+/// Null if the name does not resolve, the connection is refused, or the
+/// certificate does not verify. **There is no argument that turns verification
+/// off.** A caller who must trust something unusual adds it as a root when the
+/// client is built, where a reviewer can see which certificate and why.
+///
+/// # Safety
+///
+/// `client` must have come from [`khora_tls_client_open`], and `host` must
+/// address `host_len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_tls_connect(
+    client: *mut u8,
+    host: *const u8,
+    host_len: usize,
+    port: i64,
+) -> *mut u8 {
+    if client.is_null() || host.is_null() || !(1..=65535).contains(&port) {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: per the contract above.
+    let config = unsafe { &*client.cast::<Arc<ClientConfig>>() };
+    let bytes = unsafe { std::slice::from_raw_parts(host, host_len) };
+    let Ok(host) = std::str::from_utf8(bytes) else { return std::ptr::null_mut() };
+
+    let Ok(name) = ServerName::try_from(host.to_string()) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(mut connection) = ClientConnection::new(Arc::clone(config), name) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(mut stream) = TcpStream::connect((host, port as u16)) else {
+        return std::ptr::null_mut();
+    };
+    if connection.complete_io(&mut stream).is_err() {
+        return std::ptr::null_mut();
+    }
+    Box::into_raw(Box::new(Secured::Calling(StreamOwned::new(connection, stream)))).cast()
 }
 
 /// Reads at most `len` plaintext bytes, or 0 at the end, or -1 on failure.
@@ -180,7 +326,7 @@ pub unsafe extern "C" fn khora_tls_read(
     // SAFETY: per the contract above.
     let secured = unsafe { &mut *connection.cast::<Secured>() };
     let buffer = unsafe { std::slice::from_raw_parts_mut(into, len) };
-    match secured.stream.read(buffer) {
+    match secured.stream().read(buffer) {
         Ok(read) => read as i64,
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => 0,
         Err(_) => -1,
@@ -212,7 +358,8 @@ pub unsafe extern "C" fn khora_tls_write(
     // SAFETY: per the contract above.
     let secured = unsafe { &mut *connection.cast::<Secured>() };
     let bytes = unsafe { std::slice::from_raw_parts(from, len) };
-    match secured.stream.write_all(bytes).and_then(|()| secured.stream.flush()) {
+    let stream = secured.stream();
+    match stream.write_all(bytes).and_then(|()| stream.flush()) {
         Ok(()) => len as i64,
         Err(_) => -1,
     }
@@ -234,7 +381,8 @@ pub unsafe extern "C" fn khora_tls_close(connection: *mut u8) {
     // Politeness that is also protocol: without it a peer cannot tell a closed
     // connection from a truncated one, which is the whole of the truncation
     // attack TLS 1.3 closes.
-    secured.stream.conn.send_close_notify();
-    let _ = secured.stream.flush();
+    let stream = secured.stream();
+    stream.say_goodbye();
+    let _ = stream.flush();
     // Dropping the `TcpStream` inside closes the socket.
 }

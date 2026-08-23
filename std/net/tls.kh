@@ -15,14 +15,14 @@ import std::core::{Array, Ptr, Result, Scope, Share, acquire};
 // `std::fs`, and their lifetimes are tied to a scope with `acquire`. The code
 // generator did not have to learn a thing.
 //
-// What it does: a TLS *server*. A certificate chain and a key in PEM, a
-// handshake over an accepted socket, and reads and writes that look like the
-// plain ones.
+// What it does: both ends. A *server* takes a certificate chain and a key in
+// PEM and secures accepted sockets. A *client* trusts the machine's own root
+// certificates and connects by name, verifying that the certificate says so.
+// Reads and writes look like the plain ones on either side.
 //
-// What it does not: client connections, client certificates, ALPN, session
-// resumption, and choosing a cipher suite. The first is the next piece of work
-// and the rest are deliberate — `rustls` picks safe defaults and a knob that
-// lets somebody pick worse ones is not a feature.
+// What it does not: client certificates, ALPN, session resumption, and choosing
+// a cipher suite. Deliberate, all of them — `rustls` picks safe defaults, and a
+// knob that lets somebody pick worse ones is not a feature.
 
 extern fn khora_tls_server_open(cert: Ptr, cert_len: Int, key: Ptr, key_len: Int) -> Ptr;
 extern fn khora_tls_server_close(server: Ptr) -> ();
@@ -30,6 +30,9 @@ extern fn khora_tls_accept(server: Ptr, socket: Int) -> Ptr;
 extern fn khora_tls_read(connection: Ptr, into: Ptr, length: Int) -> Int;
 extern fn khora_tls_write(connection: Ptr, from: Ptr, length: Int) -> Int;
 extern fn khora_tls_close(connection: Ptr) -> ();
+extern fn khora_tls_client_open(extra: Ptr, extra_len: Int) -> Ptr;
+extern fn khora_tls_client_close(client: Ptr) -> ();
+extern fn khora_tls_connect(client: Ptr, host: Ptr, host_len: Int, port: Int) -> Ptr;
 
 /// Why a TLS server could not start, or a connection could not be secured.
 ///
@@ -43,7 +46,16 @@ export type TlsError =
   | BadKey
 /// A client failed the handshake. Ordinary: a port scan, a plain-HTTP
 /// request to an HTTPS port, or a client with no cipher in common.
-  | Handshake;
+  | Handshake
+/// A connection could not be made, or the server it reached did not present
+/// a certificate this client trusts for that name.
+///
+/// One case rather than four. "Could not resolve", "refused", "expired" and
+/// "wrong name" are different to somebody debugging and identical to a
+/// program: it does not have the connection, and what it does next is retry
+/// or give up. Telling them apart wants an error that carries text, which is
+/// a separate piece of work.
+  | Unreachable(host: String);
 
 /// A configured server, ready to secure accepted sockets.
 ///
@@ -84,8 +96,8 @@ export type TlsConnection = { session: Ptr };
 /// from a file, a secret store, or an ACME client — and converting is work
 /// every caller would repeat.
 export fn server(certificate: String, key: String) -> TlsServer
-  raises TlsError
   with { scope: Scope }
+  raises TlsError
 {
   let handle = String::with_data(certificate, fn (cert, cert_len) =>
     String::with_data(key, fn (k, k_len) => khora_tls_server_open(cert, cert_len, k, k_len)));
@@ -140,4 +152,75 @@ export fn transmit(connection: TlsConnection, text: String) -> Int {
 /// having an end-of-stream that is signed.
 export fn shut(connection: TlsConnection) -> () {
   khora_tls_close(connection.session)
+}
+
+// ---------------------------------------------------------------------------
+// The other end
+// ---------------------------------------------------------------------------
+
+/// What a client trusts.
+///
+/// The field is `trust` and the server's is `settings`, which is not only for
+/// reading: two records of one `Ptr` are the same shape, so a bare literal
+/// fits both and the checker asks which was meant. Distinct names answer it
+/// without an annotation — and an annotation on the `let` would not have,
+/// because a type hint does not currently reach inside the branches of an
+/// `if`.
+export type TlsClient = { trust: Ptr };
+
+/// Asserted for the reason `TlsServer`'s is, and the value has the same shape:
+/// a `rustls` configuration behind an `Arc`, built once and never written
+/// again.
+impl Share for TlsClient {}
+
+/// A client trusting the certificates this machine trusts.
+///
+/// **The operating system's store, not a list compiled into Khora.** A program
+/// should trust what its machine trusts: a corporate CA is the ordinary case
+/// rather than an exotic one, and a bundled root list is a snapshot that goes
+/// stale between releases without telling anybody.
+///
+/// Released when the enclosing scope ends, like a server.
+export fn client() -> TlsClient
+  with { scope: Scope }
+  raises TlsError
+{
+  trusting("")!
+}
+
+/// The same, trusting one more certificate chain as a root.
+///
+/// For an internal CA the machine has not been told about, and for a test
+/// against a self-signed server. **There is deliberately no way to turn
+/// verification off**: every library offers one, and it is how verification
+/// comes to be off in production. Naming the certificate you mean to trust is
+/// the same amount of typing and leaves a reviewer something to look at.
+export fn trusting(extra: String) -> TlsClient
+  with { scope: Scope }
+  raises TlsError
+{
+  let handle = String::with_data(extra, fn (pem, n) => khora_tls_client_open(pem, n));
+  if Ptr::is_null(handle) {
+    raise TlsError::BadCertificate
+  } else {
+    { trust: acquire(handle, fn h => khora_tls_client_close(h)) }
+  }
+}
+
+/// Connects to `host` on `port` and completes a handshake.
+///
+/// **The name matters twice**: it is what gets resolved, and it is what the
+/// certificate has to be for. Connecting to an address and hoping is the thing
+/// certificate verification exists to prevent, so there is no overload that
+/// takes one.
+///
+/// The socket is made here rather than passed in, because resolving a name
+/// needs `getaddrinfo` and a `struct addrinfo` cannot cross the C ABI — errata
+/// 35. The runtime already has a resolver worth using.
+export fn connect(client: TlsClient, host: String, port: Int) -> TlsConnection
+  raises TlsError
+{
+  let handle = String::with_data(host, fn (name, n) =>
+    khora_tls_connect(client.trust, name, n, port));
+  if Ptr::is_null(handle) { raise TlsError::Unreachable(host) } else { { session: handle } }
 }

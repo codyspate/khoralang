@@ -12,6 +12,10 @@ license.workspace = true
 # Khora checkout builds with a Rust toolchain and clang and nothing else.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
+# The machine's own trust store, rather than a root list compiled in here. A
+# client that ignores what its machine trusts is wrong wherever there is a
+# corporate CA, and a bundled list ages silently between releases.
+rustls-native-certs = "0.8"
 
 [lib]
 # Linked into generated executables by clang, so it must be a static archive
