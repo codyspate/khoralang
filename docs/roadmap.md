@@ -1664,16 +1664,25 @@ cannot be had from the `Share` marker however much it looks like it should.
   `a_program_that_spawns_counts_references_atomically` into that abort, which is
   how the guard was confirmed to guard something.
 
-  **What is left is per-object, and the `Share` marker cannot supply it.** It is
-  tempting to say a type that cannot cross a fiber can be counted
-  non-atomically. `String` is shareable, and so is `Map`, and so is every
-  ordinary immutable container — sharing an immutable value is the thing that
-  ought to be allowed. A sound type-level rule would deliver almost nothing. The
-  two shapes that would are a real escape analysis (which allocation sites reach
-  a spawn's captures — what D10 asked for, and the one that would help a server)
-  and biased reference counting (an owning thread per object, no analysis, a
-  wider header and a comparison per operation). Neither is started;
-  `docs/design/reuse.md` §4 has both written up against the measurement.
+  **What is left is per-allocation-site, and no type-level rule supplies it.**
+  The `Share` marker cannot: `String` is shareable, and so is every ordinary
+  immutable container, because sharing an immutable value is the thing that
+  ought to be allowed. Nor can the sharper version — the types a spawn's closure
+  actually captures — because `bench/service`'s spawned closure captures the
+  router, a router holds its route paths, and one `String` in one long-lived
+  structure poisons the whole type for the program.
+
+  **And its ceiling cannot be measured without building it.** The 7% and 12%
+  above are the win already taken, from a benchmark that never spawns. Forcing
+  a spawning program non-atomic to price the rest gave 82 requests a second and
+  then zero — `bench/service` corrupts itself in a few hundred requests. That
+  is not a measurement; it is a demonstration that this is the one optimization
+  in the phase with no margin for being approximately right. What can be said:
+  atomics are ~7% of a parse, a parse is a fraction of what a server does, so a
+  few per cent of throughput — inside the eight the benchmark varies by.
+
+  So neither remaining shape is started, and neither should be started for the
+  number. `docs/design/reuse.md` §4 has both written up against what is known.
 
   This entry used to be "priced at 12%" and to claim borrowed parameters as part
   of itself. Those landed as 9.4a during the throughput work and are recorded

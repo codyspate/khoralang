@@ -351,34 +351,59 @@ not. `a_program_that_spawns_counts_references_atomically` spawns and checks the
 live count returns to zero; forcing the flag on makes it print the abort
 instead, which is how that test was confirmed to be testing anything.
 
-#### What is left, and why the `Share` marker cannot do it
+#### What is left, why it is per-object, and what it is worth
 
-The obvious next step looks like a type-level rule, and it does not work.
-Khora already knows which types may cross a fiber — `impl Share for T`, and the
-structural check behind it — so it is tempting to say that an object whose type
-is not shareable can be counted non-atomically. **`String` is shareable.** So is
-`Map`, so is `Option`, so is every ordinary immutable container, because sharing
-an immutable value between fibers is exactly the thing that ought to be allowed.
-The types that are *not* shareable are the ones with mutable fields, `Ptr`, and
-opaque handles — a small minority of what a program allocates, and close to none
-of what a request parse allocates. A sound type-level rule would deliver almost
-nothing.
+**The ceiling for the case that matters cannot be measured without building
+it.** The 7% and 12% above are from the parse benchmark, which never spawns and
+therefore already counts non-atomically — they are the win *already taken*. What
+is left applies only to programs that do spawn, and the obvious way to price
+that is to force a spawning program non-atomic and time it. Doing so to
+`bench/service` produced 82 requests a second and then zero: the server corrupts
+itself within a few hundred requests. That is not a measurement. It is a
+demonstration that this is the one optimization in the phase with no margin for
+being approximately right.
 
-What remains is therefore per-*object*, and there are two known shapes:
+What can be said without building it: atomics are worth about 7% of an HTTP
+parse, and a parse is a fraction of what a server does between accepting a
+connection and writing a reply. A few per cent of throughput, which is inside
+the eight the benchmark varies by.
+
+**Two type-level rules that look sound and are not.** The first is `Share`:
+Khora knows which types *may* cross a fiber, so an unshareable type could be
+counted non-atomically. `String` is shareable. So is `Map`, so is `Option`, so
+is every ordinary immutable container, because sharing an immutable value is
+precisely the thing that ought to be allowed. The unshareable ones are the types
+with mutable fields, `Ptr`, and opaque handles — close to none of what a request
+parse allocates.
+
+The second is sharper and fails for a more interesting reason: restrict it to
+the types a `Fiber::spawn` closure actually *captures* in this program, rather
+than the types that could be shared in principle. In `bench/service` the spawned
+closure captures the router, and a router holds its route paths — so `String` is
+in the captured set anyway, and with it everything a request is parsed into. One
+`String` in one long-lived structure poisons the whole type for the program.
+
+So it has to be per-*allocation-site*, and there are two known shapes:
 
 - **A real escape analysis.** Which allocation sites can reach a `Fiber::spawn`
   capture. Whole-program and flow-sensitive; tractable here in principle,
   because monomorphization means there is no dynamic dispatch to lose the trail
-  in. This is what D10 actually asked for, and it is the one that would help a
-  server — where the strings a request is parsed into are made inside the fiber
-  answering it and never leave.
+  in. This is what D10 asked for, and the one that would help a server — the
+  strings a request is parsed into are made inside the fiber answering it and
+  never leave, which is exactly the fact a site-level analysis can see and a
+  type-level one cannot.
 - **Biased reference counting.** Each object records an owning thread; the owner
   uses a non-atomic count and everybody else an atomic one. No analysis at all,
   at the price of a wider header and a thread-identity comparison on every
-  operation — perhaps half the ceiling, for a much smaller change.
+  operation — perhaps half the ceiling, for a much smaller change, and no
+  soundness argument to get wrong.
 
-Neither is started. The measurement above is what either would be judged
-against.
+**Neither is started, and neither should be started for the number.** A few per
+cent, for a whole-program flow analysis whose failure mode is a data race in a
+reference count — memory corruption arriving far from its cause. If it is built
+it should be because escape information is wanted for something else too, or
+because biased counting is judged cheap enough to be worth having on its own
+terms. The measurement above is what either would be judged against.
 
 ## Where the operations actually go
 
