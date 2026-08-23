@@ -1806,7 +1806,7 @@ impl<'ctx> Backend<'ctx> {
     /// wrong first and leaked; field access got it wrong second and loaded a
     /// pointer as an integer.
     pub(crate) fn instantiated_variants(&self, ty: &Type) -> Vec<VariantInfo> {
-        let Type::Adt { name, args } = ty else { return Vec::new() };
+        let Type::Adt { name, args, .. } = ty else { return Vec::new() };
         let declared = self.variants_of(name);
         let generics = self.types.adts.get(name).cloned().unwrap_or_default();
         if args.is_empty() || generics.is_empty() {

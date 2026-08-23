@@ -83,10 +83,22 @@ fn mangle(ty: &Type) -> String {
         Type::Bool => "Bool".to_string(),
         Type::Str => "String".to_string(),
         Type::Unit => "Unit".to_string(),
-        Type::Adt { name, args } if args.is_empty() => name.clone(),
-        Type::Adt { name, args } => {
-            let inner: Vec<String> = args.iter().map(mangle).collect();
-            format!("{name}${}", inner.join("$"))
+        // The module is part of the name here for the reason it is part of the
+        // type: two modules may each declare a `Point`, and a symbol that only
+        // carried the spelling gave both instantiations one name and emitted
+        // one of them. Errata 46. Segments are joined with `$` like everything
+        // else in a mangled name, since `:` is not a symbol character
+        // everywhere Khora will eventually link.
+        Type::Adt { name, home, args } => {
+            let mut mangled = match home {
+                Some(home) => format!("{}${name}", home.segments().join("$")),
+                None => name.clone(),
+            };
+            if !args.is_empty() {
+                let inner: Vec<String> = args.iter().map(mangle).collect();
+                mangled = format!("{mangled}${}", inner.join("$"));
+            }
+            mangled
         }
         Type::Tuple(items) => {
             let inner: Vec<String> = items.iter().map(mangle).collect();

@@ -212,9 +212,9 @@ impl Unifier {
         // `?F<A>` with `?F` solved to `Option` *is* `Option<A>`. Collapsing here
         // means every caller sees the concrete type without asking.
         if let Type::Applied { head, args } = &current {
-            if let Type::Adt { name, args: none } = self.shallow(head) {
+            if let Type::Adt { name, home, args: none } = self.shallow(head) {
                 if none.is_empty() {
-                    return Type::Adt { name, args: args.clone() };
+                    return Type::Adt { name, home, args: args.clone() };
                 }
             }
         }
@@ -244,8 +244,9 @@ impl Unifier {
                 requires: Box::new(self.zonk(&requires)),
                 raises: Box::new(self.zonk(&raises)),
             },
-            Type::Adt { name, args } => Type::Adt {
+            Type::Adt { name, home, args } => Type::Adt {
                 name,
+                home,
                 args: args.iter().map(|a| self.zonk(a)).collect(),
             },
             Type::Tuple(items) => Type::Tuple(items.iter().map(|i| self.zonk(i)).collect()),
@@ -283,8 +284,8 @@ impl Unifier {
                 let head = self.zonk(&head);
                 let args: Vec<Type> = args.iter().map(|a| self.zonk(a)).collect();
                 match head {
-                    Type::Adt { name, args: none } if none.is_empty() => {
-                        Type::Adt { name, args }
+                    Type::Adt { name, home, args: none } if none.is_empty() => {
+                        Type::Adt { name, home, args }
                     }
                     head => Type::Applied { head: Box::new(head), args },
                 }
@@ -358,8 +359,14 @@ impl Unifier {
             | (Type::Str, Type::Str)
             | (Type::Unit, Type::Unit) => Ok(()),
 
-            (Type::Adt { name: n1, args: a1 }, Type::Adt { name: n2, args: a2 }) => {
-                if n1 != n2 {
+            (
+                Type::Adt { name: n1, home: h1, args: a1 },
+                Type::Adt { name: n2, home: h2, args: a2 },
+            ) => {
+                // The module as well as the name. Two `Point`s from two modules
+                // are two types, and comparing the spelling alone is what made
+                // them one. Errata 46.
+                if n1 != n2 || h1 != h2 {
                     return Err(Mismatch::Types { expected: a.clone(), found: b.clone() });
                 }
                 if a1.len() != a2.len() {
@@ -391,11 +398,13 @@ impl Unifier {
             // `Option<Int>` decides `?F := Option` and `?B := Int`. Restricted
             // higher-order unification, and it has a unique answer because the
             // head is a variable applied to a fixed number of arguments.
-            (Type::Applied { head, args }, Type::Adt { name, args: concrete })
-            | (Type::Adt { name, args: concrete }, Type::Applied { head, args })
+            (Type::Applied { head, args }, Type::Adt { name, home, args: concrete })
+            | (Type::Adt { name, home, args: concrete }, Type::Applied { head, args })
                 if args.len() == concrete.len() =>
             {
-                self.unify(head, &Type::Adt { name: name.clone(), args: Vec::new() })?;
+                let constructor =
+                    Type::Adt { name: name.clone(), home: home.clone(), args: Vec::new() };
+                self.unify(head, &constructor)?;
                 for (x, y) in args.iter().zip(concrete) {
                     self.unify(x, y)?;
                 }
@@ -657,8 +666,9 @@ pub fn match_params(
                 }
             }
         }
-        (Type::Adt { name: a, args: x }, Type::Adt { name: b, args: y }) => {
+        (Type::Adt { name: a, home: ha, args: x }, Type::Adt { name: b, home: hb, args: y }) => {
             a == b
+                && ha == hb
                 && x.len() == y.len()
                 && x.iter().zip(y).all(|(p, c)| match_params(p, c, params, out))
         }
@@ -739,8 +749,9 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
             requires: Box::new(substitute(requires, mapping)),
             raises: Box::new(substitute(raises, mapping)),
         },
-        Type::Adt { name, args } => Type::Adt {
+        Type::Adt { name, home, args } => Type::Adt {
             name: name.clone(),
+            home: home.clone(),
             args: args.iter().map(|a| substitute(a, mapping)).collect(),
         },
         Type::Tuple(items) => Type::Tuple(items.iter().map(|i| substitute(i, mapping)).collect()),
@@ -787,8 +798,8 @@ pub fn substitute(ty: &Type, mapping: &HashMap<&str, Type>) -> Type {
         Type::Applied { head, args } => {
             let args: Vec<Type> = args.iter().map(|a| substitute(a, mapping)).collect();
             match substitute(head, mapping) {
-                Type::Adt { name, args: none } if none.is_empty() => {
-                    Type::Adt { name, args }
+                Type::Adt { name, home, args: none } if none.is_empty() => {
+                    Type::Adt { name, home, args }
                 }
                 head => Type::Applied { head: Box::new(head), args },
             }
@@ -916,7 +927,7 @@ mod tests {
     }
 
     fn adt(name: &str, args: Vec<Type>) -> Type {
-        Type::Adt { name: name.to_string(), args }
+        Type::Adt { name: name.to_string(), home: None, args }
     }
 
     #[test]

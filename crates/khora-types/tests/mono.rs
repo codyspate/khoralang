@@ -85,7 +85,11 @@ fn generic_types_appear_in_the_symbol() {
          fn id<A>(x: A) -> A { x }\n\
          fn f(o: Option<Int>) -> Option<Int> { id(o) }\n",
     );
-    assert_eq!(found, vec!["m$f", "m$id$Option$Int"]);
+    // `m$Option` rather than `Option`: the module is part of the type, so it is
+    // part of the symbol. Two modules may each declare an `Option`, and a name
+    // that carried only the spelling gave both instantiations one symbol and
+    // emitted one of them. Errata 46.
+    assert_eq!(found, vec!["m$f", "m$id$m$Option$Int"]);
 }
 
 #[test]

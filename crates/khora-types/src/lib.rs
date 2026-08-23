@@ -132,7 +132,24 @@ pub enum Type {
     /// deliberately not answered by this type. `docs/design/ffi.md`.
     Ptr,
     /// A user-declared variant type, with its type arguments.
-    Adt { name: String, args: Vec<Type> },
+    ///
+    /// **`home` is what makes this an identity rather than a spelling.** Two
+    /// modules may each declare a `Point`, and without the module they were one
+    /// type: the importer looked its fields up by name, found its own
+    /// declaration, and was told that `Point` has no field `label` about a
+    /// value that has exactly that field. An alias had the mirror problem —
+    /// `import other::{Point as Other}` keyed the import under `Other`, so a
+    /// rename invented a type. Errata 46.
+    ///
+    /// `None` for a name that did not resolve to a declaration, which is a type
+    /// error already reported. It deliberately does *not* mean "any module":
+    /// two unresolved names are equal to each other and to nothing else, so a
+    /// failure here cannot quietly satisfy a comparison.
+    ///
+    /// [`std::fmt::Display`] prints `name` alone. A reader wants `Point`, and
+    /// the two places where that is genuinely ambiguous — a message naming two
+    /// types that print alike — ask for [`Type::qualified`] instead.
+    Adt { name: String, home: Option<khora_hir::ModulePath>, args: Vec<Type> },
     /// A function *value*'s type, effects included.
     ///
     /// The rows are why a function that needs capabilities can be passed as a
@@ -210,8 +227,8 @@ impl std::fmt::Display for Type {
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "()"),
-            Type::Adt { name, args } if args.is_empty() => write!(f, "{name}"),
-            Type::Adt { name, args } => {
+            Type::Adt { name, args, .. } if args.is_empty() => write!(f, "{name}"),
+            Type::Adt { name, args, .. } => {
                 let inner: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 write!(f, "{name}<{}>", inner.join(", "))
             }
@@ -282,9 +299,41 @@ impl Type {
         Type::Row { fields, tail: tail.map(Box::new) }
     }
 
-    /// A nullary ADT, which is what most of the phase 2 subset used.
+    /// A nullary ADT whose declaring module is not known here.
+    ///
+    /// Two callers, and both are legitimate. The backend works on names
+    /// monomorphization has already made unique, so there is nothing left for a
+    /// module to disambiguate. And a handful of types are the compiler's own —
+    /// [`FAILED`] is produced by `assert` and caught by a test, and no source
+    /// declares it.
+    ///
+    /// Anything reading a name a *program* wrote wants [`Type::adt_in`], or the
+    /// two `Point`s of errata 46 become one type again.
     pub fn adt(name: impl Into<String>) -> Type {
-        Type::Adt { name: name.into(), args: Vec::new() }
+        Type::Adt { name: name.into(), home: None, args: Vec::new() }
+    }
+
+    /// An ADT with the module that declares it.
+    pub fn adt_in(name: impl Into<String>, home: Option<khora_hir::ModulePath>) -> Type {
+        Type::Adt { name: name.into(), home, args: Vec::new() }
+    }
+
+    /// The name with its module, for a message where the short name would be
+    /// ambiguous: `expected `Point`, found `Point`` helps nobody.
+    ///
+    /// Only [`Type::Adt`] has a module to add; everything else prints as it
+    /// always does.
+    pub fn qualified(&self) -> String {
+        match self {
+            Type::Adt { name, home: Some(home), args } if args.is_empty() => {
+                format!("{home}::{name}")
+            }
+            Type::Adt { name, home: Some(home), args } => {
+                let inner: Vec<String> = args.iter().map(|a| a.qualified()).collect();
+                format!("{home}::{name}<{}>", inner.join(", "))
+            }
+            other => other.to_string(),
+        }
     }
 
     /// A function that needs nothing and cannot fail.
@@ -397,6 +446,76 @@ impl VariantInfo {
 /// `docs/design/sharing.md`.
 pub const SHARE: &str = "Share";
 
+/// What each type name written in one file actually refers to.
+///
+/// A name is a spelling and a type is a declaration, and this is the map
+/// between them. Two things follow that did not work before it existed
+/// (errata 46): a file's own `Point` is distinct from one it imports, and an
+/// alias resolves to the *declared* name, so `import other::{Point as Other}`
+/// gives `Other` and `other::Point` one identity instead of two.
+///
+/// A file's own declaration wins over an import of the same name, which is
+/// what shadowing means everywhere else in the language.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TypeHomes {
+    /// Local spelling to the module that declares it and the name it is
+    /// declared under.
+    by_name: HashMap<String, (khora_hir::ModulePath, String)>,
+}
+
+impl TypeHomes {
+    /// The declaration `local` names here, as `(module, declared name)`.
+    ///
+    /// `None` for a name nothing declares — a type parameter has already been
+    /// handled by the time this is asked, so what is left is a name that did
+    /// not resolve, and that is an error somebody else reports.
+    pub fn of(&self, local: &str) -> Option<(khora_hir::ModulePath, String)> {
+        self.by_name.get(local).cloned()
+    }
+
+    /// Records a declaration this file makes itself.
+    pub fn declares(&mut self, name: &str, home: &khora_hir::ModulePath) {
+        self.by_name.insert(name.to_string(), (home.clone(), name.to_string()));
+    }
+}
+
+/// Where every type name one file can write comes from.
+#[salsa::tracked(returns(ref))]
+pub fn type_homes(db: &dyn Db, file: SourceFile) -> TypeHomes {
+    let mut homes = TypeHomes::default();
+    let items = khora_hir::item_map(db, file);
+
+    // Declarations first, so an import cannot displace them.
+    if let Some(home) = &items.module {
+        for item in &items.items {
+            if is_a_type(item.kind) {
+                homes.declares(&item.name, home);
+            }
+        }
+    }
+
+    for origin in &khora_hir::file_scope(db, file).origins {
+        if is_a_type(origin.kind) {
+            homes
+                .by_name
+                .entry(origin.local.clone())
+                .or_insert_with(|| (origin.module.clone(), origin.name.clone()));
+        }
+    }
+    homes
+}
+
+/// Whether an item is something a type name can refer to.
+///
+/// An `effect` is one: it is a record of function types, and a `with` clause
+/// names it exactly as a type annotation names a type.
+fn is_a_type(kind: khora_hir::ItemKind) -> bool {
+    matches!(
+        kind,
+        khora_hir::ItemKind::Type | khora_hir::ItemKind::Effect | khora_hir::ItemKind::Trait
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TypeMap {
     pub signatures: HashMap<String, Signature>,
@@ -413,6 +532,12 @@ pub struct TypeMap {
     /// The one question an orphan rule needs, and `adts` cannot answer it: an
     /// imported type is in there too. `docs/design/sharing.md`.
     pub declared_here: HashSet<String>,
+    /// What each type name written in this file refers to.
+    ///
+    /// Carried on the map because everything that turns a name into a
+    /// [`Type`] needs it, and because the checker asks the same question about
+    /// a mention that `type_map` asked about a declaration.
+    pub homes: TypeHomes,
     /// The names declared with `effect` rather than `type`.
     ///
     /// An effect is a record of function types, which would make every one of
@@ -553,7 +678,7 @@ impl TypeMap {
                 self.holds_a_closure(head, visiting)
                     || args.iter().any(|t| self.holds_a_closure(t, visiting))
             }
-            Type::Adt { name, args } => {
+            Type::Adt { name, args, .. } => {
                 if args.iter().any(|t| self.holds_a_closure(t, visiting)) {
                     return true;
                 }
@@ -589,7 +714,7 @@ impl TypeMap {
                 self.shareable(head, visiting, bounded)
                     && args.iter().all(|t| self.shareable(t, visiting, bounded))
             }
-            Type::Adt { name, args } => {
+            Type::Adt { name, args, .. } => {
                 // The trusted answer comes first, arguments included. A type
                 // with no body does not necessarily *hold* its parameters —
                 // `SharedFn<Request, Response, 'e>` describes a call rather
@@ -669,7 +794,11 @@ impl TypeMap {
 #[salsa::tracked(returns(ref))]
 pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     let parse = khora_db::parse(db, file);
-    let mut map = TypeMap::default();
+    // What every type name in this file refers to, worked out before any of
+    // them is read: a type is a declaration rather than a spelling, and this is
+    // the only thing that knows which declaration. Errata 46.
+    let homes = type_homes(db, file);
+    let mut map = TypeMap { homes: homes.clone(), ..TypeMap::default() };
     // Which of each type's parameters are const, so `Matrix<const R, const C>`
     // gets the kind `Int -> Int -> *` rather than `* -> * -> *`.
     let mut consts: HashMap<String, Vec<bool>> = HashMap::new();
@@ -701,16 +830,16 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 let params = f
                     .params()
                     .map(|list| {
-                        list.params().map(|p| type_of_syntax(p.ty().as_ref(), &generics)).collect()
+                        list.params().map(|p| type_of_syntax(p.ty().as_ref(), &generics, homes)).collect()
                     })
                     .unwrap_or_default();
                 let ret = f
                     .return_type()
-                    .map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics));
+                    .map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics, homes));
                 let requires =
-                    row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics);
+                    row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics, homes);
                 let raises =
-                    row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics);
+                    row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics, homes);
                 map.signatures.insert(
                     name,
                     Signature {
@@ -741,7 +870,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 for op in e.operations() {
                     let Some(label) = op.name().and_then(|n| n.ident()) else { continue };
                     labels.push(label);
-                    fields.push(type_of_syntax(op.ty().as_ref(), &generics));
+                    fields.push(type_of_syntax(op.ty().as_ref(), &generics, homes));
                 }
                 map.effects.insert(name.clone());
                 map.declared_here.insert(name.clone());
@@ -769,7 +898,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                 // named fields — the same shape a constructor already has, so
                 // field access, construction and drop glue are all reused.
                 if let Some(ast::Type::Record(r)) = t.definition() {
-                    let (labels, fields) = record_fields(&r, &generics);
+                    let (labels, fields) = record_fields(&r, &generics, homes);
                     let mutable = r.fields().map(|f| f.is_mut()).collect();
                     map.variants.push(VariantInfo {
                         type_name: type_name.clone(),
@@ -786,13 +915,13 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                             .fields()
                             .map(|list| {
                                 list.fields()
-                                    .map(|f| type_of_syntax(f.ty().as_ref(), &generics))
+                                    .map(|f| type_of_syntax(f.ty().as_ref(), &generics, homes))
                                     .collect()
                             })
                             .or_else(|| {
                                 case.tuple_fields().map(|list| {
                                     list.types()
-                                        .map(|t| type_of_syntax(Some(&t), &generics))
+                                        .map(|t| type_of_syntax(Some(&t), &generics, homes))
                                         .collect()
                                 })
                             })
@@ -823,8 +952,8 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
         }
     }
 
-    map.signatures.extend(traits::impl_signatures(&parse.source_file()));
-    map.traits = traits::collect(&parse.source_file());
+    map.signatures.extend(traits::impl_signatures(&parse.source_file(), homes));
+    map.traits = traits::collect(&parse.source_file(), homes);
 
     // The impls this file's `derive` clauses expanded to, read by the same two
     // functions that just read the written ones. Nothing downstream of here
@@ -836,8 +965,8 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     // `derive` — the shorter of the two things to delete, and the one whose
     // author probably did not realize the other existed.
     let expanded = khora_hir::derive::derived(db, file);
-    map.signatures.extend(traits::impl_signatures(&expanded.source_file()));
-    let mut generated = traits::collect(&expanded.source_file());
+    map.signatures.extend(traits::impl_signatures(&expanded.source_file(), homes));
+    let mut generated = traits::collect(&expanded.source_file(), homes);
     debug_assert_eq!(generated.impls.len(), expanded.impls.len());
     for (imp, from) in generated.impls.iter_mut().zip(&expanded.impls) {
         // The range it was collected with is an offset into generated text and
@@ -1182,13 +1311,17 @@ fn covers(declared: &[String], written: &[&str]) -> bool {
 }
 
 /// The labels and types of a record type's fields, in written order.
-fn record_fields(r: &ast::RecordType, generics: &[String]) -> (Vec<String>, Vec<Type>) {
+fn record_fields(
+    r: &ast::RecordType,
+    generics: &[String],
+    homes: &TypeHomes,
+) -> (Vec<String>, Vec<Type>) {
     let mut labels = Vec::new();
     let mut fields = Vec::new();
     for f in r.fields() {
         let Some(label) = f.name().and_then(|n| n.ident()) else { continue };
         labels.push(label);
-        fields.push(type_of_syntax(f.ty().as_ref(), generics));
+        fields.push(type_of_syntax(f.ty().as_ref(), generics, homes));
     }
     (labels, fields)
 }
@@ -1198,7 +1331,7 @@ fn record_fields(r: &ast::RecordType, generics: &[String]) -> (Vec<String>, Vec<
 /// Absent means the closed empty row: a function with no clause requires
 /// nothing and raises nothing, which is what makes those the safe defaults and
 /// what an entry point has to reduce to.
-fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String]) -> Type {
+fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String], homes: &TypeHomes) -> Type {
     let Some(clause) = clause else { return Type::empty_row() };
     match clause {
         // `with { ledger: Ledger | 'e }`
@@ -1212,13 +1345,13 @@ fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String]) -> Type {
                 .chain(after_tail)
                 .filter_map(|f| {
                     let label = f.name()?.ident()?;
-                    Some((label, type_of_syntax(f.ty().as_ref(), generics)))
+                    Some((label, type_of_syntax(f.ty().as_ref(), generics, homes)))
                 })
                 .collect();
             let tail = r
                 .row_tail()
                 .and_then(|t| t.types().next())
-                .map(|t| type_of_syntax(Some(&t), generics));
+                .map(|t| type_of_syntax(Some(&t), generics, homes));
             Type::row(fields, tail)
         }
         // `raises DbError + ModelError`. An error row labels each entry with
@@ -1233,7 +1366,7 @@ fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String]) -> Type {
             let mut fields = Vec::new();
             let mut tail = None;
             for operand in u.operands() {
-                match type_of_syntax(Some(&operand), generics) {
+                match type_of_syntax(Some(&operand), generics, homes) {
                     Type::Param(name) if name.starts_with('\'') => {
                         tail = Some(Type::Param(name));
                     }
@@ -1244,11 +1377,11 @@ fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String]) -> Type {
         }
         // `raises DbError`, or a bare `'r`.
         other => {
-            let ty = type_of_syntax(Some(other), generics);
+            let ty = type_of_syntax(Some(other), generics, homes);
             match &ty {
                 // A bare row variable is the whole row.
                 Type::Param(name) if name.starts_with('\'') => Type::row(Vec::new(), Some(ty)),
-                _ => match error_label(other, generics) {
+                _ => match error_label(other, generics, homes) {
                     Some(entry) => Type::row(vec![entry], None),
                     None => Type::empty_row(),
                 },
@@ -1258,8 +1391,12 @@ fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String]) -> Type {
 }
 
 /// One entry of an error row, labelled by the error type's own name.
-fn error_label(ty: &ast::Type, generics: &[String]) -> Option<(String, Type)> {
-    let resolved = type_of_syntax(Some(ty), generics);
+fn error_label(
+    ty: &ast::Type,
+    generics: &[String],
+    homes: &TypeHomes,
+) -> Option<(String, Type)> {
+    let resolved = type_of_syntax(Some(ty), generics, homes);
     let label = match &resolved {
         Type::Adt { name, .. } => name.clone(),
         Type::Param(name) => name.clone(),
@@ -1273,7 +1410,7 @@ fn error_label(ty: &ast::Type, generics: &[String]) -> Option<(String, Type)> {
 /// `generics` are the names in scope as rigid parameters — a bare `A` inside
 /// `fn f<A>(..)` is [`Type::Param`], not an undeclared ADT. Anything else
 /// unrecognized becomes [`Type::Unknown`], which suppresses follow-on errors.
-fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
+fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes: &TypeHomes) -> Type {
     let Some(ty) = ty else { return Type::Unknown };
     match ty {
         ast::Type::Unit(_) => Type::Unit,
@@ -1283,25 +1420,27 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
         ast::Type::Fn(f) => {
             let params = match f.param_type() {
                 Some(ast::Type::Tuple(t)) => {
-                    t.elements().map(|e| type_of_syntax(Some(&e), generics)).collect()
+                    t.elements().map(|e| type_of_syntax(Some(&e), generics, homes)).collect()
                 }
                 Some(ast::Type::Unit(_)) | None => Vec::new(),
                 Some(ast::Type::Paren(p)) => {
-                    vec![type_of_syntax(p.inner().as_ref(), generics)]
+                    vec![type_of_syntax(p.inner().as_ref(), generics, homes)]
                 }
-                Some(other) => vec![type_of_syntax(Some(&other), generics)],
+                Some(other) => vec![type_of_syntax(Some(&other), generics, homes)],
             };
-            let ret = type_of_syntax(f.return_type().as_ref(), generics);
+            let ret = type_of_syntax(f.return_type().as_ref(), generics, homes);
             Type::Fn {
                 params,
                 ret: Box::new(ret),
                 requires: Box::new(row_of_syntax(
                     f.with_clause().and_then(|c| c.row()).as_ref(),
                     generics,
+                    homes,
                 )),
                 raises: Box::new(row_of_syntax(
                     f.raises_clause().and_then(|c| c.row()).as_ref(),
                     generics,
+                    homes,
                 )),
             }
         }
@@ -1309,7 +1448,7 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
         ast::Type::Literal(l) => l.value().map(Type::Const).unwrap_or(Type::Unknown),
         ast::Type::Tuple(t) => {
             let items: Vec<Type> =
-                t.elements().map(|e| type_of_syntax(Some(&e), generics)).collect();
+                t.elements().map(|e| type_of_syntax(Some(&e), generics, homes)).collect();
             if items.is_empty() { Type::Unit } else { Type::Tuple(items) }
         }
         ast::Type::Path(p) => {
@@ -1323,9 +1462,9 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
             let name = p.path().map(|p| p.text_path()).unwrap_or_default();
             let args: Vec<Type> = p
                 .type_args()
-                .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics)).collect())
+                .map(|a| a.args().map(|t| type_of_syntax(Some(&t), generics, homes)).collect())
                 .unwrap_or_default();
-            named_type(&name, args, generics)
+            named_type(&name, args, generics, homes)
         }
         _ => Type::Unknown,
     }
@@ -1337,7 +1476,12 @@ fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String]) -> Type {
 /// The single place a type *name* means something. Reached from the syntax
 /// above and from a [`TypeRef`] below, because two interpreters of one name is
 /// how the two come to disagree — and the disagreement is silent.
-fn named_type(name: &str, args: Vec<Type>, generics: &[String]) -> Type {
+fn named_type(
+    name: &str,
+    args: Vec<Type>,
+    generics: &[String],
+    homes: &TypeHomes,
+) -> Type {
     // `T::Item` where `T` is a parameter in scope is a projection, not a type
     // whose name happens to contain `::`.
     if let Some((owner, assoc)) = name.split_once("::") {
@@ -1366,7 +1510,16 @@ fn named_type(name: &str, args: Vec<Type>, generics: &[String]) -> Type {
                 Type::Applied { head: Box::new(Type::Param(other.to_string())), args }
             }
         }
-        other => Type::Adt { name: other.to_string(), args },
+        other => match homes.of(other) {
+            // The declared name, not the local spelling. An alias renames a
+            // mention and not a type: `import other::{Point as Other}` used to
+            // key the import under `Other`, and a rename invented a type.
+            Some((home, declared)) => Type::Adt { name: declared, home: Some(home), args },
+            // Nothing declares it. Already an error where the name was
+            // resolved, and `home: None` keeps it from quietly unifying with a
+            // real type that happens to share the spelling.
+            None => Type::Adt { name: other.to_string(), home: None, args },
+        },
     }
 }
 
@@ -1376,19 +1529,23 @@ fn named_type(name: &str, args: Vec<Type>, generics: &[String]) -> Type {
 /// checks nothing — the shapes it stands for are the ones the echo does not
 /// carry yet, and saying nothing about them is what every annotation used to
 /// get.
-pub fn type_of_ref(ty: &khora_hir::body::TypeRef, generics: &[String]) -> Type {
+pub fn type_of_ref(
+    ty: &khora_hir::body::TypeRef,
+    generics: &[String],
+    homes: &TypeHomes,
+) -> Type {
     use khora_hir::body::TypeRef;
     match ty {
         TypeRef::Unit => Type::Unit,
         TypeRef::Const(value) => Type::Const(*value),
         TypeRef::Opaque => Type::Unknown,
         TypeRef::Tuple(items) => {
-            let items: Vec<Type> = items.iter().map(|t| type_of_ref(t, generics)).collect();
+            let items: Vec<Type> = items.iter().map(|t| type_of_ref(t, generics, homes)).collect();
             if items.is_empty() { Type::Unit } else { Type::Tuple(items) }
         }
         TypeRef::Named { name, args } => {
-            let args = args.iter().map(|t| type_of_ref(t, generics)).collect();
-            named_type(name, args, generics)
+            let args = args.iter().map(|t| type_of_ref(t, generics, homes)).collect();
+            named_type(name, args, generics, homes)
         }
     }
 }
@@ -2460,7 +2617,7 @@ impl<'a> Checker<'a> {
     fn substitution_for(&mut self, type_name: &str, ty: &Type) -> HashMap<String, Type> {
         let generics = self.types.adts.get(type_name).cloned().unwrap_or_default();
         let args = match self.unifier.zonk(ty) {
-            Type::Adt { name, args } if name == type_name => args,
+            Type::Adt { name, args, .. } if name == type_name => args,
             _ => Vec::new(),
         };
         generics
@@ -2483,7 +2640,14 @@ impl<'a> Checker<'a> {
         let mapping: HashMap<String, Type> =
             generics.iter().map(|g| (g.clone(), self.unifier.fresh())).collect();
         let args = generics.iter().map(|g| mapping[g].clone()).collect();
-        (Type::Adt { name: name.to_string(), args }, mapping)
+        // `name` is what the mention spelled. The identity is what it
+        // resolves to, so an alias instantiates the type it names rather than
+        // one of its own.
+        let (home, declared) = match self.types.homes.of(name) {
+            Some((home, declared)) => (Some(home), declared),
+            None => (None, name.to_string()),
+        };
+        (Type::Adt { name: declared, home, args }, mapping)
     }
 
     fn infer_call(
@@ -2858,7 +3022,7 @@ impl<'a> Checker<'a> {
                     // annotation, because it is believed.
                     let declared = declared
                         .as_ref()
-                        .map(|t| type_of_ref(t, &self.signature.generics));
+                        .map(|t| type_of_ref(t, &self.signature.generics, &self.types.homes));
                     let ty = match (declared, init) {
                         (Some(declared), Some(e)) => {
                             self.expect(*e, &declared, "this binding");

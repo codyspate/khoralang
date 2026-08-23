@@ -244,7 +244,7 @@ pub fn kinds(adts: &HashMap<String, Vec<String>>, consts: &HashMap<String, Vec<b
 /// Signatures keep `Self` as a rigid parameter; substituting it is what an impl
 /// is for. The kind of `Self` is whatever the widest application in the trait
 /// requires — `Self<A>` anywhere in `Functor` makes `Self : * -> *`.
-pub fn collect(source: &ast::SourceFile) -> Traits {
+pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
     let mut out = Traits::default();
 
     for decl in source.decls() {
@@ -262,7 +262,7 @@ pub fn collect(source: &ast::SourceFile) -> Traits {
 
                 let methods: Vec<MethodDef> = t
                     .functions()
-                    .filter_map(|f| method_def(&f, &scope))
+                    .filter_map(|f| method_def(&f, &scope, homes))
                     .collect();
 
                 let self_kind = self_kind(&methods);
@@ -280,7 +280,7 @@ pub fn collect(source: &ast::SourceFile) -> Traits {
             }
             ast::Decl::Impl(i) if i.is_inherent() => {
                 let generics = crate::generic_names(i.type_params().as_ref());
-                let self_type = type_of_syntax(i.self_type().as_ref(), &generics);
+                let self_type = type_of_syntax(i.self_type().as_ref(), &generics, homes);
                 let Some(head) = head_of(&self_type) else { continue };
                 out.inherent.push(InherentImpl {
                     head,
@@ -296,14 +296,14 @@ pub fn collect(source: &ast::SourceFile) -> Traits {
             ast::Decl::Impl(i) => {
                 let generics = crate::generic_names(i.type_params().as_ref());
                 let Some(trait_name) = i.trait_().as_ref().and_then(written_head) else { continue };
-                let self_type = type_of_syntax(i.self_type().as_ref(), &generics);
+                let self_type = type_of_syntax(i.self_type().as_ref(), &generics, homes);
                 let methods: Vec<String> =
                     i.functions().filter_map(|f| f.name().and_then(|n| n.ident())).collect();
                 let assoc_types: Vec<(String, Type)> = i
                     .assoc_types()
                     .filter_map(|a| {
                         let name = a.name().and_then(|n| n.ident())?;
-                        Some((name, type_of_syntax(a.definition().as_ref(), &generics)))
+                        Some((name, type_of_syntax(a.definition().as_ref(), &generics, homes)))
                     })
                     .collect();
                 out.impls.push(ImplDef {
@@ -322,7 +322,11 @@ pub fn collect(source: &ast::SourceFile) -> Traits {
     out
 }
 
-fn method_def(f: &ast::FnDecl, scope: &[String]) -> Option<MethodDef> {
+fn method_def(
+    f: &ast::FnDecl,
+    scope: &[String],
+    homes: &crate::TypeHomes,
+) -> Option<MethodDef> {
     let name = f.name()?.ident()?;
     let own = crate::generic_names(f.type_params().as_ref());
     let own_bounds = crate::bound_lists(f.type_params().as_ref());
@@ -334,7 +338,7 @@ fn method_def(f: &ast::FnDecl, scope: &[String]) -> Option<MethodDef> {
         .map(|list| {
             list.params()
                 .map(|p| match p.ty() {
-                    Some(ty) => type_of_syntax(Some(&ty), &generics),
+                    Some(ty) => type_of_syntax(Some(&ty), &generics, homes),
                     // A bare `self` means `self: Self`, as in Rust.
                     None if p.name().and_then(|n| n.ident()).as_deref() == Some("self") => {
                         Type::Param("Self".to_string())
@@ -344,11 +348,11 @@ fn method_def(f: &ast::FnDecl, scope: &[String]) -> Option<MethodDef> {
                 .collect()
         })
         .unwrap_or_default();
-    let ret = f.return_type().map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics));
+    let ret = f.return_type().map_or(Type::Unit, |t| type_of_syntax(Some(&t), &generics, homes));
     let requires =
-        crate::row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics);
+        crate::row_of_syntax(f.with_clause().and_then(|c| c.row()).as_ref(), &generics, homes);
     let raises =
-        crate::row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics);
+        crate::row_of_syntax(f.raises_clause().and_then(|c| c.row()).as_ref(), &generics, homes);
 
     Some(MethodDef {
         name,
@@ -432,7 +436,10 @@ pub fn method_key(trait_name: &str, head: &str, method: &str) -> String {
 /// Read from the impl's own written signature rather than derived from the
 /// trait's, so that a mismatch between the two is a *diagnosable difference*
 /// rather than something the checker silently papers over.
-pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
+pub fn impl_signatures(
+    source: &ast::SourceFile,
+    homes: &crate::TypeHomes,
+) -> HashMap<String, Signature> {
     let mut out = HashMap::new();
 
     // A trait's own signatures, keyed `Trait::method`, with `Self` still rigid.
@@ -445,7 +452,7 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
         let mut scope = vec!["Self".to_string()];
         scope.extend(own.iter().cloned());
         for f in t.functions() {
-            let Some(def) = method_def(&f, &scope) else { continue };
+            let Some(def) = method_def(&f, &scope, homes) else { continue };
             let mut generics = vec!["Self".to_string()];
             generics.extend(def.signature.generics.iter().cloned());
             // `Self: ThisTrait` is what a default body relies on when it calls
@@ -468,12 +475,12 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
             continue;
         }
         let generics = crate::generic_names(i.type_params().as_ref());
-        let self_type = type_of_syntax(i.self_type().as_ref(), &generics);
+        let self_type = type_of_syntax(i.self_type().as_ref(), &generics, homes);
         let Some(head) = head_of(&self_type) else { continue };
         let mut scope = vec!["Self".to_string()];
         scope.extend(generics.iter().cloned());
         for f in i.functions() {
-            let Some(def) = method_def(&f, &scope) else { continue };
+            let Some(def) = method_def(&f, &scope, homes) else { continue };
             let mapping: HashMap<&str, Type> =
                 [("Self", self_type.clone())].into_iter().collect();
             let mut own = generics.clone();
@@ -512,13 +519,13 @@ pub fn impl_signatures(source: &ast::SourceFile) -> HashMap<String, Signature> {
         }
         let Some(trait_name) = i.trait_().as_ref().and_then(written_head) else { continue };
         let generics = crate::generic_names(i.type_params().as_ref());
-        let self_type = type_of_syntax(i.self_type().as_ref(), &generics);
+        let self_type = type_of_syntax(i.self_type().as_ref(), &generics, homes);
         let Some(head) = head_of(&self_type) else { continue };
 
         let mut scope = vec!["Self".to_string()];
         scope.extend(generics.iter().cloned());
         for f in i.functions() {
-            let Some(def) = method_def(&f, &scope) else { continue };
+            let Some(def) = method_def(&f, &scope, homes) else { continue };
             // Inside an impl, `Self` *is* the implementing type, so it is
             // substituted away here — nothing downstream of instance selection
             // should ever have to think about it again.

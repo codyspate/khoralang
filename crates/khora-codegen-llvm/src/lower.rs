@@ -1142,7 +1142,7 @@ impl<'ctx> Lower<'_, 'ctx> {
 
     /// What a `Shared<A>` holds, at this instantiation.
     fn shared_contents(&mut self, site: ExprId, cell: &Type, range: TextRange) -> Option<Type> {
-        if let Type::Adt { name, args } = cell {
+        if let Type::Adt { name, args, .. } = cell {
             if name == runtime::SHARED_TYPE {
                 if let Some(first) = args.first() {
                     return Some(first.clone());
@@ -1181,7 +1181,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             ("of", [closure]) => Some(self.expr(*closure)?),
             ("call", [wrapper, argument]) => {
                 let wrapped = self.types.of(*wrapper).clone();
-                let Type::Adt { name: owner, args: parameters } = &wrapped else {
+                let Type::Adt { name: owner, args: parameters, .. } = &wrapped else {
                     return self.fail(format!("`{wrapped}` is not a `SharedFn`"), range);
                 };
                 if owner != runtime::SHARED_FN_TYPE || parameters.len() < 3 {
@@ -1945,8 +1945,12 @@ impl<'ctx> Lower<'_, 'ctx> {
         // has to outlive the call, and a scope is what makes that true on the
         // raising path as well.
         self.drop(object.into(), &Type::Str);
+        // The compiler's own array, named rather than resolved: this is
+        // chosen here to pick drop glue, and nothing unifies it with a type a
+        // program wrote.
         let buffer_ty = Type::Adt {
             name: runtime::ARRAY_TYPE.to_string(),
+            home: None,
             args: vec![Type::Fixed(khora_types::IntKind { signed: false, bits: 8 })],
         };
         self.scopes.push(vec![Cleanup::Temp(buffer.into(), buffer_ty)]);
@@ -2441,7 +2445,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// because `Array::new` has no receiver and its result is the array.
     fn array_element(&mut self, ty: &Type, range: TextRange) -> Option<Type> {
         match ty {
-            Type::Adt { name, args } if name == runtime::ARRAY_TYPE => {
+            Type::Adt { name, args, .. } if name == runtime::ARRAY_TYPE => {
                 Some(args.first().cloned().unwrap_or(Type::Unit))
             }
             other => {
