@@ -128,14 +128,47 @@ thinking about it:
   ever wrote. Excluded by name: an arm's own pattern bindings, and anything a
   `let` inside an arm declares.
 
-**A body that can unwind keeps the conservative plan entirely**, and that is the
-piece still owing. `raise`, `!`, `catch` and `return` leave a frame from the
-middle, and what is still owned there depends on how far execution got.
-`lower.rs` holds cleanups in `scopes: Vec<Vec<Cleanup>>` and unwinds by walking
-it, so the set it releases is fixed at each lowering position and cannot be made
-path-dependent without changing that representation. The analysis above is
-already written to answer the question; the code generator cannot yet act on the
-answer.
+*Bodies that can unwind.* These were skipped entirely at first, and the reason
+was real: `raise`, `!`, `catch` and `return` leave a frame from the middle, and
+what is still owned there depends on how far execution got. `lower.rs` holds
+cleanups in `scopes: Vec<Vec<Cleanup>>` and unwinds by walking it, so the set it
+releases is fixed at each *lowering position* — and a lowering position cannot
+answer a question two runtime paths answer differently.
+
+The way out is not to make the compile-time set path-dependent but to stop
+asking it. **The block keeps its release, and a take clears the slot.** Before
+the take the binding is the block's, and a `raise` passing through releases it;
+after the take the slot holds null, and releasing null is a no-op the runtime
+already tolerates. "Has this been handed on" becomes a question the slot answers
+at run time, which is the only thing that can answer it.
+
+That store is paid only where something can unwind. Where nothing can, the block
+never lists the binding at all, the answer is static, and the store would be
+dead — which is the common case and stays free.
+
+It removed 56 of the 280 reference-count operations in an HTTP parse, a fifth of
+them, **and moved the clock by nothing measurable**. Both halves of that are
+worth stating. After §3 each remaining operation is a handful of instructions,
+so fifty-six of them is somewhere near 1% of a 1,570ns parse and beneath what
+this benchmark can resolve. It is a real win that this measurement cannot see,
+not a win that is not there — and the honest summary of §1 and §3 together is
+that reference counting has stopped being where the time goes.
+
+**What it found was worth more than what it saved.** Clearing the slot turns a
+wrong answer from the analysis into a null dereference instead of a stale
+pointer that usually still works, and the first thing it caught was a bug older
+than this pass: **a capability is read where nothing mentions it**. `with {
+clock: Clock }` puts `clock` in scope, and a call to anything that also wants a
+`Clock` is handed the evidence by code generation — there is no expression for
+that read. The link shortener's `health` mentions `clock` once and forwards it
+twice afterwards, so the pass called the mention a last use and handed the
+binding away. `Body::capabilities` records exactly which binding supplies each
+label at each call site, and is now what decides this.
+
+That bug did not need an unwinding body. It was reachable before, and survived
+because the binding kept pointing at a handler the enclosing `with` block still
+held: the count was one short rather than the pointer being wrong. A leak, on a
+path nothing measured.
 
 What made the change survivable, and is worth keeping for 9.2:
 

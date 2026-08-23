@@ -901,6 +901,28 @@ impl<'ctx> Lower<'_, 'ctx> {
         // it needs its own reference.
         if self.plan.needs_dup(id) {
             self.dup(value);
+            return Some(value);
+        }
+
+        // No copy. The plan says whether that is because this read *takes* the
+        // binding — its last use, handed the reference the binding was holding
+        // — or for one of the other reasons a read needs no copy of its own.
+        //
+        // **A take in a body that can unwind clears the slot.** The block still
+        // lists the binding among what it releases, because a `raise` passing
+        // through before this point has to release it; clearing the slot is
+        // what stops the block releasing it again after. It makes "has this
+        // been handed on" a question the slot answers at run time rather than
+        // one the lowering position would have to answer at compile time — and
+        // the lowering position cannot, because two paths reach it in different
+        // states. `docs/design/reuse.md` §1.
+        //
+        // Where nothing can unwind the answer is static, the block never lists
+        // the binding at all, and this store would be dead. That is the common
+        // case and it keeps costing nothing.
+        if self.plan.unwinds && self.plan.takes.contains(&id) {
+            let zero = self.be.zero_value(&ty);
+            self.be.builder.build_store(slot, zero).expect("clearing a taken slot");
         }
         Some(value)
     }

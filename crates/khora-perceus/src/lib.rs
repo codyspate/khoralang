@@ -134,6 +134,24 @@ pub struct RcPlan {
     /// then exactly one path from the release to the allocation and no way to
     /// take it. `docs/design/reuse.md` §2.
     pub reuse: HashMap<ExprId, ExprId>,
+    /// Reads that took the binding's reference rather than copying it.
+    ///
+    /// The same decision `dups` records by omission, said positively, because
+    /// the two are not complements: a borrow copies nothing either, and so does
+    /// a read the forward walk never planned a copy for. The code generator
+    /// used to work out which reads were takes by asking whether a copy was
+    /// planned, and that put a slot-clearing store on reads that were neither.
+    pub takes: HashSet<ExprId>,
+    /// Whether this body can leave a frame without reaching its end.
+    ///
+    /// A `!`, a `raise`, a `catch` or a `return`. The code generator reads this
+    /// to decide how a *take* is recorded: where nothing can unwind, whether a
+    /// binding has been handed on is settled at compile time and the block
+    /// simply does not release it; where something can, the block releases
+    /// every binding it declared and a take clears the slot, so the question
+    /// is answered by what is in the slot at run time. `docs/design/reuse.md`
+    /// §1.
+    pub unwinds: bool,
     /// Locals whose reference was handed to their last read rather than
     /// released by their block.
     ///
@@ -379,20 +397,32 @@ impl<'a> Planner<'a> {
     /// nothing between two points changes what is owned. Making that set
     /// path-dependent is the rest of `reuse.md` §1 and is not attempted here.
     fn settle_last_uses(&mut self) {
-        if self.unwinds {
-            return;
-        }
+        self.plan.unwinds = self.unwinds;
         let Some(root) = self.body.root else { return };
         self.unowned = self.projected_bindings(root);
+        self.unowned.extend(self.forwarded_capabilities());
         self.live_before(root, &Live::new());
 
-        // Whoever took the reference releases it. This has to sweep every list
-        // rather than only the declaring block's: a `match` arm's bindings are
+        // Whoever took the reference releases it, so a binding that was taken
+        // is struck from the release lists. This has to sweep every list rather
+        // than only the declaring block's: a `match` arm's bindings are
         // registered against the arm, and a parameter against the outermost
         // block, so a per-block sweep leaves those to be released twice.
-        let taken = self.plan.moved.clone();
-        for releases in self.plan.drops.values_mut() {
-            releases.retain(|local| !taken.contains(local));
+        //
+        // **Not in a body that can unwind.** There the take is a fact about a
+        // point in the program rather than about the binding: before it the
+        // block still owns the reference and a `raise` passing through has to
+        // release it, after it the block does not. Striking the binding here
+        // would leak on every early path, and leaving it would double-release
+        // on the ordinary one. So the block keeps its release and the code
+        // generator clears the slot at the take, which makes "has this been
+        // handed on" a question the slot answers rather than one the lowering
+        // position has to.
+        if !self.unwinds {
+            let taken = self.plan.moved.clone();
+            for releases in self.plan.drops.values_mut() {
+                releases.retain(|local| !taken.contains(local));
+            }
         }
         self.plan.drops.retain(|_, releases| !releases.is_empty());
     }
@@ -414,6 +444,7 @@ impl<'a> Planner<'a> {
                         // Needed later, so this read needs one of its own.
                     } else {
                         self.plan.dups.remove(&id);
+                        self.plan.takes.insert(id);
                         self.plan.moved.insert(local);
                     }
                     live.insert(local);
@@ -560,6 +591,14 @@ impl<'a> Planner<'a> {
     /// consumes nothing — releasing at the head would free a value that arm is
     /// about to use, and releasing at the end is what the block already does.
     fn across_arms(&mut self, arms: &[ExprId], arm_bound: &[LocalId], after: &Live) -> Live {
+        if self.unwinds {
+            let mut live = Live::new();
+            for arm in arms {
+                live.extend(self.reads_in(*arm));
+            }
+            live.extend(after.iter().copied());
+            return live;
+        }
         let before: Vec<Live> = arms
             .iter()
             .map(|arm| {
@@ -695,6 +734,37 @@ impl<'a> Planner<'a> {
         found
     }
 
+    /// Every binding a call site reads without the body saying so.
+    ///
+    /// **A capability is read where nothing mentions it.** `with { clock:
+    /// Clock }` puts `clock` in scope, and a call to something that also wants
+    /// a `Clock` is handed the evidence by code generation — there is no
+    /// `Expr::Local` for that read, so a backward pass over the expressions
+    /// cannot see it. `health` in the link shortener mentions `clock` exactly
+    /// once and forwards it twice afterwards; taking it at the mention left the
+    /// two forwards reading a binding that had been handed away.
+    ///
+    /// `Body::capabilities` is the record of precisely those reads — which
+    /// binding supplies each label at each call site — so it is what decides
+    /// this rather than a guess about which locals look like capabilities.
+    ///
+    /// This was wrong before the last-use pass reached bodies that can unwind,
+    /// and was survivable: the binding kept pointing at a handler the enclosing
+    /// `with` block still held, so the count was one short rather than the
+    /// pointer being wrong. Clearing the slot at a take is what turned it into
+    /// a crash, which is the better failure and how it was found.
+    fn forwarded_capabilities(&self) -> Live {
+        let mut found = Live::new();
+        for supplied in self.body.capabilities.values() {
+            found.extend(supplied.iter().map(|(_, local)| *local));
+        }
+        // The evidence this body was handed, whether or not it forwards any on.
+        for (_, pat) in &self.body.evidence {
+            found.extend(self.bound_by(*pat));
+        }
+        found
+    }
+
     /// Every binding that holds a reference belonging to somebody else.
     ///
     /// A `match` arm's are no longer among them — `arm_binds` gives the arm a
@@ -803,6 +873,7 @@ impl<'a> Planner<'a> {
             .collect();
         for at in places {
             self.plan.dups.insert(at);
+            self.plan.takes.remove(&at);
         }
         // A branch nested inside may have granted an arm release for this
         // binding on the strength of a take that is now a copy again. Left in

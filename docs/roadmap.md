@@ -1571,12 +1571,27 @@ cannot be had from the `Share` marker however much it looks like it should.
     not exist on the other paths, where the release would read a slot nothing
     ever wrote.
 
-  **What is left is the whole of the remaining risk:** a body that can unwind
-  keeps the conservative plan entirely. `raise`, `!`, `catch` and `return` leave
-  a frame from the middle, and the code generator's cleanup stack is positional
-  — it cannot express a live set that depends on how far execution got. Making
-  it able to is 9.1's last piece and wants a change to `lower.rs`'s scope
-  representation rather than to the analysis. `docs/design/reuse.md` §1.
+  **Bodies that can unwind are in too**, which they were not at first. The
+  cleanup stack is positional and cannot express a live set that depends on how
+  far execution got — so the fix is to stop asking it. The block keeps its
+  release and a take clears the slot: before the take the binding is the
+  block's and a `raise` releases it, after it the slot is null and releasing
+  null is a no-op. The store is emitted only where something can unwind.
+
+  56 of the 280 reference-count operations in an HTTP parse, and **no
+  measurable change to the clock** — after 9.3 each operation is a handful of
+  instructions, so a fifth of them is near 1% of a 1,570ns parse and beneath
+  what the benchmark resolves.
+
+  **It found a bug older than the pass, and that was worth more.** Clearing the
+  slot turns a wrong answer into a null dereference rather than a stale pointer
+  that usually still works, and the first thing it caught was that **a
+  capability is read where nothing mentions it**: code generation hands the
+  evidence to any callee that wants the same one, with no expression for the
+  read. The link shortener's `health` mentions `clock` once and forwards it
+  twice, so the mention was called a last use. Reachable before this too, and
+  survivable then — the binding still pointed at a live handler, so the count
+  was one short rather than the pointer wrong. `docs/design/reuse.md` §1.
 - **9.4a Borrowed parameters — done, and it was the one that paid.** The calls
   that already borrowed and said otherwise: `Region::defer`, `Shared::get` and
   friends, `String::byte`, `Array::get`. Each took an owned reference and
@@ -1669,11 +1684,9 @@ asserted by `a_uniquely_owned_walk_allocates_nothing` in
 `crates/khora-codegen-llvm/tests/reuse.rs` — written before the work, and no
 longer ignored.
 
-Two pieces are deliberately not done, and neither is part of the exit criterion:
-the unwinding half of 9.1, which wants a change to how `lower.rs` represents a
-scope rather than to the analysis; and the per-object half of 9.4, which wants
-an escape analysis or biased reference counting. Both are written up against
-their measurements.
+One piece is deliberately not done, and it is not part of the exit criterion:
+the per-object half of 9.4, which wants an escape analysis or biased reference
+counting. It is written up against its measurement.
 
 ---
 

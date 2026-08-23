@@ -1835,3 +1835,113 @@ fn main() -> Int {
     );
     assert_eq!(ran.code, Some(0));
 }
+
+/// **A body that can unwind still hands a binding to its last use.**
+///
+/// Phase 9.1 skipped these entirely at first. Where nothing can unwind, whether
+/// a binding was handed on is settled by the lowering position and the block
+/// simply does not release it; where a `raise` can leave from the middle, the
+/// same binding is the block's before the take and not after, and one release
+/// list cannot say both. So the block keeps its release and the take clears the
+/// slot, which makes it a question the slot answers at run time.
+///
+/// Both orders are checked, because they fail in opposite directions. A raise
+/// *after* the take must not release what was handed on — a double free, which
+/// the runtime aborts on. A raise *before* it must release — a leak, which only
+/// the live count finds.
+#[test]
+fn a_binding_handed_to_its_last_use_survives_a_raise() {
+    let ran = run(
+        "unwind_last_use",
+        &format!(
+            "{FALLIBLE}
+
+/// `text` is taken by the concatenation, and then the frame leaves.
+fn after(text: Node) -> Node raises DbError {{
+  let held = text;
+  raise DbError::Refused
+}}
+
+/// `text` is still the block's when the frame leaves, and is handed on only on
+/// the path that gets past the raise.
+fn before(text: Node, fail: Bool) -> Node raises DbError {{
+  if fail {{ raise DbError::Refused }} else {{ }};
+  text
+}}
+
+fn count(n: Node) -> Int {{ match n {{ Node::Of(v) => v }} }}
+
+fn run_it() -> Int {{
+  let a = after(Node::Of(1))! catch {{ DbError::Timeout => Node::Of(8), DbError::Refused => Node::Of(9) }};
+  let b = before(Node::Of(2), true)! catch {{ DbError::Timeout => Node::Of(8), DbError::Refused => Node::Of(9) }};
+  let c = before(Node::Of(3), false)! catch {{ DbError::Timeout => Node::Of(8), DbError::Refused => Node::Of(9) }};
+  count(a) + count(b) + count(c)
+}}
+
+fn main() -> Int {{
+  print(run_it());
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout,
+        "21\n0\n",
+        "9 from the raise after the take, 9 from the one before it, 3 from the survivor — \
+         and nothing left alive"
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A capability mentioned once and then forwarded**, in a body that can
+/// unwind. The shape that crashed the link shortener.
+///
+/// `health` there names `clock` exactly once and afterwards calls two things
+/// that also want a `Clock`. Code generation hands those the evidence, and
+/// there is no expression for that read — so the last-use pass saw one mention,
+/// called it the last use, and handed the binding away. In a body that can
+/// unwind a take also clears the slot, so the two forwards read null and the
+/// server died on its first request.
+///
+/// It was wrong before that too and survived, because the binding still pointed
+/// at a handler the enclosing `with` block held: the count was one short rather
+/// than the pointer being wrong.
+#[test]
+fn a_capability_survives_being_forwarded_after_its_only_mention() {
+    let ran = run(
+        "capability_forwarded",
+        &format!(
+            "{LEDGER}
+export type DbError = | Refused;
+
+fn checked(id: Int) -> Int with {{ ledger: Ledger }} raises DbError {{
+  if id < 0 {{ raise DbError::Refused }} else {{ report(id) }}
+}}
+
+/// One mention of `ledger`, then two calls that are handed it silently. The
+/// `!` is what makes this a body that can unwind.
+fn total(id: Int) -> Int with {{ ledger: Ledger }} raises DbError {{
+  let mine = ledger.balance(id);
+  mine + checked(id)! + checked(id)!
+}}
+
+fn run_it() -> Int raises DbError {{
+  with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
+    total(3)!
+  }}
+}}
+
+fn main() -> Int raises DbError {{
+  print(run_it()!);
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "90\n0\n", "three balances of 30, and nothing left alive");
+    assert_eq!(ran.code, Some(0));
+}
+

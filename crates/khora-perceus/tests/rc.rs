@@ -235,3 +235,33 @@ fn a_read_in_a_guard_keeps_the_binding_alive() {
         "`s` is read again in the guard and must not be handed away: {p:?}"
     );
 }
+
+/// **A capability is read where nothing mentions it**, so a mention can never
+/// be its last use.
+///
+/// `with { clock: Clock }` puts `clock` in scope, and a call to anything that
+/// also wants a `Clock` is handed the evidence by code generation. There is no
+/// expression for that read, so a backward pass over the expressions cannot see
+/// it: `twice` mentions `clock` once and forwards it once, and taking it at the
+/// mention leaves the forward reading a binding that was handed away.
+///
+/// This was wrong before the last-use pass reached bodies that can unwind, and
+/// it survived — the binding kept pointing at a handler the enclosing `with`
+/// block still held, so the count was one short rather than the pointer being
+/// wrong. Clearing the slot at a take is what turned it into a crash.
+#[test]
+fn a_capability_is_never_handed_to_its_last_mention() {
+    let db = KhoraDatabase::new();
+    let p = plan(
+        &db,
+        "module m;\n\
+         export effect Clock { now: () -> Int, }\n\
+         fn tick() -> Int with { clock: Clock } { clock.now() }\n\
+         fn twice() -> Int with { clock: Clock } { clock.now() + tick() }\n",
+        "twice",
+    );
+
+    assert!(!p.boxed.is_empty(), "the capability should be counted at all: {p:?}");
+    assert!(p.moved.is_empty(), "a capability must not be handed to a mention: {p:?}");
+    assert!(p.takes.is_empty(), "and so no read of one is a take: {p:?}");
+}
