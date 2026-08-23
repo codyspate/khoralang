@@ -209,7 +209,7 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
             }
             if wanted.contains(&name) {
                 errors.push(HirError {
-                    message: format!("`{name}` is named twice in this `derive`"),
+                    message: format!("`{name}` is named twice in this clause"),
                     range: at,
                 });
                 continue;
@@ -245,7 +245,7 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
     if !parse.errors().is_empty() {
         errors.push(HirError {
             message: format!(
-                "the compiler wrote an impl for this `derive` that it cannot itself \
+                "the compiler wrote an impl for this clause that it cannot itself \
                  parse; that is a compiler bug. What it wrote:\n{text}"
             ),
             range: impls.first().map_or(TextRange::empty(0.into()), |i| i.at),
@@ -270,8 +270,8 @@ fn shape_of(
     let refuse = |errors: &mut Vec<HirError>, why: &str| {
         errors.push(HirError {
             message: format!(
-                "nothing can be derived for `{type_name}`: {why}. A derive is written \
-                 from the fields, so there has to be a list of them to read"
+                "nothing can be derived for `{type_name}`: {why}. A derived impl is \
+                 written from the fields, so there has to be a list of them to read"
             ),
             range: at,
         });
@@ -331,8 +331,8 @@ fn parameters_of(
         if param.is_const() || param.row_var().is_some() {
             errors.push(HirError {
                 message: format!(
-                    "`{type_name}` has a const or row parameter, which `derive` cannot \
-                     write an impl for yet; write the impl by hand"
+                    "`{type_name}` has a const or row parameter, which cannot be derived \
+                     yet; write the impl out by hand"
                 ),
                 range: at,
             });

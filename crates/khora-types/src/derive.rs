@@ -92,7 +92,7 @@ pub fn derive_report(db: &dyn Db, file: SourceFile) -> DeriveReport {
                 refused = true;
                 out.errors.push(HirError {
                     message: format!(
-                        "`derive({})` needs every field to implement `{}`, and {} has type \
+                        "`impl {}` needs every field to implement `{}`, and {} has type \
                          `{field}`, which does not",
                         derived.trait_name,
                         derived.trait_name,
