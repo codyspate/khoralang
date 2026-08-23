@@ -57,10 +57,30 @@ before the phase that depends on it starts.
 
 | # | Question | Blocks |
 | --- | --- | --- |
-| D12 | **What Khora promises not to break.** Observable semantics, package identity, public ABI and versioning rules, editions, and which changes are allowed in a minor release. Phase 8.5 owns the decision, before optimization or publication turns an accident into a promise. | 8.5 |
 | D13 | **What `[a, b, c]` denotes.** The literal parses today and means nothing: the checker gives `Expr::List` no type at all and the backend refuses it, so every use is either an inscrutable "type was never worked out" or a hard error. It has to become a `List`, an `Array`, or a thing chosen by its expected type — and if the answer is `List`, whether writing one requires `List` to be in scope. Found by `derive(ToJson)`, whose expansion tried to be its first user. Until it is decided, generated code writes `List::Cons` chains. | any phase that lets a program write one |
 | D14 | **Whether `match` tests by equality.** Matching a `String` or float literal parses, checks, and reaches a backend that says it "needs a runtime comparison the backend does not generate yet" — so `match tag { "circle" => .. }` is a hard error at the end of the pipeline rather than a refusal at the start. Either the decision tree grows an equality test (`khora_str_eq` already exists and `==` compiles fine) or the pattern is refused where it is written. Silently accepting it through two phases and failing in the third is the one option that is wrong. | any phase that lets a program write one |
 **Closed:**
+
+- **D12** (what Khora promises not to break) is decided in
+  `docs/design/compatibility.md`: **before 1.0, change carefully and say so;
+  after 1.0, a program that compiles keeps compiling and keeps meaning the same
+  thing, within an edition, for the life of a major version.**
+
+  The consequential half is what is *not* observable, and it is why this came
+  before Phase 9 rather than before publication: when memory is allocated and
+  freed, and how much, is not something a program may depend on. Reuse analysis
+  exists to change exactly that, and optimising first would have made an
+  accident into a promise. Also unobservable: timing, `Map` iteration order,
+  hash values across runs, and the text of any diagnostic.
+
+  **Khora has no stable binary interface and will not have one.** Whole-program
+  monomorphization with no dictionary passing means a generic function does not
+  exist as code until something calls it at a type, so there is nothing to link
+  against. A package ships source; the only stable ABI is C's, at `extern`.
+
+  1.0 is blocked on package identity (10.2), declaration identity (8.5.2,
+  errata 46), and an audit of everything `std` exports — each of which the
+  document names rather than assumes.
 
 - **D4** (what `[permissions]` enforces) is decided in
   `docs/design/permissions.md`: **the manifest decides what capabilities a
@@ -346,7 +366,10 @@ by substituting its type arguments into its body, so every module's source has
 to be present at once — the constraint C++ templates and Rust generics have
 too. A symbol therefore carries the module that *defines* it, so two importers
 of one instantiation agree on a name and it is emitted once. Whether a compiled
-artifact could ever stand alone is D12.
+artifact could ever stand alone is D12, and the answer is no:
+`docs/design/compatibility.md` decides that Khora has no stable binary
+interface and will not have one, because a generic function does not exist as
+code until something calls it at a type. A package ships source.
 
 `traverse` needed three things beyond ordinary generics, all of which landed
 together: higher-kinded unification (solving `Self<A>` against `Option<Int>` as
@@ -1387,12 +1410,24 @@ promise. It does not add another execution model or widen the language.
   to make in passing. `identity.rs` asserts the collision still happens so that
   fixing it fails a test rather than passing silently. Package identity extends
   this in 10.2.
-- **8.5.3 Decide D12.** Write the pre-1.0 policy and the eventual 1.0 promise
-  separately. Pre-1.0 must preserve room to correct the language, with changes
-  called out and editions available when source migration is needed. The 1.0
-  policy must name observable semantics, source and package compatibility,
-  public ABI, versioning, editions, and which changes a minor release may make.
-  Deciding the policy does not declare the present implementation stable.
+- **8.5.3 Decide D12 — done.** `docs/design/compatibility.md`, and the
+  open-question table records it. Pre-1.0 and 1.0 are written separately:
+  before 1.0 the promise is procedural — anything may change, every change that
+  alters what a valid program does is named, and an edition arrives with the
+  first change that needs one. After 1.0 a program that compiles keeps
+  compiling and keeps meaning the same thing, within an edition, for the life
+  of a major version.
+
+  Two answers are load-bearing beyond the policy itself. **When memory is
+  allocated and freed is not observable** — which is what makes Phase 9 a
+  legal thing to do, and the reason this moved out of Phase 10. And **there is
+  no Khora ABI**, because whole-program monomorphization means a generic
+  function does not exist as code until something calls it at a type; a package
+  ships source, and the only stable ABI is C's at `extern`.
+
+  Deciding the policy does not declare the implementation stable, and the
+  document says what 1.0 still waits on: package identity, declaration
+  identity, and an audit of everything `std` exports.
 - **8.5.4 Audit claims against the executable repository.** The README,
   positioning, vision and design notes must agree about what is implemented,
   what is only designed, and what is explicitly bounded. In particular: the
@@ -1480,6 +1515,6 @@ code. Phase 8 *is* the first batch, and writing it is how we find out whether
 the language is good for the job while it is still cheap to change.
 
 **After 10 you can hand it to someone.** Packaging is last rather than first on
-purpose: D12 asks what may not break, and that question is unanswerable while
-the language is still moving. A minimal package manager could come earlier if
+purpose. D12 asked what may not break; 8.5.3 answers it, and the answer names
+package identity as one of the things 1.0 waits for. A minimal package manager could come earlier if
 the goal changes to letting other people start.
