@@ -161,6 +161,8 @@ pub struct Runtime<'ctx> {
     pub fiber_release: FunctionValue<'ctx>,
     /// `void *khora_fibers_open(void)`
     pub fibers_open: FunctionValue<'ctx>,
+    /// `void *khora_fibers_open_bounded(int64_t limit)`
+    pub fibers_bounded: FunctionValue<'ctx>,
     /// `void khora_fibers_adopt(void *fibers, void *fiber)`
     pub fibers_adopt: FunctionValue<'ctx>,
     /// `void khora_fibers_wait(void *fibers)`
@@ -264,6 +266,10 @@ impl<'ctx> Runtime<'ctx> {
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),
             fiber_release: declare("khora_fiber_release", void.fn_type(&[ptr.into()], false)),
             fibers_open: declare("khora_fibers_open", ptr.fn_type(&[], false)),
+            fibers_bounded: declare(
+                "khora_fibers_open_bounded",
+                ptr.fn_type(&[i64t.into()], false),
+            ),
             fibers_adopt: declare(
                 "khora_fibers_adopt",
                 void.fn_type(&[ptr.into(), ptr.into()], false),

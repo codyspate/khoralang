@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, SharedFn, Show, Split, nursery};
+import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, SharedFn, Show, Split, bounded_nursery};
 import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 
 // HTTP/1.1, over the sockets in `std::net::socket`.
@@ -814,7 +814,16 @@ impl Router {
       // does not exist where it is written, so `nursery` supplies one when it
       // calls it. Until that landed this was the handler spelled out by hand,
       // because a lambda's requirement row was always empty.
-      nursery(fn () => Router::serve_forever(router, server)!)!
+      // Bounded, because the connections come from outside. A fiber is an
+      // operating-system thread today and costs about 33 KB, so an unbounded
+      // nursery here would meet its ceiling by exhausting memory; this one
+      // meets it by accepting more slowly, and the backlog holds the rest.
+      //
+      // 256 is a working number rather than a tuned one: comfortably inside
+      // what was measured to be fine — 400 concurrent connections cost 401
+      // threads and 13 MB, still answering in 14 ms — and comfortably below
+      // where thread-per-connection stops being reasonable at all.
+      bounded_nursery(256, fn () => Router::serve_forever(router, server)!)!
     }
   }
 

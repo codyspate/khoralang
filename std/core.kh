@@ -2092,6 +2092,18 @@ impl Share for Fibers {}
 
 impl Fibers {
   fn open() -> Fibers;
+  /// A nursery that will hold at most `limit` running children.
+  ///
+  /// Adopting past the limit waits for the oldest to finish. That is the whole
+  /// of it, and it is what turns a capacity ceiling into a queue: a server
+  /// adopting a fiber per connection meets an unbounded nursery's ceiling by
+  /// exhausting memory, and meets a bounded one's by accepting more slowly,
+  /// which the listening socket's backlog is already built to absorb.
+  ///
+  /// Unbounded is right for a nursery over a known handful of tasks — the
+  /// shape `nursery(..)` is usually used for — and wrong for one fed by the
+  /// outside world.
+  fn bounded(limit: Int) -> Fibers;
   fn adopt(self, fiber: Fiber) -> ();
   /// Waits for every child, oldest first, and empties the nursery.
   fn wait(self) -> ();
@@ -2142,7 +2154,31 @@ export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises
   with 'e
   raises 'r
 {
-  let crew = Fibers::open();
+  bounded_nursery(0, body)!
+}
+
+/// The same, holding at most `limit` children at once.
+///
+/// **Which one to reach for is a question about where the work comes from.**
+/// A nursery over a known handful of tasks — three lookups in parallel, a
+/// fan-out over a list you are holding — should be unbounded, because the
+/// count is already bounded by the thing you are iterating. A nursery fed by
+/// the *outside world* should not be, because then the count is somebody
+/// else's decision.
+///
+/// A fiber is an operating-system thread today, so unbounded there means a
+/// ceiling met by exhausting memory. Bounded means one met by adopting more
+/// slowly, which for a server means accepting more slowly, which the listening
+/// socket's backlog is already built to absorb: overload becomes latency
+/// instead of collapse.
+export fn bounded_nursery<A, 'e, 'r>(
+  limit: Int,
+  body: () -> A with { 'e | nursery: Nursery } raises 'r
+) -> A
+  with 'e
+  raises 'r
+{
+  let crew = Fibers::bounded(limit);
   let value = with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
     body()!
   };

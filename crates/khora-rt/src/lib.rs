@@ -1103,7 +1103,14 @@ extern "C" fn fiber_release_shim(fiber: *mut u8) {
 ///
 /// Held Rust-side for the same reason a region's finalizers are: adopting one
 /// *grows* the list, and nothing in Khora grows a value in place.
-type Crew = Mutex<Vec<Handed>>;
+struct Children {
+    /// The most children this nursery will hold at once, or zero for as many
+    /// as are adopted.
+    limit: usize,
+    held: Vec<Handed>,
+}
+
+type Crew = Mutex<Children>;
 
 /// The tag every nursery object carries.
 const FIBERS_TAG: u32 = 0;
@@ -1132,8 +1139,28 @@ unsafe fn crew<'a>(fibers: *mut u8) -> Option<&'a Crew> {
 /// told which happened.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_fibers_open() -> *mut u8 {
+    khora_fibers_open_bounded(0)
+}
+
+/// Opens a nursery that will hold at most `limit` running children.
+///
+/// **The bound is what turns a capacity ceiling into a queue.** A fiber is an
+/// operating-system thread today, so a server adopting one per connection
+/// spends about 33 KB apiece — measured — and an unbounded nursery meets its
+/// ceiling by exhausting memory, which is the worst way to meet one. With a
+/// bound, adopting the child past the limit *waits* for an older one to finish,
+/// the accept loop stops accepting, and the connections pile up in the
+/// listening socket's backlog where the operating system already knows how to
+/// hold them. Overload becomes latency instead of collapse.
+///
+/// Zero means unbounded, which is right for a nursery over a known handful of
+/// concurrent tasks — the shape `nursery(..)` is usually used for — and wrong
+/// for one fed by the outside world.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
+    let limit = if limit > 0 { limit as usize } else { 0 };
     let object = khora_alloc(std::mem::size_of::<*mut Crew>(), FIBERS_TAG);
-    let list: Box<Crew> = Box::default();
+    let list: Box<Crew> = Box::new(Mutex::new(Children { limit, held: Vec::new() }));
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.
     unsafe {
@@ -1187,30 +1214,53 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
         fatal("adopting a fiber into a nursery that has already ended");
     };
 
-    let done: Vec<Handed> = {
-        // Locked: a nursery exists to be adopted into from more than one fiber,
-        // so this is the one place contention is expected rather than
-        // incidental.
-        let mut held = list.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: every handle in the list was live when adopted and this list
-        // has held the only reference since.
-        let (done, keep) =
-            std::mem::take(&mut *held).into_iter().partition(|Handed(f)| unsafe {
-                fiber_finished(*f)
-            });
-        *held = keep;
-        held.push(Handed(fiber));
-        done
-    };
+    // Until there is room. Each turn sweeps what has finished and, if that was
+    // not enough, takes the oldest child out to be waited for — outside the
+    // lock, because a join is not instant once the child is still running and a
+    // lock held across one is a nursery nobody else can adopt into.
+    loop {
+        let (done, waiting) = {
+            // Locked: a nursery exists to be adopted into from more than one
+            // fiber, so this is the one place contention is expected rather
+            // than incidental.
+            let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: every handle in the list was live when adopted and this
+            // list has held the only reference since.
+            let (done, keep): (Vec<Handed>, Vec<Handed>) = std::mem::take(&mut crew.held)
+                .into_iter()
+                .partition(|Handed(f)| unsafe { fiber_finished(*f) });
+            crew.held = keep;
 
-    // Released outside the lock. Joining a thread that has already ended
-    // returns at once, but a drop routine can reach another nursery, and a lock
-    // held across one of those is a lock ordering nobody agreed to.
-    for Handed(spent) in done {
-        // SAFETY: as above; this is the last reference to each.
-        unsafe {
-            khora_fiber_join(spent);
-            khora_drop(spent, Some(fiber_release_shim));
+            if crew.limit == 0 || crew.held.len() < crew.limit {
+                crew.held.push(Handed(fiber));
+                (done, None)
+            } else {
+                // Oldest first, which is the order `khora_fibers_wait` uses and
+                // the only one that cannot starve a child.
+                (done, Some(crew.held.remove(0)))
+            }
+        };
+
+        // Joining a thread that has already ended returns at once, but a drop
+        // routine can reach another nursery, and a lock held across one of
+        // those is a lock ordering nobody agreed to.
+        for Handed(spent) in done {
+            // SAFETY: as above; this is the last reference to each.
+            unsafe {
+                khora_fiber_join(spent);
+                khora_drop(spent, Some(fiber_release_shim));
+            }
+        }
+
+        match waiting {
+            None => return,
+            Some(Handed(oldest)) => {
+                // SAFETY: as above.
+                unsafe {
+                    khora_fiber_join(oldest);
+                    khora_drop(oldest, Some(fiber_release_shim));
+                }
+            }
         }
     }
 }
@@ -1237,7 +1287,7 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) {
     // Taken under the lock and joined outside it, because holding the lock
     // across a join would deadlock against exactly that adoption.
     loop {
-        let waiting = std::mem::take(&mut *list.lock().unwrap_or_else(|e| e.into_inner()));
+        let waiting = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
         if waiting.is_empty() {
             return;
         }
@@ -1285,7 +1335,7 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
         // slot was nulled above — so each round takes what the last one did not
         // know about.
         let list = Box::from_raw(list);
-        let mut round = std::mem::take(&mut *list.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut round = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
         while !round.is_empty() {
             for Handed(fiber) in round.iter() {
                 khora_fiber_cancel(*fiber);
@@ -1294,7 +1344,7 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
                 khora_fiber_join(fiber);
                 khora_drop(fiber, Some(fiber_release_shim));
             }
-            round = std::mem::take(&mut *list.lock().unwrap_or_else(|e| e.into_inner()));
+            round = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
         }
     }
 }

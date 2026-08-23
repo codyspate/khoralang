@@ -2466,6 +2466,19 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("a nursery is a value");
                 Some(fibers)
             }
+            ("bounded", [limit]) => {
+                let cap = self.expr(*limit)?;
+                let open = self.be.rt.fibers_bounded;
+                Some(
+                    self.be
+                        .builder
+                        .build_call(open, &[cap.into()], "fibers")
+                        .expect("opening a bounded nursery")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("a nursery is a value"),
+                )
+            }
             ("adopt", [nursery, fiber]) => {
                 let nursery_ty = self.types.of(*nursery).clone();
                 let handle = self.expr(*nursery)?;
