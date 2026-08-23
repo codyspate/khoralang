@@ -793,6 +793,17 @@ export type Router<'e> = {
   routes: List<Route<'e>>,
 };
 
+/// A response, and whether the connection that asked for it is staying open.
+///
+/// The two travel together because they are decided together: the answer's
+/// status and the request's `Connection` header are both known once, at the
+/// point the request has been parsed, and working either out again afterwards
+/// means reading the request a second time.
+export type Answered = {
+  response: Response,
+  keep: Bool,
+};
+
 /// Mounting is written `router |> Router::post(..)`, so the router is the
 /// first parameter of each. They are the type's own functions rather than free
 /// ones so that the pipeline reads as a chain against `Router` and cannot
@@ -927,29 +938,9 @@ impl Router {
     -> Bool
     raises 'e
   {
-    let answer = Router::answer_bytes(router, buffer, length)!;
-    // Kept open unless the request was malformed — a client that could not be
-    // understood cannot be trusted about where its next request begins — or
-    // unless it asked to close. HTTP/1.1 keeps by default; `Connection: close`
-    // is how a client opts out, and plenty do.
-    let keep = answer.status != 400 && answer.status != 413
-    &&!Router::asked_to_close(buffer, length);
-    transmit(connection, Response::rendered_keeping(answer, keep));
-    keep
-  }
-
-  /// Whether the request says it wants the connection closed.
-  fn asked_to_close(buffer: Array<U8>, length: Int) -> Bool {
-    let taken = Array::prefix(buffer, length);
-    if Array::is_utf8(taken) {
-      let text = lowered(String::from_bytes(taken));
-      match String::index_of(text, "connection: close") {
-        Option::None => false,
-        Option::Some(at) => true,
-      }
-    } else {
-      true
-    }
+    let outcome = Router::answer_bytes(router, buffer, length)!;
+    transmit(connection, Response::rendered_keeping(outcome.response, outcome.keep));
+    outcome.keep
   }
 
   fn answer_on<'e>(router: Router<'e>, connection: Int) -> ()
@@ -980,32 +971,45 @@ impl Router {
   }
 
   /// The answer to what arrived, whatever state it arrived in.
-  fn answer_bytes<'e>(router: Router<'e>, buffer: Array<U8>, filled: Int) -> Response
+  fn answer_bytes<'e>(router: Router<'e>, buffer: Array<U8>, filled: Int) -> Answered
     raises 'e
   {
     if filled <= 0 {
-      Response::text(400, "empty request")
+      { response: Response::text(400, "empty request"), keep: false }
     } else if filled >= limit() {
       // The buffer filled before the request ended. Whether the client lied
       // about its length or simply sent too much, the answer is the same.
-      Response::text(413, "request too large")
+      { response: Response::text(413, "request too large"), keep: false }
     } else {
       let taken = Array::prefix(buffer, filled);
       if Array::is_utf8(taken) {
         Router::answer(router, String::from_bytes(taken))!
       } else {
-        Response::text(400, "request was not text")
+        { response: Response::text(400, "request was not text"), keep: false }
       }
     }
   }
 
   /// What to send back for this request text.
-  fn answer<'e>(router: Router<'e>, text: String) -> Response
+  fn answer<'e>(router: Router<'e>, text: String) -> Answered
     raises 'e
   {
     match parse(text) {
-      Option::None => Response::text(400, "malformed request"),
-      Option::Some(request) => Router::dispatch(router.routes, request)!,
+      // A client that could not be understood cannot be trusted about where
+      // its next request begins, so this connection ends here.
+      Option::None => { response: Response::text(400, "malformed request"), keep: false },
+      Option::Some(request) => {
+        // Read off the headers the parser already folded and indexed, rather
+        // than searched for in the raw bytes. Scanning them again cost a copy
+        // of the whole request and a second pass to lower its case, on every
+        // request — about a fifth of the server's throughput for an answer
+        // that was already sitting in a map.
+        let keep = match Request::header(request, "connection") {
+          Option::None => true,
+          Option::Some(said) => lowered(said) != "close",
+        };
+        { response: Router::dispatch(router.routes, request)!, keep: keep }
+      },
     }
   }
 

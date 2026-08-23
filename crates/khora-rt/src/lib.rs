@@ -446,6 +446,85 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
 }
 
+/// Where `needle` first occurs in `hay`, or -1.
+///
+/// **A runtime call because the Khora version was 600 times slower.** Written
+/// as a loop over `String::byte`, finding a six-byte word in eighty bytes took
+/// 3,180 nanoseconds — a function call and a bounds check per byte, per
+/// candidate position. `memmem` does it in single digits, and the request
+/// parser calls it several times for every request a server answers.
+///
+/// An empty needle is found at zero, which is what every other language says
+/// and what makes `split_once` on an empty separator terminate.
+///
+/// # Safety
+///
+/// Both pointers must address at least their stated length in readable bytes,
+/// or be null with a length of zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_str_find(
+    hay: *const u8,
+    hay_len: usize,
+    needle: *const u8,
+    needle_len: usize,
+) -> i64 {
+    if needle_len == 0 {
+        return 0;
+    }
+    if needle_len > hay_len || hay.is_null() || needle.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller guarantees both lengths are readable.
+    let (hay, needle) = unsafe {
+        (
+            std::slice::from_raw_parts(hay, hay_len),
+            std::slice::from_raw_parts(needle, needle_len),
+        )
+    };
+    // The first byte narrows the candidates before anything longer is compared,
+    // which is the whole of why this is not the loop it replaced.
+    let first = needle[0];
+    let last = hay_len - needle_len;
+    let mut at = 0;
+    while at <= last {
+        match hay[at..=last].iter().position(|b| *b == first) {
+            None => return -1,
+            Some(step) => {
+                let here = at + step;
+                if &hay[here..here + needle_len] == needle {
+                    return here as i64;
+                }
+                at = here + 1;
+            }
+        }
+    }
+    -1
+}
+
+/// Copies `count` bytes from `src + from` to `dst`.
+///
+/// The same reasoning: a byte-at-a-time copy in Khora cost `String::slice`
+/// 1,575 nanoseconds for forty bytes. The offset is a parameter because Khora
+/// has no pointer arithmetic, deliberately.
+///
+/// # Safety
+///
+/// `dst` must address `count` writable bytes and `src` at least `from + count`
+/// readable ones; the two must not overlap.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_bytes_copy(
+    dst: *mut u8,
+    src: *const u8,
+    from: usize,
+    count: usize,
+) {
+    if count == 0 || dst.is_null() || src.is_null() {
+        return;
+    }
+    // SAFETY: per the contract above.
+    unsafe { std::ptr::copy_nonoverlapping(src.add(from), dst, count) };
+}
+
 /// Whether two strings hold the same bytes.
 ///
 /// Takes bytes and lengths rather than object pointers, matching

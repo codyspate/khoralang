@@ -758,28 +758,36 @@ impl String {
   /// than pretend — which is the honest failure for a caller who sliced by
   /// eye. Indices outside the string are clamped, because "the rest of it" is
   /// what every caller of `slice(i, byte_length(s))` means.
+  /// The bytes from `from` up to `to`, clamped to what is there.
+  ///
+  /// **The copy is one call, not one per byte.** Written as a loop over
+  /// `String::byte` this took 1,575 nanoseconds for forty bytes — a call and a
+  /// bounds check each way, per byte — and the request parser slices several
+  /// times for every request. `docs/design/ecosystem.md`'s rule applies: bind
+  /// the thing the platform already does well rather than writing it twice.
   fn slice(self, from: Int, to: Int) -> String {
     let length = String::byte_length(self);
     let start = if from < 0 { 0 } else if from > length { length } else { from };
     let end = if to < start { start } else if to > length { length } else { to };
     let count = end - start;
     let out: Array<U8> = Array::new(count, 0);
-    let mut at = 0;
-    while at < count {
-      Array::set(out, at, String::byte(self, start + at));
-      at = at + 1;
-    }
+    Array::with_data(out, fn (into, room) =>
+      String::with_data(self, fn (whole, n) => khora_bytes_copy(into, whole, start, count)));
     String::from_bytes(out)
   }
 
   /// Where `needle` first appears, or `None`.
+  /// Where `needle` first occurs, or nothing.
+  ///
+  /// **Bound rather than written**, and the reason is a measurement: the loop
+  /// this replaced took 3,180 nanoseconds to find a six-byte word in eighty
+  /// bytes, because it asked `String::byte` for one byte at a time and did it
+  /// again at every candidate position. It is the single hottest thing in the
+  /// request parser, which calls it once per header and twice more per line.
   fn index_of(self, needle: String) -> Option<Int> {
-    let room = String::byte_length(self) - String::byte_length(needle);
-    let mut at = 0;
-    let mut found = 0 - 1;
-    while at <= room && found < 0 {
-      if String::matches_at(self, needle, at) { found = at; } else { at = at + 1; }
-    }
+    let found = String::with_data(self, fn (hay, hay_len) =>
+      String::with_data(needle, fn (what, what_len) =>
+        khora_str_find(hay, hay_len, what, what_len)));
     if found < 0 { Option::None } else { Option::Some(found) }
   }
 
@@ -828,6 +836,8 @@ impl String {
 /// a table and a thousand lines, and `docs/design/ecosystem.md` names exactly
 /// this kind of thing as something to bind rather than write twice.
 extern fn khora_float_text(value: Float, into: Ptr, capacity: Int) -> Int;
+extern fn khora_str_find(hay: Ptr, hay_len: Int, needle: Ptr, needle_len: Int) -> Int;
+extern fn khora_bytes_copy(into: Ptr, from: Ptr, at: Int, count: Int) -> ();
 
 impl Float {
   /// The number, written out — `1.5`, `0.1`, `inf`.
@@ -1537,16 +1547,26 @@ export type Map<K, V> = {
 };
 
 impl<K: Hash, V> Map<K, V> {
-  fn new() -> Map<K, V> { { buckets: Array::new(8, Chain::Empty), count: 0 } }
+  /// An empty map, which allocates nothing but itself.
+  ///
+  /// **The buckets wait for the first insert.** An empty map used to cost an
+  /// eight-element array, and a great many maps are never written to: a
+  /// request with no query string still builds a query map, a route with no
+  /// `:name` still builds one for its parameters, and both were paid for on
+  /// every request a server answered. `Array::empty` is what makes the
+  /// difference, and it did not exist when this was written.
+  fn new() -> Map<K, V> { { buckets: Array::empty(), count: 0 } }
 
   fn len(self) -> Int { self.count }
 
   fn get(self, key: K) -> Option<V> {
-    Chain::find(Array::get(self.buckets, Map::slot(self, key)), key)
+    let at = Map::slot(self, key);
+    if at < 0 { Option::None } else { Chain::find(Array::get(self.buckets, at), key) }
   }
 
   fn holds(self, key: K) -> Bool {
-    Chain::holds(Array::get(self.buckets, Map::slot(self, key)), key)
+    let at = Map::slot(self, key);
+    if at < 0 { false } else { Chain::holds(Array::get(self.buckets, at), key) }
   }
 
   /// Adds `key`, replacing whatever was there. The count only moves when the
@@ -1671,16 +1691,28 @@ impl<K: Hash, V> Map<K, V> {
   /// Knuth's multiplicative constant, then a shift-xor so that the high bits —
   /// where multiplication puts the information — reach the low ones the mask
   /// keeps. Wrapping on purpose: overflow is where the mixing comes from.
+  /// Which bucket a key belongs in.
+  ///
+  /// Negative when there are no buckets, which is the empty map: every reader
+  /// checks for it, because masking against a length of zero would ask for
+  /// element -1.
   fn slot(self, key: K) -> Int {
-    let mixed = Int::wrapping_mul(key.hash(), 2654435761);
-    let spread = Int::xor(mixed, Int::shr(mixed, 16));
-    Int::and(spread, Array::length(self.buckets) - 1)
+    let width = Array::length(self.buckets);
+    if width == 0 {
+      0 - 1
+    } else {
+      let mixed = Int::wrapping_mul(key.hash(), 2654435761);
+      let spread = Int::xor(mixed, Int::shr(mixed, 16));
+      Int::and(spread, width - 1)
+    }
   }
 
   /// Twice the buckets, and every entry moved into the new ones.
   fn grow(self) -> () {
     let old = self.buckets;
-    self.buckets = Array::new(Array::length(old) * 2, Chain::Empty);
+    // Eight from nothing, and twice as many after that.
+    let was = Array::length(old);
+    self.buckets = Array::new(if was == 0 { 8 } else { was * 2 }, Chain::Empty);
     let mut i = 0;
     while i < Array::length(old) {
       Map::rehash(self, Array::get(old, i));

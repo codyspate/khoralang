@@ -28,7 +28,6 @@
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
-use inkwell::module::Linkage;
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
@@ -709,69 +708,27 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
-    /// Builds a heap `String` from a literal.
+    /// The `String` for a literal, which is built once for the whole program.
     ///
-    /// Layout, since the runtime does not impose one: tag [`STRING_TAG`], field
-    /// 0 is the byte length, and the bytes follow it immediately. The bytes are
-    /// copied out of a private constant rather than pointed at, so that every
-    /// pointer stored in a field is a Khora object and `drop_fields` never has
-    /// to distinguish. A string owns nothing, so it is dropped with a null
-    /// field routine.
+    /// Layout, since the runtime does not impose one: the ordinary object
+    /// header, then field 0 is the byte length and the bytes follow it
+    /// immediately.
+    ///
+    /// **A static, not an allocation.** This used to call `khora_alloc` and
+    /// memcpy the bytes every time the literal was *evaluated* — so
+    /// `Response::rendered` allocated a dozen small strings per response for
+    /// its `"Content-Type: "` and friends, `fn alphabet() -> String { ".." }`
+    /// allocated on every call, and a literal inside a loop allocated on every
+    /// turn. A string is immutable, so one object can serve every mention.
+    ///
+    /// The reference count starts enormous rather than at one. Nothing has to
+    /// know a static from a heap object that way: `khora_dup` and `khora_drop`
+    /// treat it like anything else, and the count cannot reach zero inside the
+    /// lifetime of any real program, so it is never handed to a free that would
+    /// not understand it. The alternative — a check on the hot path of every
+    /// drop — costs every object to protect these.
     fn string_literal(&mut self, text: &str) -> Flow<'ctx> {
-        let bytes = text.as_bytes();
-        let len = bytes.len() as u64;
-
-        let i64_type = self.be.ctx.i64_type();
-        let alloc = self.be.rt.alloc;
-        let object = self
-            .be
-            .builder
-            .build_call(
-                alloc,
-                &[
-                    i64_type.const_int(FIELD_WORD + len, false).into(),
-                    self.be.ctx.i32_type().const_int(STRING_TAG, false).into(),
-                ],
-                "str",
-            )
-            .expect("allocating a string")
-            .try_as_basic_value()
-            .basic()
-            .expect("khora_alloc returns a pointer")
-            .into_pointer_value();
-
-        let length_slot =
-            runtime::field_pointer(self.be.ctx, &self.be.builder, object, STRING_LEN_FIELD);
-        self.be
-            .builder
-            .build_store(length_slot, i64_type.const_int(len, false))
-            .expect("storing a string length");
-
-        if len > 0 {
-            let array = self.be.ctx.i8_type().array_type(len as u32);
-            let global = self.be.module.add_global(array, None, "kh$str");
-            global.set_initializer(&self.be.ctx.const_string(bytes, false));
-            global.set_constant(true);
-            global.set_linkage(Linkage::Private);
-
-            let destination = runtime::byte_offset(
-                self.be.ctx,
-                &self.be.builder,
-                object,
-                STRING_BYTES_OFFSET,
-                "str.bytes",
-            );
-            // Alignment 1 on both sides. The destination is in fact 8-aligned,
-            // but claiming more than is guaranteed here buys nothing a memcpy
-            // of a handful of bytes would notice.
-            let count = i64_type.const_int(len, false);
-            self.be
-                .builder
-                .build_memcpy(destination, 1, global.as_pointer_value(), 1, count)
-                .expect("copying string bytes");
-        }
-
-        Some(object.into())
+        Some(self.be.static_string(text).into())
     }
 
     fn read_local(&mut self, id: ExprId, local: LocalId, range: TextRange) -> Flow<'ctx> {

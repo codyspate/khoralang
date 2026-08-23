@@ -957,10 +957,17 @@ fn main() -> Int {
 /// The positive control for the test above: without it, a live count of zero
 /// could mean the counter is broken rather than the program clean.
 ///
-/// Two objects are alive when the count is taken — a string the program has
-/// not finished with, and a closure it never uses. This used to call
-/// `khora_dup` on the string to hold an extra reference, which handed a
-/// reference-counted Khora object straight to C and is now refused:
+/// One object is alive when the count is taken: a closure the program never
+/// uses.
+///
+/// The string beside it is *not* counted, and that is the point of keeping it
+/// here. A literal is a static now — one object per distinct text, built into
+/// the binary, never allocated — so it costs nothing to hold and nothing to
+/// let go of. This asserted `2` while every mention of a literal called
+/// `khora_alloc` and memcpy'd the bytes.
+///
+/// The count also used to be taken after a `khora_dup` on the string, which
+/// handed a reference-counted Khora object straight to C and is now refused:
 /// `docs/design/ffi.md` says only scalars and pointers cross.
 #[test]
 fn a_leaked_closure_is_actually_observable() {
@@ -983,7 +990,7 @@ fn main() -> Int {
 }
 ",
     );
-    assert_eq!(ran.stdout, "2\n4\n", "a live string and a live closure are both counted");
+    assert_eq!(ran.stdout, "1\n4\n", "the closure is counted; the literal is not an allocation");
     assert_eq!(ran.code, Some(0));
 }
 

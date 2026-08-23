@@ -561,6 +561,8 @@ pub(crate) struct Backend<'ctx> {
     trampolines: HashMap<usize, FunctionValue<'ctx>>,
     /// One change shim per value type, keyed by how the type prints.
     change_shims: HashMap<String, FunctionValue<'ctx>>,
+    /// One `String` object per distinct literal, shared by every mention.
+    static_strings: HashMap<String, PointerValue<'ctx>>,
     /// The same, for the pair of types `Shared::modify` moves.
     modify_shims: HashMap<String, FunctionValue<'ctx>>,
     /// A program-wide id for each error type, assigned on first sight. It is
@@ -650,6 +652,7 @@ impl<'ctx> Backend<'ctx> {
             pending_thunks: Vec::new(),
             trampolines: HashMap::new(),
             change_shims: HashMap::new(),
+            static_strings: HashMap::new(),
             modify_shims: HashMap::new(),
             error_ids: HashMap::new(),
             error_releaser: None,
@@ -1359,6 +1362,55 @@ impl<'ctx> Backend<'ctx> {
                 .expect("keeping a field past its record");
         }
         value
+    }
+
+    /// One `String` object per distinct literal, in static storage.
+    ///
+    /// See [`Lower::string_literal`] for why. Cached by text, so a literal
+    /// repeated across a program is one object however many times it is
+    /// written.
+    pub fn static_string(&mut self, text: &str) -> PointerValue<'ctx> {
+        if let Some(found) = self.static_strings.get(text) {
+            return *found;
+        }
+
+        let bytes = text.as_bytes();
+        let len = bytes.len() as u64;
+        let i64_type = self.ctx.i64_type();
+        let i32_type = self.ctx.i32_type();
+        let byte_array = self.ctx.i8_type().array_type(len as u32);
+
+        // The header, then the length field, then the bytes: exactly what
+        // `khora_alloc` would have produced.
+        let shape = self.ctx.struct_type(
+            &[i64_type.into(), i32_type.into(), i32_type.into(), i64_type.into(), byte_array.into()],
+            false,
+        );
+        // Large enough that no program reaches zero, small enough to leave room
+        // above for the dups a long-running one performs.
+        let immortal = i64_type.const_int(1 << 40, false);
+        let initial = self.ctx.const_struct(
+            &[
+                immortal.into(),
+                i32_type.const_int(runtime::STRING_TAG, false).into(),
+                i32_type.const_int(runtime::FIELD_WORD + len, false).into(),
+                i64_type.const_int(len, false).into(),
+                self.ctx.const_string(bytes, false).into(),
+            ],
+            false,
+        );
+
+        let global = self.module.add_global(shape, None, "kh$string");
+        global.set_initializer(&initial);
+        global.set_linkage(Linkage::Private);
+        // Not `set_constant`: the reference count is written by every `dup` and
+        // `drop` that passes through, so the object lives in writable storage
+        // even though its bytes never change.
+        global.set_alignment(8);
+
+        let pointer = global.as_pointer_value();
+        self.static_strings.insert(text.to_string(), pointer);
+        pointer
     }
 
     pub fn tagged_trampoline(&mut self, arity: usize) -> FunctionValue<'ctx> {

@@ -309,10 +309,11 @@ export fn main() -> () {
     );
     assert_eq!(
         out,
-        "2\n2\n2\n2\n102\n53\n2\n0\n",
+        "2\n2\n2\n2\n101\n52\n2\n0\n",
         "two objects — the vector and its array — at every length, including none; \
-         a hundred strings are those two plus the hundred strings themselves; \
-         popping fifty leaves fifty, the last grow's fill, and the two"
+         a hundred strings are those two plus ninety-nine, because `Int::to_string(0)` \
+         gives back the literal `\"0\"` and a literal is a static rather than an \
+         allocation; popping fifty leaves those, the last grow's fill, and the two"
     );
 }
 
