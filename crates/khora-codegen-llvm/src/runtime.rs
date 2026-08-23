@@ -115,6 +115,10 @@ pub struct Runtime<'ctx> {
     pub dup: FunctionValue<'ctx>,
     /// `void khora_drop(void *object, void (*drop_fields)(void *))`
     pub drop: FunctionValue<'ctx>,
+    /// `void khora_single_threaded(void)` — told to the runtime by `main` when
+    /// the compiler counted references non-atomically, so that a spawn is an
+    /// abort rather than a race.
+    pub single_threaded: FunctionValue<'ctx>,
     /// `void khora_drop_last(void *object, void (*drop_fields)(void *), size_t previous)`
     ///
     /// The slow half of a drop generated code decremented itself.
@@ -232,6 +236,7 @@ impl<'ctx> Runtime<'ctx> {
             // opaque pointers a function pointer is just `ptr`, so passing
             // null and passing a routine are the same call shape.
             drop: declare("khora_drop", void.fn_type(&[ptr.into(), ptr.into()], false)),
+            single_threaded: declare("khora_single_threaded", void.fn_type(&[], false)),
             drop_last: declare(
                 "khora_drop_last",
                 void.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),

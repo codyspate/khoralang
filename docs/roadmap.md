@@ -1478,17 +1478,27 @@ are still refused because the backend has not caught up.
 
 ---
 
-## Phase 9 — Perceus reuse and FBIP
+## Phase 9 — Perceus reuse and FBIP — done
 
-Reuse analysis, drop specialization, borrowed parameters. Also the escape
-analysis D10 promised: an object that provably does not leave its fiber gets
-the cheap reference-counting operations back.
+Reuse analysis, drop specialization, borrowed parameters, and as much of the
+escape analysis D10 promised as can be had without a flow analysis.
 
 Later than it used to be, deliberately. An optimization is measured against
 real code and there was none; reuse analysis over a linked list is also worth
 much less than over the arrays phase 6 brings.
 
-`docs/design/reuse.md` has the plan and the order.
+Together, on an 80-byte HTTP request: **2,440ns at the start of the phase, 1,555
+now**, and 14,560 to 7,345 on a browser's request. `bench/service` went 507k to
+548k req/s, which is inside the 8% that benchmark varies by and is here to say
+nothing regressed rather than to claim a gain — most of what a request parser
+does is build strings and hash them.
+
+Two things the phase got wrong on paper and right in the measurement, both
+recorded where they happened: 9.3 was called "the cheapest of the four and the
+least interesting" and was the second largest win, and 9.4's remaining half
+cannot be had from the `Share` marker however much it looks like it should.
+
+`docs/design/reuse.md` has the plan, the order, and what is left.
 
 - **9.0 A field-less constructor is a static — done.** `Option::None` was a
   heap allocation, and so was `List::Nil`, and so was every case of an enum
@@ -1579,23 +1589,50 @@ much less than over the arrays phase 6 brings.
   **slower**, because nothing is ever freed and the working set stops fitting in
   cache. A no-op runtime measures a program with a leak, not what counting
   costs.
-- **9.4 Borrowed parameters and D10's escape analysis — priced at 12%.** The
-  claim here used to be "the largest single win available, because every `dup`
-  in a single-threaded program is a lock-free atomic". A throwaway build with
-  the atomics removed says 2,365ns against 2,075ns on an HTTP parse, and that
-  is a ceiling rather than an estimate. Worth having, not worth reordering for.
-  `docs/design/reuse.md`.
+- **9.4 Non-atomic counting — done where the compiler can prove one thread.**
+  Measured first: with counts kept correct and the atomics removed, an HTTP
+  parse ran 1,670ns to 1,555ns and a browser's 8,360 to 7,345. Seven and twelve
+  per cent, a ceiling rather than an estimate.
 
-  What the same measurement found instead: **reference-count operations
-  outnumber allocations ten to one**, and a hundred failed `Map::get` calls
-  perform 5,704 of them. Not performing an operation is worth more than making
-  it cheaper, which is 9.1's argument and is stronger than reuse's.
+  `Fiber::spawn` is the only way a Khora program starts a thread, so a program
+  that never mentions it has one thread for its life and can count references
+  with plain arithmetic. Whole-program monomorphization makes that answerable —
+  the compiler already holds every body it will emit — and the scan is
+  conservative in both available directions: a mention rather than a call, over
+  the whole expression arena rather than a walk from the root.
+
+  **Checked at run time as well.** A data race in a refcount is memory
+  corruption arriving far from its cause and no test finds it reliably, so the
+  generated `main` tells the runtime what was decided and `khora_fiber_spawn`
+  aborts if a thread starts anyway. Forcing the flag on turns
+  `a_program_that_spawns_counts_references_atomically` into that abort, which is
+  how the guard was confirmed to guard something.
+
+  **What is left is per-object, and the `Share` marker cannot supply it.** It is
+  tempting to say a type that cannot cross a fiber can be counted
+  non-atomically. `String` is shareable, and so is `Map`, and so is every
+  ordinary immutable container — sharing an immutable value is the thing that
+  ought to be allowed. A sound type-level rule would deliver almost nothing. The
+  two shapes that would are a real escape analysis (which allocation sites reach
+  a spawn's captures — what D10 asked for, and the one that would help a server)
+  and biased reference counting (an owning thread per object, no analysis, a
+  wider header and a comparison per operation). Neither is started;
+  `docs/design/reuse.md` §4 has both written up against the measurement.
+
+  This entry used to be "priced at 12%" and to claim borrowed parameters as part
+  of itself. Those landed as 9.4a during the throughput work and are recorded
+  above.
 
 **Exit: met.** `map` over a uniquely-owned list performs zero allocations,
 asserted by `a_uniquely_owned_walk_allocates_nothing` in
 `crates/khora-codegen-llvm/tests/reuse.rs` — written before the work, and no
-longer ignored. What remains in the phase is 9.3 and 9.4, both of which are
-optimizations over a scheme that now works rather than parts of it.
+longer ignored.
+
+Two pieces are deliberately not done, and neither is part of the exit criterion:
+the unwinding half of 9.1, which wants a change to how `lower.rs` represents a
+scope rather than to the analysis; and the per-object half of 9.4, which wants
+an escape analysis or biased reference counting. Both are written up against
+their measurements.
 
 ---
 

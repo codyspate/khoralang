@@ -571,3 +571,50 @@ fn main() -> Int {{
     );
     assert_eq!(ran.code, Some(0));
 }
+
+/// A program that spawns must be compiled with **atomic** reference counting,
+/// and this is what says so.
+///
+/// A program that never mentions `Fiber::spawn` counts references with plain
+/// arithmetic — `docs/design/reuse.md` §4 — which is sound only because the
+/// compiler proved there is one thread. The failure mode of getting that wrong
+/// is a data race in a refcount: memory corruption a long way from its cause,
+/// and nothing a test would reliably catch. So the runtime is told what was
+/// decided, and `khora_fiber_spawn` refuses to start a thread in a program that
+/// claimed it would not.
+///
+/// This spawns, so it must not have claimed that. Two fibers and the parent
+/// each build and release counted objects, and the live count returns to zero —
+/// which it would not if the counts were racing, and which never prints at all
+/// if the abort fires.
+#[test]
+fn a_program_that_spawns_counts_references_atomically() {
+    let ran = run(
+        "spawn_forces_atomics",
+        &format!(
+            "{FIBERS}
+export type Cell = | Nil | One(next: Cell);
+
+/// Enough building and releasing to lose a count if two threads shared one
+/// without atomics.
+fn churn(depth: Int) -> Int {{
+  if depth == 0 {{ 0 }} else {{ let c = Cell::One(Cell::Nil); depth + churn(depth - 1) }}
+}}
+
+/// The handles are released with this block, which is also how they join.
+fn work() -> () {{
+  let one = Fiber::spawn(fn () => {{ let _ = churn(2000); }});
+  let two = Fiber::spawn(fn () => {{ let _ = churn(2000); }});
+  let _ = churn(2000);
+  Fiber::join(one);
+  Fiber::join(two)
+}}
+
+fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "0
+", "every counted object must be released");
+    assert_eq!(ran.code, Some(0));
+}

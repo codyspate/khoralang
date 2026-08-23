@@ -112,6 +112,36 @@ enum Entry {
     Tests,
 }
 
+/// Whether anything in the program can start a thread.
+///
+/// `Fiber::spawn` is the only one: `khora_fiber_spawn` is the sole runtime
+/// entry point that calls `std::thread::spawn`, and a nursery adopts fibers
+/// that already exist rather than making them. So the whole question is
+/// whether any reachable body so much as *mentions* it.
+///
+/// Mentions, not calls, and over the whole expression arena rather than a walk
+/// from the root. Both are the conservative direction: a `Fiber::spawn` handed
+/// around as a value is still a spawn, and an expression a walk would have
+/// skipped costs an optimization rather than correctness. The generated `main`
+/// tells the runtime what was decided, which turns a wrong answer into an abort
+/// at the first spawn instead of a data race.
+fn program_can_spawn<'a>(
+    mono: &'a khora_types::mono::Instances,
+    body_of: impl Fn(&khora_types::mono::Instance) -> Option<&'a khora_hir::body::Body>,
+) -> bool {
+    mono.instances.iter().any(|(instance, _)| {
+        body_of(instance).is_some_and(|body| {
+            body.exprs().any(|(_, expr)| {
+                matches!(
+                    expr,
+                    khora_hir::body::Expr::Path(khora_hir::Resolution::TraitItem { owner, name })
+                        if owner == crate::runtime::FIBER_TYPE && name == "spawn"
+                )
+            })
+        })
+    })
+}
+
 fn build(
     db: &dyn Db,
     root: SourceRoot,
@@ -146,6 +176,16 @@ fn build(
 
     let context = Context::create();
     let mut backend = Backend::new(&context, &name, types.clone(), &machine);
+    // Tests each get a fiber of their own, so only a `main` build can be
+    // single-threaded.
+    backend.single_threaded =
+        entry_point == Entry::Main && !program_can_spawn(mono, |instance| {
+            let home = mono.home(&instance.symbol())?;
+            khora_hir::body::bodies(db, home)
+                .iter()
+                .find(|(n, _)| n == &instance.function)
+                .map(|(_, b)| b)
+        });
 
     // One emitted function per *specialization*, not per source function: a
     // generic body has no machine representation until its type arguments are
@@ -524,6 +564,20 @@ pub(crate) const CLOSURE_CAPTURE_BASE: usize = 1;
 
 /// Everything shared by every function in the module under construction.
 pub(crate) struct Backend<'ctx> {
+    /// Whether this program can ever have two threads.
+    ///
+    /// False when nothing reachable mentions `Fiber::spawn`, which is the only
+    /// way a Khora program creates a thread. Reference counting is then plain
+    /// arithmetic rather than a pair of atomics — worth 7% of an HTTP parse and
+    /// 10% of a browser's, and it is D10's escape analysis in the degenerate
+    /// case where there is only one fiber to escape from.
+    ///
+    /// **The generated `main` tells the runtime**, which aborts if a spawn ever
+    /// happens anyway. Being wrong here is a data race rather than a crash, and
+    /// a data race in a reference count is memory corruption a long way from
+    /// its cause, so it is worth one branch on a call that starts a thread to
+    /// turn it into a message. `docs/design/reuse.md` §4.
+    pub single_threaded: bool,
     pub ctx: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
@@ -642,6 +696,9 @@ impl<'ctx> Backend<'ctx> {
 
         let rt = Runtime::declare(ctx, &module);
         Backend {
+            // Set by `build` once the reachable set is known. Assuming threads
+            // until told otherwise is the safe direction.
+            single_threaded: false,
             ctx,
             module,
             builder: ctx.create_builder(),
@@ -2064,6 +2121,16 @@ impl<'ctx> Backend<'ctx> {
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
         self.remember_arguments(main);
+
+        // Before anything else, and only when it is true. Generated code has
+        // been counting references without atomics on the strength of this, and
+        // the runtime turns a spawn that happens anyway into a message rather
+        // than a race. See `Backend::single_threaded`.
+        if self.single_threaded {
+            self.builder
+                .build_call(self.rt.single_threaded, &[], "")
+                .expect("declaring the program single-threaded");
+        }
 
         let call = self.builder.build_call(khora_main, &[], "result").expect("calling main");
 

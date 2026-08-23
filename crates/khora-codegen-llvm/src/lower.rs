@@ -596,18 +596,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("a dup's null guard");
 
         self.at(bump);
-        // Relaxed: the caller already owns a reference, so the object cannot be
-        // freed underneath this and nothing is being published. Ordering is
-        // only needed on the last release. The same argument `khora_dup` makes.
-        self.be
-            .builder
-            .build_atomicrmw(
-                AtomicRMWBinOp::Add,
-                object,
-                self.be.ctx.i64_type().const_int(1, false),
-                AtomicOrdering::Monotonic,
-            )
-            .expect("an inline dup");
+        self.adjust_count(object, 1);
         self.br(done);
         self.at(done);
     }
@@ -640,19 +629,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("a drop's null guard");
 
         self.at(release);
-        // Release, so that everything this thread did to the object happens
-        // before whichever thread takes the count to zero sees it. The matching
-        // acquire is the fence inside `khora_drop_last`.
-        let previous = self
-            .be
-            .builder
-            .build_atomicrmw(
-                AtomicRMWBinOp::Sub,
-                object,
-                self.be.ctx.i64_type().const_int(1, false),
-                AtomicOrdering::Release,
-            )
-            .expect("an inline drop");
+        let previous = self.adjust_count(object, -1);
         // Zero goes to the slow path too, which is where the already-zero abort
         // lives: a second branch here would be paid by every drop in the
         // program to catch something that must never happen.
@@ -679,6 +656,50 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("releasing the last reference");
         self.br(done);
         self.at(done);
+    }
+
+    /// Adds `by` to an object's refcount, returning what was there before.
+    ///
+    /// **Atomic only where two threads are possible.** A program that never
+    /// mentions `Fiber::spawn` has one thread for its whole life, and its
+    /// reference counts are then ordinary arithmetic: a load, an add and a
+    /// store, with no lock prefix and nothing for the processor to order. Worth
+    /// 7% of an HTTP request parse and 10% of a browser's — D10's escape
+    /// analysis in the case where there is nothing to escape to.
+    /// `docs/design/reuse.md` §4.
+    ///
+    /// Where threads are possible the orderings are the ones `khora_dup` and
+    /// `khora_drop` argued for: relaxed to add, because the caller already owns
+    /// a reference and nothing is being published; release to subtract, pairing
+    /// with the acquire fence inside `khora_drop_last`.
+    fn adjust_count(&mut self, object: PointerValue<'ctx>, by: i64) -> IntValue<'ctx> {
+        let i64t = self.be.ctx.i64_type();
+        let one = i64t.const_int(1, false);
+        if self.be.single_threaded {
+            let previous = self
+                .be
+                .builder
+                .build_load(i64t, object, "rc")
+                .expect("loading a refcount")
+                .into_int_value();
+            let next = if by > 0 {
+                self.be.builder.build_int_add(previous, one, "rc.up")
+            } else {
+                self.be.builder.build_int_sub(previous, one, "rc.down")
+            }
+            .expect("adjusting a refcount");
+            self.be.builder.build_store(object, next).expect("storing a refcount");
+            return previous;
+        }
+        let (op, ordering) = if by > 0 {
+            (AtomicRMWBinOp::Add, AtomicOrdering::Monotonic)
+        } else {
+            (AtomicRMWBinOp::Sub, AtomicOrdering::Release)
+        };
+        self.be
+            .builder
+            .build_atomicrmw(op, object, one, ordering)
+            .expect("adjusting a refcount")
     }
 
     /// Releases everything owned by scopes at or above `depth`, innermost

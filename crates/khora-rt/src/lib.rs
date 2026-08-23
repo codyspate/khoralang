@@ -567,6 +567,23 @@ pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: usize, tag: u32
     token
 }
 
+/// Set when the compiler decided this program cannot start a thread.
+///
+/// Generated code then counts references with plain arithmetic rather than
+/// atomics, which is only sound if it was right. [`khora_fiber_spawn`] checks
+/// this, so being wrong is a message naming the mistake rather than a data
+/// race in a refcount — which would be memory corruption a long way from its
+/// cause, and the single worst failure mode this runtime has.
+static SINGLE_THREADED: AtomicUsize = AtomicUsize::new(0);
+
+/// Records that generated code is counting references non-atomically.
+///
+/// Called once from `main`, before anything else. `docs/design/reuse.md` §4.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_single_threaded() {
+    SINGLE_THREADED.store(1, Ordering::Relaxed);
+}
+
 /// The slow half of a drop the caller decremented itself.
 ///
 /// Generated code decrements the refcount inline and calls this only when the
@@ -1174,6 +1191,12 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     glue: Option<extern "C" fn(*mut u8)>,
     call: Option<Trampoline1>,
 ) -> *mut u8 {
+    // The compiler said this program has one thread and emitted non-atomic
+    // reference counting on the strength of it. Carrying on would race every
+    // count in the program. See `SINGLE_THREADED`.
+    if SINGLE_THREADED.load(Ordering::Relaxed) == 1 {
+        fatal("a fiber was spawned in a program compiled as single-threaded");
+    }
     let cancel = Arc::new(AtomicUsize::new(0));
     let handed = Handed(body);
     let child_flag = cancel.clone();

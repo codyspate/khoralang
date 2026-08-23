@@ -284,32 +284,68 @@ came from building the thing and comparing.
 
 ### 4. Borrowed parameters, and D10's escape analysis
 
-A parameter only *read* by a function does not need to be owned by it, which
-removes a dup at every call site. And an object that provably does not leave
-its fiber can use non-atomic reference counting, which decision D10 promised.
+**4a, borrowed parameters — done**, and it was the one that paid before reuse
+did. `Region::defer` does not keep the region, `Shared::get` does not keep the
+cell, `String::byte` does not keep the string; each was handed an owned
+reference and dropped it. Written up above, under §1.
 
-**Priced, because it was about to be assumed.** A throwaway build with the
-atomics replaced by plain reads and writes, against the same build with them:
+**4b, non-atomic counting — done for a program that cannot spawn.** Measured
+first: with the counts kept correct but the atomics removed, an HTTP parse ran
+1,670ns to 1,555ns and a browser's 8,360 to 7,345. Seven and twelve per cent,
+and that is a ceiling rather than an estimate.
 
-    parsing an 80-byte request     2,365 ns -> 2,075 ns
-    parsing a browser's request   13,210 ns -> 11,600 ns
+`Fiber::spawn` is the only way a Khora program starts a thread —
+`khora_fiber_spawn` is the sole runtime entry that calls `std::thread::spawn`,
+and a nursery adopts fibers that already exist rather than making them. So if
+nothing in the reachable program so much as mentions `Fiber::spawn`, there is
+one thread for the program's whole life and every reference count can be plain
+arithmetic. Whole-program monomorphization is what makes that answerable: the
+compiler already has every body it will ever emit.
 
-**Twelve per cent**, and that is the ceiling rather than the estimate — a real
-escape analysis would only reach some of the operations. Worth having and not
-worth reordering the phase for, which is the opposite of what "every `dup` is a
-lock-free atomic" sounds like.
+The reachable set comes from `mono.instances`, and the scan is conservative in
+both of the ways it can be — it looks for a *mention* rather than a call, since
+`Fiber::spawn` handed around as a value is still a spawn, and it reads the whole
+expression arena rather than walking from the root, since an expression a walk
+skipped would be a wrong answer while one it need not have visited is only a
+missed optimization.
 
-The first version of this measurement said 1.7x, because it compared the spike
-against a number taken before the nullary-constructor change. Errata 45's rule,
-caught in the act: a benchmark that is off by a constant factor everywhere is
-measuring the wrong pair of builds.
+**And then it is checked at run time**, because the failure mode is the worst
+one available: a data race in a reference count is memory corruption arriving a
+long way from its cause, and no test finds it reliably. The generated `main`
+calls `khora_single_threaded` when the compiler decided so, and
+`khora_fiber_spawn` refuses to start a thread in a program that said it would
+not. `a_program_that_spawns_counts_references_atomically` spawns and checks the
+live count returns to zero; forcing the flag on makes it print the abort
+instead, which is how that test was confirmed to be testing anything.
 
-The same spike run against the *server* is not a measurement at all — it
-corrupts memory within a second, because a fiber is an OS thread and the
-refcounts are shared. That is D10 being right, observed directly.
+#### What is left, and why the `Share` marker cannot do it
 
-Both of these need an escape analysis and both change a calling convention, so
-they come after the first two have settled.
+The obvious next step looks like a type-level rule, and it does not work.
+Khora already knows which types may cross a fiber — `impl Share for T`, and the
+structural check behind it — so it is tempting to say that an object whose type
+is not shareable can be counted non-atomically. **`String` is shareable.** So is
+`Map`, so is `Option`, so is every ordinary immutable container, because sharing
+an immutable value between fibers is exactly the thing that ought to be allowed.
+The types that are *not* shareable are the ones with mutable fields, `Ptr`, and
+opaque handles — a small minority of what a program allocates, and close to none
+of what a request parse allocates. A sound type-level rule would deliver almost
+nothing.
+
+What remains is therefore per-*object*, and there are two known shapes:
+
+- **A real escape analysis.** Which allocation sites can reach a `Fiber::spawn`
+  capture. Whole-program and flow-sensitive; tractable here in principle,
+  because monomorphization means there is no dynamic dispatch to lose the trail
+  in. This is what D10 actually asked for, and it is the one that would help a
+  server — where the strings a request is parsed into are made inside the fiber
+  answering it and never leave.
+- **Biased reference counting.** Each object records an owning thread; the owner
+  uses a non-atomic count and everybody else an atomic one. No analysis at all,
+  at the price of a wider header and a thread-identity comparison on every
+  operation — perhaps half the ceiling, for a much smaller change.
+
+Neither is started. The measurement above is what either would be judged
+against.
 
 ## Where the operations actually go
 
