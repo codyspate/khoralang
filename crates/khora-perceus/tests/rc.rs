@@ -63,9 +63,11 @@ fn a_read_that_is_not_the_last_still_dups() {
     let db = KhoraDatabase::new();
     let p = plan(
         &db,
-        "module m;\nfn f(s: String) -> Int { String::byte_length(s) + String::byte_length(s) }\n",
+        "module m;\nfn f(s: String) -> String { s + s }\n",
         "f",
     );
+    // `String::byte_length` would not do here: it only borrows, so neither read
+    // would copy. `+` genuinely consumes both sides.
     assert_eq!(p.dups.len(), 1, "the first read copies, the second moves: {p:?}");
 }
 
@@ -158,15 +160,13 @@ fn match_arm_bindings_are_not_released_by_the_arm() {
         "f",
     );
 
-    // `r` itself is owned by the function and released; the arm binding is not.
-    //
-    // `r` is an ADT, so it is not eligible for the last-use move even though
-    // its one read is unconditional — releasing an ADT earlier is only
-    // invisible if nothing it holds has an observable release, and that is not
-    // yet decidable here. `khora_perceus::quietly_dropped`.
+    // The arm binding is never released — it borrows out of the scrutinee,
+    // which the arm does not own. `r` itself is the function's, and its one read
+    // is unconditional and consuming, so it moves into the `match` rather than
+    // being released at the end. Either way the arm accounts for nothing.
     let released: Vec<_> = p.drops.values().flatten().copied().collect();
-    assert_eq!(released.len(), 1, "only the parameter should be released: {p:?}");
-    assert!(p.moved.is_empty(), "an ADT is not moved yet: {p:?}");
+    assert!(released.is_empty(), "the arm should release nothing: {p:?}");
+    assert_eq!(p.moved.len(), 1, "the scrutinee moved into the match: {p:?}");
 }
 
 #[test]

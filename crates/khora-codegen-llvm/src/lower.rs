@@ -941,6 +941,25 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// so nothing but the code generator knows the pointer, and a Khora
     /// declaration has nowhere to write it. Everything else about a region is
     /// an ordinary reference-counted object.
+    /// Releases an argument, unless the plan passed it as a borrow.
+    ///
+    /// These intrinsics only *look at* their receiver — the runtime keeps the
+    /// finalizer, not the region; the closure, not the cell. They were handed
+    /// an owned reference anyway and dropped it here, which cancels out and
+    /// costs two atomic operations. Where the plan could see that the argument
+    /// is a binding that outlives the call, it now makes no reference and this
+    /// releases nothing. `khora_perceus::borrowed_arguments`.
+    ///
+    /// Still a real release for anything else, because a temporary handed to a
+    /// borrowing call is owned by nobody: `Region::defer(Region::open(), f)`
+    /// has to be released by somebody and there is no binding to do it.
+    fn release_unless_lent(&mut self, arg: ExprId, value: BasicValueEnum<'ctx>, ty: &Type) {
+        if self.plan.borrowed.contains(&arg) {
+            return;
+        }
+        self.drop(value, ty);
+    }
+
     fn region_intrinsic(
         &mut self,
         name: &str,
@@ -992,7 +1011,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .builder
                     .build_call(defer, &[region.into(), closure.into(), glue.into()], "")
                     .expect("deferring a finalizer");
-                self.drop(region, &region_ty);
+                self.release_unless_lent(*region_arg, region, &region_ty);
                 Some(self.be.unit_value())
             }
             _ => self.fail(
@@ -1050,7 +1069,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .basic()
                     .expect("a read gives back a word")
                     .into_int_value();
-                self.drop(handle, &cell_ty);
+                self.release_unless_lent(*cell, handle, &cell_ty);
                 Some(self.be.word_to_value(word, &value_ty))
             }
             ("set", [cell, value]) => {
@@ -1064,7 +1083,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .build_call(set, &[handle.into(), word.into()], "")
                     .expect("writing a shared cell");
                 // The value was handed over; the handle was only borrowed.
-                self.drop(handle, &cell_ty);
+                self.release_unless_lent(*cell, handle, &cell_ty);
                 Some(self.be.unit_value())
             }
             ("update", [cell, change]) => {
@@ -1092,7 +1111,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .into_int_value();
                 // Both were lent for the call and neither was kept.
                 self.drop(closure, &change_ty);
-                self.drop(handle, &cell_ty);
+                self.release_unless_lent(*cell, handle, &cell_ty);
                 Some(self.be.word_to_value(word, &value_ty))
             }
             ("modify", [cell, change]) => {
@@ -1130,7 +1149,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("reading the answer")
                     .into_int_value();
                 self.drop(closure, &change_ty);
-                self.drop(handle, &cell_ty);
+                self.release_unless_lent(*cell, handle, &cell_ty);
                 Some(self.be.word_to_value(word, &answer_ty))
             }
             _ => self.fail(
@@ -1272,7 +1291,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("acting on a fiber");
                 // Borrowed, not consumed — the handle is still the caller's,
                 // and the plan handed this frame an owned reference.
-                self.drop(handle, &ty);
+                self.release_unless_lent(*fiber, handle, &ty);
                 Some(self.be.unit_value())
             }
             _ => self.fail(
@@ -1778,7 +1797,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             .basic()
             .expect("khora_utf8_valid returns a _Bool")
             .into_int_value();
-        self.drop(object.into(), &array_ty);
+        self.release_unless_lent(array, object.into(), &array_ty);
         // A C `_Bool` is one byte; Khora's `Bool` is an `i1`.
         let narrowed = self
             .be
@@ -2134,7 +2153,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
         };
 
-        self.drop(object.into(), &Type::Str);
+        self.release_unless_lent(*subject, object.into(), &Type::Str);
         Some(result)
     }
 
@@ -2648,7 +2667,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .builder
                     .build_load(self.be.ctx.i64_type(), slot, "array.len")
                     .expect("reading an array's length");
-                self.drop(object.into(), &array_ty);
+                self.release_unless_lent(*array, object.into(), &array_ty);
                 Some(length)
             }
             ("get", [array, index]) => {
@@ -2671,7 +2690,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if is_boxed(&element) {
                     self.dup(value);
                 }
-                self.drop(object.into(), &array_ty);
+                self.release_unless_lent(*array, object.into(), &array_ty);
                 Some(value)
             }
             ("set", [array, index, value]) => {
@@ -2696,7 +2715,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 } else {
                     self.be.builder.build_store(slot, new).expect("writing an element");
                 }
-                self.drop(object.into(), &array_ty);
+                self.release_unless_lent(*array, object.into(), &array_ty);
                 Some(self.be.unit_value())
             }
             _ => self.fail(
@@ -2755,7 +2774,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("adopting a fiber");
                 // The nursery keeps the fiber's reference and only borrows its
                 // own, so exactly one of the two is given back.
-                self.drop(handle, &nursery_ty);
+                self.release_unless_lent(*nursery, handle, &nursery_ty);
                 Some(self.be.unit_value())
             }
             ("wait", [nursery]) => {
@@ -2766,7 +2785,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .builder
                     .build_call(wait, &[handle.into()], "")
                     .expect("waiting for a nursery");
-                self.drop(handle, &nursery_ty);
+                self.release_unless_lent(*nursery, handle, &nursery_ty);
                 Some(self.be.unit_value())
             }
             _ => self.fail(

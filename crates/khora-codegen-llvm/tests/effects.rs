@@ -1422,12 +1422,12 @@ fn main() -> Int {{
 "
         ),
     );
-    // The trailing 1 is the live-object count: `limit` is still in scope where
-    // it is taken. Moving a binding's reference to its last use would make this
-    // 0, and briefly did — but that optimization is restricted to `String` for
-    // now, because releasing earlier is only invisible when releasing does
-    // nothing but free. `khora_perceus::quietly_dropped`.
-    assert_eq!(ran.stdout, "7\n1\n", "twenty comparisons, and only `limit` still alive");
+    // The trailing 0 is the live-object count, and it was 1 when this was
+    // written: `limit` stayed alive to the end of `main` because a block
+    // released what it declared. Its only read is the call, so its reference
+    // moves into `count_below` and the value is gone before the count is taken.
+    // Freed at its last use, which is what Perceus is for.
+    assert_eq!(ran.stdout, "7\n0\n", "twenty comparisons, and nothing outliving its last use");
     assert_eq!(ran.code, Some(0));
 }
 

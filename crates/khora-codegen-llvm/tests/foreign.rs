@@ -401,6 +401,9 @@ fn main() -> Int {{
 "
         ),
     );
+    // The trailing 1 is the live-object count. `bytes`'s last read is an
+    // `Array::length`, which only borrows — a borrow cannot take the binding's
+    // reference, so the block still releases it, after this count.
     assert_eq!(
         ran.stdout, "5\n0\n5\n1\n",
         "five elements, a pointer that is not null, and the array still alive afterwards"
@@ -450,8 +453,10 @@ fn main() -> Int {{
 "
         ),
     );
+    // The trailing 0 is the live-object count, freed at the last read rather
+    // than at the end of `main`, as above.
     assert_eq!(
-        ran.stdout, "100\n131\n1\n",
+        ran.stdout, "100\n131\n0\n",
         "10+20+30+40, then the bytes of `AB` which are 65 and 66"
     );
     assert_eq!(ran.code, Some(0));

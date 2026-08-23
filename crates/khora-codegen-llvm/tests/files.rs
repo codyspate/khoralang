@@ -125,6 +125,10 @@ fn main() -> Int {{
 "
         ),
     );
+    // The trailing 1 is the live-object count. `buffer`'s last read is an
+    // `Array::get`, which only borrows — a borrow cannot take the binding's
+    // reference, so the block still releases it, after this count.
+    // `khora_perceus::borrowed_arguments`.
     assert_eq!(
         ran.stdout, "5\n107\n97\n1\n",
         "five bytes, `k` and `a`, and only the buffer still alive"

@@ -208,13 +208,11 @@ fn main() -> Int {{
 "
         ),
     );
-    // The trailing 0 is the live-object count, and it was 1 when this was
-    // written: `greeting` stayed alive to the end of `main` because a block
-    // released what it declared. Its last read is the `byte(greeting, 12)`
-    // above, so its reference now goes there and the string is gone before the
-    // count is taken. Freed at its last use, which is what Perceus is for.
+    // The trailing 1 is the live-object count. `greeting`'s last read is a
+    // `String::byte`, which only borrows — a borrow cannot take the binding's
+    // reference, so the block still releases it, after this count.
     assert_eq!(
-        ran.stdout, "13\n104\n107\n33\n0\n1\n0\n",
+        ran.stdout, "13\n104\n107\n33\n0\n1\n1\n",
         "`h`, then `k` where the second half starts, then the `!` at the end"
     );
     assert_eq!(ran.code, Some(0));

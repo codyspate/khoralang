@@ -74,6 +74,13 @@ pub struct RcPlan {
     pub drops: HashMap<ExprId, Vec<LocalId>>,
     /// Locals holding a boxed value. Everything else is a machine word.
     pub boxed: HashSet<LocalId>,
+    /// Argument expressions passed as a *borrow*: no reference was made for
+    /// them, and the callee must not release one.
+    ///
+    /// The backend reads this. A borrowing intrinsic used to be handed an owned
+    /// reference and immediately drop it — a `dup` and a `drop` that cancel,
+    /// two atomic operations to pass a value the callee only looks at.
+    pub borrowed: HashSet<ExprId>,
     /// Locals whose reference was handed to their last read rather than
     /// released by their block.
     ///
@@ -98,35 +105,63 @@ impl RcPlan {
     }
 }
 
-/// Whether releasing a value of this type can be *observed*.
+/// Which of a call's arguments it only looks at.
 ///
-/// **Freeing earlier is only invisible when freeing does nothing but free.**
-/// `docs/design/compatibility.md` says when memory is released is not something
-/// a program may depend on, and that is true of memory. It is not true of a
-/// `Region`, whose release runs the finalizers deferred into it — user code,
-/// with output and effects of its own.
+/// **These are the calls that were already borrowing and saying otherwise.**
+/// The runtime does not keep the region a finalizer is deferred into, the cell
+/// a `Shared` operation reads, or the handle a fiber is joined through — but
+/// the reference-counting plan read each as the ordinary owning call it is
+/// written as, so the caller made a reference and the callee released it. Two
+/// atomic operations, cancelling.
 ///
-/// Found by a test rather than by reasoning:
+/// Saying so has a second effect that matters more than the two operations. A
+/// borrowed argument is not a *use* that could be somebody's last one, so a
+/// binding passed to `Region::defer` keeps its reference — which is what makes
+/// its finalizers run when the region's scope ends rather than inside `defer`.
+/// Without this the last-use analysis had to be restricted to `String` to avoid
+/// reordering a program's output. `docs/design/reuse.md`.
 ///
-/// ```khora
-/// let region = Region::open();
-/// Region::defer(region, fn () => print(2));
-/// print(1);
-/// ```
+/// Indices are into the argument list, receiver first.
 ///
-/// The last read of `region` is the `defer`, so moving its reference there
-/// released the region on that line and printed `2` before `1`. Not a leak, not
-/// a double free — a different program.
-///
-/// So this is deliberately narrow: a `String` and nothing else. A `String`
-/// holds bytes, its release frees them, and there is nothing it can reach. An
-/// ADT could hold a `Region` in a field, a closure could capture one, and
-/// deciding *which* of those are quiet needs the field types this pass is not
-/// given. Widening it is worth doing and wants the question answered first:
-/// whether a region's end is its scope or its last reference is a language
-/// decision, not an optimizer's.
-fn quietly_dropped(ty: &Type) -> bool {
-    matches!(ty, Type::Str)
+/// **Only bodyless declarations may appear here**, and the distinction is not
+/// cosmetic: a function written in Khora owns its parameters and releases them,
+/// so promising a caller a borrow of one is a use after free. `Array::prefix`
+/// and `String::matches_at` are written in Khora and were briefly on this list.
+/// Deciding it for an ordinary function needs an escape analysis rather than a
+/// table.
+pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
+    const RECEIVER: &[usize] = &[0];
+    const NONE: &[usize] = &[];
+    match (owner, method) {
+        // The runtime keeps the *finalizer* and only looks at the region.
+        ("Region", "defer") => RECEIVER,
+        // A cell is read or written through; the handle stays the caller's.
+        ("Shared", "get" | "set" | "update" | "modify") => RECEIVER,
+        // Joining or cancelling looks at a handle. *Releasing* one is what
+        // joins, and that is the binding's business rather than the call's.
+        ("Fiber", "join" | "cancel") => RECEIVER,
+        // A nursery adopts the *fiber*; the nursery itself is borrowed.
+        ("Fibers", "adopt" | "wait") => RECEIVER,
+
+        // **The ones that pay.** A `String` or an `Array` intrinsic reads
+        // through its receiver and hands back a number, a byte or a new object;
+        // none of them keeps it. Unlike a last use, a borrow applies inside a
+        // loop, and that is where these live: `lowered_between` calls
+        // `String::byte` once per character, and every call was making a
+        // reference to the whole string and releasing it again.
+        ("String", "byte" | "byte_length" | "bytes" | "slice" | "find") => RECEIVER,
+        ("Array", "get" | "set" | "length" | "is_utf8") => RECEIVER,
+        _ => NONE,
+    }
+}
+
+/// The name a method on this type is looked up under.
+fn owner_of(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Str => Some("String"),
+        Type::Adt { name, .. } => Some(name),
+        _ => None,
+    }
 }
 
 /// Whether values of this type carry a reference count.
@@ -185,13 +220,29 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
         .collect()
 }
 
+/// One read of a counted binding, as the walk saw it.
+struct Read {
+    local: LocalId,
+    at: ExprId,
+    /// Somewhere that might not run: a branch, a loop, a lambda.
+    conditional: bool,
+    /// The callee only looks at it, so no reference was made for this read.
+    ///
+    /// **Still a use.** Leaving borrowed reads out of this list entirely was a
+    /// use-after-free: `f(s)` followed by `String::byte(s, 0)` moved the
+    /// binding into `f`, freed it there, and then read the bytes of the freed
+    /// object — because the borrow was invisible to the question "which read is
+    /// last". A borrow cannot *take* ownership, but it can certainly come after
+    /// the read that would have.
+    borrowed: bool,
+}
+
 struct Planner<'a> {
     body: &'a Body,
     plan: RcPlan,
     types: &'a khora_types::BodyTypes,
-    /// Every read of a boxed local, in program order, with whether it happened
-    /// somewhere that might not run.
-    reads: Vec<(LocalId, ExprId, bool)>,
+    /// Every read of a boxed local, in program order.
+    reads: Vec<Read>,
     /// How many conditional or repeated constructs enclose the walk.
     ///
     /// A read inside an `if` arm, a `match` arm, a loop or a lambda may run
@@ -272,29 +323,55 @@ impl<'a> Planner<'a> {
 
         let mut moved: Vec<LocalId> = Vec::new();
         for local in self.plan.boxed.clone() {
-            if !quietly_dropped(self.types.local(local)) {
+            let mut mine = self.reads.iter().filter(|read| read.local == local).peekable();
+            if mine.peek().is_none() {
                 continue;
             }
-            let mut reads = self.reads.iter().filter(|(who, _, _)| *who == local).peekable();
-            if reads.peek().is_none() {
-                continue;
-            }
-            if self.reads.iter().any(|(who, _, risky)| *who == local && *risky) {
+            if self.reads.iter().any(|read| read.local == local && read.conditional) {
                 continue;
             }
             // In program order, because `walk` visits in it.
-            let last = self.reads.iter().rfind(|(who, _, _)| *who == local).map(|(_, r, _)| *r);
-            if let Some(last) = last {
-                self.plan.dups.remove(&last);
-                self.plan.moved.insert(local);
-                moved.push(local);
+            let Some(last) = self.reads.iter().rfind(|read| read.local == local) else {
+                continue;
+            };
+            // A borrow cannot take the reference, so a binding whose last use
+            // is one still has to be released by its block — after the borrow.
+            if last.borrowed {
+                continue;
             }
+            self.plan.dups.remove(&last.at);
+            self.plan.moved.insert(local);
+            moved.push(local);
         }
 
         for releases in self.plan.drops.values_mut() {
             releases.retain(|local| !moved.contains(local));
         }
         self.plan.drops.retain(|_, releases| !releases.is_empty());
+    }
+
+    /// Records a read that takes no reference of its own.
+    fn borrow(&mut self, at: ExprId) {
+        let Expr::Local(local) = *self.body.expr(at) else { return };
+        self.plan.borrowed.insert(at);
+        if self.plan.boxed.contains(&local) {
+            self.reads.push(Read {
+                local,
+                at,
+                conditional: self.branching > 0,
+                borrowed: true,
+            });
+        }
+    }
+
+    /// The argument positions this callee only looks at.
+    fn lent_by(&self, callee: ExprId) -> Vec<usize> {
+        match self.body.expr(callee) {
+            Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
+                borrowed_arguments(owner, name).to_vec()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Records a pattern's bindings and collects the boxed ones.
@@ -323,7 +400,12 @@ impl<'a> Planner<'a> {
                 // `settle_last_uses` decides once the whole body has been seen.
                 if self.plan.boxed.contains(&local) {
                     self.plan.dups.insert(id);
-                    self.reads.push((local, id, self.branching > 0));
+                    self.reads.push(Read {
+                        local,
+                        at: id,
+                        conditional: self.branching > 0,
+                        borrowed: false,
+                    });
                 }
             }
             // A record's fields are moved into it, exactly as a
@@ -416,10 +498,41 @@ impl<'a> Planner<'a> {
                 }
                 self.branching -= 1;
             }
-            Expr::Call { callee, args } => {
-                self.walk(callee);
+            // `xs.length()` — the receiver is the callee's base rather than an
+            // argument, and it is how most of these are written. Reading only
+            // the `Array::length(xs)` spelling meant the table quietly did
+            // nothing for the calls that matter.
+            Expr::Call { callee, args }
+                if matches!(self.body.expr(callee), Expr::Field { .. }) =>
+            {
+                let Expr::Field { base, name } = self.body.expr(callee).clone() else {
+                    unreachable!("just matched")
+                };
+                let lends = owner_of(self.types.of(base))
+                    .is_some_and(|owner| borrowed_arguments(owner, &name).contains(&0));
+                if lends && matches!(self.body.expr(base), Expr::Local(_)) {
+                    self.borrow(base);
+                } else {
+                    self.walk(base);
+                }
                 for arg in args {
                     self.walk(arg);
+                }
+            }
+            Expr::Call { callee, args } => {
+                self.walk(callee);
+                let lent = self.lent_by(callee);
+                for (index, arg) in args.iter().enumerate() {
+                    // A borrowed argument that is a plain read of a binding
+                    // needs no reference of its own: the binding holds one and
+                    // outlives the call. Anything else — a temporary, an
+                    // expression — is owned by nobody else, so it is passed and
+                    // released as before.
+                    if lent.contains(&index) && matches!(self.body.expr(*arg), Expr::Local(_)) {
+                        self.borrow(*arg);
+                        continue;
+                    }
+                    self.walk(*arg);
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
