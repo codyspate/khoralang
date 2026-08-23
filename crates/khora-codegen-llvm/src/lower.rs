@@ -3820,6 +3820,22 @@ impl<'ctx> Lower<'_, 'ctx> {
             );
         }
 
+        // **A case with no fields is one object for the whole program.** It
+        // carries nothing but its tag, so every `Option::None` in a program is
+        // indistinguishable from every other and there is no reason for them to
+        // be different addresses. Before this, `Option::None`, `List::Nil` and
+        // every case of a C-like enum each cost an allocation, a pair of atomic
+        // reference-count operations and a free — twenty-four bytes of heap for
+        // a value that is a constant.
+        //
+        // The same trick, and the same reasoning, as a string literal: the
+        // count starts enormous rather than at one so that `khora_dup` and
+        // `khora_drop` need not know a static from anything else, and cannot
+        // take it to zero.
+        if info.fields.is_empty() {
+            return Some(self.be.static_variant(owner, case, tag).into());
+        }
+
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
             values.push(self.expr(*arg)?);

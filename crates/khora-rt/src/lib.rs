@@ -102,7 +102,7 @@
 //! across cores, and a spawned fiber shares at least the closure it was handed,
 //! so a non-atomic count would be a data race in the first program anyone
 //! writes. Correct by default; see `docs/design/effect-runtime.md` §9 for why
-//! there is no `Rc`/`Arc` split to opt out with, and phase 6 for the escape
+//! there is no `Rc`/`Arc` split to opt out with, and phase 9 for the escape
 //! analysis that makes a non-escaping object cheap again.
 //!
 //! The header layout is unchanged: an `AtomicUsize` has the size and alignment

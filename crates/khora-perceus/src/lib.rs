@@ -3,9 +3,27 @@
 //! Roadmap phase 2.3. This inserts *correct* reference counting, not yet
 //! *minimal* reference counting. Perceus proper earns its name by removing
 //! pairs that provably cancel and by fusing a `drop` with a following
-//! allocation into an in-place `reuse` — that is phase 6 (FBIP), and it is an
+//! allocation into an in-place `reuse` — that is phase 9 (FBIP), and it is an
 //! optimization over exactly this output. Getting the conservative version
-//! right first means phase 6 has something to prove itself against.
+//! right first means phase 9 has something to prove itself against.
+//!
+//! # What phase 9 has to change here, and why it is a rewrite
+//!
+//! The scheme below owns a value for the whole of a binding's scope: a read
+//! `dup`s, and the block releases what it declared on the way out. Reuse needs
+//! the opposite — the *last* use of a value, so that the object is uniquely
+//! held at the point an arm allocates a new one and its memory can be handed
+//! straight over.
+//!
+//! Concretely, `match xs { List::Cons(h, t) => List::Cons(f(h), map(t)) }`
+//! cannot reuse anything today, and not because the fusion is missing: at the
+//! constructor, `xs` is still held by its binding *and* by the dup the read
+//! made, so a uniqueness test sees two references and correctly declines. The
+//! fusion is the easy half. Moving the release to the last use, on every path,
+//! is the analysis, and it is the part that turns a wrong answer into a double
+//! free rather than a slow program.
+//!
+//! `docs/design/reuse.md` has the design.
 //!
 //! # The scheme
 //!
@@ -18,21 +36,20 @@
 //! - A block `drop`s every boxed local it declared, on the way out.
 //! - Parameters are owned by the callee, so they are dropped like locals.
 //!
-//! # Known gap: discarded temporaries
+//! # Why the scheme balances
 //!
-//! A boxed value produced in statement position and never bound leaks. In
-//! `Shape::Circle(4);` the allocation gets a reference nobody releases.
+//! Worth spelling out, because it is not obvious: a read `dup`s, and the callee
+//! that receives the value drops it as an owned parameter, so a call is
+//! neutral. `let t = s; t` allocates once, dups twice and drops twice, leaving
+//! the single reference the caller receives. Construction yields one reference,
+//! and the block that binds it releases it.
 //!
-//! The scheme balances everywhere else, and it is worth seeing why, because it
-//! is not obvious: a read `dup`s, and the callee that receives the value drops
-//! it as an owned parameter, so a call is neutral. `let t = s; t` allocates
-//! once, dups twice and drops twice, leaving the single reference the caller
-//! receives. Construction yields one reference, and the block that binds it
-//! releases it.
-//!
-//! Only a value that is never consumed by anything falls outside that, which is
-//! why the demo program does not trip it. Fixing it means dropping the result
-//! of a statement expression whose type is boxed — tracked separately.
+//! The one thing outside that is a boxed value produced in statement position
+//! and never bound — `Shape::Circle(4);` — because this plan records releases
+//! for *bindings* and there is no binding. It does not leak: code generation
+//! drops the value of a discarded statement expression itself, at `Stmt::Expr`
+//! in `lower.rs`. A note here used to call it an open leak, which it has not
+//! been for some time.
 //!
 //! # The interface
 //!
