@@ -125,7 +125,7 @@ docs/
   vision.md            what Khora is for; breaks ties in the roadmap
   positioning.md       who it is for, and what it is not
   roadmap.md           decisions, open questions, phases
-  design/              eighteen decision records
+  design/              nineteen decision records
   project.md           the original specification this was built against
   grammar.ebnf         the implemented grammar
   errata.md            where the specification was wrong, and what was done

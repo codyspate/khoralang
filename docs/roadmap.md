@@ -1490,8 +1490,32 @@ Later than it used to be, deliberately. An optimization is measured against
 real code and there was none; reuse analysis over a linked list is also worth
 much less than over the arrays phase 6 brings.
 
+`docs/design/reuse.md` has the plan and the order.
+
+- **9.0 A field-less constructor is a static — done.** `Option::None` was a
+  heap allocation, and so was `List::Nil`, and so was every case of an enum
+  with no payloads: twenty-four bytes and a pair of atomic reference-count
+  operations for a value described entirely by its tag. One private global per
+  `(type, case)` now, with an immortal count, the same way a string literal
+  works. Measured: a hundred failed `Map::get` calls went from 107 allocations
+  to 5, an HTTP request parse from 61 to 55, a JSON round trip from 142 to 128.
+  Server throughput did not move, which is worth saying plainly — the parser's
+  cost is strings and hashing.
+- **9.1 Ownership at the last use — not started, and the whole of the risk.**
+  Reuse cannot work until a value's release moves from the end of its block to
+  its last read, on every path including `break` and `raise`. Getting it wrong
+  is a double free. `docs/design/reuse.md` §1.
+- **9.2 Reuse tokens.** `khora_drop_reuse` and `khora_alloc_reuse`, once 9.1
+  makes a matched cell uniquely held at the arm's constructor.
+- **9.3 Drop specialization**, measured before it is written.
+- **9.4 Borrowed parameters and D10's escape analysis** — the largest single
+  win available, because every `dup` in a single-threaded program is currently
+  a lock-free atomic.
+
 **Exit:** `map` over a uniquely-owned list performs zero allocations, asserted
-by a counting-allocator test.
+by a counting-allocator test. Written already, as an ignored test in
+`crates/khora-codegen-llvm/tests/reuse.rs`, beside a record of what the same
+walk costs today.
 
 ---
 
