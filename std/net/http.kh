@@ -1,7 +1,8 @@
 module std::net::http;
 
-import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, SharedFn, Show, Split, bounded_nursery};
+import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery};
 import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
+import std::net::tls::{TlsConnection, TlsError, TlsServer, receive as tls_receive, secure, server as tls_server, shut as tls_shut, transmit as tls_transmit};
 
 // HTTP/1.1, over the sockets in `std::net::socket`.
 //
@@ -13,8 +14,13 @@ import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_rec
 // the length the headers promised, routing on method and path with `:name`
 // segments, and a response that can carry headers of its own.
 //
-// What it does not: chunked transfer, keep-alive, TLS, content negotiation,
-// or multipart bodies. Each is absent deliberately rather than forgotten.
+// What it does not: chunked transfer, content negotiation, or multipart
+// bodies. Each is absent deliberately rather than forgotten. Keep-alive and
+// TLS *are* here — the comment said otherwise for a while after each arrived.
+//
+// A connection is reached through a `Transport`, which is three closures, so
+// that the serving path is written once and `Router::listen` and
+// `Router::listen_tls` differ only in what they hand it.
 //
 // It does answer on a fiber per connection, which took a language feature to
 // reach rather than a line here: see `Router::serve_once`.
@@ -641,7 +647,54 @@ fn chunk() -> Int { 4096 }
 /// version safe is the deadline `serve_connection` sets before calling this —
 /// a client that goes quiet gets its socket closed instead of parking a fiber
 /// for the life of the process.
-fn read_request(connection: Int, into: Array<U8>, from: Int) -> Int {
+/// How to speak to one client, whatever is underneath.
+///
+/// **Three closures rather than a socket handle**, because a plain connection
+/// and a TLS one differ in exactly these three operations and in nothing else
+/// the router does. Before this the serving path took an `Int`, which is a
+/// socket, and there was no way to put a handshake in front of it without
+/// writing the whole path twice.
+///
+/// The cost is two indirect calls per request — one read, one write — against a
+/// parse that performs several hundred reference-count operations. It did not
+/// move the benchmark.
+///
+/// A record of closures is what an `effect` compiles to anyway
+/// (`docs/design/effect-runtime.md` §2), and this is not one only because a
+/// transport belongs to a connection rather than to a computation: two fibers
+/// serve two clients at once, and a capability installed by `with` would be
+/// one of them.
+export type Transport = {
+  /// Bytes into the buffer: how many, 0 when the peer closed, or -1.
+  receive: (Array<U8>) -> Int,
+  /// The text, all of it, or -1.
+  transmit: (String) -> Int,
+  /// Ends the conversation and releases whatever is underneath.
+  shut: () -> (),
+};
+
+/// A transport over a plain socket.
+export fn over_socket(connection: Int) -> Transport {
+  {
+    receive: fn buffer => receive(connection, buffer),
+    transmit: fn text => transmit(connection, text),
+    shut: fn () => shut(connection),
+  }
+}
+
+/// A transport over a secured connection.
+///
+/// The socket is the TLS connection's now — `secure` took it and `shut` closes
+/// it — so there is nothing here that closes it a second time.
+export fn over_tls(connection: TlsConnection) -> Transport {
+  {
+    receive: fn buffer => tls_receive(connection, buffer),
+    transmit: fn text => tls_transmit(connection, text),
+    shut: fn () => tls_shut(connection),
+  }
+}
+
+fn read_request(transport: Transport, into: Array<U8>, from: Int) -> Int {
   let scratch: Array<U8> = Array::new(chunk(), 0);
   // What the last request on this connection left behind. A client is allowed
   // to send the next one before reading the last answer, so the bytes after a
@@ -669,7 +722,7 @@ fn read_request(connection: Int, into: Array<U8>, from: Int) -> Int {
       // Zero is the peer closing, negative is the read failing — and with a
       // deadline set, "failing" includes "nothing arrived in time", which is
       // what stops this waiting on a client that has gone away.
-      let read = receive(connection, scratch);
+      let read = transport.receive(scratch);
       if read <= 0 {
         going = false;
       } else {
@@ -913,6 +966,60 @@ impl Router {
   }
 
   /// Accepts for as long as the process lives.
+  /// The same, over TLS.
+  ///
+  /// Takes the certificate chain and the key as PEM rather than as paths: a
+  /// server that reads its own files has decided where they live, and the two
+  /// deployments that matter — a file on disk and a secret handed in by the
+  /// platform — disagree about that.
+  ///
+  /// The configuration is released when the caller's scope ends, which for a
+  /// server is usually the program's.
+  fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) -> ()
+    with { scope: Scope }
+    raises 'e + HttpError + TlsError
+  {
+    let settings = tls_server(certificate, key)!;
+    let server = Router::bound(port)!;
+    print("listening on " + Int::to_string(port) + ", over TLS");
+    bounded_nursery(256, fn () => Router::serve_secured(router, server, settings)!)!
+  }
+
+  /// A listening socket on `port`, announced by the caller.
+  fn bound<'e>(port: Int) -> Int raises HttpError {
+    if start() {
+    } else {
+      raise HttpError::BindFailed(port)
+    };
+    let server = listen_on(port);
+    if server == invalid_handle() { raise HttpError::BindFailed(port) } else { server }
+  }
+
+  fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) -> ()
+    with { nursery: Nursery }
+    raises 'e + HttpError
+  {
+    let connection = accept_on(server);
+    if connection == invalid_handle() {
+    } else {
+      set_receive_timeout(connection, 10000);
+      nursery.adopt(Fiber::spawn(fn () => Router::secure_and_serve(router, connection, settings)));
+    };
+    Router::serve_secured(router, server, settings)!
+  }
+
+  /// One connection, handshaken and then served.
+  ///
+  /// A failed handshake is the ordinary case on a public port — a scanner, a
+  /// browser sent to `http://` — so it ends this fiber quietly. `secure` has
+  /// already closed the socket.
+  fn secure_and_serve<'e>(router: Router<'e>, connection: Int, settings: TlsServer) -> () {
+    match attempt(fn () => secure(settings, connection)!) {
+      Result::Err(_) => (),
+      Result::Ok(secured) => Router::serve_connection(router, over_tls(secured)),
+    }
+  }
+
   fn serve_forever<'e>(router: Router<'e>, server: Int) -> ()
     with { nursery: Nursery }
     raises 'e + HttpError
@@ -950,7 +1057,11 @@ impl Router {
     let connection = accept_on(server);
     if connection == invalid_handle() {
     } else {
-      nursery.adopt(Fiber::spawn(fn () => Router::serve_connection(router, connection)));
+      // The deadline goes on the socket before anything wraps it, because a
+      // handshake can hang exactly as a request can.
+      set_receive_timeout(connection, 10000);
+      nursery.adopt(Fiber::spawn(fn () =>
+          Router::serve_connection(router, over_socket(connection))));
     }
   }
 
@@ -965,33 +1076,32 @@ impl Router {
   /// this function cannot name a constructor of it. Catching *whatever* is the
   /// one thing naming constructors cannot express, and the reason a total
   /// wildcard arm exists at all.
-  fn serve_connection<'e>(router: Router<'e>, connection: Int) -> () {
+  fn serve_connection<'e>(router: Router<'e>, transport: Transport) -> () {
     // Before anything is read. `read_request` keeps reading until the request
     // is complete, which is the only correct thing to do and is also how a
     // fiber gets parked forever by a client that stops talking. Ten seconds is
     // long enough that no real client notices and short enough that a
     // half-open connection is not a leak.
-    set_receive_timeout(connection, 10000);
-    Router::answer_on(router, connection) catch {
+    Router::answer_on(router, transport) catch {
       _ => {
-        transmit(connection, Response::rendered(Response::text(500, "handler failed")));
+        transport.transmit(Response::rendered(Response::text(500, "handler failed")));
       },
     };
-    shut(connection)
+    transport.shut()
   }
 
   /// Reads one request off `connection` and writes the answer back.
   /// Answers what is in `buffer`, and says whether the connection stays open.
-  fn answer_once<'e>(router: Router<'e>, connection: Int, buffer: Array<U8>, length: Int)
+  fn answer_once<'e>(router: Router<'e>, transport: Transport, buffer: Array<U8>, length: Int)
     -> Bool
     raises 'e
   {
     let outcome = Router::answer_bytes(router, buffer, length)!;
-    transmit(connection, Response::rendered_keeping(outcome.response, outcome.keep));
+    transport.transmit(Response::rendered_keeping(outcome.response, outcome.keep));
     outcome.keep
   }
 
-  fn answer_on<'e>(router: Router<'e>, connection: Int) -> ()
+  fn answer_on<'e>(router: Router<'e>, transport: Transport) -> ()
     raises 'e
   {
     // One buffer for the whole connection rather than one per request, which
@@ -1001,14 +1111,14 @@ impl Router {
     let mut carried = 0;
     let mut going = true;
     while going {
-      let filled = read_request(connection, buffer, carried);
+      let filled = read_request(transport, buffer, carried);
       if filled <= 0 || filled == carried {
         // Nothing new arrived: the client closed, or the deadline passed.
         going = false;
       } else {
         let want = wanted(buffer, filled);
         let length = if want > 0 && want <= filled { want } else { filled };
-        if Router::answer_once(router, connection, buffer, length)! {
+        if Router::answer_once(router, transport, buffer, length)! {
           carried = filled - length;
           shift_down(buffer, length, carried);
         } else {

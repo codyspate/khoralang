@@ -1372,7 +1372,24 @@ fn record_fields(
     (labels, fields)
 }
 
-/// Reads a `with` or `raises` clause into a row.
+/// Every leaf of a `+` chain, however the parser nested them.
+///
+/// **`A + B + C` parses as `(A + B) + C`**, so a reader that takes a union's
+/// direct operands sees two: a nested union, and `C`. A nested union is not a
+/// shape `type_of_syntax` answers for, so it became `Unknown` — `A` and `B`
+/// collapsed into one entry labelled after nothing, and the row carried `C`
+/// and a ghost.
+///
+/// It failed loudly rather than silently: the call site was told the function
+/// does not raise `A`, which is true of the row that was built and a message
+/// about the wrong thing entirely. Nothing in the corpus had a three-error row
+/// until `Router::listen_tls` needed `'e + HttpError + TlsError`.
+fn union_operands(ty: &ast::Type) -> Vec<ast::Type> {
+    let ast::Type::Union(u) = ty else { return vec![ty.clone()] };
+    u.operands().flat_map(|operand| union_operands(&operand)).collect()
+}
+
+/// Reads a `with` or `raises` clause into a row./// Reads a `with` or `raises` clause into a row.
 ///
 /// Absent means the closed empty row: a function with no clause requires
 /// nothing and raises nothing, which is what makes those the safe defaults and
@@ -1411,7 +1428,9 @@ fn row_of_syntax(clause: Option<&ast::Type>, generics: &[String], homes: &TypeHo
         ast::Type::Union(u) => {
             let mut fields = Vec::new();
             let mut tail = None;
-            for operand in u.operands() {
+            // Flattened, because `A + B + C` parses as `(A + B) + C` and the
+            // direct operands of the outer union are a *union* and `C`.
+            for operand in union_operands(&ast::Type::Union(u.clone())) {
                 match type_of_syntax(Some(&operand), generics, homes) {
                     Type::Param(name) if name.starts_with('\'') => {
                         tail = Some(Type::Param(name));

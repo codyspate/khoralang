@@ -24,9 +24,9 @@ import std::core::{Array, Ptr, Result, Scope, acquire};
 // and the rest are deliberate — `rustls` picks safe defaults and a knob that
 // lets somebody pick worse ones is not a feature.
 
-extern fn khora_tls_server_open(cert: Ptr, cert_len: Int, key: Ptr, key_len: Int) -> Ptr;
-extern fn khora_tls_server_close(server: Ptr) -> ();
-extern fn khora_tls_accept(server: Ptr, socket: Int) -> Ptr;
+extern fn khora_tls_server_open(cert: Ptr, cert_len: Int, key: Ptr, key_len: Int) -> Int;
+extern fn khora_tls_server_close(server: Int) -> ();
+extern fn khora_tls_accept(server: Int, socket: Int) -> Ptr;
 extern fn khora_tls_read(connection: Ptr, into: Ptr, length: Int) -> Int;
 extern fn khora_tls_write(connection: Ptr, from: Ptr, length: Int) -> Int;
 extern fn khora_tls_close(connection: Ptr) -> ();
@@ -54,7 +54,21 @@ export type TlsError =
 /// records with one field of one type are the same shape, and a literal for
 /// either fits both. The checker says so rather than guessing, which is the
 /// right answer and a good reason to name a field after what it holds.
-export type TlsServer = { settings: Ptr };
+///
+/// **An `Int` rather than a `Ptr`, so that it can cross into a fiber**, and
+/// that deserves saying out loud. `docs/design/sharing.md` refuses to let a
+/// `Ptr` cross — "nothing on this side of the ABI knows what is behind it or
+/// who else is writing there" — and it is right in general. Here the thing
+/// behind it is a `rustls` configuration behind an `Arc`, which is immutable
+/// and safe for any number of threads to read; a server that could not be
+/// handed to the fiber answering a connection would not be a server.
+///
+/// A pointer-sized handle passed as an integer is what `std::net::socket`
+/// already does with every socket, so the precedent is one file away. It is
+/// still a dodge. The rule's own escape hatch is `impl Share` on an *opaque*
+/// type, and that is where this belongs the moment an `extern fn` can produce
+/// one — see the note in `docs/design/sharing.md`.
+export type TlsServer = { settings: Int };
 
 /// One secured connection, and the socket underneath it.
 export type TlsConnection = { session: Ptr };
@@ -75,7 +89,7 @@ export fn server(certificate: String, key: String) -> TlsServer
 {
   let handle = String::with_data(certificate, fn (cert, cert_len) =>
     String::with_data(key, fn (k, k_len) => khora_tls_server_open(cert, cert_len, k, k_len)));
-  if Ptr::is_null(handle) {
+  if handle == 0 {
     // The runtime does not say which of the two was wrong, and telling them
     // apart here would mean parsing PEM in Khora to find out. A caller with
     // both files in hand can read the message and check the obvious one first.

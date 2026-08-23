@@ -95,6 +95,37 @@ fn the_corpus_is_already_formatted() {
     }
 }
 
+/// **An alias survives being formatted.**
+///
+/// It did not. A name is a `NAME_REF` node with its `IDENT` inside, so the
+/// direct tokens of an import item are just the `as` — and `receive as
+/// tls_receive` normalized to `"as"`, which the formatter wrote back over the
+/// source. Four aliases became `{as, as, as, as}` and the file stopped parsing.
+///
+/// The unaliased case has no direct tokens at all, so it took a fallback and
+/// came out right, which is why every import in the corpus was fine until one
+/// needed an alias.
+#[test]
+fn an_aliased_import_survives_formatting() {
+    let src = "module m;
+import std::net::tls::{transmit as tls_transmit, secure};
+";
+    let out = format(src).expect("this parses");
+    assert!(
+        out.contains("{secure, transmit as tls_transmit}"),
+        "an alias was lost or mangled:
+{out}"
+    );
+    // And the result is still a program. `formatting_never_loses_a_token`
+    // above would catch this too, now that the corpus has an alias in it —
+    // which it did not until `std::net::http` grew one.
+    assert!(
+        format(&out).is_ok(),
+        "formatting produced something that does not parse:
+{out}"
+    );
+}
+
 #[test]
 fn imports_are_sorted_and_deduplicated() {
     let src = "module m;\nimport std::core::{Scope, Option, Scope, Never};\n";

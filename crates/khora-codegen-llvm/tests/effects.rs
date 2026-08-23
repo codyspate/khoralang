@@ -1158,6 +1158,63 @@ fn main() -> Int {{ khora_print_int(counter); 0 }}
     );
 }
 
+/// **Three errors in one row, not two and a ghost.**
+///
+/// `A + B + C` parses as `(A + B) + C`, and the reader took the outer union's
+/// direct operands — a nested union, and `C`. The nested one is not a shape it
+/// answers for, so `A` and `B` collapsed into one entry labelled after
+/// `Unknown` and the row carried `C` and a ghost. Loud rather than silent: the
+/// caller was told the function does not raise `A`, which was true of the row
+/// that got built and useless as a message.
+///
+/// Nothing in the corpus had a three-error row until `Router::listen_tls`
+/// needed `'e + HttpError + TlsError`, which is the whole reason this went
+/// unnoticed.
+#[test]
+fn a_raises_row_may_have_three_errors() {
+    let ran = run(
+        "three_errors",
+        "module t;
+extern fn khora_print_int(value: Int);
+
+export type A = | AA;
+export type B = | BB;
+export type C = | CC;
+
+fn pick(n: Int) -> Int raises A + B + C {
+  if n == 1 { raise A::AA }
+  if n == 2 { raise B::BB }
+  if n == 3 { raise C::CC }
+  n
+}
+
+/// Each of the three is catchable by name, which is the property the row is
+/// for and the one the bug removed.
+fn label(n: Int) -> Int {
+  pick(n)! catch {
+    A::AA => 10,
+    B::BB => 20,
+    C::CC => 30,
+  }
+}
+
+fn main() -> Int {
+  khora_print_int(label(1));
+  khora_print_int(label(2));
+  khora_print_int(label(3));
+  khora_print_int(label(4));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "10
+20
+30
+4
+");
+    assert_eq!(ran.code, Some(0));
+}
+
 // --- `==` on something with a shape -----------------------------------------
 
 const EQ: &str = "module t;

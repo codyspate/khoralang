@@ -122,6 +122,26 @@ export fn transmit(connection: Int, text: String) -> Int {
     I32::to_int(send(connection, from, I32::of(n), I32::of(0))))
 }
 
+/// Closes a connection.
+///
+/// **A hard close, and that is a defect worth knowing about.** A server that
+/// answers and closes while the client is still writing sends an RST, and the
+/// answer the client had not read yet is lost with it — which is exactly what
+/// happens when an oversized request is refused with a 413. It shows up as a
+/// client reporting no response at all, under load, sometimes.
+///
+/// The fix is to shut the writing half, drain what is still arriving, and then
+/// close. `scripts/http_conformance.sh` names the check that catches it.
+/// Closes a connection.
+///
+/// **A hard close, and that is a defect worth knowing about.** A server that
+/// answers and closes while the client is still writing sends an RST, and the
+/// answer the client had not read yet goes with it — which is what happens when
+/// an oversized request is refused with a 413. It shows up as a client
+/// reporting no response at all, under load, sometimes.
+///
+/// The fix is to shut the writing half, drain what is still arriving, and only
+/// then close. `scripts/http_conformance.sh` names the check that catches it.
 export fn shut(handle: Int) -> () {
   closesocket(handle);
 }

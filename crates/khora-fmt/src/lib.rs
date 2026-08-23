@@ -300,9 +300,21 @@ impl Formatter {
 
 /// `X` or `X as Y`, with internal whitespace normalized so sorting and
 /// deduplication compare like with like.
+/// One imported name as `X` or `X as Y`.
+///
+/// **Descendants, not children.** A name is a `NAME_REF` node with the `IDENT`
+/// inside it, so the direct tokens of an `IMPORT_ITEM` are just the `as` — and
+/// `receive as tls_receive` normalized to `"as"`, which the formatter then
+/// wrote back over the source. An import list of four aliases became
+/// `{as, as, as, as}`.
+///
+/// It survived for as long as it did because the unaliased case has *no* direct
+/// tokens at all, so it took the empty fallback below and came out right. Every
+/// import in the corpus was unaliased until `std::net::http` needed `receive as
+/// tls_receive` to have both a plain and a secured transport.
 fn normalize_import_item(node: &SyntaxNode) -> String {
     let parts: Vec<String> = node
-        .children_with_tokens()
+        .descendants_with_tokens()
         .filter_map(|el| el.into_token())
         .filter(|t| !t.kind().is_trivia())
         .map(|t| t.text().to_string())
