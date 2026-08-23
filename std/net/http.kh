@@ -840,6 +840,15 @@ impl Router {
   /// adopted fiber cannot outlive it, so leaving `listen` — by a raise, or by
   /// cancellation — deals with the connections still being answered instead of
   /// abandoning them.
+  ///
+  /// **A fiber is an operating-system thread today**, so this is
+  /// thread-per-connection and should be read as such: fine for a service with
+  /// tens or hundreds of concurrent callers, and the wrong shape for tens of
+  /// thousands. Nothing here changes when fibers become stackful coroutines on
+  /// a scheduler — `docs/design/fibers.md` promises a program cannot tell which
+  /// it has — so the ceiling is the runtime's to raise and not this module's.
+  /// Until it does, the honest position is a bounded number of connections
+  /// rather than an event loop that happens not to be written yet.
   fn serve_once<'e>(router: Router<'e>, server: Int) -> ()
     with { nursery: Nursery }
     raises 'e + HttpError

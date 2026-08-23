@@ -1226,6 +1226,27 @@ them was in the part anybody was worried about.
   generator gives up. Ordering — `<`, `>` — still does not reach `Ord`; the
   message says so now instead of claiming `==` is refused too.
 
+### Positions to hold, not gaps to close
+
+Three things an outside review asked for a straight answer on. None is a bug;
+each is a claim that would be wrong if made too broadly.
+
+- **`Share` is not yet a safety boundary.** The orphan rule closes the forgery
+  that was demonstrated, but `Share`, `Fiber`, `SharedFn` and `Array` are still
+  recognised by their bare names rather than by where they were declared. It is
+  a real rule with a real hole, and calling it a guarantee needs
+  compiler-known identity for the whole set. `docs/design/sharing.md`.
+- **The manifest is not a sandbox.** The compile-time gate is total over Khora
+  code and has `extern fn` underneath it, which reaches the operating system
+  with no row to gate on. Closing that needs package identity, which is 10.2.
+  `docs/design/permissions.md` now says so at the top rather than at the end.
+- **Fiber-per-connection is thread-per-connection.** Right for tens or
+  hundreds of concurrent callers, wrong for tens of thousands. The ceiling is
+  the runtime's to raise — `docs/design/fibers.md` promises a program cannot
+  tell a thread from a coroutine — and until it does, the position is a bounded
+  number of connections rather than an event loop that happens not to be
+  written yet.
+
 ### Not yet
 
 What still stands between here and a program somebody would use, in the order

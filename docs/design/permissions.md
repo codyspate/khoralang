@@ -6,6 +6,16 @@ The decision for D4: what in `[permissions]` is actually enforced, and when.
 > decides what may be done with it.** The first is compile-time and total. The
 > second is run-time, written in Khora, and enforced at the point of use.
 
+**It is not a sandbox, and should not be described as one yet.** The gate is
+total over Khora code — every requirement row in the program, transitively —
+and it has a hole underneath it: `extern fn` reaches the operating system
+without a capability row to be gated on. Closing it needs an allow-list on
+which *packages* may declare one, and packages do not exist until phase 10. So
+what the manifest gives you today is an honest account of what a program's own
+code can reach, and no defence against a dependency that goes around it. The
+whole argument is at the end of this file, under "The hole this does not close yet"; it
+is repeated here because a reader should not have to reach the end to find out.
+
 ## Why the line falls there
 
 `project.md` §4.1 says "OS-level capability limits enforced at compile time"
