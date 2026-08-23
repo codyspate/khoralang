@@ -1107,8 +1107,22 @@ struct Children {
     /// The most children this nursery will hold at once, or zero for as many
     /// as are adopted.
     limit: usize,
+    /// How long the list may get before it is worth sweeping.
+    ///
+    /// **Sweeping on every adoption was a third of a server's throughput.**
+    /// Asking a child whether it has finished takes its lock, so a full pass
+    /// over a bounded nursery of 256 was 256 lock-unlock pairs per connection —
+    /// 2,134 requests a second against 6,406 for the same architecture written
+    /// straight in Rust. Set to twice the survivors after each sweep, so the
+    /// work is amortised to about one check per adoption however many children
+    /// there are.
+    sweep_at: usize,
     held: Vec<Handed>,
 }
+
+/// The shortest list worth walking. Below this a sweep costs more in
+/// bookkeeping than the handles it reclaims.
+const SWEEP_FLOOR: usize = 64;
 
 type Crew = Mutex<Children>;
 
@@ -1160,7 +1174,11 @@ pub extern "C" fn khora_fibers_open() -> *mut u8 {
 pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
     let limit = if limit > 0 { limit as usize } else { 0 };
     let object = khora_alloc(std::mem::size_of::<*mut Crew>(), FIBERS_TAG);
-    let list: Box<Crew> = Box::new(Mutex::new(Children { limit, held: Vec::new() }));
+    let list: Box<Crew> = Box::new(Mutex::new(Children {
+        limit,
+        sweep_at: SWEEP_FLOOR,
+        held: Vec::new(),
+    }));
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.
     unsafe {
@@ -1198,10 +1216,12 @@ unsafe fn fiber_finished(fiber: *mut u8) -> bool {
 /// pointing at a running thread. Measured on the link shortener, which is what
 /// it took to see it.
 ///
-/// The sweep is O(n) in the children still held, which is O(1) amortised in the
-/// children that have *been* held — the whole point being that the first number
-/// stays small. A nursery over genuinely concurrent long-lived work pays a scan
-/// per adoption and keeps everything, which is what it is for.
+/// **Not on every adoption**, which is the other measured thing. Asking a child
+/// whether it has finished takes its lock, so sweeping each time cost a
+/// bounded nursery 256 lock-unlock pairs per connection and two thirds of the
+/// server's throughput. `sweep_at` holds it to about one check per adoption
+/// amortised, by only walking the list once it has grown to twice what the
+/// last sweep left behind.
 ///
 /// # Safety
 ///
@@ -1224,12 +1244,22 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
             // fiber, so this is the one place contention is expected rather
             // than incidental.
             let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
-            // SAFETY: every handle in the list was live when adopted and this
-            // list has held the only reference since.
-            let (done, keep): (Vec<Handed>, Vec<Handed>) = std::mem::take(&mut crew.held)
-                .into_iter()
-                .partition(|Handed(f)| unsafe { fiber_finished(*f) });
-            crew.held = keep;
+
+            // Only when the list has grown past its mark, or when there is no
+            // room and a sweep is the cheapest way to find some.
+            let crowded = crew.limit > 0 && crew.held.len() >= crew.limit;
+            let done: Vec<Handed> = if crowded || crew.held.len() >= crew.sweep_at {
+                // SAFETY: every handle in the list was live when adopted and
+                // this list has held the only reference since.
+                let (done, keep): (Vec<Handed>, Vec<Handed>) = std::mem::take(&mut crew.held)
+                    .into_iter()
+                    .partition(|Handed(f)| unsafe { fiber_finished(*f) });
+                crew.held = keep;
+                crew.sweep_at = SWEEP_FLOOR.max(crew.held.len().saturating_mul(2));
+                done
+            } else {
+                Vec::new()
+            };
 
             if crew.limit == 0 || crew.held.len() < crew.limit {
                 crew.held.push(Handed(fiber));

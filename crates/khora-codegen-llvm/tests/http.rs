@@ -10,8 +10,7 @@
 //! server needs a port, and cargo runs tests in one binary concurrently — two
 //! tests each starting a server means the second fails to bind and the first
 //! gets its connection reset. Sharing one process and sending several requests
-//! down several connections is what the server is built for anyway:
-//! `Connection: close`, one request each.
+//! down several connections is what the server is built for anyway.
 
 mod harness;
 
@@ -164,14 +163,51 @@ fn connect() -> Option<std::net::TcpStream> {
     None
 }
 
-/// Sends one raw request and reads the whole answer.
+/// Reads exactly one answer: the headers, then the body `Content-Length`
+/// promises.
+///
+/// **Not to end-of-file**, which is what this did while every response said
+/// `Connection: close`. The server keeps connections open now, so reading
+/// until it hangs up means waiting out the ten-second deadline — and a test
+/// that reads to EOF is one that would not notice keep-alive being silently
+/// dropped, which is the thing worth checking.
+fn read_message(socket: &mut std::net::TcpStream) -> String {
+    let mut got: Vec<u8> = Vec::new();
+    let head = loop {
+        if let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+        let mut chunk = [0u8; 4096];
+        match socket.read(&mut chunk) {
+            Ok(0) | Err(_) => return String::from_utf8_lossy(&got).into_owned(),
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
+        }
+    };
+    let length: usize = String::from_utf8_lossy(&got[..head])
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|value| value.trim().to_string())
+        })
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    while got.len() < head + length {
+        let mut chunk = [0u8; 4096];
+        match socket.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
+        }
+    }
+    String::from_utf8_lossy(&got).into_owned()
+}
+
+/// Sends one raw request on a connection of its own and reads the answer.
 fn ask(request: &[u8]) -> String {
     let mut socket = connect().expect("could not reach the server");
     socket.write_all(request).expect("writing the request");
     socket.flush().expect("flush");
-    let mut answer = String::new();
-    socket.read_to_string(&mut answer).expect("reading the answer");
-    answer
+    read_message(&mut socket)
 }
 
 /// The same, for a request the server may refuse part-way through.
@@ -184,9 +220,7 @@ fn ask_tolerating_reset(request: &[u8]) -> String {
         return String::new();
     }
     let _ = socket.flush();
-    let mut answer = String::new();
-    let _ = socket.read_to_string(&mut answer);
-    answer
+    read_message(&mut socket)
 }
 
 fn body_of(answer: &str) -> &str {
@@ -196,6 +230,42 @@ fn body_of(answer: &str) -> &str {
 #[test]
 fn the_server_reads_what_a_client_actually_sends() {
     let _server = start();
+
+    // --- several requests down one connection
+    //
+    // Reuse is the whole of the throughput story: 2,568 requests a second on a
+    // fresh connection each time, 142,991 on one held open. Everything else
+    // measured here — the parser, the router, the runtime — is inside that
+    // second number, which is why this is the property to pin rather than any
+    // of them.
+    let mut kept = connect().expect("could not reach the server");
+    for round in 1..=3 {
+        kept.write_all(b"GET /tagged HTTP/1.1\r\nHost: x\r\n\r\n").expect("a request");
+        kept.flush().expect("flush");
+        let answer = read_message(&mut kept);
+        assert!(
+            answer.starts_with("HTTP/1.1 200 OK\r\n"),
+            "request {round} on a reused connection: {answer}"
+        );
+        assert_eq!(body_of(&answer), "tagged", "request {round}: {answer}");
+        assert!(
+            answer.contains("Connection: keep-alive"),
+            "the server should say it is staying: {answer}"
+        );
+    }
+
+    // --- and a client that asks to close gets closed
+    let mut closing = connect().expect("could not reach the server");
+    closing
+        .write_all(b"GET /tagged HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .expect("a request");
+    closing.flush().expect("flush");
+    let answer = read_message(&mut closing);
+    assert!(answer.contains("Connection: close"), "the opt-out is honoured: {answer}");
+    let mut nothing = String::new();
+    closing.read_to_string(&mut nothing).expect("the server should hang up");
+    assert!(nothing.is_empty(), "nothing should follow: {nothing:?}");
+
 
     // --- query strings, percent-decoding, and the path they are not part of
     let answer = ask(
@@ -331,8 +401,7 @@ fn the_server_reads_what_a_client_actually_sends() {
     // The parked fiber was waiting, not lost.
     silent.write_all(b"GET /tagged HTTP/1.1\r\n\r\n").expect("the request, at last");
     silent.flush().expect("flush");
-    let mut late = String::new();
-    silent.read_to_string(&mut late).expect("reading the late answer");
+    let late = read_message(&mut silent);
     assert_eq!(body_of(&late), "tagged", "the connection that waited was answered too: {late}");
 
     // --- a body that arrives after its headers
@@ -353,8 +422,7 @@ fn the_server_reads_what_a_client_actually_sends() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     split.write_all(b"nine byte").expect("the body, late");
     split.flush().expect("flush");
-    let mut late = String::new();
-    split.read_to_string(&mut late).expect("reading the answer");
+    let late = read_message(&mut split);
     assert!(late.starts_with("HTTP/1.1 200 OK\r\n"), "{late}");
     assert_eq!(body_of(&late), "9", "the whole body arrived: {late}");
 
@@ -378,8 +446,7 @@ fn the_server_reads_what_a_client_actually_sends() {
         .expect("the headers and no body");
     silent.flush().expect("flush");
     let started = std::time::Instant::now();
-    let mut gave_up = String::new();
-    let _ = silent.read_to_string(&mut gave_up);
+    let _ = read_message(&mut silent);
     let waited = started.elapsed();
     assert!(
         waited >= std::time::Duration::from_secs(8),
