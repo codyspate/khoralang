@@ -429,7 +429,18 @@ impl<'a> Planner<'a> {
                 let bodies: Vec<ExprId> = arms.iter().map(|arm| arm.body).collect();
                 let bound: Vec<LocalId> =
                     arms.iter().flat_map(|arm| self.bound_by(arm.pat)).collect();
-                let live = self.across_arms(&bodies, &bound, after);
+                let mut live = self.across_arms(&bodies, &bound, after);
+                // **A guard is a read even though this pass does not walk into
+                // one.** A guard runs before its arm and may not run at all, so
+                // nothing in it can be a last use and its copies stand — but
+                // something earlier must not hand the binding away underneath
+                // it. Leaving them out let `let t = s + ""` take `s` and the
+                // guard then read the freed object.
+                for arm in &arms {
+                    if let Some(guard) = arm.guard {
+                        live.extend(self.reads_in(guard));
+                    }
+                }
                 self.live_before(scrutinee, &live)
             }
 

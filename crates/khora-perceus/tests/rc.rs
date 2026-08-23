@@ -214,3 +214,24 @@ fn a_function_with_nothing_boxed_needs_no_plan() {
     let p = plan(&db, "module m;\nfn f(a: Int, b: Int) -> Int { a + b }\n", "f");
     assert!(p.boxed.is_empty() && p.dups.is_empty() && p.drops.is_empty(), "{p:?}");
 }
+
+/// A guard runs before its arm, and the backward pass does not walk into one —
+/// its reads keep their copies. They are still reads, though, and something
+/// earlier must not hand the binding away underneath one.
+#[test]
+fn a_read_in_a_guard_keeps_the_binding_alive() {
+    let db = KhoraDatabase::new();
+    let p = plan(
+        &db,
+        "module m;\nexport type R = | A | B;\n\
+         fn f(s: String, r: R) -> Int {\n  \
+         let t = s + \"\";\n  \
+         match r { R::A if String::byte_length(s) > 0 => 1, _ => 0 }\n}\n",
+        "f",
+    );
+    // Locals bind in written order, so  is the first.
+    assert!(
+        !p.moved.iter().any(|local| local.index() == 0),
+        "`s` is read again in the guard and must not be handed away: {p:?}"
+    );
+}
