@@ -154,8 +154,9 @@ anything below it.
 - Reproducible package management, and the compatibility policy it enforces.
   The policy is decided — `docs/design/compatibility.md` — and nothing applies
   it yet.
-- Dependable HTTP, **TLS**, database, messaging and serialization libraries.
-  HTTP and JSON exist; TLS does not, and no operations team deploys without it.
+- Dependable HTTP, TLS, database, messaging and serialization libraries.
+  HTTP, JSON and TLS exist. **A database driver does not**, and that is now the
+  gap of this kind that matters most — almost every service is one.
 - Straightforward interoperability with existing Rust and C libraries.
 - Load, soak, cancellation, recovery and malformed-input testing.
 

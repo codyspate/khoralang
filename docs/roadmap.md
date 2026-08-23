@@ -963,9 +963,10 @@ effects.
   mention is still refused, a body that can fail is still refused where nothing
   may, and a call that really can leave still needs its `!`.
 
-The bindings A6 names — TLS and crypto, compression, numeric kernels — are
-consumers of phase 7 and are *not* on this critical path. A great deal of Khora
-can be written before anything needs TLS.
+TLS is bound and done: `rustls` in the runtime, both ends,
+`docs/design/ecosystem.md`'s rule applied. The other bindings A6 names —
+crypto, compression, numeric kernels — are
+consumers of phase 7 and are *not* on this critical path.
 
 - **8.2 One entry point, and the manifest names the rest — done.**
   `khora build ./app` is the whole of what a developer says. Which packages it
@@ -1228,7 +1229,8 @@ them was in the part anybody was worried about.
   handlers' rows, `:name` matches one segment, and `Response::json` asks for
   `Show` until there is a JSON module. Enough of the protocol to serve a
   request and no more — chunked transfer, keep-alive and TLS are all absent and
-  all deliberate.
+  all deliberate. *Later:* keep-alive and TLS both landed; chunked transfer and
+  multipart have not.
 
   Three compiler gaps came out of writing it, and each is worth more than the
   module: **a rigid row variable now subsumes** (a demand of `'r` against a
@@ -1454,7 +1456,7 @@ promise. It does not add another execution model or widen the language.
   are recorded where they belong rather than fixed here: D13 and D14 in the
   open questions above.
 
-Explicitly out of scope here: TLS, macOS and cross-targets, package resolution,
+Explicitly out of scope here: macOS and cross-targets, package resolution,
 permission enforcement that depends on package identity, the linter, LSP, and
 general formatter cleanup. Those remain Phase 10 or ordinary maintenance. The
 point of 8.5 is to make the foundation honest before optimizing it, not to make

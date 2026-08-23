@@ -28,9 +28,14 @@ direct-style algebraic effects (`with` and `raises` rows, handlers, `!` at
 fallible call sites), structured concurrency with nurseries, and a sharing
 discipline that decides what may cross into another fiber.
 
+`std` covers collections, strings, JSON, files, processes, randomness, time,
+HTTP and **TLS** — a server that serves HTTPS, and a client that connects by
+name and verifies the certificate against the machine's own trust store.
+
 ### What it does not have yet
 
-- **No TLS, chunked transfer, or multipart bodies** in `std::net::http`.
+- **No chunked transfer or multipart bodies** in `std::net::http`. TLS is
+  there, both ends.
 - **Windows and Linux only.** macOS sockets are not implemented.
 - **`[permissions]` is not a sandbox.** The compile-time gate over Khora code
   is total, and `extern fn` goes around it. Closing that needs package
