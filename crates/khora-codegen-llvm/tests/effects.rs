@@ -1422,6 +1422,11 @@ fn main() -> Int {{
 "
         ),
     );
+    // The trailing 1 is the live-object count: `limit` is still in scope where
+    // it is taken. Moving a binding's reference to its last use would make this
+    // 0, and briefly did — but that optimization is restricted to `String` for
+    // now, because releasing earlier is only invisible when releasing does
+    // nothing but free. `khora_perceus::quietly_dropped`.
     assert_eq!(ran.stdout, "7\n1\n", "twenty comparisons, and only `limit` still alive");
     assert_eq!(ran.code, Some(0));
 }

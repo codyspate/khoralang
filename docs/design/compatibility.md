@@ -64,6 +64,18 @@ Equally deliberate, and this is the half that matters for Phase 9.
   a specific build. They are not a public interface and a released program has
   no way to ask the question.
 
+  **One exception, and it is a real one.** Releasing is unobservable when
+  releasing does nothing but free. A `Region` runs the finalizers deferred into
+  it when it is released, which is user code with output of its own — so *when*
+  a region is released is observable, and this paragraph does not cover it.
+
+  Found by moving a binding's reference to its last use and watching a
+  finalizer print before the line above it. Whether a region ends with its
+  scope or with its last reference is a language decision nobody has taken;
+  until it is, the optimizer treats a region's release as observable and leaves
+  it where the scope puts it. `docs/design/reuse.md`, and the "Not decided
+  here" list below.
+
 - **How long anything takes**, or how much memory it uses. Performance is a
   reason to choose Khora and not a term of the contract.
 - **The order a `Map` or a `Dict` yields its entries.** Unspecified today,
@@ -206,3 +218,7 @@ Stating the policy is not meeting it. 1.0 is blocked on at least:
   is a project-management commitment and needs a project, not a design.
 - **Minimum supported compiler version for a package**, and how the resolver
   reads it.
+- **When a `Region` ends.** Its scope, or its last reference? The finalizers it
+  runs make the answer observable, so it is the one place where "freeing is not
+  observable" needs a rule rather than a shrug. Blocks widening the last-use
+  optimization past `String`.

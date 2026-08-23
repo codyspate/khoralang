@@ -74,6 +74,14 @@ pub struct RcPlan {
     pub drops: HashMap<ExprId, Vec<LocalId>>,
     /// Locals holding a boxed value. Everything else is a machine word.
     pub boxed: HashSet<LocalId>,
+    /// Locals whose reference was handed to their last read rather than
+    /// released by their block.
+    ///
+    /// Recorded so the invariant stays checkable. It used to be "every counted
+    /// local is released exactly once"; it is now "released exactly once, or
+    /// moved exactly once", and without this there would be no way to tell a
+    /// moved local from one somebody forgot.
+    pub moved: HashSet<LocalId>,
 }
 
 impl RcPlan {
@@ -88,6 +96,37 @@ impl RcPlan {
     pub fn is_boxed(&self, local: LocalId) -> bool {
         self.boxed.contains(&local)
     }
+}
+
+/// Whether releasing a value of this type can be *observed*.
+///
+/// **Freeing earlier is only invisible when freeing does nothing but free.**
+/// `docs/design/compatibility.md` says when memory is released is not something
+/// a program may depend on, and that is true of memory. It is not true of a
+/// `Region`, whose release runs the finalizers deferred into it — user code,
+/// with output and effects of its own.
+///
+/// Found by a test rather than by reasoning:
+///
+/// ```khora
+/// let region = Region::open();
+/// Region::defer(region, fn () => print(2));
+/// print(1);
+/// ```
+///
+/// The last read of `region` is the `defer`, so moving its reference there
+/// released the region on that line and printed `2` before `1`. Not a leak, not
+/// a double free — a different program.
+///
+/// So this is deliberately narrow: a `String` and nothing else. A `String`
+/// holds bytes, its release frees them, and there is nothing it can reach. An
+/// ADT could hold a `Region` in a field, a closure could capture one, and
+/// deciding *which* of those are quiet needs the field types this pass is not
+/// given. Widening it is worth doing and wants the question answered first:
+/// whether a region's end is its scope or its last reference is a language
+/// decision, not an optimizer's.
+fn quietly_dropped(ty: &Type) -> bool {
+    matches!(ty, Type::Str)
 }
 
 /// Whether values of this type carry a reference count.
@@ -109,8 +148,16 @@ pub fn is_boxed(ty: &Type) -> bool {
 /// wrong for every instantiation that fills a parameter with something boxed —
 /// see `docs/errata.md`, entry 24.
 pub fn plan(body: &Body, types: &khora_types::BodyTypes) -> RcPlan {
-    let mut planner = Planner { body, plan: RcPlan::default(), types };
+    let mut planner = Planner {
+        body,
+        plan: RcPlan::default(),
+        types,
+        reads: Vec::new(),
+        branching: 0,
+        unwinds: false,
+    };
     planner.plan_function();
+    planner.settle_last_uses();
     planner.plan
 }
 
@@ -142,6 +189,22 @@ struct Planner<'a> {
     body: &'a Body,
     plan: RcPlan,
     types: &'a khora_types::BodyTypes,
+    /// Every read of a boxed local, in program order, with whether it happened
+    /// somewhere that might not run.
+    reads: Vec<(LocalId, ExprId, bool)>,
+    /// How many conditional or repeated constructs enclose the walk.
+    ///
+    /// A read inside an `if` arm, a `match` arm, a loop or a lambda may run
+    /// zero times or many, so it cannot be *the* last use of anything.
+    branching: usize,
+    /// Whether this body can leave a frame early.
+    ///
+    /// A `!` or a `raise` unwinds, and unwinding releases what the frame's
+    /// blocks declared. Moving a reference out of a binding makes that set
+    /// depend on how far execution got, which is the hard half of
+    /// `docs/design/reuse.md` §1 and is not attempted here — so a body that
+    /// can unwind keeps the conservative plan entirely.
+    unwinds: bool,
 }
 
 impl<'a> Planner<'a> {
@@ -173,6 +236,67 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Hands a binding's reference to its last read instead of copying it.
+    ///
+    /// The conservative scheme gives every read its own reference and releases
+    /// the binding's where the block ends, so a value read once costs a `dup`,
+    /// the consumer's `drop`, and the block's `drop`. Three operations to move
+    /// one value. Counted across a workload the ratio is stark: parsing one
+    /// HTTP request performs 677 reference-count operations against 55
+    /// allocations, and a hundred failed `Map::get` calls perform 5,704
+    /// against 5. `docs/design/reuse.md`.
+    ///
+    /// So: where a binding's *last* read is unambiguous, that read takes the
+    /// binding's reference rather than making one, and the block no longer
+    /// releases it. Two operations become none.
+    ///
+    /// **The conditions are what make this safe, and they are deliberately
+    /// crude.** This is the first step of `reuse.md` §1, not the whole of it.
+    ///
+    /// - **The body cannot unwind.** A `!`, a `raise`, a `catch` or a `return`
+    ///   leaves a frame from the middle, and what is still owned then depends
+    ///   on how far execution got. Making the release set path-dependent is the
+    ///   hard half of §1; a body that can unwind keeps the conservative plan
+    ///   entirely.
+    /// - **No read may be inside a branch, a loop, or a lambda.** Those run
+    ///   zero times, or many, so no read within them is *the* last one.
+    /// - **The binding must be read at least once**, or there is nothing to
+    ///   move the reference to and the block still has to release it.
+    ///
+    /// A parameter counts as a binding here, released by the outermost block
+    /// like any other.
+    fn settle_last_uses(&mut self) {
+        if self.unwinds {
+            return;
+        }
+
+        let mut moved: Vec<LocalId> = Vec::new();
+        for local in self.plan.boxed.clone() {
+            if !quietly_dropped(self.types.local(local)) {
+                continue;
+            }
+            let mut reads = self.reads.iter().filter(|(who, _, _)| *who == local).peekable();
+            if reads.peek().is_none() {
+                continue;
+            }
+            if self.reads.iter().any(|(who, _, risky)| *who == local && *risky) {
+                continue;
+            }
+            // In program order, because `walk` visits in it.
+            let last = self.reads.iter().rfind(|(who, _, _)| *who == local).map(|(_, r, _)| *r);
+            if let Some(last) = last {
+                self.plan.dups.remove(&last);
+                self.plan.moved.insert(local);
+                moved.push(local);
+            }
+        }
+
+        for releases in self.plan.drops.values_mut() {
+            releases.retain(|local| !moved.contains(local));
+        }
+        self.plan.drops.retain(|_, releases| !releases.is_empty());
+    }
+
     /// Records a pattern's bindings and collects the boxed ones.
     fn bind(&mut self, pat: PatId, owned: &mut Vec<LocalId>) {
         match self.body.pat(pat).clone() {
@@ -194,17 +318,26 @@ impl<'a> Planner<'a> {
     fn walk(&mut self, id: ExprId) {
         match self.body.expr(id).clone() {
             Expr::Local(local) => {
-                // The value outlives the read, so it needs its own reference.
+                // The value outlives the read, so it needs its own reference —
+                // unless this read turns out to be the last one, which
+                // `settle_last_uses` decides once the whole body has been seen.
                 if self.plan.boxed.contains(&local) {
                     self.plan.dups.insert(id);
+                    self.reads.push((local, id, self.branching > 0));
                 }
             }
             // A record's fields are moved into it, exactly as a
             // constructor's arguments are.
             // The error is moved into the return, and `!` is the identity on
             // ownership: the value it unwraps is the value the call produced.
-            Expr::Raise(error) => self.walk(error),
-            Expr::Try(inner) => self.walk(inner),
+            Expr::Raise(error) => {
+                self.unwinds = true;
+                self.walk(error);
+            }
+            Expr::Try(inner) => {
+                self.unwinds = true;
+                self.walk(inner);
+            }
             Expr::Record { fields, .. } => {
                 for (_, value) in &fields {
                     self.walk(*value);
@@ -224,7 +357,11 @@ impl<'a> Planner<'a> {
                 // the plan's releases are keyed by block. The lifted function
                 // releases its own parameters instead, on every path out.
                 let _ = owned;
+                // A lambda's body runs when the closure is called, which is not
+                // here and may be never.
+                self.branching += 1;
                 self.walk(body);
+                self.branching -= 1;
             }
             Expr::Block { stmts, tail } => {
                 let mut declared = Vec::new();
@@ -248,6 +385,7 @@ impl<'a> Planner<'a> {
             }
             Expr::Match { scrutinee, arms } => {
                 self.walk(scrutinee);
+                self.branching += 1;
                 for arm in &arms {
                     // Arm bindings borrow out of the scrutinee, which the arm
                     // does not own, so they are recorded but not dropped.
@@ -258,13 +396,16 @@ impl<'a> Planner<'a> {
                     }
                     self.walk(arm.body);
                 }
+                self.branching -= 1;
             }
             // Same shape as `match`, over the error rather than a scrutinee.
             // The error object itself is owned by the catching frame — the
             // raising one moved it into the return — so code generation drops
             // it after the arm; see `lower_catch`.
             Expr::Catch { inner, arms } => {
+                self.unwinds = true;
                 self.walk(inner);
+                self.branching += 1;
                 for arm in &arms {
                     let mut ignored = Vec::new();
                     self.bind(arm.pat, &mut ignored);
@@ -273,6 +414,7 @@ impl<'a> Planner<'a> {
                     }
                     self.walk(arm.body);
                 }
+                self.branching -= 1;
             }
             Expr::Call { callee, args } => {
                 self.walk(callee);
@@ -280,29 +422,64 @@ impl<'a> Planner<'a> {
                     self.walk(arg);
                 }
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs } => {
                 self.walk(lhs);
+                // **`&&` and `||` short-circuit**, so the right side is a
+                // branch even though it does not look like one. Missing this
+                // leaked exactly one object in a derived `Bool` method whose
+                // body is three comparisons joined by `||`: the value read on
+                // the right was never released when the left answered first.
+                let skippable = matches!(op, khora_hir::body::BinOp::And | khora_hir::body::BinOp::Or);
+                if skippable {
+                    self.branching += 1;
+                }
                 self.walk(rhs);
+                if skippable {
+                    self.branching -= 1;
+                }
             }
             Expr::Assign { target, value } => {
+                // Walking the target records a *read* of the local, and a write
+                // is not a read: taking it for one would hand the binding's
+                // reference to the assignment and leave the new value with
+                // nothing to release it.
+                let before = self.reads.len();
                 self.walk(target);
+                self.reads.truncate(before);
                 self.walk(value);
             }
             Expr::Unary { operand, .. } => self.walk(operand),
             Expr::Field { base, .. } => self.walk(base),
             Expr::If { condition, then_branch, else_branch } => {
                 self.walk(condition);
+                self.branching += 1;
                 self.walk(then_branch);
                 if let Some(e) = else_branch {
                     self.walk(e);
                 }
+                self.branching -= 1;
             }
             Expr::While { condition, body } => {
+                // The condition runs at least once and the body may run many
+                // times; both are inside the repetition as far as a last use is
+                // concerned.
+                self.branching += 1;
                 self.walk(condition);
                 self.walk(body);
+                self.branching -= 1;
             }
-            Expr::Loop { body } => self.walk(body),
-            Expr::Break(Some(v)) | Expr::Return(Some(v)) => self.walk(v),
+            Expr::Loop { body } => {
+                self.branching += 1;
+                self.walk(body);
+                self.branching -= 1;
+            }
+            Expr::Break(Some(v)) => self.walk(v),
+            // A `return` leaves the frame from the middle, which makes what is
+            // still owned depend on where it left from.
+            Expr::Return(Some(v)) => {
+                self.unwinds = true;
+                self.walk(v);
+            }
             Expr::List(items) | Expr::Tuple(items) => {
                 for item in items {
                     self.walk(item);

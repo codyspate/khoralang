@@ -49,6 +49,33 @@ read inside a loop is read on every iteration. A `break` out of a loop leaves
 scopes early, and `raise` leaves several at once — `unwind_to` already knows
 how to release along that path and will need to release a different set.
 
+**A first step is in**, and it is worth reading for what it found rather than
+for what it bought. Where a binding is a `String`, every read of it is
+unconditional, and the body cannot unwind, the last read takes the binding's
+reference instead of copying it and the block no longer releases it.
+
+That removes **7% of the reference-count operations** in an HTTP parse — 677 to
+630 — and does not move the clock at all, which is what 12% of 7% looks like.
+The restriction is why: *every read unconditional* excludes almost all real
+code, because almost every read in a parser is inside a `while` or an `if`. The
+value is in the version that handles those, which is the rest of this section.
+
+Two things it did find, both by failing a test:
+
+- **`&&` and `||` short-circuit**, so the right-hand side is a branch that does
+  not look like one. Treating it as straight-line leaked exactly one object.
+- **Releasing is only invisible when releasing does nothing but free.** A
+  `Region` runs its deferred finalizers when released, so moving a region's
+  reference to its last use printed `2` before `1` in a program whose whole
+  point was the order. Not a leak and not a double free — a different program.
+  `docs/design/compatibility.md` now carries the exception, and *when a region
+  ends* is on its "not decided here" list, because that is a language question
+  rather than an optimizer's.
+
+The optimization is therefore limited to `String`, whose release can reach
+nothing. Widening it needs an answer about regions and a way to ask whether an
+ADT's fields transitively hold one.
+
 This is the whole of the risk. Getting it wrong is a double free or a use after
 free, and both present as a crash somewhere unrelated. It wants:
 

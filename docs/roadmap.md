@@ -1497,10 +1497,23 @@ much less than over the arrays phase 6 brings.
   to 5, an HTTP request parse from 61 to 55, a JSON round trip from 142 to 128.
   Server throughput did not move, which is worth saying plainly — the parser's
   cost is strings and hashing.
-- **9.1 Ownership at the last use — not started, and the whole of the risk.**
-  Reuse cannot work until a value's release moves from the end of its block to
-  its last read, on every path including `break` and `raise`. Getting it wrong
-  is a double free. `docs/design/reuse.md` §1.
+- **9.1 Ownership at the last use — begun, and the easy half is worth nothing.**
+  A `String` whose reads are all unconditional, in a body that cannot unwind,
+  now hands its reference to its last read instead of copying it. Seven per cent
+  of the reference-count operations in an HTTP parse, and no measurable time —
+  because "all reads unconditional" excludes nearly every read in real code,
+  which sits inside a `while` or an `if`.
+
+  It earned its place by what it broke rather than what it saved. `&&` and `||`
+  short-circuit, so the right side is a branch that does not look like one, and
+  missing that leaked an object. And **releasing is only invisible when
+  releasing does nothing but free**: a `Region` runs its finalizers when it is
+  released, so moving a region to its last use reordered a program's output.
+  `docs/design/compatibility.md` carries the exception now, and *when a region
+  ends* is an open question it names.
+
+  The rest — every path, including `break` and `raise` — is where the value is,
+  and is still the whole of the risk. `docs/design/reuse.md` §1.
 - **9.2 Reuse tokens.** `khora_drop_reuse` and `khora_alloc_reuse`, once 9.1
   makes a matched cell uniquely held at the arm's constructor.
 - **9.3 Drop specialization**, measured before it is written.

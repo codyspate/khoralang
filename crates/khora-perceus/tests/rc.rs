@@ -38,23 +38,62 @@ fn strings_and_adts_are_counted() {
     assert!(is_boxed(&Type::adt("R")));
 }
 
+/// An owned parameter is released — unless the body hands its reference on,
+/// which `fn f(s) { s }` does. The one read *is* the last use, so `s` moves
+/// into the result and there is nothing left for the block to release.
+///
+/// This asserted a release when it was written, because every read copied and
+/// every block released: two reference-count operations to return an argument
+/// unchanged. `docs/design/reuse.md`.
 #[test]
-fn a_boxed_parameter_is_owned_and_released() {
+fn a_parameter_returned_unchanged_is_moved_not_copied() {
     let db = KhoraDatabase::new();
     let p = plan(&db, "module m;\nfn f(s: String) -> String { s }\n", "f");
 
     assert_eq!(p.boxed.len(), 1, "the parameter should be counted: {p:?}");
+    assert!(p.dups.is_empty(), "the last read should move, not copy: {p:?}");
     let released: Vec<_> = p.drops.values().flatten().collect();
-    assert_eq!(released.len(), 1, "an owned parameter must be dropped: {p:?}");
+    assert!(released.is_empty(), "nothing is left to release: {p:?}");
 }
 
-/// Reading a counted local produces a value that outlives the read, so it
-/// needs its own reference.
+/// A read that is *not* the last still copies, because the value has to outlive
+/// it. Only the last one takes the binding's own reference.
 #[test]
-fn reading_a_boxed_local_dups() {
+fn a_read_that_is_not_the_last_still_dups() {
+    let db = KhoraDatabase::new();
+    let p = plan(
+        &db,
+        "module m;\nfn f(s: String) -> Int { String::byte_length(s) + String::byte_length(s) }\n",
+        "f",
+    );
+    assert_eq!(p.dups.len(), 1, "the first read copies, the second moves: {p:?}");
+}
+
+/// `let t = s; t` moves twice and copies nothing: each binding is read exactly
+/// once, unconditionally, and hands its reference straight on. Four
+/// reference-count operations before this, none now.
+#[test]
+fn a_chain_of_single_uses_costs_nothing() {
     let db = KhoraDatabase::new();
     let p = plan(&db, "module m;\nfn f(s: String) -> String { let t = s; t }\n", "f");
-    assert!(!p.dups.is_empty(), "reading a boxed local should dup: {p:?}");
+    assert!(p.dups.is_empty(), "nothing needs copying: {p:?}");
+    assert!(p.drops.is_empty(), "nothing is left to release: {p:?}");
+    assert_eq!(p.moved.len(), 2, "both bindings moved: {p:?}");
+}
+
+/// A read that might not happen cannot be anybody's last use, so the
+/// conservative plan stands: the read copies and the block releases.
+#[test]
+fn a_read_inside_a_branch_keeps_its_dup() {
+    let db = KhoraDatabase::new();
+    let p = plan(
+        &db,
+        "module m;\nfn f(s: String, yes: Bool) -> String { if yes { s } else { \"\" } }\n",
+        "f",
+    );
+    assert_eq!(p.dups.len(), 1, "a conditional read still copies: {p:?}");
+    let released: Vec<_> = p.drops.values().flatten().collect();
+    assert_eq!(released.len(), 1, "and the block still releases: {p:?}");
 }
 
 #[test]
@@ -90,8 +129,19 @@ fn every_counted_local_is_released_once() {
     released.dedup();
     assert_eq!(released.len(), before, "a local was released twice: {p:?}");
 
+    // Released *or* moved. A binding whose last read took its reference has
+    // nothing left to release, and that is the optimization rather than an
+    // omission — but it must be exactly one of the two, or the count does not
+    // return to zero in one direction or the other.
     for local in &p.boxed {
-        assert!(released.contains(local), "local {local:?} is counted but never released: {p:?}");
+        assert!(
+            released.contains(local) || p.moved.contains(local),
+            "local {local:?} is counted but neither released nor moved: {p:?}"
+        );
+        assert!(
+            !(released.contains(local) && p.moved.contains(local)),
+            "local {local:?} is both released and moved: {p:?}"
+        );
     }
 }
 
@@ -109,8 +159,14 @@ fn match_arm_bindings_are_not_released_by_the_arm() {
     );
 
     // `r` itself is owned by the function and released; the arm binding is not.
+    //
+    // `r` is an ADT, so it is not eligible for the last-use move even though
+    // its one read is unconditional — releasing an ADT earlier is only
+    // invisible if nothing it holds has an observable release, and that is not
+    // yet decidable here. `khora_perceus::quietly_dropped`.
     let released: Vec<_> = p.drops.values().flatten().copied().collect();
     assert_eq!(released.len(), 1, "only the parameter should be released: {p:?}");
+    assert!(p.moved.is_empty(), "an ADT is not moved yet: {p:?}");
 }
 
 #[test]
