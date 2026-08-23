@@ -1,17 +1,9 @@
-//! The trailing `impl` clause on a type declaration.
+//! `derive(..)` syntax.
 //!
-//! ```khora
-//! export type Point = { x: Int, y: Int } impl Eq, Ord, Show;
-//! ```
-//!
-//! `impl` rather than a word of its own: it already means "here are
-//! implementations for this type", so the clause costs no keyword at all — not
-//! even a contextual one — and reads as the short form of what it expands
-//! into. Trailing, because Khora already puts a declaration's clauses after it
-//! and because the name is what a reader is looking for.
-//!
-//! It was `derive(Eq, Ord)` on the line above, which is Rust's spelling. It
-//! went because it was attribute-shaped in a language with no attributes.
+//! Rust's word without Rust's `#[..]`. Khora has no attribute grammar and no
+//! second use for one, so the clause stands on its own line above the
+//! declaration — which is where a Rust reader already looks. `derive` is
+//! contextual, so a program that already calls something `derive` keeps it.
 
 use khora_syntax::ast::Decl;
 use khora_syntax::{parse, CONTEXTUAL_KEYWORDS, KEYWORDS};
@@ -40,11 +32,12 @@ fn derived(source: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_clause_belongs_to_the_type_it_follows() {
-    let out = tree("module m;\nexport type Point = { x: Int, y: Int } impl Eq, Ord;\n");
+fn a_derive_clause_belongs_to_the_type_it_introduces() {
+    let out = tree("module m;\nderive(Eq, Ord)\nexport type Point = { x: Int, y: Int };\n");
     assert!(out.contains("DERIVE_CLAUSE"), "{out}");
-    // Inside the declaration, not beside it: a reader of the tree asks the type
-    // what it implements rather than looking at what came after it.
+    assert!(out.contains("DERIVE_KW"), "the word is remapped from IDENT\n{out}");
+    // Inside the declaration, not beside it: a reader of the tree asks the
+    // type what it derives rather than looking at what came before it.
     let clause = out.find("DERIVE_CLAUSE").expect("a clause");
     let decl = out.find("TYPE_DECL").expect("a declaration");
     assert!(decl < clause, "the clause should be nested in the declaration\n{out}");
@@ -53,75 +46,73 @@ fn the_clause_belongs_to_the_type_it_follows() {
 #[test]
 fn the_traits_are_read_back_in_order() {
     assert_eq!(
-        derived("module m;\ntype P = { x: Int } impl Eq, Ord, Show, Hash;\n"),
+        derived("module m;\nderive(Eq, Ord, Show, Hash)\ntype P = { x: Int };\n"),
         vec!["Eq", "Ord", "Show", "Hash"]
     );
 }
 
-/// A variant type's clause comes after the last case, where the `;` was.
 #[test]
-fn a_variant_type_takes_the_clause_too() {
-    assert_eq!(
-        derived("module m;\ntype Shape =\n  | Circle(r: Int)\n  | Square(s: Int)\n  impl Eq, Show;\n"),
-        vec!["Eq", "Show"]
-    );
-}
-
-/// An opaque type has no body for the clause to follow, and still takes one.
-#[test]
-fn an_opaque_type_can_carry_a_clause() {
-    assert_eq!(derived("module m;\nexport type Handle impl Eq;\n"), vec!["Eq"]);
+fn a_derive_comes_before_export() {
+    let out = tree("module m;\nderive(Eq)\nexport type P = { x: Int };\n");
+    assert!(out.contains("DERIVE_CLAUSE"), "{out}");
+    assert!(out.contains("EXPORT_KW"), "{out}");
 }
 
 #[test]
 fn one_trait_needs_no_comma_and_a_trailing_one_is_allowed() {
-    assert_eq!(derived("module m;\ntype P = { x: Int } impl Eq;\n"), vec!["Eq"]);
-    assert_eq!(derived("module m;\ntype P = { x: Int } impl Eq, Ord,;\n"), vec!["Eq", "Ord"]);
+    assert_eq!(derived("module m;\nderive(Eq)\ntype P = { x: Int };\n"), vec!["Eq"]);
+    assert_eq!(derived("module m;\nderive(Eq, Ord,)\ntype P = { x: Int };\n"), vec!["Eq", "Ord"]);
 }
 
-/// The clause reuses a keyword the language already had, so nothing was added
-/// to either list. `derive` in particular went back to being an ordinary word.
+/// The word means nothing anywhere else, so `derive` stays available as a
+/// function, a parameter and a field.
 #[test]
-fn the_clause_costs_no_keyword() {
+fn derive_is_an_ordinary_identifier_everywhere_else() {
     let out = tree(
         "module m;\n\
          type Rules = { derive: Int };\n\
          fn derive(derive: Int) -> Int { derive }\n\
          fn f() -> Int { derive(1) }\n",
     );
-    assert!(!out.contains("DERIVE_KW"), "there is no such token any more\n{out}");
-    assert!(!KEYWORDS.contains(&"derive"), "`derive` must not be a keyword");
-    assert!(!CONTEXTUAL_KEYWORDS.contains(&"derive"), "`derive` must not be contextual either");
-    assert!(KEYWORDS.contains(&"impl"), "`impl` is the keyword the clause spends");
+    assert!(!out.contains("DERIVE_KW"), "none of these is a keyword\n{out}");
+    assert!(!KEYWORDS.contains(&"derive"), "`derive` must not be a hard keyword");
+    assert!(CONTEXTUAL_KEYWORDS.contains(&"derive"), "`derive` must be listed as contextual");
 }
 
-/// A trait declaration's `impl` is not this one, and an ordinary `impl` block
-/// still parses beside a type that carries a clause.
+/// A `derive` in front of anything but a `type` is the mistake worth naming,
+/// and naming it here beats a cascade downstream about a call to a function
+/// nobody declared.
 #[test]
-fn a_clause_does_not_swallow_the_impl_block_after_it() {
-    let out = tree(
-        "module m;\n\
-         type P = { x: Int } impl Eq;\n\
-         impl P { fn get(self) -> Int { self.x } }\n",
+fn a_derive_in_front_of_something_else_is_named() {
+    let found = errors("module m;\nderive(Eq)\nfn f() -> Int { 1 }\n");
+    assert!(
+        found.iter().any(|e| e.contains("introduces a `type` declaration")),
+        "got {found:?}"
     );
-    assert!(out.contains("DERIVE_CLAUSE"), "{out}");
-    assert!(out.contains("IMPL_DECL"), "the block after it is still a block\n{out}");
+}
+
+/// Recovery has to reach the next declaration, or one stray `derive` costs the
+/// rest of the file.
+#[test]
+fn recovery_reaches_the_declaration_after_a_stray_derive() {
+    let out = parse("module m;\nderive(Eq)\nfn f() -> Int { 1 }\n").debug_tree();
+    assert!(out.contains("FN_DECL"), "{out}");
 }
 
 #[test]
-fn a_clause_with_a_non_name_inside_is_reported() {
-    let found = errors("module m;\ntype P = { x: Int } impl 1;\n");
+fn a_derive_with_a_non_name_inside_is_reported() {
+    let found = errors("module m;\nderive(1)\ntype P = { x: Int };\n");
     assert!(found.iter().any(|e| e.contains("name of a trait")), "got {found:?}");
 }
 
-/// The tree is lossless whatever the input.
+/// The tree is lossless whatever the input, `derive` included.
 #[test]
-fn a_broken_clause_still_round_trips() {
+fn a_broken_derive_still_round_trips() {
     for source in [
-        "module m;\ntype P = { x: Int } impl\n",
-        "module m;\ntype P = { x: Int } impl ,;\n",
-        "module m;\ntype P = { x: Int } impl Eq\n",
-        "module m;\ntype P impl Eq Ord;\n",
+        "module m;\nderive\n",
+        "module m;\nderive(\n",
+        "module m;\nderive(Eq\ntype P = { x: Int };\n",
+        "module m;\nderive()\ntype P = { x: Int };\n",
     ] {
         let parsed = parse(source);
         assert_eq!(parsed.syntax().text().to_string(), source, "lost text for {source:?}");

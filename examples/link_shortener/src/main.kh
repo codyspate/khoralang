@@ -34,17 +34,18 @@ import std::random::{Random};
 
 /// One shortened link.
 ///
-/// `impl Eq, Ord, Show` is the whole of the boilerplate this used to need.
+/// `derive(Eq, Ord, Show)` is the whole of the boilerplate this used to need.
 /// `Ord` is what `List::sort` asks for and orders by `created` first, because
 /// that is the field written first — declaration order is comparison order,
 /// which is the rule every language has and the reason the fields are in this
 /// order rather than alphabetical.
+derive(Eq, Ord, Show)
 export type Link = {
   created: Int,
   code: String,
   url: String,
   hits: Int,
-} impl Eq, Ord, Show;
+};
 
 impl Link {
   /// The JSON a client sees. Written out rather than derived, because
@@ -166,7 +167,9 @@ fn follow(store: Store, request: Request) -> Response {
       let after = Shared::update(store.links, fn table =>
         match Dict::get(table, code) {
           Option::None => table,
-          Option::Some(found) => Dict::insert(table, code, counted(found)),
+          Option::Some(found) =>
+          Dict::insert(table, code, { created: found.created, code: found.code,
+              url: found.url, hits: found.hits + 1 }),
         });
       match Dict::get(after, code) {
         Option::None => problem(404, "no link with that code"),
@@ -175,11 +178,6 @@ fn follow(store: Store, request: Request) -> Response {
       }
     },
   }
-}
-
-/// The same link, followed once more.
-fn counted(link: Link) -> Link {
-  { created: link.created, code: link.code, url: link.url, hits: link.hits + 1 }
 }
 
 /// `GET /links` — everything, newest first.

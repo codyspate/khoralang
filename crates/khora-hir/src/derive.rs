@@ -1,4 +1,4 @@
-//! A type's trailing `impl Eq, Ord, Show, Hash`, expanded into real impls.
+//! `derive(Eq, Ord, Show, Hash)`, expanded into ordinary impls.
 //!
 //! # Why this is a source-to-source expansion
 //!
@@ -18,7 +18,7 @@
 //!
 //! What it costs is that the generated text has ranges of its own, belonging to
 //! no file. That is handled by *blaming the `derive`*: every range in a derived
-//! impl is rewritten to the range of the clause that asked for it,
+//! impl is rewritten to the range of the `derive(..)` clause that asked for it,
 //! so a diagnostic can only ever point at something the author wrote. It is
 //! also the right place to point. A derived impl that does not check is either
 //! the author's fault — a field whose type lacks the trait — or the compiler's,
@@ -66,7 +66,7 @@ pub struct DerivedImpl {
     pub trait_name: String,
     /// The type as declared: `Point`, or `Box` for `Box<A>`.
     pub type_name: String,
-    /// Where the clause is, in the *file*. Everything a derived
+    /// Where the `derive(..)` clause is, in the *file*. Everything a derived
     /// impl can be blamed for is blamed here.
     pub at: TextRange,
     /// Whether the type is a record. Whoever reads this does not otherwise
@@ -209,7 +209,7 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
             }
             if wanted.contains(&name) {
                 errors.push(HirError {
-                    message: format!("`{name}` is named twice in this clause"),
+                    message: format!("`{name}` is named twice in this `derive`"),
                     range: at,
                 });
                 continue;
@@ -245,7 +245,7 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
     if !parse.errors().is_empty() {
         errors.push(HirError {
             message: format!(
-                "the compiler wrote an impl for this clause that it cannot itself \
+                "the compiler wrote an impl for this `derive` that it cannot itself \
                  parse; that is a compiler bug. What it wrote:\n{text}"
             ),
             range: impls.first().map_or(TextRange::empty(0.into()), |i| i.at),
@@ -270,8 +270,8 @@ fn shape_of(
     let refuse = |errors: &mut Vec<HirError>, why: &str| {
         errors.push(HirError {
             message: format!(
-                "nothing can be derived for `{type_name}`: {why}. A derived impl is \
-                 written from the fields, so there has to be a list of them to read"
+                "nothing can be derived for `{type_name}`: {why}. A derive is written \
+                 from the fields, so there has to be a list of them to read"
             ),
             range: at,
         });
@@ -331,8 +331,8 @@ fn parameters_of(
         if param.is_const() || param.row_var().is_some() {
             errors.push(HirError {
                 message: format!(
-                    "`{type_name}` has a const or row parameter, which cannot be derived \
-                     yet; write the impl out by hand"
+                    "`{type_name}` has a const or row parameter, which `derive` cannot \
+                     write an impl for yet; write the impl by hand"
                 ),
                 range: at,
             });

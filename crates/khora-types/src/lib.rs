@@ -2131,19 +2131,46 @@ impl<'a> Checker<'a> {
                 // A parameter with no annotation gets a variable, so the type
                 // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
                 // learns `x: Int` from `map`'s signature, not from the lambda.
-                let types: Vec<Type> = params
-                    .iter()
-                    .map(|p| {
-                        let ty = self.unifier.fresh();
-                        self.bind_pattern(*p, &ty);
-                        ty
-                    })
-                    .collect();
+                let types: Vec<Type> = params.iter().map(|_| self.unifier.fresh()).collect();
+                let result = self.unifier.fresh();
+
+                // **Solved from the expected type before the patterns are
+                // bound, and long before the body is inferred.** `expect`
+                // already worked out what this argument has to be; using it
+                // only afterwards, in the `require` at the end, is too late for
+                // anything inside.
+                //
+                // What went wrong without it: a `match` in the body destructures
+                // the parameter, and `bind_pattern` cannot take apart a type
+                // that is still a variable — so the binding got `Unknown`, and
+                // every field read off it got `Unknown` too. Silently, because
+                // an unsolved owner is exactly the case a field read declines
+                // to complain about. The program then failed the `Unknown`
+                // audit at the end, pointing at `found.url` and saying that its
+                // type was never worked out, about a line with nothing wrong
+                // with it. The same body as a *named* function was fine, which
+                // is the tell: a declared parameter has its type from the
+                // start.
+                //
+                // Silent unification, for the reason `hint_at` is: a hint that
+                // does not fit is not itself the error, and the `require` below
+                // reports it against the right range.
+                if let Some(Type::Fn { params: wanted, ret: wanted_ret, .. }) =
+                    hint.as_ref().map(|h| self.unifier.shallow(h))
+                {
+                    for (mine, theirs) in types.iter().zip(&wanted) {
+                        let _ = self.unifier.unify(mine, theirs);
+                    }
+                    let _ = self.unifier.unify(&result, &wanted_ret);
+                }
+
+                for (pat, ty) in params.iter().zip(&types) {
+                    self.bind_pattern(*pat, ty);
+                }
 
                 // The whole type exists before the body is checked, because a
                 // recursive closure mentions itself inside it. The result is a
                 // variable the body then solves, and so is the error row.
-                let result = self.unifier.fresh();
                 let raises = self.unifier.fresh();
                 let requires = self.unifier.fresh();
                 let whole = Type::Fn {

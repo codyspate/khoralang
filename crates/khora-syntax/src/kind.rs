@@ -25,10 +25,10 @@ pub enum SyntaxKind {
 
     // --- keywords -------------------------------------------------------
     //
-    // `HANDLER_KW`, `FOR_KW`, `CONTEXT_KW`, `TEST_KW` and `BENCH_KW` are
-    // *contextual*: the lexer never produces them, the parser remaps an `IDENT`
-    // to one of them in the single position where the word is a keyword. See
-    // `CONTEXTUAL_KEYWORDS` below.
+    // `HANDLER_KW`, `FOR_KW`, `CONTEXT_KW`, `TEST_KW`, `BENCH_KW` and
+    // `DERIVE_KW` are *contextual*: the lexer never produces them, the parser
+    // remaps an `IDENT` to one of them in the single position where the word is
+    // a keyword. See `CONTEXTUAL_KEYWORDS` below.
     MODULE_KW,
     IMPORT_KW,
     TYPE_KW,
@@ -56,6 +56,7 @@ pub enum SyntaxKind {
     CATCH_KW,
     TEST_KW,
     BENCH_KW,
+    DERIVE_KW,
     WHILE_KW,
     LOOP_KW,
     BREAK_KW,
@@ -371,6 +372,7 @@ contextual_keywords! {
     // for it. Contextual because `derive` is an ordinary thing to call a
     // function or a local, and reserving it would be a tax on every program
     // that never derives anything.
+    "derive" => DERIVE_KW,
     // `extern fn` only, and every other language that has the word spells it
     // as a hard keyword. Contextual anyway, for the reason above: it costs
     // nothing here, and adding it cannot break a program that already uses the

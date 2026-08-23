@@ -1069,6 +1069,23 @@ can be written before anything needs TLS.
   switches on it. Pinned by a live-object count of zero after catching an error
   that carried a boxed field.
 
+- **Errata 48 — a lambda did not know its parameter type until too late.**
+  `expect` works out what an argument has to be, sets it as the hint, infers,
+  then requires — and the lambda arm ignored the hint, meeting the expected
+  type only in that final `require`. Too late for anything inside: a `match`
+  destructuring the parameter bound its name against a type that was still a
+  variable, `bind_pattern` cannot take one of those apart, so the binding got
+  `Unknown` and every field read off it did too. Silently, because an unsolved
+  owner is the one case a field read declines to complain about — so it
+  surfaced as the `Unknown` audit failing at the end, pointing at
+  `url: found.url` while `found.created` beside it was fine. The same body as a
+  *named* function worked, which is the tell.
+
+  The parameter variables are unified with the expected type's before the
+  patterns are bound. Found by writing the link shortener, which is what it
+  took: no test in the suite passed a lambda that destructured its own
+  argument.
+
 - **Errata 47 — a generic record's field was read as declared.**
   `read_field` asked the *declaration* for a field's type, so `Pair<K, V>`'s
   `value` was a rigid parameter — never boxed — and a `Pair<Int, String>` loaded
@@ -1230,24 +1247,20 @@ they will be missed:
   nothing to fill — the first `push` allocates using the element being pushed,
   and `wanted` is what keeps `with_capacity`'s promise until there is a value
   to keep it with. A thousand integers are two objects.
-- ~~**`derive`.**~~ Done, and spelled as a trailing clause:
+- ~~**`derive`.**~~ Done. `derive(Eq, Ord, Show, Hash)` above a `type`, with
+  `derive` a contextual keyword so a program that already has a field called
+  `derive` keeps it. Expanded source-to-source into ordinary impls before the
+  checker runs, so nothing downstream — inference, exhaustiveness, Perceus,
+  monomorphization, the backend — learns that it exists, and every range in a
+  generated body points at the `derive` clause the author wrote.
 
-  ```khora
-  export type Point = { x: Int, y: Int } impl Eq, Ord, Show;
-  ```
-
-  `impl` rather than a word of its own, because it already means "here are
-  implementations for this type" — so the feature costs the language no
-  keyword at all, not even a contextual one, and reads as the short form of
-  what it expands into. It was `derive(Eq, Ord)` on the line above for a day;
-  that went because it was *attribute-shaped* in a language with no
-  attributes, which made it the one place in the grammar hinting at a syntax
-  family that does not exist.
-
-  Expanded source-to-source into ordinary impls before the checker runs, so
-  nothing downstream — inference, exhaustiveness, Perceus, monomorphization,
-  the backend — learns that it exists, and every range in a generated body
-  points at the clause the author wrote.
+  A trailing `impl Eq, Ord` clause was tried for a day, on the grounds that
+  `derive(..)` is attribute-shaped in a language with no attributes. It was
+  reverted: `impl` already names a block, so spending it on a clause is two
+  meanings for one word, and the terminology kept leaking — into prose, and
+  into four of the compiler's own diagnostics. A word a Rust reader already
+  knows, used for exactly one thing, beats a word this language already uses,
+  stretched to a second.
 
   Structural, and refusing rather than guessing: a field whose type lacks the
   trait is named. `Ord` and `Hash` require `Eq` rather than implying it, read
@@ -1255,7 +1268,7 @@ they will be missed:
   comparison order. A derived `Hash` and a derived `Eq` read the same fields in
   the same order, so equal values hash equal by construction, and both operands
   are reduced at every step because `*` and `+` trap on overflow and
-  `Hash for Int` is the identity. Generic types get the bound: `impl Eq` on
+  `Hash for Int` is the identity. Generic types get the bound: `derive(Eq)` on
   `Box<A>` is `impl<A: Eq> Eq for Box<A>`.
 
   Converting `std`'s hand-written impls is the follow-up.

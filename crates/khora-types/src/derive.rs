@@ -62,7 +62,7 @@ pub fn derive_report(db: &dyn Db, file: SourceFile) -> DeriveReport {
         // finds a key by hashing it and then comparing, so a type that hashes
         // and cannot compare is a key that can be inserted and never found.
         //
-        // Required rather than implied. An `impl Ord` quietly writing an `Eq`
+        // Required rather than implied. `derive(Ord)` quietly writing an `Eq`
         // as well means a reader of the declaration cannot see what the type
         // implements, and someone who wanted their own `Eq` would find it
         // conflicting with one they did not ask for. Naming both is one extra
@@ -92,7 +92,7 @@ pub fn derive_report(db: &dyn Db, file: SourceFile) -> DeriveReport {
                 refused = true;
                 out.errors.push(HirError {
                     message: format!(
-                        "`impl {}` needs every field to implement `{}`, and {} has type \
+                        "`derive({})` needs every field to implement `{}`, and {} has type \
                          `{field}`, which does not",
                         derived.trait_name,
                         derived.trait_name,

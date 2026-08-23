@@ -253,8 +253,16 @@ impl Formatter {
         }
         // A call or index hugs what it applies to; `fn (a, b)` and `if (c)` do
         // not, because a keyword precedes the bracket.
+        //
+        // `derive(Eq)` hugs despite the keyword, for the reason `impl<A>` does
+        // above: the list belongs to the word, there is no name between them,
+        // and the whole point of the spelling is that it looks like the
+        // `derive(..)` a Rust reader already knows.
         if next == L_PAREN {
-            return matches!(prev, IDENT | NAME_REF | GT | R_PAREN | R_BRACK | UNDERSCORE);
+            return matches!(
+                prev,
+                IDENT | NAME_REF | GT | R_PAREN | R_BRACK | UNDERSCORE | DERIVE_KW
+            );
         }
         if next == L_BRACK {
             return matches!(prev, IDENT | NAME_REF | R_PAREN | R_BRACK);

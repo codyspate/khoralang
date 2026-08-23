@@ -212,3 +212,91 @@ fn an_unnamed_lambda_has_no_self_reference() {
         "cannot find `nope` in this scope",
     );
 }
+
+// --- what a lambda knows before its body runs ------------------------------
+//
+// `expect` works out what an argument has to be before inferring it, and the
+// lambda arm used to ignore that and only meet it in the `require` at the end
+// — too late for anything inside the body. A `match` destructuring the
+// parameter then bound its name against a type that was still a variable,
+// which `bind_pattern` cannot take apart, so the binding got `Unknown` and
+// every field read off it did too. Silently, because an unsolved owner is the
+// one case a field read declines to complain about; the program failed the
+// `Unknown` audit at the end instead, pointing at a line with nothing wrong
+// with it.
+//
+// Found by writing the link shortener, which is what it took.
+
+const RECORD: &str = "module m;\n\
+                      export type Link = { code: String, hits: Int };\n\
+                      export type Held = | Nothing | Just(link: Link);\n";
+
+/// The one that failed. A field read on a pattern binding, inside a `match`,
+/// inside a lambda whose parameter type comes from the callee's signature.
+#[test]
+fn a_lambda_knows_its_parameter_before_its_body() {
+    assert_clean(&format!(
+        "{RECORD}\
+         fn apply(v: Held, f: (Held) -> Held) -> Held {{ f(v) }}\n\
+         export fn bump(h: Held) -> Held {{\n\
+           apply(h, fn held => match held {{\n\
+             Held::Nothing => Held::Nothing,\n\
+             Held::Just(found) => Held::Just({{ code: found.code, hits: found.hits + 1 }}),\n\
+           }})\n\
+         }}\n"
+    ));
+}
+
+/// The same through a generic parameter, which is how `Shared::update` and
+/// every other higher-order function in `std` are declared.
+#[test]
+fn a_generic_callee_pins_the_parameter_too() {
+    assert_clean(&format!(
+        "{RECORD}\
+         fn apply<A>(v: A, f: (A) -> A) -> A {{ f(v) }}\n\
+         export fn bump(h: Held) -> Held {{\n\
+           apply(h, fn held => match held {{\n\
+             Held::Nothing => Held::Nothing,\n\
+             Held::Just(found) => Held::Just({{ code: found.code, hits: found.hits + 1 }}),\n\
+           }})\n\
+         }}\n"
+    ));
+}
+
+/// Reading a field is what exposed it, but the binding was untyped whatever
+/// was done with it — this is the shortest version.
+#[test]
+fn a_pattern_binding_in_a_lambda_has_a_type() {
+    assert_clean(&format!(
+        "{RECORD}\
+         fn count(v: Held, f: (Held) -> Int) -> Int {{ f(v) }}\n\
+         export fn hits(h: Held) -> Int {{\n\
+           count(h, fn held => match held {{ Held::Nothing => 0, Held::Just(g) => g.hits }})\n\
+         }}\n"
+    ));
+}
+
+/// The expected type is a hint, not a demand: a lambda that disagrees with it
+/// is still reported, and reported against itself rather than swallowed by the
+/// early unification.
+#[test]
+fn a_lambda_that_disagrees_with_the_expected_type_is_still_reported() {
+    assert_reports(
+        &format!(
+            "{RECORD}\
+             fn count(v: Held, f: (Held) -> Int) -> Int {{ f(v) }}\n\
+             export fn hits(h: Held) -> Int {{ count(h, fn held => \"not a number\") }}\n"
+        ),
+        "String",
+    );
+}
+
+/// Nothing to pin it against is still allowed: a lambda in a `let` with no
+/// annotation is solved by how it is used, which is what it always was.
+#[test]
+fn a_lambda_with_no_expected_type_is_still_inferred_from_use() {
+    assert_clean(
+        "module m;\n\
+         export fn twice(n: Int) -> Int { let f = fn x => x + 1; f(f(n)) }\n",
+    );
+}

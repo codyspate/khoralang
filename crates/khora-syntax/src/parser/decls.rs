@@ -19,11 +19,12 @@ pub(super) fn source_file_contents(p: &mut Parser<'_>) {
     }
 }
 
-/// Declaration position is where `context`, `test` and `bench` are keywords.
+/// Declaration position is where `context`, `test`, `bench` and `derive` are
+/// keywords.
 ///
 /// Nothing is given up by recognizing them here: no declaration may begin with
 /// a bare identifier, so an `IDENT` in this position is either one of these
-/// three words or a syntax error either way.
+/// four words or a syntax error either way.
 fn declaration(p: &mut Parser<'_>) {
     match p.current() {
         MODULE_KW => module_decl(p),
@@ -37,6 +38,7 @@ fn declaration(p: &mut Parser<'_>) {
         IDENT if p.at_contextual(CONTEXT_KW) => context_decl(p),
         IDENT if p.at_contextual(TEST_KW) || p.at_contextual(BENCH_KW) => test_decl(p),
         IDENT if p.at_contextual(EXTERN_KW) => fn_decl(p),
+        IDENT if p.at_contextual(DERIVE_KW) => type_decl(p),
         EXPORT_KW => match p.nth(1) {
             TYPE_KW => type_decl(p),
             TRAIT_KW => trait_decl(p),
@@ -105,17 +107,36 @@ fn import_list(p: &mut Parser<'_>) {
     m.complete(p, IMPORT_LIST);
 }
 
-/// `export? type Name<Params>? ( "=" TypeDef )? DeriveClause? ";"`
+/// `DeriveClause? export? type Name<Params>? ( "=" TypeDef )? ";"`
 ///
 /// The right-hand side is optional: the standard library declares opaque types
-/// such as `export type Fibers;` whose representation is compiler internal.
+/// such as `pub type Effect<+A, -R, +E>;` whose representation is compiler
+/// internal.
 ///
-/// The clause lives *inside* the `TYPE_DECL`, at the end. A reader of the tree
-/// that asks a type what it implements should not have to look at what came
-/// beside it in the file, and a reader of the source meets the name first.
+/// The `derive` clause lives *inside* the `TYPE_DECL` rather than beside it.
+/// It has no meaning apart from the type it introduces, and a reader of the
+/// tree that asks a type what it derives should not have to look at what came
+/// before it in the file.
 fn type_decl(p: &mut Parser<'_>) {
     let m = p.start();
+    if p.at_contextual(DERIVE_KW) {
+        derive_clause(p);
+    }
     p.eat(EXPORT_KW);
+    // Reached only through the `derive` arm above: every other caller checked
+    // for `type` first. A `derive` in front of anything else is the mistake
+    // worth naming, and naming it here — rather than letting the clause be
+    // parsed as a call expression somewhere downstream — is the difference
+    // between one sentence and a cascade.
+    if !p.at(TYPE_KW) {
+        p.err_recover(
+            "`derive(..)` introduces a `type` declaration; write it on the line \
+             directly above `type`, or delete it",
+            Parser::at_decl_start,
+        );
+        m.complete(p, TYPE_DECL);
+        return;
+    }
     p.bump(TYPE_KW);
     name(p);
     if p.at(LT) {
@@ -128,55 +149,40 @@ fn type_decl(p: &mut Parser<'_>) {
             type_(p);
         }
     }
-    if p.at(IMPL_KW) {
-        derive_clause(p);
-    }
     p.expect(SEMICOLON);
     m.complete(p, TYPE_DECL);
 }
 
-/// `impl Name ( "," Name )*`, trailing.
+/// `derive "(" Name ( "," Name )* ","? ")"`
 ///
-/// ```khora
-/// export type Point = { x: Int, y: Int } impl Eq, Ord, Show;
-/// ```
+/// Rust's word and Rust's argument list, minus the `#[..]` around it: Khora has
+/// no attribute syntax, and inventing one so that a single feature could be
+/// spelled the way Rust spells it would be a whole grammar for one word. What
+/// is left is the part a Rust reader actually recognizes — `derive(Eq, Ord)`
+/// sitting on its own line above the declaration.
 ///
-/// **`impl` rather than a word of its own.** It already means "here are
-/// implementations for this type", which is exactly what is being asked for,
-/// so this spelling costs the language no new keyword — not even a contextual
-/// one — and reads as the short form of what it expands into: `impl Eq for
-/// Point { .. }` with the body and the `for` left off because both are
-/// obvious.
-///
-/// It was `derive(Eq, Ord)` on the line above, which is Rust's spelling and
-/// which every Rust reader recognizes on sight. It went because it was
-/// *attribute-shaped* in a language that has no attributes: the one place in
-/// the grammar hinting at a syntax family that does not exist, and the thing
-/// the next feature wanting to annotate a declaration would have had to either
-/// join or duplicate.
-///
-/// Trailing, because Khora already puts a declaration's clauses after it —
-/// `fn listen(..) -> () with { .. } raises E` — and because the name is what a
-/// reader is looking for.
-///
-/// Which traits may appear is not a grammar question. `impl Frobnicate` parses;
-/// it is refused later, by the pass that knows what can be derived and can say
-/// so in a sentence.
+/// Which traits may appear is not a grammar question. `derive(Frobnicate)`
+/// parses; it is refused later, by the pass that knows what can be derived and
+/// can say so in a sentence.
 fn derive_clause(p: &mut Parser<'_>) {
     let m = p.start();
-    p.bump(IMPL_KW);
-    while !p.at(SEMICOLON) && !p.at(EOF) {
-        if !p.tick() {
-            break;
+    p.bump_contextual(DERIVE_KW);
+    let paren = p.open(L_PAREN);
+    if paren.is_some() {
+        while !p.at(R_PAREN) && !p.at(EOF) {
+            if !p.tick() {
+                break;
+            }
+            if !p.at(IDENT) {
+                p.error("expected the name of a trait to derive, as `derive(Eq, Ord)`");
+                break;
+            }
+            name_ref(p);
+            if !p.eat(COMMA) {
+                break;
+            }
         }
-        if !p.at(IDENT) {
-            p.error("expected the name of a trait, as `impl Eq, Ord`");
-            break;
-        }
-        name_ref(p);
-        if !p.eat(COMMA) {
-            break;
-        }
+        p.close(R_PAREN, paren);
     }
     m.complete(p, DERIVE_CLAUSE);
 }
