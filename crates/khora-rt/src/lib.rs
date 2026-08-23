@@ -110,6 +110,8 @@
 
 #![deny(missing_docs, unsafe_op_in_unsafe_fn)]
 
+pub mod tls;
+
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::cell::RefCell;
 use std::io::Write;

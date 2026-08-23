@@ -1,0 +1,129 @@
+module std::net::tls;
+
+import std::core::{Array, Ptr, Result, Scope, acquire};
+
+// TLS, over the sockets in `std::net::socket`.
+//
+// **Bound, not written.** `docs/design/ecosystem.md` puts TLS in the short list
+// of things Khora does not implement — "correctness is a specialist matter and
+// a bug is a breach" — so this is `rustls`, reached through the runtime that
+// every Khora executable already links. Nothing here is cryptography; it is a
+// handshake, two buffers and a lifetime.
+//
+// **No new type crossed the compiler for this.** A configuration and a
+// connection are opaque machine addresses, the way an open file is in
+// `std::fs`, and their lifetimes are tied to a scope with `acquire`. The code
+// generator did not have to learn a thing.
+//
+// What it does: a TLS *server*. A certificate chain and a key in PEM, a
+// handshake over an accepted socket, and reads and writes that look like the
+// plain ones.
+//
+// What it does not: client connections, client certificates, ALPN, session
+// resumption, and choosing a cipher suite. The first is the next piece of work
+// and the rest are deliberate — `rustls` picks safe defaults and a knob that
+// lets somebody pick worse ones is not a feature.
+
+extern fn khora_tls_server_open(cert: Ptr, cert_len: Int, key: Ptr, key_len: Int) -> Ptr;
+extern fn khora_tls_server_close(server: Ptr) -> ();
+extern fn khora_tls_accept(server: Ptr, socket: Int) -> Ptr;
+extern fn khora_tls_read(connection: Ptr, into: Ptr, length: Int) -> Int;
+extern fn khora_tls_write(connection: Ptr, from: Ptr, length: Int) -> Int;
+extern fn khora_tls_close(connection: Ptr) -> ();
+
+/// Why a TLS server could not start, or a connection could not be secured.
+///
+/// Three cases and no message. A `rustls` diagnostic is written for somebody
+/// debugging a handshake, and the three things a Khora program can *do* about a
+/// failure are: fix the certificate, fix the key, or drop the client.
+export type TlsError =
+/// The certificate chain was not readable PEM, or was empty.
+  | BadCertificate
+/// The key was not readable PEM, or does not match the certificate.
+  | BadKey
+/// A client failed the handshake. Ordinary: a port scan, a plain-HTTP
+/// request to an HTTPS port, or a client with no cipher in common.
+  | Handshake;
+
+/// A configured server, ready to secure accepted sockets.
+///
+/// Holds a machine address rather than being one, so that a signature can say
+/// what it wants. The address is `rustls`'s and Khora never looks inside it.
+///
+/// The field is not called `handle`, and neither is `TlsConnection`'s: two
+/// records with one field of one type are the same shape, and a literal for
+/// either fits both. The checker says so rather than guessing, which is the
+/// right answer and a good reason to name a field after what it holds.
+export type TlsServer = { settings: Ptr };
+
+/// One secured connection, and the socket underneath it.
+export type TlsConnection = { session: Ptr };
+
+/// A server from a certificate chain and a private key, both PEM.
+///
+/// **Released when the enclosing scope ends**, like an open file: the
+/// configuration is registered with `acquire`, so it goes however the scope
+/// goes, including through a raise. A server usually lives as long as the
+/// program, which means the scope to open it in is usually the root one.
+///
+/// PEM rather than DER because that is the shape a certificate arrives in —
+/// from a file, a secret store, or an ACME client — and converting is work
+/// every caller would repeat.
+export fn server(certificate: String, key: String) -> TlsServer
+  raises TlsError
+  with { scope: Scope }
+{
+  let handle = String::with_data(certificate, fn (cert, cert_len) =>
+    String::with_data(key, fn (k, k_len) => khora_tls_server_open(cert, cert_len, k, k_len)));
+  if Ptr::is_null(handle) {
+    // The runtime does not say which of the two was wrong, and telling them
+    // apart here would mean parsing PEM in Khora to find out. A caller with
+    // both files in hand can read the message and check the obvious one first.
+    raise TlsError::BadCertificate
+  } else {
+    { settings: acquire(handle, fn h => khora_tls_server_close(h)) }
+  }
+}
+
+/// Completes a handshake over an accepted socket.
+///
+/// **Takes the socket.** `shut` below closes it, and the caller must not close
+/// it as well: a second close lands on a descriptor the operating system is
+/// free to have reissued, which shows up much later as one connection reading
+/// another's bytes. This is why there is no `TlsConnection::socket`.
+///
+/// A failed handshake has already closed the socket, so a caller that raises
+/// and moves on has leaked nothing.
+export fn secure(server: TlsServer, socket: Int) -> TlsConnection
+  raises TlsError
+{
+  let handle = khora_tls_accept(server.settings, socket);
+  if Ptr::is_null(handle) { raise TlsError::Handshake } else { { session: handle } }
+}
+
+/// Plaintext bytes into `into`: how many, 0 when the peer has closed, or -1.
+///
+/// The same three answers `receive` gives on a plain socket, so a reader that
+/// already handles a socket handles this.
+export fn receive(connection: TlsConnection, into: Array<U8>) -> Int {
+  Array::with_data(into, fn (buffer, length) =>
+    khora_tls_read(connection.session, buffer, length))
+}
+
+/// Sends `text`, all of it, or -1.
+///
+/// All or nothing, unlike `send`: a partial write of an encrypted record is not
+/// something a caller can resume, so the runtime finishes it or fails.
+export fn transmit(connection: TlsConnection, text: String) -> Int {
+  String::with_data(text, fn (bytes, length) =>
+    khora_tls_write(connection.session, bytes, length))
+}
+
+/// Says goodbye properly, then closes the socket.
+///
+/// The `close_notify` is not politeness. Without it a peer cannot tell a closed
+/// connection from a cut one, which is the truncation attack TLS closes by
+/// having an end-of-stream that is signed.
+export fn shut(connection: TlsConnection) -> () {
+  khora_tls_close(connection.session)
+}

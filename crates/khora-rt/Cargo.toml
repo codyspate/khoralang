@@ -6,6 +6,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+# TLS is bound rather than written — `docs/design/ecosystem.md`. `ring` rather
+# than the default provider because it needs no cmake and no assembler, so a
+# Khora checkout builds with a Rust toolchain and clang and nothing else.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+
 [lib]
 # Linked into generated executables by clang, so it must be a static archive
 # exposing a C ABI.

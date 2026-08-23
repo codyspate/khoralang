@@ -50,8 +50,20 @@ const RUNTIME_ARCHIVE: &str = if cfg!(windows) { "khora_rt.lib" } else { "libkho
 /// reports, which is the only authority on the question. If a future `std`
 /// version adds one, that command says so and this list is where it goes.
 #[cfg(windows)]
-const SYSTEM_LIBS: &[&str] =
-    &["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"];
+const SYSTEM_LIBS: &[&str] = &[
+    // `bcrypt` and `advapi32` arrived with TLS: `rustls` needs the operating
+    // system's random number generator, and on Windows that is
+    // `BCryptGenRandom` with `SystemFunction036` behind it. Re-derived with the
+    // command above rather than guessed, which is the only reason the list is
+    // in this order.
+    "-lbcrypt",
+    "-ladvapi32",
+    "-lkernel32",
+    "-lntdll",
+    "-luserenv",
+    "-lws2_32",
+    "-ldbghelp",
+];
 #[cfg(target_os = "linux")]
 const SYSTEM_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
 #[cfg(not(any(windows, target_os = "linux")))]
