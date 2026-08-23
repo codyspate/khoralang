@@ -2,39 +2,96 @@
 
 A statically-typed, pure-functional systems language that compiles to native
 static executables — no VM, no tracing GC. Memory is managed by Perceus
-reference counting with static in-place reuse; effects, capabilities and typed
-failure channels are tracked in the type system via row polymorphism.
+reference counting; effects, capabilities and typed failure channels are
+tracked in the type system by row polymorphism.
 
 This repository is the compiler, written in Rust.
 
 ## Status
 
-**A Khora program compiles and runs.** `khora build` takes a `.kh` file through
-parsing, name resolution, type checking with exhaustiveness, reference-count
-planning and LLVM to a linked native executable.
+**Khora runs real programs.** `khora build` takes a package through parsing,
+name resolution, Hindley-Milner inference with row unification, exhaustiveness
+checking, whole-program monomorphization, reference-count planning and LLVM to a
+linked native executable. The standard library is written in Khora, and one of
+the reference applications is an HTTP service.
 
-The language it accepts is still the phase 2 subset: no effects, generics,
-closures or records yet.
+It is **pre-1.0 and pre-release.** There is no package manager, no editions, and
+no stability promise yet — `docs/design/compatibility.md` decides what the
+promise will be and names what 1.0 is still waiting on.
+
+### What the language has
+
+Algebraic data types and records, generics with higher-kinded types and const
+generics, traits with `derive(Eq, Ord, Show, Hash, ToJson, FromJson)`, closures,
+pattern matching with exhaustiveness and reachability, `while`/`loop`/`for`,
+direct-style algebraic effects (`with` and `raises` rows, handlers, `!` at
+fallible call sites), structured concurrency with nurseries, and a sharing
+discipline that decides what may cross into another fiber.
+
+### What it does not have yet
+
+- **No TLS, chunked transfer, or multipart bodies** in `std::net::http`.
+- **Windows and Linux only.** macOS sockets are not implemented.
+- **`[permissions]` is not a sandbox.** The compile-time gate over Khora code
+  is total, and `extern fn` goes around it. Closing that needs package
+  identity. `docs/design/permissions.md` says so at the top, and so should
+  anything quoting it.
+- **No package manager**, so a program is one source root.
+- **No language server**, and the linter is not written.
+
+### Two things worth knowing about the implementation
+
+**A fiber is an OS thread today.** `Fiber::spawn` starts a real thread;
+nurseries bound how many run at once. The design intends stackful coroutines
+later and `docs/design/fibers.md` states the property that makes the swap legal
+— a program cannot tell which it got — but *today* the answer is threads, and a
+fiber costs what a thread costs.
+
+**Compilation is whole-program.** Generics are monomorphized with no dictionary
+passing, so a generic function does not exist as code until something calls it
+at a type. One consequence is decided and permanent: **Khora has no stable
+binary interface.** A package will ship source; the only stable ABI is C's, at
+the `extern` boundary.
+
+### Where the crates stand
 
 | Crate | State |
 | --- | --- |
-| `khora-syntax` | **Working.** Lexer, lossless CST parser, typed AST, error recovery. |
-| `khora-db` | **Working.** Salsa database, `SourceFile`/`SourceRoot` inputs, the `parse` query. |
-| `khora-manifest` | **Working.** `khora.toml` parsing; unknown keys warn rather than abort. |
-| `khora-fmt` | **Working.** Canonical formatter over the CST. |
-| `khora-hir` | **Working.** Module graph, item collection, name resolution, body lowering. |
-| `khora-types` | **Working.** Monomorphic checking, exhaustiveness and reachability. |
-| `khora-perceus` | **Working.** Conservative `dup`/`drop` placement; reuse analysis is phase 6. |
-| `khora-rt` | **Working.** Reference-counted heap and intrinsics, linked into every executable. |
-| `khora-codegen-llvm` | **Working.** LLVM backend behind the `llvm` feature. |
-| `khora-cli` | `check`, `fmt`, `lex`, `parse`, and `build` with `--features llvm`. |
+| `khora-syntax` | Lexer, lossless CST parser, typed AST, error recovery. |
+| `khora-db` | Salsa database, `SourceFile`/`SourceRoot` inputs, the `parse` query. |
+| `khora-manifest` | `khora.toml` parsing; unknown keys warn rather than abort. |
+| `khora-fmt` | Canonical formatter over the CST. |
+| `khora-hir` | Module graph, item collection, name resolution, body lowering, `derive` expansion. |
+| `khora-types` | HM inference, row unification, traits and HKT, exhaustiveness, monomorphization. |
+| `khora-perceus` | `dup`/`drop` placement. Reuse analysis and FBIP are phase 9, not written. |
+| `khora-rt` | Reference-counted heap, fibers, sockets, intrinsics. Linked into every executable. |
+| `khora-codegen-llvm` | LLVM backend behind the `llvm` feature. |
+| `khora-cli` | `check`, `fmt`, `lex`, `parse`, `test`, and `build` with `--features llvm`. |
 
-`khora check` parses the whole corpus in `std/` and `examples/` with no errors.
+892 tests pass. `khora check` and `khora fmt --check` are clean over all of
+`std/` and `examples/`.
+
+## Numbers
+
+One measurement, so it can be argued with. A `/health` route on
+`std::net::http`, answering **459,000 requests a second** — 48 reused
+connections, 16-core Windows desktop, load generator on the same machine, five
+second runs, median of three.
+
+The same figure is worth two comparisons on that machine and that workload.
+The identical accept-read-write-close loop written straight in Rust does 638k,
+and a Khora server stripped to the same loop does 741k — both near what the
+load generator can drive, so the honest reading is that the runtime matches
+Rust rather than beats it. `std::net::http` itself costs the difference between
+741k and 459k.
+
+Anything quoting a number from this project should name its workload and its
+machine, because that is the only part of a benchmark that travels.
 
 ## Quickstart
 
 ```bash
-cargo test
+cargo test --workspace --features llvm
 ```
 
 ```bash
@@ -43,13 +100,7 @@ cargo build -p khora-rt && cargo run -p khora-cli --features llvm -- build examp
 
 ```bash
 cargo run -p khora-cli -- check std examples
-```
-
-```bash
 cargo run -p khora-cli -- fmt std examples --check
-```
-
-```bash
 cargo run -p khora-cli -- parse examples/risk_analyzer/src/main.kh --no-trivia
 ```
 
@@ -61,28 +112,47 @@ crates/
   khora-db/            salsa database, source inputs, the parse query
   khora-manifest/      khora.toml parsing
   khora-fmt/           the canonical formatter
-  khora-hir/           AST -> HIR lowering, pipe and placeholder desugaring
-  khora-types/         HM inference, row unification, const generics
-  khora-perceus/       reference counting and in-place reuse
+  khora-hir/           AST -> HIR lowering, name resolution, derive expansion
+  khora-types/         HM inference, row unification, traits, monomorphization
+  khora-perceus/       reference counting
   khora-codegen-llvm/  inkwell backend, lld linking
   khora-cli/           the `khora` driver
 docs/
   vision.md            what Khora is for; breaks ties in the roadmap
+  positioning.md       who it is for, and what it is not
   roadmap.md           decisions, open questions, phases
-  design/              decision records (effects, imperative, associated items)
+  design/              eighteen decision records
+  project.md           the original specification this was built against
   grammar.ebnf         the implemented grammar
-  errata.md            where the specification is wrong, and what was done
-std/                   standard library sources (.kh)
-examples/              the reference application
+  errata.md            where the specification was wrong, and what was done
+std/                   the standard library, written in Khora
+examples/              three reference applications
 ```
+
+`docs/errata.md` is the most useful file for understanding why the compiler is
+shaped the way it is. It is not a changelog — it is the list of things that were
+believed and turned out to be false, each with what the mistake cost and the
+rule it produced.
+
+## Reference applications
+
+- **`core_demo`** — the language's own features, exercised.
+- **`risk_analyzer`** — capabilities, handlers and typed failure, the shape the
+  effect system was designed for.
+- **`link_shortener`** — an HTTP service with shared mutable state, JSON,
+  persistence and a clock.
+
+Each is evidence that the pieces compose. **None is a claim of production
+completeness**, and the list above of what the language does not have applies to
+all three.
 
 ## Front-end design notes
 
 **The parser never fails.** It always returns a tree spanning the entire input
 plus a list of diagnostics. Whitespace and comments are tokens in that tree, so
 `parse(src).syntax().text() == src` holds for any input — including binary
-garbage. This is a hard requirement for the language server and is enforced by
-tests.
+garbage. This is a hard requirement for a future language server and is
+enforced by tests.
 
 **Events, not direct tree building.** The parser emits a flat event stream that
 is replayed into a `rowan` green tree afterwards. That indirection is what makes
@@ -106,9 +176,8 @@ follows, and both are called out in `docs/errata.md`:
 Operator precedence, loosest to tightest: `|>`, `||`, `&&`, comparisons,
 `+ -`, `* / %`, prefix `- !`, then call and field access.
 
-## Next step
+## What is next
 
-`khora-hir` name resolution. It blocks the type checker, and the rules it has to
-implement are decided in `docs/design/associated-items.md`: `::` resolves as a
-module-or-type path, `.` resolves as a field of a value or an item declared
-against its type.
+Phase 9: Perceus reuse analysis and FBIP, so that `map` over a uniquely-owned
+list allocates nothing. Then phase 10: packaging, the linter, and a language
+server. `docs/roadmap.md` has the order and the reasons.
