@@ -129,6 +129,33 @@ reliable native application software. In that area Khora should combine more
 static architectural information than Go or TypeScript with less application
 complexity than Rust.
 
+### Where the performance claim actually stands
+
+The thesis above is only worth stating if the runtime can hold the position, so
+here is what has been measured rather than what is hoped for. One 16-core
+Windows desktop, load generator on the same machine, all figures the median of
+three runs taken back to back — `bench/README.md` has the method and the
+caveats, and the numbers do not travel without them.
+
+- A Khora server doing **nothing but accept, read and write** measures above an
+  equivalent Rust one. The honest reading is not that Khora is faster: both are
+  near what the load generator can drive. What it rules out is the runtime being
+  the reason for anything below it.
+- A Khora server running the **whole of `std::net::http`** — routing, a parsed
+  request, a rendered response — measures around 538,000 requests a second,
+  against 560,000 for a Rust control that only echoes a fixed string. So the
+  library costs roughly a quarter of the floor, and that quarter is where the
+  work has been.
+- Parsing one 80-byte HTTP request went from **2,440ns to 1,555ns** over phase
+  9, and a browser's fourteen-header request from 14,560ns to 7,345ns.
+
+What that supports is a narrow claim, and it should be made narrowly: **Khora's
+reference-counted, garbage-collector-free runtime is not the bottleneck in a
+network service.** It does not yet support a claim against Rust on latency
+distribution, on memory under load, or on anything with a real database in it,
+because none of those has been measured. `docs/roadmap.md` phase 9 records what
+was measured and, twice, where the prediction was wrong.
+
 ## Adoption is more than language design
 
 A financial institution will not adopt Khora because its effect system is

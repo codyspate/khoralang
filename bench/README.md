@@ -40,16 +40,30 @@ python bench/load.py 18953 "rust, keep-alive"
 connections, five second runs, median of three. **These numbers travel with
 that sentence or they do not travel.**
 
+All four back to back in one sitting, after phase 9:
+
 | | req/s |
 | --- | --- |
-| Rust control, keep-alive | 653,000 |
-| Khora `floor` | 758,000 |
-| Khora `render` | 734,000 |
-| Khora `service` | 507,000 |
+| Rust control, keep-alive | 560,000 |
+| Khora `floor` | 781,000 |
+| Khora `render` | 721,000 |
+| Khora `service` | 538,000 |
 
 Runs vary by up to eight per cent on an otherwise idle machine, so a difference
-smaller than that is noise. Every figure above is the median of three; the
-`service` runs spanned 472k to 513k.
+smaller than that is noise. Every figure is the median of three; the `service`
+runs spanned 535k to 566k, and the Rust control's spanned 551k to 635k.
+
+**Read the four together or not at all.** The Rust control measured 653,000 in
+an earlier sitting on the same machine and 560,000 in this one, which is well
+outside the eight per cent and is the machine rather than the program. That is
+the whole reason for running all four at once: the ratios within a sitting mean
+something and the absolute figures across sittings do not.
+
+The set before phase 9 was 653k / 758k / 734k / 507k. `service` is the only one
+the phase could move — `floor` and `render` barely count references — and it
+moved from 507k to 538k against a control that was slower, so the honest claim
+is "the request parser got cheaper" and the size of it comes from
+`docs/design/reuse.md`, not from here.
 
 Two readings, and the second is the useful one.
 
