@@ -280,7 +280,7 @@ a throwaway runtime with `khora_dup` and `khora_drop` returning immediately. It
 measured *slower* — nothing is ever freed, so the working set grows without
 bound and the allocator loses its cache. A no-op runtime does not measure what
 reference counting costs; it measures a program with a leak. The number above
-came from building the thing and comparing.
+came from building the thing and comparing. Errata 47, with the general rule.
 
 ### 4. Borrowed parameters, and D10's escape analysis
 

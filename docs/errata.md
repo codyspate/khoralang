@@ -1199,3 +1199,45 @@ constant factor everywhere is a configuration bug; this one says a lookup that
 is right whenever you only tried one module is not a lookup, it is a
 coincidence. The way to find that class is to ask what happens when two things
 have the same name — which costs one four-line test file per table.
+
+## 47. A no-op runtime measures a program with a leak
+
+Phase 9.3 was to be measured before it was written — entry 45's rule, and the
+roadmap said so in the entry itself. The measurement was an ablation: build a
+throwaway runtime in which `khora_dup` and `khora_drop` return immediately, and
+see how much faster the benchmark runs. Whatever that gap is, it is the ceiling
+on anything that makes reference counting cheaper.
+
+It ran **slower**. 1,910 nanoseconds against 1,670 on an HTTP request parse,
+consistently, in the direction that should have been impossible.
+
+Nothing was being freed. The benchmark parses the same request a million times,
+and with the drops gone every one of those fifty allocations stayed live
+forever: fifty million objects, an allocator walking an ever-longer free list,
+and a working set that stopped fitting in any cache long before the run
+finished. The ablation removed a cost and added a larger one.
+
+**An ablation has to preserve the invariant the thing being ablated exists to
+maintain.** Reference counting is not overhead attached to a program that would
+otherwise be correct; it is what makes the memory behaviour bounded. Removing it
+does not produce the same program without a cost, it produces a different
+program with a leak, and the number that comes back is about the leak.
+
+The measurement that worked was the ordinary one: build the optimisation, run
+the benchmark, compare. The two halves were then separable because they are
+different mechanisms — inlining the counter arithmetic (§3) and dropping the
+atomics (§4) — and each could be measured against the state before it.
+
+There is a second correction in the same investigation, and it is the more
+useful one. The roadmap called drop specialization "the cheapest of the four and
+the least interesting", reasoning about the *work* the runtime does on a drop:
+the field count and the layout are compile-time constants, so a specialized drop
+saves a little arithmetic. It was the second largest win in the phase, because
+what cost was not the work but the **call**. An HTTP parse performs 280
+reference-count operations against 50 allocations, and 230 of those calls did
+nothing but add or subtract one from a word.
+
+**The cost of an operation includes the cost of reaching it.** A function whose
+body is three instructions is not a three-instruction function, and the ratio
+that says so — 280 operations to 50 allocations — was sitting in the design
+document for weeks before anybody read it as an argument about call overhead.
