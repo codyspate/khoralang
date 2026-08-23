@@ -1437,12 +1437,25 @@ promise. It does not add another execution model or widen the language.
   a claim of production completeness. Effect remains a headline comparison in
   the positioning because it is half of the language's thesis, not an
   implementation detail.
-- **8.5.5 Establish the correctness baseline Phase 9 must preserve.** Run the
-  native suite, corpus check and formatter, clippy, both reference
-  applications, an ordinary-client HTTP conformance check, and the recorded
-  throughput workload. Fix failures that reveal wrong behavior; record missing
-  product surface in the phase that owns it rather than silently expanding
-  this one.
+- **8.5.5 Establish the correctness baseline Phase 9 must preserve — done.**
+  `sh scripts/baseline.sh`: the native suite, `clippy -D warnings`, the corpus
+  check and formatter over `std`, `examples` and `bench`, every reference
+  application built, and `scripts/http_conformance.sh` — twelve checks against
+  a real `curl`, including a POST with a body, a percent-encoded redirect
+  target, three requests down one connection, and a 9 KB header that must be a
+  413 rather than a crash. `curl` rather than a socket test on purpose: the
+  reader that stopped at the first short recv passed its own tests and returned
+  400 to a real client.
+
+  The throughput workload is recorded too, in `bench/` — four servers and the
+  load generator, with `bench/README.md` carrying the method, the machine and
+  the numbers. It is deliberately *not* in the baseline script, because a
+  figure measured on a machine that is also running a test suite is not a
+  figure.
+
+  Nothing failed that revealed wrong behaviour. Two things found along the way
+  are recorded where they belong rather than fixed here: D13 and D14 in the
+  open questions above.
 
 Explicitly out of scope here: TLS, macOS and cross-targets, package resolution,
 permission enforcement that depends on package identity, the linter, LSP, and
@@ -1450,14 +1463,20 @@ general formatter cleanup. Those remain Phase 10 or ordinary maintenance. The
 point of 8.5 is to make the foundation honest before optimizing it, not to make
 the whole product complete before Phase 9 can begin.
 
-**Exit:** a native round-trip test covers derived records and variants and a
-negative test names a nested decode path; regression tests prove lookalike
-`Share`, `Fiber`, `SharedFn` and `Array` declarations receive no compiler
-privilege; `docs/design/compatibility.md` closes D12 and the open-question table
-records it as decided; public claims match the measured implementation. The
-full corpus checks and formats, the test suite is green, both applications run,
-ordinary HTTP clients conform, the benchmark is reproducible, and clippy is
-clean.
+**Exit — met, with 8.5.2 short of its own wording.** A native round-trip test
+covers derived records and variants and a negative test names a nested decode
+path. `docs/design/compatibility.md` closes D12 and the open-question table
+records it. Public claims match the measured implementation. The full corpus
+checks and formats, the test suite is green, the applications run, ordinary
+HTTP clients conform, the benchmark is reproducible in `bench/`, and clippy is
+clean under `-D warnings`.
+
+The exception is the regression tests for lookalike declarations. They prove
+that a lookalike is **refused**, which is not the same as proving it receives no
+privilege — a `Type::Adt` is a bare name, so there is nothing downstream that
+could tell two declarations apart. The memory corruption is gone and the
+remaining defect is pinned by a test that asserts it still happens. See 8.5.2
+and errata 46.
 
 ---
 

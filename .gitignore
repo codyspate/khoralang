@@ -11,3 +11,9 @@ Cargo.lock.bak
 examples/**/src/*.exe
 examples/**/src/*.o
 examples/**/links.txt
+
+# The benchmark servers, built by hand rather than by cargo.
+bench/**/src/*.exe
+bench/**/src/*.o
+bench/*.exe
+bench/*.pdb

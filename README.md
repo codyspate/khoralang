@@ -68,25 +68,29 @@ the `extern` boundary.
 | `khora-codegen-llvm` | LLVM backend behind the `llvm` feature. |
 | `khora-cli` | `check`, `fmt`, `lex`, `parse`, `test`, and `build` with `--features llvm`. |
 
-892 tests pass. `khora check` and `khora fmt --check` are clean over all of
-`std/` and `examples/`.
+892 tests pass, `clippy -D warnings` is clean, and `khora check` and
+`khora fmt --check` pass over all of `std/`, `examples/` and `bench/`.
+`sh scripts/baseline.sh` runs the lot, including twelve HTTP conformance checks
+against a real `curl`.
 
 ## Numbers
 
 One measurement, so it can be argued with. A `/health` route on
-`std::net::http`, answering **459,000 requests a second** — 48 reused
+`std::net::http`, answering **507,000 requests a second** — 48 reused
 connections, 16-core Windows desktop, load generator on the same machine, five
-second runs, median of three.
+second runs, median of three, spread 472k to 513k.
 
 The same figure is worth two comparisons on that machine and that workload.
-The identical accept-read-write-close loop written straight in Rust does 638k,
-and a Khora server stripped to the same loop does 741k — both near what the
+The identical accept-read-write-close loop written straight in Rust does 653k,
+and a Khora server stripped to the same loop does 758k — both near what the
 load generator can drive, so the honest reading is that the runtime matches
 Rust rather than beats it. `std::net::http` itself costs the difference between
-741k and 459k.
+758k and 507k, and only about 24k of that is rendering the response.
 
 Anything quoting a number from this project should name its workload and its
-machine, because that is the only part of a benchmark that travels.
+machine, because that is the only part of a benchmark that travels. `bench/`
+holds all four servers and the load generator, so the figures above are
+reproducible rather than reported.
 
 ## Quickstart
 
@@ -127,6 +131,10 @@ docs/
   errata.md            where the specification was wrong, and what was done
 std/                   the standard library, written in Khora
 examples/              three reference applications
+bench/                 four servers and a load generator; see bench/README.md
+scripts/
+  baseline.sh          everything that must keep working
+  http_conformance.sh  what an ordinary client gets, checked with curl
 ```
 
 `docs/errata.md` is the most useful file for understanding why the compiler is

@@ -1,0 +1,46 @@
+module main;
+
+import std::core::{Array, Fiber, Nursery, bounded_nursery, print};
+import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
+
+// The floor: accept, then answer whatever arrives with a fixed string until the
+// client goes away. No parsing, no routing, no allocation per request — so the
+// distance between this and `std::net::http` is what the library costs, and the
+// distance between this and the same thing in Rust is what the runtime costs.
+
+fn answer() -> String {
+  "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}"
+}
+
+fn serve(connection: Int) -> () {
+  set_receive_timeout(connection, 10000);
+  let buffer: Array<U8> = Array::new(8192, 0);
+  let mut going = true;
+  while going {
+    let read = receive(connection, buffer);
+    if read <= 0 {
+      going = false;
+    } else {
+      transmit(connection, answer());
+    }
+  };
+  shut(connection)
+}
+
+fn loop_forever(server: Int) -> ()
+  with { nursery: Nursery }
+{
+  let taken = accept_on(server);
+  if taken == invalid_handle() {
+  } else {
+    nursery.adopt(Fiber::spawn(fn () => serve(taken)));
+  };
+  loop_forever(server)
+}
+
+export fn main() -> () {
+  start();
+  let server = listen_on(18950);
+  print("listening");
+  bounded_nursery(256, fn () => loop_forever(server))
+}
