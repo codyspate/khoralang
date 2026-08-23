@@ -96,12 +96,52 @@ the four optimisations in the throughput work were worth nothing.
 
 A parameter only *read* by a function does not need to be owned by it, which
 removes a dup at every call site. And an object that provably does not leave
-its fiber can use non-atomic reference counting — decision D10 promised this,
-and it is the largest single win available, because every `dup` and `drop` in a
-single-threaded program is currently a lock-free atomic.
+its fiber can use non-atomic reference counting, which decision D10 promised.
 
-Both need an escape analysis, and both change a calling convention, so they
-come after the first two have settled.
+**Priced, because it was about to be assumed.** A throwaway build with the
+atomics replaced by plain reads and writes, against the same build with them:
+
+    parsing an 80-byte request     2,365 ns -> 2,075 ns
+    parsing a browser's request   13,210 ns -> 11,600 ns
+
+**Twelve per cent**, and that is the ceiling rather than the estimate — a real
+escape analysis would only reach some of the operations. Worth having and not
+worth reordering the phase for, which is the opposite of what "every `dup` is a
+lock-free atomic" sounds like.
+
+The first version of this measurement said 1.7x, because it compared the spike
+against a number taken before the nullary-constructor change. Errata 45's rule,
+caught in the act: a benchmark that is off by a constant factor everywhere is
+measuring the wrong pair of builds.
+
+The same spike run against the *server* is not a measurement at all — it
+corrupts memory within a second, because a fiber is an OS thread and the
+refcounts are shared. That is D10 being right, observed directly.
+
+Both of these need an escape analysis and both change a calling convention, so
+they come after the first two have settled.
+
+## Where the operations actually go
+
+Counted, on the same workloads, with a temporary counter in `khora_dup` and
+`khora_drop`:
+
+| workload | allocations | reference-count operations |
+| --- | --- | --- |
+| parse an HTTP request | 55 | 677 |
+| a JSON round trip | 128 | 2,290 |
+| 100 `Option` constructions | 51 | 2,498 |
+| 100 failed `Map::get` | 5 | 5,704 |
+
+**Reference counting outnumbers allocation by more than ten to one, and by a
+thousand to one where nothing is allocated at all.** Fifty-seven operations for
+one failed map lookup is the conservative scheme working exactly as written: a
+read `dup`s and the block that declared the binding `drop`s, whether or not
+anything needed the reference to survive.
+
+That is the argument for ordering §1 first and it is stronger than the argument
+from reuse. Making each operation cheaper is worth twelve per cent; **not
+performing it** is worth whatever fraction of those 677 were never needed.
 
 ## How it will be measured
 

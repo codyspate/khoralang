@@ -1504,9 +1504,17 @@ much less than over the arrays phase 6 brings.
 - **9.2 Reuse tokens.** `khora_drop_reuse` and `khora_alloc_reuse`, once 9.1
   makes a matched cell uniquely held at the arm's constructor.
 - **9.3 Drop specialization**, measured before it is written.
-- **9.4 Borrowed parameters and D10's escape analysis** — the largest single
-  win available, because every `dup` in a single-threaded program is currently
-  a lock-free atomic.
+- **9.4 Borrowed parameters and D10's escape analysis — priced at 12%.** The
+  claim here used to be "the largest single win available, because every `dup`
+  in a single-threaded program is a lock-free atomic". A throwaway build with
+  the atomics removed says 2,365ns against 2,075ns on an HTTP parse, and that
+  is a ceiling rather than an estimate. Worth having, not worth reordering for.
+  `docs/design/reuse.md`.
+
+  What the same measurement found instead: **reference-count operations
+  outnumber allocations ten to one**, and a hundred failed `Map::get` calls
+  perform 5,704 of them. Not performing an operation is worth more than making
+  it cheaper, which is 9.1's argument and is stronger than reuse's.
 
 **Exit:** `map` over a uniquely-owned list performs zero allocations, asserted
 by a counting-allocator test. Written already, as an ignored test in
