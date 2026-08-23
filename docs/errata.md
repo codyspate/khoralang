@@ -1125,3 +1125,61 @@ number in the string benchmarks was 2.5× too slow together, which reads as "thi
 language is slow" and is actually "one flag is missing". A single primitive
 measured against what the platform can do — one call to `memmem`, whose cost is
 known — is what turned an atmosphere into a number.
+
+## 46. A type is a string, and two strings are equal
+
+`Type::Adt { name: String, args }`. That is the whole of what the checker knows
+about a declared type — a name, as the file using it happens to spell it. Three
+things follow, and none of them was written down anywhere.
+
+**A user type called `Array` was given the runtime's array layout.** Not
+"received no intrinsic": the backend matches `name == runtime::ARRAY_TYPE`, so
+a four-line record inherited an array's header, and dropping one read its first
+field as an element width. Measured, not reasoned about:
+
+```text
+thread panicked at khora-rt/src/lib.rs:2322:
+assertion `left == right` failed: a counted element is a pointer, so it is
+always a whole word wide
+  left: 26740419144712271
+ right: 8
+```
+
+A program that never mentions an array, aborting inside the collector with a
+message about pointers. The same is true of `Shared`, `Fiber`, `SharedFn`,
+`Fibers`, the `Share` trait, and — through `named_type`, which answers before
+it consults the file — `Int`, `Float`, `Bool`, `String` and `Ptr`.
+
+**Two modules that each declare a `Point` are one type.** The importing file
+looks its fields up by name, finds the local declaration, and reports that
+`Point` has no field `label` about a value whose type has exactly that field.
+No `unsafe` reading, no crash, just the wrong answer to an ordinary question.
+
+**An alias splits one type in two.** `import other::{Point as Other}` keys the
+imported declaration under `Other`, so `Other` and `other::Point` no longer
+unify — the rename invented a type.
+
+All three are one cause. `TypeMap` is per file and keyed by *local spelling*
+throughout: `adts`, `variants`, `signatures`, `kinds`, `declared_here`, and the
+head of every impl. That is a coherent design for a single module and it has no
+way to express "the `Point` from over there".
+
+What is done here is a **guard, not a fix**: a name the compiler already means
+may not be given a *definition*, so the memory corruption becomes a diagnostic
+that names the type and says to rename it. Declaring one without a right-hand
+side stays legal, because that is not a competing definition — it is how the
+builtin is named, and it is what `std::core` and every backend test already
+write. The other two problems remain, and `identity.rs` has a test asserting
+the collision *still happens*, which will fail when it is fixed and say so.
+
+The fix is for a type to carry the declaration it resolved to rather than a
+name — canonical, module-qualified, and settled at the one place a type name
+means something. It changes how every type in the program is keyed, so it is
+its own piece of work rather than a correction to make in passing.
+
+The rule this belongs to is not "`Unknown` is a silence" but its neighbour:
+**an identifier is not an identity.** Entry 45 said a benchmark off by a
+constant factor everywhere is a configuration bug; this one says a lookup that
+is right whenever you only tried one module is not a lookup, it is a
+coincidence. The way to find that class is to ask what happens when two things
+have the same name — which costs one four-line test file per table.

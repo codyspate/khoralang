@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use khora_db::{Db, SourceFile};
 use khora_hir::body::{BinOp, Body, Expr, ExprId, Literal, LocalId, Pat, PatId, Stmt, UnOp};
 use khora_hir::HirError;
-use khora_syntax::ast::{self};
+use khora_syntax::ast::{self, AstNode};
 use text_size::TextRange;
 use unify::{Mismatch, Unifier};
 use usefulness::{ColumnType, Ctor, FieldType, Pattern};
@@ -1104,6 +1104,65 @@ pub const FIBER_TYPE: &str = "Fiber";
 
 /// The certified-closure wrapper. `SharedFn::of` is where the check happens.
 pub const SHARED_FN_TYPE: &str = "SharedFn";
+
+/// Every declaration the compiler treats specially, by the name it goes by.
+///
+/// **These are matched by name, and a name is not an identity.** A type is a
+/// [`Type::Adt`] carrying a bare `String`, so `Array` declared in a user's
+/// module and `Array` declared in `std::core` are one type to everything
+/// downstream — which meant a user's `Array` was given the runtime's array
+/// layout and dropping one read a garbage element width and aborted the
+/// process. Not "no privilege": memory corruption.
+///
+/// [`collides_with_a_builtin`] refuses the collision, which closes that hole
+/// without pretending the underlying problem is solved. It is not. Two modules
+/// that each declare a `Point` still collide, and an alias still splits one
+/// type into two — see D13's neighbours in `docs/roadmap.md` and errata 46.
+/// The real fix is for a type to carry the declaration it resolved to, and it
+/// changes how every type in the program is keyed.
+///
+/// `Int`, `Float`, `Bool`, `String` and `Ptr` are here for the same reason
+/// even though they are not ADTs: [`named_type`] answers with the builtin
+/// before it ever consults what the file declared, so a user's `type String`
+/// silently never existed.
+///
+/// `Share` is a trait rather than a type, so no *definition* of it can exist
+/// to conflict — a marker trait is empty and `std::core`'s declaration and a
+/// user's are the same three characters. It is listed because it is
+/// compiler-known, not because the check below can act on it.
+pub const COMPILER_KNOWN: [&str; 12] = [
+    SHARE,
+    FIBER_TYPE,
+    SHARED_FN_TYPE,
+    "Fibers",
+    "Shared",
+    "Array",
+    "Int",
+    "I64",
+    "Float",
+    "Bool",
+    "String",
+    "Ptr",
+];
+
+/// Whether declaring `name` with a definition would collide with the compiler.
+///
+/// **Only a definition collides.** `export type Array<A>;` with no right-hand
+/// side is how the builtin is *named* — it is what `std::core` writes, and what
+/// every backend test writes to reach an array without importing the standard
+/// library. Nothing is claimed by it that the compiler does not already
+/// provide, so nothing conflicts.
+///
+/// `type Array = { label: String }` is the other thing entirely: a shape the
+/// compiler will ignore in favour of the runtime's, on a name it will hand an
+/// array's layout. That is the case worth refusing, and it is the only one.
+///
+/// So the rule needs no exemption for `std` and no notion of a blessed module,
+/// which is just as well — there is nothing finer than a module path to check
+/// against until a package has an identity of its own (roadmap 10.2).
+pub fn collides_with_a_builtin(name: &str) -> bool {
+    COMPILER_KNOWN.contains(&name)
+}
 
 /// The error a failed assertion is.
 ///
@@ -4089,8 +4148,50 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
         all.extend(body.errors.iter().cloned());
     }
     all.extend(trait_errors(db, file).iter().cloned());
+    all.extend(shadowed_name_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
     all
+}
+
+/// Refuses a declaration that takes a name the compiler already means.
+///
+/// Reported against the declaration rather than against a use, because the use
+/// is not the mistake and there may be no use at all — a `type Array` that is
+/// never mentioned still produces one with the runtime's array layout the
+/// moment somebody does mention it.
+///
+/// Refusing is the blunt answer and it is deliberately blunt. What the phase
+/// asked for is that a lookalike receive no privilege, which wants a type to
+/// know the declaration it came from; a `Type::Adt` knows a `String` and
+/// nothing else, so there is no way to tell the two apart downstream. Between
+/// a program that is refused with a reason and a program that corrupts memory,
+/// the choice is not close — and the restriction lifts by itself once identity
+/// is real.
+fn shadowed_name_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
+    let mut found = Vec::new();
+    for decl in khora_db::parse(db, file).source_file().decls() {
+        let ast::Decl::Type(t) = decl else { continue };
+        // No right-hand side is a declaration of the builtin rather than a
+        // competing definition of it. See `collides_with_a_builtin`.
+        if t.definition().is_none() {
+            continue;
+        }
+        let Some(name) = t.name().and_then(|n| n.ident()) else { continue };
+        if !collides_with_a_builtin(&name) {
+            continue;
+        }
+        found.push(HirError {
+            message: format!(
+                "`{name}` is a name the compiler already means, so this definition would \
+                 be ignored in favour of the built-in one — and the value would still be \
+                 given the built-in's layout, which is memory corruption rather than a \
+                 shadowed name. Rename it, or drop the `=` to declare the built-in \
+                 instead"
+            ),
+            range: t.syntax().text_range(),
+        });
+    }
+    found
 }
 
 /// Whether `==` on this type has to go through an `Eq` impl.

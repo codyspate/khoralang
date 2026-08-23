@@ -1363,12 +1363,30 @@ promise. It does not add another execution model or widen the language.
   as objects. Variants have one documented stable representation. A decoding
   failure retains the path to the field or payload that disagreed. The backend
   does not learn that JSON derivation exists.
-- **8.5.2 Compiler-known declaration identity.** `Share`, `Fiber`, `SharedFn`,
-  `Array` and every other type or trait with compiler-special treatment are
-  recognized by the declaration they resolve to, not by a bare name. A user
-  type with the same spelling receives no intrinsic and satisfies no special
-  rule. Package identity will extend this mechanism in 10.2; it is not needed
-  to distinguish declarations inside the current source root.
+- **8.5.2 Compiler-known declaration identity — guarded, not solved.** The
+  hole was worse than the item assumed. A user type called `Array` did not
+  merely receive an intrinsic it should not have: it was given the runtime's
+  array layout, and dropping one read a garbage element width and aborted the
+  process. Errata 46.
+
+  What is done: a name the compiler already means may no longer be given a
+  *definition* — `Array`, `Shared`, `Fiber`, `SharedFn`, `Fibers`, and the
+  builtin spellings `named_type` answers before it consults the file at all.
+  Declaring one opaquely is still allowed, because that names the builtin
+  rather than competing with it, and it is what `std::core` and every backend
+  test write. The corruption is now a diagnostic that names the declaration and
+  says to rename it; `khora-types/tests/identity.rs` pins every case.
+
+  What is not: recognition *by declaration*. A `Type::Adt` carries a bare
+  `String`, so two modules that each declare a `Point` are still one type to
+  the checker, and an alias still splits one type into two. Both are the same
+  defect as the refused case and neither is fixed by refusing a name. The real
+  answer is a canonical, module-qualified identity settled where a type name is
+  interpreted, which rekeys `adts`, `variants`, `signatures`, `kinds`,
+  `declared_here` and every impl head — its own piece of work, not a correction
+  to make in passing. `identity.rs` asserts the collision still happens so that
+  fixing it fails a test rather than passing silently. Package identity extends
+  this in 10.2.
 - **8.5.3 Decide D12.** Write the pre-1.0 policy and the eventual 1.0 promise
   separately. Pre-1.0 must preserve room to correct the language, with changes
   called out and editions available when source migration is needed. The 1.0
