@@ -710,12 +710,15 @@ fn variant_show(type_name: &str, cases: &[Case]) -> String {
 
 /// `List::Cons(a, List::Cons(b, List::Nil))` — the list the helpers take.
 ///
-/// **Written out rather than as `[a, b]`**, because a list literal parses and
-/// then does nothing: the checker gives `Expr::List` no type and the backend
-/// refuses it outright. Generated code cannot be the first user of a construct
-/// the language has not finished, and settling what `[..]` should *mean* — a
-/// `List`, an `Array`, something inferred from context — is a language
-/// decision rather than a detail of this expansion.
+/// **Kept written out even though `[a, b]` now compiles.** D13 settled that a
+/// list literal denotes a `List`, and settled it by desugaring to exactly this
+/// chain in HIR lowering — so the two spellings produce the same expressions,
+/// and this one needs no `List` in the scope the expansion lands in. Emitting
+/// `[a, b]` here would be a shorter string that lowers to the same thing and
+/// depends on one more condition holding.
+///
+/// This function was the reason D13 was asked: generated code tried to be the
+/// literal's first user and could not be, because the construct meant nothing.
 ///
 /// `List` is in scope because `file_scope` brings it along with the other
 /// names a derived body borrows from the trait's home module.

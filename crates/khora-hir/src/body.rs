@@ -190,7 +190,6 @@ pub enum Expr {
     Break(Option<ExprId>),
     Continue,
     Return(Option<ExprId>),
-    List(Vec<ExprId>),
     Tuple(Vec<ExprId>),
     /// `raise DbError::Timeout` — leaves the function with an error.
     ///
@@ -1027,8 +1026,8 @@ impl<'a> Ctx<'a> {
             }
             ast::Expr::List(e) => {
                 let items = e.syntax().children().filter_map(ast::Expr::cast).collect::<Vec<_>>();
-                let ids = items.iter().map(|i| self.lower_expr(i)).collect();
-                self.add_expr(Expr::List(ids), range)
+                let ids: Vec<ExprId> = items.iter().map(|i| self.lower_expr(i)).collect();
+                self.lower_list(ids, range)
             }
             ast::Expr::Tuple(e) => {
                 let items = e.syntax().children().filter_map(ast::Expr::cast).collect::<Vec<_>>();
@@ -1338,6 +1337,62 @@ impl<'a> Ctx<'a> {
             },
             range,
         )
+    }
+
+    /// `[a, b, c]` is `List::Cons(a, List::Cons(b, List::Cons(c, List::Nil)))`.
+    ///
+    /// **D13.** The literal parsed and meant nothing: the checker gave it no
+    /// type and the backend refused it, so every use was either an inscrutable
+    /// "type was never worked out" or a hard error at the end of the pipeline.
+    /// It denotes a `List` — the one sequence type that is immutable, that a
+    /// `match` can take apart, and that may cross into a fiber. `Array` and
+    /// `Vector` are buffers you write into, and a literal quietly producing one
+    /// would be three surprises from one pair of brackets.
+    ///
+    /// **Desugared here rather than typed as itself**, which is why neither the
+    /// checker nor the code generator has a case for a list literal: by the
+    /// time either sees one it is constructor calls, and everything that
+    /// already works for those — inference, monomorphization, reference
+    /// counting, reuse — works for this without being told. It is also
+    /// literally what `derive(ToJson)` was already emitting by hand.
+    ///
+    /// Every node carries the literal's own range, so a diagnostic points at
+    /// the brackets somebody wrote rather than at a `Cons` nobody did.
+    ///
+    /// `List` has to be in scope, exactly as `Step` does for a `for` loop, and
+    /// for the same reason: the alternative is a name the compiler knows and
+    /// the program cannot see.
+    fn lower_list(&mut self, items: Vec<ExprId>, range: TextRange) -> ExprId {
+        // **Said here, rather than carried onward as an unsupported
+        // resolution.** The checker turns one of those into `Type::Unknown` and
+        // then reports "the type of this expression was never worked out",
+        // which is the very diagnostic D13 existed to be rid of. A `Missing` is
+        // compatible with anything, so this reports once and nothing cascades.
+        let (Some(nil), Some(cons)) = (self.list_case("Nil"), self.list_case("Cons")) else {
+            self.error("`[a, b, c]` builds a `List`; import it from `std::core`", range);
+            return self.add_expr(Expr::Missing, range);
+        };
+
+        let mut chain = self.add_expr(Expr::Path(nil), range);
+        for item in items.into_iter().rev() {
+            let callee = self.add_expr(Expr::Path(cons.clone()), range);
+            chain = self.add_expr(Expr::Call { callee, args: vec![item, chain] }, range);
+        }
+        chain
+    }
+
+    /// `List::Cons` or `List::Nil`, if a `List` declaring them is in scope.
+    fn list_case(&self, case: &str) -> Option<crate::Resolution> {
+        let found = self
+            .map
+            .variants_of("List")
+            .chain(self.scope.variants_of("List"))
+            .find(|v| v.name == case)?;
+        Some(crate::Resolution::Variant {
+            module: self.home_of_type("List"),
+            type_name: found.type_name.clone(),
+            name: found.name.clone(),
+        })
     }
 
     /// `Step::Yield` or `Step::Done`, as the desugaring needs them.

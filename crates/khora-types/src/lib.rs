@@ -2439,12 +2439,6 @@ impl<'a> Checker<'a> {
                 }
                 Type::Never
             }
-            Expr::List(items) => {
-                for item in items {
-                    self.infer(item);
-                }
-                Type::Unknown
-            }
             Expr::Tuple(items) => {
                 let types: Vec<Type> = items.iter().map(|i| self.infer(*i)).collect();
                 if types.is_empty() { Type::Unit } else { Type::Tuple(types) }

@@ -820,7 +820,6 @@ impl<'ctx> Lower<'_, 'ctx> {
                 ),
             },
             Expr::Field { base, name } => self.read_field(base, &name, range),
-            Expr::List(_) => self.fail("list literals are not supported yet", range),
             Expr::Tuple(_) => self.fail("tuple literals are not supported yet", range),
             // The checker already rejected these, so reaching one means
             // `compile` ran with diagnostics it should have refused.

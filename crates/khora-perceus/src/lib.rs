@@ -529,7 +529,7 @@ impl<'a> Planner<'a> {
                 }
                 live
             }
-            Expr::List(items) | Expr::Tuple(items) => {
+            Expr::Tuple(items) => {
                 let mut live = after.clone();
                 for item in items.iter().rev() {
                     live = self.live_before(*item, &live);
@@ -901,7 +901,7 @@ impl<'a> Planner<'a> {
                     visit(*value);
                 }
             }
-            Expr::List(items) | Expr::Tuple(items) => {
+            Expr::Tuple(items) => {
                 for item in items {
                     visit(*item);
                 }
@@ -1160,7 +1160,7 @@ impl<'a> Planner<'a> {
                 self.unwinds = true;
                 self.walk(v);
             }
-            Expr::List(items) | Expr::Tuple(items) => {
+            Expr::Tuple(items) => {
                 for item in items {
                     self.walk(item);
                 }

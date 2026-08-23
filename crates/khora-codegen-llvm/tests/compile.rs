@@ -296,6 +296,80 @@ fn main() -> Int {
     assert_eq!(ran.code, Some(0));
 }
 
+/// **D13.** `[a, b, c]` builds a `List`.
+///
+/// It parsed and meant nothing before this: the checker gave it no type and the
+/// backend refused it, so every use was either an inscrutable "type was never
+/// worked out" or a hard error at the end of the pipeline.
+///
+/// Desugared in HIR lowering into the `List::Cons` chain that generated code
+/// was already writing by hand, which is why nothing downstream needed a case
+/// for it — inference, monomorphization and reference counting all see
+/// constructor calls.
+#[test]
+fn a_list_literal_builds_a_cons_chain() {
+    let ran = run(
+        "list_literal",
+        "module t;
+fn print(value: Int);
+
+export type List<A> = | Nil | Cons(head: A, tail: List<A>);
+
+fn total(xs: List<Int>) -> Int {
+  match xs {
+    List::Nil => 0,
+    List::Cons(h, t) => h + total(t),
+  }
+}
+
+fn main() -> Int {
+  print(total([1, 2, 3, 4]));
+  // The element type is inferred from the elements, with nothing annotated.
+  print(total([10]));
+  // An empty literal takes its element type from where it is used.
+  print(total([]));
+  // Nested, so the element type is itself a list.
+  print(total(List::Cons(total([5, 6]), List::Nil)));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "10
+10
+0
+11
+");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The literal resolves `List` through the ordinary scope, exactly as a `for`
+/// loop resolves `Step`. A name the compiler knew and the program could not see
+/// would be the alternative, and errata 46 is about what that costs.
+///
+/// The diagnostic is the point of the test. Reporting it at the brackets rather
+/// than letting an unsupported resolution reach the checker is what keeps it
+/// from becoming "the type of this expression was never worked out" — the very
+/// message D13 existed to be rid of.
+#[test]
+fn a_list_literal_says_what_to_import() {
+    let found = errors(
+        "list_literal_unimported",
+        "module t;
+fn print(value: Int);
+
+fn main() -> Int {
+  let xs = [1, 2, 3];
+  0
+}
+",
+    );
+    assert_eq!(found.len(), 1, "one error, not a cascade: {found:?}");
+    assert!(
+        found[0].contains("builds a `List`") && found[0].contains("std::core"),
+        "the error should name what to import: {found:?}"
+    );
+}
+
 /// **D14.** A `String` or float literal in a pattern is an equality test.
 ///
 /// This parsed, type-checked, and then failed in the backend with "needs a

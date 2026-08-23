@@ -55,10 +55,36 @@ the winget package, which lacks the development libraries. See
 These block specific phases. Each needs a short decision doc in `docs/design/`
 before the phase that depends on it starts.
 
-| # | Question | Blocks |
-| --- | --- | --- |
-| D13 | **What `[a, b, c]` denotes.** The literal parses today and means nothing: the checker gives `Expr::List` no type at all and the backend refuses it, so every use is either an inscrutable "type was never worked out" or a hard error. It has to become a `List`, an `Array`, or a thing chosen by its expected type — and if the answer is `List`, whether writing one requires `List` to be in scope. Found by `derive(ToJson)`, whose expansion tried to be its first user. Until it is decided, generated code writes `List::Cons` chains. | any phase that lets a program write one |
+**None are open.** D13 and D14, the last two, were both language-surface holes
+that parsed and type-checked and then failed somewhere further down, and both
+are closed below.
+
 **Closed:**
+
+- **D13** (what `[a, b, c]` denotes) is a **`List`** — `std::core`'s cons list,
+  and the literal is desugared into a `List::Cons` chain during HIR lowering.
+
+  `List` is the one of the three sequence types that behaves like a value: it
+  is immutable, a `match` can take it apart, and it may cross into a fiber.
+  `Array` and `Vector` are buffers a program writes into and neither is
+  `Share`, so a literal quietly producing one would be three surprises from one
+  pair of brackets. Phase 9.2 also removed the allocation cost of the case a
+  cons list is usually criticised for: walking one and rebuilding it allocates
+  nothing when it is uniquely held.
+
+  **Desugared rather than typed as itself**, which is why nothing downstream
+  needed a case for it: by the time the checker sees one it is constructor
+  calls, so inference, monomorphization, reference counting and reuse all work
+  on it without being told. `Expr::List` is gone from the HIR. It is also
+  exactly what `derive(ToJson)` was already emitting by hand — that expansion
+  tried to be the literal's first user, which is how the question was found.
+
+  **`List` must be in scope**, as `Step` must be for a `for` loop, and for the
+  same reason: a name the compiler knows and the program cannot see is what
+  errata 46 was about. The diagnostic is reported at the brackets and names the
+  import, rather than being carried onward as an unsupported resolution and
+  arriving as "the type of this expression was never worked out" — the message
+  D13 existed to be rid of.
 
 - **D14** (whether `match` tests by equality) is **yes**: a `String` or float
   literal in a pattern compiles to an equality test. It had parsed and
