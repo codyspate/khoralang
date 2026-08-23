@@ -1077,3 +1077,45 @@ differently from everything else the language had.
 
 Found by the agent writing `std::json`, from a single stubborn `1` in a live
 count where every other number in the file was `0`.
+
+## 45. Every program shipped with a debug runtime
+
+`khora build` produced executables in which `khora_alloc`, `khora_drop`,
+`khora_str_find` and every other runtime entry point were compiled at
+`opt-level = 0`. Not in some configurations — in all of them, for as long as the
+runtime has existed.
+
+`toolchain::runtime_archive` looks for `khora_rt.lib` beside the running
+compiler and then one directory up. A compiler built with `cargo build` sits in
+`target/debug`, and beside `target/debug/khora.exe` is `target/debug/khora_rt.lib`.
+The search is correct and does exactly what it says. The problem is what it
+implies: the runtime's optimisation level tracked **how the compiler was built**
+rather than what it is for, and nothing in the profile said otherwise.
+
+Measured on parsing an eighty-byte HTTP request: 9,000 nanoseconds against
+3,650. Two and a half times, on every Khora program, from a setting nobody had
+thought to write down.
+
+The fix is one stanza:
+
+```toml
+[profile.dev.package.khora-rt]
+opt-level = 3
+```
+
+It was found while chasing something else. `String::find` is a call to
+`memmem`; it measured 315 nanoseconds against an expected 40, which is the kind
+of gap that means the thing being measured is not the thing you think it is.
+Chasing *that* found a whole archive compiled without optimisation.
+
+**A compiler's output is not the compiler.** The runtime is an artifact the
+toolchain ships, and it should be built the way a shipped artifact is built no
+matter how the tool that ships it was compiled. Anything else makes a
+user-visible property of their program depend on a developer's build command.
+
+The general shape is worth more than the fix: **a benchmark that is off by a
+constant factor everywhere is a configuration bug, not a code bug.** Every
+number in the string benchmarks was 2.5× too slow together, which reads as "this
+language is slow" and is actually "one flag is missing". A single primitive
+measured against what the platform can do — one call to `memmem`, whose cost is
+known — is what turned an atmosphere into a number.

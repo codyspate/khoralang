@@ -501,30 +501,6 @@ pub unsafe extern "C" fn khora_str_find(
     -1
 }
 
-/// Copies `count` bytes from `src + from` to `dst`.
-///
-/// The same reasoning: a byte-at-a-time copy in Khora cost `String::slice`
-/// 1,575 nanoseconds for forty bytes. The offset is a parameter because Khora
-/// has no pointer arithmetic, deliberately.
-///
-/// # Safety
-///
-/// `dst` must address `count` writable bytes and `src` at least `from + count`
-/// readable ones; the two must not overlap.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_bytes_copy(
-    dst: *mut u8,
-    src: *const u8,
-    from: usize,
-    count: usize,
-) {
-    if count == 0 || dst.is_null() || src.is_null() {
-        return;
-    }
-    // SAFETY: per the contract above.
-    unsafe { std::ptr::copy_nonoverlapping(src.add(from), dst, count) };
-}
-
 /// Whether two strings hold the same bytes.
 ///
 /// Takes bytes and lengths rather than object pointers, matching

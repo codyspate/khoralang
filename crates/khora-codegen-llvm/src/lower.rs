@@ -857,7 +857,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == "Float" && name == "to_int" {
                     return self.float_to_int(args, range);
                 }
-                if owner == "String" && matches!(name.as_str(), "bytes" | "byte" | "byte_length")
+                if owner == "String"
+                    && matches!(name.as_str(), "bytes" | "byte" | "byte_length" | "slice" | "find")
                 {
                     return self.string_intrinsic(&name, args, range);
                 }
@@ -2119,6 +2120,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("copying a string's bytes");
                 array.into()
             }
+            ("slice", [from, to]) => self.string_slice(object, length, *from, *to)?,
+            ("find", [needle, from]) => self.string_find(object, length, *needle, *from)?,
             _ => {
                 return self.fail(
                     format!("`String::{name}` is not a string operation the backend knows"),
@@ -2129,6 +2132,307 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         self.drop(object.into(), &Type::Str);
         Some(result)
+    }
+
+    /// `String::find`: where `needle` first occurs at or after `from`, or -1.
+    ///
+    /// **The offset is the point of it.** Splitting a header block by walking
+    /// the string and slicing off the front costs a copy of everything that is
+    /// left, once per header — quadratic in the number of headers, which for a
+    /// request the eight-kilobyte limit allows is a real amount of work rather
+    /// than a theoretical one. Searching from a cursor instead copies only the
+    /// pieces that are kept.
+    ///
+    /// The search itself is `khora_str_find`, reached directly rather than
+    /// through `String::with_data`: that lends the bytes to a closure, and the
+    /// two nested closures a search needs are two heap allocations, which
+    /// measured at 500 nanoseconds against 40 for the call on its own.
+    fn string_find(
+        &mut self,
+        object: PointerValue<'ctx>,
+        length: IntValue<'ctx>,
+        needle: ExprId,
+        from: ExprId,
+    ) -> Flow<'ctx> {
+        let sought = self.expr(needle)?.into_pointer_value();
+        let sought_length = self.string_length(sought);
+        let sought_bytes = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            sought,
+            runtime::STRING_BYTES_OFFSET,
+            "needle.bytes",
+        );
+        let from = self.expr(from)?.into_int_value();
+        let i64_type = self.be.ctx.i64_type();
+        // Clamped rather than checked, the same as `String::slice`: searching
+        // from past the end finds nothing, which is the answer, not a mistake.
+        let start = self.clamp(from, i64_type.const_zero(), length, "find.from");
+        let bytes = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::STRING_BYTES_OFFSET,
+            "str.bytes",
+        );
+        let hay = unsafe {
+            self.be
+                .builder
+                .build_in_bounds_gep(self.be.ctx.i8_type(), bytes, &[start], "find.hay")
+                .expect("addressing the first byte to search")
+        };
+        let remaining = self
+            .be
+            .builder
+            .build_int_sub(length, start, "find.remaining")
+            .expect("how much is left");
+        let at = self
+            .be
+            .builder
+            .build_call(
+                self.be.rt.str_find,
+                &[hay.into(), remaining.into(), sought_bytes.into(), sought_length.into()],
+                "find",
+            )
+            .expect("searching a string")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_str_find returns an index")
+            .into_int_value();
+        self.drop(sought.into(), &Type::Str);
+
+        // The runtime answers relative to where it was pointed. A hit is
+        // shifted back to an index into the whole string; a miss stays -1.
+        let shifted = self
+            .be
+            .builder
+            .build_int_add(at, start, "find.absolute")
+            .expect("shifting an index")
+        ;
+        let missed = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::SLT, at, i64_type.const_zero(), "find.missed")
+            .expect("was it found");
+        Some(
+            self.be
+                .builder
+                .build_select(missed, at, shifted, "find.at")
+                .expect("choosing an answer"),
+        )
+    }
+
+    /// `String::slice`: the bytes from `from` up to `to`, as a new string.
+    ///
+    /// **One allocation and one copy.** Written in Khora it built an
+    /// `Array<U8>` and handed that to `String::from_bytes`, so every slice was
+    /// two allocations, two copies and a walk over the bytes to re-establish
+    /// that they were UTF-8 — 2,915 nanoseconds for eighty bytes. That is the
+    /// single most expensive thing a request parser does, because
+    /// `String::split_once` is two of them and parsing a request is a dozen
+    /// splits.
+    ///
+    /// Both ends are clamped rather than checked, which is what makes
+    /// `slice(text, 0, huge)` mean "the rest" instead of stopping the program.
+    /// An index is a *request* here, unlike `String::byte` where it is a claim.
+    ///
+    /// The UTF-8 guarantee survives without the walk. The input is already
+    /// valid, so the only way to produce something that is not is to cut
+    /// through a multi-byte character — and that is visible as a continuation
+    /// byte sitting at one end or the other, which is two reads rather than
+    /// `count` of them.
+    fn string_slice(
+        &mut self,
+        object: PointerValue<'ctx>,
+        length: IntValue<'ctx>,
+        from: ExprId,
+        to: ExprId,
+    ) -> Flow<'ctx> {
+        let from = self.expr(from)?.into_int_value();
+        let to = self.expr(to)?.into_int_value();
+        let i64_type = self.be.ctx.i64_type();
+        let zero = i64_type.const_zero();
+
+        // start = from clamped into `0 ..= length`, end into `start ..= length`,
+        // so `count` cannot be negative however the caller was counting.
+        let start = self.clamp(from, zero, length, "slice.start");
+        let end = self.clamp(to, start, length, "slice.end");
+        let count = self
+            .be
+            .builder
+            .build_int_sub(end, start, "slice.count")
+            .expect("sizing a slice");
+
+        let bytes = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::STRING_BYTES_OFFSET,
+            "str.bytes",
+        );
+        let head_cut = self.cuts_a_character(object, bytes, length, start);
+        let tail_cut = self.cuts_a_character(object, bytes, length, end);
+        let cut = self
+            .be
+            .builder
+            .build_or(head_cut, tail_cut, "slice.cut")
+            .expect("either end");
+        // An empty slice is `""`, which is UTF-8 whatever it was cut out of.
+        let asked = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::SGT, count, zero, "slice.asked")
+            .expect("comparing a count");
+        let cut = self.be.builder.build_and(asked, cut, "slice.cuts").expect("and");
+        let ok = self.be.builder.build_not(cut, "slice.ok").expect("negating");
+        self.guard(ok, "this slice cuts a character in half, so it is not a String");
+
+        // The check split the block, so the source address is taken again on
+        // the side of the branch that carries on.
+        let bytes = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            object,
+            runtime::STRING_BYTES_OFFSET,
+            "str.bytes",
+        );
+        let size = self
+            .be
+            .builder
+            .build_int_add(count, i64_type.const_int(runtime::FIELD_WORD, false), "slice.size")
+            .expect("sizing a string");
+        let string = self
+            .be
+            .builder
+            .build_call(
+                self.be.rt.alloc,
+                &[size.into(), self.be.ctx.i32_type().const_int(STRING_TAG, false).into()],
+                "slice.str",
+            )
+            .expect("allocating a string")
+            .try_as_basic_value()
+            .basic()
+            .expect("khora_alloc returns a pointer")
+            .into_pointer_value();
+        let length_slot =
+            runtime::field_pointer(self.be.ctx, &self.be.builder, string, STRING_LEN_FIELD);
+        self.be
+            .builder
+            .build_store(length_slot, count)
+            .expect("storing a string length");
+        let into = runtime::byte_offset(
+            self.be.ctx,
+            &self.be.builder,
+            string,
+            STRING_BYTES_OFFSET,
+            "slice.bytes",
+        );
+        let source = unsafe {
+            self.be
+                .builder
+                .build_in_bounds_gep(self.be.ctx.i8_type(), bytes, &[start], "slice.from")
+                .expect("addressing the first byte")
+        };
+        // Alignment 1 on both sides, for the reason `String::bytes` gives: an
+        // offset into a string is not aligned to anything in particular.
+        self.be
+            .builder
+            .build_memcpy(into, 1, source, 1, count)
+            .expect("copying a slice");
+        Some(string.into())
+    }
+
+    /// `value` brought inside `low ..= high`, both ends inclusive.
+    fn clamp(
+        &self,
+        value: IntValue<'ctx>,
+        low: IntValue<'ctx>,
+        high: IntValue<'ctx>,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        let under = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::SLT, value, low, "clamp.under")
+            .expect("comparing against a floor");
+        let raised = self
+            .be
+            .builder
+            .build_select(under, low, value, "clamp.floor")
+            .expect("raising to a floor")
+            .into_int_value();
+        let over = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::SGT, raised, high, "clamp.over")
+            .expect("comparing against a ceiling");
+        self.be
+            .builder
+            .build_select(over, high, raised, name)
+            .expect("lowering to a ceiling")
+            .into_int_value()
+    }
+
+    /// Whether byte `at` is the middle of a character rather than the start of
+    /// one — which is exactly when cutting a valid string there stops it being
+    /// one.
+    ///
+    /// `at == length` is the end of the string and always a legal cut, so the
+    /// answer is no without reading anything. The read still *happens*, off the
+    /// length field instead of off the end of the bytes: a byte the object
+    /// definitely owns, whose value is then thrown away by the `and`. Branching
+    /// around it would cost more than the load it avoids.
+    fn cuts_a_character(
+        &self,
+        object: PointerValue<'ctx>,
+        bytes: PointerValue<'ctx>,
+        length: IntValue<'ctx>,
+        at: IntValue<'ctx>,
+    ) -> IntValue<'ctx> {
+        let i8_type = self.be.ctx.i8_type();
+        let inside = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::SLT, at, length, "cut.inside")
+            .expect("is there a byte here");
+        let slot = unsafe {
+            self.be
+                .builder
+                .build_in_bounds_gep(i8_type, bytes, &[at], "cut.slot")
+                .expect("addressing a byte")
+        };
+        let anchor =
+            runtime::field_pointer(self.be.ctx, &self.be.builder, object, STRING_LEN_FIELD);
+        let probe = self
+            .be
+            .builder
+            .build_select(inside, slot, anchor, "cut.probe")
+            .expect("choosing something readable")
+            .into_pointer_value();
+        let byte = self
+            .be
+            .builder
+            .build_load(i8_type, probe, "cut.byte")
+            .expect("reading a byte")
+            .into_int_value();
+        // A UTF-8 continuation byte is `10xxxxxx`; every character starts with
+        // something else.
+        let masked = self
+            .be
+            .builder
+            .build_and(byte, i8_type.const_int(0xC0, false), "cut.mask")
+            .expect("masking a byte");
+        let continues = self
+            .be
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                masked,
+                i8_type.const_int(0x80, false),
+                "cut.continues",
+            )
+            .expect("comparing a byte");
+        self.be.builder.build_and(inside, continues, "cut").expect("and")
     }
 
     /// The element type of the `Array<A>` this call is about.

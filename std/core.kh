@@ -760,34 +760,56 @@ impl String {
   /// what every caller of `slice(i, byte_length(s))` means.
   /// The bytes from `from` up to `to`, clamped to what is there.
   ///
-  /// **The copy is one call, not one per byte.** Written as a loop over
-  /// `String::byte` this took 1,575 nanoseconds for forty bytes — a call and a
-  /// bounds check each way, per byte — and the request parser slices several
-  /// times for every request. `docs/design/ecosystem.md`'s rule applies: bind
-  /// the thing the platform already does well rather than writing it twice.
-  fn slice(self, from: Int, to: Int) -> String {
-    let length = String::byte_length(self);
-    let start = if from < 0 { 0 } else if from > length { length } else { from };
-    let end = if to < start { start } else if to > length { length } else { to };
-    let count = end - start;
-    let out: Array<U8> = Array::new(count, 0);
-    Array::with_data(out, fn (into, room) =>
-      String::with_data(self, fn (whole, n) => khora_bytes_copy(into, whole, start, count)));
-    String::from_bytes(out)
-  }
+  /// **One allocation and one copy**, which is why it is a compiler intrinsic
+  /// rather than the six lines it reads like. Written in Khora it went through
+  /// an `Array<U8>` and `String::from_bytes`, so every slice was *two*
+  /// allocations, *two* copies and a walk of the bytes to re-check that they
+  /// were UTF-8 — 2,915 nanoseconds for eighty bytes. `String::split_once` is
+  /// two slices and the request parser is a dozen splits, so this one function
+  /// was most of what a server spent its time on.
+  ///
+  /// **Stops the program if the ends fall inside a character**, the same
+  /// bargain `String::byte` makes about an index. The check is two byte reads
+  /// rather than a walk: the input is already UTF-8, so the only way out of it
+  /// is a cut through a multi-byte character, and that shows up as a
+  /// continuation byte at one end or the other.
+  fn slice(self, from: Int, to: Int) -> String;
 
-  /// Where `needle` first appears, or `None`.
+  /// Where `needle` first occurs at or after `from`, counting in bytes, or
+  /// **-1** if it is nowhere.
+  ///
+  /// **The one place in this library that answers with a sentinel**, and it
+  /// earns it the way `String::byte` earns being able to stop the program:
+  /// this is the bottom of the string library, `index_of` is one line above it
+  /// and is what everything else calls. A search is the C library's `memmem`,
+  /// which says -1, and turning that into an `Option` is work the compiler
+  /// cannot do inside an intrinsic — so it is done here, once, in the open.
+  ///
+  /// `from` exists so that scanning a string does not mean copying it. Walking
+  /// a header block by slicing off the front costs a copy of everything left
+  /// over, once per header; searching from a cursor copies only the pieces
+  /// that are kept.
+  ///
+  /// An empty needle is found at `from`, which is what every other language
+  /// says and what stops `split_once` on an empty separator from running
+  /// forever.
+  fn find(self, needle: String, from: Int) -> Int;
+
   /// Where `needle` first occurs, or nothing.
   ///
-  /// **Bound rather than written**, and the reason is a measurement: the loop
-  /// this replaced took 3,180 nanoseconds to find a six-byte word in eighty
-  /// bytes, because it asked `String::byte` for one byte at a time and did it
-  /// again at every candidate position. It is the single hottest thing in the
-  /// request parser, which calls it once per header and twice more per line.
+  /// **A compiler intrinsic underneath**, and the reason is a measurement.
+  /// Written as a loop over `String::byte` this took 3,180 nanoseconds to find
+  /// a six-byte word in eighty bytes — a call and a bounds check per byte, at
+  /// every candidate position. Bound to `memmem` but reaching it through
+  /// `String::with_data` it still took 500, because the two nested closures
+  /// that borrow the bytes are two heap allocations. Going straight to the
+  /// runtime call is 40.
+  ///
+  /// That matters because this is the hottest thing in the request parser:
+  /// `split_once` is built on it, and parsing one request is about eight
+  /// searches.
   fn index_of(self, needle: String) -> Option<Int> {
-    let found = String::with_data(self, fn (hay, hay_len) =>
-      String::with_data(needle, fn (what, what_len) =>
-        khora_str_find(hay, hay_len, what, what_len)));
+    let found = String::find(self, needle, 0);
     if found < 0 { Option::None } else { Option::Some(found) }
   }
 
@@ -836,8 +858,6 @@ impl String {
 /// a table and a thousand lines, and `docs/design/ecosystem.md` names exactly
 /// this kind of thing as something to bind rather than write twice.
 extern fn khora_float_text(value: Float, into: Ptr, capacity: Int) -> Int;
-extern fn khora_str_find(hay: Ptr, hay_len: Int, needle: Ptr, needle_len: Int) -> Int;
-extern fn khora_bytes_copy(into: Ptr, from: Ptr, at: Int, count: Int) -> ();
 
 impl Float {
   /// The number, written out — `1.5`, `0.1`, `inf`.

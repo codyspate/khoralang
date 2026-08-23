@@ -125,6 +125,8 @@ pub struct Runtime<'ctx> {
     pub print_str: FunctionValue<'ctx>,
     /// `_Bool khora_str_eq(const uint8_t *, size_t, const uint8_t *, size_t)`
     pub str_eq: FunctionValue<'ctx>,
+    /// `int64_t khora_str_find(const uint8_t *, size_t, const uint8_t *, size_t)`
+    pub str_find: FunctionValue<'ctx>,
     /// `void *khora_region_open(void)`
     pub region_open: FunctionValue<'ctx>,
     /// `void khora_region_defer(void *region, void *closure, void (*glue)(void *))`
@@ -227,6 +229,10 @@ impl<'ctx> Runtime<'ctx> {
             str_eq: declare(
                 "khora_str_eq",
                 i8t.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false),
+            ),
+            str_find: declare(
+                "khora_str_find",
+                i64t.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false),
             ),
             region_open: declare("khora_region_open", ptr.fn_type(&[], false)),
             region_defer: declare(

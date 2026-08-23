@@ -49,3 +49,18 @@ toml = "1"
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# The runtime is not part of the compiler; it is part of what the compiler
+# *ships*. Every Khora program links it, so building it unoptimised because
+# `cargo build` was run without `--release` puts a debug `khora_alloc`,
+# `khora_drop` and `khora_str_find` inside somebody's release executable —
+# `toolchain::runtime_archive` looks beside the running `khora`, and beside a
+# `target/debug/khora.exe` is `target/debug/khora_rt.lib`.
+#
+# Measured, on parsing an eighty-byte HTTP request: 9,000 nanoseconds against
+# 3,650. Two and a half times, on every program, from a profile setting.
+#
+# Overflow checks stay on. They are the runtime's own bounds discipline rather
+# than a debugging aid, and `opt-level = 3` is what was actually missing.
+[profile.dev.package.khora-rt]
+opt-level = 3
