@@ -15,15 +15,22 @@ checking, whole-program monomorphization, reference-count planning and LLVM to a
 linked native executable. The standard library is written in Khora, and one of
 the reference applications is an HTTP service.
 
-It is **pre-1.0 and pre-release.** There is no package manager, no editions, and
-no stability promise yet — `docs/design/compatibility.md` decides what the
+It is **pre-1.0 and pre-release.** There is no registry, no editions, and no
+stability promise yet — `docs/design/compatibility.md` decides what the
 promise will be and names what 1.0 is still waiting on.
 
-**Platforms.** Developed on Windows. The CI matrix in `.github/workflows/ci.yml`
-covers Windows, Linux and macOS, and `khora-types/tests/portability.rs`
-type-checks `std` for all three from any host — but `std/net/socket_macos.kh`
-is new and has not yet bound a socket on a real Mac. Everything else in `std` is
-either portable or already had a file per platform.
+**Platforms.** Developed on Windows, and green on Windows, Linux and macOS —
+the whole suite and the baseline, including a Khora HTTP server binding a real
+socket and answering `curl`. `.github/workflows/ci.yml` runs all three.
+
+Two tests keep it that way from a laptop, and the reason they exist is worth a
+sentence. `khora-types/tests/portability.rs` type-checks `std` for every target
+from any host, and `khora-codegen-llvm/tests/portability.rs` *generates and
+verifies a module* for every target. The second was added after a bug that only
+existed in a combination of modules Windows never compiles together: `std/fs`
+declares `close`, so do the Linux and macOS socket files, and
+`socket_windows.kh` calls it `closesocket`. Every POSIX build was broken and no
+Windows developer could see it.
 
 ### What the language has
 
@@ -54,14 +61,21 @@ different shape, kept in the suite so the layering stays true.
   `std::net::http`, and a body must be UTF-8 text. TLS is there, both ends,
   and `Connection::holding` takes a larger cap than the default.
 - **No HTTP/2 and no WebSockets**, so no upgrade path.
-- **macOS is untested.** The sockets are written and type-checked; no Mac has
-  run them. See Platforms above.
-- **`[permissions]` is not a sandbox.** The compile-time gate over Khora code
-  is total, and `extern fn` goes around it. Closing that needs package
-  identity. `docs/design/permissions.md` says so at the top, and so should
-  anything quoting it.
-- **No package manager**, so a program is one source root.
-- **No language server**, and the linter is not written.
+- **`[permissions]` is still not a sandbox**, though the largest hole in it is
+  closed. `[permissions] extern` now decides which packages may declare a
+  foreign function, so nothing reaches outside Khora except through signatures
+  carrying capability rows. What it does *not* do is confine a program at run
+  time: the compile-time gate is a gate, not a jail.
+- **No registry.** A dependency names a git repository and a revision.
+  `khora.lock` pins both the commit and the SHA-256 of what arrived, and the
+  content-addressed store means two packages with identical contents are one
+  directory — but there is nothing to `khora publish` to, and no version
+  solving, because every source names one exact thing.
+- **The language server answers two questions.** Diagnostics and hover.
+  Completion, rename and capability inlay hints are not written.
+- **The linter has two lints**, both deliberately narrow: an expression that
+  cannot do anything and is discarded, and a capability a body cannot be
+  using. Each declines the interesting cases rather than guess.
 
 ### Two things worth knowing about the implementation
 
@@ -90,10 +104,14 @@ the `extern` boundary.
 | `khora-perceus` | `dup`/`drop` placement, last-use ownership, and reuse-token planning. |
 | `khora-rt` | Reference-counted heap, fibers, sockets, TLS, intrinsics. Linked into every executable. |
 | `khora-codegen-llvm` | LLVM backend behind the `llvm` feature. |
-| `khora-cli` | `check`, `fmt`, `lex`, `parse`, `test`, and `build` with `--features llvm`. |
+| `khora-pkg` | Resolution, `khora.lock`, the content-addressed store, the task DAG. |
+| `khora-lint` | Lints that need types. |
+| `khora-lsp` | A language server over the same queries. |
+| `khora-cli` | `check`, `fmt`, `lex`, `parse`, `lsp`, `test`, and `build` with `--features llvm`. |
 
-935 tests pass, `clippy -D warnings` is clean, and `khora check` and
-`khora fmt --check` pass over all of `std/`, `examples/` and `bench/`.
+1,023 tests pass, `clippy -D warnings` is clean, and `khora check` and
+`khora fmt --check` pass over all of `std/`, `examples/` and `bench/` — with
+no lint warnings anywhere in them.
 `sh scripts/baseline.sh` runs the lot, including twelve HTTP conformance checks
 against a real `curl`.
 
@@ -246,8 +264,11 @@ irrefutable `let` destructuring, string interpolation, a one-command LLVM
 install, and macOS. All four are written; the last waits on a green CI run for
 a Mac to have actually executed it.
 
-Then phase 10: packaging, the linter, and a language server. Then phase 11, the
-scheduler — a fiber is an operating-system thread today, so a server holds
+Phase 10 is largely done: `khora.lock` and a content-addressed store, the
+`extern` allow-list, two lints, and a language server that reports diagnostics
+and answers hover. What is left of it is a registry, cross-compilation targets,
+and the sandboxed WASM build plugins — plus the rest of the editor surface.
+Then phase 11, the scheduler — a fiber is an operating-system thread today, so a server holds
 thousands of connections and not hundreds of thousands, and that is the last
 thing standing between the positioning and the truth.
 

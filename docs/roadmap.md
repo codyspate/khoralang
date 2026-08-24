@@ -1747,7 +1747,7 @@ compiler that does not know what it supports.
   matched value's type now, which also retires the workaround `bind_pattern` was
   carrying for the same reason.
 
-- **9.5.2 macOS, and a CI matrix — written, not yet green.** `std/net` had
+- **9.5.2 macOS, and a CI matrix — green.** `std/net` had
   `socket_windows.kh` and `socket_linux.kh` and nothing for macOS, so a Mac got
   "cannot find module `std::net::socket`" — and there was no CI at all, so
   nothing but one Windows desktop was known to work.
@@ -1758,14 +1758,28 @@ compiler that does not know what it supports.
   20. File-suffix selection picks whole files, so two lines of difference still
   means a file, and a fix to one belongs in both.
 
-  Two things check it. `khora-types/tests/portability.rs` type-checks `std` for
-  every target *from any host* — type checking needs no linker — so a mistake in
-  the macOS file is a red tick on a Windows machine rather than a discovery by
-  whoever next builds on a Mac. And the CI matrix runs the whole baseline on all
-  three. **What neither covers is whether the numbers are right**: a
-  `sockaddr_in` with the family in the wrong byte type-checks perfectly. That
-  wants a real Mac, and until CI has run on one this is written rather than
-  working.
+  **A Mac has now run it.** The full suite and the whole baseline pass on
+  `macos-latest`, including a Khora HTTP server binding a real socket and
+  answering twelve `curl` checks. That is the part no amount of type checking
+  could establish — a `sockaddr_in` with the family in the wrong byte
+  type-checks perfectly — so the numbers are now known to be right rather than
+  believed to be.
+
+  It took three rounds to get there, and none of the three was the macOS file.
+  The backend job had **never once passed on any platform**: `setup-llvm.sh` let
+  the installers' stdout escape into its own answer, so `$GITHUB_ENV` got a
+  multi-line value and refused it. Behind that were two more, both real and both
+  invisible from Windows — `RelocMode::Default` produces objects Linux will not
+  link into a PIE, and the macOS entry in `SYSTEM_LIBS` was a placeholder that
+  had never been run, missing the `CoreFoundation` and `Security` frameworks
+  `rustls` reaches the trust store through.
+
+  Two tests now keep all of this findable from a laptop.
+  `khora-types/tests/portability.rs` type-checks `std` for every target from any
+  host, and `khora-codegen-llvm/tests/portability.rs` generates and *verifies* a
+  module for every target — added after a symbol collision that existed only in
+  the combination of modules a POSIX build compiles together, which no Windows
+  developer could reproduce. See phase 10.0's neighbours in the log.
 - **9.5.3 An install story that is not a specific tarball — done.**
   `scripts/setup-llvm.sh`, which CI runs too, so a failure there is a failure of
   the documented install rather than of a CI-only path.
