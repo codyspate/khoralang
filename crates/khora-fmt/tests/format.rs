@@ -205,3 +205,55 @@ fn a_derive_clause_hugs_its_traits() {
 fn a_file_with_only_a_module_declaration_formats() {
     assert_eq!(format("module m;").unwrap(), "module m;\n");
 }
+
+/// A doc comment is indented like the thing it documents.
+///
+/// A sum type's cases are continuations, so `| Ok` gets an extra level. The
+/// comment above it used to print at column 0 against a case indented two
+/// spaces — and it round-tripped, so the corpus test was happy and nothing
+/// noticed until something in `std` finally documented a variant.
+#[test]
+fn a_variant_doc_comment_is_indented_with_its_variant() {
+    let src = "module m;\n\n\
+               export type Level =\n  \
+               /// Fine.\n  \
+               | Ok\n  \
+               /// Not fine.\n  \
+               | Bad;\n";
+    assert_eq!(format(src).unwrap(), src);
+}
+
+/// The half that was never broken, asserted so a fix to the other half cannot
+/// quietly change it: a record field's comment takes the brace's indent, not a
+/// continuation's.
+#[test]
+fn a_field_doc_comment_keeps_its_own_indent() {
+    let src = "module m;\n\n\
+               export type Point = {\n  \
+               /// Across.\n  \
+               x: Int,\n\
+               };\n";
+    assert_eq!(format(src).unwrap(), src);
+}
+
+/// Several lines of one comment move as a block. Looking only at the very next
+/// token would indent the last line and leave the rest behind.
+#[test]
+fn a_multi_line_doc_comment_moves_together() {
+    let src = "module m;\n\n\
+               export type Level =\n  \
+               /// One.\n  \
+               /// Two.\n  \
+               | Ok;\n";
+    assert_eq!(format(src).unwrap(), src);
+}
+
+/// The bug produced output that was still valid and still round-tripped, so
+/// idempotence alone would not have caught it. Asserted anyway, because a
+/// lookahead is exactly the kind of change that breaks it.
+#[test]
+fn formatting_a_documented_variant_twice_is_formatting_it_once() {
+    let messy = "module m;\nexport type Level =\n/// Fine.\n| Ok\n/// Not fine.\n| Bad;\n";
+    let once = format(messy).unwrap();
+    assert_eq!(format(&once).unwrap(), once, "not idempotent:\n{once}");
+}

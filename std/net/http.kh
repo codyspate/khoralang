@@ -872,20 +872,20 @@ export type Connection = {
 
 /// What reading a connection produced.
 export type Incoming =
-/// A whole request, and whether the client asked to keep the connection open.
-///
-/// The flag is read from the `Connection` header here rather than by the
-/// caller, because the caller would have to fold the header's case and this
-/// has already done it.
+  /// A whole request, and whether the client asked to keep the connection open.
+  ///
+  /// The flag is read from the `Connection` header here rather than by the
+  /// caller, because the caller would have to fold the header's case and this
+  /// has already done it.
   | Arrived(request: Request, keep: Bool)
-/// The peer closed, or the read deadline passed. There is nothing to answer
-/// and nothing to send.
+  /// The peer closed, or the read deadline passed. There is nothing to answer
+  /// and nothing to send.
   | Ended
-/// Nothing usable arrived: send this and close.
-///
-/// A client that could not be understood cannot be trusted about where its
-/// next request begins, so the connection cannot be reused whatever the
-/// `Connection` header said.
+  /// Nothing usable arrived: send this and close.
+  ///
+  /// A client that could not be understood cannot be trusted about where its
+  /// next request begins, so the connection cannot be reused whatever the
+  /// `Connection` header said.
   | Rejected(response: Response);
 
 impl Connection {

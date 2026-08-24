@@ -310,9 +310,26 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0), "and the program was not taken down with it");
 }
 
-/// A parent cancelling a child that has not started yet is not a race to lose:
-/// the child stops at its first cancellation point, which is before it does
-/// anything.
+/// Cancelling a child immediately after spawning it, which **is** a race, and
+/// the test says so rather than pretending otherwise.
+///
+/// This asserted `"3\n"` or `"1\n3\n"` and was flaky on macOS, which produced
+/// `"1\n2\n3\n"` — the child reaching the end before the parent's `cancel`
+/// landed. That is a legal interleaving and the test was wrong, not the
+/// runtime: a fiber is an operating-system thread today, so nothing orders
+/// `Fiber::cancel` against the child arriving at its first cancellation point.
+/// The old doc comment claimed it was "not a race to lose".
+///
+/// What is actually guaranteed, and what this now checks, is that every
+/// outcome is one the program could have produced *without* a cancellation
+/// somewhere in it — the child stops at a cancellation point or not at all,
+/// never halfway through one. A torn state would be `"2\n3\n"`: `print(2)`
+/// without `print(1)` before it.
+///
+/// **Phase 11 makes the strong version true.** With a real scheduler a child
+/// spawned and cancelled before any suspension point has not been scheduled at
+/// all, so `"3\n"` becomes the only answer. Worth tightening then, and worth
+/// not asserting until it is.
 #[test]
 fn a_fiber_cancelled_before_it_starts_does_nothing() {
     let ran = run(
@@ -336,11 +353,12 @@ fn main() -> Int {{
         ),
     );
     assert!(
-        ran.stdout == "3\n" || ran.stdout == "1\n3\n",
-        "the child stopped at its first mark, wherever it had reached: {:?}",
+        matches!(ran.stdout.as_str(), "3\n" | "1\n3\n" | "1\n2\n3\n"),
+        "the child stopped at a cancellation point or finished, and nothing in \
+         between: {:?}",
         ran.stdout
     );
-    assert_eq!(ran.code, Some(0));
+    assert_eq!(ran.code, Some(0), "and the parent was not taken down with it");
 }
 
 /// An infallible fiber has no channel to be stopped on, and runs to its end.

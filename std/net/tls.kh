@@ -40,21 +40,21 @@ extern fn khora_tls_connect(client: Ptr, host: Ptr, host_len: Int, port: Int) ->
 /// debugging a handshake, and the three things a Khora program can *do* about a
 /// failure are: fix the certificate, fix the key, or drop the client.
 export type TlsError =
-/// The certificate chain was not readable PEM, or was empty.
+  /// The certificate chain was not readable PEM, or was empty.
   | BadCertificate
-/// The key was not readable PEM, or does not match the certificate.
+  /// The key was not readable PEM, or does not match the certificate.
   | BadKey
-/// A client failed the handshake. Ordinary: a port scan, a plain-HTTP
-/// request to an HTTPS port, or a client with no cipher in common.
+  /// A client failed the handshake. Ordinary: a port scan, a plain-HTTP
+  /// request to an HTTPS port, or a client with no cipher in common.
   | Handshake
-/// A connection could not be made, or the server it reached did not present
-/// a certificate this client trusts for that name.
-///
-/// One case rather than four. "Could not resolve", "refused", "expired" and
-/// "wrong name" are different to somebody debugging and identical to a
-/// program: it does not have the connection, and what it does next is retry
-/// or give up. Telling them apart wants an error that carries text, which is
-/// a separate piece of work.
+  /// A connection could not be made, or the server it reached did not present
+  /// a certificate this client trusts for that name.
+  ///
+  /// One case rather than four. "Could not resolve", "refused", "expired" and
+  /// "wrong name" are different to somebody debugging and identical to a
+  /// program: it does not have the connection, and what it does next is retry
+  /// or give up. Telling them apart wants an error that carries text, which is
+  /// a separate piece of work.
   | Unreachable(host: String);
 
 /// A configured server, ready to secure accepted sockets.

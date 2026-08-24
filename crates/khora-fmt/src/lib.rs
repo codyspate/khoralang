@@ -29,7 +29,9 @@
 //! mid-edit, while a brace is unbalanced, is exactly when a formatter can do the
 //! most damage.
 
-use khora_syntax::{ParseError, SyntaxElement, SyntaxKind, SyntaxKind::*, SyntaxNode};
+use khora_syntax::{
+    ParseError, SyntaxElement, SyntaxKind, SyntaxKind::*, SyntaxNode, SyntaxToken,
+};
 
 const INDENT: &str = "  ";
 
@@ -115,7 +117,15 @@ impl Formatter {
                     let kind = n.kind();
                     self.node(&n, kind);
                 }
-                SyntaxElement::Token(t) => self.token(t.kind(), t.text(), parent),
+                SyntaxElement::Token(t) => {
+                    // A comment is indented like the line it introduces, so
+                    // it has to know what that line will be. Nothing else
+                    // does: every other token decides its own indent from
+                    // its own kind.
+                    let continues =
+                        t.kind() == LINE_COMMENT && introduces_a_continuation(&t);
+                    self.token(t.kind(), t.text(), parent, continues);
+                }
             }
         }
         if brackets {
@@ -123,7 +133,7 @@ impl Formatter {
         }
     }
 
-    fn token(&mut self, kind: SyntaxKind, text: &str, parent: SyntaxKind) {
+    fn token(&mut self, kind: SyntaxKind, text: &str, parent: SyntaxKind, continues: bool) {
         match kind {
             WHITESPACE => {
                 let newlines = text.bytes().filter(|b| *b == b'\n').count();
@@ -139,14 +149,14 @@ impl Formatter {
             _ => {}
         }
 
-        self.write(kind, text, parent);
+        self.write(kind, text, parent, continues);
 
         if matches!(kind, L_BRACE | L_PAREN | L_BRACK) {
             self.depth += 1;
         }
     }
 
-    fn write(&mut self, kind: SyntaxKind, text: &str, parent: SyntaxKind) {
+    fn write(&mut self, kind: SyntaxKind, text: &str, parent: SyntaxKind, continues: bool) {
         if !self.started {
             self.out.push_str(text);
             self.started = true;
@@ -167,7 +177,7 @@ impl Formatter {
                 // A line that opens with a continuation gets one extra level,
                 // which is what "aligned to the source expression" means for a
                 // multi-line pipeline.
-                let extra = usize::from(is_continuation(kind, parent));
+                let extra = usize::from(continues || is_continuation(kind, parent));
                 for _ in 0..self.depth + extra {
                     self.out.push_str(INDENT);
                 }
@@ -292,14 +302,14 @@ impl Formatter {
         items.sort();
         items.dedup();
 
-        self.write(L_BRACE, "{", IMPORT_LIST);
+        self.write(L_BRACE, "{", IMPORT_LIST, false);
         for (i, item) in items.iter().enumerate() {
             if i > 0 {
-                self.write(COMMA, ",", IMPORT_LIST);
+                self.write(COMMA, ",", IMPORT_LIST, false);
             }
-            self.write(IDENT, item, IMPORT_LIST);
+            self.write(IDENT, item, IMPORT_LIST, false);
         }
-        self.write(R_BRACE, "}", IMPORT_LIST);
+        self.write(R_BRACE, "}", IMPORT_LIST, false);
     }
 }
 
@@ -337,6 +347,35 @@ fn normalize_import_item(node: &SyntaxNode) -> String {
 ///
 /// This has to consider the parent, because the same token does both jobs:
 /// `with` continues a signature but *starts* a handler region.
+/// Whether the line this comment sits on will be indented as a continuation.
+///
+/// A doc comment belongs to whatever comes next, so it has to be indented like
+/// it. Nothing else in this formatter needs to look ahead — every other token
+/// decides its own indent from its own kind and parent — which is why this is
+/// one function rather than a general lookahead mechanism.
+///
+/// The case that made it necessary: a sum type's cases are continuations, so
+/// `| Ok` gets an extra level, and the `/// ...` above it did not. It printed
+/// at column 0 against a case indented two spaces. Round-tripping, so the
+/// corpus test was happy, and invisible until something in `std` finally
+/// documented a variant.
+///
+/// Consecutive comments are skipped so a three-line doc comment moves as a
+/// block rather than having its last line indented differently.
+fn introduces_a_continuation(token: &SyntaxToken) -> bool {
+    let mut next = token.next_token();
+    while let Some(t) = next {
+        match t.kind() {
+            WHITESPACE | LINE_COMMENT => next = t.next_token(),
+            kind => {
+                let parent = t.parent().map_or(ERROR, |p| p.kind());
+                return is_continuation(kind, parent);
+            }
+        }
+    }
+    false
+}
+
 fn is_continuation(kind: SyntaxKind, parent: SyntaxKind) -> bool {
     match kind {
         PIPE_GT | DOT | THIN_ARROW => true,
