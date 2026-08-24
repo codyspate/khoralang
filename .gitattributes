@@ -12,3 +12,11 @@
 # The same, for anything else read by a POSIX tool rather than by an editor.
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# Khora source is LF everywhere too, and this one is not cosmetic either.
+#
+# The formatter emits LF, and `the_corpus_is_already_formatted` compares its
+# output against the file byte for byte. Without this a fresh clone on Windows
+# gets CRLF, the comparison fails on every `.kh` file in `std`, and a new
+# contributor's first `cargo test` fails on code they have not touched.
+*.kh text eol=lf
