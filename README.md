@@ -19,6 +19,12 @@ It is **pre-1.0 and pre-release.** There is no package manager, no editions, and
 no stability promise yet — `docs/design/compatibility.md` decides what the
 promise will be and names what 1.0 is still waiting on.
 
+**Platforms.** Developed on Windows. The CI matrix in `.github/workflows/ci.yml`
+covers Windows, Linux and macOS, and `khora-types/tests/portability.rs`
+type-checks `std` for all three from any host — but `std/net/socket_macos.kh`
+is new and has not yet bound a socket on a real Mac. Everything else in `std` is
+either portable or already had a file per platform.
+
 ### What the language has
 
 Algebraic data types and records, generics with higher-kinded types and const
@@ -99,7 +105,20 @@ reproducible rather than reported.
 
 ## Quickstart
 
+**The front end needs nothing but Rust.** Parsing, type checking, the effect
+rows, the formatter and most of the test suite build with a plain `cargo test`.
+
 ```bash
+cargo test --workspace
+```
+
+**Compiling to a binary needs LLVM 22.1.8**, which the pin in `inkwell` and
+`llvm-sys` makes exact. One script gets it, on any of the three platforms — a
+bottled `brew install llvm@22` on macOS and Linux, the official tarball plus two
+workarounds on Windows. `docs/llvm-setup.md` has the why.
+
+```bash
+export LLVM_SYS_221_PREFIX="$(sh scripts/setup-llvm.sh)"
 cargo test --workspace --features llvm
 ```
 

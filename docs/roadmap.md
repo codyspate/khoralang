@@ -1738,13 +1738,34 @@ compiler that does not know what it supports.
   matched value's type now, which also retires the workaround `bind_pattern` was
   carrying for the same reason.
 
-- **9.5.2 macOS, and a CI matrix.** `std/net` has `socket_windows.kh` and
-  `socket_linux.kh` and no macOS, so networking does not exist there — and
-  there is no CI at all, so nothing but a Windows desktop is known to work.
-  Mac is heavily overrepresented among the people who try a new language.
-- **9.5.3 An install story that is not a specific tarball.** LLVM 22.1.8 from
-  the official `clang+llvm-*.tar.xz`, *not* the distribution package. Most
-  evaluators bounce here before writing a line.
+- **9.5.2 macOS, and a CI matrix — written, not yet green.** `std/net` had
+  `socket_windows.kh` and `socket_linux.kh` and nothing for macOS, so a Mac got
+  "cannot find module `std::net::socket`" — and there was no CI at all, so
+  nothing but one Windows desktop was known to work.
+
+  `socket_macos.kh` is a copy of the Linux file with the two BSD differences: a
+  `sockaddr_in` begins with a length byte where Linux puts the low half of the
+  family, and `SOL_SOCKET`/`SO_RCVTIMEO` are `0xffff`/`0x1006` rather than 1 and
+  20. File-suffix selection picks whole files, so two lines of difference still
+  means a file, and a fix to one belongs in both.
+
+  Two things check it. `khora-types/tests/portability.rs` type-checks `std` for
+  every target *from any host* — type checking needs no linker — so a mistake in
+  the macOS file is a red tick on a Windows machine rather than a discovery by
+  whoever next builds on a Mac. And the CI matrix runs the whole baseline on all
+  three. **What neither covers is whether the numbers are right**: a
+  `sockaddr_in` with the family in the wrong byte type-checks perfectly. That
+  wants a real Mac, and until CI has run on one this is written rather than
+  working.
+- **9.5.3 An install story that is not a specific tarball — done.**
+  `scripts/setup-llvm.sh`, which CI runs too, so a failure there is a failure of
+  the documented install rather than of a CI-only path.
+
+  The discovery that made it easy: **`brew install llvm@22` is pinned at exactly
+  22.1.8** and bottled for macOS and Linux, and apt.llvm.org has a 22 channel.
+  The tarball is only needed on Windows — which is fortunate, because the LLVM
+  22.1.8 release publishes binaries for Windows and `armv7a-linux` and nothing
+  else. There was never a Linux or macOS tarball to point at.
 - **9.5.4 String interpolation, or a hard error.** `"hello ${name}"` compiles
   and prints `hello ${name}`. Silently meaning something else is the worst of
   the three options; refusing it is better than that, and interpolating is

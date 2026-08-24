@@ -2,21 +2,24 @@ module std::net::socket;
 
 import std::core::{Array, Ptr};
 
-// Sockets, on Linux.
+// Sockets, on macOS.
 //
-// The same module as `socket_windows.kh`, and only one of the two is ever in a
-// build. The differences are small and all of them are here: there is nothing
-// to start up, the handle is a small `int` rather than a pointer-sized one, and
-// the call that closes it is `close`.
+// The same module as `socket_linux.kh` and `socket_windows.kh`, and only one of
+// the three is ever in a build. Against the Linux one there are exactly two
+// differences, both of them below and both of them BSD's rather than Apple's:
+// a `sockaddr_in` begins with a length byte, and the socket-option numbers are
+// the BSD ones. Everything else — the calls, the sizes, the byte order — is the
+// same, which is why this file is otherwise a copy.
+//
+// **A copy, and that is the mechanism working as designed.** File suffixes
+// select a whole file (`khora-db::selected_for_target`), so a target that
+// differs in two lines still needs a file of its own. `_posix` exists for the
+// case where Linux and macOS agree completely, and sockets are not that case.
+// The cost is that a fix to one of these belongs in both.
 //
 // **No struct crosses the boundary.** `bind` wants a `sockaddr_in`, which is
 // sixteen bytes; those sixteen bytes are laid out here, in an `Array<U8>`, and
 // lent as a `Ptr` for exactly the duration of the call. `docs/design/ffi.md`.
-//
-// **macOS is `socket_macos.kh`**, and the two files differ in two places: a BSD
-// `sockaddr_in` puts a length byte where this one puts the low half of the
-// family, and the socket-option numbers are different. A fix here usually
-// belongs there as well.
 
 extern fn socket(family: I32, kind: I32, protocol: I32) -> I32;
 extern fn bind(handle: I32, address: Ptr, length: I32) -> I32;
@@ -36,7 +39,7 @@ export fn start() -> Bool { true }
 
 /// A socket listening on `port`, or [`invalid_handle`].
 export fn listen_on(port: Int) -> Int {
-  // AF_INET, SOCK_STREAM, IPPROTO_TCP.
+  // AF_INET, SOCK_STREAM, IPPROTO_TCP — 2, 1 and 6 here as on Linux.
   let handle = socket(I32::of(2), I32::of(1), I32::of(6));
   if I32::to_int(handle) < 0 {
     invalid_handle()
@@ -54,15 +57,22 @@ export fn listen_on(port: Int) -> Int {
 
 /// The sixteen bytes of a `sockaddr_in` bound to every interface.
 ///
+/// **This is the first of the two differences from Linux.** BSD splits what
+/// Linux spends on a two-byte `sin_family`: a one-byte length first, then a
+/// one-byte family. Writing Linux's layout here puts `AF_INET` in `sin_len` and
+/// zero in `sin_family`, which is a `bind` that fails with nothing to read.
+///
 /// ```text
-/// 0..2   sin_family  AF_INET, native order
+/// 0..1   sin_len     16, the size of this structure
+/// 1..2   sin_family  AF_INET
 /// 2..4   sin_port    network order, which is big-endian
 /// 4..8   sin_addr    INADDR_ANY, which is zero
 /// 8..16  padding
 /// ```
 fn sockaddr_in(port: Int) -> Array<U8> {
   let out: Array<U8> = Array::new(16, 0);
-  Array::set(out, 0, 2);
+  Array::set(out, 0, 16);
+  Array::set(out, 1, 2);
   Array::set(out, 2, U8::of(Int::and(Int::shr(port, 8), 255)));
   Array::set(out, 3, U8::of(Int::and(port, 255)));
   out
@@ -76,17 +86,22 @@ export fn accept_on(server: Int) -> Int {
 
 /// How long a read will wait before giving up, in milliseconds.
 ///
-/// See the note on the Windows one for why a server cannot do without it. The
-/// difference here is the shape of the value: Berkeley takes a
-/// `struct timeval`, two 64-bit words on this target, where Winsock takes a
-/// single `DWORD` of milliseconds.
+/// **The second difference.** `SOL_SOCKET` is `0xffff` here and 1 on Linux, and
+/// `SO_RCVTIMEO` is `0x1006` rather than 20 — BSD numbers the options from a
+/// different base. The *value* is the same shape: a `struct timeval`, sixteen
+/// bytes, seconds then microseconds.
+///
+/// macOS makes `tv_usec` a 32-bit `suseconds_t` where Linux makes it 64, so the
+/// structure is eight bytes plus four plus four of padding rather than eight
+/// and eight. Writing a whole word at offset 8 is right either way on a
+/// little-endian machine — the microseconds land in the low half and zero lands
+/// in the padding — and every macOS Khora targets is little-endian.
 export fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
   let value: Array<U8> = Array::new(16, 0);
   write_word(value, 0, millis / 1000);
   write_word(value, 8, (millis % 1000) * 1000);
-  // SOL_SOCKET is 1 and SO_RCVTIMEO is 20, which are Berkeley's numbers.
   let outcome = Array::with_data(value, fn (from, n) =>
-    I32::to_int(setsockopt(I32::of(handle), I32::of(1), I32::of(20), from, I32::of(n))));
+    I32::to_int(setsockopt(I32::of(handle), I32::of(65535), I32::of(4102), from, I32::of(n))));
   outcome == 0
 }
 
@@ -113,7 +128,7 @@ export fn transmit(connection: Int, text: String) -> Int {
 
 /// Closes a connection, letting the other end finish first.
 ///
-/// The same reasoning as the Windows file, and the same shape: closing while
+/// The same reasoning as the other two files, and the same shape: closing while
 /// the peer is still writing sends an RST, which discards the answer the peer
 /// had not read yet. `SHUT_WR` is 1 here too.
 export fn shut(handle: Int) -> () {

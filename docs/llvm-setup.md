@@ -5,11 +5,32 @@ default build — and therefore `cargo test` and all front-end work — needs no
 LLVM at all.
 
 Pinned version: **LLVM 22.1.8**, matching `inkwell` 0.10's `llvm22-1` feature
-and `llvm-sys` 221.0.1.
+and `llvm-sys` 221.0.1. A different LLVM does not work, and does not half-work.
 
-Getting this working on Windows takes four non-obvious steps. All of them are
-already applied in this repository; this document explains what and why, so a
-new machine can be set up and so nobody undoes one by accident.
+## Just run the script
+
+```sh
+export LLVM_SYS_221_PREFIX="$(sh scripts/setup-llvm.sh)"
+cargo test --workspace --features llvm
+```
+
+It picks the right thing per platform, checks the version, and prints the
+prefix. CI runs the same script, so a failure there is a failure of the
+documented install rather than of a path only CI takes.
+
+**On macOS and Linux it is one bottled formula.** `brew install llvm@22` is
+pinned at exactly 22.1.8, and `llvm@22` rather than `llvm` because the latter
+moves to 23 the day it is cut. Debian and Ubuntu can use apt.llvm.org's
+installer instead, which has a 22 channel. Either way there is nothing below
+this line you need to read.
+
+**Windows is the hard one**, and the rest of this document is why. Note that
+the LLVM 22.1.8 release publishes binaries for Windows and for `armv7a-linux`
+and *nothing else* — there is no official Linux or macOS tarball to fall back
+to, which is the other reason those two go through a package manager.
+
+Everything below is already applied in this repository; it is written down so a
+new machine can be set up by hand and so nobody undoes one by accident.
 
 ## 1. Use the tarball, not the installer
 

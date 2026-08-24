@@ -1,0 +1,111 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Everything that does not need LLVM, on all three platforms.
+  #
+  # This is the cheap job and it catches most of what a matrix is for. It also
+  # runs `khora-types/tests/portability.rs`, which type-checks `std` for every
+  # target from whichever host it happens to be on — so a mistake in
+  # `socket_macos.kh` is a red tick here rather than a discovery by whoever next
+  # builds on a Mac.
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-${{ matrix.os }}
+
+      # The committed `.cargo/config.toml` names a Windows LLVM prefix and a
+      # Windows SDK path. Neither is reachable on a runner, and the SDK version
+      # on this one will not be the one that file names, so the whole file is
+      # replaced by what each platform actually needs. `force = false` on the
+      # env entry means an exported prefix wins anyway; the rustflags are the
+      # part that has to go.
+      - name: Neutralise the machine-local cargo config
+        shell: bash
+        run: rm -f .cargo/config.toml
+
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # No `cargo fmt --check`. This source is deliberately not rustfmt output —
+      # running it rewrites some 2,200 lines — and the formatting that *is*
+      # enforced is Khora's own, over `std`, `examples` and `bench`, in the
+      # baseline below.
+
+  # The backend, the standard library and the reference applications — the job
+  # that finds out whether a socket actually binds.
+  #
+  # Separate because it needs LLVM 22.1.8, which is ~5 GB extracted on Windows.
+  # `scripts/setup-llvm.sh` is the same script a person runs, so a failure here
+  # is a failure of the documented install rather than of a CI-only path.
+  backend:
+    name: backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-${{ matrix.os }}
+
+      - name: Neutralise the machine-local cargo config
+        shell: bash
+        run: rm -f .cargo/config.toml
+
+      # Only Windows downloads a tarball; the other two are a bottled brew
+      # formula pinned at exactly 22.1.8.
+      - name: Cache the Windows LLVM tarball
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~/.llvm
+          key: llvm-22.1.8-${{ runner.os }}
+
+      - name: Install LLVM
+        shell: bash
+        run: |
+          prefix=$(sh scripts/setup-llvm.sh --quiet)
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+
+      # LLVM's official Windows libraries are built /MT while rustc's msvc
+      # target defaults to /MD, and the two CRTs have separate heaps — which
+      # shows up as access violations inside unrelated LLVM calls rather than as
+      # anything about CRTs. docs/llvm-setup.md §3.
+      - name: Match LLVM's C runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "RUSTFLAGS=-Ctarget-feature=+crt-static" >> "$GITHUB_ENV"
+
+      - run: cargo test --workspace --features llvm
+
+      # The whole baseline: the suite, clippy, the corpus check and formatter
+      # over `std`, every reference application built, and twelve HTTP
+      # conformance checks against a real `curl`. On Windows the script is
+      # already what `scripts/baseline.sh` runs locally.
+      - name: Baseline
+        shell: bash
+        run: sh scripts/baseline.sh

@@ -19,6 +19,12 @@ cd "$root"
 khora="./target/debug/khora.exe"
 [ -x "$khora" ] || khora="./target/debug/khora"
 
+# `khora build` names its output with the host's executable extension, so a
+# compiled program is `main.exe` on Windows and `main` everywhere else.
+built() {
+    [ -x "$1.exe" ] && printf '%s\n' "$1.exe" || printf '%s\n' "$1"
+}
+
 step() {
     printf '\n=== %s\n' "$1"
 }
@@ -45,7 +51,7 @@ for app in examples/core_demo examples/risk_analyzer examples/link_shortener; do
 done
 
 step 'the reference applications that end on their own, run'
-./examples/core_demo/src/main.exe > /dev/null
+"$(built ./examples/core_demo/src/main)" > /dev/null
 
 step 'an ordinary client gets ordinary answers'
 sh "$root/scripts/http_conformance.sh"
