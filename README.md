@@ -39,11 +39,23 @@ discipline that decides what may cross into another fiber.
 HTTP and **TLS** — a server that serves HTTPS, and a client that connects by
 name and verifies the certificate against the machine's own trust store.
 
+`std::net::http` is deliberately layered, so its `Router` is replaceable rather
+than merely optional: the codec (`parse`, `Response`, `matches`) and the
+connection layer (`Connection`, which does the reading, `Content-Length`
+framing and keep-alive) are public, and `Router` is written against them with
+nothing reserved. Nothing below the accept loop spawns, so a framework can be
+synchronous, pooled, or fiber-per-connection as it chooses.
+`crates/khora-codegen-llvm/tests/http_layers.rs` is a second framework of a
+different shape, kept in the suite so the layering stays true.
+
 ### What it does not have yet
 
-- **No chunked transfer or multipart bodies** in `std::net::http`. TLS is
-  there, both ends.
-- **Windows and Linux only.** macOS sockets are not implemented.
+- **No chunked transfer, multipart bodies, or request bodies over 8 KB** in
+  `std::net::http`, and a body must be UTF-8 text. TLS is there, both ends,
+  and `Connection::holding` takes a larger cap than the default.
+- **No HTTP/2 and no WebSockets**, so no upgrade path.
+- **macOS is untested.** The sockets are written and type-checked; no Mac has
+  run them. See Platforms above.
 - **`[permissions]` is not a sandbox.** The compile-time gate over Khora code
   is total, and `extern fn` goes around it. Closing that needs package
   identity. `docs/design/permissions.md` says so at the top, and so should
@@ -75,12 +87,12 @@ the `extern` boundary.
 | `khora-fmt` | Canonical formatter over the CST. |
 | `khora-hir` | Module graph, item collection, name resolution, body lowering, `derive` expansion. |
 | `khora-types` | HM inference, row unification, traits and HKT, exhaustiveness, monomorphization. |
-| `khora-perceus` | `dup`/`drop` placement. Reuse analysis and FBIP are phase 9, not written. |
-| `khora-rt` | Reference-counted heap, fibers, sockets, intrinsics. Linked into every executable. |
+| `khora-perceus` | `dup`/`drop` placement, last-use ownership, and reuse-token planning. |
+| `khora-rt` | Reference-counted heap, fibers, sockets, TLS, intrinsics. Linked into every executable. |
 | `khora-codegen-llvm` | LLVM backend behind the `llvm` feature. |
 | `khora-cli` | `check`, `fmt`, `lex`, `parse`, `test`, and `build` with `--features llvm`. |
 
-892 tests pass, `clippy -D warnings` is clean, and `khora check` and
+935 tests pass, `clippy -D warnings` is clean, and `khora check` and
 `khora fmt --check` pass over all of `std/`, `examples/` and `bench/`.
 `sh scripts/baseline.sh` runs the lot, including twelve HTTP conformance checks
 against a real `curl`.
@@ -88,21 +100,27 @@ against a real `curl`.
 ## Numbers
 
 One measurement, so it can be argued with. A `/health` route on
-`std::net::http`, answering **507,000 requests a second** — 48 reused
+`std::net::http`, answering **538,000 requests a second** — 48 reused
 connections, 16-core Windows desktop, load generator on the same machine, five
-second runs, median of three, spread 472k to 513k.
+second runs, median of three, spread 535k to 566k.
 
-The same figure is worth two comparisons on that machine and that workload.
-The identical accept-read-write-close loop written straight in Rust does 653k,
-and a Khora server stripped to the same loop does 758k — both near what the
-load generator can drive, so the honest reading is that the runtime matches
-Rust rather than beats it. `std::net::http` itself costs the difference between
-758k and 507k, and only about 24k of that is rendering the response.
+**Read the comparisons only against each other.** In the same sitting, a Khora
+server stripped to accept-read-write-close does 781k and the identical loop
+written straight in Rust does 560k — both near what the load generator can
+drive, so the honest reading is that the runtime is not what limits anything,
+not that Khora beats Rust. That Rust control measured 653k in an earlier
+sitting on the same machine, which is well outside the eight per cent the runs
+vary by and is the machine rather than the program. Absolute figures do not
+travel between sittings; ratios within one do.
+
+Phase 9 is where the parser's own numbers come from: an 80-byte HTTP request
+parse went from **2,440ns to 1,555ns**, and a browser's fourteen-header request
+from 14,560ns to 7,345ns.
 
 Anything quoting a number from this project should name its workload and its
 machine, because that is the only part of a benchmark that travels. `bench/`
-holds all four servers and the load generator, so the figures above are
-reproducible rather than reported.
+holds the servers and the load generator, so the figures above are reproducible
+rather than reported.
 
 ## Quickstart
 
@@ -119,9 +137,13 @@ bottled `brew install llvm@22` on macOS and Linux, the official tarball plus two
 workarounds on Windows. `docs/llvm-setup.md` has the why.
 
 ```bash
-export LLVM_SYS_221_PREFIX="$(sh scripts/setup-llvm.sh)"
+sh scripts/setup-llvm.sh
 cargo test --workspace --features llvm
 ```
+
+The script also writes `.cargo/config.toml` from the committed template. That
+file is not in the repository because both settings in it — where LLVM lives,
+and which Windows SDK to link against — differ per machine.
 
 ```bash
 cargo build -p khora-rt && cargo run -p khora-cli --features llvm -- build examples/core_demo
@@ -158,8 +180,11 @@ std/                   the standard library, written in Khora
 examples/              three reference applications
 bench/                 four servers and a load generator; see bench/README.md
 scripts/
+  setup-llvm.sh        installs LLVM 22.1.8 and writes .cargo/config.toml
   baseline.sh          everything that must keep working
   http_conformance.sh  what an ordinary client gets, checked with curl
+.github/workflows/
+  ci.yml               the three-platform matrix
 ```
 
 `docs/errata.md` is the most useful file for understanding why the compiler is
@@ -206,7 +231,8 @@ follows, and both are called out in `docs/errata.md`:
   resolution. See `docs/errata.md` item 13 and
   `docs/design/associated-items.md`.
 
-Operator precedence, loosest to tightest: `|>`, `||`, `&&`, comparisons,
+Operator precedence, loosest to tightest: `=` (right-associative, so
+`x = a |> b` assigns the whole pipeline), `|>`, `||`, `&&`, comparisons,
 `+ -`, `* / %`, prefix `- !`, then call and field access.
 
 ## What is next
@@ -214,10 +240,14 @@ Operator precedence, loosest to tightest: `|>`, `||`, `&&`, comparisons,
 Phase 9 is done — reuse analysis and FBIP, so `map` over a uniquely-owned list
 allocates nothing, and an HTTP request parse went from 2,440ns to 1,555.
 
-Phase 9.5 closes the gaps a stranger hits in their first afternoon; three of
-four are in. Then phase 10: packaging, the linter, and a language server. Then
-phase 11, the scheduler — a fiber is an operating-system thread today, so a
-server holds thousands of connections and not hundreds of thousands, and that
-is the last thing standing between the positioning and the truth.
+Phase 9.5 closes the gaps a stranger hits in their first afternoon: tuples and
+irrefutable `let` destructuring, string interpolation, a one-command LLVM
+install, and macOS. All four are written; the last waits on a green CI run for
+a Mac to have actually executed it.
+
+Then phase 10: packaging, the linter, and a language server. Then phase 11, the
+scheduler — a fiber is an operating-system thread today, so a server holds
+thousands of connections and not hundreds of thousands, and that is the last
+thing standing between the positioning and the truth.
 
 `docs/roadmap.md` has the order, the reasons, and what each one costs.
