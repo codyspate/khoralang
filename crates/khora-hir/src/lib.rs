@@ -1,9 +1,9 @@
 //! Module graph, item collection and name resolution.
 //!
-//! This is the first half of roadmap phase 2.1. It answers "what exists, and
-//! where", which everything downstream needs before it can answer anything
-//! else. Body lowering — desugaring `|>`, resolving expressions, compiling
-//! `match` to a decision tree — comes next and builds on this.
+//! This answers "what exists, and where", which everything downstream needs
+//! before it can answer anything else. Body lowering — desugaring `|>` and
+//! `for`, resolving expressions, taking patterns apart — is `body`, and builds
+//! on this.
 //!
 //! Everything here is a salsa query, per decision A3. Collecting items for one
 //! file does not read any other file, so editing a function body invalidates

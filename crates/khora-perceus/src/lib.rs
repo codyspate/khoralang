@@ -1,37 +1,29 @@
 //! Reference counting: where `dup` and `drop` go.
 //!
-//! Roadmap phase 2.3. This inserts *correct* reference counting, not yet
-//! *minimal* reference counting. Perceus proper earns its name by removing
-//! pairs that provably cancel and by fusing a `drop` with a following
-//! allocation into an in-place `reuse` — that is phase 9 (FBIP), and it is an
-//! optimization over exactly this output. Getting the conservative version
-//! right first means phase 9 has something to prove itself against.
+//! Two passes over one body, and the second is where the interesting part is.
 //!
-//! # What phase 9 has to change here, and why it is a rewrite
+//! The **conservative** scheme owns a value for the whole of a binding's scope:
+//! a read `dup`s, and the block releases what it declared on the way out. It is
+//! correct on its own and it is what everything else is measured against.
 //!
-//! The scheme below owns a value for the whole of a binding's scope: a read
-//! `dup`s, and the block releases what it declared on the way out. Reuse needs
-//! the opposite — the *last* use of a value, so that the object is uniquely
-//! held at the point an arm allocates a new one and its memory can be handed
-//! straight over.
+//! The **last-use** pass then takes that apart. It is a backward liveness walk:
+//! a read the binding does not outlive takes the reference rather than copying
+//! it, a branch that consumes on every path is balanced by a release at the
+//! head of the arms that do not, and a matched cell that is dead by the time an
+//! arm builds its result is handed to that constructor instead of being freed.
+//! That last one is what makes `map` over a uniquely-owned list allocate
+//! nothing.
 //!
-//! Concretely, `match xs { List::Cons(h, t) => List::Cons(f(h), map(t)) }`
-//! cannot reuse anything today, and not because the fusion is missing: at the
-//! constructor, `xs` is still held by its binding *and* by the dup the read
-//! made, so a uniqueness test sees two references and correctly declines. The
-//! fusion is the easy half. Moving the release to the last use, on every path,
-//! is the analysis, and it is the part that turns a wrong answer into a double
-//! free rather than a slow program.
+//! Both are needed. `match xs { List::Cons(h, t) => List::Cons(f(h), map(t)) }`
+//! cannot reuse anything under the conservative scheme alone, and not because
+//! the fusion is missing: at the constructor `xs` is still held by its binding
+//! *and* by the dup the read made, so a uniqueness test sees two references and
+//! correctly declines. The fusion is the easy half; deciding the last use on
+//! every path is the analysis, and it is the part that turns a wrong answer
+//! into a double free rather than a slow program.
 //!
-//! `settle_last_uses` is that analysis as far as it goes: a backward liveness
-//! pass over a body that cannot unwind, which turns a read the binding does not
-//! outlive into a take, and balances a branch that takes on one path with a
-//! release at the head of the arms that do not. What it does not do is the
-//! paths that leave a frame early — `raise`, `!`, `catch`, `return` — because
-//! the code generator's cleanup stack is positional and cannot describe a set
-//! of live values that depends on how far execution got.
-//!
-//! `docs/design/reuse.md` has the design.
+//! `docs/design/reuse.md` has the design, the measurements, and the three rules
+//! that were each found by a crash rather than by thinking.
 //!
 //! # The scheme
 //!

@@ -1,0 +1,281 @@
+//! Forms that are written one way and mean another.
+//!
+//! `for` becomes a `loop` over `Step`; `[a, b, c]` becomes a `List::Cons`
+//! chain; `"a ${e} b"` becomes `"a " + e + " b"`. Each is here rather than in
+//! the checker or the backend because a desugaring that happens once, early,
+//! is a construct nothing downstream has to know about — which is why neither
+//! inference nor code generation has a case for a list literal.
+//!
+//! All three resolve the names they expand into through the ordinary scope, so
+//! `for` needs `Step` imported and `[..]` needs `List`. The alternative is a
+//! name the compiler knows and the program cannot see, which is what errata 46
+//! is about.
+
+use super::*;
+
+impl<'a> Ctx<'a> {
+    /// `for pat in iter { body }`, desugared here rather than carried further.
+    ///
+    /// ```text
+    /// {
+    ///   let mut it = <iter>;
+    ///   loop {
+    ///     match it.next() {
+    ///       Step::Yield(rest, pat) => { it = rest; <body> }
+    ///       Step::Done => break,
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// Desugaring in the front end means the checker, the reference-counting
+    /// plan and the backend need no notion of `for` at all — it is `loop`,
+    /// `match` and assignment, each of which already works and is already
+    /// tested. The cost is that the loop depends on `Step` being in scope, the
+    /// same way Rust's `for` depends on `IntoIterator`.
+    pub(super) fn lower_for(&mut self, e: &ast::ForExpr, range: TextRange) -> ExprId {
+        let iter = match e.iterable() {
+            Some(i) => self.lower_expr(&i),
+            None => self.add_expr(Expr::Missing, range),
+        };
+
+        // The whole loop lives in a scope of its own so the state variable
+        // cannot collide with anything the body declares.
+        self.scopes.push(Vec::new());
+        let state = self.declare("$iter".to_string(), true, range);
+        let state_pat = self.add_pat(Pat::Bind(state));
+
+        let rest = self.declare("$rest".to_string(), false, range);
+        let rest_pat = self.add_pat(Pat::Bind(rest));
+
+        // The arm binds its own scope: the item pattern belongs to the body.
+        self.scopes.push(Vec::new());
+        let item_pat = match e.pattern() {
+            Some(p) => self.lower_pat(&p, false),
+            None => self.add_pat(Pat::Wildcard),
+        };
+
+        let advance = {
+            let target = self.add_expr(Expr::Local(state), range);
+            let value = self.add_expr(Expr::Local(rest), range);
+            self.add_expr(Expr::Assign { target, value }, range)
+        };
+        // Inside the loop before the body is lowered, or a `break` in it would
+        // be reported as outside a loop.
+        self.loop_depth += 1;
+        let body = match e.body() {
+            Some(b) => self.lower_block(&b),
+            None => self.add_expr(Expr::Missing, range),
+        };
+        self.loop_depth -= 1;
+        self.scopes.pop();
+
+        let arm_body = self.add_expr(
+            Expr::Block { stmts: vec![Stmt::Expr(advance)], tail: Some(body) },
+            range,
+        );
+
+        let yield_pat = self.add_pat(Pat::TupleStruct {
+            resolution: self.step_case("Yield", range),
+            fields: vec![rest_pat, item_pat],
+        });
+        let done_pat = self.add_pat(Pat::Path(self.step_case("Done", range)));
+        let stop = self.add_expr(Expr::Break(None), range);
+
+        let scrutinee = {
+            let receiver = self.add_expr(Expr::Local(state), range);
+            let next = self.add_expr(
+                Expr::Field { base: receiver, name: "next".to_string() },
+                range,
+            );
+            self.add_call(Expr::Call { callee: next, args: Vec::new() }, range)
+        };
+        let dispatch = self.add_expr(
+            Expr::Match {
+                scrutinee,
+                arms: vec![
+                    MatchArm { pat: yield_pat, guard: None, body: arm_body },
+                    MatchArm { pat: done_pat, guard: None, body: stop },
+                ],
+            },
+            range,
+        );
+
+        let repeat = self.add_expr(Expr::Loop { body: dispatch }, range);
+        self.scopes.pop();
+
+        self.add_expr(
+            Expr::Block {
+                stmts: vec![Stmt::Let { pat: state_pat, ty: None, init: Some(iter) }],
+                tail: Some(repeat),
+            },
+            range,
+        )
+    }
+
+    /// `"a ${e} b"` is `"a " + e + " b"`.
+    ///
+    /// **The parts are joined with the operator somebody would have written.**
+    /// That is the whole of the feature: `+` on strings already exists, already
+    /// checks that both sides are `String`, and already says
+    /// *"string concatenation: expected `String`, found `Int`"* when they are
+    /// not — which is the right diagnostic for `"${count}"`, pointing at the
+    /// expression rather than at the string.
+    ///
+    /// Nothing was added to the lexer or the grammar. A string literal is still
+    /// one token; the interpolations are found in its text here, and each is
+    /// parsed as a source file of its own. That keeps the change to one pass at
+    /// the cost of `range_shift`, which is what puts a diagnostic about an
+    /// interpolated expression back where the text is.
+    ///
+    /// `\$` is a literal dollar, so a template for some other tool still fits
+    /// in a Khora string.
+    pub(super) fn lower_interpolation(&mut self, text: &str, range: TextRange) -> ExprId {
+        // Offsets are into the file, so the opening quote is where the literal
+        // starts and the body is one byte past it.
+        let body_at = u32::from(range.start()) + 1;
+        let parts = split_interpolation(strip_quotes(text));
+
+        let mut joined: Option<ExprId> = None;
+        for part in parts {
+            let piece = match part {
+                Part::Text(raw) => {
+                    let at = body_at + raw.at;
+                    let width = raw.text.len() as u32;
+                    let span = TextRange::at(TextSize::from(at), TextSize::from(width));
+                    self.add_expr(Expr::Literal(Literal::Str(unescape_body(&raw.text))), span)
+                }
+                Part::Hole(raw) => self.lower_fragment(&raw.text, body_at + raw.at),
+            };
+            joined = Some(match joined {
+                None => piece,
+                Some(left) => self.add_expr(
+                    Expr::Binary { op: BinOp::Add, lhs: left, rhs: piece },
+                    range,
+                ),
+            });
+        }
+
+        // `"${}"` has no parts at all, and is the empty string.
+        joined.unwrap_or_else(|| {
+            self.add_expr(Expr::Literal(Literal::Str(String::new())), range)
+        })
+    }
+
+    /// Parses one `${..}` and lowers it into this body.
+    ///
+    /// The wrapper is a whole source file because that is what the parser
+    /// takes, and a `const` because its initializer is one accessor away —
+    /// digging a tail expression out of a function body would be more code for
+    /// the same result.
+    pub(super) fn lower_fragment(&mut self, source: &str, at: u32) -> ExprId {
+        const PREFIX: &str = "module i;\nconst i = ";
+        let wrapped = format!("{PREFIX}{source};\n");
+        let parsed = khora_syntax::parse(&wrapped);
+
+        let found = parsed
+            .source_file()
+            .decls()
+            .find_map(|item| match item {
+                ast::Decl::Const(c) => c.initializer(),
+                _ => None,
+            })
+            .filter(|_| parsed.errors().is_empty());
+
+        let Some(expr) = found else {
+            let width = source.len().max(1) as u32;
+            let span = TextRange::at(TextSize::from(at), TextSize::from(width));
+            self.error("this `${..}` does not contain an expression", span);
+            return self.add_expr(Expr::Missing, span);
+        };
+
+        // The fragment's ranges are measured from the start of `wrapped`, and
+        // the expression begins right after the prefix — so moving them by
+        // `at - PREFIX.len()` puts them exactly where the source text is.
+        let outer = self.range_shift;
+        self.range_shift = at.wrapping_sub(PREFIX.len() as u32);
+        let lowered = self.lower_expr(&expr);
+        self.range_shift = outer;
+        lowered
+    }
+
+    /// `[a, b, c]` is `List::Cons(a, List::Cons(b, List::Cons(c, List::Nil)))`.
+    ///
+    /// **D13.** The literal parsed and meant nothing: the checker gave it no
+    /// type and the backend refused it, so every use was either an inscrutable
+    /// "type was never worked out" or a hard error at the end of the pipeline.
+    /// It denotes a `List` — the one sequence type that is immutable, that a
+    /// `match` can take apart, and that may cross into a fiber. `Array` and
+    /// `Vector` are buffers you write into, and a literal quietly producing one
+    /// would be three surprises from one pair of brackets.
+    ///
+    /// **Desugared here rather than typed as itself**, which is why neither the
+    /// checker nor the code generator has a case for a list literal: by the
+    /// time either sees one it is constructor calls, and everything that
+    /// already works for those — inference, monomorphization, reference
+    /// counting, reuse — works for this without being told. It is also
+    /// literally what `derive(ToJson)` was already emitting by hand.
+    ///
+    /// Every node carries the literal's own range, so a diagnostic points at
+    /// the brackets somebody wrote rather than at a `Cons` nobody did.
+    ///
+    /// `List` has to be in scope, exactly as `Step` does for a `for` loop, and
+    /// for the same reason: the alternative is a name the compiler knows and
+    /// the program cannot see.
+    pub(super) fn lower_list(&mut self, items: Vec<ExprId>, range: TextRange) -> ExprId {
+        // **Said here, rather than carried onward as an unsupported
+        // resolution.** The checker turns one of those into `Type::Unknown` and
+        // then reports "the type of this expression was never worked out",
+        // which is the very diagnostic D13 existed to be rid of. A `Missing` is
+        // compatible with anything, so this reports once and nothing cascades.
+        let (Some(nil), Some(cons)) = (self.list_case("Nil"), self.list_case("Cons")) else {
+            self.error("`[a, b, c]` builds a `List`; import it from `std::core`", range);
+            return self.add_expr(Expr::Missing, range);
+        };
+
+        let mut chain = self.add_expr(Expr::Path(nil), range);
+        for item in items.into_iter().rev() {
+            let callee = self.add_expr(Expr::Path(cons.clone()), range);
+            chain = self.add_expr(Expr::Call { callee, args: vec![item, chain] }, range);
+        }
+        chain
+    }
+
+    /// `List::Cons` or `List::Nil`, if a `List` declaring them is in scope.
+    pub(super) fn list_case(&self, case: &str) -> Option<crate::Resolution> {
+        let found = self
+            .map
+            .variants_of("List")
+            .chain(self.scope.variants_of("List"))
+            .find(|v| v.name == case)?;
+        Some(crate::Resolution::Variant {
+            module: self.home_of_type("List"),
+            type_name: found.type_name.clone(),
+            name: found.name.clone(),
+        })
+    }
+
+    /// `Step::Yield` or `Step::Done`, as the desugaring needs them.
+    pub(super) fn step_case(&self, case: &str, _range: TextRange) -> crate::Resolution {
+        // Through the scope as well as the file: `Step` almost always arrives
+        // by `import std::core::{Step}` rather than being declared next to the
+        // loop that uses it.
+        match self
+            .map
+            .variants_of("Step")
+            .chain(self.scope.variants_of("Step"))
+            .find(|v| v.name == case)
+        {
+            Some(v) => crate::Resolution::Variant {
+                module: self.home_of_type("Step"),
+                type_name: v.type_name.clone(),
+                name: v.name.clone(),
+            },
+            // `for` needs `Step` the way Rust's needs `IntoIterator`. Saying so
+            // beats an unresolved-name error pointing at code nobody wrote.
+            None => crate::Resolution::Unsupported(
+                "`for` needs the `Step` type in scope; import it from `std::core`",
+            ),
+        }
+    }
+}
