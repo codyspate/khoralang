@@ -212,7 +212,26 @@ fiber. Both are acceptable; neither is free. The prologue check is another
 compiler change, and it is the same mechanism as the safepoint above, which is
 an argument for designing them together.
 
-### Measured, on Windows
+### Measured, on Windows: waiting fibers
+
+The criterion's headline row, through the park-and-wake path 11C built:
+
+| fibers | resident | per fiber | woke |
+| --- | --- | --- | --- |
+| 10,000 | 46 MB | ~4,269 B | all of them |
+| 100,000 | 418 MB | ~4,240 B | all of them |
+
+**A hundred thousand fibers waiting at once, 418 MB, and every one of them was
+woken and ran to completion.** That is the row this phase exists for, and it is
+reached before the reactor — because what a fiber waits *on* does not change
+what waiting costs.
+
+What is not yet proven is the third row of the table at the top: fibers waiting
+on *sockets*. That needs the reactor, and it is the part that can still make
+the number worse, because a registration has a cost per fiber that a timer does
+not.
+
+### Measured, on Windows: idle fibers
 
 11A's context switch uses `corosensei`'s default stacks, which reserve a range
 and let the operating system commit pages as they are touched. Building fibers
@@ -276,6 +295,27 @@ stating as a rule the implementation must be able to point at:
 
 Every suspend/wake pair in the scheduler is checked against that sentence.
 
+**Built in 11C, and the way it is kept is a rule about ownership.** Three
+states — `RUNNING`, `WAITING`, `NOTIFIED` — and: *only the worker running a
+fiber holds its `Task`*. A waker never does, so a wake cannot enqueue a fiber
+that is still running; it can only leave a `NOTIFIED` behind. The worker reads
+the state after the suspension returns and decides — `WAITING` means file it
+where a waker can find it, `NOTIFIED` means the wake already arrived and it
+goes straight back on the queue.
+
+The gap that leaves — between the worker reading the state and filing the task
+— is closed by doing both under the same lock the waker takes. `crate::wait`
+holds the state machine; `crate::scheduler` holds that lock, because it holds
+the tasks.
+
+Two tests are the ones that matter. `a_wake_racing_a_wait_never_disappears`
+runs the race two thousand times and asserts that either the waker owns the
+wake or the fiber never waited, never neither.
+`a_wake_that_beats_the_park_does_not_strand_the_fiber` is the same property end
+to end through the real scheduler, with no timer and no second waker — so a
+lost notification hangs rather than fails, which is what the deadline in it is
+for.
+
 ---
 
 ## 5. Cancelling something that is asleep
@@ -307,7 +347,13 @@ another chance to look.
 fiber, record a deadline, make it runnable when the deadline passes.
 
 A timer heap is enough to establish the semantics. A hierarchical wheel is the
-thing to reach for if measurement says the heap is the problem, and not before.
+thing to reach for if measurement says the heap is the problem, and not before —
+and a hundred thousand timers sort correctly and fire in one pass, so it is not
+the problem yet.
+
+Built in 11C on a thread of its own. One thread sleeping is not a worker
+blocked, which is the whole distinction; a condvar it could wait on instead of
+polling at a millisecond is the obvious refinement and wants a reason.
 
 **There is an existing interaction to migrate.** `std::net::http` sets a read
 deadline with `SO_RCVTIMEO` before reading, and relies on the socket timing out
@@ -452,7 +498,7 @@ Staged so that a failure is attributable to the thing that just changed.
 | --- | --- |
 | **11A** context switch, one worker, many fibers, explicit yield, join | stack switching, and the current-fiber pointer replacing thread-locals |
 | **11B** N workers, local and global queues, migration, safepoints — **done** | CPU parallelism, and fairness |
-| **11C** reactor and timers: suspend, wake, cancel-while-waiting | a hundred thousand waiting fibers |
+| **11C** timers, suspend, wake — **done**; the reactor's syscalls remain | a hundred thousand waiting fibers |
 | **11D** work stealing | locality, once the simple scheduler's behaviour is understood |
 | **11E** bounded blocking pool | that unavoidable blocking cannot stall a worker |
 | **11F** scale and soak | the adversarial tests below |

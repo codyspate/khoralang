@@ -2298,6 +2298,37 @@ workers and fairness, then the reactor and timers, then stealing, then the
 bounded blocking pool, then soak. Khora stays buildable throughout; threads
 remain the implementation wherever a backend has not landed.
 
+**Where it has got to.** 11A, 11B and the platform-independent half of 11C are
+built, and `Fiber::spawn` still makes threads — deliberately, until a socket
+read can suspend a fiber instead of a worker.
+
+| | |
+| --- | --- |
+| 11A | context switch, and fiber identity that survives it |
+| 11B | workers, queues, and a loop back-edge safepoint from the compiler |
+| 11C | the wait protocol, timers, park and wake, cancel-while-waiting |
+| 11C.2 | the reactor's syscalls — **not built** |
+
+Two numbers, measured on Windows. **A hundred thousand fibers waiting at once
+cost 418 MB and every one of them woke** — about 4,240 bytes each, against
+roughly 33 KB for a thread. And the compiler's safepoint is under
+`bench/service`'s noise floor: 800,730 req/s without it against 796,116 /
+781,456 / 784,215 with, where the spread among the three is wider than the gap.
+
+Three things found by building it rather than by designing it:
+
+- A yielder installed once per body rather than once per resume is undefined
+  behaviour that *looks* like it works, because every yielder switches back to
+  the same worker. It survived a three-fiber interleaving test and became an
+  access violation at five hundred fibers across four workers. The regression
+  test keeps a value on the fiber's own stack across a suspension, which fails
+  deterministically with three.
+- The slot allocator the design argued for is not needed on Windows: stacks
+  commit one page each and stay flat to a hundred thousand. Linux is unmeasured
+  and is where `vm.max_map_count` would bite.
+- The safepoint is a call and a budget rather than the inlined flag and timer
+  the design assumed, and costs less than either was expected to.
+
 Two things the review assumed were missing and are not. `bounded_nursery`
 already exists, so the backpressure that cheap fibers make necessary has its
 primitive. And `Shared<A>` exists, which unblocks the one item `fibers.md` left

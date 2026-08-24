@@ -62,18 +62,35 @@ pub(crate) struct Fiber {
     /// nowhere left to unwind to. The first is an outcome; the second is a
     /// hole.
     spawned: bool,
+    /// Where this fiber is in the sleep/wake protocol. [`crate::wait`].
+    wait: crate::wait::Wait,
 }
 
 impl Fiber {
     /// The fiber a thread carries when nothing has been installed: the
     /// program's own computation.
     fn root() -> Fiber {
-        Fiber { id: next_id(), cancelled: AtomicUsize::new(0), spawned: false }
+        Fiber {
+            id: next_id(),
+            cancelled: AtomicUsize::new(0),
+            spawned: false,
+            wait: crate::wait::Wait::default(),
+        }
     }
 
     /// A fiber somebody spawned.
     pub(crate) fn spawned() -> Arc<Fiber> {
-        Arc::new(Fiber { id: next_id(), cancelled: AtomicUsize::new(0), spawned: true })
+        Arc::new(Fiber {
+            id: next_id(),
+            cancelled: AtomicUsize::new(0),
+            spawned: true,
+            wait: crate::wait::Wait::default(),
+        })
+    }
+
+    /// Where this fiber is in the sleep/wake protocol.
+    pub(crate) fn wait(&self) -> &crate::wait::Wait {
+        &self.wait
     }
 
     pub(crate) fn id(&self) -> usize {

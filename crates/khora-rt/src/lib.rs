@@ -142,6 +142,7 @@ mod testing;
 mod text;
 mod time;
 mod trap;
+mod wait;
 pub mod tls;
 
 pub use args::*;
