@@ -196,17 +196,19 @@ the right fiber is woken by the right peer, a hangup wakes a reader rather than
 leaking it, and a fiber waiting on a socket nobody will ever write to is still
 cancellable.
 
-**Verified on Linux as well as Windows**, and the way that happens is worth
-knowing because it removes most of the reason to be nervous about this module.
-`scripts/check-linux.sh` runs `khora-rt`'s tests under WSL2 — a real kernel with
-real sockets and the real `poll`, not an emulation — and `scripts/baseline.sh`
-calls it whenever `wsl` is present. Sixty-nine tests, including every socket
-one, pass there.
+**Linux runs these tests, and one of them crashes there.** This paragraph
+used to say the suite passed under WSL2, and that claim was wrong twice over.
+The script that produced it had no `set -e` in its inner shell, so a failing
+`cargo test` followed by a passing `cargo clippy` reported success; and the
+failure it was hiding is intermittent, so even a careful single run would have
+had a two-in-three chance of looking fine. Both are fixed — the script now
+stops on failure and runs the suite fifteen times — and what it reports is:
 
-That leaves **macOS as the only unverified platform**, and it reaches `kqueue`
-through the same `poll` call with the same struct, so the remaining risk is
-narrow. `.github/workflows/runtime.yml` is what closes it, and it is now
-essentially a macOS-only job.
+> `scheduler::tests::many_sleeping_fibers_all_wake` dies of a signal in
+> **17 of 60 runs** on Linux, at `27b051b`.
+
+See [the open problem](#the-linux-crash) below. macOS remains unverified
+entirely; `.github/workflows/runtime.yml` is what would close that.
 
 ---
 
@@ -592,3 +594,47 @@ thousand runs" into a case that can be replayed.
   and is where `vm.max_map_count` would bite.
 - Whether Windows' commit accounting makes the single-reservation strategy
   workable there, or whether it needs its own.
+
+## The Linux crash
+
+`scheduler::tests::many_sleeping_fibers_all_wake` — four workers, four hundred
+fibers, each sleeping a few milliseconds — dies of `SIGSEGV` on Linux in
+roughly a quarter to a third of runs. It has never been seen on Windows. It is
+present at `27b051b`, which is to say it arrived with the scheduler itself and
+not with anything layered on top.
+
+What is known:
+
+  - It needs **two or more workers**. One worker, same fibers, same timers:
+    clean over hundreds of runs.
+  - It needs **the timer thread**. Four workers with every wake delivered by
+    hand, after all four hundred fibers have already parked: clean.
+    The difference between those two is that timers deliver wakes *while other
+    fibers are still being started*, so the suspicion is a first resume racing
+    a wake on another worker.
+  - `gdb` catches it as `Thread 6 "khora-worker-3" received signal SIGSEGV`
+    with the instruction pointer at `0x0`, which is a jump through a null or
+    freed pointer rather than a corrupted stack.
+
+What has been ruled out: dropping a coroutine on a thread other than the one
+that resumed it, resuming a coroutine twice, resuming one that has already
+finished, and running a body under the wrong yielder. Each was tested with an
+assertion, and none fired.
+
+The awkward part is that **it disappears under observation**. Under `gdb`, under
+`valgrind`, and with the assertions above compiled in, the crash rate drops to
+zero. That is the signature of a timing-dependent data race rather than a
+deterministic memory error, and it is why the assertions proving each theory
+wrong are weaker evidence than they look: they may have simply perturbed the
+window closed.
+
+**Nothing shipped depends on this yet.** `Fiber::spawn` still runs each fiber on
+its own thread; the coroutine scheduler is not wired into it. Compiled Khora
+programs do not reach this code. That is the only reason it is written down
+here rather than fixed before anything else.
+
+The next things to try, roughly in order of expected value: ThreadSanitizer on
+nightly, which is built for exactly this and has not been run; then a build with
+`opt-level=1` and overflow checks, which sometimes shifts a race enough to make
+it deterministic without hiding it; then reducing the test until it is small
+enough to reason about completely.

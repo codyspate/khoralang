@@ -30,6 +30,18 @@ fi
 # Linux artefacts in one `target/` would have each rebuild the other's.
 TARGET=/tmp/khora-linux-target
 
+# How many times to run the suite. The scheduler's bugs are races, and one of
+# them showed up in about a third of runs — invisible to a single pass.
+REPEATS=${KHORA_LINUX_REPEATS:-15}
+
+# This repository, as WSL names it.
+#
+# `$PWD` under Git Bash is `/c/Users/...`, which `wslpath` reads as a relative
+# path and turns into `/mnt/c/c/Users/...`. `pwd -W` gives the Windows spelling
+# that `wslpath` actually wants.
+here=$(pwd -W 2>/dev/null || pwd)
+inside=$(wsl -e wslpath -a "$here" | tr -d '\r')
+
 say 'the toolchain, if it is not there yet'
 wsl -e bash -lc '
     if [ ! -x "$HOME/.cargo/bin/cargo" ]; then
@@ -52,11 +64,40 @@ if ! wsl -e bash -lc 'command -v cc >/dev/null 2>&1'; then
     '
 fi
 
+# **`set -e` inside the inner shell, and it is not decoration.** Without it a
+# failing `cargo test` was followed by a passing `cargo clippy`, the inner shell
+# returned clippy's status, and this script reported success over a segfault.
+# It did, for one commit.
 say 'khora-rt on Linux'
-wsl -e bash -lc ". \"\$HOME/.cargo/env\"
-    cd \"\$(wslpath '$PWD')\"
+wsl -e bash -lc "set -eu
+    . \"\$HOME/.cargo/env\"
+    cd '$inside'
     CARGO_TARGET_DIR=$TARGET cargo test -p khora-rt
     CARGO_TARGET_DIR=$TARGET cargo clippy -p khora-rt --all-targets -- -D warnings
+"
+
+# **Again, several times, because the scheduler's failures are races.** One
+# green run of a flaky suite is not evidence, and a `poll` that behaves
+# differently under load is exactly the kind of thing this script exists to
+# catch. The binary is copied out first: cargo rebuilds under a different hash
+# often enough that a loop over `cargo test` measures the wrong thing.
+say 'the runtime, repeatedly, because a race needs more than one look'
+wsl -e bash -lc "set -eu
+    . \"\$HOME/.cargo/env\"
+    cd '$inside'
+    CARGO_TARGET_DIR=$TARGET cargo test -q -p khora-rt --lib --no-run 2>/dev/null
+    bin=\$(ls -t $TARGET/debug/deps/khora_rt-* | grep -v '[.]d\$' | head -1)
+    cp \"\$bin\" /tmp/khora-rt-under-test
+    chmod +x /tmp/khora-rt-under-test
+    failures=0
+    for _ in \$(seq 1 $REPEATS); do
+        /tmp/khora-rt-under-test > /dev/null 2>&1 || failures=\$((failures + 1))
+    done
+    if [ \"\$failures\" -ne 0 ]; then
+        echo \"  FAILED  \$failures of $REPEATS runs crashed or failed\" >&2
+        exit 1
+    fi
+    echo \"  ok    $REPEATS runs, all clean\"
 "
 
 say 'linux clean'
