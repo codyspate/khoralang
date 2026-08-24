@@ -128,7 +128,23 @@ pub struct HirError {
 pub struct TestItem {
     pub key: String,
     pub name: String,
+    pub kind: TestKind,
     pub range: TextRange,
+}
+
+/// Whether a block is checked or timed.
+///
+/// They are collected together and keyed the same way because to everything
+/// between here and code generation they are the same thing: a body with no
+/// name, no parameters and no caller. Only the runner treats them differently,
+/// and only in what it does with the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestKind {
+    /// `test "..." { .. }` — run once, and it either passed or it did not.
+    Test,
+    /// `bench "..." { .. }` — run many times, and what comes out is a
+    /// distribution.
+    Bench,
 }
 
 /// The types that exist without being declared.
@@ -153,7 +169,11 @@ pub fn test_key(index: usize) -> String {
     format!("{TEST_PREFIX}{index}")
 }
 
-/// Whether a name is a test's, however it has been qualified.
+/// Whether a name is a test's or a bench's, however it has been qualified.
+///
+/// One prefix for both, because everything this gates is "a body with no name
+/// and no caller, which has to be compiled anyway". [`TestKind`] is where the
+/// difference lives.
 ///
 /// Monomorphization prefixes a body's key with its module — `app$main$#test$0`
 /// — so a test is not recognised by what its symbol *starts* with. Searching
@@ -286,11 +306,24 @@ pub fn item_map(db: &dyn Db, file: SourceFile) -> ItemMap {
     // name would be nicer to read in a symbol table and worse to rely on:
     // nothing stops two tests sharing one.
     for (index, decl) in source.decls().enumerate() {
-        let ast::Decl::Test(t) = &decl else { continue };
+        let (kind, name, range) = match &decl {
+            ast::Decl::Test(t) => {
+                (TestKind::Test, t.name(), t.syntax().text_range())
+            }
+            // **`bench` parsed and was then dropped on the floor.** The grammar
+            // has had it since phase 1 and nothing ever collected it, so a
+            // `bench` block compiled to nothing and ran never -- silently,
+            // which is the worst way for a promised feature not to work.
+            ast::Decl::Bench(b) => {
+                (TestKind::Bench, b.name(), b.syntax().text_range())
+            }
+            _ => continue,
+        };
         map.tests.push(TestItem {
             key: test_key(index),
-            name: t.name().unwrap_or_default(),
-            range: t.syntax().text_range(),
+            name: name.unwrap_or_default(),
+            kind,
+            range,
         });
     }
 

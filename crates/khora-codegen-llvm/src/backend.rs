@@ -119,6 +119,16 @@ pub fn compile_tests(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Ve
     build(db, root, out, Entry::Tests, Stop::AtExecutable)
 }
 
+/// Compiles the program's `bench` blocks to an executable that times them.
+///
+/// A third entry point rather than a flag on the test one, because a build
+/// containing both would register each block with a harness that then has to
+/// decide which it is — and the decision already exists, in
+/// `khora_hir::TestKind`, at compile time.
+pub fn compile_benches(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Benches, Stop::AtExecutable)
+}
+
 /// How far to take a build.
 ///
 /// Verification is the last step that is the same on every platform. Writing an
@@ -140,6 +150,8 @@ enum Entry {
     Main,
     /// Run every test, and whether they all passed is the exit status.
     Tests,
+    /// Time every `bench` block and report the distribution.
+    Benches,
 }
 
 // One module per backend responsibility. This was 2,306 lines in one file, and

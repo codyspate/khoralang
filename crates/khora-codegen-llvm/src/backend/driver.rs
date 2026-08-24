@@ -178,21 +178,31 @@ pub(super) fn build(
                 mono.instances.iter().find(|(i, _)| i.function == "main").map(|(i, _)| i.symbol());
             backend.emit_c_main(entry.as_deref());
         }
-        Entry::Tests => {
+        Entry::Tests | Entry::Benches => {
             // In written order, per file, which is the order a reader expects
-            // a report in even though the runs themselves overlap.
-            let mut tests: Vec<(String, String)> = Vec::new();
+            // a report in even though the test runs themselves overlap.
+            let wanted = match entry_point {
+                Entry::Benches => khora_hir::TestKind::Bench,
+                _ => khora_hir::TestKind::Test,
+            };
+            let mut blocks: Vec<(String, String)> = Vec::new();
             for file in files {
                 for test in &khora_hir::item_map(db, *file).tests {
+                    if test.kind != wanted {
+                        continue;
+                    }
                     let Some((instance, _)) =
                         mono.instances.iter().find(|(i, _)| i.function == test.key)
                     else {
                         continue;
                     };
-                    tests.push((instance.symbol(), test.name.clone()));
+                    blocks.push((instance.symbol(), test.name.clone()));
                 }
             }
-            backend.emit_test_main(&tests);
+            match entry_point {
+                Entry::Benches => backend.emit_bench_main(&blocks),
+                _ => backend.emit_test_main(&blocks),
+            }
         }
     }
     backend.emit_pending_thunks();

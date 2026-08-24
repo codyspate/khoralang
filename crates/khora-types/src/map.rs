@@ -411,7 +411,13 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
             // the only interesting thing about its signature. The row is
             // *opened* where the body is checked, because a test may fail any
             // way it likes: that is what a failing test is.
-            ast::Decl::Test(_) => {
+            // A bench has the same signature for the same reasons, and the
+            // consequence of leaving it out is quiet: no signature means no
+            // registered instance, which means `emit_function` declines to
+            // declare the body, which means the entry point's registration
+            // loop finds no function to point at. The build succeeds and
+            // reports `no benchmarks`.
+            ast::Decl::Test(_) | ast::Decl::Bench(_) => {
                 map.signatures.insert(
                     khora_hir::test_key(index),
                     Signature {

@@ -515,8 +515,15 @@ pub fn bodies(db: &dyn Db, file: SourceFile) -> Vec<(String, Body)> {
     // reference counted, and `khora test` compiles it. Numbered by position
     // rather than by name, because nothing stops two tests sharing a name.
     for (index, decl) in parse.source_file().decls().enumerate() {
-        let ast::Decl::Test(t) = &decl else { continue };
-        let Some(block) = t.body() else { continue };
+        // A bench's body is lowered identically. What it is *for* differs --
+        // one is checked once, the other timed many times -- and nothing about
+        // that is visible until the runner has it.
+        let body = match &decl {
+            ast::Decl::Test(t) => t.body(),
+            ast::Decl::Bench(b) => b.body(),
+            _ => continue,
+        };
+        let Some(block) = body else { continue };
         out.push((crate::test_key(index), lower_test(map, scope, &contexts, &constants, &block)));
     }
     out

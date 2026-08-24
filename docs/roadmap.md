@@ -2048,8 +2048,41 @@ Ordered by value, not by §6's numbering.
   the compiler counts bytes: they agree exactly until the first accented
   letter, which is why `position.rs` has its own tests and why the negotiated
   encoding is echoed back in the `initialize` reply.
-- **10.5 `khora bench`**, and `khora test` grown up: filtering, snapshots with
-  `--update-snapshots`, P50/P95/P99.
+- **10.5 `khora bench` and filtering — done. Snapshots are not.**
+
+  **`bench` had been in the grammar since phase 1 and nothing collected it.** A
+  `bench` block parsed, type-checked, and then compiled to nothing and ran
+  never — silently, which is the worst way for a promised feature not to work.
+  Four places had to learn about it, and the last one is the reason it stayed
+  hidden: without a synthesised signature in `type_map`, no instance is
+  registered, so `emit_function` declines to declare the body, so the entry
+  point's registration loop finds no function to point at. The build succeeds
+  and prints `no benchmarks`.
+
+  `khora bench` reports **P50, P95, P99 and a sample count, and no mean**. A
+  mean over a run containing one scheduler preemption describes none of the
+  iterations, and the tail is usually the interesting half. Percentiles are
+  nearest-rank, so every number reported is a measurement that happened rather
+  than an interpolation between two that did.
+
+  Two limits worth knowing. There is **no `black_box`**: a bench whose body
+  computes something nobody reads may be optimised away and will then report a
+  few nanoseconds very confidently. Adding one means a compiler intrinsic, not
+  a library function. And benches run **one at a time**, unlike tests —
+  overlapping tests find tests that lie, and overlapping benches contend for
+  cores and measure that.
+
+  `--filter` on both, matching a name by substring, read from `argv` rather
+  than from the environment so the compiled harness behaves the same when
+  somebody runs it by hand. A filter that matches nothing says how many it
+  skipped, because otherwise it reads identically to a file with no tests and
+  one of those is a typo.
+
+  **Snapshots with `--update-snapshots` are not written.** They need a file
+  format, a comparison that reports a readable diff, and an assertion API in
+  `std` — the last of which is a language-surface decision rather than a
+  toolchain one, since `assert_snapshot` has to name the file it is comparing
+  against.
 - **10.6 Cross-targets**: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`.
 - **10.7 WASM build plugins** via wasmtime. Last: largest scope, least critical,
   and it needs D4 settled first.

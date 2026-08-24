@@ -50,12 +50,34 @@ impl<'ctx> Backend<'ctx> {
     /// would need a layout agreed with the runtime and this needs nothing: the
     /// name is a pointer and a length, and the body is a function pointer.
     pub(super) fn emit_test_main(&mut self, tests: &[(String, String)]) {
+        let (register, run) = (self.rt.test_register, self.rt.test_run);
+        self.emit_harness_main(tests, register, run);
+    }
+
+    /// The same, for `bench` blocks.
+    pub(super) fn emit_bench_main(&mut self, benches: &[(String, String)]) {
+        let (register, run) = (self.rt.bench_register, self.rt.bench_run);
+        self.emit_harness_main(benches, register, run);
+    }
+
+    /// One entry point shape for both harnesses.
+    ///
+    /// They differ in which two runtime functions they call and in nothing
+    /// else, so writing it twice would mean two places to forget
+    /// `remember_arguments` or `close_root_region` — and forgetting the second
+    /// means a `bench` that defers to the root region silently never runs it.
+    fn emit_harness_main(
+        &mut self,
+        blocks: &[(String, String)],
+        register: FunctionValue<'ctx>,
+        run: FunctionValue<'ctx>,
+    ) {
         let main = self.entry_point();
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
         self.remember_arguments(main);
 
-        for (symbol, name) in tests {
+        for (symbol, name) in blocks {
             let Some(function) = self.functions.get(symbol).copied() else { continue };
             let text = self
                 .builder
@@ -68,18 +90,14 @@ impl<'ctx> Backend<'ctx> {
             // cross into the runtime. See `tagged_trampoline`.
             let call = self.tagged_trampoline(0).as_global_value().as_pointer_value();
             self.builder
-                .build_call(
-                    self.rt.test_register,
-                    &[text.into(), len.into(), code.into(), call.into()],
-                    "",
-                )
-                .expect("registering a test");
+                .build_call(register, &[text.into(), len.into(), code.into(), call.into()], "")
+                .expect("registering a block");
         }
 
         let status = self
             .builder
-            .build_call(self.rt.test_run, &[], "status")
-            .expect("running the tests")
+            .build_call(run, &[], "status")
+            .expect("running the harness")
             .try_as_basic_value()
             .basic()
             .expect("the runner returns a status")

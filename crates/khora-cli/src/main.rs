@@ -55,6 +55,18 @@ enum Command {
         /// A `.kh` file, or a directory to walk.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Run only the tests whose name contains this.
+        #[arg(short, long)]
+        filter: Option<String>,
+    },
+    /// Compile and time the program's `bench` blocks.
+    Bench {
+        /// A `.kh` file, or a directory to walk.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Run only the benchmarks whose name contains this.
+        #[arg(short, long)]
+        filter: Option<String>,
     },
     /// Compile to a native executable.
     Build {
@@ -87,7 +99,8 @@ fn run() -> Result<bool> {
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out } => build(&path, out.as_deref()),
         Command::Lsp => lsp().map(|()| true),
-        Command::Test { path } => test(&path),
+        Command::Test { path, filter } => test(&path, filter.as_deref()),
+        Command::Bench { path, filter } => bench(&path, filter.as_deref()),
     }
 }
 
@@ -269,28 +282,70 @@ fn fmt(paths: &[PathBuf], check: bool) -> Result<bool> {
 /// so that a failing test can be run again under a debugger without rebuilding
 /// — which is the first thing anyone wants and would otherwise need a flag.
 #[cfg(feature = "llvm")]
-fn test(path: &Path) -> Result<bool> {
+fn test(path: &Path, filter: Option<&str>) -> Result<bool> {
+    harness(path, filter, "khora-tests", khora_codegen_llvm::compile_tests)
+}
+
+/// Compiles the `bench` blocks and times them.
+#[cfg(feature = "llvm")]
+fn bench(path: &Path, filter: Option<&str>) -> Result<bool> {
+    harness(path, filter, "khora-benches", khora_codegen_llvm::compile_benches)
+}
+
+/// The signature `compile_tests` and `compile_benches` share.
+///
+/// Named because `harness` takes one of them and clippy is right that the
+/// inline form is unreadable.
+#[cfg(feature = "llvm")]
+type CompileHarness =
+    fn(&dyn khora_db::Db, SourceRoot, &Path) -> Result<(), Vec<khora_hir::HirError>>;
+
+/// Builds a harness executable and runs it.
+///
+/// **The filter is passed on the command line rather than through the
+/// environment**, so the executable this leaves behind behaves the same when
+/// somebody runs it directly. A test binary that only obeys its filter when a
+/// build tool sets a variable is one nobody can debug by hand.
+#[cfg(feature = "llvm")]
+fn harness(
+    path: &Path,
+    filter: Option<&str>,
+    name: &str,
+    compile: CompileHarness,
+) -> Result<bool> {
     let (db, inputs, root) = load(path)?;
     let target = inputs
         .first()
         .expect("at least one source")
         .0
-        .with_file_name("khora-tests")
+        .with_file_name(name)
         .with_extension(std::env::consts::EXE_EXTENSION);
 
-    if let Err(errors) = khora_codegen_llvm::compile_tests(&db, root, &target) {
+    if let Err(errors) = compile(&db as &dyn khora_db::Db, root, &target) {
         report_build_errors(&inputs, &errors);
         return Ok(false);
     }
 
-    let status = std::process::Command::new(&target)
+    let mut command = std::process::Command::new(&target);
+    if let Some(want) = filter {
+        command.args(["--filter", want]);
+    }
+    let status = command
         .status()
         .with_context(|| format!("running {}", target.display()))?;
     Ok(status.success())
 }
 
 #[cfg(not(feature = "llvm"))]
-fn test(_path: &Path) -> Result<bool> {
+fn test(_path: &Path, _filter: Option<&str>) -> Result<bool> {
+    anyhow::bail!(
+        "this `khora` was built without the LLVM backend. \
+         Rebuild with `--features llvm`; see docs/llvm-setup.md."
+    )
+}
+
+#[cfg(not(feature = "llvm"))]
+fn bench(_path: &Path, _filter: Option<&str>) -> Result<bool> {
     anyhow::bail!(
         "this `khora` was built without the LLVM backend. \
          Rebuild with `--features llvm`; see docs/llvm-setup.md."

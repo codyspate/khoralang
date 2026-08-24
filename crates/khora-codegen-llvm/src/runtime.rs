@@ -209,6 +209,11 @@ pub struct Runtime<'ctx> {
     pub test_register: FunctionValue<'ctx>,
     /// `int32_t khora_test_run(void)`
     pub test_run: FunctionValue<'ctx>,
+    /// The same pair for `bench` blocks. Same signatures, because a bench body
+    /// and a test body are the same shape; only the runner differs.
+    pub bench_register: FunctionValue<'ctx>,
+    /// `int32_t khora_bench_run(void)`
+    pub bench_run: FunctionValue<'ctx>,
     /// `void khora_region_close_root(void)`
     pub region_close_root: FunctionValue<'ctx>,
     /// `llvm.trap`, for a branch that exhaustiveness says cannot be taken.
@@ -342,6 +347,11 @@ impl<'ctx> Runtime<'ctx> {
                 void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),
             ),
             test_run: declare("khora_test_run", i32t.fn_type(&[], false)),
+            bench_register: declare(
+                "khora_bench_register",
+                void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),
+            ),
+            bench_run: declare("khora_bench_run", i32t.fn_type(&[], false)),
             region_close_root: declare("khora_region_close_root", void.fn_type(&[], false)),
             trap: declare("llvm.trap", void.fn_type(&[], false)),
         }

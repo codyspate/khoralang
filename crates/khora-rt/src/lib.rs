@@ -134,6 +134,7 @@ mod print;
 mod random;
 mod region;
 mod shared;
+mod benching;
 mod testing;
 mod text;
 mod time;

@@ -41,6 +41,33 @@ pub unsafe extern "C" fn khora_test_register(
     }
 }
 
+/// Which names to run, from the command line.
+///
+/// **Read from `argv`, not from an environment variable**, so that the compiled
+/// test executable behaves the same whether `khora test --filter x` started it
+/// or somebody ran it directly. A test binary that only obeys its filter when a
+/// build tool sets a variable is a test binary nobody can debug by hand.
+///
+/// `--filter x` and `--filter=x` both work, and a bare argument is taken as the
+/// filter too, which is what `cargo test name` trained everyone to expect.
+/// Substring rather than a pattern: a regular expression here is a dependency
+/// and a syntax to document, and nobody has wanted one yet.
+pub(crate) fn name_filter() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--filter=") {
+            return Some(value.to_string());
+        }
+        if arg == "--filter" {
+            return args.next();
+        }
+        if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
+}
+
 /// Runs every registered test, one fiber each, and reports.
 ///
 /// Returns the process's exit status: 0 when every test passed.
@@ -52,15 +79,32 @@ pub unsafe extern "C" fn khora_test_register(
 /// is shared but what the program itself shares.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_test_run() -> i32 {
-    let tests: Vec<PendingTest> = match PENDING.lock() {
+    let registered: Vec<PendingTest> = match PENDING.lock() {
         Ok(mut pending) => std::mem::take(&mut *pending),
         Err(_) => return 1,
     };
+    let declared = registered.len();
+
+    let filter = name_filter();
+    let tests: Vec<PendingTest> = registered
+        .into_iter()
+        .filter(|t| filter.as_ref().is_none_or(|want| t.name.contains(want.as_str())))
+        .collect();
+
     if tests.is_empty() {
         let mut out = std::io::stdout().lock();
-        let _ = out.write_all(b"no tests\n");
+        // Saying how many were skipped, because "no tests" from a filter that
+        // matched nothing looks exactly like "no tests" from a file with none,
+        // and one of those is a typo.
+        let _ = match &filter {
+            Some(want) if declared > 0 => {
+                writeln!(out, "no tests matching `{want}` ({declared} declared)")
+            }
+            _ => out.write_all(b"no tests\n").map(|_| ()),
+        };
         return 0;
     }
+    let filtered_out = declared - tests.len();
 
     let running: Vec<_> = tests
         .into_iter()
@@ -106,6 +150,9 @@ pub extern "C" fn khora_test_run() -> i32 {
     }
 
     let passed = total - failed;
-    let _ = writeln!(out, "\n{passed} passed, {failed} failed");
+    let _ = match filtered_out {
+        0 => writeln!(out, "\n{passed} passed, {failed} failed"),
+        skipped => writeln!(out, "\n{passed} passed, {failed} failed, {skipped} filtered out"),
+    };
     i32::from(failed != 0)
 }
