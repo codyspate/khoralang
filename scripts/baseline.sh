@@ -56,4 +56,16 @@ step 'the reference applications that end on their own, run'
 step 'an ordinary client gets ordinary answers'
 sh "$root/scripts/http_conformance.sh"
 
+# The runtime's reactor is `WSAPoll` here and `poll` everywhere else, and only
+# one of those runs on this machine. WSL2 is a real kernel with real sockets, so
+# it answers the question for Linux at no cost. Skipped rather than failed when
+# there is no WSL: this is a Windows developer's extra check, not a requirement.
+if command -v wsl >/dev/null 2>&1; then
+    step 'the runtime on Linux, through WSL'
+    sh "$root/scripts/check-linux.sh" > /dev/null
+    printf '  ok    khora-rt passes against the POSIX `poll`\n'
+else
+    printf '\n=== skipping the Linux check: no wsl\n'
+fi
+
 printf '\n=== baseline clean\n'

@@ -17,6 +17,12 @@ name: runtime
 # Roughly one billed minute on Linux and ten on macOS, against 120 for the full
 # matrix. Windows is left out on purpose: it is the machine this is developed
 # on, so the local baseline already covers it.
+#
+# **And Linux is covered locally too, so in practice this runs for macOS.**
+# `scripts/check-linux.sh` runs the same tests under WSL2 — a real kernel, real
+# sockets, real `poll` — and `scripts/baseline.sh` calls it. That leaves
+# `kqueue` as the only thing here that nothing else can answer, which is worth
+# ten billed minutes and would not be worth a hundred and twenty.
 
 on:
   push:

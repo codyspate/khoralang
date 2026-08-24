@@ -196,6 +196,18 @@ the right fiber is woken by the right peer, a hangup wakes a reader rather than
 leaking it, and a fiber waiting on a socket nobody will ever write to is still
 cancellable.
 
+**Verified on Linux as well as Windows**, and the way that happens is worth
+knowing because it removes most of the reason to be nervous about this module.
+`scripts/check-linux.sh` runs `khora-rt`'s tests under WSL2 — a real kernel with
+real sockets and the real `poll`, not an emulation — and `scripts/baseline.sh`
+calls it whenever `wsl` is present. Sixty-nine tests, including every socket
+one, pass there.
+
+That leaves **macOS as the only unverified platform**, and it reaches `kqueue`
+through the same `poll` call with the same struct, so the remaining risk is
+narrow. `.github/workflows/runtime.yml` is what closes it, and it is now
+essentially a macOS-only job.
+
 ---
 
 ## 3. Stacks, and a tension worth naming
