@@ -45,6 +45,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Speak the Language Server Protocol on stdin and stdout.
+    ///
+    /// Not for a person to run: an editor starts it. Running it by hand gets a
+    /// process waiting for a `Content-Length` header, which is why it says so.
+    Lsp,
     /// Compile and run the program's tests, one fiber each.
     Test {
         /// A `.kh` file, or a directory to walk.
@@ -81,6 +86,7 @@ fn run() -> Result<bool> {
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out } => build(&path, out.as_deref()),
+        Command::Lsp => lsp().map(|()| true),
         Command::Test { path } => test(&path),
     }
 }
@@ -191,6 +197,25 @@ fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintL
         out.insert(name.clone(), lint.level);
     }
     out
+}
+
+/// Runs the language server over stdin and stdout.
+///
+/// Diagnostics go nowhere near stdout, which carries the protocol; anything
+/// this needs to say goes to stderr, where an editor shows it in a log.
+fn lsp() -> Result<()> {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprintln!(
+            "khora lsp speaks the Language Server Protocol on stdin and stdout, so it is 
+             waiting for a `Content-Length` header rather than for you. Point an editor at 
+             it instead."
+        );
+    }
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    khora_lsp::serve(&mut input, &mut output)
 }
 
 /// Formats files in place, or reports which would change.

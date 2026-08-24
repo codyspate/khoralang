@@ -2012,8 +2012,28 @@ Ordered by value, not by §6's numbering.
   then drops it; `lambda_captures` is the same fact published for a different
   consumer and is the shape to copy. With it, "used" becomes "read, or required
   by something this body calls" and the call-free restriction goes away.
-- **10.4 LSP** over the salsa database: diagnostics, hover, completion,
-  capability inlay hints, rename.
+- **10.4 LSP — the half that answers, done.** `crates/khora-lsp`, and
+  `khora lsp` starts it. Diagnostics (parse, type, and lints at their manifest
+  level) and hover. Completion, capability inlay hints and rename are not
+  here: each needs an index the server does not build, and a completion that
+  half answers is worse than none.
+
+  One thread, one message at a time. Nothing is slow enough yet to want
+  cancellation, and a single thread means the database has one owner and no
+  locking — worth keeping until something measured says otherwise.
+
+  **10.0 is why this works at all**, and it is worth restating where it will be
+  read: an editor asks the compiler a question after every keystroke, so a
+  keystroke that invalidates the world is a language server that recompiles the
+  world. One did. `khora-hir/tests/incremental.rs` holds it closed.
+
+  Two things worth knowing before extending it. `serve` is generic over its
+  streams, so `tests/session.rs` drives a whole session through two buffers
+  with no editor and no subprocess — that is why there are seventeen session
+  tests rather than none. And positions are UTF-16 code units by default while
+  the compiler counts bytes: they agree exactly until the first accented
+  letter, which is why `position.rs` has its own tests and why the negotiated
+  encoding is echoed back in the `initialize` reply.
 - **10.5 `khora bench`**, and `khora test` grown up: filtering, snapshots with
   `--update-snapshots`, P50/P95/P99.
 - **10.6 Cross-targets**: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`.

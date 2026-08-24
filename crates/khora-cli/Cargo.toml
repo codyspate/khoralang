@@ -14,6 +14,7 @@ path = "src/main.rs"
 khora-syntax.workspace = true
 khora-db.workspace = true
 khora-lint.workspace = true
+khora-lsp.workspace = true
 khora-manifest.workspace = true
 khora-pkg.workspace = true
 khora-fmt.workspace = true
