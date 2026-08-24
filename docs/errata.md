@@ -201,9 +201,21 @@ anything.
 
 Tuples are now real in the type system — width and component types are checked,
 they nest, they carry type parameters, and destructuring binds each name at its
-own component's type. They still have no runtime representation: `khora build`
-reports that tuple literals are not supported yet, which is the same honest
-refusal it already gave for list literals, and is unchanged by this entry.
+own component's type.
+
+**They had no runtime representation for a long time after that**, and this
+entry used to end by saying so: `khora build` reported that tuple literals were
+not supported yet, which was the same honest refusal it gave for list literals.
+Both refusals are gone. A tuple is an anonymous record — one heap object with
+positional fields — and `[a, b, c]` is a `List::Cons` chain. Roadmap 9.5.1 and
+D13.
+
+Worth keeping as its own lesson, because the gap lasted through five phases:
+**a type the checker understands and the backend cannot represent is a feature
+that parses, type-checks, and then fails at the end of the pipeline.** That is
+the worst place for a refusal to live, and it took a stranger's-first-afternoon
+audit to notice that three of the four things on that list had the same
+shape.
 
 ## 15. `khora check` never type checked
 
@@ -1241,3 +1253,54 @@ nothing but add or subtract one from a word.
 body is three instructions is not a three-instruction function, and the ratio
 that says so — 280 operations to 50 allocations — was sitting in the design
 document for weeks before anybody read it as an argument about call overhead.
+
+## 48. A guarantee that expired without anybody noticing
+
+`docs/design/memory.md` opened with a section called "The invariant that
+currently holds", and inside it:
+
+> **Perceus reference counting is currently complete.** No object can leak,
+> because the only way reference counting leaks is a cycle, and there is no way
+> to build one.
+
+That was true and load-bearing when it was written. The heap graph was a DAG
+because constructors build bottom-up, closures capture by value, assignment
+rebinds a name rather than mutating an object, and a `let` initializer cannot
+see its own binding. No cycle, therefore no leak.
+
+**Phase 6.1 added mutable fields and it stopped being true.** This compiles
+today and leaves four objects alive:
+
+```khora
+export type Node = { name: String, mut next: Option<Node> };
+
+let a: Node = { name: "a", next: Option::None };
+let b: Node = { name: "b", next: Option::None };
+a.next = Option::Some(b);
+b.next = Option::Some(a);
+```
+
+The document was not wrong about *that*. Section 4, ninety lines below, says
+plainly: "Decided in phase 6, and the DAG is gone." Both halves were written by
+somebody who understood the situation exactly.
+
+**The defect was the ordering, and it is a documentation failure rather than a
+code one.** A guarantee stated in the present tense at the top of a file, and
+retracted ninety lines down, is a guarantee that will be quoted without its
+retraction — by a reader in a hurry, by anybody grepping for "leak", and by
+whoever writes the marketing page. Section 1 is now titled "The invariant that
+used to hold" and carries the counter-example, so the two halves cannot be
+separated.
+
+**A claim in the present tense is a claim with an expiry date, and nothing
+prints the date.** Errata 45 said a benchmark off by a constant factor
+everywhere is a configuration bug; errata 46 said an identifier is not an
+identity. This one says: *a document that records both a rule and the thing
+that will end it has to put them in that order, because the second one is what
+makes the first safe to read.* The cheap version of the discipline is to write
+the retraction where the claim is, at the moment the claim is made, in the
+future tense — which section 4 did, and section 1 did not.
+
+Found by auditing the design notes for stale messaging, which is the same pass
+8.5.4 ran over the README and did not extend to `docs/design/`.
+

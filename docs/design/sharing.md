@@ -155,7 +155,7 @@ A supervisor recovers from work whose failures are the *caller's* choice, so
 there is no constructor to name:
 
 ```khora
-Router::answer_on(router, connection) catch { _ => respond_500() }
+Router::answer_on(router, transport) catch { _ => respond_500() }
 ```
 
 `_` subtracts the whole row, tail included. Every neighbour has the form

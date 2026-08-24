@@ -1494,8 +1494,8 @@ promise. It does not add another execution model or widen the language.
   figure.
 
   Nothing failed that revealed wrong behaviour. Two things found along the way
-  are recorded where they belong rather than fixed here: D13 and D14 in the
-  open questions above.
+  were recorded as open questions rather than fixed here: D13 and D14, both
+  since closed — see the design questions above.
 
 Explicitly out of scope here: macOS and cross-targets, package resolution,
 permission enforcement that depends on package identity, the linter, LSP, and
@@ -1529,10 +1529,15 @@ real code and there was none; reuse analysis over a linked list is also worth
 much less than over the arrays phase 6 brings.
 
 Together, on an 80-byte HTTP request: **2,440ns at the start of the phase, 1,555
-now**, and 14,560 to 7,345 on a browser's request. `bench/service` went 507k to
-548k req/s, which is inside the 8% that benchmark varies by and is here to say
-nothing regressed rather than to claim a gain — most of what a request parser
-does is build strings and hash them.
+now**, and 14,560 to 7,345 on a browser's request.
+
+`bench/service` measured 507k req/s before the phase and 548k during it, and
+then 538k in the final sitting where all four servers were run back to back —
+which is the figure `bench/README.md` and the README carry, because it is the
+one taken alongside its controls. All three are inside the eight per cent that
+benchmark varies by. The honest reading is that nothing regressed, not that
+anything was gained: most of what a request parser does is build strings and
+hash them.
 
 Two things the phase got wrong on paper and right in the measurement, both
 recorded where they happened: 9.3 was called "the cheapest of the four and the

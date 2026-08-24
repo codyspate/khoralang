@@ -11,11 +11,18 @@ been settled *by implementation* rather than by decision.
 
 ---
 
-## 1. The invariant that currently holds
+## 1. The invariant that used to hold
 
 **Every heap object can only reference objects created strictly before it.**
 
-Four facts produce this, none of them coincidental:
+**This section is history.** It held when this document was written, it is the
+reason sections 2 and 3 are shaped as they are, and *it is no longer true* —
+mutable fields landed in phase 6.1 and section 4 records what that cost. It is
+kept rather than deleted because the four facts below still describe everything
+except a `mut` field, and because a reader who quotes the guarantee at the end
+of this section should meet the retraction in the same breath.
+
+Four facts produced it, none of them coincidental:
 
 - **ADTs are built bottom-up.** A constructor's arguments are evaluated before
   the object is allocated, so a node can only point at nodes that already exist.
@@ -26,27 +33,38 @@ Four facts produce this, none of them coincidental:
 - **A `let` initializer cannot see its own binding.** `let x = f(x)` does not
   resolve the inner `x` to the one being declared.
 
-The heap reference graph is therefore a **DAG**, and a cycle cannot be
-constructed. Which means:
+The heap reference graph was therefore a **DAG**, and a cycle could not be
+constructed. Which meant:
 
-> **Perceus reference counting is currently complete.** No object can leak,
-> because the only way reference counting leaks is a cycle, and there is no way
-> to build one.
+> **Perceus reference counting was complete.** No object could leak, because the
+> only way reference counting leaks is a cycle, and there was no way to build
+> one.
 
-That is a real guarantee and it is worth stating plainly, because it is easy to
-assume reference counting always leaks something and to stop looking.
+That was a real guarantee and it was worth stating plainly, because it is easy
+to assume reference counting always leaks something and to stop looking.
 
-It is also **temporary**, and the way it ends is specific.
+It was also **temporary**, and it ended exactly where this predicted — see
+section 4. Today this compiles, and leaves four objects alive:
+
+```khora
+export type Node = { name: String, mut next: Option<Node> };
+
+let a: Node = { name: "a", next: Option::None };
+let b: Node = { name: "b", next: Option::None };
+a.next = Option::Some(b);
+b.next = Option::Some(a);
+```
 
 ## 2. What would break it
 
 Exactly two things, and they are the same thing wearing different hats — both
 make an older object point at a newer one.
 
-**Mutable fields.** `node.next = node` is a cycle in one line. Nothing prevents
-this today except that records do not exist; note that `check_assignable` in
-`khora-hir` already accepts `Expr::Field` as an assignment target, so the door
-is propped open for whenever they land.
+**Mutable fields.** `node.next = node` is a cycle in one line. When this was
+written nothing prevented it except that records did not exist, and
+`check_assignable` in `khora-hir` already accepted `Expr::Field` as an
+assignment target — the door was propped open. Both landed in phase 6.1, and
+the door is through.
 
 **Recursive closures.** `let go = fn n => .. go(n - 1) ..` captures `go`, which
 is the closure being built, so the closure holds a counted reference to itself.
@@ -171,8 +189,8 @@ boundary** — the captures of the closure handed to `spawn`. Nothing else
 escapes anywhere, because there are no references. So the rule is one property,
 checked in one place, over a list the checker already computes and publishes.
 
-What crosses instead is `Shared<A>`, which does not exist yet and waits for a
-workload worth judging its API against. Compare what it replaces:
+What crosses instead is `Shared<A>`, which exists now — `docs/design/shared.md`
+decided its API and `std::core` exports it. Compare what it replaces:
 `Arc<Mutex<HashMap<K, V>>>` becomes `Shared<Map<K, V>>`, because reference
 counting is implicit and there are no lifetimes to name.
 

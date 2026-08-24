@@ -211,5 +211,8 @@ per fiber, and three things follow:
    therefore D11.
 5. **`khora test` across cores**, the exit criterion's second half.
 
-Work stealing, stack growth and the coroutine switch itself are phase 9 or
-later, and are not on the path to the exit criterion.
+Work stealing, stack growth and the coroutine switch itself are **Phase 11**,
+and are not on the path to phase 5's exit criterion. That entry in
+`docs/roadmap.md` carries what this one only implies: what the thread
+implementation costs while it lasts, and the reactor a scheduler needs
+underneath it so that a blocking syscall does not park a worker.

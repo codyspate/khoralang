@@ -42,8 +42,10 @@ Rust's ownership complexity:
 
 Two of those are true today with a qualification worth stating wherever the
 list is quoted. **A fiber is an OS thread**, so "concurrent work has an owner
-and a defined lifetime" is about structure rather than cost; stackful
-coroutines are intended and not written. And **the manifest is not a sandbox**
+and a defined lifetime" is about structure rather than cost — a server holds
+thousands of connections and not hundreds of thousands. Stackful coroutines are
+what a fiber is *defined* to be and they are Phase 11 of `docs/roadmap.md`,
+which states the cost rather than leaving it here as an aside. And **the manifest is not a sandbox**
 — the compile-time gate over Khora code is total, `extern fn` goes around it,
 and closing that needs package identity. `docs/design/permissions.md`.
 
@@ -171,8 +173,10 @@ anything below it.
 
 - The manifest is not a sandbox until package identity closes the `extern`
   hole. Designed, partly enforced, not a guarantee. `docs/design/permissions.md`.
-- A type must know which declaration it came from. Two modules that each
-  declare a `Point` are currently one type. Errata 46.
+- ~~A type must know which declaration it came from.~~ Done in 8.5.2: a type
+  carries its declaring module, so two modules may each have a `Point`. It was
+  worse than "one type" — the second one was handed the first's *layout*, and
+  dropping it aborted the process. Errata 46.
 - Numbers must name their workload and machine. `bench/README.md` does; anyone
   quoting them must too.
 
@@ -195,7 +199,9 @@ anything below it.
 
 - Familiar surface syntax and documentation that does not require type theory.
 - Editor support, debugging, profiling. Diagnostics and formatting exist and
-  are held to a standard from phase 2 by decision A7.
+  are held to a standard from phase 2 by decision A7; `editors/vscode` does
+  syntax highlighting and nothing else, because everything past that wants the
+  language server in 10.4.
 - Logging, metrics and distributed tracing.
 - Conventional container and cloud deployment.
 - Editions, when something first needs one.
@@ -204,9 +210,15 @@ An important onboarding test is whether a competent Go, Rust or TypeScript
 engineer can build, test and deploy a small Khora service after one day with
 the documentation. If that is difficult, the language or its tooling still has
 work to do. Engineers should not need to understand row unification, effect
-evidence or Perceus before writing useful programs. **That test cannot be run
-yet** — there is no package manager and no installable toolchain — and until it
-can, every claim about adoption on this page is a prediction.
+evidence or Perceus before writing useful programs.
+
+**That test still cannot be run**, but the reason has narrowed. Building the
+compiler from a clone is now two commands on any of three platforms
+(`scripts/setup-llvm.sh`), and phase 9.5 closed the surface holes a newcomer
+hit in the first hour. What is left is that there is no released binary and no
+package manager, so "deploy a small service" means building the toolchain from
+source and vendoring every dependency by hand. Until that changes, every claim
+about adoption on this page is a prediction.
 
 ## The goal
 
