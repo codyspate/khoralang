@@ -126,6 +126,7 @@
 mod args;
 mod array;
 mod cancel;
+mod coro;
 mod counters;
 mod current;
 mod fiber;

@@ -195,9 +195,34 @@ fiber. Both are acceptable; neither is free. The prologue check is another
 compiler change, and it is the same mechanism as the safepoint above, which is
 an argument for designing them together.
 
-Windows reserves and commits differently and charges commit against the page
-file, so the slot strategy needs checking there specifically before it is
-locked in.
+### Measured, on Windows
+
+11A's context switch uses `corosensei`'s default stacks, which reserve a range
+and let the operating system commit pages as they are touched. Building fibers
+and running each to its first suspension:
+
+| fibers | resident | per fiber |
+| --- | --- | --- |
+| 1,000 | 8.8 MB | ~4,177 B |
+| 10,000 | 45 MB | ~4,168 B |
+| 50,000 | 208 MB | ~4,156 B |
+| 100,000 | 410 MB | ~4,155 B |
+
+**A hundred thousand suspended fibers cost 410 MB and did not fail**, which is
+one page each and flat all the way up. Against roughly 33 KB for a thread, that
+is a factor of eight — and threads stop for other reasons long before a hundred
+thousand of them.
+
+So on Windows the target is already reachable and the elaborate slot strategy
+above is not yet needed. That is a real result and it is also *one platform*.
+
+**The Linux question is still open**, and it is the specific one this section
+predicted: guard pages split mappings, `vm.max_map_count` defaults to 65530,
+and a hundred thousand fibers wants more mappings than that. Windows has no
+equivalent limit, so the machine this was measured on could not have found it.
+The experiment to run is the table above on Linux; if it stops at about 65,000,
+the single-reservation strategy is the answer and the numbers here say what it
+has to beat.
 
 ---
 
@@ -456,7 +481,8 @@ thousand runs" into a case that can be replayed.
 
 - Whether the prologue check is one instruction sequence serving both the stack
   limit and the safepoint, or two. It should be measured in 11A.
-- The slot size for a stack, which is a measurement: committed bytes per idle
-  fiber at one thousand, ten thousand and a hundred thousand.
+- Whether a custom stack allocator is needed at all. On Windows it is not:
+  4 KB per idle fiber, flat to a hundred thousand. Linux has not been measured
+  and is where `vm.max_map_count` would bite.
 - Whether Windows' commit accounting makes the single-reservation strategy
   workable there, or whether it needs its own.
