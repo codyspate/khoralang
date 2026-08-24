@@ -100,3 +100,50 @@ runtime.**
   there is nothing left to say about it by the time it fails. Saying more means
   taking the comparison apart, which is a macro-shaped problem and not one to
   solve before there are macros.
+
+## One findable test per promise
+
+From an outside review, and worth adopting as a standing rule rather than a
+one-off audit:
+
+> For every defining Khora promise, have one obvious test somebody can find.
+
+The point is not coverage. It is that a claim in a document and a claim in the
+test suite should be the *same* claim, so that a reader who doubts the prose can
+go and read the executable version, and so that a promise cannot quietly stop
+being true. `memory.md` promised no program could leak and that promise expired
+unnoticed for two phases — errata 48 — precisely because no test was named after
+it.
+
+**A test earns its place here by being discriminating, not by passing.** The
+identity case is the lesson: `two_modules_may_declare_one_name` asserted that
+two same-named types keep their own fields, which would still pass if nominal
+identity were dropped, because two records of `{ label: String }` unify fine
+when they are secretly one type. The test that actually holds the promise is
+`two_declarations_of_one_shape_do_not_unify`. Both are needed and only the
+second is evidence.
+
+| Promise | Test |
+| --- | --- |
+| The parser never loses a byte | `khora-syntax`, `formatting_never_loses_a_token` and the round-trip cases |
+| Same-shaped declarations stay distinct | `khora-types/tests/identity.rs`, `two_declarations_of_one_shape_do_not_unify` |
+| A mutable value cannot cross into a fiber | `khora-types/tests/vouching.rs`, and `sharing.md` |
+| A scope that is cancelled still runs its finalizers | `khora-codegen-llvm/tests/regions.rs` |
+| Effect requirements subtract through a handler | `khora-codegen-llvm/tests/effects.rs` |
+| `map` over a uniquely-owned list allocates nothing | `khora-codegen-llvm/tests/reuse.rs`, `a_uniquely_owned_walk_allocates_nothing` |
+| The formatter is idempotent | `khora-fmt/tests/format.rs` |
+| HTTP works without the `Router` | `khora-codegen-llvm/tests/http_layers.rs` |
+| A capability is read where nothing mentions it | `khora-perceus/tests/rc.rs`, and `effects.rs` |
+| `std` type-checks for every target | `khora-types/tests/portability.rs` |
+
+**Named but not yet held by a test**, and each is a gap rather than a decision:
+
+- *Editing a function body does not invalidate item collection for unrelated
+  modules.* `khora-db` logs query execution so this is measurable; nothing
+  measures it. It is the claim Phase 10.4's language server rests on, and the
+  one most likely to be quietly false.
+- *`extern fn` bypassing `[permissions]` is detected rather than accidentally
+  allowed.* `permissions.md` says the gate over Khora code is total and that
+  `extern` goes around it. That is a documented hole, so the test to write is
+  that the hole is exactly where it is said to be and no wider.
+

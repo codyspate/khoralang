@@ -55,9 +55,13 @@ the winget package, which lacks the development libraries. See
 These block specific phases. Each needs a short decision doc in `docs/design/`
 before the phase that depends on it starts.
 
-**None are open.** D13 and D14, the last two, were both language-surface holes
-that parsed and type-checked and then failed somewhere further down, and both
-are closed below.
+| # | Question | Blocks |
+| --- | --- | --- |
+| D15 | **When Khora needs a core IR.** Today there is one semantic representation — HIR — and everything else is a side table keyed back to it: inferred types, resolutions, effect evidence, the reference-counting plan, borrows, reuse sites, closure layouts, monomorphization substitutions. That is deliberate and it is why the language could move this fast: no second representation drifts. But the tables accumulate, and at some point "HIR plus nine maps" *is* an IR, assembled implicitly and worse than one designed on purpose. The trigger, from an outside review and worth adopting because it is measurable: **introduce a post-typecheck core IR when code generation must reconstruct semantics from three or more independently-computed side tables to lower one ordinary expression.** Not before — a second IR now would be premature — and not by feel, because inertia argues for "not yet" forever. | phase 12 or later; watch it during 10 and 11 |
+
+D13 and D14, the two before it, were both language-surface holes that parsed
+and type-checked and then failed somewhere further down. Both are closed
+below.
 
 **Closed:**
 
@@ -1804,6 +1808,69 @@ write a hundred lines without hitting a wall that isn't their own mistake.
 
 Three of the four are done. What is left is a green CI run on a real Mac, which
 needs the workflow to have run once.
+
+---
+
+## Phase 9.6 — Internal boundaries
+
+**The crate architecture is clean; the architecture inside four of the crates
+is not.** From an outside review, confirmed by measurement:
+
+| file | size |
+| --- | --- |
+| `khora-codegen-llvm/src/lower.rs` | 252 KB |
+| `khora-types/src/lib.rs` | 205 KB |
+| `khora-rt/src/lib.rs` | 107 KB |
+| `khora-codegen-llvm/src/backend.rs` | 102 KB |
+| `khora-hir/src/body.rs` | 84 KB |
+
+Large files are not the problem in themselves. Two things make this worth a
+phase of its own:
+
+**Phase 10 is when navigation starts to matter.** It adds a language server and
+invites contributors, and both are people trying to find where function-call
+inference happens without reading 205 KB first.
+
+**Phase 11 rewrites `khora-rt`'s deepest invariant.** Splitting the runtime
+*during* the scheduler work means refactoring a giant module at the same moment
+its concurrency model changes, which is the one ordering guaranteed to make
+both harder.
+
+**The boundaries have already begun to erode**, which is the argument that this
+is not premature. `khora-rt/src/lib.rs` carries `// --- section ---` banners and
+three of them are already wrong: `khora_str_find` and `khora_str_eq` live under
+"Allocation and reference counting", `khora_utf8_valid` and `khora_sum_bytes`
+under "Allocation accounting", and `khora_print_float` and the process arguments
+under "arrays". A banner nobody can trust is worse than no banner.
+
+Split by **compiler responsibility**, not by size, and as **move-only commits**
+— no behaviour change, no API change, verified by the full suite and
+`scripts/baseline.sh` at each step. The cost worth naming: a pure move breaks
+`git blame` for a codebase whose comments and bug stories are its main asset, so
+a move commit must contain nothing but moves.
+
+- **9.6.1 `khora-rt`.** First, for the Phase 11 reason. Its banners already name
+  the seams and `tls.rs` proves the pattern works in this crate. The `no_mangle`
+  C ABI must come out byte-identical.
+- **9.6.2 `khora-codegen-llvm`.** `lower.rs` and `backend.rs`, 354 KB between
+  them. The review missed this one; it is the largest file in the repository and
+  Phase 11 touches its cleanup stack too.
+- **9.6.3 `khora-types`.** One `Checker` with about fifty methods that already
+  cluster: calls, effects and rows, expression forms, patterns, traits and
+  bounds, sharing, diagnostics. Inherent impls may be split across modules
+  within a crate and a child module can see the parent's private fields, so this
+  is a pure move.
+- **9.6.4 `khora-hir/body.rs`**, and the tense.
+
+  Module documentation ages every time the roadmap advances. `khora-perceus`
+  opens with "Roadmap phase 2.3" and a section called "What phase 9 has to
+  change here"; `khora-hir` calls itself "the first half of roadmap phase 2.1".
+  Phase 9 is done and 2.1 is two years of work ago. The explanations are good
+  and stay; the tense goes, so a source file describes what a pass *does*
+  instead of where it sat in a plan.
+
+**Exit:** no source file over about 60 KB, every module named for a compiler
+responsibility, and the suite and baseline unchanged throughout.
 
 ---
 

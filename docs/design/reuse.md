@@ -180,6 +180,35 @@ What made the change survivable, and is worth keeping for 9.2:
   every one of the three rules above from a silent corruption into a message
   naming the program that did it.
 
+#### The borrow table is a second calling convention, and should not stay one
+
+`borrowed_arguments()` in `khora-perceus` is a hand-written table keyed by
+`(type name, method name)`:
+
+```rust
+("Shared", "get" | "set" | "update" | "modify") => RECEIVER,
+("Array",  "get" | "set" | "length" | "is_utf8") => RECEIVER,
+```
+
+It works, and its own doc comment already carries the two rules that keep it
+honest — only bodyless declarations may appear, and a Khora-implemented function
+listed here is a use after free. An outside review named the longer-term risk
+and it is the right one: **this is a calling convention maintained in a
+different place from the declaration it describes.** The runtime, the type
+checker, this table and LLVM lowering can eventually disagree about whether an
+argument is borrowed, and nothing would notice.
+
+The fix is one declaration of the convention, attached to the intrinsic:
+
+```khora
+extern fn byte(borrow self: String, index: Int) -> U8
+```
+
+— not necessarily user-facing syntax, and possibly just compiler metadata
+registered where the intrinsic is. Not urgent while the table is twelve entries
+long and every entry is in one file. It becomes urgent the first time a package
+outside `std` declares an intrinsic, which is phase 10.2.
+
 ### 2. Reuse tokens — done
 
 **A ten-element `map` over a list nothing else holds allocates nothing**, which

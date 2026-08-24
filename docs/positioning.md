@@ -53,6 +53,34 @@ These properties are valuable in finance, but none belongs only to finance.
 They apply equally to healthcare, logistics, security, infrastructure,
 developer tooling and ordinary business services.
 
+### Ownership, derived rather than proved
+
+"Perceus reference counting instead of a garbage collector" undersells this, and
+an outside review was right to say so. What the compiler actually does is derive
+an ownership plan for code that never mentions ownership: which read is a
+binding's last and may take its reference instead of copying it, which branch
+consumes on every path, which argument a callee only borrows, which matched cell
+is dead early enough that the arm's constructor can be built in it.
+
+That is a third answer to a question with only two well-known ones:
+
+| | |
+| --- | --- |
+| Rust | *You* prove ownership, and the compiler checks the proof. |
+| Go | The collector works lifetime out later, at run time. |
+| Khora | You write ordinary functional code, and the compiler derives a safe ownership plan at compile time. |
+
+The property being traded away is control: a Khora programmer cannot hand-tune
+what the planner decides, where a Rust programmer can. The property being bought
+is that the ownership model imposes no syntax and no annotations on application
+code, and `docs/design/reuse.md` is the evidence it is real work rather than a
+slogan.
+
+Worth stating carefully, though — it is a claim about *this* implementation and
+not about reference counting in general, and it is bounded by what has actually
+been measured. `docs/roadmap.md` phase 9 has the numbers, and twice records
+where the prediction was wrong.
+
 The concise product statement is:
 
 > Khora is a general-purpose native language for reliable concurrent
