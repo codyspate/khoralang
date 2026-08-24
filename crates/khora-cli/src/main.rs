@@ -391,7 +391,7 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     }
 
     for root in &roots {
-        for dependency in path_dependencies(root)? {
+        for dependency in dependencies_of(root)? {
             gather(&dependency, &mut out)?;
         }
     }
@@ -423,31 +423,36 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     }
 }
 
-/// The directories named by `path` dependencies of the manifest nearest `root`.
+/// The directories every dependency of the manifest nearest `root` resolves to.
 ///
-/// A manifest that cannot be parsed is not this command's problem to report —
-/// `khora check` on the manifest is — so it contributes nothing rather than
-/// failing the build with a second opinion about the same file.
-fn path_dependencies(root: &Path) -> Result<Vec<PathBuf>> {
+/// Transitive, through `khora-pkg`: a dependency's own manifest says what *it*
+/// needs, and a git dependency is fetched into the content-addressed store and
+/// pinned in `khora.lock`. Roadmap 10.2.
+///
+/// **A manifest that cannot be parsed contributes nothing rather than failing
+/// the build.** `khora check` on the manifest is the command whose job that is,
+/// and two commands reporting the same error differently is worse than one
+/// reporting it. A manifest that parses and then *cannot be resolved* is
+/// different: nothing else will say so, so that error is returned.
+fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
     let Some(manifest_path) = nearest_manifest(root) else { return Ok(Vec::new()) };
     let Ok(text) = std::fs::read_to_string(&manifest_path) else { return Ok(Vec::new()) };
-    let Ok(parsed) = khora_manifest::Manifest::parse(&text) else { return Ok(Vec::new()) };
-    let base = manifest_path.parent().unwrap_or(Path::new("."));
-
-    let mut out = Vec::new();
-    for (name, dependency) in &parsed.manifest.dependencies {
-        match (&dependency.path, &dependency.version) {
-            (Some(relative), _) => out.push(base.join(relative)),
-            (None, Some(_)) => anyhow::bail!(
-                "`{name}` is declared with a version, and resolving one needs a registry \
-                 that does not exist yet. Point it at a `path` for now."
-            ),
-            (None, None) => anyhow::bail!(
-                "`{name}` says neither `path` nor `version`, so there is nothing to resolve"
-            ),
-        }
+    if khora_manifest::Manifest::parse(&text).is_err() {
+        return Ok(Vec::new());
     }
-    Ok(out)
+
+    let store = khora_pkg::Store::open()?;
+    let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
+    Ok(resolution.directories())
+}
+
+/// Whether `--locked` was asked for, by flag or by `KHORA_LOCKED`.
+///
+/// Read here rather than threaded through every command because it is a
+/// property of the run, not of the subcommand, and every path that resolves
+/// wants the same answer.
+fn locked_requested() -> bool {
+    std::env::args().any(|a| a == "--locked") || std::env::var_os("KHORA_LOCKED").is_some()
 }
 
 /// The `khora.toml` governing `start`: in it if it is a directory, beside it if

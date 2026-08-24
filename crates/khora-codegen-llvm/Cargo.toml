@@ -34,3 +34,7 @@ inkwell = { version = "0.10", default-features = false, features = [
     "target-x86",
     "target-aarch64",
 ], optional = true }
+
+[dev-dependencies]
+khora-pkg.workspace = true
+tempfile = "3"

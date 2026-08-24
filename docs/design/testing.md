@@ -136,6 +136,7 @@ second is evidence.
 | A capability is read where nothing mentions it | `khora-perceus/tests/rc.rs`, and `effects.rs` |
 | `std` type-checks for every target | `khora-types/tests/portability.rs` |
 | `std` *generates code* for every target | `khora-codegen-llvm/tests/portability.rs` |
+| A package outside the repo is resolved, locked and compiled | `khora-codegen-llvm/tests/packages.rs` |
 | An edit inside a body does not reach another file | `khora-hir/tests/incremental.rs` |
 
 **Named but not yet held by a test**, and each is a gap rather than a decision:

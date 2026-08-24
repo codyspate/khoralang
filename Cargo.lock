@@ -427,6 +427,7 @@ dependencies = [
  "khora-fmt",
  "khora-hir",
  "khora-manifest",
+ "khora-pkg",
  "khora-syntax",
  "khora-types",
 ]
@@ -439,8 +440,10 @@ dependencies = [
  "khora-db",
  "khora-hir",
  "khora-perceus",
+ "khora-pkg",
  "khora-rt",
  "khora-types",
+ "tempfile",
  "text-size",
 ]
 
