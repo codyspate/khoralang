@@ -933,22 +933,24 @@ mod tests {
         assert!(pool.counts().wakes_before_waiting >= 1, "{:?}", pool.counts());
     }
 
-    /// **The smallest thing that reproduces the Linux crash.** Ignored,
-    /// because it dies of `SIGSEGV` in roughly one run in ten.
+    /// **The reduction that found the cached-TLS bug, kept as its
+    /// regression test.**
     ///
-    /// `many_sleeping_fibers_all_wake` found it first, which made it look like
-    /// a timer bug. It is not: this has no deadlines, no `Timers`, and no
-    /// timer thread — just four hundred fibers that park, four workers, and
-    /// one thread waking them a millisecond later. That millisecond is the
-    /// load-bearing part. A waker that spins instead of sleeping never
-    /// reproduces it, because the fibers take the already-notified path and
-    /// never actually suspend, so nothing ever migrates between workers.
+    /// `many_sleeping_fibers_all_wake` hit it first, which made it look like a
+    /// timer bug for a day. It is not: this has no deadlines, no `Timers` and
+    /// no timer thread — four hundred fibers that park, four workers, and one
+    /// thread waking them a millisecond later.
     ///
-    /// Run it with `cargo test -p khora-rt -- --ignored --exact` and the name
-    /// below, in a loop. `docs/design/scheduler.md` has what is known.
+    /// **That millisecond is load-bearing, and so is every number here.** A
+    /// waker that spins instead of sleeping never reproduces anything, because
+    /// the fibers take the already-notified path in `declare` and never
+    /// actually suspend, so nothing migrates between workers — and migration
+    /// is the whole point. Fewer workers, or fewer fibers, and the window
+    /// closes. Before `coro::installed` stopped the compiler caching a
+    /// thread-local address across a stack switch, this died of `SIGSEGV`
+    /// about once in ten runs; after, zero in eighty.
     #[test]
-    #[ignore = "reproduces a known SIGSEGV; see docs/design/scheduler.md"]
-    fn park_and_wake_at_scale_reproduces_the_linux_crash() {
+    fn parking_and_waking_at_scale_survives_fibers_changing_worker() {
         const COUNT: usize = 400;
         let woke = Arc::new(AtomicUsize::new(0));
         let ids: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
@@ -987,14 +989,10 @@ mod tests {
 
     /// Many fibers, many deadlines, all across several workers.
     ///
-    /// **Ignored on Linux**, where it dies of `SIGSEGV` in about a quarter of
-    /// runs. Not a timer bug and not a bug in this test — see
-    /// `park_and_wake_at_scale_reproduces_the_linux_crash` above, which is the
-    /// same failure with the timers taken out, and `docs/design/scheduler.md`
-    /// for what is known. It still runs on Windows, where it passes, because
-    /// an ignored test on every platform is a test nobody notices breaking.
+    /// This is the test that caught the cached-TLS bug, by dying of `SIGSEGV`
+    /// in seventeen runs out of sixty on Linux while passing every time on
+    /// Windows. It is green on both now; the reduction above says why.
     #[test]
-    #[cfg_attr(target_os = "linux", ignore = "known SIGSEGV; see docs/design/scheduler.md")]
     fn many_sleeping_fibers_all_wake() {
         const COUNT: usize = 400;
         let woke = Arc::new(AtomicUsize::new(0));

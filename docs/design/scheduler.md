@@ -196,22 +196,22 @@ the right fiber is woken by the right peer, a hangup wakes a reader rather than
 leaking it, and a fiber waiting on a socket nobody will ever write to is still
 cancellable.
 
-**Linux runs these tests, and one of them crashes there.** This paragraph
-used to say the suite passed under WSL2, and that claim was wrong twice over.
-The script that produced it had no `set -e` in its inner shell, so a failing
-`cargo test` followed by a passing `cargo clippy` reported success; and the
-failure it was hiding is intermittent, so even a careful single run would have
-had a two-in-three chance of looking fine. Both are fixed — the script now
-stops on failure and runs the suite fifteen times — and what it reports is:
+**Verified on Linux as well as Windows — after Linux found a real bug that
+Windows could not.** `scripts/check-linux.sh` runs these tests under WSL2, a
+real kernel with real sockets and the real `poll`, and `scripts/baseline.sh`
+calls it whenever `wsl` is present.
 
-> `scheduler::tests::many_sleeping_fibers_all_wake` dies of a signal in
-> **17 of 60 runs** on Linux, at `27b051b`.
+It earned its keep immediately. `many_sleeping_fibers_all_wake` was dying of
+`SIGSEGV` in 17 runs out of 60 there while passing every single time on
+Windows — see [the cached thread-local](#the-cached-thread-local) below, which
+is the most valuable thing this phase has produced. Both platforms are green
+now, and the script runs the suite fifteen times rather than once, because one
+green run of a racy suite is not evidence.
 
-That test is now ignored on Linux and the crash has been reduced to something
-smaller with no timers in it at all.
-
-See [the open problem](#the-linux-crash) below. macOS remains unverified
-entirely; `.github/workflows/runtime.yml` is what would close that.
+That leaves **macOS as the only unverified platform**, and it reaches `kqueue`
+through the same `poll` call with the same struct, so the remaining risk is
+narrow. `.github/workflows/runtime.yml` is what closes it, and it is now
+essentially a macOS-only job.
 
 ---
 
@@ -598,83 +598,93 @@ thousand runs" into a case that can be replayed.
 - Whether Windows' commit accounting makes the single-reservation strategy
   workable there, or whether it needs its own.
 
-## The Linux crash
+## The cached thread-local
 
-Four workers, four hundred fibers, each parking once and being woken a
-millisecond later: `SIGSEGV` in roughly a quarter of runs on Linux, never on
-Windows. Present at `27b051b`, which is the scheduler's own commit, so it
-arrived with this design and not with anything layered on since.
+The worst bug in this phase, and the one most likely to come back in another
+form, so it is written up at length.
 
-Two tests carry it. `many_sleeping_fibers_all_wake` found it and is now
-`#[ignore]`d on Linux; `park_and_wake_at_scale_reproduces_the_linux_crash` is
-the reduction and is ignored everywhere. Both are in `scheduler.rs`.
+**The symptom.** Four workers, four hundred fibers, each parking once and being
+woken a millisecond later: `SIGSEGV` in roughly a quarter of runs on Linux,
+never once on Windows. The faulting thread was inside corosensei's stack
+switch, inlined into `park_current`, with `rip` at zero — the switch had
+followed a parent link that was not a return address. A core dump showed two
+threads with **byte-identical stack pointers**, and the address belonged to
+another worker's own thread stack, at the frame where that worker was asleep in
+the condvar waiting for work.
 
-### What it is
+**The cause.** `coro.rs` kept the running fiber's yielder in a thread-local:
 
-The faulting thread is executing corosensei's stack switch, inlined into
-`park_current` — `rax` holds `park_current+270`, which resolves to the switch
-in `corosensei/src/unwind.rs`. `rip` is `0`. So the switch ran and jumped to a
-parent link that was not a return address.
+```rust
+let yielder = YIELDER.with(|y| y.get());
+unsafe { (*yielder).suspend(()) };   // may come back on a different worker
+YIELDER.with(|y| y.set(yielder));    // ... and this is the bug
+```
 
-Where it landed is the useful part. In a core dump, two threads have
-**byte-identical stack pointers**:
+A thread-local is reached through a base address the compiler holds in a
+register, and the compiler is entitled to compute that address once and reuse
+it across the whole function. Nothing in the language says a thread can change
+in the middle of one. Here it can — that is what a scheduler *is* — so the
+second access wrote through an address computed before the switch, into the
+thread-locals of the worker that used to be running this fiber.
 
-    LWP 1  sp=0x7aadfbffeb18  pc=(nil)          <- the fault
-    LWP 5  sp=0x7aadfbffeb18  pc=0x7aae00734c8d <- parked in the worker condvar
+The lost write is the smaller half. The thread that should have received the
+yielder never got it, so it kept a stale one, and its next suspension switched
+to a stack pointer belonging to some other worker. The crash therefore lands on
+a different thread, at a different time, doing something unrelated.
 
-`0x7aadfbffeb18` is LWP 5's own thread stack — the arithmetic is unambiguous,
-since every worker sits exactly `0xba8` below its TLS block and the stacks are
-`0x201000` apart. The faulting thread switched onto another worker's live
-stack, at the frame where that worker is asleep waiting for work.
+**The fix** is three lines: put each access behind an `#[inline(never)]`
+function, so the address is computed inside the callee, which runs after the
+switch on the thread that is actually executing. `coro::installed` and
+`coro::install`. The inline assembly in the switch does not help on its own — it
+clobbers memory, and a cached thread-local address is a register.
 
-### What it is not
+**What found it.** Not reading the code; that was tried for a long time. Every
+theory — double resume, resume after finish, dropping on a foreign thread, the
+wrong yielder — was tested with an assertion, and none fired, because *any*
+instrumentation perturbed the timing enough to hide the crash. Under `gdb` and
+under `valgrind` the rate went to zero.
 
-  - **Not corosensei.** `coro.rs` has
-    `a_coroutine_survives_being_resumed_by_a_different_thread`: four hundred
-    coroutines, four threads, four hops each, the same install-on-entry and
-    re-install-after-wake dance, and no scheduler. Clean over forty runs. Its
-    docs warn that yielder *references* must not cross threads, which is a
-    narrower claim than migration being unsafe, and the test is there so that
-    distinction stays checked rather than assumed.
-  - **Not the timers.** The reduction has no deadlines, no `Timers`, and no
-    timer thread.
-  - **Not a panic.** `stderr` is empty on a crashing run.
-  - **Not a fiber that never suspends.** A waker that spins instead of sleeping
-    a millisecond is clean over forty runs, because the fibers take the
-    already-notified path in `declare` and never park, so nothing migrates.
-    Migration is necessary; the millisecond is what produces it.
-  - **Not a stack overflow.** corosensei's default stack is a megabyte with a
-    guard page, and these bodies are shallow.
+Two things worked, and both are worth keeping:
 
-### The part that makes it hard
+  - **Core dumps**, which disturb nothing. `core_pattern` is already `core`
+    under WSL2, so `ulimit -c unlimited` in a writable directory and a loop of
+    eighty runs produces one in under a minute with no debugger attached. Two
+    threads sharing a stack pointer is not something an assertion would have
+    told us.
+  - **ThreadSanitizer**, which named it outright:
 
-**It disappears under observation.** Under `gdb`, under `valgrind`, and under
-every assertion written to test a theory about it, the rate goes to zero. A
-probe comparing the thread-local yielder against one recorded on the fiber
-itself reported no mismatch in forty runs — and also crashed zero times in
-those forty runs, so it proved nothing. Each of double-resume,
-resume-after-finish, foreign-thread drop and wrong-yielder was tested the same
-way and is unrefuted rather than ruled out.
+        Read of size 8 at 0x7ffff43fd668 by thread T2:
+        Previous write of size 8 at 0x7ffff43fd668 by thread T5:
+        Location is TLS of thread T2.
 
-Core dumps are the way around this, and they cost nothing: `core_pattern` is
-already `core` on WSL2, so `ulimit -c unlimited` in a writable directory and a
-loop of eighty runs produces one in under a minute, with no debugger attached
-and no timing disturbed.
+    Three reports before the fix, all on that slot. After it: zero, across a
+    clean completed run of the crashing test and a run of the suite that got
+    through 64 tests.
 
-### Nothing shipped depends on it
+TSan is itself unreliable here and the numbers above should be read with that
+in mind. It needs `__tsan_switch_to_fiber` around a stack switch, corosensei
+only annotates for AddressSanitizer, and so a run has perhaps an even chance of
+dying on its own shadow memory before the suite ends. It reports races on
+ordinary memory perfectly well up to that point, which was enough to name this
+one — but the load-bearing evidence that the fix works is not TSan. It is 80
+runs of the reduction and 60 of `many_sleeping_fibers_all_wake` without a
+single failure, against roughly one in ten and 17 in 60 before.
 
-`Fiber::spawn` still gives each fiber an operating-system thread. The coroutine
-scheduler is not wired into it, and no compiled Khora program reaches this
-code. That is the only reason this is written down rather than blocking
-everything else — but it does block 11D, since work stealing makes migration
-more frequent, not less.
+**What it means beyond this bug.** Every thread-local this runtime touches is
+now suspect wherever a suspension can happen between two accesses in one
+function — `SHARED`, `LOCAL`, `REMAINING`, `CURRENT`. Each was checked: they
+either read a thread-local into a value before suspending and never touch it
+again, or run entirely on a worker with no switch in between. The rule to
+apply when adding to this file is short:
 
-### Where to look next
+> **Never let a thread-local address be computed on one side of a suspension
+> and used on the other.** If a function both suspends and touches a
+> thread-local afterwards, the access goes behind `#[inline(never)]`.
 
-The evidence points at a parent link being followed after it stopped being
-current, on a thread that was not the one that installed it. The two places
-that can produce that are the `YIELDER` thread-local in `coro.rs` and the
-handoff in `wake`/`run` around the `parked` map. ThreadSanitizer on nightly is
-the untried tool that is actually built for this; a nightly toolchain is
-installed in WSL2 for it. Failing that, reduce further — the reduction above is
-forty lines from being a program with nothing in it but the bug.
+`coro.rs` also gains
+`a_coroutine_survives_being_resumed_by_a_different_thread`, from the day spent
+suspecting corosensei rather than ourselves: four hundred coroutines, four
+threads, four hops each, no scheduler underneath. corosensei's docs warn that
+references to a `Yielder` must not cross threads, which is a narrower claim
+than migration being unsafe, and that distinction should stay checked rather
+than re-argued.

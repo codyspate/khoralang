@@ -86,6 +86,46 @@ thread_local! {
 }
 
 /// A fiber with a stack of its own.
+/// Reads the yielder installed on *this* thread, right now.
+///
+/// **`#[inline(never)]` is the whole point of this function.** A thread-local
+/// is reached through a register-held base address, and the compiler is
+/// entitled to compute that address once and reuse it â€” it has no reason to
+/// think the thread could change underneath. Here it can: every call to
+/// [`suspend`] may come back on a different worker. Inlined, the address
+/// computed before a switch gets reused after it, and the access lands in the
+/// TLS of the thread that *used* to be running this fiber.
+///
+/// That is not a theory. ThreadSanitizer named it exactly:
+///
+/// ```text
+/// Read of size 8 at 0x7ffff43fd668 by thread T2:
+/// Previous write of size 8 at 0x7ffff43fd668 by thread T5:
+/// Location is TLS of thread T2.
+/// ```
+///
+/// The consequence is worse than a lost write. The thread that should have
+/// been given the yielder never gets it, so it keeps a stale one, and the next
+/// suspension switches to a stack pointer belonging to some other worker â€”
+/// which is a `SIGSEGV` a quarter of the time, on another thread, much later.
+///
+/// Not inlining puts the address computation inside the callee, where it runs
+/// after the switch and on the thread that is actually executing. The inline
+/// assembly in the switch itself does not help: it clobbers memory, and a
+/// cached TLS address is a register.
+#[inline(never)]
+fn installed() -> *const Yielder<(), ()> {
+    YIELDER.with(|y| y.get())
+}
+
+/// Installs `yielder` on *this* thread. See [`installed`] for why it is not
+/// inlined; the same reasoning applies, and this is the direction that
+/// corrupts another thread rather than merely misreading its own.
+#[inline(never)]
+fn install(yielder: *const Yielder<(), ()>) {
+    YIELDER.with(|y| y.set(yielder));
+}
+
 pub(crate) struct Task {
     fiber: Arc<Fiber>,
     coroutine: Coroutine<(), (), ()>,
@@ -133,12 +173,12 @@ impl Task {
         let coroutine = Coroutine::new(move |yielder: &Yielder<(), ()>, ()| {
             // Entry. `suspend` re-installs this after every wake, and
             // `Task::resume` puts the worker's back when this turn ends.
-            YIELDER.with(|y| y.set(yielder as *const _));
+            install(yielder as *const _);
             body();
             // Nothing is running on a fiber stack once the body returns, and
             // leaving a dangling yielder installed is how the next thing to
             // call `suspend` on this worker reaches a stack that is gone.
-            YIELDER.with(|y| y.set(std::ptr::null()));
+            install(std::ptr::null());
         });
         Task { fiber, coroutine }
     }
@@ -160,12 +200,12 @@ impl Task {
         // Whatever was installed belongs to whoever is resuming us — a worker
         // with nothing, or an outer fiber if these ever nest. Either way it is
         // theirs again the moment this turn ends.
-        let outer = YIELDER.with(|y| y.get());
+        let outer = installed();
         let ran = match self.coroutine.resume(()) {
             CoroutineResult::Yield(()) => Ran::Suspended,
             CoroutineResult::Return(()) => Ran::Finished,
         };
-        YIELDER.with(|y| y.set(outer));
+        install(outer);
         ran
     }
 
@@ -188,7 +228,7 @@ impl Task {
 /// infallible loop has no cancellation point and would otherwise own a worker
 /// until the process ended.
 pub(crate) fn suspend() -> bool {
-    let yielder = YIELDER.with(|y| y.get());
+    let yielder = installed();
     if yielder.is_null() {
         return false;
     }
@@ -197,11 +237,14 @@ pub(crate) fn suspend() -> bool {
     // it on exit, and the line below keeps it right across a wake.
     unsafe { (*yielder).suspend(()) };
 
-    // Resumed. Somebody else ran on this worker in the meantime and installed
-    // their own yielder, so this fiber's has to be put back before it can
-    // suspend a second time. Without this line the next suspension goes
-    // through whichever fiber happened to run last.
-    YIELDER.with(|y| y.set(yielder));
+    // Resumed, and possibly not where we left off: this may be a different
+    // worker entirely. Two things have to be put right. Somebody else ran on
+    // whichever worker this is and installed their own yielder, so this
+    // fiber's has to go back before it can suspend again — and the write has
+    // to reach *this* thread's slot, which is why it goes through `install`
+    // rather than touching `YIELDER` here. See `installed` for what happens
+    // when it does not.
+    install(yielder);
     true
 }
 
@@ -243,15 +286,15 @@ mod tests {
             let counter = done.clone();
             queue.lock().expect("the queue").push(Migrating(Coroutine::new(
                 move |yielder: &Yielder<(), ()>, ()| {
-                    YIELDER.with(|y| y.set(yielder as *const _));
+                    install(yielder as *const _);
                     for _ in 0..HOPS {
-                        let mine = YIELDER.with(|y| y.get());
+                        let mine = installed();
                         // SAFETY: ours, and we are the thread running it.
                         unsafe { (*mine).suspend(()) };
-                        YIELDER.with(|y| y.set(mine));
+                        install(mine);
                     }
                     counter.fetch_add(1, Ordering::SeqCst);
-                    YIELDER.with(|y| y.set(std::ptr::null()));
+                    install(std::ptr::null());
                 },
             )));
         }
@@ -266,9 +309,9 @@ mod tests {
                         std::thread::yield_now();
                         continue;
                     };
-                    let outer = YIELDER.with(|y| y.get());
+                    let outer = installed();
                     let finished = matches!(co.0.resume(()), CoroutineResult::Return(()));
-                    YIELDER.with(|y| y.set(outer));
+                    install(outer);
                     if !finished {
                         queue.lock().expect("the queue").push(co);
                     }
