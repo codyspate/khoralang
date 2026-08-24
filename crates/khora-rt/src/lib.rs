@@ -135,6 +135,7 @@ mod nursery;
 mod print;
 mod random;
 mod region;
+mod scheduler;
 mod shared;
 mod benching;
 mod testing;

@@ -68,6 +68,20 @@ thread_local! {
     /// particular execution. A yielder belongs to the *running-ness*: it is
     /// valid only between entering a body and leaving it, and only on the
     /// thread doing the running.
+    ///
+    /// **It has to be re-installed on every resume, not once per body**, and
+    /// getting that wrong is how this was first written. A body sets it when it
+    /// starts; then it suspends, the worker runs somebody else who sets it to
+    /// *their* yielder, and when the first fiber is resumed control returns
+    /// inside its own `suspend` with the wrong pointer installed. The next
+    /// suspension goes through another fiber's yielder, which is undefined and
+    /// obligingly appears to work — every yielder switches back to the same
+    /// worker — until enough fibers and workers are involved, at which point it
+    /// is an access violation with no obvious author.
+    ///
+    /// So there are three writers, and all three are needed: the body on entry,
+    /// [`suspend`] on the way back from a suspension, and [`Task::resume`]
+    /// restoring whatever the worker had.
     static YIELDER: Cell<*const Yielder<(), ()>> = const { Cell::new(std::ptr::null()) };
 }
 
@@ -76,6 +90,32 @@ pub(crate) struct Task {
     fiber: Arc<Fiber>,
     coroutine: Coroutine<(), (), ()>,
 }
+
+// SAFETY: a suspended coroutine is a stack, and whether it may cross to another
+// thread depends on what is *on* that stack — which no Rust type system can
+// see, which is why `corosensei` declines to implement this and documents
+// exactly this escape hatch for callers who can reason about their own bodies.
+//
+// Khora bodies can be reasoned about, and the language already did the work:
+//
+//   - Every value on a Khora stack is a Khora value, reference-counted. When a
+//     program can spawn at all, those counts are atomic — `SINGLE_THREADED` is
+//     the flag, and `khora_fiber_spawn` aborts a program that spawns after the
+//     compiler emitted non-atomic counting on the strength of it never doing
+//     so. So moving a stack between workers cannot race a count.
+//   - What may cross *into* a fiber is `Share`, checked by the type checker and
+//     restricted to the module declaring the type — `docs/design/sharing.md`.
+//     A fiber's stack therefore holds only what was already allowed to be there.
+//   - Foreign code is the exception, and it is handled by policy rather than by
+//     types: `docs/design/scheduler.md` §8 says a fiber may not suspend inside
+//     an `extern` call, so no C library's thread-affine state is ever live
+//     across a migration.
+//
+// **The obligation this leaves on a Rust body**, which the tests in this crate
+// are: anything held across a `suspend()` must be `Send`. Captures are already
+// checked, because `Task::new` requires a `Send` closure; a local created
+// inside the body and held across a suspension is not, and would be unsound.
+unsafe impl Send for Task {}
 
 impl Task {
     /// Builds a fiber that will run `body` when it is first resumed.
@@ -91,11 +131,14 @@ impl Task {
     /// a parent that needs to be able to cancel it.
     pub(crate) fn with_fiber(fiber: Arc<Fiber>, body: impl FnOnce() + Send + 'static) -> Task {
         let coroutine = Coroutine::new(move |yielder: &Yielder<(), ()>, ()| {
-            // The yielder is reachable from `suspend` for as long as the body
-            // runs, and unreachable outside it.
-            let previous = YIELDER.with(|y| y.replace(yielder as *const _));
+            // Entry. `suspend` re-installs this after every wake, and
+            // `Task::resume` puts the worker's back when this turn ends.
+            YIELDER.with(|y| y.set(yielder as *const _));
             body();
-            YIELDER.with(|y| y.set(previous));
+            // Nothing is running on a fiber stack once the body returns, and
+            // leaving a dangling yielder installed is how the next thing to
+            // call `suspend` on this worker reaches a stack that is gone.
+            YIELDER.with(|y| y.set(std::ptr::null()));
         });
         Task { fiber, coroutine }
     }
@@ -114,10 +157,16 @@ impl Task {
     /// the body panics.
     pub(crate) fn resume(&mut self) -> Ran {
         let _entered = enter(self.fiber.clone());
-        match self.coroutine.resume(()) {
+        // Whatever was installed belongs to whoever is resuming us — a worker
+        // with nothing, or an outer fiber if these ever nest. Either way it is
+        // theirs again the moment this turn ends.
+        let outer = YIELDER.with(|y| y.get());
+        let ran = match self.coroutine.resume(()) {
             CoroutineResult::Yield(()) => Ran::Suspended,
             CoroutineResult::Return(()) => Ran::Finished,
-        }
+        };
+        YIELDER.with(|y| y.set(outer));
+        ran
     }
 
     pub(crate) fn finished(&self) -> bool {
@@ -144,9 +193,15 @@ pub(crate) fn suspend() -> bool {
         return false;
     }
     // SAFETY: non-null only between entering a body and leaving it, and only
-    // on the thread running it. `Task::with_fiber` sets it around exactly that
-    // window and restores the previous value after.
+    // on the thread running it. `Task::with_fiber` sets it on entry and clears
+    // it on exit, and the line below keeps it right across a wake.
     unsafe { (*yielder).suspend(()) };
+
+    // Resumed. Somebody else ran on this worker in the meantime and installed
+    // their own yielder, so this fiber's has to be put back before it can
+    // suspend a second time. Without this line the next suspension goes
+    // through whichever fiber happened to run last.
+    YIELDER.with(|y| y.set(yielder));
     true
 }
 
@@ -297,6 +352,52 @@ mod tests {
         task.resume();
 
         assert_eq!(saw.load(Ordering::SeqCst), 1, "the fiber should have seen it");
+    }
+
+    /// **The regression test for the bug this module shipped first.**
+    ///
+    /// The yielder was installed once when a body started. Two fibers taking
+    /// turns on one worker meant the second overwrote it, and when the first
+    /// was resumed it suspended through the second's yielder — undefined, and
+    /// it appears to work, because every yielder switches back to the same
+    /// worker. It only became an access violation at five hundred fibers
+    /// across four workers.
+    ///
+    /// What makes this deterministic is asserting on a value that lives *on
+    /// the fiber's own stack* across a suspension. Suspending through somebody
+    /// else's yielder puts the wrong stack back, and a local read after the
+    /// wake is no longer the one written before it.
+    #[test]
+    fn each_fiber_comes_back_to_its_own_stack() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut tasks: Vec<Task> = (1..=3)
+            .map(|mark: u64| {
+                let log = seen.clone();
+                Task::new(move || {
+                    // On this fiber's stack, and nowhere else.
+                    let mine = [mark; 16];
+                    for _ in 0..4 {
+                        suspend();
+                        log.lock().unwrap().push(mine[15]);
+                    }
+                })
+            })
+            .collect();
+
+        for _ in 0..5 {
+            for task in &mut tasks {
+                if !task.finished() {
+                    task.resume();
+                }
+            }
+        }
+
+        let marks = seen.lock().unwrap().clone();
+        assert_eq!(marks.len(), 12, "{marks:?}");
+        for round in marks.chunks(3) {
+            assert_eq!(round, [1, 2, 3], "a fiber woke on the wrong stack: {marks:?}");
+        }
     }
 
     /// Nothing is running on a fiber stack here, so there is nowhere to yield
