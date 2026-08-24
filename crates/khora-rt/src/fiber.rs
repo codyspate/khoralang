@@ -12,11 +12,10 @@
 //! that happens.
 
 use super::*;
-use crate::cancel::{CANCELLED, ON_FIBER};
+use crate::current::{enter, Fiber};
 use crate::heap::SINGLE_THREADED;
-use crate::counters::COUNTER_ORDER;
 use crate::heap::{khora_alloc, khora_drop};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// A Khora pointer being moved to another fiber.
@@ -72,7 +71,7 @@ pub(crate) struct FiberState {
     /// `Some` and join the same thread twice.
     pub(crate) thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// The child's flag, shared with the child so a parent can set it.
-    pub(crate) cancel: Arc<AtomicUsize>,
+    pub(crate) fiber: Arc<Fiber>,
 }
 
 /// The tag every fiber handle carries.
@@ -108,9 +107,9 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     if SINGLE_THREADED.load(Ordering::Relaxed) == 1 {
         fatal("a fiber was spawned in a program compiled as single-threaded");
     }
-    let cancel = Arc::new(AtomicUsize::new(0));
+    let fiber = Fiber::spawned();
     let handed = Handed(body);
-    let child_flag = cancel.clone();
+    let child = fiber.clone();
 
     let thread = std::thread::spawn(move || {
         // Named before it is destructured, so the closure captures the wrapper
@@ -119,8 +118,9 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         // declared — the wrapper only helps if the wrapper is what moves.
         let handed = handed;
         let Handed(body) = handed;
-        CANCELLED.with(|c| *c.borrow_mut() = child_flag);
-        ON_FIBER.with(|f| f.set(true));
+        // Installed for as long as this thread runs the fiber. After 11A a
+        // context switch does the same thing, many times, on one thread.
+        let _entered = enter(child);
 
         // SAFETY: the caller guarantees a live `() -> ()` closure, and this
         // fiber now owns the reference. A closure's first field is its code
@@ -144,7 +144,8 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     });
 
     let object = khora_alloc(std::mem::size_of::<*mut FiberState>(), FIBER_TAG);
-    let state: Box<FiberState> = Box::new(FiberState { thread: Mutex::new(Some(thread)), cancel });
+    let state: Box<FiberState> =
+        Box::new(FiberState { thread: Mutex::new(Some(thread)), fiber });
     // SAFETY: `khora_alloc` returned an object with one field's worth of space,
     // zeroed and aligned, and nothing else holds this pointer yet.
     unsafe {
@@ -231,7 +232,7 @@ pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8) {
 pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
-    state.cancel.store(1, COUNTER_ORDER);
+    state.fiber.cancel();
 }
 
 /// Joins a fiber and frees its handle.

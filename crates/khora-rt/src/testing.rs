@@ -4,7 +4,7 @@
 //! run on a fiber of its own so that a test which hangs does not hang the rest.
 
 use super::*;
-use crate::cancel::ON_FIBER;
+use crate::current::{enter, Fiber};
 use crate::fiber::Handed;
 use crate::heap::khora_drop;
 use std::io::Write;
@@ -114,7 +114,7 @@ pub extern "C" fn khora_test_run() -> i32 {
             let call = test.call;
             let handle = std::thread::spawn(move || {
                 let code = code;
-                ON_FIBER.with(|f| f.set(true));
+                let _entered = enter(Fiber::spawned());
                 let mut payload: u64 = 0;
                 let which = (call)(code.0, &raw mut payload);
                 Tagged { which, payload }

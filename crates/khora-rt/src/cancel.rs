@@ -5,36 +5,8 @@
 //! cancellation point reads and the stop that unwinds when it is set.
 
 use super::*;
-use crate::counters::COUNTER_ORDER;
+use crate::current::current;
 use crate::region::khora_region_close_root;
-use std::cell::RefCell;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
-
-thread_local! {
-    /// Whether *this* fiber has been asked to stop.
-    ///
-    /// One per fiber, which is what makes cancelling one not cancel the rest.
-    /// The main thread is a fiber too — it gets the flag every thread gets —
-    /// so nothing has to special-case the program's own computation.
-    ///
-    /// Shared rather than owned, because the handle a parent holds has to be
-    /// able to set it from outside.
-    pub(crate) static CANCELLED: RefCell<Arc<AtomicUsize>> =
-        RefCell::new(Arc::new(AtomicUsize::new(0)));
-
-    /// Whether this thread is a spawned fiber rather than the program itself.
-    ///
-    /// Only [`khora_cancel_stop`] asks, and only to tell a program that has
-    /// nowhere left to unwind to from a *fiber* that has nowhere left to
-    /// unwind to. The first is an outcome; the second is a hole.
-    pub(crate) static ON_FIBER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// The running fiber's cancellation flag.
-fn cancel_flag() -> Arc<AtomicUsize> {
-    CANCELLED.with(|c| c.borrow().clone())
-}
 
 /// Asks the running computation to stop.
 ///
@@ -45,7 +17,7 @@ fn cancel_flag() -> Arc<AtomicUsize> {
 /// Idempotent: asking twice is asking once.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_cancel() {
-    cancel_flag().store(1, COUNTER_ORDER);
+    current(|fiber| fiber.cancel());
 }
 
 /// Whether a cancellation is pending.
@@ -54,7 +26,7 @@ pub extern "C" fn khora_cancel() {
 /// does fallible work. A relaxed load of a word, which is what it costs.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_cancelled() -> u8 {
-    cancel_flag().load(COUNTER_ORDER) as u8
+    u8::from(current(|fiber| fiber.is_cancelled()))
 }
 
 /// Stops a cancelled computation that has nowhere left to unwind to.
@@ -79,7 +51,7 @@ pub extern "C" fn khora_cancelled() -> u8 {
 /// Must be called with no Khora frame relying on returning: it does not.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_cancel_stop() -> ! {
-    if ON_FIBER.with(|f| f.get()) {
+    if current(|fiber| fiber.is_spawned()) {
         fatal(
             "a cancellation reached a fiber's root, which cannot absorb one yet; \
              see docs/design/fibers.md",
@@ -98,5 +70,5 @@ pub unsafe extern "C" fn khora_cancel_stop() -> ! {
 /// and is about to start another.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_cancel_reset() {
-    cancel_flag().store(0, COUNTER_ORDER);
+    current(|fiber| fiber.uncancel());
 }

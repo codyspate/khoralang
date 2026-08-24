@@ -127,6 +127,7 @@ mod args;
 mod array;
 mod cancel;
 mod counters;
+mod current;
 mod fiber;
 mod heap;
 mod nursery;

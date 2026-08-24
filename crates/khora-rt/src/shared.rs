@@ -38,17 +38,6 @@ struct Held {
 /// The tag every shared cell carries.
 const SHARED_TAG: u32 = 0;
 
-/// Fiber ids, handed out on first use and never reused.
-static NEXT_FIBER: AtomicUsize = AtomicUsize::new(0);
-
-thread_local! {
-    /// This fiber's id, which is only ever compared for equality.
-    ///
-    /// Not a thread id: `ThreadId` has no stable integer form on stable Rust,
-    /// and this has to sit in an atomic so it can be read without locking.
-    static FIBER: usize = NEXT_FIBER.fetch_add(1, COUNTER_ORDER) + 1;
-}
-
 /// Stops the program rather than letting a fiber wait for itself.
 ///
 /// Every operation checks, not only `update`: the lock is held for the whole of
@@ -57,7 +46,12 @@ thread_local! {
 /// `holder` lives outside the `Mutex` — a check that had to take the lock to
 /// read it would be the very thing it is trying to report.
 fn deny_reentry(held: &Held, doing: &str) -> usize {
-    let me = FIBER.with(|id| *id);
+    // **The running fiber's id, not the running thread's.** These were the
+    // same thing while a fiber was a thread, and stop being under M:N: a fiber
+    // scheduled onto a worker whose previous occupant holds this lock would
+    // read that occupant's id, match the recorded holder, and be killed for a
+    // re-entry it never performed. `crate::current`.
+    let me = crate::current::current(|fiber| fiber.id());
     if held.holder.load(COUNTER_ORDER) == me {
         fatal(&format!(
             "this fiber is inside `Shared::update` on this cell, so it cannot also {doing} it: \
