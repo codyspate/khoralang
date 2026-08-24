@@ -211,6 +211,15 @@ per fiber, and three things follow:
    therefore D11.
 5. **`khora test` across cores**, the exit criterion's second half.
 
+**Phase 11 is designed in `docs/design/scheduler.md`**, which decides the parts
+this note only gestured at — and adds one it did not have. Cancellation is
+observed at `!`, so a function with no error row has no cancellation channel;
+that is the right *language* rule and it means an infallible loop has no way to
+be preempted. On threads the operating system solves that. On a scheduler it
+does not, so the runtime needs a **safepoint** that is separate from a
+cancellation point: it asks whether somebody else should run, it cannot fail,
+and it unwinds nothing.
+
 Work stealing, stack growth and the coroutine switch itself are **Phase 11**,
 and are not on the path to phase 5's exit criterion. That entry in
 `docs/roadmap.md` carries what this one only implies: what the thread

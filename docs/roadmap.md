@@ -2250,6 +2250,62 @@ packaging is what lets anybody else do anything at all. If the goal changes to
 machine that could not hold a hundred thousand threads — and every test in the
 suite passing unchanged, because none of them can tell.
 
+**Designed before it is built: `docs/design/scheduler.md`.** An outside review
+went through this entry and the runtime, and most of what it asked for is
+adopted there. Four things are worth pulling up to here, because they change
+what the phase *is* rather than how it is done.
+
+- **Yield points are not cancellation points.** The largest addition. A
+  cancellation is observed at `!` in something that can raise, so
+  `fn crunch() { while true { calculate() } }` has no cancellation points at
+  all — which is fine on a thread and owns a worker forever on M:N. The runtime
+  needs a second, cheaper idea: a safepoint that asks "should somebody else
+  run?", cannot fail, and unwinds nothing. Loop back-edges are the required
+  site, and emitting them is a **compiler** change, which is why it is decided
+  now rather than discovered in the middle.
+
+- **The reactor's interface is operation-oriented, not readiness-oriented**,
+  which is where the design disagrees with the obvious answer. A
+  `register/poll/wake` interface is epoll's model, and IOCP is
+  completion-based; forcing IOCP to fake readiness costs a buffer and a copy on
+  the platform this compiler is developed on. Submitting an operation and
+  suspending until it completes is native on Windows and easy to emulate on
+  epoll and kqueue — the retry lives inside the backend and the scheduler never
+  learns it happened.
+
+- **Growable stacks and an object-graph-ignorant scheduler pull against each
+  other**, and the usual resolution does not survive the target. Growing by
+  copying needs to know which stack slots hold references, which is exactly the
+  knowledge Perceus lets the scheduler avoid. Growing by guard page keeps that
+  separation and splits a mapping per stack — and Linux's `vm.max_map_count`
+  defaults to **65530**, so a hundred thousand fibers with guard pages fails to
+  allocate long before it runs out of memory. The recommendation is one large
+  reservation carved into fixed slots with a prologue stack-limit check, which
+  costs one mapping, commits lazily, needs no stack maps, and turns overflow
+  into a clean error naming the fiber.
+
+- **One thread-local in the runtime is already a bug waiting for this phase.**
+  `shared.rs` keeps a per-fiber id in thread-local storage so `Shared::update`
+  can refuse re-entry. Under M:N it fails in both directions, and the worse one
+  is the false positive: a fiber scheduled onto a worker whose previous
+  occupant holds the lock reads the same id, matches the recorded holder, and
+  is killed with `fatal()` for a re-entry it never performed. A correct program
+  aborts, dependent on timing. The runtime needs an explicit current-fiber
+  pointer.
+
+Staged **11A–11F** so a failure is attributable: the context switch first, then
+workers and fairness, then the reactor and timers, then stealing, then the
+bounded blocking pool, then soak. Khora stays buildable throughout; threads
+remain the implementation wherever a backend has not landed.
+
+Two things the review assumed were missing and are not. `bounded_nursery`
+already exists, so the backpressure that cheap fibers make necessary has its
+primitive. And `Shared<A>` exists, which unblocks the one item `fibers.md` left
+open — a child's failure reaching its nursery rather than stderr — and that is
+worth finishing alongside the scheduler, since structured concurrency is not
+complete until a failing child cancels its siblings and hands its parent a
+typed error.
+
 ---
 
 ## When can libraries be written?
