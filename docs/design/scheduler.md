@@ -85,12 +85,29 @@ that, `khora_alloc`'s slow path is nearly free to instrument and covers most
 real loops, because Perceus-managed code allocates constantly. Function entry
 is tempting and probably unnecessary — measure before adding it.
 
-The check itself is a load of a per-worker flag and a rarely-taken branch. The
-flag is set by a timer or by another worker wanting to preempt.
+**Built in 11B, and it cost less than predicted.** The check is a call to
+`khora_safepoint` at every back-edge, not the inlined flag load described
+above, and what decides when to yield is a budget of safepoints granted at each
+resume rather than a timer. Measured on `bench/service`:
 
-**This needs the compiler**, which is why it is decided here and not
-discovered in 11C. A back-edge safepoint is emitted by code generation, and
-nothing in `khora-codegen-llvm` emits anything of the kind today.
+| | req/s |
+| --- | --- |
+| without safepoints | 800,730 |
+| with safepoints | 796,116 / 781,456 / 784,215 |
+
+The spread across the three "with" runs is wider than the gap to the "without"
+run, so the call is under this benchmark's noise floor. A tight loop over a
+large byte buffer would show more, and the inlined flag check is what to reach
+for then.
+
+**A program that cannot spawn emits no safepoints at all.** The compiler
+already proves that to decide whether reference counting is atomic, and the
+same proof says there is nobody to be fair to.
+
+The budget is fairness measured in safepoints rather than in time, which is
+worth being honest about: a fiber doing something expensive between two
+safepoints still holds its worker for exactly that long. A timer setting a flag
+is the refinement, and it now has something to measure against.
 
 ---
 
@@ -434,7 +451,7 @@ Staged so that a failure is attributable to the thing that just changed.
 | | what it proves |
 | --- | --- |
 | **11A** context switch, one worker, many fibers, explicit yield, join | stack switching, and the current-fiber pointer replacing thread-locals |
-| **11B** N workers, local and global queues, migration, safepoints | CPU parallelism, and fairness |
+| **11B** N workers, local and global queues, migration, safepoints — **done** | CPU parallelism, and fairness |
 | **11C** reactor and timers: suspend, wake, cancel-while-waiting | a hundred thousand waiting fibers |
 | **11D** work stealing | locality, once the simple scheduler's behaviour is understood |
 | **11E** bounded blocking pool | that unavoidable blocking cannot stall a worker |
