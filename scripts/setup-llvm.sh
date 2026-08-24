@@ -23,8 +23,27 @@ VERSION=22.1.8
 MAJOR=22
 PREFIX_VAR=LLVM_SYS_221_PREFIX
 
+# The one thing this script prints on stdout is the prefix, because a caller
+# writes it straight into a variable:
+#
+#     prefix=$(sh scripts/setup-llvm.sh --quiet)
+#
+# `say` was careful about that and the installers underneath it were not.
+# `brew install` and apt.llvm.org's script write progress to stdout, so the
+# whole install log -- including an ASCII-armoured GPG key -- ended up in
+# `$prefix`, and CI's `echo "VAR=$prefix" >> "$GITHUB_ENV"` rejected the
+# multi-line value with `Invalid format 'mQINBFE9lCwBEADi0WUAApM/'`. The
+# backend job had never once passed, on any platform.
+#
+# Fixing those two installers would leave the next command added here to
+# rediscover this, so the redirect is structural: stdout becomes stderr for
+# the whole script, and the answer leaves on a descriptor nothing else knows
+# about.
+exec 3>&1 1>&2
+
 say() { [ "${QUIET:-0}" = 1 ] || printf '%s\n' "$*" >&2; }
 die() { printf 'setup-llvm: %s\n' "$*" >&2; exit 1; }
+answer() { printf '%s\n' "$1" >&3; }
 
 QUIET=0
 [ "${1:-}" = "--quiet" ] && QUIET=1
@@ -49,7 +68,7 @@ if [ -n "$existing" ]; then
         case "$have" in
             "$MAJOR".*)
                 say "$PREFIX_VAR already points at LLVM $have."
-                printf '%s\n' "$existing"
+                answer "$existing"
                 exit 0
                 ;;
             *) die "$PREFIX_VAR points at LLVM $have; this needs $MAJOR.x. Unset it to install one." ;;
@@ -180,4 +199,4 @@ say "LLVM $have is at $prefix."
 say ""
 say "    cargo test --workspace --features llvm"
 say ""
-printf '%s\n' "$prefix"
+answer "$prefix"

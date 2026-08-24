@@ -84,6 +84,24 @@ jobs:
         shell: bash
         run: |
           prefix=$(sh scripts/setup-llvm.sh --quiet)
+
+          # `$GITHUB_ENV` takes `KEY=value` one line at a time, so a
+          # multi-line value is not an error here -- it is a confusing error
+          # later, raised by the runner, quoting whichever line of the
+          # install log it choked on. Say it plainly instead. The script
+          # redirects its own stdout now so this should be unreachable; it
+          # is here because the failure it names cost five red runs to
+          # recognise. `printf %s` emits no trailing newline, so a count of
+          # zero means exactly one line.
+          if [ -z "$prefix" ]; then
+            echo "setup-llvm printed nothing"; exit 1
+          fi
+          if [ "$(printf %s "$prefix" | wc -l)" -ne 0 ]; then
+            echo "setup-llvm printed more than the prefix:"
+            printf %s "$prefix" | head -20
+            exit 1
+          fi
+
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
 
       - run: cargo test --workspace --features llvm
