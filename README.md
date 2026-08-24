@@ -211,6 +211,13 @@ Operator precedence, loosest to tightest: `|>`, `||`, `&&`, comparisons,
 
 ## What is next
 
-Phase 9: Perceus reuse analysis and FBIP, so that `map` over a uniquely-owned
-list allocates nothing. Then phase 10: packaging, the linter, and a language
-server. `docs/roadmap.md` has the order and the reasons.
+Phase 9 is done — reuse analysis and FBIP, so `map` over a uniquely-owned list
+allocates nothing, and an HTTP request parse went from 2,440ns to 1,555.
+
+Phase 9.5 closes the gaps a stranger hits in their first afternoon; three of
+four are in. Then phase 10: packaging, the linter, and a language server. Then
+phase 11, the scheduler — a fiber is an operating-system thread today, so a
+server holds thousands of connections and not hundreds of thousands, and that
+is the last thing standing between the positioning and the truth.
+
+`docs/roadmap.md` has the order, the reasons, and what each one costs.

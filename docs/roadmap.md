@@ -1831,6 +1831,61 @@ Phases 2 and 3. What remains here is surface area, not standards.
 
 ---
 
+## Phase 11 — The scheduler
+
+**A fiber becomes a stackful coroutine multiplexed onto worker threads**, which
+is what `docs/design/fibers.md` decided a fiber *is*. Phase 5.3 shipped the
+interface and made each fiber an operating-system thread, on the argument that
+a program cannot tell the difference. That argument is sound and it has a
+price, and this is the entry that names the price rather than leaving it in a
+design note.
+
+**Why it is load-bearing rather than an optimization.** A fiber costs about
+33 KB today, so a server holds thousands of connections and not hundreds of
+thousands — `std::net::http` says so in its own doc comment, and
+`docs/positioning.md` claims Khora should be a candidate wherever a team
+compares Rust, Go and TypeScript. Go's answer to that comparison *is* cheap
+goroutines. Until this lands, the honest version of the claim is "for services
+with hundreds of concurrent callers", which is a smaller claim than the one the
+positioning makes.
+
+It is also what makes the language's concurrency bet pay. Khora has **one**
+concurrency model on purpose: the state-machine transform was rejected outright
+because "can this suspend" colours every call graph, and there is deliberately
+no non-blocking socket API for a framework to build a competing event loop on.
+The upside is that there is no tokio-versus-async-std schism to have and every
+library composes with every other. The downside is that the ceiling is the
+runtime's alone to raise, and nobody else can work around it.
+
+**What it costs**, from `docs/design/fibers.md` §"a real project":
+
+- context switching, which is per-target assembly;
+- stacks that start small and grow, which needs guard pages or segmentation;
+- a work-stealing scheduler across worker threads;
+- and the part that is easy to forget: **a reactor**. A scheduler whose fibers
+  make blocking syscalls parks a worker thread per blocked fiber and has bought
+  nothing, so `khora-rt` needs `epoll`, `kqueue` and IOCP underneath. That work
+  stays inside the runtime — no Khora program sees a readiness API, and
+  `std::net::socket` keeps its blocking shape — which is precisely the property
+  that lets every existing program benefit without being rewritten.
+
+**What it does not change: anything a program can see.** No signature in `std`,
+no line in a reference application, no `async` keyword. `Fiber::spawn`, `join`,
+`cancel` and the nursery mean what they meant. That is the whole reason 5.3 was
+allowed to ship threads, and this phase either honours it or invalidates the
+decision retroactively.
+
+**Ordering.** After Phase 10 rather than before, and it is a genuine trade: the
+scheduler is one deep piece of runtime work that one person does, while
+packaging is what lets anybody else do anything at all. If the goal changes to
+"be credible for services" before "be contributable to", these swap.
+
+**Exit:** a hundred thousand fibers, each holding an idle connection, on a
+machine that could not hold a hundred thousand threads — and every test in the
+suite passing unchanged, because none of them can tell.
+
+---
+
 ## When can libraries be written?
 
 The question A6 was really about, and the phases answer it in two steps.
