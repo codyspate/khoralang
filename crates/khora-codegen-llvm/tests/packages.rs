@@ -169,7 +169,11 @@ fn a_package_from_a_git_repository_is_resolved_compiled_and_run() {
     let db = KhoraDatabase::new();
     let files = sources(&db, &directories);
     let root = SourceRoot::new(&db, files);
-    let exe = tmp.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+    // Not `app`: that is the source directory's name, and on anything but
+    // Windows the executable would have no extension to tell them apart. `ld`
+    // says `cannot open output file ...: Is a directory`, which is a clear
+    // message about a confusing mistake.
+    let exe = tmp.path().join(if cfg!(windows) { "program.exe" } else { "program" });
     if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
         let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
         panic!("compiling against a git dependency failed:\n  {}", messages.join("\n  "));
