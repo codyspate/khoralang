@@ -820,7 +820,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 ),
             },
             Expr::Field { base, name } => self.read_field(base, &name, range),
-            Expr::Tuple(_) => self.fail("tuple literals are not supported yet", range),
+            Expr::Tuple(items) => self.build_tuple(id, &items, range),
             // The checker already rejected these, so reaching one means
             // `compile` ran with diagnostics it should have refused.
             Expr::Missing | Expr::Unresolved(_) => {
@@ -3522,6 +3522,39 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(self.be.word_to_value(word, ret))
     }
 
+    /// Builds a tuple: the same object a record is, with positional fields.
+    ///
+    /// **A tuple is an anonymous record.** One heap object under the same
+    /// header, counted and released the same way, with its elements as fields
+    /// 0..n. Nothing in the reference-counting plan, the drop glue or the reuse
+    /// analysis had to learn what a tuple is — `instantiated_variants` answers
+    /// for one out of its type, and everything downstream asks that.
+    ///
+    /// Boxed rather than passed in registers, which is a real cost and the
+    /// consistent choice: every other aggregate in the language is boxed, and
+    /// `docs/design/compatibility.md` says when memory is allocated is not
+    /// observable, so unboxing small ones later stays legal.
+    fn build_tuple(&mut self, id: ExprId, items: &[ExprId], range: TextRange) -> Flow<'ctx> {
+        let ty = self.types.of(id).clone();
+        let Some(info) = self.be.instantiated_variants(&ty).into_iter().next() else {
+            return self.fail(format!("`{ty}` is not a tuple"), range);
+        };
+
+        // Evaluated before the allocation, as a constructor's arguments are: an
+        // element can diverge, and an object allocated before that happens is
+        // unreachable and unfreed.
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            values.push(self.expr(*item)?);
+        }
+
+        let object = self.allocate_at(id, info.fields.len(), 0, "tuple");
+        for (index, (value, field_ty)) in values.into_iter().zip(&info.fields).enumerate() {
+            self.store_field(object, index, value, field_ty);
+        }
+        Some(object.into())
+    }
+
     /// Builds a record: the same object a constructor builds, with the fields
     /// written in whatever order and stored in declaration order.
     fn build_record(
@@ -4676,14 +4709,98 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.drop(value, &ty);
                 true
             }
+            // **Only a pattern that cannot fail.** A `let` has nowhere to
+            // send a value that does not match, so `let (a, b) = pair` is
+            // allowed and `let Option::Some(x) = o` is not — the second needs a
+            // `match`, and saying so is more useful than refusing both.
+            other if self.destructures_irrefutably(pat, &ty) => {
+                let _ = other;
+                self.bind_pattern(pat, value, &ty);
+                // The bindings are projections into the object, exactly as a
+                // `match` arm's are: `bind_pattern` stores the loaded field and
+                // nothing has taken a reference for it. One copy each makes
+                // them the owning locals the plan already believes they are —
+                // it put every one of them in this block's release list.
+                self.own_projected(pat);
+                // And the container itself was owned by this expression.
+                self.drop(value, &ty);
+                true
+            }
             _ => {
                 self.fail(
-                    "destructuring in a `let` is not supported yet; use `match`, which can \
-                     handle the case where the pattern does not apply",
+                    "this pattern can fail, so it needs a `match` rather than a `let` — a \
+                     `let` has nowhere to send a value that does not match",
                     range,
                 );
                 false
             }
+        }
+    }
+
+    /// Whether a `let` can take this pattern apart without a way to fail.
+    ///
+    /// A tuple always matches, so its elements decide. A constructor matches
+    /// only when its type has no other case — which is what a record is, and
+    /// what makes `let Wrapper(x) = w` safe and `let Option::Some(x) = o` not.
+    fn destructures_irrefutably(&self, pat: PatId, ty: &Type) -> bool {
+        match self.body.pat(pat) {
+            Pat::Bind(_) | Pat::Wildcard | Pat::Missing => true,
+            Pat::Tuple(fields) => {
+                let Type::Tuple(items) = ty else { return false };
+                fields.len() == items.len()
+                    && fields
+                        .clone()
+                        .iter()
+                        .zip(items)
+                        .all(|(p, t)| self.destructures_irrefutably(*p, t))
+            }
+            Pat::TupleStruct { fields, .. } => {
+                let variants = self.be.instantiated_variants(ty);
+                if variants.len() != 1 {
+                    return false;
+                }
+                let only = &variants[0];
+                fields.len() == only.fields.len()
+                    && fields
+                        .clone()
+                        .iter()
+                        .zip(&only.fields)
+                        .all(|(p, t)| self.destructures_irrefutably(*p, t))
+            }
+            Pat::Literal(_) | Pat::Path(_) => false,
+        }
+    }
+
+    /// Gives the bindings a `let` pattern introduced ownership of what they
+    /// point at, the way [`Self::own_arm_bindings`] does for a `match` arm.
+    fn own_projected(&mut self, pat: PatId) {
+        let mut locals = Vec::new();
+        self.bound_locals(pat, &mut locals);
+        for local in locals {
+            let ty = self.types.local(local).clone();
+            if !is_boxed(&ty) {
+                continue;
+            }
+            let Some(slot) = self.slots.get(&local).copied() else { continue };
+            let Some(llvm_ty) = self.be.llvm_type(&ty) else { continue };
+            let value = self
+                .be
+                .builder
+                .build_load(llvm_ty, slot, "bound")
+                .expect("loading a destructured binding");
+            self.dup(value);
+        }
+    }
+
+    fn bound_locals(&self, pat: PatId, found: &mut Vec<LocalId>) {
+        match self.body.pat(pat) {
+            Pat::Bind(local) => found.push(*local),
+            Pat::Tuple(fields) | Pat::TupleStruct { fields, .. } => {
+                for field in fields.clone() {
+                    self.bound_locals(field, found);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5195,7 +5312,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         let mut reached = 0;
         for (index, arm) in arms.iter().enumerate() {
             self.at(binds[index]);
-            self.bind_pattern(arm.pat, value);
+            self.bind_pattern(arm.pat, value, ty);
             match arm.guard {
                 Some(guard) => {
                     // A guard is checked with the bindings in scope and, if it
@@ -5380,7 +5497,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         for (index, arm) in arms.iter().enumerate() {
             let next = tests.get(index + 1).copied().unwrap_or(unmatched);
             self.at(tests[index]);
-            self.test_pattern(arm.pat, value, binds[index], next);
+            self.test_pattern(arm.pat, value, scrutinee_ty, binds[index], next);
         }
     }
 
@@ -5445,8 +5562,19 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// Whether this pattern can fail to match, ignoring what it binds.
+    ///
+    /// A tuple has one shape, so a tuple of names tests nothing — which is what
+    /// lets `test_fields` skip the field entirely rather than emitting a
+    /// comparison against a value it would always accept.
     fn is_irrefutable(&self, pat: PatId) -> bool {
-        matches!(self.body.pat(pat), Pat::Wildcard | Pat::Bind(_) | Pat::Missing)
+        match self.body.pat(pat) {
+            Pat::Wildcard | Pat::Bind(_) | Pat::Missing => true,
+            Pat::Tuple(fields) => {
+                fields.clone().iter().all(|field| self.is_irrefutable(*field))
+            }
+            _ => false,
+        }
     }
 
     /// A block for "no arm applied".
@@ -5475,6 +5603,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         &mut self,
         pat: PatId,
         value: BasicValueEnum<'ctx>,
+        ty: &Type,
         success: BasicBlock<'ctx>,
         failure: BasicBlock<'ctx>,
     ) {
@@ -5557,6 +5686,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     self.fail("this pattern does not name a constructor", range);
                     return;
                 };
+                let info = self.at_this_instantiation(ty, info);
                 let object = value.into_pointer_value();
                 let loaded = runtime::load_tag(self.be.ctx, &self.be.builder, object);
                 let expected = self.be.ctx.i32_type().const_int(tag as u64, false);
@@ -5566,10 +5696,39 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.at(matched);
                 self.test_fields(object, &info, &fields, 0, success, failure);
             }
-            Pat::Tuple(_) => {
-                self.fail("tuple patterns are not supported yet", range);
+            // **No tag to test.** A tuple has one shape, so matching one is
+            // only its elements — and whether *they* match is `test_fields`,
+            // the same walk a constructor's payload gets. The layout comes from
+            // the type rather than from a declaration, because a tuple has no
+            // declaration to look one up in.
+            Pat::Tuple(fields) => {
+                let Some(info) = self.be.instantiated_variants(ty).into_iter().next() else {
+                    self.fail(format!("`{ty}` is not a tuple"), range);
+                    return;
+                };
+                let object = value.into_pointer_value();
+                self.test_fields(object, &info, &fields, 0, success, failure);
             }
         }
+    }
+
+    /// A variant's fields with *this* use's type arguments substituted in.
+    ///
+    /// `variant_of` answers from the declaration, where `Cons(head: A, ..)`
+    /// carries an `A`. A pattern that descends into that field needs to know
+    /// what `A` is here — `List<(Int, String)>` makes it a tuple, and a
+    /// parameter is not a shape anything can be loaded at.
+    ///
+    /// `bind_pattern` used to work around this by preferring the bound local's
+    /// recorded type, which is right for a leaf and has nothing to say about a
+    /// nested pattern. Both callers know the type of the value they are
+    /// matching now, so the substitution can just be done.
+    fn at_this_instantiation(&self, ty: &Type, declared: VariantInfo) -> VariantInfo {
+        self.be
+            .instantiated_variants(ty)
+            .into_iter()
+            .find(|v| v.name == declared.name)
+            .unwrap_or(declared)
     }
 
     fn test_fields(
@@ -5593,7 +5752,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         let field_ty = info.fields.get(index).cloned().unwrap_or(Type::Unknown);
         let value = self.load_field(object, index, &field_ty);
         let next = self.block("field.next");
-        self.test_pattern(fields[index], value, next, failure);
+        self.test_pattern(fields[index], value, &field_ty, next, failure);
         self.at(next);
         self.test_fields(object, info, fields, index + 1, success, failure);
     }
@@ -5621,7 +5780,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// No `dup` anywhere: a binding borrows out of the scrutinee, which the
     /// `match` owns for the duration of the arm. A read of the binding is what
     /// duplicates, and the plan records that read.
-    fn bind_pattern(&mut self, pat: PatId, value: BasicValueEnum<'ctx>) {
+    fn bind_pattern(&mut self, pat: PatId, value: BasicValueEnum<'ctx>, ty: &Type) {
         match self.body.pat(pat).clone() {
             Pat::Bind(local) => {
                 if let Some(slot) = self.slots.get(&local).copied() {
@@ -5630,6 +5789,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             }
             Pat::TupleStruct { resolution, fields } => {
                 let Some((_, info)) = self.variant_of(&resolution) else { return };
+                let info = self.at_this_instantiation(ty, info);
                 let object = value.into_pointer_value();
                 for (index, field) in fields.iter().enumerate() {
                     // **The binding's own type, not the variant's declared
@@ -5653,10 +5813,24 @@ impl<'ctx> Lower<'_, 'ctx> {
                         _ => info.fields.get(index).cloned().unwrap_or(Type::Unknown),
                     };
                     let loaded = self.load_field(object, index, &field_ty);
-                    self.bind_pattern(*field, loaded);
+                    self.bind_pattern(*field, loaded, &field_ty);
                 }
             }
-            Pat::Wildcard | Pat::Literal(_) | Pat::Path(_) | Pat::Missing | Pat::Tuple(_) => {}
+            // The elements come from the type, positionally. A tuple has no
+            // declaration, so there is nothing else they could come from — and
+            // nothing else they need to, since a tuple's shape is its type.
+            Pat::Tuple(fields) => {
+                let Some(info) = self.be.instantiated_variants(ty).into_iter().next() else {
+                    return;
+                };
+                let object = value.into_pointer_value();
+                for (index, field) in fields.iter().enumerate() {
+                    let field_ty = info.fields.get(index).cloned().unwrap_or(Type::Unknown);
+                    let loaded = self.load_field(object, index, &field_ty);
+                    self.bind_pattern(*field, loaded, &field_ty);
+                }
+            }
+            Pat::Wildcard | Pat::Literal(_) | Pat::Path(_) | Pat::Missing => {}
         }
     }
 

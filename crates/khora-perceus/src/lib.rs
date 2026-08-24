@@ -256,8 +256,10 @@ fn owner_of(ty: &Type) -> Option<&str> {
 /// spurious `drop` on a machine word would be a wild free.
 pub fn is_boxed(ty: &Type) -> bool {
     // A closure is an ordinary heap object: a function pointer and whatever it
-    // captured, under the same header as everything else.
-    matches!(ty, Type::Str | Type::Adt { .. } | Type::Fn { .. })
+    // captured, under the same header as everything else. So is a tuple — an
+    // anonymous record with positional fields, counted and released like the
+    // named kind.
+    matches!(ty, Type::Str | Type::Adt { .. } | Type::Fn { .. } | Type::Tuple(_))
 }
 
 /// Plans reference counting for one body at one set of types.

@@ -1699,6 +1699,62 @@ counting. It is written up against its measurement.
 
 ---
 
+## Phase 9.5 — Surface completeness
+
+Everything here is something a stranger hits in the first afternoon. None of it
+is deep, all of it is the difference between "interesting" and "usable", and
+none of it was on the roadmap because each piece was individually small enough
+to keep not doing.
+
+The order is by damage prevented, and the shape of the damage matters: three of
+the four are things that **parse and type-check and then fail further down**,
+which is the pattern D14 was closed for and which reads to a newcomer as a
+compiler that does not know what it supports.
+
+- **9.5.1 Tuples and irrefutable `let` — done.** `(1, 2)` parsed, type-checked,
+  survived exhaustiveness checking, and then failed in the backend with
+  *"phase 2 handles `Int`, `Bool`, `String`, `()` and ADTs"* — an internal phase
+  number in a user-facing error. The front end had been complete for a long
+  time; only the layout was missing.
+
+  **A tuple is an anonymous record**: one heap object, positional fields,
+  counted and released like every other aggregate. `instantiated_variants`
+  answers for one out of its type, and that is the whole of it — the reference
+  counting plan, the drop glue, pattern binding and the reuse analysis all ask
+  that question already and none of them learned that tuples exist. Boxed
+  rather than in registers, consistently with every other aggregate, and
+  `docs/design/compatibility.md` keeps unboxing legal later.
+
+  `let (a, b) = pair` works too, for any pattern that **cannot fail** — a tuple,
+  or a constructor whose type has one case, recursively. One that can fail still
+  needs a `match`, and now says which of the two it is instead of refusing all
+  destructuring.
+
+  Two bugs on the way, both found by the live-object count. A tuple took a null
+  `drop_fields`, because `drop_glue` matched on `Type::Adt` and gave everything
+  else nothing — so tuples were freed and their boxed elements were not. And
+  pattern binding read field types from the *declaration*, so a tuple inside a
+  generic container arrived as the rigid parameter `A`; both callers know the
+  matched value's type now, which also retires the workaround `bind_pattern` was
+  carrying for the same reason.
+
+- **9.5.2 macOS, and a CI matrix.** `std/net` has `socket_windows.kh` and
+  `socket_linux.kh` and no macOS, so networking does not exist there — and
+  there is no CI at all, so nothing but a Windows desktop is known to work.
+  Mac is heavily overrepresented among the people who try a new language.
+- **9.5.3 An install story that is not a specific tarball.** LLVM 22.1.8 from
+  the official `clang+llvm-*.tar.xz`, *not* the distribution package. Most
+  evaluators bounce here before writing a line.
+- **9.5.4 String interpolation, or a hard error.** `"hello ${name}"` compiles
+  and prints `hello ${name}`. Silently meaning something else is the worst of
+  the three options; refusing it is better than that, and interpolating is
+  better still.
+
+**Exit:** someone with a Mac and no prior knowledge can install the compiler and
+write a hundred lines without hitting a wall that isn't their own mistake.
+
+---
+
 ## Phase 10 — Packaging and toolchain
 
 Ordered by value, not by §6's numbering.

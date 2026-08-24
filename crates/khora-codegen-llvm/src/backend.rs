@@ -551,7 +551,7 @@ const CLOSURE_GLUE: &str = "$closure";
 
 /// A type as it appears in a generated symbol name.
 fn mangle_type(ty: &Type) -> String {
-    ty.to_string().replace(['<', '>', ',', ' '], "$").replace("$$", "$")
+    ty.to_string().replace(['<', '>', '(', ')', ',', ' '], "$").replace("$$", "$")
 }
 
 /// The tag an adapter closure carries. Far above any real closure site, so the
@@ -757,7 +757,12 @@ impl<'ctx> Backend<'ctx> {
             // A closure is a heap object holding its function pointer and its
             // captures, so a value of function type is a pointer to one. `Ptr`
             // is a pointer that is only a pointer: no header, no count.
-            Type::Ptr | Type::Str | Type::Adt { .. } | Type::Fn { .. } => {
+            // A tuple is an anonymous record: one heap object with its
+            // elements as positional fields, so a value of tuple type is a
+            // pointer to one exactly as a record is. Nothing else about it is
+            // special — the same header, the same counting, the same generated
+            // `drop_fields`.
+            Type::Ptr | Type::Str | Type::Adt { .. } | Type::Fn { .. } | Type::Tuple(_) => {
                 Some(self.ctx.ptr_type(AddressSpace::default()).into())
             }
             // A variable or a rigid parameter reaching code generation means
@@ -765,15 +770,12 @@ impl<'ctx> Backend<'ctx> {
             // monomorphized. Both are compiler bugs rather than user errors, so
             // there is no representation to pick here.
             Type::Var(_) | Type::Param(_) => None,
-            // Tuples type check but have no layout yet; `lower` reports that
-            // in the one place it can happen, rather than here.
             // A projection reaching here never normalized, which means the
             // owner was never pinned down. That is a type error reported
             // elsewhere, not a shape the backend could pick.
             // A row is a compile-time description of what a function needs,
             // not a value: nothing is ever emitted holding one.
-            Type::Tuple(_)
-            | Type::Const(_)
+            Type::Const(_)
             | Type::Applied { .. }
             | Type::Assoc { .. }
             | Type::Row { .. } => None,
@@ -1807,7 +1809,17 @@ impl<'ctx> Backend<'ctx> {
         if matches!(ty, Type::Fn { .. }) {
             return self.closure_glue();
         }
-        let Type::Adt { name, .. } = ty else { return self.null_pointer() };
+        // A tuple gets the generic path: it owns whatever its elements own, and
+        // `instantiated_variants` describes it the same way it describes a
+        // record. Without this it took a null `drop_fields` and every boxed
+        // element it held was freed with nobody releasing it.
+        let name: &str = match ty {
+            Type::Adt { name, .. } => name,
+            // No runtime type has a tuple's shape, so none of the special cases
+            // below can match, and an empty name is the honest way to say so.
+            Type::Tuple(_) => "",
+            _ => return self.null_pointer(),
+        };
 
         // A region's release is the runtime's, not one generated from a field
         // layout: its finalizers live Rust-side because deferring grows the
@@ -1907,6 +1919,20 @@ impl<'ctx> Backend<'ctx> {
     /// wrong first and leaked; field access got it wrong second and loaded a
     /// pointer as an integer.
     pub(crate) fn instantiated_variants(&self, ty: &Type) -> Vec<VariantInfo> {
+        // A tuple has one shape and no declaration to look it up in, so its
+        // layout *is* its type: the elements, in order, as positional fields.
+        // Answering here is what gives it drop glue, field loads and pattern
+        // binding without any of them learning that tuples exist.
+        if let Type::Tuple(items) = ty {
+            return vec![VariantInfo {
+                type_name: ty.to_string(),
+                home: None,
+                name: ty.to_string(),
+                fields: items.clone(),
+                labels: (0..items.len()).map(|i| i.to_string()).collect(),
+                mutable: vec![false; items.len()],
+            }];
+        }
         let Type::Adt { name, args, .. } = ty else { return Vec::new() };
         let declared = self.variants_for(ty);
         let generics = self.types.adts.get(name).cloned().unwrap_or_default();
