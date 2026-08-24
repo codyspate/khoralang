@@ -23,6 +23,20 @@ impl<'ctx> Backend<'ctx> {
             .or_else(|| self.types.signatures.get(name).cloned())
     }
 
+    /// The signature to call `name` through, given that nothing in Khora
+    /// defines it.
+    ///
+    /// Such a name is a C symbol, so an `extern` declaration of it is the right
+    /// answer even when a Khora function of the same name exists somewhere in
+    /// the program — see [`Backend::foreign_signatures`].
+    pub fn foreign_signature_of(&self, name: &str) -> Option<khora_types::Signature> {
+        self.foreign_signatures.get(name).cloned().or_else(|| self.signature_of(name))
+    }
+
+    pub(super) fn register_foreign(&mut self, name: &str, signature: khora_types::Signature) {
+        self.foreign_signatures.insert(name.to_string(), signature);
+    }
+
     pub fn register_instance(&mut self, symbol: &str, signature: khora_types::Signature) {
         self.instance_signatures.insert(symbol.to_string(), signature);
     }
@@ -63,9 +77,15 @@ impl<'ctx> Backend<'ctx> {
         if let Some(f) = self.functions.get(name) {
             return Ok(*f);
         }
-        let signature = self
-            .signature_of(name)
-            .ok_or_else(|| format!("`{name}` has no signature to call through"))?;
+        // Which map to ask depends on what kind of thing this is, and
+        // `is_defined` is that question: a name no Khora body defines is a C
+        // symbol, whatever else in the program happens to share its spelling.
+        let signature = if self.is_defined(name) {
+            self.signature_of(name)
+        } else {
+            self.foreign_signature_of(name)
+        }
+        .ok_or_else(|| format!("`{name}` has no signature to call through"))?;
         // Three kinds of function reach this point, and only one of them is a
         // call to somewhere else.
         //

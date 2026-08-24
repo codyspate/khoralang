@@ -87,6 +87,20 @@ case "$(uname -s)" in
                 chmod +x "$tmp/llvm.sh"
                 sudo "$tmp/llvm.sh" "$MAJOR"
                 rm -rf "$tmp"
+
+                # apt.llvm.org's script installs the *tools* -- clang, lld,
+                # lldb, clangd -- and stops there. `llvm-sys` links against the
+                # libraries, and asks `llvm-config` which ones; on this
+                # packaging that answer includes Polly, whose static library
+                # lives in a package nothing above pulls in. Without these the
+                # build dies at
+                #
+                #     could not find native static library `Polly`
+                #
+                # which names neither apt nor the missing package.
+                say "Adding the libraries llvm-sys links against."
+                sudo apt-get install -y "llvm-$MAJOR-dev" "libpolly-$MAJOR-dev"
+
                 prefix="/usr/lib/llvm-$MAJOR"
             else
                 die "Install Homebrew (https://brew.sh) and re-run, or set $PREFIX_VAR yourself."

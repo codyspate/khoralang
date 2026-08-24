@@ -43,6 +43,7 @@ pub(super) fn build(
     root: SourceRoot,
     out: &Path,
     entry_point: Entry,
+    stop: Stop,
 ) -> Result<(), Vec<HirError>> {
     let files = root.files(db);
     let mut diagnostics: Vec<HirError> = Vec::new();
@@ -72,6 +73,21 @@ pub(super) fn build(
 
     let context = Context::create();
     let mut backend = Backend::new(&context, &name, types.clone(), &machine);
+
+    // Every `extern fn` in the program, under the C symbol it names.
+    //
+    // `merged_types` flattens signatures into one map keyed by a bare name, so
+    // a Khora `close` and POSIX's `close` collide there and the winner is
+    // whichever file was walked first. These are kept apart because they never
+    // shared a namespace to begin with: one is emitted `kh$std$fs$close`, the
+    // other is looked up by the linker. `Backend::foreign_signatures`.
+    for file in files {
+        for (symbol, signature) in &khora_types::type_map(db, *file).signatures {
+            if signature.is_extern {
+                backend.register_foreign(symbol, signature.clone());
+            }
+        }
+    }
     // Tests each get a fiber of their own, so only a `main` build can be
     // single-threaded.
     backend.single_threaded =
@@ -175,7 +191,7 @@ pub(super) fn build(
     if !backend.errors.is_empty() {
         return Err(backend.errors);
     }
-    backend.finish(&machine, out)
+    backend.finish(&machine, out, stop)
 }
 
 /// One view of every type in the program.

@@ -441,8 +441,30 @@ fn defining(units: &[Unit<'_>], from: usize, name: &str) -> Option<(usize, Strin
     }
 
     // A trait or impl method carries a compound key of its own —
-    // `Show#Int::show` — which no import names. It traveled in with its trait,
-    // so look for the key itself in the other modules.
+    // `Show#Int::show`, or `#Int::show` for an inherent one — which no import
+    // names. It traveled in with its trait, so look for the key itself in the
+    // other modules.
+    //
+    // **Only for compound keys.** This used to search every unit for any name,
+    // which meant a name the calling file neither defines nor imported was
+    // matched against whatever module happened to declare one first. That is
+    // wrong for exactly the case it looks harmless in: an `extern fn` is a
+    // declaration with no body, so `extern fn close(handle: I32) -> I32` in
+    // `socket_linux.kh` fell past both branches above and bound to the private
+    // `close(file: Ptr)` in `std::fs`. Every POSIX build emitted
+    // `call void @kh$std$fs$close(i32 %handle)` and LLVM rejected the module.
+    //
+    // Windows hid it for as long as it existed, because `socket_windows.kh`
+    // spells the same call `closesocket`. `khora-codegen-llvm/tests/portability.rs`
+    // is what makes that class of bug visible from any host now.
+    //
+    // A bare name that this file neither defines nor imported is not a Khora
+    // function. It is a C symbol the file declared, and the caller's `None`
+    // branch already does the right thing with it.
+    if !name.contains('#') {
+        return None;
+    }
+
     units
         .iter()
         .enumerate()

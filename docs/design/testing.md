@@ -135,6 +135,7 @@ second is evidence.
 | HTTP works without the `Router` | `khora-codegen-llvm/tests/http_layers.rs` |
 | A capability is read where nothing mentions it | `khora-perceus/tests/rc.rs`, and `effects.rs` |
 | `std` type-checks for every target | `khora-types/tests/portability.rs` |
+| `std` *generates code* for every target | `khora-codegen-llvm/tests/portability.rs` |
 | An edit inside a body does not reach another file | `khora-hir/tests/incremental.rs` |
 
 **Named but not yet held by a test**, and each is a gap rather than a decision:

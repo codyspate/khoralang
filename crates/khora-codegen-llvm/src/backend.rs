@@ -90,7 +90,23 @@ const FEATURES: &str = "";
 /// naming the command that produces it, not a link failure full of undefined
 /// symbols from Rust's `std`.
 pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Main)
+    build(db, root, out, Entry::Main, Stop::AtExecutable)
+}
+
+/// Generates and verifies a module, and stops before writing anything.
+///
+/// For checking that code generation works for a platform this host cannot
+/// link for. Which `std` files a build selects is a per-target decision, so a
+/// bug can live in a combination of modules that only one platform compiles --
+/// `std::fs` and `socket_linux.kh` both declare `close`, and
+/// `socket_windows.kh` does not, which hid a symbol collision from everyone
+/// working on Windows until CI ran on a Mac.
+///
+/// Set `KHORA_TARGET` to choose the target. Verification is genuinely the last
+/// portable step: an unresolved symbol or a wrong calling convention still
+/// needs the real platform, and CI still builds on all three.
+pub fn verify_for_target(db: &dyn Db, root: SourceRoot) -> Result<(), Vec<HirError>> {
+    build(db, root, Path::new("verify-only"), Entry::Main, Stop::AtVerification)
 }
 
 /// Compiles the program's *tests* to an executable that runs them.
@@ -100,7 +116,21 @@ pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirE
 /// each one a fiber of its own. Everything else — the same monomorphization,
 /// the same lowering — is shared, because a test body is a function body.
 pub fn compile_tests(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Tests)
+    build(db, root, out, Entry::Tests, Stop::AtExecutable)
+}
+
+/// How far to take a build.
+///
+/// Verification is the last step that is the same on every platform. Writing an
+/// object needs a target machine that can encode for the target, and linking
+/// needs that target's libraries -- so a host can check another platform's code
+/// generation but cannot produce a program from it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// Verify, write the object, link the executable.
+    AtExecutable,
+    /// Verify the module and stop. See [`crate::verify_for_target`].
+    AtVerification,
 }
 
 /// Which entry point an executable gets.
@@ -259,6 +289,20 @@ pub(crate) struct Backend<'ctx> {
     defined: HashSet<String>,
     /// Specialized signatures, by mangled symbol. See `signature_of`.
     instance_signatures: HashMap<String, Signature>,
+    /// `extern fn` declarations, by the C symbol they name.
+    ///
+    /// Separate from `types.signatures` because that map is keyed by a bare
+    /// function name across the whole program, and two modules may legitimately
+    /// use one name for different things. `std::fs` declares a Khora
+    /// `close(file: Ptr)`; `socket_linux.kh` declares `extern fn close(handle:
+    /// I32)`, which is POSIX's. Merged into one map the first one wins by
+    /// accident of file order, and every POSIX build compiled a call to the
+    /// wrong one.
+    ///
+    /// They do not really share a namespace: a Khora function is emitted as
+    /// `kh$std$fs$close` and a C symbol as `close`. This map is that
+    /// distinction, made where the lookup happens.
+    foreign_signatures: HashMap<String, Signature>,
     /// Per-ADT `drop_fields` routines. `None` records a type that owns no
     /// references, so drop sites pass a null callback rather than calling a
     /// routine that would do nothing.
@@ -376,6 +420,7 @@ impl<'ctx> Backend<'ctx> {
             functions: HashMap::new(),
             defined: HashSet::new(),
             instance_signatures: HashMap::new(),
+            foreign_signatures: HashMap::new(),
             drop_glue: HashMap::new(),
             pending_glue: Vec::new(),
             closures: Vec::new(),
@@ -405,8 +450,14 @@ impl<'ctx> Backend<'ctx> {
     // Types
     // -----------------------------------------------------------------------
 
-    /// Verifies the module, writes an object and links an executable.
-    fn finish(self, machine: &TargetMachine, out: &Path) -> Result<(), Vec<HirError>> {
+    /// Verifies the module, and unless `stop` says otherwise writes an object
+    /// and links an executable.
+    fn finish(
+        self,
+        machine: &TargetMachine,
+        out: &Path,
+        stop: Stop,
+    ) -> Result<(), Vec<HirError>> {
         // Dumped before verification, so that a module which fails to verify is
         // still there to be read — that is precisely when it is wanted.
         if std::env::var_os("KHORA_EMIT_LLVM").is_some() {
@@ -418,6 +469,10 @@ impl<'ctx> Backend<'ctx> {
                 "the generated module is not valid LLVM IR, which is a compiler bug:\n{e}"
             ))]
         })?;
+
+        if stop == Stop::AtVerification {
+            return Ok(());
+        }
 
         let object = with_suffix(out, ".o");
         machine

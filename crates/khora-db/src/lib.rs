@@ -201,7 +201,31 @@ pub fn selected_for_target(path: &std::path::Path, target: &str) -> bool {
 ///
 /// Khora generates for the host triple, so the host's name is the target's —
 /// the same assumption the code generator already makes about word size.
+///
+/// **`KHORA_TARGET` overrides it**, and the reason is worth stating because the
+/// override cannot produce a runnable program. Which `std` files are selected
+/// is a per-target decision, so a bug that only exists in the combination of
+/// modules some *other* platform compiles is invisible here: `std::fs` declares
+/// `close`, and so does `socket_linux.kh` and `socket_macos.kh`, but
+/// `socket_windows.kh` calls it `closesocket`. A collision between those two
+/// was found by CI on macOS and could not be reproduced by anyone working on
+/// Windows, which is the worst kind of bug to own.
+///
+/// With this, `khora-codegen-llvm/tests/portability.rs` generates and *verifies*
+/// a module for all three targets from whichever host it runs on. It stops
+/// before linking, which is the honest limit — an unresolved symbol or a wrong
+/// calling convention still needs the real platform, and CI still runs all
+/// three.
 pub fn host_target() -> &'static str {
+    match std::env::var("KHORA_TARGET").ok().as_deref() {
+        Some("windows") => return "windows",
+        Some("macos") => return "macos",
+        Some("linux") => return "linux",
+        Some(other) => panic!(
+            "KHORA_TARGET={other:?} is not a target; expected `windows`, `macos` or `linux`"
+        ),
+        None => {}
+    }
     if cfg!(windows) {
         "windows"
     } else if cfg!(target_os = "macos") {
