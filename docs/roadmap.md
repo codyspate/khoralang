@@ -1910,7 +1910,29 @@ compiler checks.
 
 Ordered by value, not by §6's numbering.
 
-- **10.0 Prove the incrementality the rest of the phase assumes.** One test,
+- **10.0 Prove the incrementality the rest of the phase assumes — done, and it
+  was false.** `khora-hir/tests/incremental.rs`. The promise as `testing.md`
+  worded it turned out to be trivially true; the claim one layer out was not.
+  `Item` carries a `TextRange`, so a character typed into the first function of
+  a file shifted every declaration below it, `ItemMap` compared unequal, and
+  salsa correctly rebuilt `module_graph` and the `file_scope` of every importer.
+  `file_scope`'s own doc comment had asserted the opposite since the day it was
+  written.
+
+  The fix is a barrier rather than a rewrite: `module_api` is a span-free
+  projection of `item_map` that every *cross-file* query reads instead. It
+  re-executes on each edit, compares equal, and the invalidation stops there.
+  `item_map` keeps its spans for diagnostics and for go-to-definition. `Variant`
+  lost its `range`, which nothing had ever read.
+
+  A one-character body edit now re-runs the edited file's own item collection,
+  scope and bodies, and nothing else. The whole of `docs/design/testing.md`
+  §"What writing the first one found" is about why this was the right test to
+  write first.
+
+  The original entry, for the record:
+
+- ~~**10.0 Prove the incrementality the rest of the phase assumes.** One test,
   first, because it is a prerequisite rather than a part: *editing a function
   body does not invalidate item collection for unrelated modules.* Everything
   asserted today is at the parse layer — `khora-db/tests/incremental.rs` proves
@@ -1918,7 +1940,7 @@ Ordered by value, not by §6's numbering.
   backdated. Item collection is a different query and nothing measures it. It
   is the claim 10.4 rests on, `khora-db` already logs query execution so the
   machinery exists, and if it is false that changes the language server's design
-  rather than adding a bug to fix. From `docs/design/testing.md`.
+  rather than adding a bug to fix. From `docs/design/testing.md`.~~
 - **10.1 Apply D12 at publication.** Phase 8.5 decides the policy; this is where
   package metadata, the resolver and release tooling begin enforcing it.
 - **10.2 `khora-pkg`**: `khora.lock` with SHA-256 hashes, content-addressed

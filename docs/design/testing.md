@@ -135,17 +135,46 @@ second is evidence.
 | HTTP works without the `Router` | `khora-codegen-llvm/tests/http_layers.rs` |
 | A capability is read where nothing mentions it | `khora-perceus/tests/rc.rs`, and `effects.rs` |
 | `std` type-checks for every target | `khora-types/tests/portability.rs` |
+| An edit inside a body does not reach another file | `khora-hir/tests/incremental.rs` |
 
-**Named but not yet held by a test**, and each is a gap rather than a decision.
-Both are now scheduled — the first as Phase 10.0, ahead of the language server
-that rests on it, the second beside the `extern` allow-list in 10.2:
+**Named but not yet held by a test**, and each is a gap rather than a decision:
 
-- *Editing a function body does not invalidate item collection for unrelated
-  modules.* `khora-db` logs query execution so this is measurable; nothing
-  measures it. It is the claim Phase 10.4's language server rests on, and the
-  one most likely to be quietly false.
 - *`extern fn` bypassing `[permissions]` is detected rather than accidentally
   allowed.* `permissions.md` says the gate over Khora code is total and that
   `extern` goes around it. That is a documented hole, so the test to write is
-  that the hole is exactly where it is said to be and no wider.
+  that the hole is exactly where it is said to be and no wider. Scheduled
+  beside the `extern` allow-list in Phase 10.2.
+
+### What writing the first one found
+
+The incrementality entry above was on this list, and it is worth recording what
+happened when somebody finally went to write it, because it is the argument for
+the whole section.
+
+The promise as worded here — *editing a body does not invalidate item collection
+for unrelated modules* — turned out to be **trivially true and not worth
+asserting**. `item_map` reads exactly one file, so another file's item
+collection was never reachable from the edit. A test of that claim would have
+passed on day one and proved nothing.
+
+The claim one layer out was **false**. `Item` carries a `TextRange`, so
+inserting a character into the first function of a file shifts the span of every
+declaration below it; `ItemMap` compares unequal; and salsa correctly propagates
+that to `module_graph` and to the `file_scope` of every importer. A diagnostic
+run showed the two maps differing in nothing but spans — *equal ignoring ranges:
+true* — while a one-character edit re-resolved an importing file.
+
+`file_scope` even carried a doc comment asserting the property: "editing a
+function cannot invalidate another file's scope." It had been there, wrong,
+since the query was written.
+
+Two lessons, both of which generalise:
+
+- **A promise worth testing is one where a reasonable person could be wrong
+  about the answer.** The version on this list was safe, and being safe is what
+  made it useless. The version one layer out was the one nobody had checked.
+- **A comment claiming an invariant is the strongest possible signal that the
+  invariant is untested**, because a claim that had a test would cite it. Both
+  errata 48 and this were found by reading a confident sentence and asking what
+  would happen if it were false.
 

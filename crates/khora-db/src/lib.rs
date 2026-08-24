@@ -90,6 +90,16 @@ impl QueryLog {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 
+    /// Reads the recorded executions without draining them.
+    ///
+    /// [`QueryLog::take`] is the right call when a test wants a count and then
+    /// a clean slate. This one is for the tests that assert on *which* queries
+    /// ran, since naming the offender in the failure message means reading the
+    /// log twice: once to count, once to print.
+    pub fn peek(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+
     /// Number of executions recorded since the last [`QueryLog::take`].
     pub fn len(&self) -> usize {
         self.0.lock().unwrap().len()

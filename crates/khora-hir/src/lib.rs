@@ -87,7 +87,6 @@ pub struct Item {
 pub struct Variant {
     pub type_name: String,
     pub name: String,
-    pub range: TextRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,10 +187,78 @@ impl ItemMap {
     }
 }
 
+/// One declaration, as another file can observe it.
+///
+/// [`Item`] without the span, which is the whole point -- see [`module_api`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiItem {
+    pub name: String,
+    pub kind: ItemKind,
+    pub is_public: bool,
+}
+
+/// What a module offers, with nothing in it that moves when a body is edited.
+///
+/// **This type exists to be compared.** Salsa stops an invalidation from
+/// spreading when a recomputed value equals the old one, so the question that
+/// decides whether this compiler is incremental in practice is which values
+/// change after a keystroke. [`ItemMap`] changes constantly: it carries a
+/// [`TextRange`] per item, and inserting one character into the *first*
+/// function in a file shifts the span of every declaration below it. Anything
+/// downstream of `item_map` therefore re-ran on every edit -- the module graph,
+/// every importer's [`FileScope`], and every type check behind those.
+///
+/// So the cross-file queries depend on this projection instead. It re-executes
+/// on each edit, costs a walk over the item list, and compares equal, which is
+/// where the invalidation stops. `item_map` keeps its spans for the things that
+/// genuinely need them: diagnostics, and eventually go-to-definition.
+///
+/// Measured on the two-file case in `khora-hir/tests/incremental.rs`: before
+/// this, a one-character body edit re-ran `module_graph` and the importing
+/// file's `file_scope`. After it, neither runs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModuleApi {
+    pub module: Option<ModulePath>,
+    pub items: Vec<ApiItem>,
+    pub variants: Vec<Variant>,
+}
+
+impl ModuleApi {
+    pub fn item(&self, name: &str) -> Option<&ApiItem> {
+        self.items.iter().find(|i| i.name == name)
+    }
+
+    /// Constructors of `type_name`.
+    pub fn variants_of<'a>(&'a self, type_name: &'a str) -> impl Iterator<Item = &'a Variant> + 'a {
+        self.variants.iter().filter(move |v| v.type_name == type_name)
+    }
+}
+
+/// The span-free view of a file's declarations.
+///
+/// Every query that reads *another* file goes through this rather than through
+/// [`item_map`]. See [`ModuleApi`] for why.
+#[salsa::tracked(returns(ref))]
+pub fn module_api(db: &dyn Db, file: SourceFile) -> ModuleApi {
+    let map = item_map(db, file);
+    ModuleApi {
+        module: map.module.clone(),
+        items: map
+            .items
+            .iter()
+            .map(|i| ApiItem { name: i.name.clone(), kind: i.kind, is_public: i.is_public })
+            .collect(),
+        variants: map.variants.clone(),
+    }
+}
+
 /// Collects what one file declares.
 ///
-/// Deliberately reads only this file. Cross-file questions are answered by
-/// [`module_graph`], so a body edit cannot invalidate another file's items.
+/// Deliberately reads only this file, so it can never be invalidated by an edit
+/// to another one. Note that the converse does not follow and was wrong here
+/// for a long time: this map changing does not mean another file's *meaning*
+/// changed, because it carries spans that move for reasons nobody imports.
+/// [`module_api`] is the barrier that makes the difference visible to salsa.
 #[salsa::tracked(returns(ref))]
 pub fn item_map(db: &dyn Db, file: SourceFile) -> ItemMap {
     let parse = khora_db::parse(db, file);
@@ -274,7 +341,6 @@ fn collect_decl(decl: &ast::Decl, map: &mut ItemMap) {
                             map.variants.push(Variant {
                                 type_name: type_name.clone(),
                                 name: case_name,
-                                range: case.syntax().text_range(),
                             });
                         }
                     }
@@ -365,8 +431,11 @@ impl ModuleGraph {
 pub fn module_graph(db: &dyn Db, root: khora_db::SourceRoot) -> ModuleGraph {
     let mut graph = ModuleGraph::default();
     for file in root.files(db) {
-        let map = item_map(db, *file);
-        let Some(path) = map.module.clone() else { continue };
+        // `module_api`, not `item_map`: this reads one field, and depending on
+        // the whole map would rebuild the graph -- and everything behind it --
+        // every time a span moved.
+        let api = module_api(db, *file);
+        let Some(path) = api.module.clone() else { continue };
 
         if graph.modules.iter().any(|(p, _)| p == &path) {
             graph.errors.push(HirError {
@@ -433,8 +502,13 @@ impl FileScope {
 
 /// Resolves a file's imports into the names its bodies may use.
 ///
-/// Reads the *other* modules' item maps, never their bodies, so editing a
-/// function cannot invalidate another file's scope.
+/// Reads other modules through [`module_api`], never through [`item_map`] and
+/// never their bodies, so editing a function cannot invalidate another file's
+/// scope.
+///
+/// That sentence was here before it was true. `item_map` carries a span per
+/// item, so it changed whenever anything above an item was edited, and this
+/// query re-ran for every importer of the edited file.
 #[salsa::tracked(returns(ref))]
 pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     let map = item_map(db, file);
@@ -451,7 +525,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             });
             continue;
         };
-        let exported = item_map(db, source);
+        let exported = module_api(db, source);
 
         match &import.kind {
             ImportKind::Glob => {
@@ -544,7 +618,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             out.origins.iter().find(|o| o.local == "Ord").map(|o| o.module.clone())
         {
             if let Some(source) = graph.file(&home) {
-                let exported = item_map(db, source);
+                let exported = module_api(db, source);
                 if let Some(item) = exported.item("Ordering").filter(|i| i.is_public) {
                     out.names.push((
                         "Ordering".to_string(),
@@ -639,7 +713,7 @@ fn bring_derive_companions(
         return;
     }
 
-    let declared = item_map(db, source);
+    let declared = module_api(db, source);
     // `file_scope` rather than `item_map`, so a name the home module imported
     // is as reachable as one it wrote. Terminates because the branch above
     // stops a module from asking about itself.
