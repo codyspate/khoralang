@@ -1,0 +1,18 @@
+[package]
+name = "khora-pkg"
+description = "Dependency resolution, the lockfile, the package store and the task runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+khora-manifest.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+khora-manifest.workspace = true
+tempfile = "3"

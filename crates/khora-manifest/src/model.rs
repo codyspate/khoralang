@@ -439,6 +439,25 @@ pub struct Dependency {
     /// Where the package is, relative to this manifest.
     #[serde(default)]
     pub path: Option<String>,
+    /// A git repository to fetch the package from.
+    ///
+    /// **Added in phase 10.2, ahead of the registry**, because a `path`
+    /// dependency does not exercise any of what a package manager is for:
+    /// nothing is fetched, so nothing is hashed, pinned or cached, and a
+    /// lockfile over paths alone records almost nothing. A git source is the
+    /// smallest one that is really a source.
+    #[serde(default)]
+    pub git: Option<String>,
+    /// The revision to take from `git` -- a commit id, a tag or a branch.
+    ///
+    /// Resolved to a full commit id before it reaches `khora.lock`, so a
+    /// locked build cannot change under a moved tag.
+    #[serde(default)]
+    pub rev: Option<String>,
+    /// A tag to take from `git`. Spelt separately from `rev` because that is
+    /// how people think about it; they mean the same thing here.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 impl Dependency {
@@ -447,7 +466,7 @@ impl Dependency {
     /// A dependency with neither is the mistake worth naming: it parses, and
     /// then resolves to nothing.
     pub fn is_located(&self) -> bool {
-        self.version.is_some() || self.path.is_some()
+        self.version.is_some() || self.path.is_some() || self.git.is_some()
     }
 }
 

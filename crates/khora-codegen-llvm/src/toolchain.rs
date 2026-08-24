@@ -66,7 +66,27 @@ const SYSTEM_LIBS: &[&str] = &[
 ];
 #[cfg(target_os = "linux")]
 const SYSTEM_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+const SYSTEM_LIBS: &[&str] = &[
+    // The two frameworks are TLS, the same way `bcrypt` is on Windows:
+    // `rustls` reaches the system trust store through `security-framework`,
+    // which is Apple's `Security`, which is built on `CoreFoundation`.
+    //
+    // This list was a placeholder -- `-lSystem -lc -lm` -- until CI ran the
+    // backend on a Mac for the first time and every generated program failed
+    // to link with a page of undefined `_$s...CFError...` symbols. Nothing had
+    // ever exercised it.
+    "-lobjc",
+    "-liconv",
+    "-framework",
+    "CoreFoundation",
+    "-framework",
+    "Security",
+    "-lSystem",
+    "-lc",
+    "-lm",
+];
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 const SYSTEM_LIBS: &[&str] = &["-lSystem", "-lc", "-lm"];
 
 /// The runtime archive generated executables link against.

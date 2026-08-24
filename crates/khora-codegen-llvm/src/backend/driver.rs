@@ -365,7 +365,19 @@ fn target_machine() -> Result<TargetMachine, Vec<HirError>> {
             CPU,
             FEATURES,
             OptimizationLevel::Default,
-            RelocMode::Default,
+            // **`PIC`, not `Default`.** `Default` means the target's
+            // traditional model, which on x86-64 Linux is absolute addressing
+            // -- and every mainstream distribution now builds executables as
+            // position-independent, so the link fails with
+            //
+            //     relocation R_X86_64_32 against `.rodata.str1.1` can not be
+            //     used when making a PIE object; recompile with -fPIE
+            //
+            // naming a flag that means nothing here, because nothing was
+            // compiled with a C compiler. Windows and macOS already produce
+            // position-independent code whatever this says, so asking for it
+            // everywhere costs nothing and removes a per-platform branch.
+            RelocMode::PIC,
             CodeModel::Default,
         )
         .ok_or_else(|| vec![backend_error("creating the target machine")])
