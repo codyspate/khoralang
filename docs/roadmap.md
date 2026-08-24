@@ -2129,6 +2129,32 @@ Ordered by value, not by §6's numbering.
   from; `link` registers a build already on disk, and copies rather than
   symlinks so a `cargo clean` cannot leave a toolchain pointing at nothing.
 
+- **10.5.6 An MCP server, so an agent can ask the compiler — done.**
+  `crates/khora-mcp`, started by `khora mcp`. Also not previously on this list.
+
+  **The premise is that no model has seen Khora.** An agent asked to write some
+  produces something plausible — it borrows enough syntax from Rust and enough
+  ideas from Effect that a good guess is easy — and is wrong in ways it cannot
+  detect by reading. The failures with no analogue elsewhere are the expensive
+  ones: a capability that must appear in a `with` row, an error that must
+  appear in `raises`, `Share` on anything crossing into a fiber.
+
+  So the server is not documentation. It is `khora_check`: the agent writes
+  Khora, the real compiler answers with real diagnostics against the real
+  `std`, and the agent learns from the answer. That loop needs no training data
+  and cannot go stale, because the thing answering is the thing that will
+  compile the code. Four other tools — searching `std`, the grammar, the design
+  notes, the formatter — exist so the first guess is worth checking.
+
+  Version-aware for free: `khora mcp` goes through the toolchain shim, so a
+  pinned project gets that compiler and that `std` answering.
+
+  Two things to know. The transport is **newline-delimited JSON**, which is MCP
+  stdio and is *not* what `khora-lsp` uses — LSP frames with `Content-Length`,
+  and confusing the two gives a client that hangs on the first message. And a
+  tool failure comes back as content with `isError` rather than as a JSON-RPC
+  error, because an agent can read the first and usually cannot see the second.
+
 - **10.6 Cross-targets**: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`.
 - **10.7 WASM build plugins** via wasmtime. Last: largest scope, least critical,
   and it needs D4 settled first.

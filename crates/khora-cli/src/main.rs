@@ -50,6 +50,12 @@ enum Command {
         #[command(subcommand)]
         command: ToolchainCommand,
     },
+    /// Speak the Model Context Protocol on stdin and stdout.
+    ///
+    /// For an AI coding agent: no model has training data for Khora, so this
+    /// lets one ask the compiler instead of guessing. Started by the agent's
+    /// client, not by a person.
+    Mcp,
     /// Speak the Language Server Protocol on stdin and stdout.
     ///
     /// Not for a person to run: an editor starts it. Running it by hand gets a
@@ -131,6 +137,7 @@ fn run() -> Result<bool> {
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out } => build(&path, out.as_deref()),
         Command::Lsp => lsp().map(|()| true),
+        Command::Mcp => mcp().map(|()| true),
         Command::Toolchain { command } => toolchain(command),
         Command::Test { path, filter } => test(&path, filter.as_deref()),
         Command::Bench { path, filter } => bench(&path, filter.as_deref()),
@@ -243,6 +250,24 @@ fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintL
         out.insert(name.clone(), lint.level);
     }
     out
+}
+
+/// Runs the MCP server over stdin and stdout.
+///
+/// Newline-delimited JSON, unlike `lsp`, which frames with `Content-Length`.
+/// Anything this needs to say goes to stderr, because stdout is the protocol.
+fn mcp() -> Result<()> {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprintln!(
+            "khora mcp speaks the Model Context Protocol on stdin and stdout, so it is 
+             waiting for a JSON message rather than for you. Point an agent at it instead."
+        );
+    }
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    khora_mcp::serve(&mut input, &mut output)
 }
 
 /// `khora toolchain ...`.

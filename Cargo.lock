@@ -568,6 +568,7 @@ dependencies = [
  "khora-lint",
  "khora-lsp",
  "khora-manifest",
+ "khora-mcp",
  "khora-pkg",
  "khora-syntax",
  "khora-toolchain",
@@ -660,6 +661,21 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "toml",
+]
+
+[[package]]
+name = "khora-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "khora-db",
+ "khora-fmt",
+ "khora-hir",
+ "khora-syntax",
+ "khora-types",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

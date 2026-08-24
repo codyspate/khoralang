@@ -15,6 +15,7 @@ khora-syntax.workspace = true
 khora-db.workspace = true
 khora-lint.workspace = true
 khora-lsp.workspace = true
+khora-mcp.workspace = true
 khora-manifest.workspace = true
 khora-pkg.workspace = true
 khora-toolchain.workspace = true
