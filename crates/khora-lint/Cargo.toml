@@ -1,0 +1,15 @@
+[package]
+name = "khora-lint"
+description = "Lints that need types: unused capabilities, statements that do nothing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+khora-db.workspace = true
+khora-hir.workspace = true
+khora-types.workspace = true
+khora-manifest.workspace = true
+salsa.workspace = true
+text-size.workspace = true

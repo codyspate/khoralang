@@ -426,6 +426,7 @@ dependencies = [
  "khora-diagnostics",
  "khora-fmt",
  "khora-hir",
+ "khora-lint",
  "khora-manifest",
  "khora-pkg",
  "khora-syntax",
@@ -477,6 +478,18 @@ version = "0.1.0"
 dependencies = [
  "khora-db",
  "khora-syntax",
+ "khora-types",
+ "salsa",
+ "text-size",
+]
+
+[[package]]
+name = "khora-lint"
+version = "0.1.0"
+dependencies = [
+ "khora-db",
+ "khora-hir",
+ "khora-manifest",
  "khora-types",
  "salsa",
  "text-size",

@@ -9,7 +9,10 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
-use khora_diagnostics::{render_hir_errors, render_parse_errors};
+use khora_diagnostics::{
+    render_hir_errors, render_hir_errors_as, render_parse_errors, Severity,
+};
+use khora_manifest::LintLevel;
 
 #[derive(Parser)]
 #[command(name = "khora", version, about = "The Khora language toolchain")]
@@ -99,7 +102,13 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
     }
     SourceRoot::new(&db, inputs.iter().map(|(_, f)| *f).collect());
 
+    // One project's policy about how loud each lint is, read once. A file
+    // outside any package gets the defaults, which is right: `khora check
+    // scratch.kh` should work without a manifest.
+    let levels = lint_levels(paths.first().map(PathBuf::as_path));
+
     let mut total = 0usize;
+    let mut warnings = 0usize;
     for (path, input) in &inputs {
         let parse = khora_db::parse(&db, *input);
         let text = input.text(&db);
@@ -119,15 +128,69 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
             total += semantic.len();
             eprintln!("{}", render_hir_errors(path, text, semantic));
             eprintln!();
+            // Lints on a file with type errors are noise: the reader has real
+            // problems to fix, and half of what a lint sees downstream of one
+            // is an artefact of it.
+            continue;
+        }
+
+        for finding in khora_lint::findings(&db, *input) {
+            let level = levels.get(finding.lint).copied().unwrap_or(LintLevel::Warn);
+            if level == LintLevel::Allow {
+                continue;
+            }
+            let error = khora_hir::HirError {
+                message: format!("{} [{}]", finding.message, finding.lint),
+                range: finding.range,
+            };
+            // A `warn` lint that prints `error:` and then exits zero teaches
+            // people that the word means nothing.
+            let severity = match level {
+                LintLevel::Deny => Severity::Error,
+                _ => Severity::Warning,
+            };
+            eprintln!(
+                "{}",
+                render_hir_errors_as(path, text, std::slice::from_ref(&error), severity)
+            );
+            eprintln!();
+            match level {
+                LintLevel::Deny => total += 1,
+                _ => warnings += 1,
+            }
         }
     }
 
-    if total == 0 {
+    if total == 0 && warnings == 0 {
         println!("checked {} file(s): no errors", files.len());
+    } else if total == 0 {
+        println!("checked {} file(s): no errors, {warnings} warning(s)", files.len());
     } else {
         eprintln!("{total} error(s) across {} file(s)", files.len());
     }
     Ok(total == 0)
+}
+
+/// How loud each lint is, from the `[lints]` table nearest `start`.
+///
+/// A lint the manifest does not mention warns. That is the useful default for
+/// this set — both are quiet enough to be worth hearing about and neither is
+/// worth failing a build over — and `[lints]` is where a project disagrees.
+///
+/// A manifest that cannot be read contributes nothing rather than failing the
+/// command, which is the same rule `dependencies_of` follows and for the same
+/// reason: `khora check` on the manifest is the thing whose job it is to
+/// complain about the manifest.
+fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintLevel> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(manifest_path) = start.and_then(nearest_manifest) else { return out };
+    let Ok(text) = std::fs::read_to_string(&manifest_path) else { return out };
+    let Ok(parsed) = khora_manifest::Manifest::parse(&text) else { return out };
+
+    for (name, lint) in &parsed.manifest.lints {
+        out.insert(name.clone(), lint.level);
+    }
+    out
 }
 
 /// Formats files in place, or reports which would change.

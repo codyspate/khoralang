@@ -11,6 +11,7 @@ members = [
     "crates/khora-rt",
     "crates/khora-codegen-llvm",
     "crates/khora-manifest",
+    "crates/khora-lint",
     "crates/khora-pkg",
     "crates/khora-cli",
 ]
@@ -34,6 +35,7 @@ khora-perceus = { path = "crates/khora-perceus" }
 khora-rt = { path = "crates/khora-rt" }
 khora-codegen-llvm = { path = "crates/khora-codegen-llvm" }
 khora-manifest = { path = "crates/khora-manifest" }
+khora-lint = { path = "crates/khora-lint" }
 khora-pkg = { path = "crates/khora-pkg" }
 
 salsa = "0.28"

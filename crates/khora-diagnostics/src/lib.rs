@@ -137,3 +137,22 @@ pub fn render_hir_errors(path: &Path, source: &str, errors: &[HirError]) -> Stri
     let diagnostics: Vec<_> = errors.iter().map(Diagnostic::from_hir_error).collect();
     render_all(path, source, &diagnostics)
 }
+
+/// The same again, at a severity the caller chooses.
+///
+/// A lint set to `warn` is not an error and must not print as one — a build
+/// that prints `error:` and then succeeds teaches people that the word means
+/// nothing. Lints are the only thing whose severity is a decision rather than a
+/// fact, which is why this is the only entry point that takes one.
+pub fn render_hir_errors_as(
+    path: &Path,
+    source: &str,
+    errors: &[HirError],
+    severity: Severity,
+) -> String {
+    let diagnostics: Vec<_> = errors
+        .iter()
+        .map(|e| Diagnostic { severity, ..Diagnostic::from_hir_error(e) })
+        .collect();
+    render_all(path, source, &diagnostics)
+}

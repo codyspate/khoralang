@@ -1989,8 +1989,29 @@ Ordered by value, not by §6's numbering.
     everything, and `khora-cli/tests/permissions.rs` holds both the refusal and
     the two cases saying the hole is no wider than documented.
 
-- **10.3 Linter** (needs types): unused capability, dangling pure expression,
-  redundant match arm.
+- **10.3 Linter — done, two of three.** `crates/khora-lint`, wired to the
+  `[lints]` table through `khora check`. The third the entry asked for already
+  existed: a `match` arm that cannot be reached is a *type error*, out of the
+  same usefulness algorithm that decides exhaustiveness, and making it a lint
+  as well would give one mistake two voices.
+
+  `std`, all three examples and `bench/service` are clean.
+
+  **Both are narrow on purpose.** A lint people learn to ignore is worse than
+  no lint, so where a judgement was available each takes the quiet side.
+  `dangling-expression` reports only an expression that *cannot* do anything —
+  no call, no assignment, nothing that could raise — which leaves out the
+  interesting case of a call whose result is discarded, because deciding that
+  needs a purity analysis rather than a table. `unused-capability` stays silent
+  whenever the body contains any call, because a call may be forwarding the
+  capability without naming it.
+
+  Sharpening the second is a small, well-defined piece of work: `BodyTypes`
+  needs a per-call-site record of the labels the callee required. The checker
+  computes exactly that in `check/effects.rs` to do its row subtraction and
+  then drops it; `lambda_captures` is the same fact published for a different
+  consumer and is the shape to copy. With it, "used" becomes "read, or required
+  by something this body calls" and the call-free restriction goes away.
 - **10.4 LSP** over the salsa database: diagnostics, hover, completion,
   capability inlay hints, rename.
 - **10.5 `khora bench`**, and `khora test` grown up: filtering, snapshots with
