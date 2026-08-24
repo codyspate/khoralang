@@ -1943,30 +1943,52 @@ Ordered by value, not by §6's numbering.
   rather than adding a bug to fix. From `docs/design/testing.md`.~~
 - **10.1 Apply D12 at publication.** Phase 8.5 decides the policy; this is where
   package metadata, the resolver and release tooling begin enforcing it.
-- **10.2 `khora-pkg`**: `khora.lock` with SHA-256 hashes, content-addressed
-  cache, DAG task runner. Also what finally lets the orphan rule be *enforced*,
-  which needs cross-package resolution — and the `extern` allow-list from D4,
-  which is the rule that turns the permission system from a convention into a
-  guarantee and cannot be written until a declaration belongs to a package.
+- **10.2 `khora-pkg` — mostly done.** `khora.lock`, a content-addressed store,
+  transitive resolution and the task DAG all exist, and the exit criterion
+  below is met. `crates/khora-pkg`, and `khora-codegen-llvm/tests/packages.rs`
+  is the end-to-end proof.
 
-  Two things the outside review left here, both of which fire at this bullet
-  rather than at a later one:
+  **A `git` source was added ahead of the registry.** The manifest modelled
+  `path` and `version`, and neither exercises what a package manager is for: a
+  path is not fetched, so nothing is hashed, pinned or cached, and `version`
+  needs a registry that does not exist. `{ git = "...", rev = "..." }` is the
+  smallest source that is really a source, and a git dependency with no
+  revision is refused rather than quietly taking the default branch.
 
-  - **Give the borrow table an owner before a stranger writes an intrinsic.**
-    `borrowed_arguments()` in `khora-perceus` is a calling convention
-    maintained in a different place from the declarations it describes, so the
-    runtime, the checker, Perceus and lowering can eventually disagree about
-    whether an argument is borrowed — and the symptom of disagreement is a use
-    after free, not a type error. Inside `std` it is survivable because one
-    person edits both places. Cross-package resolution is exactly the moment
-    that stops being true. The fix and its reasoning are in
-    `docs/design/reuse.md` §"The borrow table is a second calling convention":
-    attach ownership to the intrinsic's declaration.
-  - **Test that the `extern` hole is where it is claimed to be.**
-    `permissions.md` says the gate over Khora code is total and that `extern`
-    goes around it. A documented hole is a decision; an undocumented one is a
-    vulnerability, and only a test tells them apart. Write it beside the
-    allow-list, asserting the hole is exactly that wide and no wider.
+  A git package is pinned twice, to a full commit id and to the SHA-256 of the
+  tree it produced. The commit id is what a server said it was serving; the
+  hash is what arrived, and them disagreeing is the case a lockfile exists for.
+
+  There is **no version solver**, because every source names one exact thing.
+  Two packages wanting different revisions of a third is therefore an error
+  naming both askers. That is where a solver goes when a registry arrives.
+
+  Still open here: the orphan rule is not yet *enforced* across packages, and
+  the registry and `khora publish` do not exist.
+
+  Both things the outside review left at this bullet are done:
+
+  - **The borrow table's rule is enforced rather than remembered.**
+    `borrowed_arguments()`'s doc comment always said only bodyless declarations
+    may appear, because a Khora body owns its parameters and releases them.
+    Nothing checked it, and packages made it uncheckable by hand: the key is a
+    bare type name, and anybody may declare a `Shared` with a `get`. The
+    planner now takes `Defined` — what the program implements in Khora — and
+    consults the table only for a pair nothing implements.
+
+    Worth knowing before touching it: restricting the table to types `std`
+    declares is the obvious fix and is **wrong**. A self-contained program may
+    declare its own `Region` and let the runtime implement `defer`, which most
+    of the backend's tests do, and refusing to lend to them reorders
+    finalizers. `docs/design/reuse.md` §1.
+  - **The `extern` hole is closed, not merely tested.** `permissions.md` had
+    carried it as "cannot be implemented yet, because packages do not exist",
+    which stopped being true earlier in this same phase — going to write the
+    test is what noticed. `[permissions] extern = [..]` now decides which
+    packages may declare a foreign function; `std` always may, absent grants
+    everything, and `khora-cli/tests/permissions.rs` holds both the refusal and
+    the two cases saying the hole is no wider than documented.
+
 - **10.3 Linter** (needs types): unused capability, dangling pure expression,
   redundant match arm.
 - **10.4 LSP** over the salsa database: diagnostics, hover, completion,
@@ -1980,10 +2002,31 @@ Ordered by value, not by §6's numbering.
 Note that A7 pulls the *quality* of diagnostics and LSP latency forward into
 Phases 2 and 3. What remains here is surface area, not standards.
 
-**Exit:** a package built outside this repository, resolved through
-`khora.lock`, and used by the reference application — and 10.0's test still
-passing, since a resolver is the most likely thing to make item collection
-depend on something it should not.
+**Exit — met for 10.0 and 10.2.** A package built outside this repository,
+resolved through `khora.lock`, compiled and run:
+
+```
+$ khora build src/main.kh
+built ticket from 14 module(s)
+$ ./ticket
+910a2dec-8902-4cc1-beeb-8da1658eec67
+```
+
+`uuid` is at `~/dev/khora-uuid` — RFC 4122 version 4, eleven of its own tests,
+no permissions at all because randomness arrives as the caller's capability. It
+is not in this repository and not in `std`.
+
+The repository's own proof is a test rather than an example, because an example
+whose manifest reads `file:///C:/Users/...` builds on one machine.
+`khora-codegen-llvm/tests/packages.rs` builds the repository, the commit, the
+manifest and the app in a temporary directory, then compiles and runs. The
+package it builds has a type, an `impl` of a standard library trait and a
+generic, so the expected output only appears if a dependency's types are
+visible, its trait impls are found by the consumer's checker, and
+monomorphization crossed the boundary.
+
+10.0's test still passes, which was the thing to watch: a resolver is the most
+likely thing to make item collection depend on something it should not.
 
 **Watch D15 throughout.** Not an item to schedule; a thing to notice. The
 trigger is measurable and this is the phase where a language server starts
