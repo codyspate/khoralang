@@ -58,8 +58,7 @@ impl Show for ReportSpec {
 /// yet — and because `Show` is what `Response::json` asks for until there is.
 impl Show for AnalysisReport {
   fn show(self) -> String {
-    "{\"account_id\": \"" + self.account_id + "\", \"risk\": \"" + RiskLevel::show(self.risk)
-    + "\", \"confidence\": " + Int::to_string(self.confidence_percent()) + "}"
+    "{\"account_id\": \"${self.account_id}\", \"risk\": \"${RiskLevel::show(self.risk)}\", \"confidence\": ${Int::to_string(self.confidence_percent())}}"
   }
 }
 

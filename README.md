@@ -27,9 +27,10 @@ either portable or already had a file per platform.
 
 ### What the language has
 
-Algebraic data types and records, generics with higher-kinded types and const
-generics, traits with `derive(Eq, Ord, Show, Hash, ToJson, FromJson)`, closures,
-pattern matching with exhaustiveness and reachability, `while`/`loop`/`for`,
+Algebraic data types, records and tuples, generics with higher-kinded types and
+const generics, traits with `derive(Eq, Ord, Show, Hash, ToJson, FromJson)`,
+closures, string interpolation, pattern matching with exhaustiveness and
+reachability, irrefutable destructuring in a `let`, `while`/`loop`/`for`,
 direct-style algebraic effects (`with` and `raises` rows, handlers, `!` at
 fallible call sites), structured concurrency with nurseries, and a sharing
 discipline that decides what may cross into another fiber.

@@ -31,7 +31,7 @@
 
 use khora_db::{Db, SourceFile};
 use khora_syntax::ast::{self, AstNode};
-use text_size::TextRange;
+use text_size::{TextRange, TextSize};
 
 use crate::{item_map, HirError};
 
@@ -532,6 +532,7 @@ fn lower_test(
     block: &ast::Block,
 ) -> Body {
     let mut ctx = Ctx {
+        range_shift: 0,
         body: Body::default(),
         scopes: vec![Vec::new()],
         map,
@@ -615,6 +616,7 @@ fn lower_function(
     }
 
     let mut ctx = Ctx {
+        range_shift: 0,
         body: Body::default(),
         scopes: vec![Vec::new()],
         map,
@@ -690,6 +692,12 @@ struct Ctx<'a> {
     /// lowered into the initializer, so a module-level `let` is a constant
     /// rather than a global.
     constants: &'a [(String, ast::ConstDecl)],
+    /// How far the tree being lowered sits from the start of the file.
+    ///
+    /// Zero for the file's own tree. An interpolated `${..}` is parsed as a
+    /// little source file of its own, so its ranges start again at zero and
+    /// have to be moved back to where the text actually is.
+    range_shift: u32,
     /// The constants currently being expanded, innermost last.
     ///
     /// `let a = b; let b = a;` is a cycle, and inlining is what turns a cycle
@@ -717,8 +725,20 @@ struct Ctx<'a> {
 impl<'a> Ctx<'a> {
     fn add_expr(&mut self, expr: Expr, range: TextRange) -> ExprId {
         self.body.exprs.push(expr);
-        self.body.expr_ranges.push(range);
+        self.body.expr_ranges.push(self.shifted(range));
         ExprId((self.body.exprs.len() - 1) as u32)
+    }
+
+    /// Moves a range from the tree it was measured in to the file it belongs to.
+    ///
+    /// Zero everywhere except inside `${..}`, whose expression is parsed on its
+    /// own — see [`Ctx::lower_interpolation`]. Without this a diagnostic about
+    /// an interpolated expression points at the top of the file.
+    fn shifted(&self, range: TextRange) -> TextRange {
+        match self.range_shift {
+            0 => range,
+            shift => range + TextSize::from(shift),
+        }
     }
 
     /// Adds a call, remembering which bindings could supply its capabilities.
@@ -758,6 +778,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn declare(&mut self, name: String, is_mut: bool, range: TextRange) -> LocalId {
+        let range = self.shifted(range);
         self.body.locals.push(Local { name: name.clone(), is_mut, range });
         let id = LocalId((self.body.locals.len() - 1) as u32);
         self.scopes.last_mut().expect("a scope is always open").push((name, id));
@@ -795,6 +816,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn error(&mut self, message: impl Into<String>, range: TextRange) {
+        let range = self.shifted(range);
         self.body.errors.push(HirError { message: message.into(), range });
     }
 
@@ -917,10 +939,17 @@ impl<'a> Ctx<'a> {
     fn lower_expr(&mut self, expr: &ast::Expr) -> ExprId {
         let range = expr.syntax().text_range();
         match expr {
-            ast::Expr::Literal(e) => match literal_of(e.syntax()) {
-                Some(lit) => self.add_expr(Expr::Literal(lit), range),
-                None => self.add_expr(Expr::Missing, range),
-            },
+            ast::Expr::Literal(e) => {
+                let text = e.syntax().text().to_string();
+                if text.starts_with('"') && has_interpolation(&text)
+                {
+                    return self.lower_interpolation(&text, range);
+                }
+                match literal_of(e.syntax()) {
+                    Some(lit) => self.add_expr(Expr::Literal(lit), range),
+                    None => self.add_expr(Expr::Missing, range),
+                }
+            }
             ast::Expr::Path(e) => self.lower_path_expr(e, range),
             ast::Expr::Block(b) => self.lower_block(b),
             ast::Expr::Paren(e) => match e.syntax().children().find_map(ast::Expr::cast) {
@@ -1337,6 +1366,92 @@ impl<'a> Ctx<'a> {
             },
             range,
         )
+    }
+
+    /// `"a ${e} b"` is `"a " + e + " b"`.
+    ///
+    /// **The parts are joined with the operator somebody would have written.**
+    /// That is the whole of the feature: `+` on strings already exists, already
+    /// checks that both sides are `String`, and already says
+    /// *"string concatenation: expected `String`, found `Int`"* when they are
+    /// not — which is the right diagnostic for `"${count}"`, pointing at the
+    /// expression rather than at the string.
+    ///
+    /// Nothing was added to the lexer or the grammar. A string literal is still
+    /// one token; the interpolations are found in its text here, and each is
+    /// parsed as a source file of its own. That keeps the change to one pass at
+    /// the cost of `range_shift`, which is what puts a diagnostic about an
+    /// interpolated expression back where the text is.
+    ///
+    /// `\$` is a literal dollar, so a template for some other tool still fits
+    /// in a Khora string.
+    fn lower_interpolation(&mut self, text: &str, range: TextRange) -> ExprId {
+        // Offsets are into the file, so the opening quote is where the literal
+        // starts and the body is one byte past it.
+        let body_at = u32::from(range.start()) + 1;
+        let parts = split_interpolation(strip_quotes(text));
+
+        let mut joined: Option<ExprId> = None;
+        for part in parts {
+            let piece = match part {
+                Part::Text(raw) => {
+                    let at = body_at + raw.at;
+                    let width = raw.text.len() as u32;
+                    let span = TextRange::at(TextSize::from(at), TextSize::from(width));
+                    self.add_expr(Expr::Literal(Literal::Str(unescape_body(&raw.text))), span)
+                }
+                Part::Hole(raw) => self.lower_fragment(&raw.text, body_at + raw.at),
+            };
+            joined = Some(match joined {
+                None => piece,
+                Some(left) => self.add_expr(
+                    Expr::Binary { op: BinOp::Add, lhs: left, rhs: piece },
+                    range,
+                ),
+            });
+        }
+
+        // `"${}"` has no parts at all, and is the empty string.
+        joined.unwrap_or_else(|| {
+            self.add_expr(Expr::Literal(Literal::Str(String::new())), range)
+        })
+    }
+
+    /// Parses one `${..}` and lowers it into this body.
+    ///
+    /// The wrapper is a whole source file because that is what the parser
+    /// takes, and a `const` because its initializer is one accessor away —
+    /// digging a tail expression out of a function body would be more code for
+    /// the same result.
+    fn lower_fragment(&mut self, source: &str, at: u32) -> ExprId {
+        const PREFIX: &str = "module i;\nconst i = ";
+        let wrapped = format!("{PREFIX}{source};\n");
+        let parsed = khora_syntax::parse(&wrapped);
+
+        let found = parsed
+            .source_file()
+            .decls()
+            .find_map(|item| match item {
+                ast::Decl::Const(c) => c.initializer(),
+                _ => None,
+            })
+            .filter(|_| parsed.errors().is_empty());
+
+        let Some(expr) = found else {
+            let width = source.len().max(1) as u32;
+            let span = TextRange::at(TextSize::from(at), TextSize::from(width));
+            self.error("this `${..}` does not contain an expression", span);
+            return self.add_expr(Expr::Missing, span);
+        };
+
+        // The fragment's ranges are measured from the start of `wrapped`, and
+        // the expression begins right after the prefix — so moving them by
+        // `at - PREFIX.len()` puts them exactly where the source text is.
+        let outer = self.range_shift;
+        self.range_shift = at.wrapping_sub(PREFIX.len() as u32);
+        let lowered = self.lower_expr(&expr);
+        self.range_shift = outer;
+        lowered
     }
 
     /// `[a, b, c]` is `List::Cons(a, List::Cons(b, List::Cons(c, List::Nil)))`.
@@ -1813,10 +1928,113 @@ impl<'a> Ctx<'a> {
 ///
 /// Only the outermost pair of quotes is removed. `trim_matches` took them all,
 /// so `""""` lost more than it should have.
-fn unescape(text: &str) -> String {
-    let inner = text.strip_prefix('"').unwrap_or(text);
-    let inner = inner.strip_suffix('"').unwrap_or(inner);
+/// One piece of an interpolated string, and where in the literal it began.
+struct Piece {
+    text: String,
+    /// Bytes from the start of the literal's *body*, past the opening quote.
+    at: u32,
+}
 
+enum Part {
+    Text(Piece),
+    Hole(Piece),
+}
+
+/// Whether a literal has a `${` that is not escaped.
+///
+/// Scanning for the escape matters: `"\\${x}"` is a literal dollar followed by
+/// a brace, which is what somebody writing a shell snippet or a JSON template
+/// into a Khora string means.
+fn has_interpolation(text: &str) -> bool {
+    let body = strip_quotes(text);
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'$' if bytes.get(i + 1) == Some(&b'{') => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+fn strip_quotes(text: &str) -> &str {
+    let inner = text.strip_prefix('"').unwrap_or(text);
+    inner.strip_suffix('"').unwrap_or(inner)
+}
+
+/// Splits a literal's body into the text around its `${..}` holes.
+///
+/// **Braces are counted, and strings inside are skipped**, so
+/// `${f("}", x)}` and `${g({ a: 1 })}` both end where they should rather than
+/// at the first `}`. An unclosed hole runs to the end of the literal and is
+/// reported by `lower_fragment`, which cannot parse it.
+fn split_interpolation(body: &str) -> Vec<Part> {
+    let bytes = body.as_bytes();
+    let mut parts = Vec::new();
+    let mut text = String::new();
+    let mut text_at = 0u32;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            text.push_str(&body[i..i + 2]);
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
+            if !text.is_empty() {
+                parts.push(Part::Text(Piece { text: std::mem::take(&mut text), at: text_at }));
+            }
+            let start = i + 2;
+            let mut depth = 1usize;
+            let mut j = start;
+            let mut quoted = false;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' if quoted => j += 1,
+                    b'"' => quoted = !quoted,
+                    b'{' if !quoted => depth += 1,
+                    b'}' if !quoted => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end = j.min(bytes.len());
+            parts.push(Part::Hole(Piece {
+                text: body[start..end].to_string(),
+                at: start as u32,
+            }));
+            i = (end + 1).min(bytes.len());
+            text_at = i as u32;
+            continue;
+        }
+        text.push_str(&body[i..i + 1]);
+        i += 1;
+    }
+    if !text.is_empty() {
+        parts.push(Part::Text(Piece { text, at: text_at }));
+    }
+    parts
+}
+
+/// [`unescape`] for a body whose quotes are already off.
+fn unescape_body(inner: &str) -> String {
+    unescape_inner(inner)
+}
+
+fn unescape(text: &str) -> String {
+    let inner = strip_quotes(text);
+    unescape_inner(inner)
+}
+
+fn unescape_inner(inner: &str) -> String {
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
@@ -1832,6 +2050,9 @@ fn unescape(text: &str) -> String {
             Some('\\') => out.push('\\'),
             Some('"') => out.push('"'),
             Some('\'') => out.push('\''),
+            // A literal dollar, so a template for another tool still fits in a
+            // Khora string now that `${` means something.
+            Some('$') => out.push('$'),
             Some(other) => {
                 out.push('\\');
                 out.push(other);

@@ -414,7 +414,7 @@ fn port() -> Int
 export fn main() raises HttpError {
   with { env: Env::real(), clock: Clock::real(), fs: Fs::real(), random: Random::real() } {
     let store: Store = { links: Shared::of(load()), started: clock.monotonic_millis() };
-    print("restored " + Int::to_string(Dict::size(Shared::get(store.links))) + " link(s)");
+    print("restored ${Int::to_string(Dict::size(Shared::get(store.links)))} link(s)");
 
     // `SharedFn::of` at each mount is what lets the whole router cross into
     // the fiber answering a connection: a closure's captures are not in its

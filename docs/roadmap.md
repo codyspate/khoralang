@@ -1766,13 +1766,39 @@ compiler that does not know what it supports.
   The tarball is only needed on Windows — which is fortunate, because the LLVM
   22.1.8 release publishes binaries for Windows and `armv7a-linux` and nothing
   else. There was never a Linux or macOS tarball to point at.
-- **9.5.4 String interpolation, or a hard error.** `"hello ${name}"` compiles
-  and prints `hello ${name}`. Silently meaning something else is the worst of
-  the three options; refusing it is better than that, and interpolating is
-  better still.
+- **9.5.4 String interpolation — done.** `"hello ${name}"` compiled and printed
+  `hello ${name}`. That is what every language without interpolation does, and
+  it is still a trap for anyone arriving from JavaScript, Kotlin or Swift,
+  because it is wrong silently rather than loudly.
+
+  `"a ${e} b"` is now `"a " + e + " b"`. Joining with the operator somebody
+  would have written is the whole of the feature: `+` on strings already
+  requires both sides to be `String` and already says *"string concatenation:
+  expected `String`, found `Int`"*, which is the right thing to say about
+  `"${count}"`. Numbers go through `Int::to_string` as they always did.
+
+  **Nothing was added to the grammar.** A string literal is still one token; the
+  holes are found in its text during HIR lowering and each is parsed as a little
+  source file of its own. The cost of that is `Ctx::range_shift`, which moves a
+  fragment's ranges back to where the text is — without it every diagnostic
+  about an interpolated expression points at the top of the file. With it, the
+  caret lands on the name.
+
+  The lexer learned exactly one thing: a `"` inside a hole opens a nested string
+  rather than ending the literal. Without it `"${f("x")}"` ends at the third
+  quote and the rest of the line lexes as code, arriving as `expected )` — the
+  same fail-further-down shape this phase exists to remove. `\$` is a literal
+  dollar, so a template for another tool still fits in a Khora string, and `${}`
+  is refused rather than quietly becoming `""`.
+
+  Both reference applications use it now, which is the only real test of whether
+  it reads better.
 
 **Exit:** someone with a Mac and no prior knowledge can install the compiler and
 write a hundred lines without hitting a wall that isn't their own mistake.
+
+Three of the four are done. What is left is a green CI run on a real Mac, which
+needs the workflow to have run once.
 
 ---
 

@@ -123,16 +123,39 @@ fn lex_block_comment(lex: &mut Lexer<Tok>) -> bool {
 
 /// Consumes a double-quoted string literal with backslash escapes. An
 /// unterminated literal ends at the newline so recovery stays line-local.
+///
+/// **`${..}` is part of the literal, quotes and all.** A string stays one token
+/// — interpolation is taken apart in `khora-hir`, not here — so the only thing
+/// this has to know is that a `"` inside a hole opens a nested string rather
+/// than ending the literal. Without that, `"${f("x")}"` ends at the third quote
+/// and the rest of the line lexes as code, which surfaces as `expected )`
+/// several tokens later and points at nothing to do with strings.
+///
+/// Braces are counted so a hole may contain them. A newline still ends the
+/// literal whatever the depth: an unclosed `${` is a mistake, and swallowing
+/// the rest of the file for it would turn one bad line into a bad file.
 fn lex_string(lex: &mut Lexer<Tok>) -> bool {
     let rest = lex.remainder();
     let mut escaped = false;
-    for (i, c) in rest.char_indices() {
+    // How many `${` are open, and whether a nested string is open inside one.
+    let mut holes = 0usize;
+    let mut nested = false;
+    let mut chars = rest.char_indices().peekable();
+
+    while let Some((i, c)) = chars.next() {
         if escaped {
             escaped = false;
             continue;
         }
         match c {
             '\\' => escaped = true,
+            '$' if !nested && chars.peek().map(|(_, c)| *c) == Some('{') => {
+                chars.next();
+                holes += 1;
+            }
+            '{' if holes > 0 && !nested => holes += 1,
+            '}' if holes > 0 && !nested => holes -= 1,
+            '"' if holes > 0 => nested = !nested,
             '"' => {
                 lex.bump(i + 1);
                 return true;
