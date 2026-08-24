@@ -134,6 +134,48 @@ Note what is *not* on that list: HTTP, JSON, and collections. Those are a few
 weeks each and they would be better in Khora, because they can be generic over
 their effects instead of being wrapped in something that is not.
 
+## What `std` reserves, and what it does not
+
+A standard library that ships a web framework can do it two ways. It can be the
+framework, and every alternative starts from a socket; or it can be the layer
+underneath one, and the framework it happens to ship is the first consumer of a
+public API. `std::net::http` is the second, and it is worth writing down because
+it is the difference between an ecosystem with one HTTP library and an ecosystem
+with several.
+
+Three layers, and only the top one is `Router`'s:
+
+- **Codec.** `parse`, `Response::rendered`, `percent_decode`, `matches` for
+  `:name` path patterns, and the `Request`/`Response`/`Method`/`Header` types.
+- **Connection.** `Connection` and `Incoming`: reading until a request is whole,
+  `Content-Length` framing, holding what a pipelining client sent early,
+  refusing one that will not fit, and the `Connection` header. Plus
+  `request_length` for anyone who wants their own buffer strategy, and
+  `Transport` — three closures — so a framework can serve over a socket, over
+  TLS, or over an in-memory pipe in its own tests.
+- **Router.** Optional, and written against the two below it with no privileged
+  access to either.
+
+**The middle layer is the one that matters.** A router is a matter of taste and
+a weekend; framing a request correctly is neither. It is also the part that
+fails in production rather than in testing — a truncated request at a packet
+boundary, two requests read as one — so leaving each framework to derive it
+again is how an ecosystem gets three subtly broken HTTP servers. Splitting it
+out immediately found a bug `Router` had carried: a pipelined second request was
+read as "the client has gone" and dropped, which no test using `curl` could see,
+because `curl` waits for each answer before sending the next.
+
+**Concurrency is not in any of the three.** Nothing below `Router`'s accept loop
+spawns; `Router` gives each connection a fiber and that is a decision of the
+accept loop. A synchronous server, or one with a bounded pool, is written
+against exactly the same `Connection`. `crates/khora-codegen-llvm/tests/http_layers.rs`
+is a middleware-chain framework with no `Router`, no `Fiber` and no nursery,
+kept in the suite so the layering stays true rather than merely being intended.
+
+What `std` does still reserve is the *shape* of concurrency itself — there is
+one model, and no non-blocking socket API to build a competing event loop on.
+That is deliberate and is argued in Phase 11 of `docs/roadmap.md`.
+
 ## What this gives up, plainly
 
 crates.io. The hedge A6 was making — that a new language without libraries

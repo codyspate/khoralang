@@ -622,7 +622,16 @@ fn body_of(rest: String) -> String {
 /// disappeared. It is no longer "how much can we survive" but "how much may an
 /// unauthenticated client make a server hold", and that is a smaller number
 /// than the one the stack would now permit.
-fn limit() -> Int { 8192 }
+/// The most a request may be, headers and body together, unless a caller
+/// says otherwise.
+///
+/// Eight kilobytes is what a buffer costs per connection, and a connection is
+/// what a fiber costs — so this is the number that decides how many callers a
+/// server can hold, not a guess about how big a request is. `Connection::holding`
+/// takes another.
+export fn default_limit() -> Int { 8192 }
+
+fn limit() -> Int { default_limit() }
 
 /// How many bytes to ask the socket for at a time.
 fn chunk() -> Int { 4096 }
@@ -703,7 +712,7 @@ fn read_request(transport: Transport, into: Array<U8>, from: Int) -> Int {
   // Whether `Content-Length` promised more than the buffer holds.
   let mut oversized = false;
   // What was carried over may already be a whole request.
-  let mut want = wanted(into, filled);
+  let mut want = request_length(into, filled);
   let mut going = true;
   while going {
     if want >= 0 && filled >= want {
@@ -731,7 +740,7 @@ fn read_request(transport: Transport, into: Array<U8>, from: Int) -> Int {
         copy_at(scratch, into, taken, filled);
         filled = filled + taken;
         if want < 0 {
-          want = wanted(into, filled);
+          want = request_length(into, filled);
         }
       }
     }
@@ -762,7 +771,19 @@ fn copy_at(from: Array<U8>, into: Array<U8>, count: Int, offset: Int) -> () {
 
 /// How long the whole request should be, or negative while the headers are
 /// still arriving.
-fn wanted(bytes: Array<U8>, filled: Int) -> Int {
+/// How many bytes the request starting at 0 is, or 0 if it has not all
+/// arrived.
+///
+/// **The framing primitive.** A reader needs to know when to stop, and HTTP
+/// answers that in two parts: the headers end at a blank line, and
+/// `Content-Length` says how much follows. Getting it wrong is not a bug that
+/// shows up in testing — it is a request truncated at a packet boundary, or two
+/// requests read as one — which is why this is exported rather than left for
+/// each framework to derive again.
+///
+/// [`Connection`] is this with a buffer around it, and is what most callers
+/// want.
+export fn request_length(bytes: Array<U8>, filled: Int) -> Int {
   let after = end_of_headers(bytes, filled);
   if after < 0 {
     0 - 1
@@ -819,6 +840,147 @@ fn content_length(head: String) -> Int {
 /// Segment by segment, because that is what a `:name` matches — one segment,
 /// never a `/`. A pattern and a path of different lengths do not match, which
 /// is what keeps `/a/:b` from swallowing `/a/b/c`.
+// ---------------------------------------------------------------------------
+// Reading requests off a connection
+// ---------------------------------------------------------------------------
+
+/// One connection, read a request at a time.
+///
+/// **This is the layer between a socket and a router**, and it is public
+/// because a router is a matter of taste and this is not. Framing a request
+/// correctly — reading until it is whole, honouring `Content-Length`, holding
+/// what a pipelined client sent early, refusing one that will not fit — is the
+/// same work whatever shape the framework above it has, and it is the work that
+/// fails in production rather than in testing.
+///
+/// `Router` is written against this and has no privileged access to anything
+/// below it. A framework with a different shape — middleware chain, effect
+/// handler, one function per method — starts here and owes nothing to `Router`.
+///
+/// **Nothing here spawns.** A connection is read by whoever calls `next`, on
+/// whatever fiber that is. `Router` gives each connection a fiber in its accept
+/// loop and that is a decision of the accept loop, not of this type: a server
+/// that answers one caller at a time, or hands connections to a pool, is
+/// written against exactly this.
+export type Connection = {
+  transport: Transport,
+  buffer: Array<U8>,
+  /// Bytes of the *next* request that arrived with the last one. A pipelining
+  /// client sends two without waiting, and the second must not be dropped.
+  mut carried: Int,
+};
+
+/// What reading a connection produced.
+export type Incoming =
+/// A whole request, and whether the client asked to keep the connection open.
+///
+/// The flag is read from the `Connection` header here rather than by the
+/// caller, because the caller would have to fold the header's case and this
+/// has already done it.
+  | Arrived(request: Request, keep: Bool)
+/// The peer closed, or the read deadline passed. There is nothing to answer
+/// and nothing to send.
+  | Ended
+/// Nothing usable arrived: send this and close.
+///
+/// A client that could not be understood cannot be trusted about where its
+/// next request begins, so the connection cannot be reused whatever the
+/// `Connection` header said.
+  | Rejected(response: Response);
+
+impl Connection {
+  /// Over a transport, holding at most [`default_limit`] bytes per request.
+  export fn over(transport: Transport) -> Connection {
+    Connection::holding(transport, default_limit())
+  }
+
+  /// The same, with a cap of your own.
+  ///
+  /// The buffer is allocated once for the connection rather than once per
+  /// request, so this is what one caller costs in memory for as long as they
+  /// are connected.
+  export fn holding(transport: Transport, most: Int) -> Connection {
+    let buffer: Array<U8> = Array::new(most, 0);
+    { transport: transport, buffer: buffer, carried: 0 }
+  }
+
+  /// Reads until one request is whole, and says what arrived.
+  ///
+  /// Blocks. Whether that blocks a thread, a fiber or the only thread there is
+  /// belongs to the caller — see the note on [`Connection`].
+  export fn next(self) -> Incoming {
+    let filled = read_request(self.transport, self.buffer, self.carried);
+    let want = request_length(self.buffer, filled);
+    // Whether what is in the buffer is already a whole request.
+    let whole = want > 0 && want <= filled;
+    // **A read that added nothing is not always the end.** `read_request`
+    // returns immediately when the carry is already a whole request, which is
+    // what a pipelining client produces: two requests in one packet, the
+    // second sitting in the buffer while the first is answered. Reading
+    // "nothing new arrived" as "the client has gone" dropped it, and no test
+    // with `curl` in it could see that — `curl` waits for each answer before
+    // sending the next, so the carry is always empty.
+    if filled <= 0 || (filled == self.carried && !whole) {
+      // The client closed, or the deadline passed.
+      Incoming::Ended
+    } else {
+      // A request whose length is not yet known is taken to be everything
+      // read so far, which is either a request without a body or one that
+      // will fail the size check below.
+      let length = if whole { want } else { filled };
+      if length >= Array::length(self.buffer) {
+        // The buffer filled before the request ended. Whether the client lied
+        // about its length or simply sent too much, the answer is the same.
+        Incoming::Rejected(Response::text(413, "request too large"))
+      } else {
+        let taken = Array::prefix(self.buffer, length);
+        // Held before parsing, so `next` leaves the connection ready whatever
+        // the parse decides. `prefix` copied, so moving the buffer underneath
+        // is safe.
+        self.carried = filled - length;
+        shift_down(self.buffer, length, self.carried);
+        if Array::is_utf8(taken) {
+          Connection::understood(String::from_bytes(taken))
+        } else {
+          Incoming::Rejected(Response::text(400, "request was not text"))
+        }
+      }
+    }
+  }
+
+  fn understood(text: String) -> Incoming {
+    match parse(text) {
+      Option::None => Incoming::Rejected(Response::text(400, "malformed request")),
+      Option::Some(request) => {
+        // Read off the headers the parser already folded and indexed, rather
+        // than searched for in the raw bytes. Scanning them again cost a copy
+        // of the whole request and a second pass to lower its case, on every
+        // request, for an answer that was already sitting in a map. Worth
+        // 3.4% — a note here once said "about a fifth", which was a guess
+        // written down as though it had been measured.
+        let keep = match Request::header(request, "connection") {
+          Option::None => true,
+          Option::Some(said) => lowered(said) != "close",
+        };
+        Incoming::Arrived(request, keep)
+      },
+    }
+  }
+
+  /// Renders `response` and sends it.
+  ///
+  /// `keep` decides the `Connection` header, and is what [`Incoming::Arrived`]
+  /// reported unless the caller has its own reason to close.
+  export fn reply(self, response: Response, keep: Bool) -> Int {
+    self.transport.transmit(Response::rendered_keeping(response, keep))
+  }
+
+  /// Ends the conversation and releases the transport.
+  export fn shut(self) -> () {
+    self.transport.shut()
+  }
+}
+
 export fn matches(pattern: String, path: String) -> Option<Params> {
   match_segments(pattern, path, Map::new())
 }
@@ -900,11 +1062,6 @@ export type Router<'e> = {
 /// status and the request's `Connection` header are both known once, at the
 /// point the request has been parsed, and working either out again afterwards
 /// means reading the request a second time.
-export type Answered = {
-  response: Response,
-  keep: Bool,
-};
-
 /// Mounting is written `router |> Router::post(..)`, so the router is the
 /// first parameter of each. They are the type's own functions rather than free
 /// ones so that the pipeline reads as a chain against `Router` and cannot
@@ -1090,88 +1247,33 @@ impl Router {
     transport.shut()
   }
 
-  /// Reads one request off `connection` and writes the answer back.
-  /// Answers what is in `buffer`, and says whether the connection stays open.
-  fn answer_once<'e>(router: Router<'e>, transport: Transport, buffer: Array<U8>, length: Int)
-    -> Bool
-    raises 'e
-  {
-    let outcome = Router::answer_bytes(router, buffer, length)!;
-    transport.transmit(Response::rendered_keeping(outcome.response, outcome.keep));
-    outcome.keep
-  }
-
+  /// Answers every request on one connection, until the client stops.
+  ///
+  /// **Written against the public [`Connection`], with nothing reserved.** A
+  /// framework of a different shape writes this loop itself and is not missing
+  /// anything: the reading, the framing and the refusals are all above.
   fn answer_on<'e>(router: Router<'e>, transport: Transport) -> ()
     raises 'e
   {
-    // One buffer for the whole connection rather than one per request, which
-    // is the other thing reuse buys: eight kilobytes allocated and zeroed once
-    // instead of once a request.
-    let buffer: Array<U8> = Array::new(limit(), 0);
-    let mut carried = 0;
+    let connection = Connection::over(transport);
     let mut going = true;
     while going {
-      let filled = read_request(transport, buffer, carried);
-      if filled <= 0 || filled == carried {
-        // Nothing new arrived: the client closed, or the deadline passed.
-        going = false;
-      } else {
-        let want = wanted(buffer, filled);
-        let length = if want > 0 && want <= filled { want } else { filled };
-        if Router::answer_once(router, transport, buffer, length)! {
-          carried = filled - length;
-          shift_down(buffer, length, carried);
-        } else {
-          going = false;
-        }
-      }
-    }
-  }
-
-  /// The answer to what arrived, whatever state it arrived in.
-  fn answer_bytes<'e>(router: Router<'e>, buffer: Array<U8>, filled: Int) -> Answered
-    raises 'e
-  {
-    if filled <= 0 {
-      { response: Response::text(400, "empty request"), keep: false }
-    } else if filled >= limit() {
-      // The buffer filled before the request ended. Whether the client lied
-      // about its length or simply sent too much, the answer is the same.
-      { response: Response::text(413, "request too large"), keep: false }
-    } else {
-      let taken = Array::prefix(buffer, filled);
-      if Array::is_utf8(taken) {
-        Router::answer(router, String::from_bytes(taken))!
-      } else {
-        { response: Response::text(400, "request was not text"), keep: false }
+      match Connection::next(connection) {
+        Incoming::Ended => going = false,
+        Incoming::Rejected(response) => {
+          Connection::reply(connection, response, false);
+          going = false
+        },
+        Incoming::Arrived(request, keep) => {
+          let response = Router::dispatch(router.routes, request)!;
+          Connection::reply(connection, response, keep);
+          going = keep
+        },
       }
     }
   }
 
   /// What to send back for this request text.
-  fn answer<'e>(router: Router<'e>, text: String) -> Answered
-    raises 'e
-  {
-    match parse(text) {
-      // A client that could not be understood cannot be trusted about where
-      // its next request begins, so this connection ends here.
-      Option::None => { response: Response::text(400, "malformed request"), keep: false },
-      Option::Some(request) => {
-        // Read off the headers the parser already folded and indexed, rather
-        // than searched for in the raw bytes. Scanning them again cost a copy
-        // of the whole request and a second pass to lower its case, on every
-        // request, for an answer that was already sitting in a map. Worth
-        // 3.4% — a note here once said "about a fifth", which was a guess
-        // written down as though it had been measured.
-        let keep = match Request::header(request, "connection") {
-          Option::None => true,
-          Option::Some(said) => lowered(said) != "close",
-        };
-        { response: Router::dispatch(router.routes, request)!, keep: keep }
-      },
-    }
-  }
-
   fn dispatch<'e>(routes: List<Route<'e>>, request: Request) -> Response
     raises 'e
   {
