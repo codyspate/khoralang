@@ -131,6 +131,49 @@ fn two_modules_may_declare_one_name() {
     assert!(found.is_empty(), "each `Point` should keep its own fields: {found:?}");
 }
 
+/// **Same name, same shape, different declaration — and they do not unify.**
+///
+/// The test above says each `Point` keeps its own fields, which is the half
+/// that shows they work independently. This is the half that shows they are
+/// *distinct*: give one where the other is wanted and it has to be an error.
+///
+/// Both directions are needed, and only having the first is how a nominal type
+/// system quietly becomes a structural one. If identity were dropped tomorrow
+/// the test above would still pass — two records of `{ label: String }` unify
+/// perfectly well when they are secretly the same type. This one would not.
+///
+/// The shapes are identical on purpose. Anything else would be caught by field
+/// mismatch and prove nothing about identity.
+#[test]
+fn two_declarations_of_one_shape_do_not_unify() {
+    let found = errors_in_user(
+        "module library;
+         export type Point = { label: String };
+         export fn make() -> Point { { label: \"theirs\" } }
+         export fn take(p: Point) -> String { p.label }
+",
+        "module app;
+         import library::{make, take};
+         export type Point = { label: String };
+         fn mine() -> Point { { label: \"mine\" } }
+         // Theirs where mine is wanted.
+         fn wrong_way() -> Point { make() }
+         // Mine where theirs is wanted.
+         fn other_way() -> String { take(mine()) }
+         fn main() -> Int { 0 }
+",
+    );
+    assert_eq!(
+        found.len(),
+        2,
+        "each direction should be its own error, and neither should unify: {found:?}"
+    );
+    assert!(
+        found.iter().all(|e| e.contains("Point")),
+        "the diagnostics should name the type: {found:?}"
+    );
+}
+
 /// The alias is a second spelling, not a second type.
 ///
 /// It used to be both: the import was keyed under the local name, so `Theirs`
