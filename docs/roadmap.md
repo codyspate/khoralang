@@ -1811,7 +1811,7 @@ needs the workflow to have run once.
 
 ---
 
-## Phase 9.6 — Internal boundaries
+## Phase 9.6 — Internal boundaries — done
 
 **The crate architecture is clean; the architecture inside four of the crates
 is not.** From an outside review, confirmed by measurement:
@@ -1869,8 +1869,40 @@ a move commit must contain nothing but moves.
   and stay; the tense goes, so a source file describes what a pass *does*
   instead of where it sat in a plan.
 
-**Exit:** no source file over about 60 KB, every module named for a compiler
-responsibility, and the suite and baseline unchanged throughout.
+**Exit — met.** 745 KB across five files became 59 modules. The largest source
+file in the repository is now `khora-types/src/unify.rs` at 44 KB, which was
+already one thing with one name. The suite and the baseline were clean at every
+step.
+
+| | before | after, largest |
+| --- | --- | --- |
+| `khora-codegen-llvm` lowering | 252 KB, one file | 14 modules, 38 KB |
+| `khora-types` checking | 205 KB, one file | 11 modules, 40 KB |
+| `khora-rt` | 107 KB, one file | 16 modules, 16 KB |
+| `khora-codegen-llvm` backend | 102 KB, one file | 9 modules, 19 KB |
+| `khora-hir` body lowering | 84 KB, one file | 6 modules, 24 KB |
+| `khora-perceus` | 53 KB, one file | 5 modules, 16 KB |
+
+**Nothing changed behaviour.** Each split was verified three ways: the function
+definitions before and after, the doc-comment lines before and after, and the
+baseline. The doc-line check earned its keep — a patch script failed halfway
+through reuniting a comment with its function, deleting it from one file
+without adding it to the other, and nothing else would have noticed.
+
+Two visibility widenings were forced and neither leaves a crate: methods that
+cross a module boundary are `pub(super)`, and `khora-types`'s `Checker` fields
+are `pub(crate)` because the query layer builds one and reads what it inferred.
+`khora-rt`'s modules are private and re-exported wholesale, because that crate's
+API is a C ABI reached by symbol and `khora_rt::heap::khora_alloc` would be a
+second name for one function.
+
+**What the exercise found, beyond navigability.** Section banners had begun to
+disagree with their contents in three of the five files, always in the same
+direction: a section grows, absorbs a neighbour, and nobody renames it. The
+worst was `backend.rs`, which had an empty "Drop glue" heading immediately
+followed by "Closures" with the glue filed under the latter. A banner is a
+promise with no compiler behind it, and a module is the same promise the
+compiler checks.
 
 ---
 
