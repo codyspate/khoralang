@@ -122,6 +122,13 @@ fn main() -> Int {
     socket.read_to_string(&mut answer).expect("reading the Khora server's answer");
     assert_eq!(answer, "khora says 15", "fifteen bytes went, and it counted them");
 
+    // **Close before waiting on the child.** `shut` on the Khora side does a
+    // `shutdown` and then drains whatever the client still had to say, and a
+    // client socket left open gives that drain nothing to end it — the program
+    // cannot exit, so the `read_to_string` below cannot return. This test spent
+    // two minutes of every suite run waiting for that to time out.
+    drop(socket);
+
     let mut rest = String::new();
     stdout.read_to_string(&mut rest).expect("the rest of stdout");
     assert!(rest.contains("15"), "the program printed what it read: {rest:?}");

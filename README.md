@@ -181,7 +181,8 @@ examples/              three reference applications
 bench/                 four servers and a load generator; see bench/README.md
 scripts/
   setup-llvm.sh        installs LLVM 22.1.8 and writes .cargo/config.toml
-  baseline.sh          everything that must keep working
+  check.sh             the fast loop: front end in ~30s, `native` for the rest
+  baseline.sh          everything that must keep working, ~2m
   http_conformance.sh  what an ordinary client gets, checked with curl
 .github/workflows/
   ci.yml               the three-platform matrix
