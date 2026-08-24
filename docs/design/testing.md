@@ -136,7 +136,9 @@ second is evidence.
 | A capability is read where nothing mentions it | `khora-perceus/tests/rc.rs`, and `effects.rs` |
 | `std` type-checks for every target | `khora-types/tests/portability.rs` |
 
-**Named but not yet held by a test**, and each is a gap rather than a decision:
+**Named but not yet held by a test**, and each is a gap rather than a decision.
+Both are now scheduled — the first as Phase 10.0, ahead of the language server
+that rests on it, the second beside the `extern` allow-list in 10.2:
 
 - *Editing a function body does not invalidate item collection for unrelated
   modules.* `khora-db` logs query execution so this is measurable; nothing

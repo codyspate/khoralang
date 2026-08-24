@@ -1910,6 +1910,15 @@ compiler checks.
 
 Ordered by value, not by §6's numbering.
 
+- **10.0 Prove the incrementality the rest of the phase assumes.** One test,
+  first, because it is a prerequisite rather than a part: *editing a function
+  body does not invalidate item collection for unrelated modules.* Everything
+  asserted today is at the parse layer — `khora-db/tests/incremental.rs` proves
+  an edit to file B does not reparse file A, and that reverting text is
+  backdated. Item collection is a different query and nothing measures it. It
+  is the claim 10.4 rests on, `khora-db` already logs query execution so the
+  machinery exists, and if it is false that changes the language server's design
+  rather than adding a bug to fix. From `docs/design/testing.md`.
 - **10.1 Apply D12 at publication.** Phase 8.5 decides the policy; this is where
   package metadata, the resolver and release tooling begin enforcing it.
 - **10.2 `khora-pkg`**: `khora.lock` with SHA-256 hashes, content-addressed
@@ -1917,6 +1926,25 @@ Ordered by value, not by §6's numbering.
   which needs cross-package resolution — and the `extern` allow-list from D4,
   which is the rule that turns the permission system from a convention into a
   guarantee and cannot be written until a declaration belongs to a package.
+
+  Two things the outside review left here, both of which fire at this bullet
+  rather than at a later one:
+
+  - **Give the borrow table an owner before a stranger writes an intrinsic.**
+    `borrowed_arguments()` in `khora-perceus` is a calling convention
+    maintained in a different place from the declarations it describes, so the
+    runtime, the checker, Perceus and lowering can eventually disagree about
+    whether an argument is borrowed — and the symptom of disagreement is a use
+    after free, not a type error. Inside `std` it is survivable because one
+    person edits both places. Cross-package resolution is exactly the moment
+    that stops being true. The fix and its reasoning are in
+    `docs/design/reuse.md` §"The borrow table is a second calling convention":
+    attach ownership to the intrinsic's declaration.
+  - **Test that the `extern` hole is where it is claimed to be.**
+    `permissions.md` says the gate over Khora code is total and that `extern`
+    goes around it. A documented hole is a decision; an undocumented one is a
+    vulnerability, and only a test tells them apart. Write it beside the
+    allow-list, asserting the hole is exactly that wide and no wider.
 - **10.3 Linter** (needs types): unused capability, dangling pure expression,
   redundant match arm.
 - **10.4 LSP** over the salsa database: diagnostics, hover, completion,
@@ -1931,7 +1959,16 @@ Note that A7 pulls the *quality* of diagnostics and LSP latency forward into
 Phases 2 and 3. What remains here is surface area, not standards.
 
 **Exit:** a package built outside this repository, resolved through
-`khora.lock`, and used by the reference application.
+`khora.lock`, and used by the reference application — and 10.0's test still
+passing, since a resolver is the most likely thing to make item collection
+depend on something it should not.
+
+**Watch D15 throughout.** Not an item to schedule; a thing to notice. The
+trigger is measurable and this is the phase where a language server starts
+asking the compiler questions it was never asked before: introduce a
+post-typecheck core IR when code generation must reconstruct semantics from
+three or more independently-computed side tables to lower one ordinary
+expression.
 
 ---
 
