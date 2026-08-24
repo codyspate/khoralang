@@ -1,0 +1,14 @@
+# Shell scripts are LF everywhere, including on a Windows checkout.
+#
+# Git's `core.autocrlf=true` is the default on Windows and on GitHub's Windows
+# runners, so without this a clone there gets CRLF line endings — and `sh` reads
+# the carriage return as part of the command, which fails as `$'\r': command not
+# found` a long way from anything that looks like a line-ending problem.
+#
+# The scripts are run by `sh` on all three platforms (the baseline, the HTTP
+# conformance checks, the LLVM install), so this is not cosmetic.
+*.sh text eol=lf
+
+# The same, for anything else read by a POSIX tool rather than by an editor.
+*.yml text eol=lf
+*.yaml text eol=lf
