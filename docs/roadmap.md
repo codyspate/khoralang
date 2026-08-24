@@ -2298,9 +2298,10 @@ workers and fairness, then the reactor and timers, then stealing, then the
 bounded blocking pool, then soak. Khora stays buildable throughout; threads
 remain the implementation wherever a backend has not landed.
 
-**Where it has got to.** 11A, 11B and the platform-independent half of 11C are
-built, and `Fiber::spawn` still makes threads — deliberately, until a socket
-read can suspend a fiber instead of a worker.
+**Where it has got to.** 11A, 11B and 11C are built, on Windows and on Linux —
+the latter through `scripts/check-linux.sh`, which runs the runtime's tests
+under WSL2 and is now part of the baseline. `Fiber::spawn` still makes threads,
+deliberately, until the remaining backends land.
 
 | | |
 | --- | --- |
@@ -2308,6 +2309,7 @@ read can suspend a fiber instead of a worker.
 | 11B | workers, queues, and a loop back-edge safepoint from the compiler |
 | 11C | the wait protocol, timers, park and wake, cancel-while-waiting |
 | 11C.2 | a `poll` reactor, so a socket read suspends a fiber and not a worker |
+| 11C.3 | `recv`, `send` and `accept` that suspend a fiber rather than a worker |
 | — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
 Two numbers, measured on Windows. **A hundred thousand fibers waiting at once
@@ -2329,6 +2331,16 @@ Three things found by building it rather than by designing it:
   and is where `vm.max_map_count` would bite.
 - The safepoint is a call and a budget rather than the inlined flag and timer
   the design assumed, and costs less than either was expected to.
+- **A thread-local read on both sides of a stack switch is a use-after-move of
+  the thread itself.** The compiler computes a thread-local's base address once
+  and reuses it across a function, which is correct everywhere except in a
+  scheduler, where the thread can change in the middle of one. `coro.rs` did
+  exactly that with the yielder, and the result was a `SIGSEGV` a quarter of
+  the time on Linux, never on Windows, landing on an unrelated thread long
+  afterwards. Reading the code did not find it and neither did assertions,
+  which perturbed the timing enough to hide it; core dumps and ThreadSanitizer
+  did. `docs/design/scheduler.md` has the account, and the rule it produced
+  applies to every thread-local this runtime touches.
 
 Two things the review assumed were missing and are not. `bounded_nursery`
 already exists, so the backpressure that cheap fibers make necessary has its
