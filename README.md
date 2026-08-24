@@ -81,6 +81,51 @@ different shape, kept in the suite so the layering stays true.
   cannot do anything and is discarded, and a capability a body cannot be
   using. Each declines the interesting cases rather than guess.
 
+### Pinning a compiler
+
+A project says which Khora builds it, in the same file as everything else:
+
+```toml
+[toolchain]
+version = "0.1.0"
+```
+
+`khora` hands over to that version before it parses an argument, so a project
+pinning a release with flags your build has never heard of still works. A
+version that is not installed **stops the build** rather than falling back —
+quietly using a different compiler than the one the project asked for is worse
+than no pin at all, because it looks like it worked.
+
+```sh
+khora toolchain list                      # what is installed, and what is running
+khora toolchain link 0.2.0 ./target/debug/khora
+khora toolchain which                     # what this directory would use, and why
+```
+
+There is no `install`: nothing exists to download from yet. `link` registers a
+build you already have, which is what two checkouts of this repository need.
+
+### For an AI coding agent
+
+No model has training data for Khora, so an agent writing it guesses from Rust
+and is wrong in ways it cannot see. `khora mcp` is a Model Context Protocol
+server that lets it ask the compiler instead:
+
+```json
+{
+  "mcpServers": {
+    "khora": { "command": "khora", "args": ["mcp"] }
+  }
+}
+```
+
+The tool that matters is `khora_check` — it compiles a snippet against the real
+standard library and returns the real diagnostics, so an agent can find out
+whether something works rather than guessing. `khora_std_search`,
+`khora_grammar`, `khora_design_doc` and `khora_format` exist so its first guess
+is worth checking. It runs through the toolchain shim, so a pinned project gets
+that version's compiler answering.
+
 ### Two things worth knowing about the implementation
 
 **A fiber is an OS thread today.** `Fiber::spawn` starts a real thread;
@@ -111,9 +156,11 @@ the `extern` boundary.
 | `khora-pkg` | Resolution, `khora.lock`, the content-addressed store, the task DAG. |
 | `khora-lint` | Lints that need types. |
 | `khora-lsp` | A language server over the same queries. |
-| `khora-cli` | `check`, `fmt`, `lex`, `parse`, `lsp`, `test`, `bench`, and `build` with `--features llvm`. |
+| `khora-toolchain` | Several Khora versions on one machine, and which one a project wants. |
+| `khora-mcp` | A Model Context Protocol server, so an agent can ask the compiler. |
+| `khora-cli` | `check`, `fmt`, `lex`, `parse`, `lsp`, `mcp`, `toolchain`, `test`, `bench`, and `build` with `--features llvm`. |
 
-1,041 tests pass, `clippy -D warnings` is clean, and `khora check` and
+1,101 tests pass, `clippy -D warnings` is clean, and `khora check` and
 `khora fmt --check` pass over all of `std/`, `examples/` and `bench/` — with
 no lint warnings anywhere in them.
 `sh scripts/baseline.sh` runs the lot, including twelve HTTP conformance checks
