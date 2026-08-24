@@ -1,0 +1,55 @@
+name: runtime
+
+# **The cheap job, and the only one that runs on a push.**
+#
+# `ci.yml` is on demand because it costs about 120 billed minutes a run on a
+# private repository, most of it the macOS backend at a ten-times multiplier.
+# This exists because one part of the tree cannot be checked from a laptop at
+# all: the reactor's `poll` is `WSAPoll` on Windows and `poll` on Linux and
+# macOS, and only the first can be run here.
+#
+# So it does the least that answers that question:
+#
+#   - `khora-rt` only, which is where the scheduler and the reactor live;
+#   - no LLVM, which is the five-gigabyte, twenty-minute part of `ci.yml`;
+#   - only when the runtime actually changes.
+#
+# Roughly one billed minute on Linux and ten on macOS, against 120 for the full
+# matrix. Windows is left out on purpose: it is the machine this is developed
+# on, so the local baseline already covers it.
+
+on:
+  push:
+    paths:
+      - 'crates/khora-rt/**'
+      - '.github/workflows/runtime.yml'
+  pull_request:
+    paths:
+      - 'crates/khora-rt/**'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  reactor:
+    name: khora-rt (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: runtime-${{ matrix.os }}
+
+      # The scheduler's tests open real sockets over loopback and race wakes
+      # against suspensions thousands of times, so a difference between
+      # `WSAPoll` and `poll` shows up here rather than in somebody's server.
+      - run: cargo test -p khora-rt
+      - run: cargo clippy -p khora-rt --all-targets -- -D warnings

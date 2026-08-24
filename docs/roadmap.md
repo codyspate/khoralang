@@ -2307,7 +2307,8 @@ read can suspend a fiber instead of a worker.
 | 11A | context switch, and fiber identity that survives it |
 | 11B | workers, queues, and a loop back-edge safepoint from the compiler |
 | 11C | the wait protocol, timers, park and wake, cancel-while-waiting |
-| 11C.2 | the reactor's syscalls — **not built** |
+| 11C.2 | a `poll` reactor, so a socket read suspends a fiber and not a worker |
+| — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
 Two numbers, measured on Windows. **A hundred thousand fibers waiting at once
 cost 418 MB and every one of them woke** — about 4,240 bytes each, against

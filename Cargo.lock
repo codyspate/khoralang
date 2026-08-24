@@ -718,9 +718,11 @@ name = "khora-rt"
 version = "0.1.0"
 dependencies = [
  "corosensei",
+ "libc",
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

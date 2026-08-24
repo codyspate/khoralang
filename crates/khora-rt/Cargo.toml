@@ -24,6 +24,15 @@ rustls-native-certs = "0.8"
 # ours to implement.
 corosensei = "0.3"
 
+# The reactor's one platform-specific call. Both are already in the tree
+# through `rustls-native-certs`, so naming them here costs no build time and
+# buys not hand-declaring a struct whose width differs per platform.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock", "Win32_Foundation"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [lib]
 # Linked into generated executables by clang, so it must be a static archive
 # exposing a C ABI.

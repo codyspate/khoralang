@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::coro::{suspend, Ran, Task};
+use crate::reactor::{Interest, Reactor, Socket, Watch};
 use crate::wait::{Timers, Wait, NOTIFIED, WAITING};
 
 /// How many turns a worker takes before looking at the shared queue first.
@@ -101,6 +102,20 @@ fn withdraw() {
 struct Shared {
     /// Fibers nobody has a worker for yet: spawned from outside, or woken.
     queued: Mutex<VecDeque<Task>>,
+    /// Every fiber this pool knows about, by id.
+    ///
+    /// **Separate from `parked`, and the separation is load-bearing.** Looking
+    /// a fiber up in `parked` to wake or cancel it is a race: a fiber that has
+    /// suspended but whose worker has not yet filed it is in neither map, so
+    /// the lookup finds nothing and the wake is silently dropped. It hung
+    /// `cancelling_a_sleeping_fiber_wakes_it_to_notice` — the fiber was
+    /// counted as waiting, the cancel found no entry and did nothing, and the
+    /// fiber slept for ever.
+    ///
+    /// A waker needs the *state* to set `NOTIFIED` on, which exists from the
+    /// moment the fiber does; whether anybody is holding its `Task` yet is a
+    /// separate question, and one the protocol already answers.
+    live: Mutex<std::collections::HashMap<usize, Arc<crate::current::Fiber>>>,
     /// Fibers waiting for something, by fiber id.
     ///
     /// **The same lock covers parking and waking**, which is what closes the
@@ -111,6 +126,8 @@ struct Shared {
     parked: Mutex<std::collections::HashMap<usize, Task>>,
     /// Deadlines, and the fibers waiting on them.
     timers: Mutex<Timers>,
+    /// Sockets, and the fibers waiting on them.
+    reactor: Reactor,
     /// Wakes a parked worker.
     arrived: Condvar,
     stopping: AtomicBool,
@@ -135,6 +152,8 @@ pub(crate) struct Counts {
     pub(crate) wakes: AtomicU64,
     /// Timers that fired.
     pub(crate) timers_fired: AtomicU64,
+    /// Sockets that became ready.
+    pub(crate) sockets_ready: AtomicU64,
     /// Wakes that arrived before the fiber suspended, so it never waited.
     pub(crate) wakes_before_waiting: AtomicU64,
 }
@@ -150,6 +169,7 @@ impl Counts {
             waiting: self.waiting.load(Ordering::Relaxed),
             wakes: self.wakes.load(Ordering::Relaxed),
             timers_fired: self.timers_fired.load(Ordering::Relaxed),
+            sockets_ready: self.sockets_ready.load(Ordering::Relaxed),
             wakes_before_waiting: self.wakes_before_waiting.load(Ordering::Relaxed),
         }
     }
@@ -166,6 +186,7 @@ pub(crate) struct Snapshot {
     pub(crate) waiting: u64,
     pub(crate) wakes: u64,
     pub(crate) timers_fired: u64,
+    pub(crate) sockets_ready: u64,
     pub(crate) wakes_before_waiting: u64,
 }
 
@@ -197,8 +218,10 @@ impl Scheduler {
         };
         let shared = Arc::new(Shared {
             queued: Mutex::new(VecDeque::new()),
+            live: Mutex::new(std::collections::HashMap::new()),
             parked: Mutex::new(std::collections::HashMap::new()),
             timers: Mutex::new(Timers::default()),
+            reactor: Reactor::default(),
             arrived: Condvar::new(),
             stopping: AtomicBool::new(false),
             counts: Counts::default(),
@@ -213,6 +236,17 @@ impl Scheduler {
                     .expect("a worker thread")
             })
             .collect();
+
+        // One thread watching sockets. Like the timer thread, this is a
+        // thread waiting so that no *worker* has to — which is the whole
+        // distinction the phase turns on.
+        let watching = shared.clone();
+        handles.push(
+            std::thread::Builder::new()
+                .name("khora-reactor".to_string())
+                .spawn(move || watch(watching))
+                .expect("the reactor thread"),
+        );
 
         // One thread for deadlines. A `sleep` that blocked a worker would
         // undo the entire phase, so time is something the scheduler waits on
@@ -231,6 +265,7 @@ impl Scheduler {
     /// Hands a fiber to the pool.
     pub(crate) fn spawn(&self, task: Task) {
         self.shared.counts.spawned.fetch_add(1, Ordering::Relaxed);
+        remember(&self.shared, &task);
         inject(&self.shared, task);
     }
 
@@ -276,23 +311,25 @@ impl Scheduler {
     /// through ordinary Khora finalizers. The scheduler only guarantees it gets
     /// another chance to look.
     pub(crate) fn cancel_fiber(&self, fiber: usize) {
-        let asleep =
-            self.shared.parked.lock().expect("the parked fibers").get(&fiber).map(|t| t.fiber().clone());
-        let Some(state) = asleep else { return };
+        let Some(state) = state_of(&self.shared, fiber) else { return };
 
         state.cancel();
-        // Its deadline is no longer interesting, and a hundred thousand
-        // cancelled sleepers would otherwise hold the heap open.
+        // Its deadline and its sockets are no longer interesting, and a
+        // hundred thousand cancelled sleepers would otherwise hold the heap
+        // and the watch list open.
         self.shared.timers.lock().expect("the timers").forget(fiber);
+        self.shared.reactor.forget(fiber);
         wake(&self.shared, fiber, state.wait());
+    }
+
+    /// How many sockets fibers are waiting on.
+    pub(crate) fn watching(&self) -> usize {
+        self.shared.reactor.len()
     }
 
     /// Wakes a fiber by id, from outside.
     pub(crate) fn wake_fiber(&self, fiber: usize) {
-        let state = self.shared.parked.lock().expect("the parked fibers")
-            .get(&fiber)
-            .map(|t| t.fiber().clone());
-        if let Some(state) = state {
+        if let Some(state) = state_of(&self.shared, fiber) {
             wake(&self.shared, fiber, state.wait());
         }
     }
@@ -377,6 +414,48 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
     inject(shared, task);
 }
 
+/// Suspends the running fiber until `socket` is ready.
+///
+/// Called by an operation that has already tried and would have blocked. The
+/// caller retries when this returns — readiness is a hint, not a promise, and
+/// a second `EWOULDBLOCK` simply comes back here.
+///
+/// Returns false off a scheduler, where there is nobody to watch anything and
+/// the caller should block the thread as it always did.
+pub(crate) fn wait_until_ready(socket: Socket, interest: Interest) -> bool {
+    let Some(shared) = SHARED.with(|s| s.borrow().clone()) else { return false };
+    let fiber = crate::current::current(|f| f.id());
+
+    shared.reactor.register(Watch { socket, interest, fiber });
+    let parked = park_current();
+    // Woken by something else — a cancellation, or another registration — so
+    // this one must come off, or a later readiness wakes a fiber that has
+    // stopped caring about this socket.
+    shared.reactor.forget(fiber);
+    parked
+}
+
+/// Wakes every fiber whose socket has become ready, for ever.
+fn watch(shared: Arc<Shared>) {
+    while !shared.stopping.load(Ordering::Acquire) {
+        // A short wait rather than an indefinite one, because a registration
+        // arriving while `poll` is already blocked would otherwise not be seen
+        // until something else woke it. A self-pipe or an event handle is the
+        // refinement, and it is the same shape of change on all three
+        // platforms.
+        let ready = shared.reactor.poll(std::time::Duration::from_millis(1));
+        if ready.is_empty() {
+            continue;
+        }
+        shared.counts.sockets_ready.fetch_add(ready.len() as u64, Ordering::Relaxed);
+        for id in ready {
+            if let Some(state) = state_of(&shared, id) {
+                wake(&shared, id, state.wait());
+            }
+        }
+    }
+}
+
 /// Wakes every fiber whose deadline has passed, for ever.
 fn tick(shared: Arc<Shared>) {
     while !shared.stopping.load(Ordering::Acquire) {
@@ -388,7 +467,7 @@ fn tick(shared: Arc<Shared>) {
         for id in due {
             // The fiber may have been woken by something else and moved on, in
             // which case its state says so and the wake is a no-op.
-            if let Some(state) = registered(&shared, id) {
+            if let Some(state) = state_of(&shared, id) {
                 wake(&shared, id, state.wait());
             }
         }
@@ -408,9 +487,14 @@ fn tick(shared: Arc<Shared>) {
     }
 }
 
-/// The wait state of a parked fiber, if it is one.
-fn registered(shared: &Arc<Shared>, fiber: usize) -> Option<Arc<crate::current::Fiber>> {
-    shared.parked.lock().expect("the parked fibers").get(&fiber).map(|t| t.fiber().clone())
+/// Records a fiber so it can be woken before anybody is holding its task.
+fn remember(shared: &Arc<Shared>, task: &Task) {
+    shared.live.lock().expect("the live fibers").insert(task.fiber().id(), task.fiber().clone());
+}
+
+/// The state of a fiber this pool knows about.
+fn state_of(shared: &Arc<Shared>, fiber: usize) -> Option<Arc<crate::current::Fiber>> {
+    shared.live.lock().expect("the live fibers").get(&fiber).cloned()
 }
 
 /// Puts a fiber on the shared queue and wakes somebody.
@@ -429,6 +513,7 @@ pub(crate) fn schedule(task: Task) -> bool {
     match (local, shared) {
         (Some(queue), Some(shared)) => {
             shared.counts.spawned.fetch_add(1, Ordering::Relaxed);
+            remember(&shared, &task);
             queue.lock().expect("a local queue").push_back(task);
             // Somebody else may be parked with nothing to do while this
             // worker's queue grows. Until 11D can steal, the wake is what
@@ -498,6 +583,8 @@ fn run(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>, mut task: Task)
     match outcome {
         Ran::Finished => {
             shared.counts.completed.fetch_add(1, Ordering::Relaxed);
+            // Otherwise the registry is every fiber the pool ever ran.
+            shared.live.lock().expect("the live fibers").remove(&task.fiber().id());
         }
         Ran::Suspended => {
             if spent {
@@ -969,6 +1056,48 @@ mod tests {
         );
     }
 
+    /// **The regression test for a hang.** Cancelling a fiber that has not run
+    /// yet, so nobody is holding its task and it is in no queue a waker can
+    /// search.
+    ///
+    /// `cancel_fiber` used to look the fiber up in the *parked* map, which is
+    /// a race with two losing sides: a fiber suspended but not yet filed is in
+    /// neither map, so the cancel found nothing and did nothing, and the fiber
+    /// slept for ever. It passed until the reactor thread changed the timing
+    /// enough to lose.
+    ///
+    /// The state lives from the moment the fiber does, so this now works
+    /// through the ordinary protocol: the cancel leaves a notification, the
+    /// fiber's first attempt to wait takes it instead of sleeping, and it sees
+    /// the cancellation on the other side.
+    #[test]
+    fn cancelling_a_fiber_before_anybody_holds_it_is_not_lost() {
+        let noticed = Arc::new(AtomicUsize::new(0));
+        let counter = noticed.clone();
+
+        let pool = Scheduler::new(1);
+        let task = Task::new(move || {
+            // Nobody will ever wake this on its own merits.
+            park_current();
+            if crate::current::current(|f| f.is_cancelled()) {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let id = task.fiber().id();
+        pool.spawn(task);
+
+        // No waiting for it to park: the point is that this lands first.
+        pool.cancel_fiber(id);
+        pool.drain();
+
+        assert_eq!(
+            noticed.load(Ordering::SeqCst),
+            1,
+            "the cancellation was dropped: {:?}",
+            pool.counts()
+        );
+    }
+
     /// A sleeper cancelled before its deadline must not be left in the timer
     /// heap: at scale that is a hundred thousand dead entries.
     #[test]
@@ -992,6 +1121,171 @@ mod tests {
         // Finishing at all is the assertion: an hour-long timer is still
         // pending, so this only returns because the cancellation woke it.
         pool.drain();
+    }
+
+    // --- sockets ------------------------------------------------------------
+
+    /// A fiber waits on a socket, and is woken when bytes arrive.
+    ///
+    /// The shape every Khora `read()!` will take once `std::net::socket` calls
+    /// through here: try, would block, park, wake, retry.
+    #[test]
+    fn a_fiber_waiting_on_a_socket_is_woken_by_its_peer() {
+        use crate::reactor::{connected_pair, socket_of, Interest};
+        use std::io::{Read, Write};
+
+        let (client, mut server) = connected_pair();
+        let socket = socket_of(&client);
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let seen = got.clone();
+
+        let pool = Scheduler::new(1);
+        pool.spawn(Task::new(move || {
+            // Nothing has arrived yet, so this is the would-block path.
+            assert!(wait_until_ready(socket, Interest::Readable));
+            let mut client = client;
+            let mut buffer = [0u8; 5];
+            client.read_exact(&mut buffer).expect("the bytes are there");
+            seen.lock().unwrap().extend_from_slice(&buffer);
+        }));
+
+        // Give it time to park before anything is sent, so the wake is a real
+        // one rather than the socket already being ready.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.watching() == 0 {
+            assert!(std::time::Instant::now() < deadline, "it never registered");
+            std::thread::yield_now();
+        }
+        assert!(got.lock().unwrap().is_empty(), "nothing should have been read yet");
+
+        server.write_all(b"hello").expect("writing");
+        pool.drain();
+
+        assert_eq!(&*got.lock().unwrap(), b"hello");
+        assert!(pool.counts().sockets_ready >= 1, "{:?}", pool.counts());
+    }
+
+    /// **The property the whole phase is for.** One worker, one fiber blocked
+    /// on a socket that nobody will write to — and the worker keeps running
+    /// everything else.
+    ///
+    /// On threads this is impossible: the blocked read owns the thread.
+    #[test]
+    fn a_worker_is_not_blocked_by_a_fiber_waiting_on_a_socket() {
+        use crate::reactor::{connected_pair, socket_of, Interest};
+
+        let (client, _peer) = connected_pair();
+        let socket = socket_of(&client);
+        let others = Arc::new(AtomicUsize::new(0));
+
+        let pool = Scheduler::new(1);
+        pool.spawn(Task::new(move || {
+            // Nobody ever writes, so this waits until the pool stops.
+            let _client = client;
+            wait_until_ready(socket, Interest::Readable);
+        }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.watching() == 0 {
+            assert!(std::time::Instant::now() < deadline, "it never registered");
+            std::thread::yield_now();
+        }
+
+        for _ in 0..32 {
+            let counter = others.clone();
+            pool.spawn(Task::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while others.load(Ordering::SeqCst) < 32 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the blocked socket read owned the worker: {} of 32 ran",
+                others.load(Ordering::SeqCst)
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// Many fibers on many sockets, each woken by its own peer and nobody
+    /// else's.
+    #[test]
+    fn many_fibers_wait_on_their_own_sockets() {
+        use crate::reactor::{connected_pair, socket_of, Interest};
+        use std::io::{Read, Write};
+
+        const COUNT: usize = 64;
+        let done = Arc::new(AtomicUsize::new(0));
+        let mut peers = Vec::new();
+
+        let pool = Scheduler::new(2);
+        for n in 0..COUNT {
+            let (client, peer) = connected_pair();
+            let socket = socket_of(&client);
+            let counter = done.clone();
+            pool.spawn(Task::new(move || {
+                let mut client = client;
+                wait_until_ready(socket, Interest::Readable);
+                let mut byte = [0u8; 1];
+                client.read_exact(&mut byte).expect("its own byte");
+                assert_eq!(byte[0], (n % 251) as u8, "a fiber read somebody else's socket");
+                counter.fetch_add(1, Ordering::SeqCst);
+            }));
+            peers.push(peer);
+        }
+
+        for (n, peer) in peers.iter_mut().enumerate() {
+            peer.write_all(&[(n % 251) as u8]).expect("writing");
+        }
+        pool.drain();
+        assert_eq!(done.load(Ordering::SeqCst), COUNT);
+    }
+
+    /// A fiber waiting on a socket that will never be ready still has to be
+    /// cancellable, and its watch must not outlive it.
+    #[test]
+    fn cancelling_a_fiber_waiting_on_a_socket_wakes_it() {
+        use crate::reactor::{connected_pair, socket_of, Interest};
+
+        let (client, _peer) = connected_pair();
+        let socket = socket_of(&client);
+        let noticed = Arc::new(AtomicUsize::new(0));
+        let counter = noticed.clone();
+        let id = Arc::new(AtomicUsize::new(0));
+        let mine = id.clone();
+
+        let pool = Scheduler::new(1);
+        pool.spawn(Task::new(move || {
+            let _client = client;
+            mine.store(crate::current::current(|f| f.id()), Ordering::SeqCst);
+            wait_until_ready(socket, Interest::Readable);
+            if crate::current::current(|f| f.is_cancelled()) {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.watching() == 0 {
+            assert!(std::time::Instant::now() < deadline, "it never registered");
+            std::thread::yield_now();
+        }
+
+        pool.cancel_fiber(id.load(Ordering::SeqCst));
+        pool.drain();
+
+        assert_eq!(noticed.load(Ordering::SeqCst), 1, "{:?}", pool.counts());
+        assert_eq!(pool.watching(), 0, "its watch should be gone");
+    }
+
+    /// Off a scheduler there is nobody to watch anything, so the caller has to
+    /// know to block the thread as it always did.
+    #[test]
+    fn waiting_on_a_socket_without_a_scheduler_is_refused() {
+        use crate::reactor::{connected_pair, socket_of, Interest};
+        let (client, _peer) = connected_pair();
+        assert!(!wait_until_ready(socket_of(&client), Interest::Readable));
     }
 
     /// Off a scheduler there is nobody to wake anything, so sleeping would be

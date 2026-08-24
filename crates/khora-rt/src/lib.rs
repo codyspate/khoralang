@@ -134,6 +134,7 @@ mod heap;
 mod nursery;
 mod print;
 mod random;
+mod reactor;
 mod region;
 mod scheduler;
 mod shared;

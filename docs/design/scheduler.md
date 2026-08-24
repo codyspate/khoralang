@@ -166,6 +166,36 @@ share mechanics, and pretending they do is how the awkwardness gets in.
 architecture, and io_uring is a Linux optimization to reach for after there is
 something to profile.
 
+### What 11C.2 actually built, and a course correction
+
+**`poll`, on all three platforms** — `WSAPoll` on Windows and `poll` by the
+same name on Linux and macOS, with the same struct in a different width. Not
+IOCP, not epoll, not kqueue.
+
+The interface above it is unchanged and is still the operation-oriented one
+this section argues for: `wait_until_ready` is called by an operation that has
+already tried and would block, and returns when it is worth trying again.
+Nothing above the reactor learns which mechanism answered, which is the whole
+property that makes swapping the mechanism a local change.
+
+So this is a course correction about the *backend*, not the interface, and it
+is the same call made about `io_uring` two paragraphs up: take the simple
+mechanism that is correct everywhere, prove the architecture, and reach for the
+better one when there is something to measure. IOCP is Windows' `io_uring`
+here.
+
+**What it costs is scale, and the number is knowable in advance.** `poll` is
+O(n) in registered descriptors per call, so a hundred thousand waiting sockets
+would spend their time in the kernel walking a list. **The socket row of the
+table at the top is therefore not claimed**, and epoll, kqueue and IOCP are
+what claim it.
+
+What is claimed, and tested against real loopback sockets: a fiber that would
+have blocked suspends instead, its worker carries on running everything else,
+the right fiber is woken by the right peer, a hangup wakes a reader rather than
+leaking it, and a fiber waiting on a socket nobody will ever write to is still
+cancellable.
+
 ---
 
 ## 3. Stacks, and a tension worth naming
@@ -227,9 +257,10 @@ reached before the reactor — because what a fiber waits *on* does not change
 what waiting costs.
 
 What is not yet proven is the third row of the table at the top: fibers waiting
-on *sockets*. That needs the reactor, and it is the part that can still make
-the number worse, because a registration has a cost per fiber that a timer does
-not.
+on *sockets* at that scale. The reactor exists and a fiber does suspend on a
+real socket without blocking its worker — but on `poll`, which is O(n) per
+call. The registration itself is cheap; walking a hundred thousand of them
+every millisecond is not. epoll, kqueue and IOCP are what that row waits for.
 
 ### Measured, on Windows: idle fibers
 
@@ -498,7 +529,7 @@ Staged so that a failure is attributable to the thing that just changed.
 | --- | --- |
 | **11A** context switch, one worker, many fibers, explicit yield, join | stack switching, and the current-fiber pointer replacing thread-locals |
 | **11B** N workers, local and global queues, migration, safepoints — **done** | CPU parallelism, and fairness |
-| **11C** timers, suspend, wake — **done**; the reactor's syscalls remain | a hundred thousand waiting fibers |
+| **11C** timers, suspend, wake, and a `poll` reactor — **done** | a hundred thousand waiting on *timers*; sockets need a scalable backend |
 | **11D** work stealing | locality, once the simple scheduler's behaviour is understood |
 | **11E** bounded blocking pool | that unavoidable blocking cannot stall a worker |
 | **11F** scale and soak | the adversarial tests below |
