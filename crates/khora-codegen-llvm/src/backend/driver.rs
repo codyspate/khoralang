@@ -129,12 +129,22 @@ pub(super) fn build(
         let Some(body) = body_of(instance) else { continue };
         declare_closures(&mut backend, &instance.symbol(), body, instance_types);
     }
+
+    // Which methods the program writes in Khora, so the reference-counting
+    // planner does not take the borrow table's word about one of them. A body
+    // owns its parameters and releases them, and telling its caller to lend one
+    // instead is a use after free — `khora_perceus::Defined`.
+    let body_names: Vec<String> = files
+        .iter()
+        .flat_map(|f| khora_hir::body::bodies(db, *f).iter().map(|(n, _)| n.clone()))
+        .collect();
+    let defined = khora_perceus::Defined::from_body_names(body_names.iter().map(String::as_str));
     for (instance, instance_types) in &mono.instances {
         let Some(body) = body_of(instance) else { continue };
         // Planned per *specialization*: `A` is unboxed in the generic body and
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
-        let plan = khora_perceus::plan(body, instance_types);
+        let plan = khora_perceus::plan(body, instance_types, &defined);
         crate::lower::emit_function(
             &mut backend,
             &instance.symbol(),
@@ -154,7 +164,7 @@ pub(super) fn build(
             continue;
         };
         let Some(body) = body_of(owner) else { continue };
-        let plan = khora_perceus::plan(body, owner_types);
+        let plan = khora_perceus::plan(body, owner_types, &defined);
         crate::lower::emit_closure(&mut backend, &site, body, Some(&plan), owner_types, mono);
     }
 

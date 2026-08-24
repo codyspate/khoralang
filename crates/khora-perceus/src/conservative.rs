@@ -54,11 +54,25 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// What `borrowed_arguments` says, unless the program implements the method
+    /// itself.
+    ///
+    /// A Khora body owns its parameters and releases them, so telling its
+    /// caller to lend one is a use after free. Any package may declare a type
+    /// called `Shared` with a `get`, and this table is keyed by a bare name.
+    /// `khora_perceus::Defined`.
+    fn lends(&self, owner: &str, method: &str) -> Vec<usize> {
+        if self.defined.writes(owner, method) {
+            return Vec::new();
+        }
+        borrowed_arguments(owner, method).to_vec()
+    }
+
     /// The argument positions this callee only looks at.
     pub(super) fn lent_by(&self, callee: ExprId) -> Vec<usize> {
         match self.body.expr(callee) {
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
-                borrowed_arguments(owner, name).to_vec()
+                self.lends(owner, name)
             }
             _ => Vec::new(),
         }
@@ -204,7 +218,7 @@ impl<'a> Planner<'a> {
                     unreachable!("just matched")
                 };
                 let lends = owner_of(self.types.of(base))
-                    .is_some_and(|owner| borrowed_arguments(owner, &name).contains(&0));
+                    .is_some_and(|owner| self.lends(owner, &name).contains(&0));
                 if lends && matches!(self.body.expr(base), Expr::Local(_)) {
                     self.borrow(base);
                 } else {

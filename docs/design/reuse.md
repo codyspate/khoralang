@@ -180,7 +180,7 @@ What made the change survivable, and is worth keeping for 9.2:
   every one of the three rules above from a silent corruption into a message
   naming the program that did it.
 
-#### The borrow table is a second calling convention, and should not stay one
+#### The borrow table was a second calling convention — enforced since 10.2
 
 `borrowed_arguments()` in `khora-perceus` is a hand-written table keyed by
 `(type name, method name)`:
@@ -198,16 +198,48 @@ different place from the declaration it describes.** The runtime, the type
 checker, this table and LLVM lowering can eventually disagree about whether an
 argument is borrowed, and nothing would notice.
 
-The fix is one declaration of the convention, attached to the intrinsic:
+The eventual fix is one declaration of the convention, attached to the
+intrinsic:
 
 ```khora
 extern fn byte(borrow self: String, index: Int) -> U8
 ```
 
 — not necessarily user-facing syntax, and possibly just compiler metadata
-registered where the intrinsic is. Not urgent while the table is twelve entries
-long and every entry is in one file. It becomes urgent the first time a package
-outside `std` declares an intrinsic, which is phase 10.2.
+registered where the intrinsic is. That is still the right shape and it is still
+not written.
+
+**What 10.2 did instead was enforce the rule this table already stated.** Its
+doc comment has always said only bodyless declarations may appear here, because
+a Khora body owns its parameters and releases them, so telling its caller to
+lend one is a use after free. That rule was kept by whoever edited the file.
+Packages made it unkeepable: the key is a bare type *name*, and anyone may now
+write
+
+```khora
+export type Shared = { .. };
+impl Shared { export fn get(self) -> Int { .. } }
+```
+
+whose `get` would have been told its caller was lending. The caller makes no
+reference, the callee releases one anyway, and the object is freed while
+somebody still holds it — in a package whose only mistake was choosing a common
+noun.
+
+So the planner is handed `Defined`, the set of methods the program implements in
+Khora, and the table is consulted only for a pair nothing implements. Built from
+the source root by `rc_plans` and from monomorphization by the backend.
+`a_packages_own_shared_is_not_borrowed` is the test; it fails without it.
+
+**One wrong turn is worth recording, because it looks more obvious than the
+right one.** The first attempt restricted the table to types `std` declares,
+which is what "attach the convention to the declaration" sounds like it means.
+It broke three fiber tests. A self-contained program may perfectly well declare
+its own `Region` and let the runtime implement `defer` — most of
+`khora-codegen-llvm`'s tests do — and refusing to lend to them reordered a
+program's finalizers, which is the exact failure this table was added to fix.
+Where a declaration lives is not the property that matters. Whether anybody
+wrote a body for it is.
 
 ### 2. Reuse tokens — done
 

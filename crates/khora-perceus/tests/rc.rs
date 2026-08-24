@@ -265,3 +265,56 @@ fn a_capability_is_never_handed_to_its_last_mention() {
     assert!(p.moved.is_empty(), "a capability must not be handed to a mention: {p:?}");
     assert!(p.takes.is_empty(), "and so no read of one is a take: {p:?}");
 }
+
+// --- the borrow table's key ------------------------------------------------
+
+/// A package may declare a type called `Shared`, and its methods are ordinary
+/// Khora functions that own their receiver.
+///
+/// `borrowed_arguments` is keyed by a type *name*, and while every program was
+/// one source root that name could only ever be `std`'s. Packages ended that.
+/// Under a name-only key this program's `get` would be told its caller was
+/// lending: the caller would not make a reference, the callee would release one
+/// anyway, and the receiver would be freed while somebody still held it.
+///
+/// So the plan must borrow nothing here. `owner_of` declines a type `std` did
+/// not declare — `docs/design/reuse.md` §1.
+#[test]
+fn a_packages_own_shared_is_not_borrowed() {
+    let db = KhoraDatabase::new();
+    let p = plan(
+        &db,
+        "module m;\n\
+         export type Shared = { label: String };\n\
+         impl Shared {\n  \
+         export fn get(self) -> String { self.label }\n\
+         }\n\
+         fn use_it(cell: Shared) -> String { Shared::get(cell) }\n",
+        "use_it",
+    );
+    assert!(
+        p.borrowed.is_empty(),
+        "a method this module wrote owns its receiver, so nothing may be lent to it: {p:?}"
+    );
+}
+
+/// The same for the method-call spelling, which is the one people write and
+/// the one the table reads through `owner_of`.
+#[test]
+fn a_packages_own_array_method_is_not_borrowed() {
+    let db = KhoraDatabase::new();
+    let p = plan(
+        &db,
+        "module m;\n\
+         export type Array = { label: String };\n\
+         impl Array {\n  \
+         export fn length(self) -> Int { 1 }\n\
+         }\n\
+         fn use_it(xs: Array) -> Int { xs.length() }\n",
+        "use_it",
+    );
+    assert!(
+        p.borrowed.is_empty(),
+        "`Array` here is this module's, not `std`'s: {p:?}"
+    );
+}

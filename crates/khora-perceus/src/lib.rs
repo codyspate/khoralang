@@ -207,6 +207,38 @@ impl RcPlan {
 /// and `String::matches_at` are written in Khora and were briefly on this list.
 /// Deciding it for an ordinary function needs an escape analysis rather than a
 /// table.
+///
+/// # The rule above is now enforced rather than remembered
+///
+/// The key is a bare type *name*, which was safe while every program was one
+/// source root and every `Shared` was `std`'s. Packages ended that. Anyone may
+/// now write
+///
+/// ```khora
+/// export type Shared = { .. };
+/// impl Shared { export fn get(self) -> Int { .. } }
+/// ```
+///
+/// and under a name-only key their `get` — an ordinary Khora function, which
+/// owns its receiver and releases it — would be told its caller was lending.
+/// The caller would not make a reference, the callee would release one anyway,
+/// and the object would be freed while somebody still held it: a silent use
+/// after free in a package whose only mistake was choosing a common noun.
+///
+/// So the planner is given [`Defined`] — the set of methods the *program*
+/// implements in Khora — and this table is consulted only for a `(type,
+/// method)` pair nothing implements. That is precisely the rule the paragraph
+/// above states, and it used to be enforced by whoever edited this file.
+///
+/// **Not "declared by `std`", which was tried first and is wrong.** A
+/// self-contained program may legitimately declare its own `Region` and let the
+/// runtime implement `defer` — most of `khora-codegen-llvm`'s tests do exactly
+/// that, and restricting the table to `std` silently stopped lending to them,
+/// which reordered a program's finalizers. Bodylessness is the property that
+/// actually matters; where the declaration lives is not.
+///
+/// `docs/design/reuse.md` §1 has the shape this eventually wants — ownership
+/// written on the intrinsic itself, rather than a table keyed by name.
 pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
     const RECEIVER: &[usize] = &[0];
     const NONE: &[usize] = &[];
@@ -242,6 +274,39 @@ fn owner_of(ty: &Type) -> Option<&str> {
     }
 }
 
+/// The methods a program implements in Khora, as `#Type::method`.
+///
+/// Handed to the planner so that [`borrowed_arguments`] can be consulted only
+/// for a pair nothing implements — see its documentation for why a table keyed
+/// by a bare type name stopped being safe when packages arrived.
+///
+/// Empty means "nothing is known to have a body", which makes the table apply
+/// exactly as it did before this existed. That is the wrong default for safety
+/// and the right one for a caller that only has one file: `rc_plans` builds it
+/// from the whole source root, and the backend from monomorphization, and those
+/// are the two callers that matter.
+#[derive(Debug, Clone, Default)]
+pub struct Defined(HashSet<String>);
+
+impl Defined {
+    /// From the names bodies are keyed by, which for a method is
+    /// `#Type::method` and for a trait impl `Trait#Type::method`.
+    pub fn from_body_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Defined(names.into_iter().map(str::to_string).collect())
+    }
+
+    /// Whether the program writes this method in Khora.
+    ///
+    /// Both spellings are checked: an inherent `impl Shared { fn get }` is
+    /// `#Shared::get`, and a trait impl is `Trait#Shared::get`, which no caller
+    /// here knows the trait name for.
+    fn writes(&self, owner: &str, method: &str) -> bool {
+        let inherent = format!("#{owner}::{method}");
+        let suffix = format!("#{owner}::{method}");
+        self.0.iter().any(|name| *name == inherent || name.ends_with(&suffix))
+    }
+}
+
 /// Whether values of this type carry a reference count.
 ///
 /// `Unknown` counts as unboxed: it only appears downstream of an error, and a
@@ -262,11 +327,12 @@ pub fn is_boxed(ty: &Type) -> bool {
 /// pointer that has to be counted. A plan made once from the generic body is
 /// wrong for every instantiation that fills a parameter with something boxed —
 /// see `docs/errata.md`, entry 24.
-pub fn plan(body: &Body, types: &khora_types::BodyTypes) -> RcPlan {
+pub fn plan(body: &Body, types: &khora_types::BodyTypes, defined: &Defined) -> RcPlan {
     let mut planner = Planner {
         body,
         plan: RcPlan::default(),
         types,
+        defined,
         reads: Vec::new(),
         unowned: HashSet::new(),
         unwinds: false,
@@ -286,6 +352,21 @@ pub fn plan(body: &Body, types: &khora_types::BodyTypes) -> RcPlan {
 pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
     let checked = khora_types::checked(db, file);
     let empty = khora_types::BodyTypes::default();
+
+    // Every body in the program, not just this file's: a package may implement
+    // `Shared::get` somewhere else entirely, and the point of the set is to
+    // notice that. `source_root` is absent only in a test that made a file
+    // without one, where this file's own bodies are the whole program.
+    let names: Vec<String> = match khora_db::source_root(db) {
+        Some(root) => root
+            .files(db)
+            .iter()
+            .flat_map(|f| khora_hir::body::bodies(db, *f).iter().map(|(n, _)| n.clone()))
+            .collect(),
+        None => khora_hir::body::bodies(db, file).iter().map(|(n, _)| n.clone()).collect(),
+    };
+    let defined = Defined::from_body_names(names.iter().map(String::as_str));
+
     khora_hir::body::bodies(db, file)
         .iter()
         .map(|(name, body)| {
@@ -296,7 +377,7 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
             // value passed to one was freed twice.
             let body_types =
                 checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t).unwrap_or(&empty);
-            (name.clone(), plan(body, body_types))
+            (name.clone(), plan(body, body_types, &defined))
         })
         .collect()
 }
@@ -323,6 +404,9 @@ struct Planner<'a> {
     body: &'a Body,
     plan: RcPlan,
     types: &'a khora_types::BodyTypes,
+    /// What the program implements in Khora, so that the borrow table is not
+    /// consulted for a method somebody wrote a body for. [`Defined`].
+    defined: &'a Defined,
     /// Every read of a boxed local, in program order.
     reads: Vec<Read>,
     /// Bindings that hold a reference belonging to somebody else.
