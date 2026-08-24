@@ -130,7 +130,7 @@ fn create(store: Store, request: Request) -> Response
   match url_of(request.body) {
     Option::None => problem(400, "the body must be an object with a `url` string"),
     Option::Some(url) =>
-    if!absolute(url) {
+    if !absolute(url) {
       problem(400, "`url` must be absolute, as `https://example.com/x`")
     } else {
       // Drawing the code, inserting under it, and learning which code it was

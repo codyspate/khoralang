@@ -268,8 +268,13 @@ impl Formatter {
             return matches!(prev, IDENT | NAME_REF | R_PAREN | R_BRACK);
         }
         // Postfix `!` binds to the call it marks; prefix `!` binds to its operand.
+        //
+        // Which of the two it is decides what comes *before* it as well. A
+        // postfix `!` joins what it marks — `read_text(p)!` — but a prefix one
+        // is an operand of whatever precedes it, and `a && !b` was being
+        // printed `a &&!b`: the rule tested the `!` and not which `!` it was.
         if next == BANG {
-            return true;
+            return parent != PREFIX_EXPR;
         }
         if prev == BANG {
             return prev_parent == PREFIX_EXPR;
