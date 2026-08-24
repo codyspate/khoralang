@@ -1955,8 +1955,21 @@ Ordered by value, not by §6's numbering.
   is the claim 10.4 rests on, `khora-db` already logs query execution so the
   machinery exists, and if it is false that changes the language server's design
   rather than adding a bug to fix. From `docs/design/testing.md`.~~
-- **10.1 Apply D12 at publication.** Phase 8.5 decides the policy; this is where
-  package metadata, the resolver and release tooling begin enforcing it.
+- **10.1 Apply D12 at publication — the enforceable half, done.**
+  `khora-manifest`'s `semver` module. `compatibility.md` is written entirely in
+  terms of major, minor and patch, and none of it meant anything against a
+  version string nobody parsed: `"1.2"`, `"v1.2.3"` and `"latest"` were all
+  accepted, and the first place any of them would have been noticed is a
+  resolver comparing two and giving an answer nobody could explain. A leading
+  zero is refused too, so `01.0.0` and `1.0.0` cannot become two spellings of
+  one version in a lockfile.
+
+  **The rest genuinely waits on the registry.** The substance of "apply D12 at
+  publication" is comparing a package's public surface against its previous
+  published version and refusing a minor release that added a case to a sum
+  type, a field to a record, or a requirement to a `with` row. There is nothing
+  to compare against until something has been published, so this is blocked on
+  the registry rather than on effort.
 - **10.2 `khora-pkg` — mostly done.** `khora.lock`, a content-addressed store,
   transitive resolution and the task DAG all exist, and the exit criterion
   below is met. `crates/khora-pkg`, and `khora-codegen-llvm/tests/packages.rs`

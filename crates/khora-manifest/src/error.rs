@@ -75,6 +75,17 @@ impl ManifestError {
         }
     }
 
+    /// A failure the schema saw rather than the parser: a well-formed TOML
+    /// value that is not a legal one.
+    ///
+    /// `key` is the dotted path, so the message names the field. There is no
+    /// span, because by this point the typed value has been parsed out of the
+    /// document and the position is gone -- and a message naming
+    /// `package.version` is enough to find it.
+    pub(crate) fn invalid_value(key: &str, why: String) -> ManifestError {
+        ManifestError { message: format!("`{key}`: {why}"), span: None, location: None, file: None }
+    }
+
     /// Records which file the text came from.
     ///
     /// [`crate::Manifest::parse`] is handed text, not a path, so that it stays

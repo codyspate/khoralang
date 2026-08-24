@@ -44,6 +44,7 @@
 mod audit;
 mod error;
 mod model;
+mod semver;
 mod warning;
 
 pub use crate::error::{Location, ManifestError};
@@ -51,6 +52,7 @@ pub use crate::model::{
     granted_host, granted_name, granted_path, Build, Category, Default_, Dependency, Fmt,
     FsGrants, IndentStyle, Lint, LintLevel, Manifest, Package, Permissions, Task,
 };
+pub use crate::semver::Version;
 pub use crate::warning::{Warning, WarningKind};
 
 /// The result of a successful parse.
@@ -75,6 +77,16 @@ impl Manifest {
     pub fn parse(text: &str) -> Result<Parsed, ManifestError> {
         let manifest: Manifest =
             toml::from_str(text).map_err(|error| ManifestError::from_toml(error, text))?;
+        // `version` is the field `docs/design/compatibility.md` is written
+        // entirely in terms of -- what a major may break, what a minor may add
+        // -- and none of that means anything against a string nobody parsed.
+        // `"1.2"`, `"v1.2.3"` and `"latest"` all used to be accepted, and the
+        // first place any of them would have been noticed is a resolver
+        // comparing two and giving an answer nobody could explain. Roadmap
+        // 10.1.
+        crate::semver::Version::parse(&manifest.package.version)
+            .map_err(|why| ManifestError::invalid_value("package.version", why))?;
+
         // Second read: the typed one above cannot report what it ignored.
         let warnings = audit::unknown_keys(text)?;
         Ok(Parsed { manifest, warnings })
