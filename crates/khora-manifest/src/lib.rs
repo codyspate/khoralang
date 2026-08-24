@@ -49,8 +49,7 @@ mod warning;
 
 pub use crate::error::{Location, ManifestError};
 pub use crate::model::{
-    granted_host, granted_name, granted_path, Build, Category, Default_, Dependency, Fmt,
-    FsGrants, IndentStyle, Lint, LintLevel, Manifest, Package, Permissions, Task,
+    Build, Category, Default_, Dependency, Fmt, FsGrants, IndentStyle, Lint, LintLevel, Manifest, Package, Permissions, Task, Toolchain, granted_host, granted_name, granted_path,
 };
 pub use crate::semver::Version;
 pub use crate::warning::{Warning, WarningKind};

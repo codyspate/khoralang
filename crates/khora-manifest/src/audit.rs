@@ -39,6 +39,7 @@ static ROOT: Schema = Schema::Fields(&[
     ("dependencies", &DEPENDENCIES),
     ("build", &BUILD),
     ("tasks", &TASKS),
+    ("toolchain", &TOOLCHAIN),
 ]);
 
 static PACKAGE: Schema = Schema::Fields(&[
@@ -53,7 +54,10 @@ static PERMISSIONS: Schema = Schema::Fields(&[
     ("network", &OPEN),
     ("fs", &OPEN),
     ("env", &OPEN),
+    ("extern", &OPEN),
 ]);
+
+static TOOLCHAIN: Schema = Schema::Fields(&[("version", &OPEN)]);
 
 static FMT: Schema = Schema::Fields(&[
     ("indent-style", &OPEN),
@@ -66,7 +70,13 @@ static FMT: Schema = Schema::Fields(&[
 static LINTS: Schema = Schema::Map(&OPEN);
 
 static DEPENDENCIES: Schema = Schema::Map(&DEPENDENCY);
-static DEPENDENCY: Schema = Schema::Fields(&[("version", &OPEN), ("path", &OPEN)]);
+static DEPENDENCY: Schema = Schema::Fields(&[
+    ("version", &OPEN),
+    ("path", &OPEN),
+    ("git", &OPEN),
+    ("rev", &OPEN),
+    ("tag", &OPEN),
+]);
 
 static BUILD: Schema = Schema::Fields(&[("target", &OPEN), ("plugin", &OPEN)]);
 

@@ -27,6 +27,9 @@ pub struct Manifest {
     /// Dependencies, keyed by module path such as `std.effect`.
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
+    /// Which compiler this project expects.
+    #[serde(default)]
+    pub toolchain: Option<Toolchain>,
     /// Build settings, when the manifest configures the build.
     pub build: Option<Build>,
     /// Task-runner entries, keyed by task name.
@@ -451,6 +454,33 @@ impl<'de> Visitor<'de> for LintVisitor {
         }
         Ok(Lint { level: level.ok_or_else(|| de::Error::missing_field("level"))?, options })
     }
+}
+
+/// The `[toolchain]` table: which Khora builds this project.
+///
+/// ```toml
+/// [toolchain]
+/// version = "0.1.0"
+/// ```
+///
+/// **In this file rather than one of its own.** Rust and Node both keep the
+/// toolchain apart -- `rust-toolchain.toml`, `.nvmrc` -- on the argument that a
+/// compiler version is not a property of the package. It is a good argument and
+/// it loses to a simpler one: a project with two files describing how to build
+/// it has two files that must both be found and both be committed, and only one
+/// that anybody remembers. One file that says everything is easier to keep true.
+///
+/// A version named here and not installed is an error, never a fallback. See
+/// `khora-toolchain`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Toolchain {
+    /// An exact version. No ranges, and no channels.
+    ///
+    /// A range would need a resolver and would reintroduce the thing a pin
+    /// exists to remove: two machines agreeing on the constraint and
+    /// disagreeing on the compiler.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// One entry of the `[dependencies]` table.

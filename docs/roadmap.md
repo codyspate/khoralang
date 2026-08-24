@@ -2096,6 +2096,39 @@ Ordered by value, not by §6's numbering.
   `std` — the last of which is a language-surface decision rather than a
   toolchain one, since `assert_snapshot` has to name the file it is comparing
   against.
+- **10.5.5 Toolchain versions — done.** Not previously on this list, and it
+  should have been: everything above assumes one Khora on the machine, and the
+  moment a project has a lockfile it also wants to say which compiler produced
+  it.
+
+  ```toml
+  [toolchain]
+  version = "0.1.0"
+  ```
+
+  **In `khora.toml` rather than a file of its own**, which is the opposite of
+  what Rust and Node do. Their argument — a compiler version is not a property
+  of the package — is good, and it loses to a simpler one: a project with two
+  files describing how to build it has two that must both be found and both be
+  committed, and only one anybody remembers.
+
+  Toolchains live in `$KHORA_HOME/toolchains/<version>/bin/`, the same root the
+  package store uses, so a machine has one Khora directory rather than two.
+  `khora` hands over to the pinned version **before argument parsing**, so a
+  project pinning a version with flags this build has never heard of still
+  works — which is the whole point of a pin.
+
+  **A missing pinned version stops the build.** Falling back is the exact
+  failure the feature exists to prevent: a build that quietly used a different
+  compiler looks like it worked.
+
+  Two things worth knowing before extending it. `khora toolchain ...` never
+  hands over, because otherwise standing in a project whose pin is missing
+  leaves you unable to run the command that installs it — the pin becomes a
+  trap. And there is **no `install`**, because there is nothing to download
+  from; `link` registers a build already on disk, and copies rather than
+  symlinks so a `cargo clean` cannot leave a toolchain pointing at nothing.
+
 - **10.6 Cross-targets**: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`.
 - **10.7 WASM build plugins** via wasmtime. Last: largest scope, least critical,
   and it needs D4 settled first.

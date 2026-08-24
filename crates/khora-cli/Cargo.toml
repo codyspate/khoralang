@@ -17,6 +17,7 @@ khora-lint.workspace = true
 khora-lsp.workspace = true
 khora-manifest.workspace = true
 khora-pkg.workspace = true
+khora-toolchain.workspace = true
 khora-fmt.workspace = true
 khora-diagnostics.workspace = true
 khora-types.workspace = true

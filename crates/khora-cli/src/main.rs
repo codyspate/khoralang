@@ -45,6 +45,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Manage the Khora versions installed on this machine.
+    Toolchain {
+        #[command(subcommand)]
+        command: ToolchainCommand,
+    },
     /// Speak the Language Server Protocol on stdin and stdout.
     ///
     /// Not for a person to run: an editor starts it. Running it by hand gets a
@@ -80,6 +85,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Before anything else, including argument parsing: a project pinning a
+    // version whose flags this build does not recognise must still work.
+    hand_over_if_pinned();
+
     match run() {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
@@ -88,6 +97,29 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `khora toolchain ...`.
+#[derive(Subcommand)]
+enum ToolchainCommand {
+    /// Show what is installed, and which one is running.
+    List,
+    /// Register a Khora executable as the toolchain for a version.
+    ///
+    /// There is no `install`, because there is nothing to download from yet.
+    Link {
+        /// The version it will be known as.
+        version: String,
+        /// The executable to register. It is copied, not pointed at.
+        path: PathBuf,
+    },
+    /// Forget a registered toolchain.
+    Unlink { version: String },
+    /// Say which toolchain this directory would use, and why.
+    Which {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn run() -> Result<bool> {
@@ -99,6 +131,7 @@ fn run() -> Result<bool> {
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out } => build(&path, out.as_deref()),
         Command::Lsp => lsp().map(|()| true),
+        Command::Toolchain { command } => toolchain(command),
         Command::Test { path, filter } => test(&path, filter.as_deref()),
         Command::Bench { path, filter } => bench(&path, filter.as_deref()),
     }
@@ -210,6 +243,141 @@ fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintL
         out.insert(name.clone(), lint.level);
     }
     out
+}
+
+/// `khora toolchain ...`.
+fn toolchain(command: ToolchainCommand) -> Result<bool> {
+    match command {
+        ToolchainCommand::List => {
+            let installed = khora_toolchain::installed()?;
+            if installed.is_empty() {
+                println!(
+                    "no toolchains registered; this is Khora {} and it is the only one \
+                     that will run.\n\n    khora toolchain link {} <path-to-khora>",
+                    khora_toolchain::RUNNING,
+                    khora_toolchain::RUNNING
+                );
+                return Ok(true);
+            }
+            for entry in installed {
+                let running =
+                    if entry.version == khora_toolchain::RUNNING { "  (running)" } else { "" };
+                println!("{}{running}", entry.version);
+            }
+            Ok(true)
+        }
+        ToolchainCommand::Link { version, path } => {
+            let at = khora_toolchain::link(&version, &path)?;
+            println!("registered Khora {version} at {}", at.display());
+            Ok(true)
+        }
+        ToolchainCommand::Unlink { version } => {
+            khora_toolchain::unlink(&version)?;
+            println!("forgot Khora {version}");
+            Ok(true)
+        }
+        ToolchainCommand::Which { path } => {
+            match khora_toolchain::pinned_version(&path) {
+                None => println!(
+                    "no pin here, so whatever is on the path runs. This is Khora {}.",
+                    khora_toolchain::RUNNING
+                ),
+                Some(wanted) => {
+                    let installed = khora_toolchain::installed()?;
+                    match khora_toolchain::decide(
+                        Some(&wanted),
+                        khora_toolchain::RUNNING,
+                        None,
+                        &installed,
+                    ) {
+                        khora_toolchain::Decision::Proceed => {
+                            println!("pinned to {wanted}, which is what is running")
+                        }
+                        khora_toolchain::Decision::Handover(t) => println!(
+                            "pinned to {wanted}, at {}\nthis is {}, which would hand over",
+                            t.binary.display(),
+                            khora_toolchain::RUNNING
+                        ),
+                        khora_toolchain::Decision::Missing { wanted, available } => {
+                            println!("{}", khora_toolchain::missing_message(&wanted, &available))
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Hands this invocation to the toolchain the project pins, if that is not us.
+///
+/// **Before `clap` sees anything**, so that a project pinning a version with
+/// subcommands or flags this build has never heard of still works — which is
+/// the whole point of a pin. Parsing first would reject the arguments before
+/// the toolchain that understands them ever ran.
+///
+/// Returns only when this process should carry on. On Unix the handover
+/// replaces the process; on Windows there is no `exec`, so it runs the child
+/// and exits with its status. The difference is visible if you look at a
+/// process tree and nowhere else.
+fn hand_over_if_pinned() {
+    // **`khora toolchain ...` never hands over.** It is about the machine
+    // rather than the project, and handing it over makes the one situation it
+    // exists for unrecoverable: standing inside a project whose pinned version
+    // is missing, unable to run the command that installs it because the pin
+    // refuses to let anything run. `which` has the same problem in the other
+    // direction -- it would report on the toolchain that answered rather than
+    // on the decision being asked about.
+    if std::env::args().nth(1).as_deref() == Some("toolchain") {
+        return;
+    }
+
+    // A handover already happened. Whatever we are, we are what was asked for
+    // -- and re-deciding here is how a mislinked toolchain becomes an infinite
+    // chain of `exec`s that presents as a hang.
+    let active = std::env::var(khora_toolchain::ACTIVE).ok();
+    let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let pin = khora_toolchain::pinned_version(&here);
+
+    let installed = khora_toolchain::installed().unwrap_or_default();
+    let decision = khora_toolchain::decide(
+        pin.as_deref(),
+        khora_toolchain::RUNNING,
+        active.as_deref(),
+        &installed,
+    );
+
+    match decision {
+        khora_toolchain::Decision::Proceed => {}
+        khora_toolchain::Decision::Missing { wanted, available } => {
+            eprintln!("khora: {}", khora_toolchain::missing_message(&wanted, &available));
+            std::process::exit(1);
+        }
+        khora_toolchain::Decision::Handover(target) => {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            let mut command = std::process::Command::new(&target.binary);
+            command.args(&args).env(khora_toolchain::ACTIVE, &target.version);
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                // Only returns on failure.
+                let failure = command.exec();
+                eprintln!("khora: running {}: {failure}", target.binary.display());
+                std::process::exit(1);
+            }
+            #[cfg(not(unix))]
+            {
+                match command.status() {
+                    Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+                    Err(e) => {
+                        eprintln!("khora: running {}: {e}", target.binary.display());
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Runs the language server over stdin and stdout.

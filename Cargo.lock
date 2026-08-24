@@ -570,6 +570,7 @@ dependencies = [
  "khora-manifest",
  "khora-pkg",
  "khora-syntax",
+ "khora-toolchain",
  "khora-types",
  "tempfile",
 ]
@@ -700,6 +701,15 @@ dependencies = [
  "rowan",
  "serde_json",
  "text-size",
+]
+
+[[package]]
+name = "khora-toolchain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "khora-manifest",
+ "tempfile",
 ]
 
 [[package]]

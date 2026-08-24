@@ -499,3 +499,79 @@ edition = \"2026\"
     .expect("a manifest");
     assert!(!parsed.manifest.dependencies["acme.json"].is_located());
 }
+
+/// Every key the model reads is a key the audit knows.
+///
+/// These two lists are maintained by hand in different files, and the failure
+/// when they drift is quiet: a manifest using a real feature is told the key is
+/// unrecognized, which reads as "this does nothing". Three keys had already
+/// drifted — `permissions.extern`, and a dependency's `git` and `rev` — before
+/// anything checked.
+#[test]
+fn every_supported_key_is_recognized_by_the_audit() {
+    let text = r#"
+[package]
+name = "a"
+version = "0.1.0"
+authors = ["Someone <s@example.com>"]
+edition = "2026"
+
+[toolchain]
+version = "0.1.0"
+
+[permissions]
+default = "deny"
+network = ["*"]
+env = ["HOME"]
+extern = ["std"]
+
+[permissions.fs]
+read = ["/tmp"]
+write = ["/tmp"]
+
+[fmt]
+indent-style = "space"
+indent-width = 2
+
+[lints]
+dangling-expression = "warn"
+
+[dependencies]
+by_path = { path = "../other" }
+by_git = { git = "https://example.com/x.git", rev = "abc" }
+by_tag = { git = "https://example.com/y.git", tag = "v1" }
+
+[build]
+target = "x86_64-unknown-linux-musl"
+plugin = "protobuf-compiler@2.1"
+
+[tasks.ci]
+description = "everything"
+depends_on = ["test"]
+"#;
+    let parsed = Manifest::parse(text).expect("a well-formed manifest");
+    assert!(
+        parsed.warnings.is_empty(),
+        "these are all real keys: {:?}",
+        parsed.warnings.iter().map(ToString::to_string).collect::<Vec<_>>()
+    );
+}
+
+/// The audit still has to catch a genuine typo, or the test above could be
+/// satisfied by an audit that warns about nothing.
+#[test]
+fn a_misspelled_key_is_still_caught() {
+    let text = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n\
+                [toolchain]\nverison = \"0.1.0\"\n";
+    let parsed = Manifest::parse(text).expect("it parses");
+    assert_eq!(parsed.warnings.len(), 1, "{:?}", parsed.warnings);
+    assert!(parsed.warnings[0].to_string().contains("toolchain.verison"), "{:?}", parsed.warnings);
+}
+
+#[test]
+fn the_toolchain_version_is_read() {
+    let text = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n\
+                [toolchain]\nversion = \"0.2.0\"\n";
+    let parsed = Manifest::parse(text).expect("a well-formed manifest");
+    assert_eq!(parsed.manifest.toolchain.and_then(|t| t.version).as_deref(), Some("0.2.0"));
+}
