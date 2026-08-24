@@ -209,6 +209,77 @@ pub(crate) fn suspend() -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// **Four hundred coroutines, four threads, and every one of them moves.**
+    ///
+    /// This exists to answer one question, because a crash in `scheduler`
+    /// hinges on it: is corosensei safe when a coroutine is resumed by a
+    /// thread other than the one that resumed it last? Its `Yielder` is
+    /// documented as a parent link updated on every resume, and its docs warn
+    /// that *references* to a yielder must not cross threads — which is not
+    /// the same claim, and the difference matters to every fiber this
+    /// scheduler migrates.
+    ///
+    /// So: no scheduler, no wait states, no timers. A queue, four threads
+    /// pulling from it, and the same install-on-entry, re-install-after-wake
+    /// dance `suspend` does. If this ever fails, the bug is underneath us. It
+    /// does not fail, which is why `scheduler.md` can say the Linux crash is
+    /// ours.
+    #[test]
+    fn a_coroutine_survives_being_resumed_by_a_different_thread() {
+        const COUNT: usize = 400;
+        const HOPS: usize = 4;
+        const WORKERS: usize = 4;
+
+        struct Migrating(Coroutine<(), (), (), corosensei::stack::DefaultStack>);
+        // SAFETY: the same argument as `Task`'s, and the point of the test.
+        unsafe impl Send for Migrating {}
+
+        let done = Arc::new(AtomicUsize::new(0));
+        let queue: Arc<Mutex<Vec<Migrating>>> = Arc::new(Mutex::new(Vec::new()));
+
+        for _ in 0..COUNT {
+            let counter = done.clone();
+            queue.lock().expect("the queue").push(Migrating(Coroutine::new(
+                move |yielder: &Yielder<(), ()>, ()| {
+                    YIELDER.with(|y| y.set(yielder as *const _));
+                    for _ in 0..HOPS {
+                        let mine = YIELDER.with(|y| y.get());
+                        // SAFETY: ours, and we are the thread running it.
+                        unsafe { (*mine).suspend(()) };
+                        YIELDER.with(|y| y.set(mine));
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    YIELDER.with(|y| y.set(std::ptr::null()));
+                },
+            )));
+        }
+
+        let mut workers = Vec::new();
+        for _ in 0..WORKERS {
+            let queue = queue.clone();
+            let done = done.clone();
+            workers.push(std::thread::spawn(move || {
+                while done.load(Ordering::SeqCst) != COUNT {
+                    let Some(mut co) = queue.lock().expect("the queue").pop() else {
+                        std::thread::yield_now();
+                        continue;
+                    };
+                    let outer = YIELDER.with(|y| y.get());
+                    let finished = matches!(co.0.resume(()), CoroutineResult::Return(()));
+                    YIELDER.with(|y| y.set(outer));
+                    if !finished {
+                        queue.lock().expect("the queue").push(co);
+                    }
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("a worker");
+        }
+        assert_eq!(done.load(Ordering::SeqCst), COUNT);
+    }
 
     #[test]
     fn a_task_runs_when_it_is_resumed_and_not_before() {

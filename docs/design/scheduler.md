@@ -207,6 +207,9 @@ stops on failure and runs the suite fifteen times — and what it reports is:
 > `scheduler::tests::many_sleeping_fibers_all_wake` dies of a signal in
 > **17 of 60 runs** on Linux, at `27b051b`.
 
+That test is now ignored on Linux and the crash has been reduced to something
+smaller with no timers in it at all.
+
 See [the open problem](#the-linux-crash) below. macOS remains unverified
 entirely; `.github/workflows/runtime.yml` is what would close that.
 
@@ -597,44 +600,81 @@ thousand runs" into a case that can be replayed.
 
 ## The Linux crash
 
-`scheduler::tests::many_sleeping_fibers_all_wake` — four workers, four hundred
-fibers, each sleeping a few milliseconds — dies of `SIGSEGV` on Linux in
-roughly a quarter to a third of runs. It has never been seen on Windows. It is
-present at `27b051b`, which is to say it arrived with the scheduler itself and
-not with anything layered on top.
+Four workers, four hundred fibers, each parking once and being woken a
+millisecond later: `SIGSEGV` in roughly a quarter of runs on Linux, never on
+Windows. Present at `27b051b`, which is the scheduler's own commit, so it
+arrived with this design and not with anything layered on since.
 
-What is known:
+Two tests carry it. `many_sleeping_fibers_all_wake` found it and is now
+`#[ignore]`d on Linux; `park_and_wake_at_scale_reproduces_the_linux_crash` is
+the reduction and is ignored everywhere. Both are in `scheduler.rs`.
 
-  - It needs **two or more workers**. One worker, same fibers, same timers:
-    clean over hundreds of runs.
-  - It needs **the timer thread**. Four workers with every wake delivered by
-    hand, after all four hundred fibers have already parked: clean.
-    The difference between those two is that timers deliver wakes *while other
-    fibers are still being started*, so the suspicion is a first resume racing
-    a wake on another worker.
-  - `gdb` catches it as `Thread 6 "khora-worker-3" received signal SIGSEGV`
-    with the instruction pointer at `0x0`, which is a jump through a null or
-    freed pointer rather than a corrupted stack.
+### What it is
 
-What has been ruled out: dropping a coroutine on a thread other than the one
-that resumed it, resuming a coroutine twice, resuming one that has already
-finished, and running a body under the wrong yielder. Each was tested with an
-assertion, and none fired.
+The faulting thread is executing corosensei's stack switch, inlined into
+`park_current` — `rax` holds `park_current+270`, which resolves to the switch
+in `corosensei/src/unwind.rs`. `rip` is `0`. So the switch ran and jumped to a
+parent link that was not a return address.
 
-The awkward part is that **it disappears under observation**. Under `gdb`, under
-`valgrind`, and with the assertions above compiled in, the crash rate drops to
-zero. That is the signature of a timing-dependent data race rather than a
-deterministic memory error, and it is why the assertions proving each theory
-wrong are weaker evidence than they look: they may have simply perturbed the
-window closed.
+Where it landed is the useful part. In a core dump, two threads have
+**byte-identical stack pointers**:
 
-**Nothing shipped depends on this yet.** `Fiber::spawn` still runs each fiber on
-its own thread; the coroutine scheduler is not wired into it. Compiled Khora
-programs do not reach this code. That is the only reason it is written down
-here rather than fixed before anything else.
+    LWP 1  sp=0x7aadfbffeb18  pc=(nil)          <- the fault
+    LWP 5  sp=0x7aadfbffeb18  pc=0x7aae00734c8d <- parked in the worker condvar
 
-The next things to try, roughly in order of expected value: ThreadSanitizer on
-nightly, which is built for exactly this and has not been run; then a build with
-`opt-level=1` and overflow checks, which sometimes shifts a race enough to make
-it deterministic without hiding it; then reducing the test until it is small
-enough to reason about completely.
+`0x7aadfbffeb18` is LWP 5's own thread stack — the arithmetic is unambiguous,
+since every worker sits exactly `0xba8` below its TLS block and the stacks are
+`0x201000` apart. The faulting thread switched onto another worker's live
+stack, at the frame where that worker is asleep waiting for work.
+
+### What it is not
+
+  - **Not corosensei.** `coro.rs` has
+    `a_coroutine_survives_being_resumed_by_a_different_thread`: four hundred
+    coroutines, four threads, four hops each, the same install-on-entry and
+    re-install-after-wake dance, and no scheduler. Clean over forty runs. Its
+    docs warn that yielder *references* must not cross threads, which is a
+    narrower claim than migration being unsafe, and the test is there so that
+    distinction stays checked rather than assumed.
+  - **Not the timers.** The reduction has no deadlines, no `Timers`, and no
+    timer thread.
+  - **Not a panic.** `stderr` is empty on a crashing run.
+  - **Not a fiber that never suspends.** A waker that spins instead of sleeping
+    a millisecond is clean over forty runs, because the fibers take the
+    already-notified path in `declare` and never park, so nothing migrates.
+    Migration is necessary; the millisecond is what produces it.
+  - **Not a stack overflow.** corosensei's default stack is a megabyte with a
+    guard page, and these bodies are shallow.
+
+### The part that makes it hard
+
+**It disappears under observation.** Under `gdb`, under `valgrind`, and under
+every assertion written to test a theory about it, the rate goes to zero. A
+probe comparing the thread-local yielder against one recorded on the fiber
+itself reported no mismatch in forty runs — and also crashed zero times in
+those forty runs, so it proved nothing. Each of double-resume,
+resume-after-finish, foreign-thread drop and wrong-yielder was tested the same
+way and is unrefuted rather than ruled out.
+
+Core dumps are the way around this, and they cost nothing: `core_pattern` is
+already `core` on WSL2, so `ulimit -c unlimited` in a writable directory and a
+loop of eighty runs produces one in under a minute, with no debugger attached
+and no timing disturbed.
+
+### Nothing shipped depends on it
+
+`Fiber::spawn` still gives each fiber an operating-system thread. The coroutine
+scheduler is not wired into it, and no compiled Khora program reaches this
+code. That is the only reason this is written down rather than blocking
+everything else — but it does block 11D, since work stealing makes migration
+more frequent, not less.
+
+### Where to look next
+
+The evidence points at a parent link being followed after it stopped being
+current, on a thread that was not the one that installed it. The two places
+that can produce that are the `YIELDER` thread-local in `coro.rs` and the
+handoff in `wake`/`run` around the `parked` map. ThreadSanitizer on nightly is
+the untried tool that is actually built for this; a nightly toolchain is
+installed in WSL2 for it. Failing that, reduce further — the reduction above is
+forty lines from being a program with nothing in it but the bug.
