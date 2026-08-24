@@ -68,6 +68,24 @@ pub(crate) fn spend_safepoint() -> bool {
     })
 }
 
+/// A loop went round again.
+///
+/// Emitted by code generation at every back-edge of a program that can spawn.
+/// **A safepoint, not a cancellation point**: it cannot fail, nothing unwinds
+/// through it, and a fiber that yields here is not thereby cancellable. That
+/// distinction is what lets an infallible loop be preempted at all —
+/// `docs/design/scheduler.md` §1.
+///
+/// Off a worker this is a thread-local load and a compare, because the budget
+/// is only ever granted around a resume. A program that never spawns emits no
+/// calls to it at all.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_safepoint() {
+    if spend_safepoint() {
+        crate::coro::suspend();
+    }
+}
+
 /// Grants a fresh budget, at the start of a turn.
 fn refill() {
     REMAINING.with(|r| r.set(BUDGET));

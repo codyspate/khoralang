@@ -301,6 +301,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         let body_ty = self.types.of(body).clone();
         if let Some(value) = self.expr(body) {
             self.drop(value, &body_ty);
+            // The back-edge. After the body's drops, so a fiber that yields
+            // here is not holding a reference it was about to release.
+            self.safepoint();
             self.br(head);
         }
         self.loops.pop();
@@ -324,6 +327,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         let body_ty = self.types.of(body).clone();
         if let Some(value) = self.expr(body) {
             self.drop(value, &body_ty);
+            self.safepoint();
             self.br(body_block);
         }
         let frame = self.loops.pop().expect("the frame just pushed");

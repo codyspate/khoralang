@@ -209,6 +209,8 @@ pub struct Runtime<'ctx> {
     pub test_register: FunctionValue<'ctx>,
     /// `int32_t khora_test_run(void)`
     pub test_run: FunctionValue<'ctx>,
+    /// `void khora_safepoint(void)`, at every loop back-edge.
+    pub safepoint: FunctionValue<'ctx>,
     /// The same pair for `bench` blocks. Same signatures, because a bench body
     /// and a test body are the same shape; only the runner differs.
     pub bench_register: FunctionValue<'ctx>,
@@ -347,6 +349,7 @@ impl<'ctx> Runtime<'ctx> {
                 void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),
             ),
             test_run: declare("khora_test_run", i32t.fn_type(&[], false)),
+            safepoint: declare("khora_safepoint", void.fn_type(&[], false)),
             bench_register: declare(
                 "khora_bench_register",
                 void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),

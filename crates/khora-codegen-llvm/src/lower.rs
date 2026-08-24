@@ -541,6 +541,29 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.be.builder.build_unconditional_branch(target).expect("an unconditional branch");
     }
 
+    /// Gives the scheduler a chance to take the worker back.
+    ///
+    /// Emitted at loop back-edges, which is the only place a Khora program can
+    /// run forever without doing anything the runtime already sees. A
+    /// cancellation is observed at `!` in something that can raise, so a
+    /// function with no error row has no cancellation point — correct as a
+    /// language rule, and on M:N it means an infallible loop would own a
+    /// worker until the process ended. `docs/design/scheduler.md` §1.
+    ///
+    /// **Nothing is emitted for a program that cannot spawn.** The compiler
+    /// already proves that to decide whether reference counting is atomic, and
+    /// the same proof says there is nobody to be fair to. So the usual program
+    /// pays exactly nothing for this.
+    fn safepoint(&mut self) {
+        if self.be.single_threaded {
+            return;
+        }
+        self.be
+            .builder
+            .build_call(self.be.rt.safepoint, &[], "")
+            .expect("a safepoint");
+    }
+
     /// An `alloca` in the entry block, whatever block we are currently in.
     fn entry_slot(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
         let current = self.be.builder.get_insert_block();
