@@ -107,9 +107,9 @@ the `extern` boundary.
 | `khora-pkg` | Resolution, `khora.lock`, the content-addressed store, the task DAG. |
 | `khora-lint` | Lints that need types. |
 | `khora-lsp` | A language server over the same queries. |
-| `khora-cli` | `check`, `fmt`, `lex`, `parse`, `lsp`, `test`, and `build` with `--features llvm`. |
+| `khora-cli` | `check`, `fmt`, `lex`, `parse`, `lsp`, `test`, `bench`, and `build` with `--features llvm`. |
 
-1,023 tests pass, `clippy -D warnings` is clean, and `khora check` and
+1,041 tests pass, `clippy -D warnings` is clean, and `khora check` and
 `khora fmt --check` pass over all of `std/`, `examples/` and `bench/` — with
 no lint warnings anywhere in them.
 `sh scripts/baseline.sh` runs the lot, including twelve HTTP conformance checks
