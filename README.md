@@ -21,7 +21,11 @@ promise will be and names what 1.0 is still waiting on.
 
 **Platforms.** Developed on Windows, and green on Windows, Linux and macOS —
 the whole suite and the baseline, including a Khora HTTP server binding a real
-socket and answering `curl`. `.github/workflows/ci.yml` runs all three.
+socket and answering `curl`. `.github/workflows/ci.yml` runs all three, **on
+demand rather than on every push**: this repository is private, macOS minutes
+bill at ten times wall clock, and one full run costs around two hours of
+billed time. `sh scripts/baseline.sh` is the gate; run the workflow before a
+release or a change to the runtime or code generation.
 
 Two tests keep it that way from a laptop, and the reason they exist is worth a
 sentence. `khora-types/tests/portability.rs` type-checks `std` for every target

@@ -1,9 +1,42 @@
 name: ci
 
+# **On demand only, deliberately.** This repository is private, and private
+# Actions minutes bill with a multiplier: Linux x1, Windows x2, macOS x10. This
+# workflow runs six jobs and the backend ones take ten to twenty-five minutes,
+# so one green run costs on the order of 120 billed minutes -- most of it the
+# macOS backend at x10. Nineteen pushes in a night exhausted the allowance, and
+# every job then failed in three seconds with no steps, which looks like a
+# broken workflow and is not.
+#
+# `sh scripts/baseline.sh` is the gate now: the whole suite, clippy with
+# warnings denied, the corpus and formatter over `std`, every reference
+# application built, and twelve HTTP conformance checks against a real `curl`.
+#
+# **What the local baseline cannot tell you**, and what this workflow found the
+# first time it was able to run at all:
+#
+#   - `std` did not compile on Linux or macOS, because `std/fs` and the POSIX
+#     socket files both declare `close` and `socket_windows.kh` does not;
+#   - generated objects were not position-independent, so nothing linked on a
+#     modern Linux;
+#   - the macOS entry in `SYSTEM_LIBS` was a placeholder missing the
+#     `CoreFoundation` and `Security` frameworks;
+#   - `a_fiber_cancelled_before_it_starts_does_nothing` asserted a race it
+#     could lose, which needs load to show.
+#
+# Two of those are now caught from any host by
+# `khora-codegen-llvm/tests/portability.rs`, which generates and verifies a
+# module for all three targets. The other two still need a real machine.
+#
+# **Run it before anything that matters** -- a release, a merge, a change to
+# `khora-rt` or to code generation -- from the Actions tab, or:
+#
+#     gh workflow run ci.yml
+#
+# To go back to running on every push, put the `push` and `pull_request`
+# triggers back. Consider dropping the macOS backend to a schedule first: it is
+# a tenth of the wall clock and most of the bill.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 env:

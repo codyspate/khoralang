@@ -14,6 +14,7 @@ members = [
     "crates/khora-lint",
     "crates/khora-lsp",
     "crates/khora-pkg",
+    "crates/khora-toolchain",
     "crates/khora-cli",
 ]
 
@@ -39,6 +40,7 @@ khora-manifest = { path = "crates/khora-manifest" }
 khora-lint = { path = "crates/khora-lint" }
 khora-lsp = { path = "crates/khora-lsp" }
 khora-pkg = { path = "crates/khora-pkg" }
+khora-toolchain = { path = "crates/khora-toolchain" }
 
 salsa = "0.28"
 logos = "0.15"
