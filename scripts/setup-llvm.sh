@@ -129,10 +129,55 @@ case "$have" in
     *) die "installed LLVM is $have, not $MAJOR.x" ;;
 esac
 
+# **Forward slashes, and a drive letter.** Everything downstream of here is a
+# Windows program reading a path out of a file or an environment variable, so a
+# `/c/...` MSYS path is no good — and the backslash form is worse, because it
+# goes through `sed` below, where `\10\Lib` is a backreference and not a path.
+# `cygpath -m` gives `C:/...`, which every tool involved accepts.
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) prefix=$(cygpath -m "$prefix") ;;
+esac
+
+# --- .cargo/config.toml -------------------------------------------------------
+#
+# Generated rather than committed, because both settings in it name paths that
+# differ per machine. `.cargo/config.toml.example` is the template.
+root=$(cd "$(dirname "$0")/.." && pwd)
+config="$root/.cargo/config.toml"
+template="$root/.cargo/config.toml.example"
+
+if [ -f "$config" ]; then
+    say "Leaving the existing $config alone."
+elif [ ! -f "$template" ]; then
+    say "No $template to write from; export $PREFIX_VAR yourself."
+else
+    sdk=""
+    case "$(uname -s)" in
+        MINGW* | MSYS* | CYGWIN*)
+            # The newest SDK on this machine. `llvm-sys` emits the Windows
+            # system libraries as `static=` once the CRT is static, so rustc
+            # has to find those import libraries.
+            for candidate in "/c/Program Files (x86)/Windows Kits/10/Lib"/*/um/x64; do
+                [ -d "$candidate" ] && sdk="$candidate"
+            done
+            if [ -z "$sdk" ]; then
+                die "no Windows SDK under 'C:/Program Files (x86)/Windows Kits/10/Lib'. \
+Install the Windows SDK, or write $config by hand from the template."
+            fi
+            sdk=$(cygpath -m "$sdk")
+            ;;
+    esac
+
+    # `|` as the delimiter, because the values are paths with `/` in them.
+    # Both are forward-slash form by now, so there is no backslash for `sed` to
+    # read as a backreference.
+    sed -e "s|@LLVM_PREFIX@|$prefix|" -e "s|@WINDOWS_SDK@|$sdk|" "$template" > "$config"
+    say "Wrote $config."
+fi
+
 say ""
-say "LLVM $have is at $prefix. Export this, then build:"
+say "LLVM $have is at $prefix."
 say ""
-say "    export $PREFIX_VAR=\"$prefix\""
 say "    cargo test --workspace --features llvm"
 say ""
 printf '%s\n' "$prefix"

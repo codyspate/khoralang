@@ -17,3 +17,8 @@ bench/**/src/*.exe
 bench/**/src/*.o
 bench/*.exe
 bench/*.pdb
+
+# Written by `scripts/setup-llvm.sh`; `.cargo/config.toml.example` is the
+# template. It names an LLVM prefix and a Windows SDK version, both of which
+# differ per machine.
+/.cargo/config.toml

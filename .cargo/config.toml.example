@@ -1,0 +1,34 @@
+# Written by `scripts/setup-llvm.sh` as `.cargo/config.toml`, which is ignored.
+#
+# **Both settings below name paths that differ per machine**, which is why this
+# is a template rather than the real file. It used to be committed with one
+# developer's home directory and one Windows SDK version in it, and everybody
+# else had to notice and edit it.
+#
+#     sh scripts/setup-llvm.sh
+#
+# writes the real one. Nothing else in the repository needs configuring.
+
+# Where LLVM 22.1.8 lives. `force = false` so an exported LLVM_SYS_221_PREFIX
+# wins, which is what CI does.
+[env]
+LLVM_SYS_221_PREFIX = { value = '@LLVM_PREFIX@', force = false }
+
+# Windows only, and both of these are load-bearing.
+#
+# LLVM's official Windows libraries are built /MT — they carry DEFAULTLIB:libcmt
+# and libcpmt — while rustc's msvc target defaults to the dynamic CRT. The two
+# have separate heaps, so mixing them makes ordinary, unrelated LLVM calls fault
+# with STATUS_ACCESS_VIOLATION. The only hint is an easily-ignored LNK4098.
+# docs/llvm-setup.md section 3.
+#
+# Linking the static CRT then makes `llvm-sys` emit the Windows system libraries
+# as `static=` (its build.rs switches on cfg!(target_feature = "crt-static")),
+# and rustc has to be able to find those import libraries — hence the search
+# path, which is the newest Windows SDK on this machine. Without it the build
+# stops at `could not find native static library psapi`.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-Ctarget-feature=+crt-static",
+    '-Lnative=@WINDOWS_SDK@',
+]

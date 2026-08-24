@@ -33,16 +33,8 @@ jobs:
         with:
           key: check-${{ matrix.os }}
 
-      # The committed `.cargo/config.toml` names a Windows LLVM prefix and a
-      # Windows SDK path. Neither is reachable on a runner, and the SDK version
-      # on this one will not be the one that file names, so the whole file is
-      # replaced by what each platform actually needs. `force = false` on the
-      # env entry means an exported prefix wins anyway; the rustflags are the
-      # part that has to go.
-      - name: Neutralise the machine-local cargo config
-        shell: bash
-        run: rm -f .cargo/config.toml
-
+      # No LLVM here, so no `.cargo/config.toml` is needed — `setup-llvm.sh`
+      # writes it and this job does not run it.
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -72,10 +64,6 @@ jobs:
         with:
           key: backend-${{ matrix.os }}
 
-      - name: Neutralise the machine-local cargo config
-        shell: bash
-        run: rm -f .cargo/config.toml
-
       # Only Windows downloads a tarball; the other two are a bottled brew
       # formula pinned at exactly 22.1.8.
       - name: Cache the Windows LLVM tarball
@@ -85,20 +73,18 @@ jobs:
           path: ~/.llvm
           key: llvm-22.1.8-${{ runner.os }}
 
-      - name: Install LLVM
+      # Installs LLVM *and* writes `.cargo/config.toml` from the template,
+      # which is where the static-CRT flag and the Windows SDK search path come
+      # from. Both are needed on Windows and neither can be committed: the SDK
+      # version differs per machine. `docs/llvm-setup.md` §3 has the why.
+      #
+      # This is the same script a person runs, so a failure here is a failure of
+      # the documented install rather than of a CI-only path.
+      - name: Install LLVM and write the cargo config
         shell: bash
         run: |
           prefix=$(sh scripts/setup-llvm.sh --quiet)
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
-
-      # LLVM's official Windows libraries are built /MT while rustc's msvc
-      # target defaults to /MD, and the two CRTs have separate heaps — which
-      # shows up as access violations inside unrelated LLVM calls rather than as
-      # anything about CRTs. docs/llvm-setup.md §3.
-      - name: Match LLVM's C runtime
-        if: runner.os == 'Windows'
-        shell: bash
-        run: echo "RUSTFLAGS=-Ctarget-feature=+crt-static" >> "$GITHUB_ENV"
 
       - run: cargo test --workspace --features llvm
 
