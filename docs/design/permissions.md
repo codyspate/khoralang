@@ -173,7 +173,7 @@ the flag form could only say by encoding a second key inside a string.
 `project.md`'s claim that the limits are "enforced at compile time" is also
 narrowed here, to the half that can be. That is the whole of D4.
 
-## The hole this does not close yet
+## The hole this closes, as of 10.2
 
 None of it is worth much while a dependency can write:
 
@@ -197,11 +197,28 @@ outside Khora except through the standard library, whose functions all carry
 capability rows, and the compile-time gate above becomes a real guarantee
 rather than a convention.
 
-**It cannot be implemented yet**, because it is a rule about *which package* a
-declaration is in and packages do not exist — there is one source root and no
-package identity until phase 10. So it is written down here, and the roadmap
-carries it as part of 10.2 rather than pretending the gate is airtight in the
-meantime.
+**It is implemented.** It could not be until 10.2, because it is a rule about
+*which package* a declaration is in and there were no packages — one source
+root and no package identity. There are packages now, so:
+
+- `Permissions::may_declare_extern` answers the question, and `std` always may.
+  That is the design rather than an exception to it: the point of the list is
+  that everything reaching outside Khora goes through functions whose
+  signatures carry capability rows, and those live in `std`. A `std` that could
+  not declare `fopen` could not offer `Fs`.
+- The check runs in `khora-cli` after resolution, because package identity
+  exists in the resolver and nowhere else — the type checker sees a flat set of
+  files. It reads the declarations out of the syntax tree rather than
+  type-checking a package the build may be about to refuse.
+- An absent key still grants every package, like everything else in this table.
+  `extern = []` is the interesting value: nothing but `std` may reach out.
+
+The refusal names the function, the file and the package, and prints the line
+to add — because the alternative is somebody guessing at TOML.
+
+`crates/khora-cli/tests/permissions.rs` holds it, including the two cases that
+say the hole is no *wider* than documented: `std` is never refused, and a
+project that has never thought about this is not punished for it.
 
 Two smaller things also wait for packages:
 

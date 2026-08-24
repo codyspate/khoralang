@@ -92,6 +92,22 @@ pub struct Permissions {
     /// Environment variables that may be read.
     #[serde(default)]
     pub env: Option<Vec<String>>,
+    /// Packages that may declare `extern fn`. `std` is always among them.
+    ///
+    /// **This is the key the rest of the table rests on.** Every other grant
+    /// here is a rule about Khora code, and `extern fn` is the door out of
+    /// Khora: a foreign declaration's effect row is a promise the compiler
+    /// takes on trust, so a dependency that simply declines to make the promise
+    /// reaches the operating system with nothing in its signature and nothing
+    /// in yours. `docs/design/permissions.md` calls it "the hole this does not
+    /// close yet"; it is a rule about *which package* a declaration is in, and
+    /// there were no packages until 10.2.
+    ///
+    /// Absent grants every package, like the rest of the table -- tightening is
+    /// opt-in, and a project that has not thought about this is not punished
+    /// for it. `[]` is the interesting value: nothing but `std` may reach out.
+    #[serde(default, rename = "extern")]
+    pub extern_: Option<Vec<String>>,
 }
 
 /// `[permissions.fs]`: reading and writing are not the same grant.
@@ -120,6 +136,23 @@ impl Permissions {
         match listed {
             Some(any) => any,
             None => matches!(self.default, Default_::Allow),
+        }
+    }
+
+    /// Whether `package` may declare `extern fn`.
+    ///
+    /// `std` always may, and that is the whole design rather than an exception
+    /// to it: the point of the allow-list is that everything reaching outside
+    /// Khora goes through functions whose signatures carry capability rows, and
+    /// the standard library is where those live. A `std` that could not declare
+    /// `fopen` could not offer `Fs`.
+    pub fn may_declare_extern(&self, package: &str) -> bool {
+        if package == "std" {
+            return true;
+        }
+        match &self.extern_ {
+            Some(allowed) => allowed.iter().any(|a| a == package),
+            None => true,
         }
     }
 }

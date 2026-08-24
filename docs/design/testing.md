@@ -137,15 +137,15 @@ second is evidence.
 | `std` type-checks for every target | `khora-types/tests/portability.rs` |
 | `std` *generates code* for every target | `khora-codegen-llvm/tests/portability.rs` |
 | A package outside the repo is resolved, locked and compiled | `khora-codegen-llvm/tests/packages.rs` |
+| `extern fn` cannot go round `[permissions]` unnoticed | `khora-cli/tests/permissions.rs` |
 | An edit inside a body does not reach another file | `khora-hir/tests/incremental.rs` |
 
-**Named but not yet held by a test**, and each is a gap rather than a decision:
-
-- *`extern fn` bypassing `[permissions]` is detected rather than accidentally
-  allowed.* `permissions.md` says the gate over Khora code is total and that
-  `extern` goes around it. That is a documented hole, so the test to write is
-  that the hole is exactly where it is said to be and no wider. Scheduled
-  beside the `extern` allow-list in Phase 10.2.
+**Named but not yet held by a test.** The list is empty. Both entries were
+written in Phase 10, and both times writing the test was the thing that found
+something — see below for the first, and for the second: `permissions.md` had
+carried the `extern` hole as "cannot be implemented yet, because packages do not
+exist", which stopped being true the moment they did. Going to write the test
+was what noticed.
 
 ### What writing the first one found
 

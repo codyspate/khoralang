@@ -27,3 +27,7 @@ clap.workspace = true
 # `khora build` needs the LLVM backend; everything else works without it.
 default = []
 llvm = ["khora-codegen-llvm/llvm"]
+
+[dev-dependencies]
+khora-manifest.workspace = true
+tempfile = "3"

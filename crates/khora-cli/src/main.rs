@@ -443,7 +443,109 @@ fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
 
     let store = khora_pkg::Store::open()?;
     let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
+
+    let parsed = khora_manifest::Manifest::parse(&text)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
+    check_extern_allowlist(&parsed.manifest.permissions, &resolution)?;
+
     Ok(resolution.directories())
+}
+
+/// Refuses a dependency that declares `extern fn` without being allowed to.
+///
+/// **This is what turns the permission table from a convention into a
+/// guarantee.** Every other grant is a rule about Khora code, and every
+/// capability in `std` carries its requirement in its signature — so a
+/// program's rows say what it can reach. `extern fn` is the door out of that:
+/// a foreign declaration's effect row is a promise the compiler takes on trust,
+/// and a dependency that declines to make the promise reaches the operating
+/// system with nothing in its signature and nothing in yours.
+///
+/// `docs/design/permissions.md` has carried this as "the hole this does not
+/// close yet" since D4, for a good reason — it is a rule about *which package*
+/// a declaration is in, and there were no packages. There are now.
+///
+/// Checked here rather than in the type checker because the checker sees a flat
+/// set of files: package identity exists in the resolver and nowhere else.
+fn check_extern_allowlist(
+    permissions: &khora_manifest::Permissions,
+    resolution: &khora_pkg::Resolution,
+) -> Result<()> {
+    let mut refused: Vec<String> = Vec::new();
+
+    for package in &resolution.packages {
+        if permissions.may_declare_extern(&package.name) {
+            continue;
+        }
+        for (file, function) in extern_declarations(&package.directory)? {
+            refused.push(format!(
+                "  `{function}` in {}, from the package `{}`",
+                file.display(),
+                package.name
+            ));
+        }
+    }
+
+    if refused.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "these declare `extern fn`, and this project's `[permissions] extern` \
+         does not list the packages they are in:\n{}\n\n\
+         An `extern fn` reaches the operating system without appearing in \
+         anybody's capability row, so allowing one is a decision about trust \
+         rather than about types. Add the package to the list if that is what \
+         you mean:\n\n    [permissions]\n    extern = [{}]",
+        refused.join("\n"),
+        allow_list_suggestion(permissions, resolution)
+    )
+}
+
+/// What the `extern` list would have to say for this build to go through.
+fn allow_list_suggestion(
+    permissions: &khora_manifest::Permissions,
+    resolution: &khora_pkg::Resolution,
+) -> String {
+    let mut names: Vec<String> =
+        permissions.extern_.clone().unwrap_or_default().into_iter().collect();
+    for package in &resolution.packages {
+        if !permissions.may_declare_extern(&package.name) && !names.contains(&package.name) {
+            names.push(package.name.clone());
+        }
+    }
+    names.sort();
+    names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")
+}
+
+/// Every `extern fn` a package declares, as (file, name).
+///
+/// A syntax question, so it is answered from the tree rather than by
+/// type-checking a package the build may be about to refuse.
+fn extern_declarations(directory: &Path) -> Result<Vec<(PathBuf, String)>> {
+    use khora_syntax::ast;
+
+    let mut files = Vec::new();
+    gather(directory, &mut files)?;
+
+    let db = KhoraDatabase::new();
+    let mut out = Vec::new();
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let file = SourceFile::new(&db, path.clone(), text);
+        let parse = khora_db::parse(&db, file);
+        for declaration in parse.source_file().decls() {
+            if let ast::Decl::Fn(f) = declaration {
+                if f.is_extern() {
+                    let name = f
+                        .name()
+                        .and_then(|n| n.ident())
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    out.push((path.clone(), name));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Whether `--locked` was asked for, by flag or by `KHORA_LOCKED`.
