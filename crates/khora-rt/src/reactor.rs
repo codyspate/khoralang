@@ -216,6 +216,19 @@ fn ready<T>(fds: &[T], watching: &[Watch], is_ready: impl Fn(&T) -> bool) -> Vec
     fds.iter().zip(watching).filter(|(fd, _)| is_ready(fd)).map(|(_, w)| *w).collect()
 }
 
+/// Blocks this thread until `socket` is ready.
+///
+/// For a program with no scheduler to park a fiber on. A socket in
+/// non-blocking mode would otherwise spin, and spinning is worse than the
+/// blocking read this replaced.
+pub(crate) fn block_until_ready(socket: Socket, interest: Interest) {
+    let watch = [Watch { socket, interest, fiber: 0 }];
+    // A long wait rather than an indefinite one, so a socket closed from
+    // another thread does not leave this here for ever. `poll` reports a
+    // hangup, but only if it is looking.
+    while poll_sockets(&watch, std::time::Duration::from_millis(50)).is_empty() {}
+}
+
 /// A pair of connected sockets over loopback, for tests.
 ///
 /// There is no `socketpair` on Windows, so this is a listener, a connect and an

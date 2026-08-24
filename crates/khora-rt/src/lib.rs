@@ -131,6 +131,7 @@ mod counters;
 mod current;
 mod fiber;
 mod heap;
+mod net;
 mod nursery;
 mod print;
 mod random;
