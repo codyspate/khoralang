@@ -2589,7 +2589,56 @@ monomorphization already makes the mapping from machine code back to source
 non-obvious, and coroutine stacks make an unwinder's job worse. Doing it while
 those layouts are still being changed is cheaper than doing it after.
 
-### 12.5 Database access
+### 12.5 Database access — **the capability and the contract, done**
+
+`std/db.kh`. The `Db` effect, the `Cell`/`Row` types two packages must agree on
+to exchange a result, a deliberately coarse `DbError`, and `transaction`.
+
+**`transaction` is the whole reason the module is in `std`.** A caller who
+writes begin, body and commit by hand has written the correct thing only for
+the path where nothing goes wrong; the paths where something does are the ones
+that leave a connection holding locks until somebody restarts the service.
+Four tests run against a handler that prints what it was told to do, so the
+transcript *is* the assertion: a body that returns commits and does not roll
+back, a body that fails rolls back and never commits, a refused commit is
+reported as itself, and cells do not coerce.
+
+`Cell::Money` carries a `Decimal` and there is no `Float` variant, which is
+12.0's argument applied here: a `NUMERIC` column read through a float is a
+number that has already lost.
+
+**Still open, and it is the half that matters most:** rolling back when the
+fiber is *cancelled* rather than when the body returns an error. That needs
+`Region`'s `defer` threaded through `transaction`, and the doc comment says so
+where it will go.
+
+### Three things this cost, which are worth more than the module
+
+Writing the tests hit three rough edges, none of them in the database code.
+
+**`+` on `String` does not infer inside a handler's closure.** `soFar +
+"begin;"` in a `Shared<String>` update reported `arithmetic: expected Int,
+found String`, with the parameter annotated `String`, while the identical
+expression is used throughout `std/json.kh`. Worked around by printing rather
+than accumulating. **Not diagnosed**, and it should be.
+
+**A generic error parameter did not monomorphize.** `transaction<A, E: Show>`
+failed with "`problem` has no type the backend can represent" even where `E`
+was plainly `String`. The signature is now concrete in `DbError`, which is
+better design anyway — but it was chosen under pressure from a limitation, not
+freely, and that is worth recording.
+
+**A diagnostic named the wrong problem, again.** An ambiguous type variable —
+a body that only ever returns `Err`, so nothing says what `A` is — reports
+"`answer` has no type the backend can represent; phase 2 handles `Int`,
+`Bool`, `String`, `()` and ADTs". The type is not unrepresentable, it is
+*unknown*, and the message sends the reader looking at the backend's
+capabilities instead of at their own annotation. This is the second such
+message this session; `vision.md` non-negotiable 4 says diagnostics are the
+product.
+
+The original entry:
+
 
 Nothing. `ecosystem.md` decides the shape: the `Db` capability, the row and
 value types, and **what a transaction does when its fiber is cancelled** belong

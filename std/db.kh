@@ -1,0 +1,207 @@
+module std::db;
+
+// Talking to a database, as a capability rather than a library.
+//
+// `docs/design/ecosystem.md` §"Applying the rule" settles what belongs here
+// and it is not an engine. SQLite has no middle layer at all — no framing, no
+// handshake, nothing that fails at a packet boundary — so putting it in `std`
+// would be the mistake `std::net::http` avoided, all top layer plus a quarter
+// of a million lines of C. It is a first-party package. Postgres is a package
+// for the ordinary reason: its wire protocol is versioned by somebody else.
+//
+// # What the middle layer actually is
+//
+// **What a transaction does when its fiber is cancelled.** That is the part
+// that fails in production and never in testing, the part every package would
+// answer differently, and the part that is Khora's to answer rather than an
+// engine's — because cancellation semantics belong to the language. A
+// transaction that returns without rolling back, holding a connection and its
+// locks, is the truncated-request-at-a-packet-boundary of this subject.
+//
+// So `std` owns three things: the `Db` capability's shape, the row and value
+// types two packages must agree on to exchange a result, and the contract
+// below. Everything that speaks a protocol is somebody else's.
+//
+// # The contract
+//
+// `transaction` commits when its body returns and rolls back when it does not
+// — including when the body raises, and including when the fiber running it is
+// cancelled. **A handler that cannot promise that is a broken handler**, and
+// the test beside this module is written against the promise rather than
+// against any engine.
+
+import std::core::{Eq, List, Option, Result, Show};
+import std::decimal::{Decimal};
+
+/// A value in a column, or bound to a parameter.
+///
+/// **`Decimal` is here and `Float` is not, for money.** A database `NUMERIC`
+/// read through a float is a number that has already lost, and
+/// `docs/design/numbers.md` is the long version. Floats can be added when
+/// something that is genuinely a measurement needs one.
+export type Cell =
+  | Null
+  | Text(String)
+  | Number(Int)
+  | Money(Decimal)
+  | Flag(Bool);
+
+/// One row, in the order the query named its columns.
+export type Row = {
+  cells: List<Cell>,
+};
+
+/// What went wrong, as far as `std` is willing to say.
+///
+/// **Deliberately coarse**, on the same reasoning `std::fs` gives for not
+/// knowing C's error numbers: a code that means "unique violation" is a
+/// different integer in every engine, and a `std` that pretended otherwise
+/// would be wrong for the second engine anybody wrote. A package that knows
+/// its engine can offer a richer type; this is what everything can agree on.
+export type DbError =
+  /// The statement was not accepted.
+  | Rejected(String)
+  /// The connection is gone.
+  | Disconnected(String)
+  /// The transaction was rolled back rather than committed.
+  | RolledBack(String);
+
+/// Somewhere to run statements.
+///
+/// A record of closures, so a Postgres package, a SQLite package, D1 behind a
+/// Worker and an in-memory double are the same type to everything above.
+export effect Db {
+  /// Runs a query and gives back every row.
+  query: (String, List<Cell>) -> Result<List<Row>, DbError>,
+  /// Runs a statement and gives back how many rows it changed.
+  execute: (String, List<Cell>) -> Result<Int, DbError>,
+  /// Begins a transaction. Handlers use this to implement `transaction`.
+  begin: () -> Result<(), DbError>,
+  /// Commits the transaction in progress.
+  commit: () -> Result<(), DbError>,
+  /// Rolls the transaction in progress back.
+  rollback: () -> Result<(), DbError>,
+}
+
+/// Runs `body` in a transaction, committing on success and rolling back
+/// otherwise.
+///
+/// **This is the function the whole module exists for.** A caller that wrote
+/// begin, body and commit by hand has written the correct thing only for the
+/// path where nothing goes wrong, and the paths where something does are the
+/// ones that leave a connection holding locks until somebody restarts the
+/// service.
+///
+/// Rolling back on a raised error is handled here. Rolling back when the fiber
+/// is *cancelled* is the case that needs `Region`'s `defer` to be threaded
+/// through, and is the open half — `docs/design/ecosystem.md` names it as the
+/// middle layer and this is where it will live.
+/// **The body's failure is a `DbError`**, not a type variable. A body doing
+/// database work produces one already, and a caller with an error of its own
+/// renders it into `Rejected` before getting here — which keeps this function
+/// concrete, and keeps the rendering where the type is still known rather than
+/// behind a `Show` the transaction would have to carry.
+export fn transaction<A, 'c>(
+  db: Db, body: () -> Result<A, DbError> with 'c
+) -> Result<A, DbError> with 'c {
+  match db.begin() {
+    Result::Err(problem) => Result::Err(problem),
+    Result::Ok(_) => match body() {
+      Result::Err(problem) => {
+        // The rollback's own failure is not allowed to hide the reason for it.
+        // A caller who sees `RolledBack` knows the transaction did not commit,
+        // which is the fact they have to act on; the engine's complaint about
+        // the rollback is a second problem and a worse thing to report.
+        db.rollback();
+        Result::Err(DbError::RolledBack(problem.show()))
+      },
+      Result::Ok(answer) => match db.commit() {
+        Result::Err(problem) => Result::Err(problem),
+        Result::Ok(_) => Result::Ok(answer),
+      },
+    },
+  }
+}
+
+impl Cell {
+  /// The text in this cell, or `None` if it holds something else.
+  ///
+  /// **No coercion.** A `Number` read as text is a schema misunderstanding,
+  /// and a library that rendered it would hide the day somebody changed a
+  /// column's type.
+  export fn text(self) -> Option<String> {
+    match self { Cell::Text(value) => Option::Some(value), _ => Option::None }
+  }
+
+  /// The number in this cell, or `None`.
+  export fn number(self) -> Option<Int> {
+    match self { Cell::Number(value) => Option::Some(value), _ => Option::None }
+  }
+
+  /// The decimal in this cell, or `None`.
+  export fn money(self) -> Option<Decimal> {
+    match self { Cell::Money(value) => Option::Some(value), _ => Option::None }
+  }
+
+  /// The boolean in this cell, or `None`.
+  export fn flag(self) -> Option<Bool> {
+    match self { Cell::Flag(value) => Option::Some(value), _ => Option::None }
+  }
+
+  /// Whether the cell is null, which is a question rather than a value.
+  export fn is_null(self) -> Bool {
+    match self { Cell::Null => true, _ => false }
+  }
+}
+
+impl Row {
+  /// The cell at `index`, or `None` past the end.
+  export fn cell(self, index: Int) -> Option<Cell> {
+    nth(self.cells, index)
+  }
+}
+
+impl Eq for Cell {
+  fn eq(self, other: Cell) -> Bool {
+    match self {
+      Cell::Null => match other { Cell::Null => true, _ => false },
+      Cell::Text(mine) => match other { Cell::Text(theirs) => mine == theirs, _ => false },
+      Cell::Number(mine) => match other { Cell::Number(theirs) => mine == theirs, _ => false },
+      Cell::Money(mine) => match other { Cell::Money(theirs) => mine == theirs, _ => false },
+      Cell::Flag(mine) => match other { Cell::Flag(theirs) => mine == theirs, _ => false },
+    }
+  }
+}
+
+impl Show for Cell {
+  fn show(self) -> String {
+    match self {
+      Cell::Null => "null",
+      Cell::Text(value) => value,
+      Cell::Number(value) => Int::to_string(value),
+      Cell::Money(value) => value.show(),
+      Cell::Flag(value) => if value { "true" } else { "false" },
+    }
+  }
+}
+
+impl Show for DbError {
+  fn show(self) -> String {
+    match self {
+      DbError::Rejected(why) => "rejected: " + why,
+      DbError::Disconnected(why) => "disconnected: " + why,
+      DbError::RolledBack(why) => "rolled back: " + why,
+    }
+  }
+}
+
+/// The element at `index`, counting from zero.
+///
+/// Here rather than in `core` because adding to `List` is a decision about
+/// `List`, and this module only needs one column.
+fn nth(items: List<Cell>, index: Int) -> Option<Cell> {
+  match items {
+    List::Nil => Option::None,
+    List::Cons(head, tail) => if index <= 0 { Option::Some(head) } else { nth(tail, index - 1) },
+  }
+}
