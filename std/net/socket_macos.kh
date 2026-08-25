@@ -46,6 +46,7 @@ extern fn khora_net_send(handle: I32, from: Ptr, length: Int) -> Int;
 extern fn khora_net_accept(handle: I32, address: Ptr, length: Ptr) -> I32;
 extern fn khora_net_set_timeout(handle: I32, millis: Int) -> I32;
 extern fn khora_net_forget(handle: I32) -> ();
+extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int) -> Int;
 
 /// A failed call returns -1, and a handle is never negative.
 export fn invalid_handle() -> Int { 0 - 1 }
@@ -142,6 +143,36 @@ export fn receive(connection: Int, buffer: Array<U8>) -> Int {
 /// Writes `text`, and says how many bytes went. Negative if the write failed.
 export fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) => khora_net_send(I32::of(connection), from, n))
+}
+
+/// Opens a connection to `host` on `port`, or [`invalid_handle`].
+///
+/// **The first thing here that starts a conversation.** Everything else in this
+/// module grew from serving: `listen_on`, `accept_on`, and nothing that dials.
+/// A database driver is the first caller that needs the other direction.
+///
+/// `host` may be a name or an address; resolution, address family and the
+/// platform's own resolver are the runtime's, which is why this is one extern
+/// rather than `getaddrinfo` and two `sockaddr` layouts written three times.
+/// `docs/design/ffi.md` is the boundary and `khora_net_connect` is on the far
+/// side of it.
+///
+/// **It blocks the fiber's worker while it connects.** A DNS lookup is not
+/// something the reactor can wait on. That is once per connection against many
+/// queries, which is the right thing to get wrong first, and it is written
+/// down in `docs/roadmap.md` Phase 13 rather than left to be found.
+export fn connect_to(host: String, port: Int) -> Int {
+  String::with_data(host, fn (from, n) => khora_net_connect(from, n, port))
+}
+
+/// Writes bytes, and says how many went. Negative if the write failed.
+///
+/// [`transmit`] takes a `String`, which is right for a protocol made of text
+/// and wrong for one made of bytes: a wire protocol frames its messages with a
+/// length nobody wrote as characters. Postgres is the first caller, and a
+/// `String` would have meant deciding what its bytes mean on the way through.
+export fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
+  Array::with_data(bytes, fn (from, n) => khora_net_send(I32::of(connection), from, n))
 }
 
 /// Closes a connection, letting the other end finish first.

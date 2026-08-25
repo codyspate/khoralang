@@ -43,6 +43,7 @@ extern fn khora_net_send(handle: Int, from: Ptr, length: Int) -> Int;
 extern fn khora_net_accept(handle: Int, address: Ptr, length: Ptr) -> Int;
 extern fn khora_net_set_timeout(handle: Int, millis: Int) -> I32;
 extern fn khora_net_forget(handle: Int) -> ();
+extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int) -> Int;
 
 /// `INVALID_SOCKET` is `(SOCKET)~0`, which read as a signed handle is -1.
 export fn invalid_handle() -> Int { 0 - 1 }
@@ -148,6 +149,32 @@ export fn receive(connection: Int, buffer: Array<U8>) -> Int {
 export fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) =>
     khora_net_send(connection, from, n))
+}
+
+/// Opens a connection to `host` on `port`, or [`invalid_handle`].
+///
+/// **The first thing here that starts a conversation.** Everything else in this
+/// module grew from serving: `listen_on`, `accept_on`, and nothing that dials.
+/// A database driver is the first caller that needs the other direction.
+///
+/// `host` may be a name or an address; resolution, address family and the
+/// platform's own resolver are the runtime's, which is why this is one extern
+/// rather than `getaddrinfo` and two `sockaddr` layouts written three times.
+///
+/// **It blocks the fiber's worker while it connects.** A DNS lookup is not
+/// something the reactor can wait on. Once per connection against many
+/// queries, and written down in `docs/roadmap.md` Phase 13.
+export fn connect_to(host: String, port: Int) -> Int {
+  String::with_data(host, fn (from, n) => khora_net_connect(from, n, port))
+}
+
+/// Writes bytes, and says how many went. Negative if the write failed.
+///
+/// [`transmit`] takes a `String`, which is right for a protocol made of text
+/// and wrong for one made of bytes: a wire protocol frames its messages with a
+/// length nobody wrote as characters.
+export fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
+  Array::with_data(bytes, fn (from, n) => khora_net_send(connection, from, n))
 }
 
 /// Closes a connection, letting the other end finish first.

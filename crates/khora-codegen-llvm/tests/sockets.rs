@@ -159,3 +159,88 @@ fn connect_retrying(port: u16) -> std::net::TcpStream {
     }
     panic!("could not connect to the Khora server on {port}");
 }
+
+/// Khora dialling *out*, which nothing could do until phase 13.
+///
+/// Everything else in this module and in `std::net::socket` grew from serving:
+/// `listen_on`, `accept_on`, and nothing that starts a conversation. A database
+/// driver is the first caller that needs the other direction, so `connect_to`
+/// exists and this is the proof it reaches something.
+///
+/// It also exercises `transmit_bytes`. `transmit` takes a `String`, which is
+/// right for a protocol made of text and wrong for one framed with a length
+/// nobody wrote as characters — which is every wire protocol, Postgres
+/// included.
+#[test]
+fn khora_can_dial_out_and_send_bytes() {
+    // A listener on this side, so the Khora program has something real to
+    // reach. Port zero: the operating system picks one that is free, which
+    // beats hoping a hard-coded number is.
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("a port to listen on");
+    let port = listener.local_addr().expect("an address").port();
+
+    let heard = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("a connection");
+        let mut got = [0u8; 5];
+        stream.read_exact(&mut got).expect("the five bytes");
+        // Answer, so the Khora side can prove the connection is two-way.
+        stream.write_all(b"pong").expect("the answer");
+        got
+    });
+
+    let exe = build(
+        "socket_dial",
+        &format!(
+            "module demo::main;
+import std::core::{{Array, Option}};
+import std::net::socket::{{start, connect_to, transmit_bytes, receive, shut, invalid_handle}};
+
+fn print(value: String);
+extern fn khora_print_int(value: Int);
+
+fn main() -> Int {{
+  if start() {{
+    let connection = connect_to(\"127.0.0.1\", {port});
+    if connection == invalid_handle() {{
+      print(\"could not connect\");
+      1
+    }} else {{
+      // Five bytes that are not text: a zero and a high byte would both be
+      // mangled by anything that went through a `String`.
+      let message: Array<U8> = Array::new(5, 0);
+      Array::set(message, 0, 1);
+      Array::set(message, 1, 0);
+      Array::set(message, 2, 255);
+      Array::set(message, 3, 128);
+      Array::set(message, 4, 42);
+      let sent = transmit_bytes(connection, message);
+      khora_print_int(sent);
+
+      let buffer: Array<U8> = Array::new(16, 0);
+      let read = receive(connection, buffer);
+      khora_print_int(read);
+      shut(connection);
+      0
+    }}
+  }} else {{
+    print(\"no winsock\");
+    1
+  }}
+}}
+"
+        ),
+    );
+
+    let ran = std::process::Command::new(&exe).output().expect("the program should run");
+    let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
+    assert!(ran.status.success(), "the dialler exited with {:?}: {out}", ran.status.code());
+    assert_eq!(out, "5\n4\n", "five bytes out, four back: {out}");
+
+    let got = heard.join().expect("the listener");
+    assert_eq!(
+        got,
+        [1u8, 0, 255, 128, 42],
+        "the bytes arrived unchanged — a zero and a high byte included"
+    );
+}

@@ -134,6 +134,68 @@ fn deadline_for(socket: Socket) -> Option<std::time::Instant> {
 /// How long a receive on `socket` may wait before it reports a timeout.
 ///
 /// Replaces `setsockopt(SO_RCVTIMEO)`. Zero clears it.
+/// Opens an outbound connection, resolving `host` first.
+///
+/// **The one place a Khora program dials out.** `std::net::socket` grew from a
+/// server: `listen_on`, `accept_on`, and nothing that starts a conversation.
+/// A database driver is the first thing that needs the other direction, and
+/// writing it as Khora over `connect(2)` would mean `getaddrinfo`, `sockaddr`
+/// for two address families, and three copies — one per platform — of struct
+/// arithmetic that has no business being in a standard library.
+///
+/// So it is here, once, in Rust. `TcpStream::connect` brings DNS, IPv6 and the
+/// platform's own resolver with it, and what comes back is a handle the
+/// reactor can take over exactly like an accepted one.
+///
+/// **It blocks the worker while it connects**, which is honest rather than
+/// ideal: a DNS lookup is not something the reactor can wait on, and the
+/// blocking pool that exists for this (`crate::blocking`) is not reachable
+/// from a plain `extern fn` yet. A connect is once per connection and a query
+/// is many, so this is the right thing to get wrong first — recorded in
+/// `docs/roadmap.md` Phase 13 rather than left to be discovered.
+///
+/// Returns the handle, or -1.
+///
+/// # Safety
+///
+/// `host` must point at `host_len` bytes of UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_net_connect(host: *const u8, host_len: u64, port: i64) -> isize {
+    // `isize` with -1 for failure, matching `raw_accept`. A `Socket` is a
+    // `usize` on Windows and cannot carry the -1 that `invalid_handle` is on
+    // both sides of the boundary.
+    if host.is_null() || !(0..=65535).contains(&port) {
+        return -1;
+    }
+    // SAFETY: the caller guarantees `host_len` readable bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(host, host_len as usize) };
+    let Ok(name) = std::str::from_utf8(bytes) else { return -1 };
+
+    let Ok(stream) = std::net::TcpStream::connect((name, port as u16)) else {
+        return -1;
+    };
+    // Nagle off: a wire protocol writes a small message and waits for the
+    // answer, which is the exact shape Nagle delays for no gain.
+    let _ = stream.set_nodelay(true);
+
+    // Handed to the reactor, so the descriptor must outlive this `TcpStream`.
+    #[cfg(windows)]
+    let handle = {
+        use std::os::windows::io::IntoRawSocket;
+        stream.into_raw_socket() as Socket
+    };
+    #[cfg(not(windows))]
+    let handle = {
+        use std::os::fd::IntoRawFd;
+        stream.into_raw_fd() as Socket
+    };
+
+    if khora_net_prepare(handle) != 0 {
+        return -1;
+    }
+    handle as isize
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_net_set_timeout(socket: Socket, millis: i64) -> i32 {
     let mut guard = TIMEOUTS.lock().expect("the receive deadlines");
