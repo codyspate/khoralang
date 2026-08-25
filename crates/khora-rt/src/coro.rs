@@ -126,6 +126,17 @@ fn install(yielder: *const Yielder<(), ()>) {
     YIELDER.with(|y| y.set(yielder));
 }
 
+/// Set while a `Task` is inside `resume`, in debug builds only.
+///
+/// **Two workers resuming one coroutine is the failure this cannot detect
+/// after the fact.** Both switch to the same stack, and what comes out is a
+/// crash somewhere unrelated, minutes later, with nothing left to say what
+/// happened. So it is checked at the door instead. 11F's soak runs in debug,
+/// which is where this is on; release builds have neither the flag nor the
+/// branch.
+#[cfg(debug_assertions)]
+static RESUMING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub(crate) struct Task {
     fiber: Arc<Fiber>,
     coroutine: Coroutine<(), (), ()>,
@@ -196,6 +207,8 @@ impl Task {
     /// it. The guard puts the previous one back on the way out, including if
     /// the body panics.
     pub(crate) fn resume(&mut self) -> Ran {
+        #[cfg(debug_assertions)]
+        let _once = ResumedOnce::claim(&self.fiber);
         let _entered = enter(self.fiber.clone());
         // Whatever was installed belongs to whoever is resuming us — a worker
         // with nothing, or an outer fiber if these ever nest. Either way it is
@@ -221,6 +234,42 @@ impl Task {
 /// waiting would be strictly worse than doing the work here.
 pub(crate) fn on_a_fiber() -> bool {
     !installed().is_null()
+}
+
+/// Asserts that nobody else is resuming this fiber, for as long as it lives.
+///
+/// A guard rather than a pair of calls, so that a panic inside the fiber
+/// releases the claim rather than making every later resume look like a
+/// duplicate.
+#[cfg(debug_assertions)]
+struct ResumedOnce<'a>(&'a Fiber);
+
+#[cfg(debug_assertions)]
+impl<'a> ResumedOnce<'a> {
+    fn claim(fiber: &'a Arc<Fiber>) -> ResumedOnce<'a> {
+        let already = fiber.resuming.swap(true, std::sync::atomic::Ordering::AcqRel);
+        assert!(
+            !already,
+            "fiber {} resumed by two workers at once",
+            fiber.id()
+        );
+        RESUMING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ResumedOnce(fiber)
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for ResumedOnce<'_> {
+    fn drop(&mut self) {
+        self.0.resuming.store(false, std::sync::atomic::Ordering::Release);
+        RESUMING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// How many fibers are inside `resume` right now. Debug builds only.
+#[cfg(debug_assertions)]
+pub(crate) fn resuming_now() -> usize {
+    RESUMING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Gives the worker back to whoever resumed this fiber.

@@ -33,7 +33,7 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::coro::{suspend, Ran, Task};
@@ -153,8 +153,87 @@ struct Shared {
     reactor: Reactor,
     /// Wakes a parked worker.
     arrived: Condvar,
+    /// Tasks that belong to no queue at this instant because somebody is
+    /// carrying them between two.
+    ///
+    /// **The sixth place a fiber can be, and the audit was wrong without it.**
+    /// A waker takes a task out of `parked` and holds it until `inject`; a
+    /// thief takes half a queue and holds it until it reaches its own. Neither
+    /// is a worker, so neither is bounded by the worker count, and 11F's soak
+    /// found ten fibers unaccounted for on four workers by assuming otherwise.
+    /// Counting them is what lets `Audit::in_hand` mean "a worker is running
+    /// this" rather than "somewhere, we think".
+    in_transit: AtomicUsize,
     stopping: AtomicBool,
     counts: Counts,
+}
+
+/// Everywhere a fiber can be, at one instant. See [`Scheduler::audit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Audit {
+    pub(crate) spawned: u64,
+    pub(crate) completed: u64,
+    /// Waiting for any worker.
+    pub(crate) queued: usize,
+    /// Waiting for one particular worker, summed over all of them.
+    pub(crate) local: usize,
+    /// Suspended, filed by the worker that suspended them.
+    pub(crate) parked: usize,
+    /// Known to the pool: spawned and not yet finished.
+    pub(crate) live: usize,
+    /// Being carried between two queues by somebody who is not a worker.
+    pub(crate) in_transit: usize,
+    /// What the counter thinks is waiting, which `parked` should agree with
+    /// once nothing is in flight.
+    pub(crate) waiting: u64,
+    /// Deadlines registered.
+    pub(crate) timers: usize,
+    /// Sockets registered.
+    pub(crate) watched: usize,
+}
+
+impl Audit {
+    /// Fibers begun and not yet finished.
+    pub(crate) fn outstanding(&self) -> i64 {
+        self.spawned as i64 - self.completed as i64
+    }
+
+    /// Fibers nobody has filed: being run by a worker, or carried by a waker.
+    ///
+    /// **Only meaningful when the pool is quiescent**, and that is not a
+    /// limitation of the arithmetic but of reading five places without a lock
+    /// across them. A task moving from `parked` into a waker's hands is
+    /// removed from one and added to the other, and an audit that reads the
+    /// source before the destination sees it twice. So this can read negative
+    /// on a busy pool with nothing wrong, and 11F spent a while proving that
+    /// to itself.
+    ///
+    /// Making it sound while busy would mean one counter maintained at every
+    /// push and pop — an atomic on the hottest path in the file, to catch
+    /// something [`Audit::settled`] catches for free the moment the pool goes
+    /// quiet, and that `crate::coro::ResumedOnce` catches at the instant it
+    /// happens rather than afterwards. `docs/design/scheduler.md` §6's rule
+    /// about measuring before redesigning applies to instruments too.
+    pub(crate) fn in_hand(&self) -> i64 {
+        self.outstanding() - (self.queued + self.local + self.parked + self.in_transit) as i64
+    }
+
+    /// Whether the pool is empty and self-consistent.
+    ///
+    /// Everything begun has finished, nothing is filed anywhere, nothing is
+    /// registered, and the two independent accounts of who is waiting — the
+    /// parked map and the counter — agree at zero.
+    pub(crate) fn settled(&self) -> bool {
+        self.outstanding() == 0
+            && self.queued == 0
+            && self.local == 0
+            && self.parked == 0
+            && self.live == 0
+            && self.in_transit == 0
+            && self.waiting == 0
+            && self.timers == 0
+            && self.watched == 0
+    }
 }
 
 /// Cheap counters, so a bad result can say *why*.
@@ -183,6 +262,8 @@ pub(crate) struct Counts {
     pub(crate) steals_attempted: AtomicU64,
     /// Sweeps that found something.
     pub(crate) steals_succeeded: AtomicU64,
+    /// Deadlines that came due for a fiber that had already finished.
+    pub(crate) timers_dead: AtomicU64,
     /// Fibers actually moved from one worker to another.
     ///
     /// Separate from the sweep counts because a sweep takes half a queue, so
@@ -204,6 +285,7 @@ impl Counts {
             waiting: self.waiting.load(Ordering::Relaxed),
             wakes: self.wakes.load(Ordering::Relaxed),
             timers_fired: self.timers_fired.load(Ordering::Relaxed),
+            timers_dead: self.timers_dead.load(Ordering::Relaxed),
             sockets_ready: self.sockets_ready.load(Ordering::Relaxed),
             wakes_before_waiting: self.wakes_before_waiting.load(Ordering::Relaxed),
             steals_attempted: self.steals_attempted.load(Ordering::Relaxed),
@@ -224,6 +306,7 @@ pub(crate) struct Snapshot {
     pub(crate) waiting: u64,
     pub(crate) wakes: u64,
     pub(crate) timers_fired: u64,
+    pub(crate) timers_dead: u64,
     pub(crate) sockets_ready: u64,
     pub(crate) wakes_before_waiting: u64,
     pub(crate) steals_attempted: u64,
@@ -294,6 +377,7 @@ impl Scheduler {
             timers: Mutex::new(Timers::default()),
             reactor: Reactor::default(),
             arrived: Condvar::new(),
+            in_transit: AtomicUsize::new(0),
             stopping: AtomicBool::new(false),
             counts: Counts::default(),
         });
@@ -365,6 +449,87 @@ impl Scheduler {
         self.shared.counts.waiting.load(Ordering::Relaxed)
     }
 
+    /// Waits for the pool to be empty and self-consistent, or gives up.
+    ///
+    /// **`drain` and this are different questions.** `drain` waits for every
+    /// fiber to finish; a pool can satisfy that while still holding registered
+    /// state, because a fiber woken before its deadline leaves the deadline
+    /// behind and the timer thread only discards it when it comes due. So a
+    /// pool with unexpired timers is finished but not yet quiescent, and a
+    /// test that asserted [`Audit::settled`] the instant `drain` returned
+    /// would be asserting the wrong thing.
+    ///
+    /// Returns the last audit taken either way, so a caller that ran out of
+    /// patience can say what it was still waiting for.
+    pub(crate) fn settle(&self, patience: std::time::Duration) -> Audit {
+        let until = std::time::Instant::now() + patience;
+        loop {
+            let audit = self.audit();
+            if audit.settled() || std::time::Instant::now() >= until {
+                return audit;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// Everywhere a fiber can be at one instant, for 11F.
+    ///
+    /// **The point is the arithmetic, not any single number.** A `Task` is a
+    /// value that is moved, so at any moment it is in exactly one of five
+    /// places: the shared queue, a worker's queue, the parked map, a worker's
+    /// hand, or gone. Nothing counts `in_hand` directly — a worker holding a
+    /// task holds it in a stack frame — so it is derived, and that is what
+    /// makes this an audit rather than a report. If the derivation goes
+    /// negative or fails to reach zero when everything is finished, a task has
+    /// been lost or run twice, and no amount of staring at the individual
+    /// counters would have said so.
+    pub(crate) fn audit(&self) -> Audit {
+        // **The order of these reads is the whole soundness argument.** There
+        // is no lock held across all of them — taking one would mean ordering
+        // five mutexes against every other path in this file — so the audit is
+        // skewed by whatever happens while it runs. The skew is made
+        // one-sided on purpose:
+        //
+        //   - `completed` is read *first*. A fiber counted here has already
+        //     been popped from every queue, so nothing counted as completed
+        //     can also be found filed below.
+        //   - `spawned` is read *last*. `spawn` counts a fiber before it
+        //     injects it, so everything found filed below is already included.
+        //
+        // That makes `outstanding` an over-estimate and never an under-one,
+        // so `in_hand` can read high while the pool is busy but cannot read
+        // negative. A negative answer is then real: a task in two places.
+        // Reading them the other way round gave `in_hand: -1` under a
+        // concurrent spawner, which looked exactly like the bug it was not.
+        let completed = self.shared.counts.completed.load(Ordering::Acquire);
+        let queued = self.shared.queued.lock().expect("the shared queue").len();
+        let local: usize = self
+            .shared
+            .locals
+            .iter()
+            .map(|q| q.lock().expect("a local queue").len())
+            .sum();
+        let parked = self.shared.parked.lock().expect("the parked fibers").len();
+        let live = self.shared.live.lock().expect("the live fibers").len();
+        let in_transit = self.shared.in_transit.load(Ordering::Acquire);
+        let timers = self.shared.timers.lock().expect("the timers").len();
+        let watched = self.shared.reactor.len();
+        let waiting = self.shared.counts.waiting.load(Ordering::Acquire);
+        let spawned = self.shared.counts.spawned.load(Ordering::Acquire);
+        Audit {
+            spawned,
+            completed,
+            queued,
+            local,
+            parked,
+            live,
+            in_transit,
+            waiting,
+            timers,
+            watched,
+        }
+    }
+
     /// Cancels a fiber, and wakes it if it is asleep.
     ///
     /// **Setting the flag is not enough.** Cancellation is observed by running
@@ -399,6 +564,14 @@ impl Scheduler {
     }
 
     /// Wakes a fiber by id, from outside.
+    ///
+    /// **Only a fiber this pool has been told about**, which means one that
+    /// has been through `spawn`. A wake for an id the pool does not know is
+    /// dropped, and that is deliberate: remembering notifications for fibers
+    /// that might never arrive is a leak with no bound. It does make an
+    /// ordering trap for callers that publish an id before handing over the
+    /// task — 11F's soak did exactly that and stranded a fiber about twice in
+    /// a hundred runs.
     pub(crate) fn wake_fiber(&self, fiber: usize) {
         if let Some(state) = state_of(&self.shared, fiber) {
             wake(&self.shared, fiber, state.wait());
@@ -443,6 +616,9 @@ pub(crate) fn park_current() -> bool {
         return true;
     }
     shared.counts.waiting.fetch_add(1, Ordering::Relaxed);
+    // After the increment, and before the suspension that lets anybody else
+    // observe this fiber, so every decrement below has something to take.
+    crate::current::current(|fiber| fiber.wait().start_counting());
     suspend();
     true
 }
@@ -514,11 +690,16 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
         // `NOTIFIED` when it looks.
         return;
     };
+    // In this thread's hands from here until `inject`, and in no queue.
+    shared.in_transit.fetch_add(1, Ordering::AcqRel);
     drop(parked);
 
     state.running();
-    shared.counts.waiting.fetch_sub(1, Ordering::Relaxed);
+    if state.stop_counting() {
+        shared.counts.waiting.fetch_sub(1, Ordering::Relaxed);
+    }
     inject(shared, task);
+    shared.in_transit.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// Suspends the running fiber until `socket` is ready.
@@ -572,10 +753,20 @@ fn tick(shared: Arc<Shared>) {
             shared.counts.timers_fired.fetch_add(due.len() as u64, Ordering::Relaxed);
         }
         for id in due {
-            // The fiber may have been woken by something else and moved on, in
-            // which case its state says so and the wake is a no-op.
-            if let Some(state) = state_of(&shared, id) {
-                wake(&shared, id, state.wait());
+            match state_of(&shared, id) {
+                // The fiber may have been woken by something else and moved
+                // on, in which case its state says so and this is a no-op.
+                Some(state) => wake(&shared, id, state.wait()),
+                // **A deadline belonging to a fiber that has gone.** Released
+                // early and then finished, so the entry sat in the heap until
+                // it came due. Bounded — by how long deadlines are and how
+                // often sleepers are released early — rather than a leak, but
+                // this is the number to look at before believing that. A heap
+                // mostly full of these is `docs/design/scheduler.md` §6's cue
+                // to stop using a heap.
+                None => {
+                    shared.counts.timers_dead.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
 
@@ -714,7 +905,10 @@ fn steal(
         let victim = (me + offset) % workers;
         let mut taken = {
             let mut queue = shared.locals[victim].lock().expect("a local queue");
-            take_half(&mut queue)
+            let taken = take_half(&mut queue);
+            // Out of the victim's queue and not yet in ours.
+            shared.in_transit.fetch_add(taken.len(), Ordering::AcqRel);
+            taken
             // The victim's lock goes here, before ours is taken. Two thieves
             // holding one queue each and reaching for the other's is a
             // deadlock, and this is the line that makes it impossible.
@@ -722,10 +916,14 @@ fn steal(
         let Some(first) = taken.pop_front() else { continue };
 
         shared.counts.steals_succeeded.fetch_add(1, Ordering::Relaxed);
-        shared.counts.fibers_stolen.fetch_add(taken.len() as u64 + 1, Ordering::Relaxed);
+        let moved = taken.len() + 1;
+        shared.counts.fibers_stolen.fetch_add(moved as u64, Ordering::Relaxed);
         if !taken.is_empty() {
             mine.lock().expect("a local queue").extend(taken);
         }
+        // The rest are queued and `first` is about to be this worker's, which
+        // is what `in_hand` counts.
+        shared.in_transit.fetch_sub(moved, Ordering::AcqRel);
         return Some(first);
     }
     None
@@ -776,7 +974,13 @@ fn run(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>, mut task: Task)
                     // only yielded for fairness.
                     if state == NOTIFIED {
                         task.fiber().wait().running();
-                        shared.counts.waiting.fetch_sub(1, Ordering::Relaxed);
+                        // Only if this fiber was actually counted as waiting.
+                        // A fiber that took a wake while running and then
+                        // yielded for fairness reaches here too, and owes
+                        // nothing.
+                        if task.fiber().wait().stop_counting() {
+                            shared.counts.waiting.fetch_sub(1, Ordering::Relaxed);
+                        }
                     }
                     drop(parked);
                     // Back to the end of this worker's queue: it gave the
@@ -836,7 +1040,6 @@ fn park(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>) -> bool {
 mod tests {
     use super::*;
     use crate::coro::suspend;
-    use std::sync::atomic::AtomicUsize;
 
     /// Spends a safepoint the way generated code will, and yields if the
     /// budget says to.
@@ -1282,6 +1485,56 @@ mod tests {
         pool.drain();
         assert_eq!(ran.load(Ordering::SeqCst), 1);
         assert_eq!(pool.counts().steals_attempted, 0, "{:?}", pool.counts());
+    }
+
+    /// **A wake for a fiber that is not waiting must not be counted as one.**
+    ///
+    /// Found by 11F's soak, as `waiting: 18446744073709551588` — minus
+    /// twenty-eight, in a pool where every fiber had finished and every queue
+    /// was empty.
+    ///
+    /// `NOTIFIED` means two different things and the counting conflated them.
+    /// Reached from `WAITING` it means "a fiber that was waiting has been
+    /// released", and something must give the waiting total back. Reached from
+    /// `RUNNING` it means "do not sleep next time", and nothing was ever
+    /// added. The worker sees only the state, so a fiber that took a spurious
+    /// wake while running and then yielded for fairness had a decrement
+    /// charged against a fiber that never waited.
+    ///
+    /// Deterministic: the fiber spins until it has been woken, so the wake is
+    /// guaranteed to land while it is running rather than while it waits.
+    #[test]
+    fn a_wake_for_a_running_fiber_is_not_counted_as_a_wait() {
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let poked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let pool = Scheduler::new(1);
+        let task = Task::new({
+            let started = started.clone();
+            let poked = poked.clone();
+            move || {
+                started.store(true, Ordering::SeqCst);
+                // Still RUNNING, by construction: parking here would be the
+                // case that *should* be counted.
+                while !poked.load(Ordering::SeqCst) {
+                    std::hint::spin_loop();
+                }
+                suspend();
+            }
+        });
+        let id = task.fiber().id();
+        pool.spawn(task);
+
+        while !started.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        pool.wake_fiber(id);
+        poked.store(true, Ordering::SeqCst);
+        pool.drain();
+
+        let counts = pool.counts();
+        assert_eq!(counts.waiting, 0, "the waiting total went negative: {counts:?}");
+        assert!(pool.audit().settled(), "{:?}", pool.audit());
     }
 
     /// Many fibers, many deadlines, all across several workers.

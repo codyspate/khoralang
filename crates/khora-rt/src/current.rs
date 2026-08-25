@@ -54,6 +54,10 @@ pub(crate) struct Fiber {
     /// Shared rather than owned, because a parent holding the handle sets it
     /// from outside.
     cancelled: AtomicUsize,
+    /// Set while a worker is inside this fiber's `resume`. See
+    /// `crate::coro::ResumedOnce`; debug builds only.
+    #[cfg(debug_assertions)]
+    pub(crate) resuming: std::sync::atomic::AtomicBool,
     /// Whether this is a spawned fiber rather than the program's own
     /// computation.
     ///
@@ -73,6 +77,8 @@ impl Fiber {
         Fiber {
             id: next_id(),
             cancelled: AtomicUsize::new(0),
+            #[cfg(debug_assertions)]
+            resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: false,
             wait: crate::wait::Wait::default(),
         }
@@ -83,6 +89,8 @@ impl Fiber {
         Arc::new(Fiber {
             id: next_id(),
             cancelled: AtomicUsize::new(0),
+            #[cfg(debug_assertions)]
+            resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: true,
             wait: crate::wait::Wait::default(),
         })

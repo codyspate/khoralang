@@ -140,6 +140,7 @@ mod reactor;
 mod region;
 mod scheduler;
 mod shared;
+mod soak;
 mod benching;
 mod blocking;
 mod testing;

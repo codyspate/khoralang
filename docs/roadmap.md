@@ -2298,7 +2298,7 @@ workers and fairness, then the reactor and timers, then stealing, then the
 bounded blocking pool, then soak. Khora stays buildable throughout; threads
 remain the implementation wherever a backend has not landed.
 
-**Where it has got to.** 11A through 11E are built, on Windows and on Linux —
+**Where it has got to.** 11A through 11F are built, on Windows and on Linux —
 the latter through `scripts/check-linux.sh`, which runs the runtime's tests
 under WSL2 and is now part of the baseline. `Fiber::spawn` still makes threads,
 deliberately, until the remaining backends land.
@@ -2312,13 +2312,21 @@ deliberately, until the remaining backends land.
 | 11C.3 | `recv`, `send` and `accept` that suspend a fiber rather than a worker |
 | 11D | work stealing, so a burst spawned on one worker reaches the others |
 | 11E | a bounded blocking pool, and `std::fs` routed through it |
+| 11F | adversarial soak, a full state audit, and the scale numbers |
 | — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
-Two numbers, measured on Windows. **A hundred thousand fibers waiting at once
-cost 418 MB and every one of them woke** — about 4,240 bytes each, against
-roughly 33 KB for a thread. And the compiler's safepoint is under
-`bench/service`'s noise floor: 800,730 req/s without it against 796,116 /
-781,456 / 784,215 with, where the spread among the three is wider than the gap.
+Measured on both platforms now, and they agree to within one per cent. **A
+hundred thousand fibers waiting at once cost 407 MB and every one of them
+woke** — about 4,270 bytes each, against roughly 33 KB for a thread, and flat
+from a thousand up. The round trip is 1.04 s on Windows and 4.49 s on Linux.
+And the compiler's safepoint is under `bench/service`'s noise floor: 800,730
+req/s without it against 796,116 / 781,456 / 784,215 with, where the spread
+among the three is wider than the gap.
+
+**`vm.max_map_count` has an answer.** Two mappings per fiber, so a kernel at
+the traditional default of 65,530 caps a program near 32,700 fibers. The one
+measured here allows 1,048,576. The slot allocator the design argued about is
+the fix if that ever bites, and it is not needed to reach the phase's number.
 
 Three things found by building it rather than by designing it:
 
@@ -2343,6 +2351,13 @@ Three things found by building it rather than by designing it:
   which perturbed the timing enough to hide it; core dumps and ThreadSanitizer
   did. `docs/design/scheduler.md` has the account, and the rule it produced
   applies to every thread-local this runtime touches.
+- **A scheduler's bugs are arithmetic, not answers.** Nothing in 11F was
+  found by a test that computed something wrong; every one was a count that
+  did not come back to zero, and the instrument that found them —
+  `Scheduler::audit`, naming all six places a fiber can be — was worth more
+  than any individual test. The corollary is that the audit has to be
+  *complete*: a waker carrying a task between two queues is a place, and
+  omitting it reported ten fibers missing on four workers.
 - **And the rule was not believed hard enough the first time.** Having found it
   in the yielder, the design doc asserted that the other four thread-locals had
   been checked and were fine. Stealing disproved that within a day: `current()`

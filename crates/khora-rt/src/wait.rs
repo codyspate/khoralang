@@ -43,7 +43,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Instant;
 
 /// Running, or suspended only for fairness. Its worker will resume it.
@@ -55,11 +55,11 @@ pub(crate) const NOTIFIED: u8 = 2;
 
 /// A fiber's place in the sleep/wake protocol.
 #[derive(Debug)]
-pub(crate) struct Wait(AtomicU8);
+pub(crate) struct Wait(AtomicU8, AtomicBool);
 
 impl Default for Wait {
     fn default() -> Wait {
-        Wait(AtomicU8::new(RUNNING))
+        Wait(AtomicU8::new(RUNNING), AtomicBool::new(false))
     }
 }
 
@@ -96,6 +96,31 @@ impl Wait {
     /// Back to running, once a worker has taken responsibility for the fiber.
     pub(crate) fn running(&self) {
         self.0.store(RUNNING, Ordering::Release);
+    }
+
+    /// Says this fiber has been added to the waiting total.
+    ///
+    /// **`NOTIFIED` cannot answer this on its own**, which is the whole reason
+    /// this flag exists. The state says a notification is pending; it does not
+    /// say whether the fiber was ever waiting to begin with. Reached from
+    /// `WAITING` it means a wait is being released and the total owes one
+    /// back; reached from `RUNNING` — a wake that arrived while the fiber was
+    /// busy — nothing was ever added, and a worker that later saw the fiber
+    /// yield for fairness would take one anyway. That is how the total went to
+    /// minus twenty-eight in 11F's soak.
+    ///
+    /// Set after the total is incremented, so nobody can see the flag before
+    /// there is something to take.
+    pub(crate) fn start_counting(&self) {
+        self.1.store(true, Ordering::Release);
+    }
+
+    /// Takes this fiber's place in the waiting total back, if it had one.
+    ///
+    /// Exactly one caller gets `true` per wait, which is what keeps a wake and
+    /// the worker that files the suspension from both subtracting.
+    pub(crate) fn stop_counting(&self) -> bool {
+        self.1.swap(false, Ordering::AcqRel)
     }
 
     /// Takes a pending notification, if there is one.

@@ -399,6 +399,16 @@ thing to reach for if measurement says the heap is the problem, and not before �
 and a hundred thousand timers sort correctly and fire in one pass, so it is not
 the problem yet.
 
+**11F found the shape of the eventual problem, and left it alone.** A fiber
+released before its deadline — woken by I/O, or cancelled — leaves the deadline
+in the heap, because taking it out means rebuilding the heap and doing that per
+wake is quadratic. The entry is discarded when it comes due, so the waste is
+bounded by how long deadlines are and how often sleepers are released early,
+not unbounded. `timers_dead` counts them: 367 against 2,668 fired in one soak, about one in
+seven, in a workload built to release sleepers early and so an over-estimate of
+what a real program would see. The rule above still holds — measure a real
+program before replacing the heap — and this is the counter to measure.
+
 Built in 11C on a thread of its own. One thread sleeping is not a worker
 blocked, which is the whole distinction; a condvar it could wait on instead of
 polling at a millisecond is the obvious refinement and wants a reason.
@@ -623,7 +633,7 @@ Staged so that a failure is attributable to the thing that just changed.
 | **11C** timers, suspend, wake, a `poll` reactor, and socket calls that suspend a fiber — **done** | a hundred thousand waiting on *timers*; sockets need a scalable backend |
 | **11D** work stealing — **done** | locality, once the simple scheduler's behaviour is understood |
 | **11E** bounded blocking pool — **done** | that unavoidable blocking cannot stall a worker |
-| **11F** scale and soak | the adversarial tests below |
+| **11F** scale and soak — **done** | the adversarial tests below |
 
 Khora stays buildable throughout. Threads remain the implementation on any
 platform whose backend has not landed.
@@ -661,6 +671,114 @@ contention; a child failing as a sibling completes.
 A **deterministic test scheduler**, where queue decisions are controlled rather
 than raced, is worth building for this. It turns "it failed once in ten
 thousand runs" into a case that can be replayed.
+
+### What 11F built instead, and why
+
+`crates/khora-rt/src/soak.rs`. Eight workloads mixed by a seeded generator —
+one for each ownership transition, plus the reactor — with two threads
+interfering: an adversary that
+wakes and cancels fibers at random, including ones that finished long ago, and
+a releaser that gives every parked fiber exactly one wake.
+
+**Exactly one, and that is the whole design.** Waking until something moves
+would hide a lost wakeup, which is one of the things this exists to find. The
+protocol has to survive a single wake landing on either side of the park.
+
+The deterministic scheduler was not built, because the thing it buys —
+replaying a failure — turned out to be available more cheaply. What a scheduler
+gets wrong is not a wrong answer but a wrong *count*, and counts can be checked
+exactly at the one moment when nothing is moving:
+
+  - `Scheduler::audit` names all six places a fiber can be — the shared queue,
+    a worker's queue, the parked map, in transit between two of those, a
+    worker's hand, or finished — and `Audit::settled` says the pool is empty
+    and self-consistent.
+  - `Scheduler::settle` waits for that, because `drain` answers a different
+    question: every fiber can have finished while deadlines are still
+    registered.
+  - `coro::ResumedOnce` aborts at the instant two workers enter one coroutine,
+    which is stronger than any count, and costs nothing outside debug builds.
+  - Every fiber in the soak asserts its own identity on every resume.
+
+**What cannot be checked while the pool is busy, and the hour it took to
+accept that.** `Audit` reads six places without a lock across them, so a task
+moving from one to another can be seen in both, and the arithmetic goes
+negative with nothing wrong. Making it sound while busy needs a single counter
+maintained at every push and pop — an atomic on the hottest path in the file,
+to catch what quiescence catches for free. The one thing that does survive a
+skewed read is `completed <= spawned`, because `audit` reads `completed`
+before everything else and `spawned` after everything else; that one is
+asserted throughout the run.
+
+A hang is the least informative failure a soak can produce, so a watchdog turns
+one into a state dump and aborts. It earned itself twice over, both times
+reading `parked: 1, waiting: 1` with nothing else outstanding — and both times
+the fault was the test's, not the scheduler's. Without the dump those are
+indistinguishable from a lost wakeup, which is exactly the bug the soak exists
+to find, and either one would have been believed.
+
+### What it found
+
+  - **A waiting count that went negative.** `NOTIFIED` means two things —
+    "a wait is being released" and "do not sleep next time" — and only the
+    first owes the waiting total anything. A fiber that took a wake while
+    running and then yielded for fairness had a decrement charged against a
+    wait it never made. `Wait::start_counting` pairs them properly, and
+    `a_wake_for_a_running_fiber_is_not_counted_as_a_wait` is the deterministic
+    case.
+  - **A sixth place a fiber can be.** A waker holds a task between taking it
+    out of the parked map and injecting it; a thief holds half a queue between
+    two others. Neither is a worker, so neither is bounded by the worker count,
+    and an audit that did not know about them reported ten fibers unaccounted
+    for on four workers.
+  - **An unwritten precondition on `wake_fiber`.** It can only wake a fiber the
+    pool has been told about, and `spawn` is what tells it; a wake that arrives
+    first finds nothing and is dropped. That is right — remembering
+    notifications for fibers that may never arrive is an unbounded leak — but
+    it is a trap for anything that publishes a fiber's id before handing over
+    its task, and the soak fell into it and stranded a fiber about twice in a
+    hundred runs. Now written down where the function is.
+
+### What it ran
+
+Eight workloads, four worker counts, on both platforms:
+
+| | Windows | Linux |
+| --- | --- | --- |
+| runs of 6,000 rounds | 120 | 120 |
+| failures | 0 | 0 |
+| repeated passes, one process | 5,771 in 5 min | 4,648 in 4 min |
+| resident drift over those | 880 KB | 684 KB |
+
+The repeated-pass figure is the leak check, and it has to be one process:
+every individual soak proves its own pool came back to empty, and none of them
+can see something accumulating *between* pools. Five thousand schedulers built
+and destroyed, something over two million fibers, and resident memory flat to
+within a megabyte.
+
+### Scale
+
+A thousand, ten thousand and a hundred thousand fibers, all waiting at once,
+then all woken. Windows and Linux agree to within one per cent:
+
+| | 1,000 | 10,000 | 100,000 |
+| --- | --- | --- | --- |
+| resident | 4 MB | 40 MB | 407 MB |
+| per fiber | 4,464 B | 4,290 B | 4,266 B |
+| mappings (Linux) | 2,069 | 20,068 | 200,068 |
+| round trip (Windows) | 12 ms | 104 ms | 1.04 s |
+| round trip (Linux) | 41 ms | 419 ms | 4.49 s |
+
+About 4.3 KB a fiber against roughly 33 KB for a thread, and flat with scale.
+
+**`vm.max_map_count` is answered.** Exactly two mappings per fiber — a guard
+page and the stack — so the traditional default of 65,530 caps a program near
+**32,700 fibers**, and nothing about that is visible until the allocation
+fails. The kernel this was measured on allows 1,048,576, which is why 100,000
+works here. A slot allocator that carves many stacks out of one mapping is the
+answer if it ever matters; it is not needed to reach the phase's number on a
+modern kernel, and knowing which kernels need it is worth more than building
+it now.
 
 ---
 
