@@ -2907,11 +2907,57 @@ rather than permanent: a real service showing traps frequent enough that
 restart is an availability problem; region-backed allocation landing for other
 reasons; or a target with no supervisor to restart anything.
 
-### 12.9 Supply chain
+### 12.9 Supply chain — **the SBOM, not the signature**
 
-`khora-pkg`'s content-addressed store gives reproducibility. Signing, provenance
-and an SBOM are what an audit-heavy buyer asks for next, and `positioning.md`
-names that buyer explicitly.
+`khora sbom` writes CycloneDX 1.5 JSON. `khora-pkg/src/sbom.rs`.
+
+Almost nothing new is computed. `khora.lock` already records every resolved
+package, the immutable revision it came from, the SHA-256 of its visible files
+and what each depends on — which is most of a bill of materials already. This
+renders it in the shape scanners read.
+
+Three decisions worth keeping:
+
+**No timestamp.** §6.1 asks for bit-for-bit reproducible builds, and a clock in
+a generated artifact is the ordinary way to lose that: the same input would
+produce two documents and nothing downstream could tell a real change from time
+passing. CycloneDX makes `metadata.timestamp` optional, so it is omitted and the
+document is a pure function of the manifest and the lockfile. Components are
+sorted by name for the same reason — a resolver may reorder without anything
+having changed. The cost, named rather than hidden: a consumer that wants to
+know when a document was produced has to learn it from where the file came from.
+
+**Rendered from the resolution, not from a lockfile read off disk.** Those
+differ exactly when the lockfile is stale, which is the case an audit most wants
+not to be misled about. `--locked` refuses the difference rather than absorbing
+it.
+
+**A path dependency says it is unpinned**, in a property, because there is no
+immutable thing to hash and a component with no checksum otherwise reads as an
+omission.
+
+**Not signing, and not provenance.** Both need a decision about keys that this
+does not make. An unsigned SBOM is still what a scanner reads; a signature is
+what makes it *evidence*, and inventing a key story to have one sooner would be
+worse than saying so. That is the rest of 12.9.
+
+Eleven tests: seven on the document's shape, four running the binary — the
+empty case produces a document rather than nothing, two runs agree byte for
+byte, and a directory with no `khora.toml` is refused by name.
+
+### A feature gate that only the front-end build could catch
+
+Found while wiring the command up, and worth its own note because the thing it
+broke is the thing the gate exists for. 12.4 added `mod debug;` without
+`#[cfg(feature = "llvm")]`, so `cargo build` with no features failed on
+inkwell. Every check in `scripts/baseline.sh` passes `--features llvm`; CI's
+`check` job is the only thing that builds without it, and this would have gone
+to CI green from here.
+
+Moving the gate then broke the other way: `toolchain.rs` is unconditional and
+needs `debug_info_wanted()` to decide whether to pass `-g`. An environment
+variable does not belong behind an LLVM feature, so it lives in `toolchain`
+now, with a comment saying why it is not where it looks like it should be.
 
 ### 11H — the reactor could not be woken, and that was the twelve times
 

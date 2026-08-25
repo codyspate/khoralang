@@ -78,7 +78,7 @@ pub(super) fn build(
     // attached to a function before that function's instructions are built,
     // and the compile unit has to exist before the first subprogram — so this
     // is as early as it can be and still know the entry file's path.
-    if crate::debug::wanted() {
+    if crate::toolchain::debug_info_wanted() {
         let entry_path = files.first().map(|f| f.path(db).clone()).unwrap_or_default();
         let triple = machine.get_triple();
         let is_msvc = triple.as_str().to_string_lossy().contains("msvc");

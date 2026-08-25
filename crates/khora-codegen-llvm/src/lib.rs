@@ -29,6 +29,10 @@ pub mod spike;
 
 #[cfg(feature = "llvm")]
 mod backend;
+// Gated like the rest of it. `mod debug` went in unconditional and nothing
+// noticed, because every check that runs here passes `--features llvm` — the
+// front-end build the feature exists to keep working is the one it broke.
+#[cfg(feature = "llvm")]
 mod debug;
 #[cfg(feature = "llvm")]
 mod lower;

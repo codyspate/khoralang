@@ -88,6 +88,20 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Write a software bill of materials for a package's dependencies.
+    ///
+    /// CycloneDX 1.5, JSON, on standard output unless `--out` names a file.
+    /// The document is a pure function of `khora.toml` and `khora.lock` — no
+    /// timestamp — so two runs over unchanged input produce identical bytes
+    /// and a diff means something changed.
+    Sbom {
+        /// A directory containing a `khora.toml`, or a file beside one.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Where to write it. Standard output by default.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -136,6 +150,7 @@ fn run() -> Result<bool> {
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out } => build(&path, out.as_deref()),
+        Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
         Command::Lsp => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
         Command::Toolchain { command } => toolchain(command),
@@ -891,6 +906,48 @@ fn extern_declarations(directory: &Path) -> Result<Vec<(PathBuf, String)>> {
 /// wants the same answer.
 fn locked_requested() -> bool {
     std::env::args().any(|a| a == "--locked") || std::env::var_os("KHORA_LOCKED").is_some()
+}
+
+/// `khora sbom` — a bill of materials for what a package actually builds
+/// against.
+///
+/// Rendered from the *resolution* rather than from a `khora.lock` read off
+/// disk, so the document describes what a build here would use rather than
+/// what a lockfile last recorded. Those differ exactly when the lockfile is
+/// stale, which is the case an audit most wants not to be misled about; pass
+/// `--locked` to refuse that difference instead of absorbing it.
+///
+/// A package with no dependencies still gets a document. An empty bill of
+/// materials is a fact about the package, and a tool that produces nothing
+/// cannot be told apart from one that failed.
+fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
+    let manifest_path = nearest_manifest(path).with_context(|| {
+        format!(
+            "no `khora.toml` in {} or any directory above it, and a bill of materials is              about a package",
+            path.display()
+        )
+    })?;
+    let text = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let parsed = khora_manifest::Manifest::parse(&text)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
+
+    let store = khora_pkg::Store::open()?;
+    let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
+
+    let document = khora_pkg::cyclonedx(
+        &resolution.lockfile,
+        &parsed.manifest.package.name,
+        &parsed.manifest.package.version,
+    );
+    match out {
+        Some(file) => std::fs::write(file, document)
+            .with_context(|| format!("writing {}", file.display())),
+        None => {
+            print!("{document}");
+            Ok(())
+        }
+    }
 }
 
 /// The `khora.toml` governing `start`: in it if it is a directory, beside it if

@@ -50,16 +50,6 @@ use inkwell::module::{FlagBehavior, Module};
 use inkwell::values::FunctionValue;
 use text_size::TextRange;
 
-/// Whether a build emits debug information.
-///
-/// On by default, and off with `KHORA_DEBUG=0`. There is no release mode to
-/// hang this off yet, and the default that serves a language being brought up
-/// is the one where a crash can be read. When there is an optimization level to
-/// speak of, this becomes part of it.
-pub(crate) fn wanted() -> bool {
-    !matches!(std::env::var("KHORA_DEBUG").as_deref(), Ok("0") | Ok("off") | Ok("false"))
-}
-
 /// The debug-info state for one module under construction.
 pub(crate) struct Debug<'ctx> {
     builder: DebugInfoBuilder<'ctx>,

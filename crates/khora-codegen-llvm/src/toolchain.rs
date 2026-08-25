@@ -137,6 +137,23 @@ pub fn runtime_archive() -> Option<PathBuf> {
 /// *after* the objects and the system libraries after that: a static link
 /// resolves left to right, so an archive listed before its user contributes
 /// nothing.
+/// Whether a build emits debug information.
+///
+/// On by default, and off with `KHORA_DEBUG=0`. There is no release mode to
+/// hang this off yet, and the default that serves a language being brought up
+/// is the one where a crash can be read. When there is an optimization level to
+/// speak of, this becomes part of it.
+///
+/// **Here rather than in `debug`, which is where it belongs and cannot live.**
+/// That module is behind the `llvm` feature because it names inkwell types;
+/// this is an environment variable, and the linker driver below needs it in a
+/// build that has no LLVM at all. Defining it there made `cargo build` fail for
+/// anyone working on the front end, which is the one thing the feature exists
+/// to prevent.
+pub fn debug_info_wanted() -> bool {
+    !matches!(std::env::var("KHORA_DEBUG").as_deref(), Ok("0") | Ok("off") | Ok("false"))
+}
+
 pub fn link_with_runtime(objects: &[&Path], out: &Path) -> Result<(), String> {
     let runtime = runtime_archive().ok_or_else(|| {
         format!(
@@ -166,7 +183,7 @@ fn drive_clang(objects: &[&Path], archives: &[&Path], out: &Path) -> Result<(), 
     // artifact that discards it is the failure mode worth guarding against
     // here: everything verifies, nothing is wrong, and no debugger can read
     // the program.
-    if crate::debug::wanted() {
+    if debug_info_wanted() {
         cmd.arg("-g");
     }
     cmd.arg("-o").arg(out);
