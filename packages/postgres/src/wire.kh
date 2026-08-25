@@ -1,0 +1,297 @@
+module postgres::wire;
+
+import std::core::{Array, Option, Vector};
+
+/// The bytes of a PostgreSQL frontend/backend message, and how to read them
+/// back.
+///
+/// **Everything here is pure.** No socket, no connection, no state machine —
+/// building a message and taking one apart are functions from bytes to bytes,
+/// which is what makes them testable without a server. That mattered: there is
+/// no PostgreSQL on the machine this was written on, so a protocol that could
+/// only be checked by talking to one could not have been checked at all.
+///
+/// # The frame
+///
+/// Every message after the handshake is a type byte, a 32-bit big-endian
+/// length, and a payload:
+///
+/// ```text
+/// +--------+------------------+------------------+
+/// | 'Q'    | length (4 bytes) | payload          |
+/// +--------+------------------+------------------+
+/// ```
+///
+/// **The length counts itself and excludes the type byte**, which is the one
+/// off-by-one in the protocol worth writing down. A `Query` carrying five
+/// bytes of payload has a length field of nine, and the whole message on the
+/// wire is ten.
+///
+/// The startup message is the exception: it has no type byte, because the
+/// server does not yet know what protocol it is speaking.
+
+// --- writing ---------------------------------------------------------------
+
+/// A message being built.
+///
+/// A `Vector<U8>` rather than an `Array<U8>`, because the length is not known
+/// until the payload is finished — which is the whole reason a protocol puts
+/// the length first and a writer has to buffer.
+export type Writer = {
+  bytes: Vector<U8>,
+};
+
+impl Writer {
+  export fn new() -> Writer {
+    { bytes: Vector::new() }
+  }
+
+  /// One byte.
+  export fn u8(self, value: Int) -> () {
+    Vector::push(self.bytes, U8::of(Int::and(value, 255)));
+  }
+
+  /// Sixteen bits, most significant first. The protocol is big-endian
+  /// throughout, which is not this machine's order and so is written out
+  /// rather than reinterpreted.
+  export fn i16(self, value: Int) -> () {
+    Writer::u8(self, Int::shr(value, 8));
+    Writer::u8(self, value);
+  }
+
+  /// Thirty-two bits, most significant first.
+  export fn i32(self, value: Int) -> () {
+    Writer::u8(self, Int::shr(value, 24));
+    Writer::u8(self, Int::shr(value, 16));
+    Writer::u8(self, Int::shr(value, 8));
+    Writer::u8(self, value);
+  }
+
+  /// A string's bytes, without a terminator.
+  export fn text(self, value: String) -> () {
+    let count = String::byte_length(value);
+    let mut at = 0;
+    while at < count {
+      Vector::push(self.bytes, String::byte(value, at));
+      at = at + 1
+    };
+  }
+
+  /// A string, terminated by a zero byte, which is how the protocol carries
+  /// every name it has: users, databases, parameters, SQL.
+  export fn cstring(self, value: String) -> () {
+    Writer::text(self, value);
+    Writer::u8(self, 0);
+  }
+
+  export fn length(self) -> Int { Vector::length(self.bytes) }
+
+  /// What has been written, as an array ready to send.
+  export fn finish(self) -> Array<U8> {
+    let count = Vector::length(self.bytes);
+    let out: Array<U8> = Array::new(count, 0);
+    let mut at = 0;
+    while at < count {
+      match Vector::get(self.bytes, at) {
+        Option::Some(b) => Array::set(out, at, b),
+        Option::None => (),
+      };
+      at = at + 1
+    };
+    out
+  }
+}
+
+/// Wraps a payload in a type byte and a length.
+///
+/// **The length is four plus the payload**, counting itself and not the type
+/// byte. Getting that wrong desynchronises the stream one message later, where
+/// the symptom is an unrelated message type and no clue which frame was
+/// mis-sized — so it is one function, used by everything, rather than
+/// arithmetic repeated at every call site.
+export fn framed(kind: Int, payload: Array<U8>) -> Array<U8> {
+  let count = Array::length(payload);
+  let out = Writer::new();
+  Writer::u8(out, kind);
+  Writer::i32(out, count + 4);
+  let mut at = 0;
+  while at < count {
+    Vector::push(out.bytes, Array::get(payload, at));
+    at = at + 1
+  };
+  Writer::finish(out)
+}
+
+/// The first message, which has no type byte.
+///
+/// The server has not agreed a protocol yet, so there is nothing for a type
+/// byte to mean. Version three is `0x00030000`, and the parameters are
+/// `name\0value\0` pairs ended by one more zero.
+export fn startup(user: String, database: String) -> Array<U8> {
+  let body = Writer::new();
+  Writer::i32(body, 196608);
+  Writer::cstring(body, "user");
+  Writer::cstring(body, user);
+  Writer::cstring(body, "database");
+  Writer::cstring(body, database);
+  Writer::u8(body, 0);
+
+  let payload = Writer::finish(body);
+  let count = Array::length(payload);
+  let out = Writer::new();
+  Writer::i32(out, count + 4);
+  let mut at = 0;
+  while at < count {
+    Vector::push(out.bytes, Array::get(payload, at));
+    at = at + 1
+  };
+  Writer::finish(out)
+}
+
+/// A simple query: everything in one string, results in one round trip.
+export fn query(sql: String) -> Array<U8> {
+  let body = Writer::new();
+  Writer::cstring(body, sql);
+  framed(81, Writer::finish(body))
+}
+
+/// A password, in whatever form the server asked for.
+export fn password(secret: String) -> Array<U8> {
+  let body = Writer::new();
+  Writer::cstring(body, secret);
+  framed(112, Writer::finish(body))
+}
+
+/// `Terminate`. Politer than closing the socket: the server logs a
+/// disconnection rather than a broken connection.
+export fn terminate() -> Array<U8> {
+  let empty: Array<U8> = Array::new(0, 0);
+  framed(88, empty)
+}
+
+// --- reading ---------------------------------------------------------------
+
+/// A position in a received buffer.
+export type Reader = {
+  bytes: Array<U8>,
+  mut at: Int,
+};
+
+impl Reader {
+  export fn of(bytes: Array<U8>) -> Reader { { bytes: bytes, at: 0 } }
+
+  export fn remaining(self) -> Int { Array::length(self.bytes) - self.at }
+
+  /// One byte, or zero past the end.
+  ///
+  /// **Zero rather than a failure**, deliberately: a reader that runs off the
+  /// end is looking at a message it has already decided the length of, so the
+  /// mistake was upstream and reporting it here would blame the wrong line.
+  /// `remaining` is how a caller checks before it reads.
+  export fn u8(self) -> Int {
+    if self.at >= Array::length(self.bytes) {
+      0
+    } else {
+      let b = U8::to_int(Array::get(self.bytes, self.at));
+      self.at = self.at + 1;
+      b
+    }
+  }
+
+  export fn i16(self) -> Int {
+    let hi = Reader::u8(self);
+    let lo = Reader::u8(self);
+    Int::or(Int::shl(hi, 8), lo)
+  }
+
+  export fn i32(self) -> Int {
+    let a = Reader::u8(self);
+    let b = Reader::u8(self);
+    let c = Reader::u8(self);
+    let d = Reader::u8(self);
+    Int::or(Int::or(Int::shl(a, 24), Int::shl(b, 16)), Int::or(Int::shl(c, 8), d))
+  }
+
+  /// Bytes up to a zero, as text. The zero is consumed and not returned.
+  export fn cstring(self) -> String {
+    let out = Vector::new();
+    let mut going = true;
+    while going {
+      if Reader::remaining(self) <= 0 {
+        going = false
+      } else {
+        let b = Reader::u8(self);
+        if b == 0 { going = false } else { Vector::push(out, U8::of(b)) }
+      }
+    };
+    // `Vector` has `to_list` and no `to_array`, so the copy is written out.
+    // Worth noticing rather than working around silently: a byte buffer that
+    // cannot become the array every byte-oriented call wants is a gap in
+    // `std`, and this is the second one this package has found.
+    let count = Vector::length(out);
+    let bytes: Array<U8> = Array::new(count, 0);
+    let mut i = 0;
+    while i < count {
+      match Vector::get(out, i) {
+        Option::Some(b) => Array::set(bytes, i, b),
+        Option::None => (),
+      };
+      i = i + 1
+    };
+    String::from_bytes(bytes)
+  }
+
+  /// `count` bytes, as their own array.
+  export fn take(self, count: Int) -> Array<U8> {
+    let have = Reader::remaining(self);
+    let n = if count < have { count } else { have };
+    let out: Array<U8> = Array::new(n, 0);
+    let mut i = 0;
+    while i < n {
+      Array::set(out, i, Array::get(self.bytes, self.at + i));
+      i = i + 1
+    };
+    self.at = self.at + n;
+    out
+  }
+}
+
+/// One message read off the wire, before anything is made of it.
+export type Message = {
+  /// The type byte: `R` for authentication, `T` for a row description, and so
+  /// on. Kept as a number because that is what the wire carries and a name
+  /// here would be a second vocabulary to keep in step.
+  kind: Int,
+  payload: Array<U8>,
+};
+
+/// Reads one message from `bytes` starting at `from`, if a whole one is there.
+///
+/// `Option::None` means *not yet*, not *broken*: a socket read returns whatever
+/// has arrived, and a message split across two reads is the ordinary case
+/// rather than an error. The caller reads more and asks again.
+export fn message_at(bytes: Array<U8>, from: Int) -> Option<Message> {
+  let available = Array::length(bytes) - from;
+  if available < 5 {
+    Option::None
+  } else {
+    let head = Reader::of(bytes);
+    head.at = from + 1;
+    let length = Reader::i32(head);
+    // The length counts itself, so the payload is four fewer, and the whole
+    // message on the wire is one more than the length.
+    if length < 4 {
+      Option::None
+    } else if available < length + 1 {
+      Option::None
+    } else {
+      let kind = U8::to_int(Array::get(bytes, from));
+      Option::Some({ kind: kind, payload: Reader::take(head, length - 4) })
+    }
+  }
+}
+
+/// How many bytes a message occupies, given its payload.
+export fn message_width(message: Message) -> Int {
+  Array::length(message.payload) + 5
+}

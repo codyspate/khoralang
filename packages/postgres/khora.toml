@@ -1,0 +1,9 @@
+[package]
+name = "postgres"
+version = "0.1.0"
+edition = "2026"
+
+# A driver reaches the operating system through `std::net::socket`, which is
+# `std`'s to declare. Nothing here declares an `extern fn` of its own, so this
+# package needs no entry in the parent's `[permissions] extern` list — see
+# `docs/design/permissions.md`.

@@ -1,0 +1,165 @@
+module postgres::wire_test;
+
+// **`std` has `assert(Bool)` and nothing else** — no `assert_eq`, no message,
+// no way for a failure to say what it got. Every assertion below is therefore
+// a comparison whose two sides are only visible by reading the line the
+// debugger names, and a test that fails says "assertion failed" and no more.
+//
+// That is thin for a language meant for production, and it is written here
+// rather than worked around because it is the second gap this package has
+// found in a day: `Vector` has no `to_array`, and a test cannot say what it
+// expected. `docs/roadmap.md` Phase 13.
+
+import std::core::{Array, Option, Show, assert, print};
+import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, query, startup, terminate};
+
+/// The bytes as hex, so a failure says which byte rather than that two arrays
+/// differ.
+fn hex(bytes: Array<U8>) -> String {
+  let digits = "0123456789abcdef";
+  let count = Array::length(bytes);
+  let mut out = "";
+  let mut at = 0;
+  while at < count {
+    let b = U8::to_int(Array::get(bytes, at));
+    out = out + String::slice(digits, Int::shr(b, 4), Int::shr(b, 4) + 1)
+    + String::slice(digits, Int::and(b, 15), Int::and(b, 15) + 1);
+    at = at + 1
+  };
+  out
+}
+
+/// **A simple query, byte for byte against the protocol.**
+///
+/// `'Q'` is 0x51, the length is nine — four for itself and five for
+/// `SELECT\0`... no: `"a"` is one byte plus its terminator, so the payload is
+/// two and the length is six. Written out here rather than computed, because a
+/// test that computes the expected value the same way the code does agrees
+/// with the code and not with PostgreSQL.
+test "a query is a type byte, a length that counts itself, and a C string" {
+  let bytes = query("a");
+  // 51            'Q'
+  //   00 00 00 06 length: 4 for itself + 2 for "a\0"
+  //               61 00  "a\0"
+  assert(hex(bytes) == "51000000066100");
+}
+
+test "the length excludes the type byte and includes itself" {
+  let payload: Array<U8> = Array::new(3, 7);
+  let bytes = framed(88, payload);
+  assert(Array::length(bytes) == 8);
+  // The length field reads 7: three of payload and four of itself.
+  let read = Reader::of(bytes);
+  assert(Reader::u8(read) == 88);
+  assert(Reader::i32(read) == 7);
+}
+
+/// The startup message has no type byte, because the server does not yet know
+/// what protocol it is speaking.
+test "the startup message carries the version and no type byte" {
+  let bytes = startup("bob", "shop");
+  let read = Reader::of(bytes);
+  let length = Reader::i32(read);
+  assert(length == Array::length(bytes));
+  // 196608 is 0x00030000: major three, minor zero.
+  assert(Reader::i32(read) == 196608);
+  assert(Reader::cstring(read) == "user");
+  assert(Reader::cstring(read) == "bob");
+  assert(Reader::cstring(read) == "database");
+  assert(Reader::cstring(read) == "shop");
+  // One more zero ends the parameter list.
+  assert(Reader::u8(read) == 0);
+  assert(Reader::remaining(read) == 0);
+}
+
+test "big-endian is written most significant first" {
+  let out = Writer::new();
+  Writer::i32(out, 196608);
+  Writer::i16(out, 513);
+  let bytes = Writer::finish(out);
+  assert(hex(bytes) == "000300000201");
+}
+
+test "a password message is a C string under 'p'" {
+  let bytes = password("hunter2");
+  let read = Reader::of(bytes);
+  assert(Reader::u8(read) == 112);
+  assert(Reader::i32(read) == 12);
+  assert(Reader::cstring(read) == "hunter2");
+}
+
+test "terminate is a bare frame" {
+  let bytes = terminate();
+  assert(Array::length(bytes) == 5);
+  let read = Reader::of(bytes);
+  assert(Reader::u8(read) == 88);
+  assert(Reader::i32(read) == 4);
+}
+
+// --- reading back ----------------------------------------------------------
+
+/// **A message split across two socket reads is the ordinary case.**
+///
+/// A `recv` returns what has arrived, not what was sent. `message_at` says
+/// `None` for *not yet* rather than for *broken*, and this is the case that
+/// distinguishes the two: the same bytes, one short of complete, then complete.
+test "a partial message is not yet rather than broken" {
+  let whole = query("select 1");
+  let short: Array<U8> = Array::new(Array::length(whole) - 1, 0);
+  let mut at = 0;
+  while at < Array::length(short) {
+    Array::set(short, at, Array::get(whole, at));
+    at = at + 1
+  };
+
+  match message_at(short, 0) {
+    Option::Some(_) => assert(false),
+    Option::None => (),
+  };
+  match message_at(whole, 0) {
+    Option::Some(m) => {
+      assert(m.kind == 81);
+      assert(Array::length(m.payload) == 9);
+    },
+    Option::None => assert(false),
+  };
+}
+
+/// Two messages in one read, which is what a server does when it can.
+test "messages are read one after another out of one buffer" {
+  let first = query("a");
+  let second = terminate();
+  let total = Array::length(first) + Array::length(second);
+  let both: Array<U8> = Array::new(total, 0);
+  let mut at = 0;
+  while at < Array::length(first) {
+    Array::set(both, at, Array::get(first, at));
+    at = at + 1
+  };
+  let mut j = 0;
+  while j < Array::length(second) {
+    Array::set(both, Array::length(first) + j, Array::get(second, j));
+    j = j + 1
+  };
+
+  match message_at(both, 0) {
+    Option::Some(one) => {
+      assert(one.kind == 81);
+      match message_at(both, message_width(one)) {
+        Option::Some(two) => assert(two.kind == 88),
+        Option::None => assert(false),
+      }
+    },
+    Option::None => assert(false),
+  };
+}
+
+test "a reader stops a C string at its zero and consumes it" {
+  let out = Writer::new();
+  Writer::cstring(out, "one");
+  Writer::cstring(out, "two");
+  let read = Reader::of(Writer::finish(out));
+  assert(Reader::cstring(read) == "one");
+  assert(Reader::cstring(read) == "two");
+  assert(Reader::remaining(read) == 0);
+}

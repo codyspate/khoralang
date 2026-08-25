@@ -39,11 +39,21 @@ step 'the corpus checks'
 "$khora" check std
 "$khora" check examples
 "$khora" check bench
+# Packages live in the tree while they are written — `docs/roadmap.md` 13.12
+# says why — so the baseline has to see them or they are not covered by it.
+"$khora" check packages
 
 step 'the corpus is formatted'
 "$khora" fmt std --check
 "$khora" fmt examples --check
 "$khora" fmt bench --check
+"$khora" fmt packages --check
+
+step 'the packages pass their own tests'
+# A package whose tests nobody runs is a package with no tests. `khora test`
+# compiles the `test` blocks into their own executable and runs it — the same
+# path a user of the language would take.
+"$khora" test packages/postgres
 
 step 'every reference application builds'
 for app in examples/core_demo examples/risk_analyzer examples/link_shortener; do
