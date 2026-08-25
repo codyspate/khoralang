@@ -3025,10 +3025,50 @@ it.
 immutable thing to hash and a component with no checksum otherwise reads as an
 omission.
 
-**Not signing, and not provenance.** Both need a decision about keys that this
-does not make. An unsigned SBOM is still what a scanner reads; a signature is
-what makes it *evidence*, and inventing a key story to have one sooner would be
-worse than saying so. That is the rest of 12.9.
+**Not signing.** It needs a decision about keys that this does not make. An
+unsigned SBOM is still what a scanner reads; a signature is what makes it
+*evidence*, and inventing a key story to have one sooner would be worse than
+saying so.
+
+### And the thing signing would have been standing in for — **builds are
+reproducible now, and were not**
+
+`docs/project.md` §6.1 asks for bit-for-bit reproducible builds. Nothing had
+checked, and they were not: two runs of `khora build` over an unchanged
+`risk_analyzer` produced different objects, differing in 112 lines of IR.
+
+**Rust's `HashSet` was the whole of it.** Every one is seeded with a
+per-process random value, and `khora-perceus` iterated one to decide which
+locals a `match` arm releases and in what order — so the release sequence came
+out differently each run. `Live` is a `BTreeSet` now, keyed on a `LocalId`
+that is a `u32` in declaration order, which makes the order the source's own
+and costs nothing anybody has to think about.
+
+    risk_analyzer: reproducible
+    link_shortener: reproducible
+    core_demo: reproducible
+
+**The linker needed telling too**, and half-listened. A PE header carries a
+`TimeDateStamp` that is the clock unless `/Brepro` replaces it with a content
+hash, which is now passed. That is sufficient *without* debug information and
+not with it: relinking one unchanged object twice gives identical bytes with
+`KHORA_DEBUG=0` and different bytes otherwise, `/Brepro` or not, and what
+varies is inside lld-link's PDB emission. Measured rather than assumed. So the
+honest statement is **`KHORA_DEBUG=0 khora build` is bit-for-bit reproducible
+on Windows**, and the debug-information case is a known limit rather than a
+claim quietly weakened.
+
+**This is most of what signing was for.** A build anybody can repeat byte for
+byte is verifiable by repeating it, which is a stronger claim than a signature
+over an artifact nobody can reproduce — the signature says who built it, the
+reproduction says what it is. So the remaining work is smaller than it looked:
+emit a canonical provenance document and let existing tooling — cosign,
+minisign — sign it, rather than putting key management inside a language
+toolchain that has no business holding keys.
+
+Two tests, and the second is the one that could see the bug: within one process
+every `HashSet` shares a seed, so a cross-process check through the `khora`
+binary is the only way to vary it.
 
 Eleven tests: seven on the document's shape, four running the binary — the
 empty case produces a document rather than nothing, two runs agree byte for

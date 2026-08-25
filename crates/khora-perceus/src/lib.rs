@@ -60,7 +60,7 @@
 //! this as it goes, so there is no third representation to keep in step — which
 //! matters most while the three passes are all still moving.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use khora_db::{Db, SourceFile};
 use khora_hir::body::{BinOp, Body, Expr, ExprId, LocalId, Pat, PatId, Stmt};
@@ -334,7 +334,7 @@ pub fn plan(body: &Body, types: &khora_types::BodyTypes, defined: &Defined) -> R
         types,
         defined,
         reads: Vec::new(),
-        unowned: HashSet::new(),
+        unowned: Live::new(),
         unwinds: false,
     };
     planner.plan_function();
@@ -383,7 +383,20 @@ pub fn rc_plans(db: &dyn Db, file: SourceFile) -> Vec<(String, RcPlan)> {
 }
 
 /// Bindings still needed at a point in the backward pass.
-type Live = HashSet<LocalId>;
+///
+/// **A `BTreeSet` rather than a `HashSet`, and that is a correctness
+/// requirement rather than a preference.** These sets are *iterated* to decide
+/// the order releases are emitted in, and Rust seeds every `HashSet` with a
+/// per-process random value — so two builds of one program released the same
+/// locals in different orders and produced different object files.
+/// `docs/project.md` §6.1 asks for bit-for-bit reproducible builds, and this
+/// was the whole of why they were not: two runs of `khora build` over an
+/// unchanged `risk_analyzer` differed in 112 lines of IR, all of them the
+/// order of a release sequence.
+///
+/// `LocalId` is a `u32` in declaration order, so the ordering is the source's
+/// own and costs nothing anybody has to think about.
+type Live = BTreeSet<LocalId>;
 
 /// One read of a counted binding, as the walk saw it.
 struct Read {
@@ -415,7 +428,7 @@ struct Planner<'a> {
     /// arm never made a reference for them, which is why no block releases one
     /// — see `match_arm_bindings_are_not_released_by_the_arm`. Reading one has
     /// to copy, always, because there is no reference there to hand over.
-    unowned: HashSet<LocalId>,
+    unowned: Live,
     /// Whether this body can leave a frame early.
     ///
     /// A `!` or a `raise` unwinds, and unwinding releases what the frame's

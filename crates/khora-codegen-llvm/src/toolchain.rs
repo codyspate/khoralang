@@ -339,6 +339,23 @@ fn drive_clang(
     if debug_info_wanted() {
         cmd.arg("-g");
     }
+
+    // **No timestamp in the artifact.** `docs/project.md` §6.1 asks for
+    // bit-for-bit reproducible builds, and a PE header carries a
+    // `TimeDateStamp` that is the clock unless the linker is told otherwise.
+    // `/Brepro` replaces it with a hash of the content, which is what the flag
+    // is for.
+    //
+    // **It is not sufficient on Windows with debug information**, and that is
+    // measured rather than assumed: relinking one unchanged object twice gives
+    // identical bytes without `-g` and different bytes with it, `/Brepro` or
+    // not. What varies is inside lld-link's PDB emission. Recorded in
+    // `docs/roadmap.md` 12.9 rather than worked around, because a build that
+    // is reproducible only without debug information is a real limit and
+    // pretending otherwise would be worse than naming it.
+    if cfg!(windows) {
+        cmd.arg("-Wl,-Brepro");
+    }
     cmd.arg("-o").arg(out);
 
     let output = cmd.output().map_err(|e| format!("running {}: {e}", clang.display()))?;
