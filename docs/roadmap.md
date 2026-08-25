@@ -2577,17 +2577,92 @@ already inserts runtime calls at loop back-edges.
 `docs/design/observability.md` has the design. `std` owns propagation and the
 vocabulary; exporters are a package, by the same rule that keeps Postgres out.
 
-### 12.4 Debug information
+### 12.4 Debug information — **line tables done, variables not**
 
-`khora-codegen-llvm` emits no DWARF at all — no `create_debug_*` anywhere — so
-there is no source-level debugging, no `lldb`, no stepping, and a trap aborts
-with a message and no backtrace. `khora_overflow` and `khora_bounds_fail` say
-what happened and not where.
+A trap used to say what happened and not where:
 
-Ordered here rather than lower because it gets *harder* with time: whole-program
-monomorphization already makes the mapping from machine code back to source
-non-obvious, and coroutine stacks make an unwinder's job worse. Doing it while
-those layouts are still being changed is cheaper than doing it after.
+    khora: Int addition overflowed
+
+and that was the whole of it, in a program of any size. `khora_bounds_fail`'s
+own doc comment said "the useful thing to do is say where", which it could not.
+Now:
+
+    khora: Int addition overflowed
+       6: deep
+                 at examples/demo/src/main.kh:6
+       7: middle
+                 at examples/demo/src/main.kh:10
+       8: main
+                 at examples/demo/src/main.kh:15
+
+**What is emitted.** `khora-codegen-llvm/src/debug.rs`: a compile unit, a
+`DISubprogram` per emitted function naming its own file and line, and a debug
+location on every expression. One `DIFile` per source file, because a build is
+whole-program — a specialization of `List::map` belongs to `std/list.kh`
+however deep in an application it was reached from, and a backtrace that walks
+out of user code into `std` should say so. DWARF everywhere, CodeView on an
+MSVC target, chosen by the triple.
+
+**What is not.** Variables. A `DILocalVariable` needs a `DIType` for every
+Khora type, which means describing the heap layout — header, tag, field words —
+in DWARF. That is a second piece of work of comparable size, and worth having;
+it is not worth blocking line tables on, because a backtrace without variables
+is most of the value and no variables at all is none of it.
+
+### Four places it silently did nothing, which is the story worth keeping
+
+Every one of these verified clean, produced no error, and emitted no usable
+debug information. That is this feature's failure mode: it does not break, it
+evaporates.
+
+**The builder keeps its last location across functions.** `Debug::leave`
+forgot the subprogram but the *builder* held the location, and the next
+function's `alloca`s inherited it. LLVM's verifier calls that "!dbg attachment
+points at wrong subprogram" — a failed build, and the right answer: a location
+naming another function's scope is not a worse answer, it is a corrupt one. 42
+tests caught it at once.
+
+**A lifted lambda is not its enclosing function.** The closure pass re-entered
+the *owner's* symbol, so `create_function` attached a second `DISubprogram` to a
+function that already had one, and every instruction in the lambda pointed at a
+scope it was not in.
+
+**The linker discards what it is not asked for.** The object carried `.debug$S`
+and `.debug$T`; the executable had neither and no PDB was written. Perfect
+metadata, emitted into an artifact that threw it away. `-g` on the link.
+
+**The trap handler's own frames are not the answer.** Six frames of
+`backtrace_rs` and `force_capture` sat above the line that overflowed, and the
+top of a backtrace is what anybody reads first.
+
+Which is why the tests assert on **the output of a program that trapped**
+rather than on the metadata. Every intermediate check — the IR has
+`DISubprogram`, the object has debug sections — passed at a point where the
+feature did not work.
+
+### The cost, measured
+
+| | executable | cold build |
+| --- | --- | --- |
+| `risk_analyzer`, debug info on | 5,898 KB | 2,470 ms |
+| off (`KHORA_DEBUG=0`) | 3,816 KB | 2,192 ms |
+
+About 2 MB and 13%, which is what `-g` costs in any toolchain. **On by
+default**, and that is a decision worth revisiting rather than a law: there is
+no release mode to hang it off yet, and the default that serves a language
+being brought up is the one where a crash can be read. It should become part of
+an optimization level when there is one — and 12.2 makes that sooner rather
+than later, because a Cloudflare Worker has a size limit and 2 MB of DWARF is a
+material fraction of it.
+
+Backtraces themselves are behind `RUST_BACKTRACE`, the switch every Rust binary
+on the machine already answers to rather than a Khora-specific one nobody would
+guess. A trap without it says how to get one.
+
+**Verified on Windows only, locally.** The DWARF half — every non-MSVC target —
+is exercised by CI's backend job on ubuntu and macos and by nothing on this
+machine, because WSL has no LLVM. That is a gap in what was checked before
+pushing, not a claim about what works.
 
 ### 12.5 Database access — **the capability and the contract, done**
 

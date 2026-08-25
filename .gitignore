@@ -10,11 +10,17 @@ Cargo.lock.bak
 # shortener writes while it runs.
 examples/**/src/*.exe
 examples/**/src/*.o
+# Debug information, since 12.4: a PDB beside the executable on Windows, and
+# the IR dump `KHORA_EMIT_LLVM` asks for.
+examples/**/src/*.pdb
+examples/**/src/*.ll
 examples/**/links.txt
 
 # The benchmark servers, built by hand rather than by cargo.
 bench/**/src/*.exe
 bench/**/src/*.o
+bench/**/src/*.pdb
+bench/**/src/*.ll
 bench/*.exe
 bench/*.pdb
 

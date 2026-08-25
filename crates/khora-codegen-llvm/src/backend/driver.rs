@@ -74,6 +74,18 @@ pub(super) fn build(
     let context = Context::create();
     let mut backend = Backend::new(&context, &name, types.clone(), &machine);
 
+    // **Debug info, before anything is emitted.** A `DISubprogram` has to be
+    // attached to a function before that function's instructions are built,
+    // and the compile unit has to exist before the first subprogram — so this
+    // is as early as it can be and still know the entry file's path.
+    if crate::debug::wanted() {
+        let entry_path = files.first().map(|f| f.path(db).clone()).unwrap_or_default();
+        let triple = machine.get_triple();
+        let is_msvc = triple.as_str().to_string_lossy().contains("msvc");
+        backend.debug =
+            Some(crate::debug::Debug::new(&backend.module, &context, &entry_path, is_msvc));
+    }
+
     // Every `extern fn` in the program, under the C symbol it names.
     //
     // `merged_types` flattens signatures into one map keyed by a bare name, so
@@ -145,6 +157,7 @@ pub(super) fn build(
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
         let plan = khora_perceus::plan(body, instance_types, &defined);
+        enter_debug_scope(db, &mut backend, mono, instance, body, &instance.symbol(), None);
         crate::lower::emit_function(
             &mut backend,
             &instance.symbol(),
@@ -153,6 +166,7 @@ pub(super) fn build(
             instance_types,
             mono,
         );
+        backend.end_debug_scope();
     }
 
     // Lifted lambda bodies come after the functions that build them, because
@@ -165,7 +179,22 @@ pub(super) fn build(
         };
         let Some(body) = body_of(owner) else { continue };
         let plan = khora_perceus::plan(body, owner_types, &defined);
+        // A lifted lambda belongs to the file its enclosing function came
+        // from, and reads in a backtrace under the name of that function —
+        // there is nothing else to call it, and a bare symbol would be worse.
+        // Its *own* symbol and its own position, though: the lambda is a
+        // separate function and gets a separate subprogram.
+        enter_debug_scope(
+            db,
+            &mut backend,
+            mono,
+            owner,
+            body,
+            &site.symbol,
+            Some(body.range(site.expr)),
+        );
         crate::lower::emit_closure(&mut backend, &site, body, Some(&plan), owner_types, mono);
+        backend.end_debug_scope();
     }
 
     // After every body and every lifted closure, because lowering is what
@@ -211,7 +240,56 @@ pub(super) fn build(
     if !backend.errors.is_empty() {
         return Err(backend.errors);
     }
+    // **Before `finish`**, which verifies. The verifier reads debug metadata,
+    // and unresolved temporaries are exactly what it objects to.
+    if let Some(debug) = backend.debug.as_ref() {
+        debug.finalize();
+    }
     backend.finish(&machine, out, stop)
+}
+
+/// Opens the debug scope for one emitted function.
+///
+/// The file is the *home* of the instance rather than the file being compiled:
+/// a build is whole-program, so a specialization of `List::map` belongs to
+/// `std/list.kh` however deep in an application it was reached from, and a
+/// backtrace that walks out of user code into `std` should say so.
+fn enter_debug_scope(
+    db: &dyn Db,
+    backend: &mut Backend<'_>,
+    mono: &khora_types::mono::Instances,
+    instance: &khora_types::mono::Instance,
+    body: &khora_hir::body::Body,
+    // **The symbol being emitted, which is not always the instance's.** A
+    // lifted lambda takes its file and its display name from the function it
+    // was written inside, and everything else from itself. Passing the owner's
+    // symbol here attached a *second* `DISubprogram` to the owner's function,
+    // silently replacing the one it already had, and every instruction in the
+    // lambda then pointed at a scope belonging to a function it was not in.
+    symbol: &str,
+    at: Option<TextRange>,
+) {
+    if backend.debug.is_none() {
+        return;
+    }
+    // Cleared on the way *in* as well as on the way out. Entering is the
+    // reliable half — a `continue` in either emit loop skips the exit, and a
+    // stale location surviving that is a failed build.
+    backend.end_debug_scope();
+    let Some(home) = mono.home(&instance.symbol()) else { return };
+    // The body's first expression, which is inside the function and is the
+    // best position available: a `Body` records where its expressions are and
+    // not where its `fn` keyword was.
+    let at = match at.or_else(|| body.root.map(|root| body.range(root))) {
+        Some(at) => at,
+        None => return,
+    };
+    let path = home.path(db).to_string_lossy().into_owned();
+    let text = home.text(db).to_string();
+    let Some(function) = backend.definition(symbol) else { return };
+    if let Some(debug) = backend.debug.as_mut() {
+        debug.enter(function, &instance.function, symbol, &path, &text, at);
+    }
 }
 
 /// One view of every type in the program.

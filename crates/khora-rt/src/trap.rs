@@ -30,6 +30,7 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: usize) -> ! {
     };
     let mut err = std::io::stderr().lock();
     let _ = writeln!(err, "khora: {} overflowed", String::from_utf8_lossy(bytes));
+    where_from(&mut err);
     let _ = std::io::stdout().flush();
     std::process::exit(134)
 }
@@ -43,6 +44,112 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: usize) -> ! {
 pub extern "C" fn khora_bounds_fail(index: i64, len: i64) -> ! {
     let mut err = std::io::stderr().lock();
     let _ = writeln!(err, "khora: index {index} is outside an array of {len}");
+    where_from(&mut err);
     let _ = std::io::stdout().flush();
     std::process::exit(134)
+}
+
+/// Prints where the trap came from, if the program was built to know.
+///
+/// **This is the half of a trap that was missing.** `khora_bounds_fail`'s own
+/// doc comment said the useful thing to do is say where, and until the compiler
+/// emitted line tables there was no way for it to. Both messages named what had
+/// happened, in a program of any size, with nothing to connect it to a line.
+///
+/// Off unless asked for, by `RUST_BACKTRACE` — the same switch every Rust
+/// binary on the machine already answers to, rather than a Khora-specific one
+/// nobody would guess. A trap is a bug and the first thing anybody does with a
+/// bug is re-run it, so a switch costs one attempt and a default costs every
+/// well-behaved program a page of stack on the way out.
+///
+/// The frames are symbolized from the debug information the executable carries,
+/// so this is only as good as `KHORA_DEBUG` left it. With debug info off the
+/// backtrace is addresses, which is worth printing anyway: an address plus the
+/// binary is still something a symbolizer can be pointed at later.
+fn where_from(err: &mut impl Write) {
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        let _ = writeln!(err, "note: re-run with RUST_BACKTRACE=1 to see where");
+        return;
+    }
+    let captured = std::backtrace::Backtrace::force_capture().to_string();
+    let _ = writeln!(err, "{}", from_khora_down(&captured));
+}
+
+/// Drops the runtime's own frames from the top of a captured backtrace.
+///
+/// Six frames of `backtrace_rs` and `Backtrace::force_capture` sit above the
+/// line that actually overflowed, and the top of a backtrace is the part
+/// anybody reads first. What is wanted is the Khora frame that trapped, on the
+/// first line.
+///
+/// **A text filter over the formatted backtrace**, which is worth being plain
+/// about: `std::backtrace` exposes no way to skip frames, and depending on the
+/// `backtrace` crate directly to get one would put an unwinder in the runtime's
+/// dependency graph to save six lines. The rule is to cut after the last frame
+/// naming this module, and if that frame is ever not found the whole capture is
+/// returned unchanged — so the failure mode is the noisy output this replaced,
+/// never a backtrace with something real missing from it.
+fn from_khora_down(captured: &str) -> &str {
+    const MINE: &str = "khora_rt::trap::";
+    let Some(last) = captured.rfind(MINE) else { return captured };
+    // The frame *after* the trap handler: the next line that **opens** a
+    // frame. A frame's own `at <file>:<line>` line is indented too, so
+    // "newline then spaces" finds the wrong one and cuts a frame in half —
+    // what distinguishes an opener is the number.
+    let start = captured[last..].match_indices('\n').find_map(|(i, _)| {
+        let after = last + i + 1;
+        opens_a_frame(&captured[after..]).then_some(after)
+    });
+    match start {
+        Some(start) => &captured[start..],
+        None => captured,
+    }
+}
+
+/// Whether `line` begins a numbered backtrace frame — spaces, digits, `:`.
+fn opens_a_frame(line: &str) -> bool {
+    let rest = line.trim_start_matches(' ');
+    let digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    digits.len() < rest.len() && digits.starts_with(':')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::from_khora_down;
+
+    /// A capture with the shape the real one has: the runtime's frames, the
+    /// trap handler, then the Khora frames that are the whole point.
+    const CAPTURE: &str = concat!(
+        "   0: std::backtrace_rs::backtrace::win64::trace\n",
+        "             at library/std/src/backtrace.rs:85\n",
+        "   5: khora_rt::trap::khora_overflow\n",
+        "             at ./crates/khora-rt/src/trap.rs:33\n",
+        "   6: deep\n",
+        "             at main.kh:6\n",
+        "   7: main\n",
+        "             at main.kh:15\n",
+    );
+
+    #[test]
+    fn the_runtimes_own_frames_come_off_the_top() {
+        let trimmed = from_khora_down(CAPTURE);
+        assert!(trimmed.starts_with("   6: deep"), "got {trimmed:?}");
+        assert!(trimmed.contains("main.kh:15"), "the rest is kept");
+        assert!(!trimmed.contains("backtrace_rs"), "the runtime's frames are gone");
+    }
+
+    /// The one thing this must never do is eat a frame it did not recognise.
+    #[test]
+    fn a_capture_without_the_trap_handler_is_left_alone() {
+        let other = "   0: something\n             at elsewhere.rs:1\n";
+        assert_eq!(from_khora_down(other), other);
+    }
+
+    /// A trap frame with nothing after it — the whole program was one function
+    /// — leaves the capture rather than returning an empty string.
+    #[test]
+    fn a_trap_with_no_frames_below_it_is_left_alone() {
+        let only = "   5: khora_rt::trap::khora_overflow\n             at trap.rs:33\n";
+        assert_eq!(from_khora_down(only), only);
+    }
 }

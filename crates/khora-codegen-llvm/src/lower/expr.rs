@@ -13,6 +13,11 @@ impl<'ctx> Lower<'_, 'ctx> {
             return None;
         }
         let range = self.body.range(id);
+        // **The one place a source position is attached to code.** Every
+        // expression passes through here, so setting the debug location once
+        // at the top covers whatever the arm below emits — including the arms
+        // that emit nothing themselves and hand off to a neighbouring module.
+        self.be.at(range);
         match self.body.expr(id).clone() {
             Expr::Unit => Some(self.be.unit_value()),
             Expr::Literal(lit) => {

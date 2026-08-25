@@ -29,6 +29,7 @@ pub mod spike;
 
 #[cfg(feature = "llvm")]
 mod backend;
+mod debug;
 #[cfg(feature = "llvm")]
 mod lower;
 #[cfg(feature = "llvm")]

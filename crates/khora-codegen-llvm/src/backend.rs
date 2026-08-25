@@ -293,6 +293,8 @@ pub(crate) struct Backend<'ctx> {
     pub ctx: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
+    /// DWARF line tables, or `None` when `KHORA_DEBUG=0`. See [`crate::debug`].
+    pub(crate) debug: Option<crate::debug::Debug<'ctx>>,
     pub rt: Runtime<'ctx>,
     pub types: TypeMap,
     /// Khora function name to the LLVM function, whether definition or extern.
@@ -428,6 +430,9 @@ impl<'ctx> Backend<'ctx> {
             ctx,
             module,
             builder: ctx.create_builder(),
+            // Installed by `build`, which is where the entry file's path is
+            // known. `Backend::new` has a module name and not a path.
+            debug: None,
             rt,
             types,
             functions: HashMap::new(),
@@ -457,6 +462,49 @@ impl<'ctx> Backend<'ctx> {
 
     pub fn error(&mut self, message: impl Into<String>, range: TextRange) {
         self.errors.push(HirError { message: message.into(), range });
+    }
+
+    // -----------------------------------------------------------------------
+    // Debug information
+    // -----------------------------------------------------------------------
+
+    /// Closes the current function's debug scope, and clears the builder with
+    /// it.
+    ///
+    /// **Both halves, or neither is any use.** `Debug::leave` forgets the
+    /// subprogram, but the *builder* keeps the last location it was given, and
+    /// the next function's prologue — the `alloca`s `allocate_slots` emits
+    /// before a single expression is lowered — inherits it. LLVM's verifier
+    /// calls that "!dbg attachment points at wrong subprogram", which is a
+    /// failed build rather than a wrong backtrace, and is the right thing for
+    /// it to do: a location naming another function's scope is not a slightly
+    /// worse answer, it is a corrupt one.
+    pub(crate) fn end_debug_scope(&mut self) {
+        if self.debug.is_none() {
+            return;
+        }
+        self.builder.unset_current_debug_location();
+        if let Some(debug) = self.debug.as_mut() {
+            debug.leave();
+        }
+    }
+
+    /// Points the builder at `range` for the instructions that follow.
+    ///
+    /// A no-op with debug info off, and a no-op inside the helpers the backend
+    /// emits for itself — those have no Khora source, and `Debug::location`
+    /// declines rather than inventing one.
+    pub(crate) fn at(&mut self, range: TextRange) {
+        let Some(debug) = self.debug.as_ref() else { return };
+        match debug.location(self.ctx, range) {
+            Some(location) => self.builder.set_current_debug_location(location),
+            // **Cleared rather than left standing.** A location belonging to a
+            // function that is no longer being emitted is attached to whatever
+            // instruction comes next, and LLVM's verifier rejects that — which
+            // is how a stale scope turns into a failed build rather than a
+            // wrong backtrace.
+            None => self.builder.unset_current_debug_location(),
+        }
     }
 
     // -----------------------------------------------------------------------

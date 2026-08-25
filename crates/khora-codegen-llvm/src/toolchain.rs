@@ -159,6 +159,16 @@ fn drive_clang(objects: &[&Path], archives: &[&Path], out: &Path) -> Result<(), 
     if !archives.is_empty() {
         cmd.args(SYSTEM_LIBS);
     }
+    // **The link needs telling too.** The object carried `.debug$S` and
+    // `.debug$T` all along and the executable had neither, because a linker
+    // does not keep debug sections it was not asked for — on Windows that
+    // means no PDB is written at all. Emitting perfect metadata into an
+    // artifact that discards it is the failure mode worth guarding against
+    // here: everything verifies, nothing is wrong, and no debugger can read
+    // the program.
+    if crate::debug::wanted() {
+        cmd.arg("-g");
+    }
     cmd.arg("-o").arg(out);
 
     let output = cmd.output().map_err(|e| format!("running {}: {e}", clang.display()))?;
