@@ -409,34 +409,31 @@ seven, in a workload built to release sleepers early and so an over-estimate of
 what a real program would see. The rule above still holds — measure a real
 program before replacing the heap — and this is the counter to measure.
 
-### The counters do not agree with the clock, and nobody knows why
+### The heap is off the socket path entirely, which was the whole problem
 
-**Open, and recorded rather than left to be rediscovered.** A `bench/service`
-run registers deadlines of ten seconds — `std::net::http` sets that, and
-`khora_net_set_timeout` was watched receiving exactly `10000` — in a process
-that lives about ten seconds from start to kill. Almost none of them should
-come due. The counters say otherwise:
+**Closed, and the answer was worse than the anomaly.** The counters said a
+`bench/service` run registered 763,737 ten-second deadlines in a process that
+lived about ten seconds, and that 692,795 of them came due — impossible on the
+face of it, and every one belonged to a fiber the pool no longer had in `live`.
 
-    timers_added:  763,737
-    timers_fired:  692,795
-    timers_dead:   692,795
+11J found why by measuring what nobody had: `timers_added` and `sockets_ready`
+were **the same number**, 1,262,225 against 1,262,221. Every socket read that
+would block was pushing a deadline onto this heap — a global mutex and an
+`O(log n)` insertion apiece — and the heap was growing to a million entries of
+deadlines the process would never see come due. Roughly thirty megabytes per
+five seconds of load, released only as deadlines passed, which on a server is
+memory that grows with request rate and reads as a leak.
 
-Ninety-one per cent of them fired, and every single one belonged to a fiber the
-pool no longer had in `live`. Both halves are surprising and neither is
-explained. `Timers::add` and `Timers::expired` were read closely and are
-correct; `expired` pops only what is due, and the heap is a min-heap on the
-deadline.
+A deadline belongs to the wait it bounds, and the reactor already holds every
+wait, so it rides on the `Watch` now. `poll` shortens its own timeout to the
+soonest deadline and reports whatever has passed, a timeout and a readiness
+leave by the same door, and the same benchmark registers **zero** timers. The
+heap is for `sleep` again.
 
-**What it is not.** It does not reach a read.
-`net::tests::a_long_deadline_does_not_fire_early` sets five seconds, has a peer
-answer at three hundred milliseconds, and asserts the read completes — so a
-connection that is merely slow is not being dropped, which was the way this
-could have hurt somebody. A timer that fires for a fiber that has moved on is a
-spurious wake, and those are safe here by construction.
-
-So it is a *measurement* fault rather than a behaviour one, which matters
-exactly because the paragraph above tells a future reader to decide the heap's
-fate on these numbers. Do not do that until they are trusted.
+It bought no throughput — 62% of the thread figure against 63% before, inside
+the noise — so the mutex was never the contended thing. It bought the memory
+back and it made deadlines exact, and the anomaly went with it: there is
+nothing left to be anomalous about.
 
 Built in 11C on a thread of its own. One thread sleeping is not a worker
 blocked, which is the whole distinction; a condvar it could wait on instead of

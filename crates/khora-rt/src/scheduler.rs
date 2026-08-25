@@ -808,17 +808,13 @@ pub(crate) fn wait_until_ready_by(
         if std::time::Instant::now() >= at {
             return Waited::TimedOut;
         }
-        // **Registered before the socket, and left to expire on its own.**
-        // Taking it out again costs a rebuild of the heap, which per read is
-        // quadratic — `docs/design/scheduler.md` §6 measures the waste this
-        // leaves instead and calls it bounded. A deadline that fires for a
-        // fiber that has moved on is a spurious wake, and spurious wakes are
-        // already safe here.
-        shared.counts.timers_added.fetch_add(1, Ordering::Relaxed);
-        shared.timers.lock().expect("the timers").add(at, fiber);
     }
 
-    shared.reactor.register(Watch { socket, interest, fiber });
+    // **The deadline rides on the watch rather than the timer heap.** It used
+    // to be pushed onto `Timers`, which cost a global mutex and a heap
+    // insertion for every read that would block — one apiece, measured. The
+    // reactor already holds this wait; it can hold when to give up on it.
+    shared.reactor.register(Watch { socket, interest, fiber, deadline });
     let parked = park_current();
     // Woken by something else — a cancellation, or another registration — so
     // this one must come off, or a later readiness wakes a fiber that has

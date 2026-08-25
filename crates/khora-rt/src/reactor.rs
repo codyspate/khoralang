@@ -73,6 +73,21 @@ pub(crate) struct Watch {
     pub(crate) socket: Socket,
     pub(crate) interest: Interest,
     pub(crate) fiber: usize,
+    /// When to give up, if the caller set a receive deadline.
+    ///
+    /// **Here rather than in the timer heap, and that is a measurement.** A
+    /// socket read that would block used to push a deadline onto
+    /// `crate::wait::Timers` — a global mutex and an `O(log n)` insertion per
+    /// read. `bench/service` did 1,262,225 of them in five seconds against
+    /// 1,262,221 socket waits, which is one apiece, and the heap grew to a
+    /// million entries of ten-second deadlines the process never lived long
+    /// enough to see come due.
+    ///
+    /// A deadline belongs to the wait it bounds, and the reactor is already
+    /// holding every wait. So it rides along: `poll` shortens its own timeout
+    /// to the soonest one and reports whatever has passed, and the timer heap
+    /// goes back to being for `sleep`.
+    pub(crate) deadline: Option<std::time::Instant>,
 }
 
 /// The descriptors fibers are waiting on.
@@ -154,6 +169,7 @@ impl Reactor {
             socket: socket_of(&nudge.listen),
             interest: Interest::Readable,
             fiber: WAKER_FIBER,
+            deadline: None,
         });
         if watching.is_empty() && waking.is_none() {
             // Nothing to wait on and no way to be told. Sleeping rather than
@@ -167,12 +183,19 @@ impl Reactor {
             watching.push(waking);
         }
 
-        let ready = poll_sockets(&watching, timeout);
+        // **Never wait past the soonest deadline.** A comparison per watch, in
+        // place of a heap that was taking one insertion per read.
+        let now = std::time::Instant::now();
+        let mut slice = timeout;
+        for watch in &watching {
+            if let Some(at) = watch.deadline {
+                slice = slice.min(at.saturating_duration_since(now));
+            }
+        }
+
+        let ready = poll_sockets(&watching, slice);
         self.polling.store(false, Ordering::Release);
 
-        if ready.is_empty() {
-            return Vec::new();
-        }
         let mut woken = Vec::new();
         let mut watching = self.watching.lock().expect("the reactor");
         for index in ready {
@@ -187,6 +210,18 @@ impl Reactor {
             };
             woken.push(watching.remove(entry).fiber);
         }
+        // Whatever ran out of time leaves by the same door: the fiber retries,
+        // finds nothing, and `wait_until_ready_by` sees its deadline has
+        // passed. A timeout and a readiness are the same event to everything
+        // above here.
+        let later = std::time::Instant::now();
+        watching.retain(|w| match w.deadline {
+            Some(at) if at <= later => {
+                woken.push(w.fiber);
+                false
+            }
+            _ => true,
+        });
         woken
     }
 
@@ -337,7 +372,9 @@ pub(crate) fn block_until_ready(
     interest: Interest,
     deadline: Option<std::time::Instant>,
 ) -> bool {
-    let watch = [Watch { socket, interest, fiber: 0 }];
+    // The deadline is honoured by the caller's own loop here rather than by a
+    // reactor that is not running: this is the no-scheduler path.
+    let watch = [Watch { socket, interest, fiber: 0, deadline: None }];
     loop {
         // A long wait rather than an indefinite one, so a socket closed from
         // another thread does not leave this here for ever. `poll` reports a
@@ -404,6 +441,7 @@ mod tests {
             socket: socket_of(&client),
             interest: Interest::Readable,
             fiber: 1,
+            deadline: None,
         });
 
         assert!(reactor.poll(Duration::from_millis(20)).is_empty());
@@ -418,6 +456,7 @@ mod tests {
             socket: socket_of(&client),
             interest: Interest::Readable,
             fiber: 7,
+            deadline: None,
         });
 
         server.write_all(b"hello").expect("writing");
@@ -437,8 +476,9 @@ mod tests {
             socket: socket_of(&quiet),
             interest: Interest::Readable,
             fiber: 1,
+            deadline: None,
         });
-        reactor.register(Watch { socket: socket_of(&busy), interest: Interest::Readable, fiber: 2 });
+        reactor.register(Watch { socket: socket_of(&busy), interest: Interest::Readable, fiber: 2, deadline: None });
 
         busy_peer.write_all(b"x").expect("writing");
         assert_eq!(reactor.poll(Duration::from_secs(5)), [2]);
@@ -455,6 +495,7 @@ mod tests {
             socket: socket_of(&client),
             interest: Interest::Writable,
             fiber: 3,
+            deadline: None,
         });
         assert_eq!(reactor.poll(Duration::from_secs(5)), [3]);
     }
@@ -470,6 +511,7 @@ mod tests {
             socket: socket_of(&client),
             interest: Interest::Readable,
             fiber: 9,
+            deadline: None,
         });
 
         drop(server);
@@ -481,9 +523,9 @@ mod tests {
         let (a, _pa) = a_connected_pair();
         let (b, _pb) = a_connected_pair();
         let reactor = Reactor::default();
-        reactor.register(Watch { socket: socket_of(&a), interest: Interest::Readable, fiber: 4 });
-        reactor.register(Watch { socket: socket_of(&b), interest: Interest::Readable, fiber: 4 });
-        reactor.register(Watch { socket: socket_of(&b), interest: Interest::Readable, fiber: 5 });
+        reactor.register(Watch { socket: socket_of(&a), interest: Interest::Readable, fiber: 4, deadline: None });
+        reactor.register(Watch { socket: socket_of(&b), interest: Interest::Readable, fiber: 4, deadline: None });
+        reactor.register(Watch { socket: socket_of(&b), interest: Interest::Readable, fiber: 5, deadline: None });
 
         reactor.forget(4);
         assert_eq!(reactor.len(), 1);
@@ -510,6 +552,7 @@ mod tests {
                 socket: socket_of(&client),
                 interest: Interest::Readable,
                 fiber,
+                deadline: None,
             });
             // Held so the sockets stay open.
             peers.push((client, peer));
@@ -531,6 +574,7 @@ mod tests {
             socket: socket_of(&client),
             interest: Interest::Readable,
             fiber: 1,
+            deadline: None,
         });
 
         server.write_all(b"payload").expect("writing");
