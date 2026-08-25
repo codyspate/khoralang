@@ -110,3 +110,34 @@ fn structural_types_carry_no_name_to_resolve() {
     assert_quiet("module m;\nfn f(g: (Int) -> Bool) -> Bool { g(1) }\n");
     assert_quiet("module m;\nfn f(g: (Int, Bool)) -> Int { 1 }\n");
 }
+
+// --- and a name the *desugaring* needs ------------------------------------
+
+/// A `for` loop with no `Step` in scope says so, at check time.
+///
+/// **The message existed and nobody printed it.** `Resolution::Unsupported`
+/// carries the text and only the *backend* read it, so `khora check` reported
+/// "`Int` has no method `next`" — pointing at a method call the desugaring
+/// wrote and the programmer did not. That is exactly the "unresolved-name
+/// error pointing at code nobody wrote" the message was written to replace,
+/// and it was the one anybody actually saw.
+///
+/// The follow-on about `next` is still reported after it. That is the
+/// established policy rather than an oversight: `reporting.rs` puts lowering
+/// errors first because a name that did not resolve makes the type error
+/// following it noise.
+#[test]
+fn a_for_loop_without_step_says_what_to_import() {
+    const LOOP: &str = "module m;
+fn f() -> Int { let mut t = 0; for x in 1..3 { t = t + x }; t }
+";
+    let found = errors(LOOP);
+    assert!(
+        found.iter().any(|e| e.contains("`for` needs the `Step` type in scope")),
+        "expected the import to be named, got {found:?}"
+    );
+    // Once for the pair. `Yield` and `Done` both missing is one mistake, and
+    // saying it twice about one loop is worse than saying it once.
+    let said = found.iter().filter(|e| e.contains("needs the `Step` type")).count();
+    assert_eq!(said, 1, "said once, got {found:?}");
+}

@@ -526,3 +526,4 @@ fn a_loop_with_no_value_produces_unit() {
         "this function returns `Int`",
     );
 }
+

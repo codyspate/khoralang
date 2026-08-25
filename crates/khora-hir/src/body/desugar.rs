@@ -13,6 +13,10 @@
 
 use super::*;
 
+/// Said by the desugaring when it reports, and carried by the `Resolution` for
+/// the backend to say if it ever gets one. Named once so the two cannot drift.
+const STEP_IS_MISSING: &str = "`for` needs the `Step` type in scope; import it from `std::core`";
+
 impl<'a> Ctx<'a> {
     /// `for pat in iter { body }`, desugared here rather than carried further.
     ///
@@ -75,11 +79,15 @@ impl<'a> Ctx<'a> {
             range,
         );
 
+        // Both at once, and reported once: `Yield` and `Done` missing is one
+        // absence, and hoisting the calls out of `add_pat` is what lets
+        // `step_cases` take `&mut self` and say so.
+        let (yield_case, done_case) = self.step_cases(range);
         let yield_pat = self.add_pat(Pat::TupleStruct {
-            resolution: self.step_case("Yield", range),
+            resolution: yield_case,
             fields: vec![rest_pat, item_pat],
         });
-        let done_pat = self.add_pat(Pat::Path(self.step_case("Done", range)));
+        let done_pat = self.add_pat(Pat::Path(done_case));
         let stop = self.add_expr(Expr::Break(None), range);
 
         let scrutinee = {
@@ -255,8 +263,36 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// `Step::Yield` or `Step::Done`, as the desugaring needs them.
-    pub(super) fn step_case(&self, case: &str, _range: TextRange) -> crate::Resolution {
+    /// `Step::Yield` and `Step::Done`, as the desugaring needs them, reporting
+    /// once if `Step` is not in scope.
+    ///
+    /// **The message existed and nobody printed it.** `Resolution::Unsupported`
+    /// carries the text, and the only thing that reads it is the backend — so
+    /// `khora check` on a `for` loop with no `Step` imported said "`Int` has no
+    /// method `next`", pointing at a method call the desugaring wrote and the
+    /// programmer did not. That is exactly the "unresolved-name error pointing
+    /// at code nobody wrote" the message was written to replace, and it was the
+    /// error anybody actually saw.
+    ///
+    /// Reported here, beside the knowledge, the way `resolve_constructor` in
+    /// `patterns.rs` already does. Once for the pair, because one missing
+    /// `Step` is one mistake.
+    pub(super) fn step_cases(
+        &mut self,
+        range: TextRange,
+    ) -> (crate::Resolution, crate::Resolution) {
+        let yield_case = self.step_case("Yield");
+        let done_case = self.step_case("Done");
+        if matches!(yield_case, crate::Resolution::Unsupported(_))
+            || matches!(done_case, crate::Resolution::Unsupported(_))
+        {
+            self.error(STEP_IS_MISSING, range);
+        }
+        (yield_case, done_case)
+    }
+
+    /// One case of `Step`, resolved and not reported. See [`Self::step_cases`].
+    fn step_case(&self, case: &str) -> crate::Resolution {
         // Through the scope as well as the file: `Step` almost always arrives
         // by `import std::core::{Step}` rather than being declared next to the
         // loop that uses it.
@@ -271,11 +307,8 @@ impl<'a> Ctx<'a> {
                 type_name: v.type_name.clone(),
                 name: v.name.clone(),
             },
-            // `for` needs `Step` the way Rust's needs `IntoIterator`. Saying so
-            // beats an unresolved-name error pointing at code nobody wrote.
-            None => crate::Resolution::Unsupported(
-                "`for` needs the `Step` type in scope; import it from `std::core`",
-            ),
+            // `for` needs `Step` the way Rust's needs `IntoIterator`.
+            None => crate::Resolution::Unsupported(STEP_IS_MISSING),
         }
     }
 }

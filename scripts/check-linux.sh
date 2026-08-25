@@ -89,12 +89,41 @@ wsl -e bash -lc "set -eu
     bin=\$(ls -t $TARGET/debug/deps/khora_rt-* | grep -v '[.]d\$' | head -1)
     cp \"\$bin\" /tmp/khora-rt-under-test
     chmod +x /tmp/khora-rt-under-test
+    # **Keep what failed.** This loop said '1 of 15 runs crashed or failed' and
+    # threw the output away, and the run was not reproducible afterwards — 160
+    # clean passes of the same copied binary. A flaky-failure reporter that
+    # discards the evidence turns a race into a rumour, which is the one thing
+    # the scheduler's bug list in docs/design/scheduler.md says not to let
+    # happen. Core dumps are on for the same reason: instrumenting these has
+    # hidden them before, and a dump is the observation that does not perturb.
+    #
+    # No backticks in this comment. It is inside a double-quoted string handed
+    # to bash -lc, so a backtick is command substitution and the shell ran the
+    # design document.
+    ulimit -c unlimited 2>/dev/null || true
     failures=0
-    for _ in \$(seq 1 $REPEATS); do
-        /tmp/khora-rt-under-test > /dev/null 2>&1 || failures=\$((failures + 1))
+    kept=/tmp/khora-rt-failure.log
+    rm -f \$kept
+    for run in \$(seq 1 $REPEATS); do
+        /tmp/khora-rt-under-test > /tmp/khora-rt-run.log 2>&1
+        # Read immediately. Taken any later it is the status of the test that
+        # asks whether a failure has already been kept, which is always 0 or 1
+        # and never the thing that crashed.
+        status=\$?
+        if [ \$status -ne 0 ]; then
+            failures=\$((failures + 1))
+            if [ ! -f \$kept ]; then
+                { echo \"run \$run of $REPEATS, exit \$status\"
+                  cat /tmp/khora-rt-run.log; } > \$kept
+            fi
+        fi
     done
     if [ \"\$failures\" -ne 0 ]; then
         echo \"  FAILED  \$failures of $REPEATS runs crashed or failed\" >&2
+        echo \"  --- the first one, kept at \$kept ---\" >&2
+        # The tail rather than the whole thing: a passing suite's output is
+        # thousands of lines and the failure is at the end of it.
+        tail -40 \$kept >&2
         exit 1
     fi
     echo \"  ok    $REPEATS runs, all clean\"
