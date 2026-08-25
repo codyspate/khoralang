@@ -459,6 +459,52 @@ mod tests {
         assert!(took >= std::time::Duration::from_millis(55), "returned early: {took:?}");
     }
 
+    /// **A long deadline must not fire early**, which is the half of the timer
+    /// anomaly that could reach a user.
+    ///
+    /// `std::net::http` sets ten seconds to shed a client that has stopped
+    /// talking. A deadline that came due sooner would drop connections that
+    /// were merely slow, and the counters in a `bench/service` run say
+    /// something about deadlines is wrong — 763,737 registered and 692,795
+    /// fired, inside a process that did not live ten seconds. This test says
+    /// whether that reaches the read. It passes, so it does not.
+    #[test]
+    fn a_long_deadline_does_not_fire_early() {
+        use crate::coro::Task;
+        use crate::scheduler::Scheduler;
+
+        let outcome = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen = outcome.clone();
+
+        let pool = Scheduler::new(2);
+        pool.spawn(Task::new(move || {
+            let (mine, mut peer) = a_connected_pair();
+            let socket = socket_of(&mine);
+            khora_net_prepare(socket);
+            khora_net_set_timeout(socket, 5_000);
+
+            std::thread::spawn(move || {
+                use std::io::Write;
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let _ = peer.write_all(b"late but inside the deadline");
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            });
+
+            let mut buffer = [0u8; 64];
+            let began = std::time::Instant::now();
+            // SAFETY: sixty-four writable bytes.
+            let read = unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 64) };
+            khora_net_forget(socket);
+            *seen.lock().expect("the outcome") = Some((read, began.elapsed()));
+        }));
+        pool.drain();
+
+        let (read, took) = outcome.lock().expect("the outcome").expect("it ran");
+        assert!(read > 0, "a five-second deadline cut off a read at {took:?}");
+        assert!(took >= std::time::Duration::from_millis(250), "{took:?}");
+        assert!(took < std::time::Duration::from_secs(4), "it waited far too long: {took:?}");
+    }
+
     /// A socket with no deadline set waits as long as it takes.
     #[test]
     fn without_a_deadline_a_receive_waits() {

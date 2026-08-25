@@ -409,6 +409,35 @@ seven, in a workload built to release sleepers early and so an over-estimate of
 what a real program would see. The rule above still holds — measure a real
 program before replacing the heap — and this is the counter to measure.
 
+### The counters do not agree with the clock, and nobody knows why
+
+**Open, and recorded rather than left to be rediscovered.** A `bench/service`
+run registers deadlines of ten seconds — `std::net::http` sets that, and
+`khora_net_set_timeout` was watched receiving exactly `10000` — in a process
+that lives about ten seconds from start to kill. Almost none of them should
+come due. The counters say otherwise:
+
+    timers_added:  763,737
+    timers_fired:  692,795
+    timers_dead:   692,795
+
+Ninety-one per cent of them fired, and every single one belonged to a fiber the
+pool no longer had in `live`. Both halves are surprising and neither is
+explained. `Timers::add` and `Timers::expired` were read closely and are
+correct; `expired` pops only what is due, and the heap is a min-heap on the
+deadline.
+
+**What it is not.** It does not reach a read.
+`net::tests::a_long_deadline_does_not_fire_early` sets five seconds, has a peer
+answer at three hundred milliseconds, and asserts the read completes — so a
+connection that is merely slow is not being dropped, which was the way this
+could have hurt somebody. A timer that fires for a fiber that has moved on is a
+spurious wake, and those are safe here by construction.
+
+So it is a *measurement* fault rather than a behaviour one, which matters
+exactly because the paragraph above tells a future reader to decide the heap's
+fate on these numbers. Do not do that until they are trusted.
+
 Built in 11C on a thread of its own. One thread sleeping is not a worker
 blocked, which is the whole distinction; a condvar it could wait on instead of
 polling at a millisecond is the obvious refinement and wants a reason.

@@ -262,6 +262,13 @@ pub(crate) struct Counts {
     pub(crate) steals_attempted: AtomicU64,
     /// Sweeps that found something.
     pub(crate) steals_succeeded: AtomicU64,
+    /// Deadlines registered.
+    ///
+    /// Beside `timers_fired` because the pair is what `docs/design/scheduler.md`
+    /// §6 needs in order to decide whether the heap should stay a heap — and
+    /// because the two of them currently disagree with the clock in a way
+    /// nobody has explained. See the note there.
+    pub(crate) timers_added: AtomicU64,
     /// Deadlines that came due for a fiber that had already finished.
     pub(crate) timers_dead: AtomicU64,
     /// Fibers actually moved from one worker to another.
@@ -286,6 +293,7 @@ impl Counts {
             wakes: self.wakes.load(Ordering::Relaxed),
             timers_fired: self.timers_fired.load(Ordering::Relaxed),
             timers_dead: self.timers_dead.load(Ordering::Relaxed),
+            timers_added: self.timers_added.load(Ordering::Relaxed),
             sockets_ready: self.sockets_ready.load(Ordering::Relaxed),
             wakes_before_waiting: self.wakes_before_waiting.load(Ordering::Relaxed),
             steals_attempted: self.steals_attempted.load(Ordering::Relaxed),
@@ -307,6 +315,7 @@ pub(crate) struct Snapshot {
     pub(crate) wakes: u64,
     pub(crate) timers_fired: u64,
     pub(crate) timers_dead: u64,
+    pub(crate) timers_added: u64,
     pub(crate) sockets_ready: u64,
     pub(crate) wakes_before_waiting: u64,
     pub(crate) steals_attempted: u64,
@@ -796,6 +805,7 @@ pub(crate) fn wait_until_ready_by(
         // leaves instead and calls it bounded. A deadline that fires for a
         // fiber that has moved on is a spurious wake, and spurious wakes are
         // already safe here.
+        shared.counts.timers_added.fetch_add(1, Ordering::Relaxed);
         shared.timers.lock().expect("the timers").add(at, fiber);
     }
 
