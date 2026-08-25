@@ -73,10 +73,34 @@ down every program that never traps to help the ones that do.
 
 ## 4. The three cheaper answers, and why two fail
 
-**Cancel the fiber and accept the leak.** Bounded if the bug is rare. But a
-trap that an input can trigger is a leak an attacker can drive: the trap becomes
-a denial-of-service primitive, and a security property is a bad thing to trade
-for an availability one. Rejected.
+**Cancel the fiber and accept the leak.** This was rejected here on the ground
+that a trap an input can trigger is a leak an attacker can drive, and **that
+argument was wrong** — it compared leaking against nothing. The alternative is
+not nothing, it is the process ending. An attacker who can trigger a trap today
+gets an immediate and total outage; against leak-containment they get gradual
+memory growth. That trade runs in the defender's favour, and the original
+reasoning had the comparison backwards.
+
+It is still rejected, for a reason that is specific to what Khora has rather
+than general:
+
+**A fiber can be holding a lock over user code.** `khora_shared_update` takes
+the cell's mutex and calls the change function *while holding it* — it has to,
+because the whole point of `Shared` is that a read-modify-write is atomic
+against other fibers. A trap inside that closure, contained by a non-local
+exit, skips the guard's destructor and leaves the mutex locked with no owner.
+Every other fiber that touches that cell then blocks forever.
+
+**A hung server is worse than a crashed one.** A crash is loud, a supervisor
+restarts it, and the failure is over. A deadlock is silent, survives every
+health check that only pings a socket, and needs a human. Trading a crash for a
+hang is not the direction to move in, and it is what containment here would buy
+without an unwinder to run the destructors.
+
+There is a *second* problem behind that one, and it does not go away by fixing
+the first: the cell's value is mid-update. Releasing the lock without unwinding
+would publish a half-changed value to every other fiber, which is silent
+corruption — worse again.
 
 **Region-scoped allocation.** If a request's allocations came from an arena,
 containment needs no unwinding at all — free the arena and the counts stop
@@ -163,5 +187,16 @@ Deliberately falsifiable, in the style of `docs/vision.md`'s non-negotiables:
    where that ground actually holds: a trap ends the process wherever the
    escape argument fails, which is everywhere except an export.
 
-Absent one of those, more diagnosability is the better spend, and the next
-increment of it is variable-level debug info — 12.4's other half.
+4. **`Shared::update` stops holding a lock over user code.** This is the one
+   with a concrete shape, and it is not far-fetched: a transactional update —
+   compute the new value against a copy, then swap it in under a lock that
+   never spans the change function — would leave a trapped fiber holding
+   nothing. The `Held` mutex is the specific obstacle §4 names, so removing it
+   is the specific thing that would make fiber containment worth costing again.
+   It is not free: a swap-on-success update copies, and `Shared` exists partly
+   so that a large structure does not have to be.
+
+Absent one of those, more diagnosability is the better spend. 12.4's other half
+— variable-level debug info — has since landed, so a frame now lists its locals
+and prints the scalar ones; the next increment after that is describing the
+heap layout so a debugger can follow a pointer into an object.

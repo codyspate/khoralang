@@ -2993,8 +2993,26 @@ unavailable — is available at exactly this boundary.
 So it is built: a per-call allocation registry, a `setjmp` landing point in
 twelve lines of C, opt-in per process, 2.6% on the allocation path of programs
 that never use it. `docs/design/c-export.md` §8. **The decision is unchanged
-everywhere else**, because everywhere else the escape argument still fails and
-§3's unwinder is still the blocker.
+everywhere else**, and the reason is now sharper than the one first written
+down. `khora_shared_update` holds the cell's mutex *across the change
+function* — it must, or a read-modify-write is not atomic against other fibers
+— so a trap inside one, contained by a non-local exit, skips the guard and
+leaves the mutex locked with no owner. Every fiber that later touches that cell
+blocks forever. **A hung server is worse than a crashed one**: a crash is loud
+and a supervisor ends it, a deadlock is silent and survives any health check
+that only pings a socket.
+
+`traps.md` §4 also had an argument wrong and now says so. It rejected
+leak-on-cancel because an attacker could drive the leak — comparing leaking
+against nothing, when the alternative is the process ending. An attacker who
+can trigger a trap today gets a total outage; leak-containment would give them
+gradual memory growth. That trade favours the defender, and the mutex is the
+real objection rather than the leak.
+
+Which makes the falsifiable list four items instead of three: a transactional
+`Shared::update`, computing against a copy and swapping under a lock that
+never spans user code, would leave a trapped fiber holding nothing and put
+fiber containment back on the table.
 
 ### 12.9 Supply chain — **the SBOM, not the signature**
 
