@@ -216,3 +216,45 @@ forwarding call and nothing else.
 `export extern fn price` in different modules are a collision a linker resolves
 by picking one — silently, and not necessarily the same one twice. Refused by
 name.
+
+## 8. Containing a trap here, if it is worth it
+
+§4 said an export boundary would be a smaller containment problem than a fiber
+and left it there. Working out how much smaller changed the answer enough to
+write down, and `traps.md` §4 has been corrected to match.
+
+**The escape argument holds here, and it fails for a fiber.** An exported
+function takes scalars and `Ptr`, returns scalars, cannot `raise`, and — since
+the `with` clause is refused — can be handed no capability. A function that
+holds no capability can reach no effect. There is no module-level mutable
+binding to store anything in, and nothing heap-allocated crosses the signature
+in either direction. So **every allocation an exported call makes is reachable
+only from its own stack**, which is exactly the property `traps.md` §4 wanted
+from arenas and could not have for a request fiber.
+
+That makes containment here a matter of two mechanisms rather than an unwinder:
+
+**One: know which allocations belong to the call.** The runtime counts live
+objects — `LIVE_COUNT`, which the leak tests read — and does not list them.
+A list is what discarding a failed call needs. Cheapest shape is a thread-local
+registry that `khora_alloc` pushes to while an exported call is on the stack;
+the branch can be kept off every other program by having a `--lib` build emit
+calls to a tracking allocator, since the backend already knows `Entry::Library`.
+
+**Two: get back to the wrapper.** `catch_unwind` cannot do it: the Khora frames
+in between are LLVM-generated with no personality routine, and unwinding
+through them is undefined. That leaves `longjmp`, whose hazard is not the jump
+but what it skips — which is what mechanism one exists to make recoverable.
+Running exported calls on a `corosensei` fiber and abandoning the stack is the
+alternative, and it trades a hand-rolled unsafe path for a stack allocation per
+call and machinery phase 11 has already debugged.
+
+**Three, and it is a real question rather than a mechanism: how does C learn?**
+An export returns a scalar and C has no exceptions. The default must not
+change — a host that opted into nothing should get today's behaviour exactly —
+so this wants `khora_set_trap_policy` to opt in and `khora_trapped()` to query
+after, which is `errno`'s shape and no signature changes.
+
+None of this is written. It is recorded at this length because the conclusion
+moved: this document and `traps.md` both said containment was blocked on an
+unwinder, and at *this* boundary it is not.

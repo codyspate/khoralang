@@ -81,10 +81,25 @@ for an availability one. Rejected.
 **Region-scoped allocation.** If a request's allocations came from an arena,
 containment needs no unwinding at all — free the arena and the counts stop
 mattering. This is the genuinely interesting long-term answer, it fits
-`Region`, and it sidesteps every cost in §3. It does not work *today* because
-allocation is not arena-backed and `Shared` values deliberately outlive the
-scope that made them. Worth returning to when regions carry more weight; not
-available now.
+`Region`, and it sidesteps every cost in §3. It does not work *today* for a
+**fiber**, because allocation is not arena-backed and `Shared` values
+deliberately outlive the scope that made them.
+
+**It does work at an export boundary, which this document originally missed.**
+12.6 constrains an `export extern fn` to scalars and `Ptr` in and out, no
+`raises`, and — since `khora-types/src/exports.rs` — no `with` clause. A
+function that can be handed no capability can reach no effect, so nothing it
+allocates is reachable from anywhere but its own stack: there is no module-level
+mutable binding to store a value in, and nothing heap-allocated crosses the
+signature in either direction. The escape argument that fails for a fiber holds
+here by construction.
+
+So the boundary 12.6 introduced is the one place in the language where §4's
+second answer is *available*, and it is available because the ABI is narrow
+rather than because anything was built for it. What it still needs is a way to
+know which allocations belong to the call — the runtime counts live objects and
+does not list them — and a non-local exit back to the wrapper. Neither is free
+and neither is phase-sized; see `docs/design/c-export.md` §8.
 
 **A supervisor outside the process.** A trap kills the process, something
 restarts it. This needs no language change, it is what a container runtime,
