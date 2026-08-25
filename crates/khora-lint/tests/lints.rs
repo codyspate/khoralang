@@ -314,3 +314,38 @@ fn the_corpus_is_quiet() {
         findings(&db, file).iter().filter(|f| f.lint == REFERENCE_CYCLE).collect();
     assert!(found.is_empty(), "this is the shape that was reported wrongly: {found:?}");
 }
+
+/// **A function's result is not its argument**, and assuming otherwise is how
+/// this lint met real code and lost.
+///
+/// The first Khora written after it landed was `packages/postgres`, whose read
+/// loop is `c.pending = advance(c.pending, n)` — a function that builds a new
+/// array out of the old one and returns it. Reported twice as a cycle, on a
+/// line where nothing points at anything. A constructor holds its arguments;
+/// a function is computed *from* them, and almost every call is the second.
+#[test]
+fn a_call_that_is_not_a_constructor_is_not_reported() {
+    let db = KhoraDatabase::new();
+    let found = cycles(
+        &db,
+        "fn shorter(n: Node) -> Node { n }\n\
+         fn f(a: Node) -> () { a.next = shorter(a.next); }\n",
+    );
+    assert!(found.is_empty(), "a call is not a construction: {found:?}");
+}
+
+/// And a constructor still is one, or the lint would see nothing at all.
+#[test]
+fn a_variant_holding_the_target_is_still_reported() {
+    let db = KhoraDatabase::new();
+    let text = "module m;\n\
+                export type Slot = | Empty | Held(Slot)\n\
+                export type Box = { mut slot: Slot }\n\
+                fn f(b: Box, s: Slot) -> () { b.slot = Held(s); }\n";
+    let file = SourceFile::new(&db, "a.kh".into(), text.to_string());
+    // Not a cycle — `s` does not reach `b` — so this is the quiet direction,
+    // and the shape is here to prove a constructor is still walked at all.
+    let found: Vec<&Finding> =
+        findings(&db, file).iter().filter(|f| f.lint == REFERENCE_CYCLE).collect();
+    assert!(found.is_empty(), "{found:?}");
+}

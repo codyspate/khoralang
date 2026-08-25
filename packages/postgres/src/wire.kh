@@ -204,12 +204,24 @@ impl Reader {
     Int::or(Int::shl(hi, 8), lo)
   }
 
+  /// Thirty-two bits, **signed**.
+  ///
+  /// The protocol's `Int32` is two's complement and Khora's `Int` is
+  /// sixty-four bits wide, so four bytes assembled with shifts give a positive
+  /// number where the wire meant a negative one: -1 arrives as 4294967295.
+  ///
+  /// That is not academic. A `DataRow` gives every value a length, and **-1 is
+  /// how it says NULL** — distinct from a length of zero, which is an empty
+  /// string. Without the sign, every NULL in every result became an empty
+  /// text, which is the kind of wrong that reaches a report rather than a
+  /// crash. Found by the first query the driver ever ran.
   export fn i32(self) -> Int {
     let a = Reader::u8(self);
     let b = Reader::u8(self);
     let c = Reader::u8(self);
     let d = Reader::u8(self);
-    Int::or(Int::or(Int::shl(a, 24), Int::shl(b, 16)), Int::or(Int::shl(c, 8), d))
+    let raw = Int::or(Int::or(Int::shl(a, 24), Int::shl(b, 16)), Int::or(Int::shl(c, 8), d));
+    if raw >= 2147483648 { raw - 4294967296 } else { raw }
   }
 
   /// Bytes up to a zero, as text. The zero is consumed and not returned.

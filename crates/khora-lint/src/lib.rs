@@ -436,20 +436,46 @@ fn locals_in(body: &Body, id: khora_hir::body::ExprId, out: &mut BTreeSet<LocalI
                 locals_in(body, *value, out);
             }
         }
-        Expr::Call { args, .. } => {
-            for arg in args {
-                locals_in(body, *arg, out);
-            }
-        }
         Expr::Tuple(items) => {
             for item in items {
                 locals_in(body, *item, out);
             }
         }
-        // A field read reaches whatever its base does: `b.next` can be `a`.
-        Expr::Field { base, .. } => locals_in(body, *base, out),
+        // **Only a constructor.** `List::Cons(head, tail)` produces a thing
+        // that holds its arguments; `advance(pending, n)` produces a thing
+        // computed *from* one, which is not the same and is the overwhelming
+        // majority of calls.
+        //
+        // Treating every call as the first was wrong, and wrong in the
+        // direction that matters: the first real Khora written after this
+        // landed — `packages/postgres`, `c.pending = advance(c.pending, n)`,
+        // a function that builds a new array and returns it — was reported
+        // twice as a cycle. A lint people learn to ignore is worse than no
+        // lint, and this file's own header says where a judgement is available
+        // to take the quiet side. It had not.
+        Expr::Call { callee, args } if constructs(body, *callee) => {
+            for arg in args {
+                locals_in(body, *arg, out);
+            }
+        }
+        // Everything else contributes nothing. A field read is the interesting
+        // omission: `b.next` is a thing `b` points *at*, so the value does not
+        // contain `b` and saying it does was the same mistake pointing the
+        // other way. Following it properly needs per-field reachability, which
+        // is more than a warning is worth.
         _ => {}
     }
+}
+
+/// Whether a callee builds a value out of its arguments.
+///
+/// A variant constructor does — `Option::Some(x)` holds `x`. A function does
+/// not, whatever it happens to do inside.
+fn constructs(body: &Body, callee: khora_hir::body::ExprId) -> bool {
+    matches!(
+        body.expr(callee),
+        Expr::Path(khora_hir::Resolution::Variant { .. })
+    )
 }
 
 /// Whether `from` can already reach `to`, following the edges recorded so far.

@@ -1,0 +1,43 @@
+# A PostgreSQL to develop the driver against.
+#
+#   docker compose -f packages/postgres/docker-compose.yml up -d
+#   KHORA_POSTGRES=1 cargo test -p khora-codegen-llvm --features llvm --test postgres
+#
+# The tests do not need this. `crates/khora-codegen-llvm/tests/postgres.rs`
+# carries a server of its own — enough of the protocol to complete a handshake
+# and answer a query — and runs against it by default, which is what makes the
+# suite work on a machine with no Docker. Setting `KHORA_POSTGRES` runs the
+# same assertions against this instead, and that is the run that can find what
+# a fake cannot: a real server's parameter list, its error format, its idea of
+# what `int4` looks like as text.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: khora-postgres
+    environment:
+      POSTGRES_USER: khora
+      POSTGRES_PASSWORD: khora
+      POSTGRES_DB: khora
+      # **`password`, not `scram-sha-256`.** The driver cannot answer SCRAM yet
+      # — it needs HMAC and PBKDF2 that the runtime does not expose to Khora —
+      # and it says so by name rather than hanging. Cleartext over a loopback
+      # container is fine for development and is not what a deployment should
+      # do; `docs/roadmap.md` 13.12 tracks the hash surface that removes this.
+      POSTGRES_HOST_AUTH_METHOD: password
+      POSTGRES_INITDB_ARGS: "--auth-host=password"
+    ports:
+      # 5433 rather than 5432, so a PostgreSQL somebody already runs is not
+      # shadowed by this one and a test cannot silently use the wrong database.
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U khora -d khora"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    tmpfs:
+      # No volume: this database is disposable by design. A test that depends
+      # on what a previous run left behind is a test that passes alone and
+      # fails in CI, and the fastest way to never write one is to have nowhere
+      # to write it.
+      - /var/lib/postgresql/data

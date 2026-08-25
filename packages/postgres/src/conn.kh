@@ -1,0 +1,474 @@
+module postgres::conn;
+
+import std::core::{Array, List, Option, Result, Vector, print};
+import std::db::{Cell, DbError, Row};
+import std::net::socket::{connect_to, invalid_handle, receive, shut, start, transmit_bytes};
+import postgres::wire::{Message, Reader, message_at, message_width, password, query, startup, terminate};
+
+/// A connection to a PostgreSQL server, and the conversation it has.
+///
+/// # What this speaks
+///
+/// The **simple query** protocol: one string in, rows out, one round trip. Not
+/// the extended one — no `Parse`, no `Bind`, no prepared statements, and so no
+/// parameter binding. That is the next slice and it matters: a driver without
+/// bound parameters is a driver that invites string concatenation into SQL,
+/// which is the oldest hole there is. Until then this is for reading a schema
+/// and running fixed statements, and `docs/roadmap.md` 13.12 says so.
+///
+/// # What it does not speak
+///
+/// **MD5 and SCRAM-SHA-256.** Both need a hash the runtime does not expose to
+/// Khora — `ring` is linked for TLS and reaches no further. A server set to
+/// either is refused by name rather than hung: `Unsupported` says which method
+/// was asked for, because "connection failed" against a default PostgreSQL 14
+/// install would send somebody looking at their network.
+///
+/// **TLS.** `SSLRequest` is one message and `std::net::tls` exists, so this is
+/// closer than it sounds; it is not here yet.
+
+/// What went wrong, before it becomes a `DbError`.
+///
+/// Kept separate from `DbError` so the driver can say things `std::db`'s three
+/// cases cannot — an authentication method it has not got is neither a
+/// rejected statement nor a lost connection.
+export type PgError =
+  /// The socket never opened.
+  | Unreachable(String)
+  /// The server said no. Carries its message, which is usually the useful one.
+  | Refused(String)
+  /// The connection went away mid-conversation.
+  | Closed(String)
+  /// Something the protocol allows and this driver has not built.
+  | Unsupported(String);
+
+impl PgError {
+  /// How a driver failure reaches a caller that only knows `std::db`.
+  ///
+  /// `Unsupported` becomes `Rejected` rather than `Disconnected`: the
+  /// connection is fine, the request is the thing that cannot be served, and
+  /// a caller retrying a `Disconnected` would retry forever.
+  export fn to_db(self) -> DbError {
+    match self {
+      PgError::Unreachable(why) => DbError::Disconnected(why),
+      PgError::Closed(why) => DbError::Disconnected(why),
+      PgError::Refused(why) => DbError::Rejected(why),
+      PgError::Unsupported(why) => DbError::Rejected(why),
+    }
+  }
+}
+
+/// An open connection.
+export type Connection = {
+  handle: Int,
+  /// Bytes that have arrived and not yet been consumed as messages.
+  ///
+  /// A server may put several messages in one packet and split one across two,
+  /// so the socket's boundaries and the protocol's have nothing to do with
+  /// each other. This is where that is absorbed.
+  mut pending: Array<U8>,
+};
+
+/// What a column is called and what type the server says it is.
+export type Column = {
+  name: String,
+  /// The type's OID. Text is 25, `int4` is 23, and so on — see `oid_to_cell`.
+  oid: Int,
+};
+
+/// A query's answer.
+export type Answer = {
+  columns: List<Column>,
+  rows: List<Row>,
+  /// What `CommandComplete` said: `SELECT 3`, `INSERT 0 1`.
+  tag: String,
+};
+
+// --- reading messages ------------------------------------------------------
+
+/// Appends what arrived to what was left over.
+fn extend(head: Array<U8>, tail: Array<U8>, tail_len: Int) -> Array<U8> {
+  let head_len = Array::length(head);
+  let out: Array<U8> = Array::new(head_len + tail_len, 0);
+  let mut i = 0;
+  while i < head_len {
+    Array::set(out, i, Array::get(head, i));
+    i = i + 1
+  };
+  let mut j = 0;
+  while j < tail_len {
+    Array::set(out, head_len + j, Array::get(tail, j));
+    j = j + 1
+  };
+  out
+}
+
+/// Drops the first `count` bytes.
+fn advance(bytes: Array<U8>, count: Int) -> Array<U8> {
+  let total = Array::length(bytes);
+  let left = total - count;
+  let out: Array<U8> = Array::new(left, 0);
+  let mut i = 0;
+  while i < left {
+    Array::set(out, i, Array::get(bytes, count + i));
+    i = i + 1
+  };
+  out
+}
+
+/// One message, reading from the socket until a whole one has arrived.
+export fn next_message(c: Connection) -> Result<Message, PgError> {
+  let mut answer: Result<Message, PgError> = Result::Err(PgError::Closed("no message"));
+  let mut going = true;
+  while going {
+    match message_at(c.pending, 0) {
+      Option::Some(m) => {
+        c.pending = advance(c.pending, message_width(m));
+        answer = Result::Ok(m);
+        going = false
+      },
+      Option::None => {
+        let buffer: Array<U8> = Array::new(8192, 0);
+        let read = receive(c.handle, buffer);
+        if read <= 0 {
+          answer = Result::Err(PgError::Closed(
+              "the server closed the connection while a reply was expected"
+            ));
+          going = false
+        } else {
+          c.pending = extend(c.pending, buffer, read)
+        }
+      },
+    }
+  };
+  answer
+}
+
+/// The text of an `ErrorResponse`, which is a list of tagged fields.
+///
+/// `M` is the human-readable message and the only one worth leading with; the
+/// rest are severity, SQLSTATE, and where in the server's own source it came
+/// from, which nobody debugging their own SQL wants first.
+fn error_text(m: Message) -> String {
+  let read = Reader::of(m.payload);
+  let mut message = "";
+  let mut code = "";
+  let mut going = true;
+  while going {
+    let field = Reader::u8(read);
+    if field == 0 {
+      going = false
+    } else {
+      let value = Reader::cstring(read);
+      if field == 77 { message = value } else if field == 67 { code = value } else { () }
+    }
+  };
+  if code == "" { message } else { message + " [" + code + "]" }
+}
+
+// --- connecting ------------------------------------------------------------
+
+/// Opens a connection and completes the handshake.
+export fn open(
+  host: String,
+  port: Int,
+  user: String,
+  database: String,
+  secret: String,
+) -> Result<Connection, PgError> {
+  if !start() {
+    Result::Err(PgError::Unreachable("the socket layer would not start"))
+  } else {
+    let handle = connect_to(host, port);
+    if handle == invalid_handle() {
+      Result::Err(PgError::Unreachable(
+          "could not reach " + host + ":" + Int::to_string(port)
+        ))
+    } else {
+      let empty: Array<U8> = Array::new(0, 0);
+      let c: Connection = { handle: handle, pending: empty };
+      let hello = startup(user, database);
+      if transmit_bytes(handle, hello) < 0 {
+        shut(handle);
+        Result::Err(PgError::Closed("the startup message could not be sent"))
+      } else {
+        match handshake(c, secret) {
+          Result::Ok(_) => Result::Ok(c),
+          Result::Err(why) => {
+            shut(handle);
+            Result::Err(why)
+          },
+        }
+      }
+    }
+  }
+}
+
+/// Everything between the startup message and the first `ReadyForQuery`.
+fn handshake(c: Connection, secret: String) -> Result<Bool, PgError> {
+  let mut outcome: Result<Bool, PgError> = Result::Ok(true);
+  let mut going = true;
+  while going {
+    match next_message(c) {
+      Result::Err(why) => {
+        outcome = Result::Err(why);
+        going = false
+      },
+      Result::Ok(m) => {
+        // 'Z' ReadyForQuery: the handshake is over and the server is idle.
+        if m.kind == 90 {
+          going = false
+        } else if m.kind == 69 {
+          // 'E' ErrorResponse. Usually the password or the database name.
+          outcome = Result::Err(PgError::Refused(error_text(m)));
+          going = false
+        } else if m.kind == 82 {
+          // 'R' Authentication.
+          match authenticate(c, m, secret) {
+            Result::Ok(_) => (),
+            Result::Err(why) => {
+              outcome = Result::Err(why);
+              going = false
+            },
+          }
+        } else {
+          // 'S' ParameterStatus, 'K' BackendKeyData, 'N' NoticeResponse. None
+          // of them is needed to run a query, and a driver that refused what
+          // it did not recognise would break on the next server version.
+          ()
+        }
+      },
+    }
+  };
+  outcome
+}
+
+/// Answers whichever authentication the server asked for, if it can.
+fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgError> {
+  let read = Reader::of(m.payload);
+  let method = Reader::i32(read);
+  if method == 0 {
+    // AuthenticationOk. Nothing to send.
+    Result::Ok(true)
+  } else if method == 3 {
+    // Cleartext. Only reasonable over a unix socket or TLS, and this driver
+    // has neither yet — which is the caller's decision to make, not this
+    // function's, so it is sent rather than refused.
+    if transmit_bytes(c.handle, password(secret)) < 0 {
+      Result::Err(PgError::Closed("the password could not be sent"))
+    } else {
+      Result::Ok(true)
+    }
+  } else if method == 5 {
+    Result::Err(PgError::Unsupported(
+        "the server asked for MD5 authentication, which needs a hash this driver \
+       has no way to compute yet. Set the server to `trust` or `password` for now"
+      ))
+  } else if method == 10 {
+    Result::Err(PgError::Unsupported(
+        "the server asked for SCRAM-SHA-256, which needs HMAC and PBKDF2 that the \
+       runtime does not expose to Khora yet. This is the default on PostgreSQL 14 \
+       and later, so a stock install will land here: set `password_encryption` to \
+       `md5` and the method to `password`, or wait for the hash surface"
+      ))
+  } else {
+    Result::Err(PgError::Unsupported(
+        "the server asked for authentication method " + Int::to_string(method)
+        + ", which this driver does not know"
+      ))
+  }
+}
+
+/// Closes politely, so the server logs a disconnection and not a broken pipe.
+export fn close(c: Connection) -> () {
+  transmit_bytes(c.handle, terminate());
+  shut(c.handle);
+}
+
+// --- querying --------------------------------------------------------------
+
+/// Runs one statement and reads everything it produces.
+export fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
+  if transmit_bytes(c.handle, query(sql)) < 0 {
+    Result::Err(PgError::Closed("the query could not be sent"))
+  } else {
+    collect(c)
+  }
+}
+
+/// Reads until `ReadyForQuery`, gathering whatever came before it.
+fn collect(c: Connection) -> Result<Answer, PgError> {
+  let mut columns: List<Column> = List::Nil;
+  let mut rows: Vector<Row> = Vector::new();
+  let mut tag = "";
+  let mut failure: Option<PgError> = Option::None;
+  let mut going = true;
+
+  while going {
+    match next_message(c) {
+      Result::Err(why) => {
+        failure = Option::Some(why);
+        going = false
+      },
+      Result::Ok(m) => {
+        if m.kind == 90 {
+          // 'Z' ReadyForQuery ends every exchange, including a failed one —
+          // which is why the error is remembered rather than returned here:
+          // leaving the stream mid-reply would desynchronise the next query.
+          going = false
+        } else if m.kind == 84 {
+          columns = describe(m)
+        } else if m.kind == 68 {
+          Vector::push(rows, data_row(m, columns))
+        } else if m.kind == 67 {
+          tag = Reader::cstring(Reader::of(m.payload))
+        } else if m.kind == 69 {
+          failure = Option::Some(PgError::Refused(error_text(m)))
+        } else {
+          ()
+        }
+      },
+    }
+  };
+
+  match failure {
+    Option::Some(why) => Result::Err(why),
+    Option::None => Result::Ok({ columns: columns, rows: to_list(rows), tag: tag }),
+  }
+}
+
+/// `RowDescription`: a count, then a name and a type for each column.
+fn describe(m: Message) -> List<Column> {
+  let read = Reader::of(m.payload);
+  let count = Reader::i16(read);
+  let mut out: Vector<Column> = Vector::new();
+  let mut i = 0;
+  while i < count {
+    let name = Reader::cstring(read);
+    // The table OID and column number this came from, which this driver has
+    // no use for.
+    Reader::i32(read);
+    Reader::i16(read);
+    let oid = Reader::i32(read);
+    // Type size, type modifier and format code.
+    Reader::i16(read);
+    Reader::i32(read);
+    Reader::i16(read);
+    Vector::push(out, { name: name, oid: oid });
+    i = i + 1
+  };
+  to_column_list(out)
+}
+
+/// `DataRow`: a count, then a length and that many bytes for each value.
+///
+/// **Every value arrives as text.** The simple query protocol has no way to
+/// ask for anything else, so a `bool` is `"t"` and an `int4` is `"42"`, and
+/// `oid_to_cell` is where that becomes a `Cell`.
+fn data_row(m: Message, columns: List<Column>) -> Row {
+  let read = Reader::of(m.payload);
+  let count = Reader::i16(read);
+  let mut cells: Vector<Cell> = Vector::new();
+  let mut i = 0;
+  while i < count {
+    let length = Reader::i32(read);
+    // -1 is NULL, which is not the same as a value of length zero.
+    if length < 0 {
+      Vector::push(cells, Cell::Null)
+    } else {
+      let bytes = Reader::take(read, length);
+      let text = String::from_bytes(bytes);
+      Vector::push(cells, oid_to_cell(oid_at(columns, i), text))
+    };
+    i = i + 1
+  };
+  { cells: to_cell_list(cells) }
+}
+
+/// The type of column `index`, or text if the description is missing.
+fn oid_at(columns: List<Column>, index: Int) -> Int {
+  let mut at = 0;
+  let mut rest = columns;
+  let mut found = 25;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(head, tail) => {
+        if at == index {
+          found = head.oid;
+          going = false
+        } else {
+          at = at + 1;
+          rest = tail
+        }
+      },
+    }
+  };
+  found
+}
+
+/// A text value, as the `Cell` its column's type calls for.
+///
+/// **Deliberately few.** `Number` for the integer types, `Flag` for `bool`,
+/// and `Text` for everything else — including `numeric`, which ought to be
+/// `Money` and is not: `Decimal::of_string` exists, and a `numeric` that fails
+/// to parse would have to become either a wrong number or a lost value, and
+/// neither is a decision to take quietly. `Text` keeps the server's own digits
+/// until 13.12 says what should happen to them.
+export fn oid_to_cell(oid: Int, text: String) -> Cell {
+  // 16 bool, 20 int8, 21 int2, 23 int4.
+  if oid == 16 {
+    Cell::Flag(text == "t")
+  } else if oid == 20 || oid == 21 || oid == 23 {
+    match Int::of_string(text) {
+      Option::Some(n) => Cell::Number(n),
+      // A server that says `int4` and sends something that is not one is
+      // wrong, and guessing would hide it.
+      Option::None => Cell::Text(text),
+    }
+  } else {
+    Cell::Text(text)
+  }
+}
+
+// --- the three list copies `Vector` cannot do for itself --------------------
+
+fn to_list(v: Vector<Row>) -> List<Row> {
+  let mut out: List<Row> = List::Nil;
+  let mut i = Vector::length(v) - 1;
+  while i >= 0 {
+    match Vector::get(v, i) {
+      Option::Some(item) => out = List::Cons(item, out),
+      Option::None => (),
+    };
+    i = i - 1
+  };
+  out
+}
+
+fn to_column_list(v: Vector<Column>) -> List<Column> {
+  let mut out: List<Column> = List::Nil;
+  let mut i = Vector::length(v) - 1;
+  while i >= 0 {
+    match Vector::get(v, i) {
+      Option::Some(item) => out = List::Cons(item, out),
+      Option::None => (),
+    };
+    i = i - 1
+  };
+  out
+}
+
+fn to_cell_list(v: Vector<Cell>) -> List<Cell> {
+  let mut out: List<Cell> = List::Nil;
+  let mut i = Vector::length(v) - 1;
+  while i >= 0 {
+    match Vector::get(v, i) {
+      Option::Some(item) => out = List::Cons(item, out),
+      Option::None => (),
+    };
+    i = i - 1
+  };
+  out
+}
