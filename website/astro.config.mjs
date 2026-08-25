@@ -15,6 +15,11 @@ export default defineConfig({
     starlight({
       title: 'Khora',
       description: 'Khora language documentation',
+      logo: {
+        src: './src/assets/khora-mark.svg',
+        alt: 'Khora pipe operator mark',
+      },
+      favicon: '/docs/favicon.svg',
       social: [
         {
           icon: 'github',
