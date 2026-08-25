@@ -176,6 +176,62 @@ What `std` does still reserve is the *shape* of concurrency itself — there is
 one model, and no non-blocking socket API to build a competing event loop on.
 That is deliberate and is argued in Phase 11 of `docs/roadmap.md`.
 
+## Applying the rule to what is not written yet
+
+The section above settled `std::net::http` by asking where the middle layer is.
+Phase 12 of `docs/roadmap.md` proposes several more things, and the same
+question answers all of them — including two where the obvious answer is wrong.
+
+**Most of them are not `std`'s business at all**, which is worth saying first so
+the rule is not over-applied. Cross-compilation, WebAssembly, debug information,
+a C export surface, compile times and what a trap does to a process are
+properties of the compiler and the runtime. The rule only bites where something
+could plausibly be a library.
+
+| | middle layer? | where it goes |
+| --- | --- | --- |
+| `Decimal` | it *is* the vocabulary; two of them cannot exchange a price | `std`, and partly the language |
+| civil date and time types | vocabulary | `std` |
+| the IANA time zone database | a dataset, released several times a year | **package, or the system** |
+| span and attribute types, `traceparent` | vocabulary; nothing composes without agreement | `std` |
+| propagation across spawn, steal, wake and cancel | fails in production only; the scheduler's, not a library's | `std` |
+| OTLP, Datadog, Prometheus exporters | a vendor's protocol and release cadence | package |
+| the `Db` capability and its transaction contract | a transaction that leaks on cancellation | `std` |
+| the SQLite engine | no middle layer at all | **first-party package** |
+| Postgres | a wire protocol somebody else versions | package |
+
+### Two the obvious answer gets wrong
+
+**Time zones are not standard library material, and civil dates are.** The
+types — a date, a time of day, a zoned instant, an offset — are vocabulary, and
+two libraries that disagree about what a date is cannot exchange one. But the
+tzdb is a *dataset*: Egypt changes its rules, IANA cuts a release, and every
+binary already shipped is wrong about the future. Nothing behind this
+document's compatibility promise can be updated four times a year. `std` owns
+the types and the interface to a zone provider; the data comes from a package
+or from the host.
+
+**SQLite in `std` would be the mistake `std::net::http` avoided.** It is
+tempting because it is a file rather than a service — no protocol, no auth, no
+TLS — but that is exactly the argument against it. There is no framing to get
+right, no handshake to get wrong, nothing that fails at a packet boundary. It
+is all top layer, plus a quarter of a million lines of C and a question about
+what a virtual file system means in an isolate. Under this document's rule that
+is a framework, and it belongs in a first-party package where it can version on
+its own.
+
+The middle layer for databases exists, but it is not the engine. **It is what a
+transaction does when its fiber is cancelled.** A transaction that returns
+without rolling back, holding a connection and its locks, is the truncated
+request at a packet boundary of this subject: it fails in production, never in
+testing, and every package would answer it differently. It is also Khora's to
+answer rather than the engine's, because cancellation semantics are the
+language's. So `std` owns the `Db` capability, the row and value types, and
+that contract — and SQLite, Postgres, D1 and an in-memory double are handlers.
+
+`docs/design/observability.md` makes the same split for tracing and says why
+the runtime forces `std`'s hand there.
+
 ## What this gives up, plainly
 
 crates.io. The hedge A6 was making — that a new language without libraries

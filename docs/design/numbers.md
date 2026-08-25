@@ -150,6 +150,56 @@ The checked narrowing is one rule for all fourteen combinations rather than
 fourteen bounds written by hand: narrow it, widen it back the way the target's
 signedness says, and require the same number.
 
+## Decimal, and why its absence is the loudest one
+
+`docs/positioning.md` opens by saying Khora is "particularly well suited to
+financial reconciliation and audit-heavy systems". There is no exact decimal
+type in this document, in `std`, or anywhere in the tree. A reconciliation
+engine that cannot represent ten pence is not a candidate for reconciling
+anything, and `Float`'s own section above already explains why it is not the
+answer: it is IEEE, and it implements neither `Eq` nor `Ord` precisely because
+its equality is a trap.
+
+**This is `std`'s, unambiguously**, and it is one of the few items on the
+Phase 12 list that is. `ecosystem.md`'s rule asks what every package would
+otherwise re-derive subtly wrong; two libraries with two incompatible `Decimal`
+types cannot exchange a price, and a language where the money type comes from a
+package is a language with several money types. It is also partly *language*
+rather than library, because a literal needs a syntax.
+
+Four decisions, and the first is the only one that must be made before anything
+is written.
+
+**What it represents.** A scaled integer — an `i128` significand and a decimal
+exponent — is what financial systems actually use, and it is what
+IEEE 754-2008's `decimal128`, SQL `NUMERIC`, Java's `BigDecimal` and .NET's
+`decimal` all approximate. Arbitrary precision is the other option and it puts
+an allocation behind every addition, which for a type that appears in every row
+of a ledger is the wrong default. A fixed 128-bit significand gives 38 digits,
+which is more than any currency needs and less than a general mathematics
+library wants — and this is a money type, not a mathematics one.
+
+**What overflow does.** The same as every other number in this document: it
+traps. §"Overflow traps, in every build" argues that case and none of the
+argument changes here.
+
+**What division does.** It cannot be exact, so it must take a rounding mode and
+a scale rather than pretending. Half-even is the default because it is what
+accounting standards specify and what every other decimal type defaults to;
+naming the alternatives explicitly is the point.
+
+**How a literal is written.** `1.10` is already `Float`, so a decimal literal
+needs its own spelling — a suffix (`1.10d`), a constructor
+(`Decimal::of("1.10")`), or making the bare form context-dependent. **This is a
+language-surface change and is not decided here.** The suffix is the smallest
+and matches how `U64` is spelled elsewhere; making bare decimals default to
+`Decimal` would be the boldest and would need `Float` to become the annotated
+one, which is a much larger claim about what the language is for.
+
+What is *not* in `std`: currency codes, exchange rates, allocation and rounding
+policies for splitting a payment, and anything that knows what a fiscal quarter
+is. Those are a package, by the same rule that keeps the type here.
+
 ## Not yet
 
 - **`Float32`.** One float type is enough until something needs the other, and

@@ -2377,6 +2377,133 @@ typed error.
 
 ---
 
+## Phase 12 — What a service needs that Khora has not got
+
+Phase 11 finished the concurrency claim. This is the list of everything else
+`docs/positioning.md` promises and the tree does not have, found by reading the
+positioning against the code rather than by planning.
+
+**Two of these contradict the positioning outright**, which is why they are
+first. The rest is ordered by what blocks deployment, then by daily friction.
+
+`docs/design/ecosystem.md` §"Applying the rule to what is not written yet"
+decides for each of these whether it is `std`'s, a package's, or neither, and
+most of them are neither — they belong to the compiler or the runtime. Nothing
+below should widen `std`.
+
+### 12.0 `Decimal` — the positioning's own claim
+
+`positioning.md` says "particularly well suited to financial reconciliation".
+There is no exact decimal type anywhere: not in `docs/design/numbers.md`, not
+in `std`, not in `khora-types`. Only `Int` and `Float`, and `Float` deliberately
+implements neither `Eq` nor `Ord` because its equality is a trap. An engine that
+cannot represent ten pence reconciles nothing.
+
+First because it is `std`'s and partly the language's — a literal needs a
+spelling — and because everything written before it that touches money will have
+to be written again after. `numbers.md` §"Decimal" has the four decisions and
+names the literal syntax as the one needing a language-surface call.
+
+### 12.1 Civil dates and time zones
+
+`Clock` gives `unix_millis` and `monotonic_millis`, and that is the whole of
+time. Reconciliation is date-bucketed by its nature — value dates, settlement
+dates, business-day calendars, what day it was in Tokyo — and none of that is
+expressible.
+
+The split is the interesting part and `ecosystem.md` argues it: the **types** are
+`std`'s, and the **IANA database** cannot be, because it is a dataset released
+several times a year and `std` is behind a compatibility promise that cannot
+move that fast.
+
+### 12.2 Cross-compilation, and WebAssembly as its first consumer
+
+`khora-codegen-llvm` calls `initialize_native` and `get_default_triple`; there
+is no `--target`. Competing with Go without `GOOS`/`GOARCH` is a losing
+position: no arm64 container, no musl static binary in a `scratch` image, no
+macOS build from a Linux runner — and that last one is what
+`.github/workflows/runtime.yml` pays a ten-times billing multiplier to avoid.
+
+**WebAssembly is wanted for edge hosting** and is the hardest consumer of the
+same mechanism, so it goes second rather than first. `docs/design/targets.md`
+has it in full, including the part that is not a matter of effort:
+**WebAssembly cannot switch stacks**, so Phase 11's coroutines cannot exist
+there until the stack-switching proposal ships. The recommendation is to ship
+wasm *without* fibers — an isolate is single-threaded anyway, and 11E's
+blocking pool already falls through to inline when there is no worker to
+protect — rather than pay Asyncify's cost on every wasm user.
+
+That document also records a correction worth keeping: **AWS CloudFront does
+not run WebAssembly.** CloudFront Functions is restricted JavaScript and
+Lambda@Edge is Node or Python. Cloudflare Workers, Fastly Compute, Deno Deploy,
+Vercel Edge and Spin are the wasm platforms, and they do not want the same
+target.
+
+### 12.3 Observability
+
+Nothing in `std` emits a log line, let alone a span. For services, workers and
+event consumers that is disqualifying — and Khora can do it better than the
+ecosystems it is competing with, because the three things that make
+instrumentation manual elsewhere are structural here: a capability is an
+interception point, a fiber's lifetime is a span's lifetime, and code generation
+already inserts runtime calls at loop back-edges.
+
+`docs/design/observability.md` has the design. `std` owns propagation and the
+vocabulary; exporters are a package, by the same rule that keeps Postgres out.
+
+### 12.4 Debug information
+
+`khora-codegen-llvm` emits no DWARF at all — no `create_debug_*` anywhere — so
+there is no source-level debugging, no `lldb`, no stepping, and a trap aborts
+with a message and no backtrace. `khora_overflow` and `khora_bounds_fail` say
+what happened and not where.
+
+Ordered here rather than lower because it gets *harder* with time: whole-program
+monomorphization already makes the mapping from machine code back to source
+non-obvious, and coroutine stacks make an unwinder's job worse. Doing it while
+those layouts are still being changed is cheaper than doing it after.
+
+### 12.5 Database access
+
+Nothing. `ecosystem.md` decides the shape: the `Db` capability, the row and
+value types, and **what a transaction does when its fiber is cancelled** belong
+to `std`; the SQLite engine is a first-party package; Postgres is a package.
+The transaction-under-cancellation contract is the middle layer here and the
+only part that fails in production rather than in testing.
+
+### 12.6 A C export surface
+
+`docs/design/compatibility.md` is right that there is no stable Khora ABI, and
+that is a different question from whether a Khora library can be *called*.
+Exporting a C ABI — a shared library with a header — is how Khora gets used
+without anybody rewriting anything: a Python extension, a Node addon, a plugin
+for something written in C++. It is also the cheapest adoption path there is,
+and it costs a calling convention and a lifetime story rather than a language
+feature.
+
+### 12.7 The compile-time budget
+
+Whole-program monomorphization plus LLVM is superlinear in program size, and
+compile speed is the headline feature of the language Khora is compared to.
+Nobody has measured it. The corpus is still small enough that a baseline is
+cheap to take and expensive to reconstruct later — this entry is a measurement
+and a number to defend, not a project.
+
+### 12.8 What a trap does to a process
+
+`khora_overflow` and `khora_bounds_fail` end the process. That is right for a
+command-line tool and wrong for a server or an edge isolate, where one bad
+request should not take the other connections with it. Phase 11 gives fibers an
+identity and a parent; whether a trap can be contained at a fiber boundary —
+and what that means for a language whose traps are meant to be unrecoverable
+bugs — is a real argument that has not been had.
+
+### 12.9 Supply chain
+
+`khora-pkg`'s content-addressed store gives reproducibility. Signing, provenance
+and an SBOM are what an audit-heavy buyer asks for next, and `positioning.md`
+names that buyer explicitly.
+
 ## When can libraries be written?
 
 The question A6 was really about, and the phases answer it in two steps.
