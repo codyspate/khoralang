@@ -34,7 +34,10 @@
 //! has no opinion about how loud it is — the manifest is one project's policy
 //! and these are facts about a file.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use khora_db::{Db, SourceFile};
+use khora_types::BodyTypes;
 use khora_hir::body::{Body, Expr, LocalId, Pat, Stmt};
 use text_size::TextRange;
 
@@ -49,10 +52,19 @@ pub struct Finding {
 
 /// Every lint's name, so that a manifest naming one that does not exist can be
 /// told what does.
-pub const LINTS: &[&str] = &[DANGLING_EXPRESSION, UNUSED_CAPABILITY];
+pub const LINTS: &[&str] = &[DANGLING_EXPRESSION, REFERENCE_CYCLE, UNUSED_CAPABILITY];
 
 pub const UNUSED_CAPABILITY: &str = "unused-capability";
 pub const DANGLING_EXPRESSION: &str = "dangling-expression";
+/// Named for the problem rather than for the fix.
+///
+/// The advice this gives will change — today it is "restructure or accept the
+/// leak", and when weak references exist it becomes "make this field weak".
+/// A lint's name goes in somebody's `khora.toml`, so a name that describes the
+/// *remedy* would have to be renamed when the remedy changes, and renaming one
+/// breaks every manifest that mentions it. `reference-cycle` is true either
+/// way. `docs/roadmap.md` Phase 13.
+pub const REFERENCE_CYCLE: &str = "reference-cycle";
 
 /// What the lints find in one file.
 ///
@@ -61,9 +73,17 @@ pub const DANGLING_EXPRESSION: &str = "dangling-expression";
 #[salsa::tracked(returns(ref))]
 pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
-    for (_, body) in khora_hir::body::bodies(db, file) {
+    let checked = khora_types::checked(db, file);
+    for (name, body) in khora_hir::body::bodies(db, file) {
         unused_capabilities(body, &mut out);
         dangling_expressions(body, &mut out);
+        // Paired by name, which is how `Checked` keys them. A body with no
+        // types — one whose `derive` was refused, say — is skipped rather than
+        // guessed at: `reference_cycles` needs to know what is on the heap and
+        // has nothing useful to say without it.
+        if let Some((_, types)) = checked.bodies.iter().find(|(n, _)| n == name) {
+            reference_cycles(body, types, &mut out);
+        }
     }
     out.sort_by_key(|f| (f.range.start(), f.range.end()));
     out
@@ -187,4 +207,269 @@ fn is_inert(body: &Body, id: khora_hir::body::ExprId) -> bool {
         // noise.
         _ => false,
     }
+}
+
+// --- reference cycles ------------------------------------------------------
+
+/// A field assignment that closes a loop in the heap.
+///
+/// **Why this is worth a lint at all.** Khora frees memory by counting
+/// references, which works for every shape of data except a loop: in
+/// `a.next = b; b.next = a` each object holds the other, so neither count ever
+/// reaches zero and the memory is never returned. `docs/design/memory.md` §4
+/// decided the policy — a tracing collector is ruled out by non-negotiable 5,
+/// so a cycle leaks and a weak reference is what breaks one — and then weak
+/// references were never built. Mutable fields shipped in phase 6.1, so the
+/// cycle compiles today and there is nothing to reach for instead.
+///
+/// That makes the failure **silent**: nothing is freed early, nothing is read
+/// after free, the memory is simply never returned. `memory.md` §4 predicts the
+/// reader it will catch — "a TypeScript or Go developer has never had to think
+/// about it and will need the diagnostic to be good" — and this is that
+/// diagnostic.
+///
+/// # What it sees, and what it does not
+///
+/// One function body, and reachability built from what that body does:
+/// constructing a value out of a local, and assigning a local into a field.
+/// It warns when a field assignment stores something that can already reach
+/// the object being assigned into.
+///
+/// It does **not** see across function boundaries, through a `Shared` cell, or
+/// through a collection. A cycle built in two functions is invisible to it.
+/// That is the honest limit of a syntactic pass and the reason this is a
+/// warning rather than an error: it finds the accident, and says nothing about
+/// what it cannot see.
+///
+/// **No false positives is the harder half.** A lint people learn to ignore is
+/// worse than no lint, and the way that starts is one that is wrong about real
+/// code — so where a judgement was available this takes the quiet side, as the
+/// other two passes here do.
+fn reference_cycles(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
+    let Some(root) = body.root else { return };
+    let mut walk = Cycles { body, types, reaches: BTreeMap::new(), out };
+    walk.expr(root);
+}
+
+/// The walk `reference_cycles` runs.
+///
+/// **Structural, from the root, and not a scan of the arena.** The first
+/// version iterated `body.exprs()`, which is allocation order rather than
+/// program order: lowering is depth-first and append-only, so a block is
+/// created *after* every statement inside it. An assignment was therefore seen
+/// before the `let` two lines above it, and the edge that made the cycle had
+/// not been recorded yet — the pass missed the shape it exists to catch and
+/// reported nothing, which is the worst way for a lint to be wrong.
+struct Cycles<'a> {
+    body: &'a Body,
+    types: &'a BodyTypes,
+    /// What each local can reach, as far as the walk has got.
+    ///
+    /// `BTreeMap` and `BTreeSet` rather than the hashed pair: a `HashSet`'s
+    /// per-process seed leaking into compiler output is a bug this repository
+    /// has already had once, in `khora-perceus`, and findings are ordered.
+    reaches: BTreeMap<LocalId, BTreeSet<LocalId>>,
+    out: &'a mut Vec<Finding>,
+}
+
+impl Cycles<'_> {
+    fn expr(&mut self, id: khora_hir::body::ExprId) {
+        match self.body.expr(id).clone() {
+            Expr::Block { stmts, tail } => {
+                for stmt in &stmts {
+                    match stmt {
+                        Stmt::Let { pat, init, .. } => {
+                            let Some(init) = init else { continue };
+                            self.expr(*init);
+                            // Recorded *after* the initializer is walked, so a
+                            // binding cannot reach itself through its own
+                            // right-hand side.
+                            if let Pat::Bind(local) = self.body.pat(*pat) {
+                                let mut named = BTreeSet::new();
+                                locals_in(self.body, *init, &mut named);
+                                self.reaches.entry(*local).or_default().extend(named);
+                            }
+                        }
+                        Stmt::Expr(e) => self.expr(*e),
+                    }
+                }
+                if let Some(tail) = tail {
+                    self.expr(tail);
+                }
+            }
+            Expr::Assign { target, value } => {
+                self.expr(target);
+                self.expr(value);
+                self.assignment(target, value);
+            }
+            Expr::Call { callee, args } => {
+                self.expr(callee);
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            Expr::Unary { operand, .. } => self.expr(operand),
+            Expr::Field { base, .. } => self.expr(base),
+            Expr::If { condition, then_branch, else_branch } => {
+                self.expr(condition);
+                self.expr(then_branch);
+                if let Some(other) = else_branch {
+                    self.expr(other);
+                }
+            }
+            Expr::While { condition, body } => {
+                self.expr(condition);
+                self.expr(body);
+            }
+            Expr::Loop { body } => self.expr(body),
+            Expr::Match { scrutinee, arms } | Expr::Catch { inner: scrutinee, arms } => {
+                self.expr(scrutinee);
+                for arm in &arms {
+                    if let Some(guard) = arm.guard {
+                        self.expr(guard);
+                    }
+                    self.expr(arm.body);
+                }
+            }
+            Expr::Lambda { body, .. } => self.expr(body),
+            Expr::Record { fields, .. } => {
+                for (_, value) in &fields {
+                    self.expr(*value);
+                }
+            }
+            Expr::Tuple(items) => {
+                for item in &items {
+                    self.expr(*item);
+                }
+            }
+            Expr::Return(inner) | Expr::Break(inner) => {
+                if let Some(inner) = inner {
+                    self.expr(inner);
+                }
+            }
+            Expr::Try(inner) | Expr::Raise(inner) => self.expr(inner),
+            _ => {}
+        }
+    }
+
+    /// `target.field = value`: does it close a loop?
+    fn assignment(&mut self, target: khora_hir::body::ExprId, value: khora_hir::body::ExprId) {
+        let Expr::Field { base, name } = self.body.expr(target).clone() else { return };
+        let Some(into) = root_local(self.body, base) else { return };
+
+        // **Only a heap value can be part of a loop**, and this is where the
+        // first version was wrong about real code. `self.wanted = held`, with
+        // `held` an `Int` from `Array::length`, was reported as a cycle in
+        // `std/core.kh`: a scalar is copied, not pointed at, and copying one
+        // into a field can no more make a loop than adding two numbers can.
+        //
+        // Two false positives out of twenty-one files is exactly the failure a
+        // lint cannot have — the module documentation above says a warning
+        // people learn to ignore is worse than no warning, and this is how
+        // that starts.
+        if !khora_perceus::is_boxed(self.types.of(value)) {
+            return;
+        }
+
+        let mut stored = BTreeSet::new();
+        locals_in(self.body, value, &mut stored);
+
+        let closes =
+            stored.iter().any(|from| *from == into || can_reach(&self.reaches, *from, into));
+        if closes {
+            self.out.push(Finding {
+                lint: REFERENCE_CYCLE,
+                message: format!(
+                    "this stores something that already reaches `{}`, which makes a loop in \
+                     the heap. Reference counting cannot free a loop, so the memory is never \
+                     returned — and nothing else will say so. Break the link by storing an \
+                     identifier instead of the object, or by keeping the back-reference \
+                     outside the structure; `khora_live_count` shows the leak if you want to \
+                     see it",
+                    field_of(self.body, base, &name)
+                ),
+                range: self.body.range(target),
+            });
+        }
+
+        // Recorded whether or not it was reported: the edge exists either way,
+        // and a later assignment may be the one that closes the loop.
+        self.reaches.entry(into).or_default().extend(stored);
+    }
+}
+
+/// How to name the thing being assigned into, for the message.
+fn field_of(body: &Body, base: khora_hir::body::ExprId, field: &str) -> String {
+    match body.expr(base) {
+        Expr::Local(local) => format!("{}.{field}", body.local(*local).name),
+        _ => field.to_string(),
+    }
+}
+
+/// The local a place expression is rooted at: `a.b.c` is rooted at `a`.
+fn root_local(body: &Body, id: khora_hir::body::ExprId) -> Option<LocalId> {
+    match body.expr(id) {
+        Expr::Local(local) => Some(*local),
+        Expr::Field { base, .. } => root_local(body, *base),
+        _ => None,
+    }
+}
+
+/// Every local an expression mentions.
+///
+/// Deliberately shallow about *how* they are mentioned: a local inside a record
+/// literal, a constructor call or a tuple is reachable from the result, and one
+/// inside an arbitrary call might be. Treating them alike is what keeps this
+/// from needing an escape analysis, and the cost is that it can only be a
+/// warning.
+fn locals_in(body: &Body, id: khora_hir::body::ExprId, out: &mut BTreeSet<LocalId>) {
+    match body.expr(id) {
+        Expr::Local(local) => {
+            out.insert(*local);
+        }
+        Expr::Record { fields, .. } => {
+            for (_, value) in fields {
+                locals_in(body, *value, out);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                locals_in(body, *arg, out);
+            }
+        }
+        Expr::Tuple(items) => {
+            for item in items {
+                locals_in(body, *item, out);
+            }
+        }
+        // A field read reaches whatever its base does: `b.next` can be `a`.
+        Expr::Field { base, .. } => locals_in(body, *base, out),
+        _ => {}
+    }
+}
+
+/// Whether `from` can already reach `to`, following the edges recorded so far.
+fn can_reach(
+    reaches: &BTreeMap<LocalId, BTreeSet<LocalId>>,
+    from: LocalId,
+    to: LocalId,
+) -> bool {
+    let mut seen: BTreeSet<LocalId> = BTreeSet::new();
+    let mut stack = vec![from];
+    while let Some(here) = stack.pop() {
+        if here == to {
+            return true;
+        }
+        if !seen.insert(here) {
+            continue;
+        }
+        if let Some(next) = reaches.get(&here) {
+            stack.extend(next.iter().copied());
+        }
+    }
+    false
 }

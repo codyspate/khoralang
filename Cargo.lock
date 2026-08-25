@@ -645,6 +645,7 @@ dependencies = [
  "khora-db",
  "khora-hir",
  "khora-manifest",
+ "khora-perceus",
  "khora-types",
  "salsa",
  "text-size",

@@ -3409,7 +3409,22 @@ polishing it**, because that is what has found every diagnostic bug so far; and
 **audit before exposure**, because an alpha is a poor way to discover
 memory-safety bugs and the people in it did not sign up for that.
 
-1. **The cycle lint** — small, and it closes the gap this section opens.
+1. ~~**The cycle lint**~~ — **done**, and it earned its place before it was
+   finished: run against `std`, `examples` and `bench` it reported two cycles
+   in `std/core.kh` that were not cycles. `self.wanted = held`, with `held` an
+   `Int` from `Array::length` — a scalar is copied into a field, not pointed
+   at from one, and can no more make a loop than adding two numbers can. Two
+   false positives across twenty-one files, on the first real code the pass
+   ever saw, which is exactly the failure the crate documentation says a lint
+   cannot have. It now asks `khora-perceus::is_boxed` whether the value is
+   even on the heap.
+
+   The other thing worth keeping: the first version walked `body.exprs()`,
+   which is arena order rather than program order — lowering is depth-first and
+   append-only, so a block is built *after* every statement in it, and an
+   assignment was examined before the `let` two lines above it. The pass missed
+   the shape it exists to catch and said nothing, which is the worst way for a
+   lint to be wrong. It walks structurally from the root now.
 2. **13.12's Postgres package** — the largest single piece of Khora anybody has
    written, and therefore the best available test of the language. Expected to
    produce more diagnostic and ergonomic findings than any deliberate pass

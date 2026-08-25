@@ -7,7 +7,7 @@
 //! that is perfectly fine.
 
 use khora_db::{Db, KhoraDatabase, SourceFile};
-use khora_lint::{findings, Finding, DANGLING_EXPRESSION, UNUSED_CAPABILITY};
+use khora_lint::{findings, Finding, DANGLING_EXPRESSION, REFERENCE_CYCLE, UNUSED_CAPABILITY};
 
 fn lint(db: &dyn Db, text: &str) -> Vec<Finding> {
     let file = SourceFile::new(db, "a.kh".into(), text.to_string());
@@ -201,4 +201,116 @@ fn findings_come_out_in_source_order() {
     let mut sorted = starts.clone();
     sorted.sort();
     assert_eq!(starts, sorted, "{found:?}");
+}
+
+// --- reference cycles ------------------------------------------------------
+
+/// A record that can hold another of its own kind, which is what makes a loop
+/// possible at all. `mut`, because an immutable graph is still a DAG.
+const NODE: &str = "module m;\nexport type Node = { mut next: Node, value: Int }\n";
+
+fn cycles(db: &dyn Db, body: &str) -> Vec<Finding> {
+    let text = format!("{NODE}{body}");
+    let file = SourceFile::new(db, "a.kh".into(), text.clone());
+    // A lint reported on a program that does not type-check says nothing
+    // useful, and a fixture that stopped compiling would quietly stop testing.
+    let errors: Vec<String> =
+        khora_types::diagnostics(db, file).iter().map(|e| e.message.clone()).collect();
+    assert!(errors.is_empty(), "the fixture should compile, got {errors:?}\n{text}");
+    findings(db, file).iter().filter(|f| f.lint == REFERENCE_CYCLE).cloned().collect()
+}
+
+#[test]
+fn a_field_pointing_at_its_own_object_is_reported() {
+    let db = KhoraDatabase::new();
+    let found = cycles(&db, "fn f(a: Node) -> () { a.next = a; }\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("loop in the heap"), "{:?}", found[0].message);
+    // The message has to name what is being closed, or a reader with three
+    // assignments on one line cannot tell which.
+    assert!(found[0].message.contains("`a.next`"), "{:?}", found[0].message);
+}
+
+#[test]
+fn two_objects_pointing_at_each_other_are_reported() {
+    let db = KhoraDatabase::new();
+    let found = cycles(&db, "fn f(a: Node, b: Node) -> () { a.next = b; b.next = a; }\n");
+    // Once, on the assignment that closes it. The first is innocent until the
+    // second happens, and reporting both would blame a line that is fine.
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn a_longer_loop_is_still_a_loop() {
+    let db = KhoraDatabase::new();
+    let found = cycles(
+        &db,
+        "fn f(a: Node, b: Node, c: Node) -> () { a.next = b; b.next = c; c.next = a; }\n",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+/// Reachability comes from construction as well as assignment: a record built
+/// out of `a` reaches `a` before anything is assigned at all.
+#[test]
+fn a_value_built_from_the_target_is_reported() {
+    let db = KhoraDatabase::new();
+    let found =
+        cycles(&db, "fn f(a: Node) -> () { let b: Node = { next: a, value: 1 }; a.next = b; }\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+// --- and the half that matters more ---------------------------------------
+
+#[test]
+fn a_chain_that_does_not_close_is_not_reported() {
+    let db = KhoraDatabase::new();
+    let found =
+        cycles(&db, "fn f(a: Node, b: Node, c: Node) -> () { a.next = b; b.next = c; }\n");
+    assert!(found.is_empty(), "a list is not a loop: {found:?}");
+}
+
+#[test]
+fn building_from_something_else_is_not_reported() {
+    let db = KhoraDatabase::new();
+    let found =
+        cycles(&db, "fn f(a: Node, c: Node) -> () { let b: Node = { next: c, value: 1 }; a.next = b; }\n");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// **A scalar cannot be part of a loop**, and the first version of this pass
+/// did not know that. `self.wanted = held`, with `held` an `Int` from
+/// `Array::length`, was reported as a cycle in `std/core.kh` — two false
+/// positives across twenty-one files, on the first real code it ever saw. A
+/// number is copied into a field, not pointed at from one.
+#[test]
+fn assigning_a_number_is_never_a_cycle() {
+    let db = KhoraDatabase::new();
+    let text = "module m;\n\
+                export type Counter = { mut seen: Int }\n\
+                fn f(c: Counter) -> () { let n = 3; c.seen = n; }\n";
+    let file = SourceFile::new(&db, "a.kh".into(), text.to_string());
+    let found: Vec<&Finding> =
+        findings(&db, file).iter().filter(|f| f.lint == REFERENCE_CYCLE).collect();
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// The whole of `std`, `examples` and `bench` is the real test of the quiet
+/// half. It is checked by `scripts/baseline.sh` rather than here — a lint that
+/// only sees fixtures has not met anything — and this records what that run
+/// says so a regression has something to contradict.
+#[test]
+fn the_corpus_is_quiet() {
+    let db = KhoraDatabase::new();
+    // A representative shape from `std/core.kh`: a field updated from a length.
+    let text = "module m;\n\
+                export type Vector = { mut items: String, mut wanted: Int }\n\
+                fn clear(self: Vector) -> () {\n\
+                \x20 let held = 4;\n\
+                \x20 if held > 0 { self.wanted = held; }\n\
+                }\n";
+    let file = SourceFile::new(&db, "a.kh".into(), text.to_string());
+    let found: Vec<&Finding> =
+        findings(&db, file).iter().filter(|f| f.lint == REFERENCE_CYCLE).collect();
+    assert!(found.is_empty(), "this is the shape that was reported wrongly: {found:?}");
 }

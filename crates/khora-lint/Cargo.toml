@@ -9,6 +9,10 @@ license.workspace = true
 [dependencies]
 khora-db.workspace = true
 khora-hir.workspace = true
+# For `is_boxed` — what counts as a heap value is the reference-counting
+# planner's answer, and a second opinion here could disagree with the one that
+# actually allocates.
+khora-perceus.workspace = true
 khora-types.workspace = true
 khora-manifest.workspace = true
 salsa.workspace = true
