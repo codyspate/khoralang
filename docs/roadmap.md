@@ -2539,7 +2539,33 @@ That document also records a correction worth keeping: **AWS CloudFront does
 not run WebAssembly.** CloudFront Functions is restricted JavaScript and
 Lambda@Edge is Node or Python.
 
-### 12.3 Observability
+### 12.3 Observability — **the middle layer, done**
+
+`std/trace.kh`. The vocabulary — `Context`, `Span`, `Attribute`, `Value`,
+`Status` — plus W3C `traceparent` in both directions, a `Tracer` effect, and a
+no-op handler that is the default because tracing which costs when it is off
+gets turned off.
+
+Five tests, and the ones that matter are about the wire format, since that is
+the only part another system reads: a header round-trips exactly, the sampled
+flag survives, and six malformed headers are refused — short, wrong version,
+uppercase hex, wrong separator, non-hex digits. A header half-read is a trace
+joined to the wrong parent, which is worse than starting a fresh one.
+
+**The rank-2 question `observability.md` left open turned out not to need
+answering.** A scoped `around` is generic in the body's result, and an effect
+field that is itself polymorphic is a different feature from ordinary
+generics — so `around` is an ordinary generic *function* that takes the tracer
+as an argument instead. Same scoping, no type-system change, and the effect
+stays monomorphic.
+
+Exporters remain a package, by the same rule that keeps Postgres out. What is
+not built yet is the part `observability.md` calls the real middle layer:
+propagation across a spawn, a steal and a cancellation, which needs the
+scheduler to carry the context. The types exist for it now.
+
+The original entry:
+
 
 Nothing in `std` emits a log line, let alone a span. For services, workers and
 event consumers that is disqualifying — and Khora can do it better than the

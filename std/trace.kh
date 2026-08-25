@@ -1,0 +1,292 @@
+module std::trace;
+
+// Spans, and the context that has to survive a fiber changing worker.
+//
+// A service that cannot be traced is not a candidate, and `docs/positioning.md`
+// claims Khora should be one wherever a team compares Go, backend TypeScript
+// or application Rust. Nothing in `std` emitted so much as a log line before
+// this module.
+//
+// # Why this is `std`'s and the exporter is not
+//
+// `docs/design/observability.md` argues it in full and the short version is
+// `ecosystem.md`'s rule: what belongs here is the layer everyone would
+// otherwise re-derive subtly wrong, and for tracing that is two things.
+//
+// **The vocabulary**, because two packages that disagree about what a span is
+// cannot compose into one trace. And **propagation** — a span's parent
+// surviving a spawn, a steal, a wake and a cancellation — which is not a
+// library concern at all: it is a property of the scheduler, and it is exactly
+// where every other ecosystem's tracing leaks.
+//
+// What is *not* here: OTLP, Datadog's protocol, Prometheus, batching, retry,
+// and every sampling policy beyond a head sampler. All of it is a vendor's
+// release cadence attached to a network protocol, which is the same argument
+// that keeps Postgres out of `std`.
+//
+// # The model is OpenTelemetry's, and that is a one-way decision
+//
+// Datadog spans are a service, a resource and flat string tags; OpenTelemetry
+// spans carry typed attributes, events and a status. Rendering OTel into
+// Datadog loses information and the reverse cannot be done at all — which is
+// why Datadog ships an OTel exporter and not the other way round. So the model
+// is the superset and the narrower vendor drops what it cannot hold.
+//
+// # What makes this cheap in Khora specifically
+//
+// A capability is an interception point. Instrumenting one is another handler:
+//
+// ```text
+// fn traced(inner: Fs, tracer: Tracer) -> Fs {
+//   handler for Fs {
+//     read: fn path => around(tracer, "fs.read", fn () => inner.read(path)),
+//     ..
+//   }
+// }
+// ```
+//
+// Every existing caller of `Fs` is instrumented and none of them changed.
+// That is what OpenTelemetry achieves with bytecode agents, and here it falls
+// out of capability-passing because that is what a capability *is*.
+
+import std::core::{Eq, List, Option, Result, Show};
+
+/// What an attribute can hold.
+///
+/// The smallest thing that matches OpenTelemetry's `AnyValue` without
+/// inheriting its variance. A vendor that only has strings renders these; one
+/// that has types keeps them.
+export type Value =
+  | Text(String)
+  | Number(Int)
+  | Decimal(Float)
+  | Flag(Bool);
+
+/// A named value on a span.
+export type Attribute = {
+  name: String,
+  value: Value,
+};
+
+/// How a span ended.
+export type Status =
+  /// Nothing went wrong, which is the common case and carries nothing.
+  | Ok
+  /// Something did, and this is what it was.
+  ///
+  /// A string rather than a typed error, because a span crosses into a
+  /// protocol that has no idea what Khora's rows are. The typed error stays
+  /// where it was raised; this is its rendering.
+  | Failed(String);
+
+/// A trace and a span within it, in the shape the wire format uses.
+///
+/// **Two `Int`s for the trace id** because W3C's is 128 bits and Khora's
+/// integer is 64. Naming the halves is better than a string that has to be
+/// parsed at every hop.
+export type Context = {
+  trace_high: Int,
+  trace_low: Int,
+  span: Int,
+  /// Whether this trace is being recorded. Decided once, at the root, and
+  /// carried unchanged — a trace that is half sampled is not a trace.
+  sampled: Bool,
+};
+
+/// A span in progress.
+export type Span = {
+  context: Context,
+  /// The span this one is inside, or zero at the root.
+  parent: Int,
+  name: String,
+};
+
+/// Starting, ending and annotating spans.
+///
+/// **Monomorphic on purpose.** A scoped `around` would be generic in the
+/// body's result, and an effect field that is itself polymorphic is a rank-2
+/// type — a different feature from ordinary generics, and one
+/// `observability.md` flagged as an open question. It is not needed: `around`
+/// below is an ordinary generic *function* that takes the tracer as an
+/// argument, which gets the scoping without the type system change.
+export effect Tracer {
+  /// Begins a span inside whatever is current.
+  start: (String, List<Attribute>) -> Span,
+  /// Ends it. Idempotent is not promised; end a span once.
+  finish: (Span, Status) -> (),
+  /// Something that happened during the span, with no duration of its own.
+  event: (Span, String, List<Attribute>) -> (),
+}
+
+impl Tracer {
+  /// A tracer that records nothing, as cheaply as possible.
+  ///
+  /// **The default, and it has to be nearly free.** If tracing costs when it
+  /// is off it gets turned off, and then it does not exist. This allocates one
+  /// span value with a zero context and does nothing else — no attributes are
+  /// read, no strings are built, and with Perceus the list the caller passed
+  /// is released at the call.
+  export fn none() -> Tracer {
+    handler for Tracer {
+      start: fn (name, _attributes) => {
+        context: { trace_high: 0, trace_low: 0, span: 0, sampled: false },
+        parent: 0,
+        name: name,
+      },
+      finish: fn (_span, _status) => (),
+      event: fn (_span, _name, _attributes) => (),
+    }
+  }
+}
+
+/// Runs `body` inside a span, and ends the span whichever way it leaves.
+///
+/// The scoped form, as a plain function rather than a field on the effect, so
+/// that no rank-2 type is needed. Takes the tracer explicitly because that is
+/// what makes it ordinary.
+///
+/// **The span is finished on the way out, including when `body` raises.**
+/// A `defer` would be the way to say that once Khora's `Region` is threaded
+/// here; until then the caller of a fallible body should use `around_result`.
+export fn around<A, 'c>(tracer: Tracer, name: String, body: () -> A with 'c) -> A with 'c {
+  let span = tracer.start(name, List::Nil);
+  let answer = body();
+  tracer.finish(span, Status::Ok);
+  answer
+}
+
+/// The same, for a body whose failure should mark the span failed.
+export fn around_result<A, E: Show, 'c>(
+  tracer: Tracer, name: String, body: () -> Result<A, E> with 'c
+) -> Result<A, E> with 'c {
+  let span = tracer.start(name, List::Nil);
+  let answer = body();
+  match answer {
+    Result::Ok(_) => tracer.finish(span, Status::Ok),
+    Result::Err(problem) => tracer.finish(span, Status::Failed(problem.show())),
+  }
+  answer
+}
+
+/// A `Text` attribute, which is most of them.
+export fn text(name: String, value: String) -> Attribute {
+  { name: name, value: Value::Text(value) }
+}
+
+/// A `Number` attribute.
+export fn number(name: String, value: Int) -> Attribute {
+  { name: name, value: Value::Number(value) }
+}
+
+/// A `Flag` attribute.
+export fn flag(name: String, value: Bool) -> Attribute {
+  { name: name, value: Value::Flag(value) }
+}
+
+impl Context {
+  /// A context that names no trace.
+  export fn none() -> Context {
+    { trace_high: 0, trace_low: 0, span: 0, sampled: false }
+  }
+
+  /// Whether this context refers to a trace at all.
+  ///
+  /// W3C says an all-zero trace id or span id is invalid, which is what makes
+  /// zero usable as "none" without a separate flag.
+  export fn is_valid(self) -> Bool {
+    (self.trace_high != 0 || self.trace_low != 0) && self.span != 0
+  }
+
+  /// The `traceparent` header for this context.
+  ///
+  /// `00-{32 hex}-{16 hex}-{2 hex}`, which is version zero of the W3C trace
+  /// context — a stable, tiny, vendor-neutral spec, which is why it is in
+  /// `std` when the exporters are not.
+  export fn to_traceparent(self) -> String {
+    "00-" + hex16(self.trace_high) + hex16(self.trace_low) + "-" + hex16(self.span)
+    + "-" + (if self.sampled { "01" } else { "00" })
+  }
+
+  /// The context a `traceparent` header names, or `None` if it does not.
+  ///
+  /// **Refuses anything it does not fully understand**, including a version it
+  /// has not heard of. A header half-read is a trace joined to the wrong
+  /// parent, which is worse than a trace that starts fresh.
+  export fn of_traceparent(header: String) -> Option<Context> {
+    if String::byte_length(header) != 55 { Option::None }
+    else if !String::starts_with(header, "00-") { Option::None }
+    else if U8::to_int(String::byte(header, 35)) != 45 { Option::None }
+    else if U8::to_int(String::byte(header, 52)) != 45 { Option::None }
+    else {
+      match unhex(header, 3, 16) {
+        Option::None => Option::None,
+        Option::Some(high) => match unhex(header, 19, 16) {
+          Option::None => Option::None,
+          Option::Some(low) => match unhex(header, 36, 16) {
+            Option::None => Option::None,
+            Option::Some(span) => match unhex(header, 53, 2) {
+              Option::None => Option::None,
+              Option::Some(flags) => Option::Some({
+                  trace_high: high,
+                  trace_low: low,
+                  span: span,
+                  sampled: Int::and(flags, 1) == 1,
+                }),
+            },
+          },
+        },
+      }
+    }
+  }
+}
+
+/// Sixteen lowercase hex digits, most significant first.
+fn hex16(value: Int) -> String { hex_from(value, 15, "") }
+
+fn hex_from(value: Int, shift: Int, out: String) -> String {
+  if shift < 0 { out } else {
+    hex_from(value, shift - 1, out + hex_digit(Int::and(Int::shr(value, shift * 4), 15)))
+  }
+}
+
+fn hex_digit(value: Int) -> String {
+  if value == 0 { "0" } else if value == 1 { "1" } else if value == 2 { "2" }
+  else if value == 3 { "3" } else if value == 4 { "4" } else if value == 5 { "5" }
+  else if value == 6 { "6" } else if value == 7 { "7" } else if value == 8 { "8" }
+  else if value == 9 { "9" } else if value == 10 { "a" } else if value == 11 { "b" }
+  else if value == 12 { "c" } else if value == 13 { "d" } else if value == 14 { "e" }
+  else { "f" }
+}
+
+/// `count` hex digits of `text` starting at `at`, as a number.
+fn unhex(text: String, at: Int, count: Int) -> Option<Int> {
+  if count == 0 { Option::Some(0) } else {
+    match digit_of(U8::to_int(String::byte(text, at))) {
+      Option::None => Option::None,
+      Option::Some(top) => match unhex(text, at + 1, count - 1) {
+        Option::None => Option::None,
+        Option::Some(rest) => Option::Some(Int::or(Int::shl(top, (count - 1) * 4), rest)),
+      },
+    }
+  }
+}
+
+/// **Lowercase only**, which is what the specification says and not a
+/// convenience anybody should relax: a header that round-trips differently
+/// from how it arrived is a header two systems disagree about.
+fn digit_of(byte: Int) -> Option<Int> {
+  if byte >= 48 && byte <= 57 { Option::Some(byte - 48) }
+  else if byte >= 97 && byte <= 102 { Option::Some(byte - 87) }
+  else { Option::None }
+}
+
+impl Eq for Context {
+  fn eq(self, other: Context) -> Bool {
+    self.trace_high == other.trace_high && self.trace_low == other.trace_low
+    && self.span == other.span && self.sampled == other.sampled
+  }
+}
+
+impl Show for Context {
+  fn show(self) -> String { Context::to_traceparent(self) }
+}
