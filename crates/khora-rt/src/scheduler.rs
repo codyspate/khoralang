@@ -414,6 +414,43 @@ impl Scheduler {
                 .expect("the timer thread"),
         );
 
+        // **A way to read the counters out of a program that does not end.**
+        // `docs/design/scheduler.md` §14 says the instruments exist so a slow
+        // result can say why it was slow, and until now nothing outside this
+        // crate's tests could see them: a server runs until it is killed, so
+        // there is no moment to print them at. `KHORA_SCHEDULER_REPORT=500`
+        // prints every five hundred milliseconds to stderr, and the difference
+        // between two lines is the interesting part.
+        if let Some(every) = std::env::var("KHORA_SCHEDULER_REPORT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            let watching = shared.clone();
+            let started = std::thread::Builder::new()
+                .name("khora-report".to_string())
+                .spawn(move || {
+                    let gap = std::time::Duration::from_millis(every.max(1));
+                    while !watching.stopping.load(Ordering::Acquire) {
+                        std::thread::sleep(gap);
+                        eprintln!(
+                            "khora-scheduler {:?} queued={} local={} parked={} live={}",
+                            watching.counts.snapshot(),
+                            watching.queued.lock().expect("the shared queue").len(),
+                            watching
+                                .locals
+                                .iter()
+                                .map(|q| q.lock().expect("a local queue").len())
+                                .sum::<usize>(),
+                            watching.parked.lock().expect("the parked fibers").len(),
+                            watching.live.lock().expect("the live fibers").len(),
+                        );
+                    }
+                });
+            if let Ok(handle) = started {
+                handles.push(handle);
+            }
+        }
+
         Scheduler { shared, workers: handles }
     }
 
@@ -786,7 +823,7 @@ fn watch(shared: Arc<Shared>) {
         // until something else woke it. A self-pipe or an event handle is the
         // refinement, and it is the same shape of change on all three
         // platforms.
-        let ready = shared.reactor.poll(std::time::Duration::from_millis(1));
+        let ready = shared.reactor.poll(std::time::Duration::from_millis(50));
         if ready.is_empty() {
             continue;
         }
@@ -1607,7 +1644,7 @@ mod tests {
         pool.spawn(Task::new(move || {
             // Connected, so it stays open, and silent, so it never becomes
             // readable. Only the deadline can end this.
-            let (mine, _peer) = crate::reactor::connected_pair();
+            let (mine, _peer) = crate::reactor::a_connected_pair();
             let began = std::time::Instant::now();
             let ended = wait_until_ready_by(
                 crate::reactor::socket_of(&mine),
@@ -1632,7 +1669,7 @@ mod tests {
 
         let pool = Scheduler::new(1);
         pool.spawn(Task::new(move || {
-            let (mine, _peer) = crate::reactor::connected_pair();
+            let (mine, _peer) = crate::reactor::a_connected_pair();
             *seen.lock().expect("the outcome") = Some(wait_until_ready_by(
                 crate::reactor::socket_of(&mine),
                 Interest::Readable,
@@ -1654,7 +1691,7 @@ mod tests {
 
         let pool = Scheduler::new(2);
         pool.spawn(Task::new(move || {
-            let (mine, mut peer) = crate::reactor::connected_pair();
+            let (mine, mut peer) = crate::reactor::a_connected_pair();
             let socket = crate::reactor::socket_of(&mine);
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1676,7 +1713,7 @@ mod tests {
     /// Off a scheduler it says so, rather than pretending to wait.
     #[test]
     fn a_deadline_without_a_scheduler_is_refused() {
-        let (mine, _peer) = crate::reactor::connected_pair();
+        let (mine, _peer) = crate::reactor::a_connected_pair();
         assert_eq!(
             wait_until_ready_by(
                 crate::reactor::socket_of(&mine),
@@ -1889,10 +1926,10 @@ mod tests {
     /// through here: try, would block, park, wake, retry.
     #[test]
     fn a_fiber_waiting_on_a_socket_is_woken_by_its_peer() {
-        use crate::reactor::{connected_pair, socket_of, Interest};
+        use crate::reactor::{a_connected_pair, socket_of, Interest};
         use std::io::{Read, Write};
 
-        let (client, mut server) = connected_pair();
+        let (client, mut server) = a_connected_pair();
         let socket = socket_of(&client);
         let got = Arc::new(Mutex::new(Vec::new()));
         let seen = got.clone();
@@ -1930,9 +1967,9 @@ mod tests {
     /// On threads this is impossible: the blocked read owns the thread.
     #[test]
     fn a_worker_is_not_blocked_by_a_fiber_waiting_on_a_socket() {
-        use crate::reactor::{connected_pair, socket_of, Interest};
+        use crate::reactor::{a_connected_pair, socket_of, Interest};
 
-        let (client, _peer) = connected_pair();
+        let (client, _peer) = a_connected_pair();
         let socket = socket_of(&client);
         let others = Arc::new(AtomicUsize::new(0));
 
@@ -1971,7 +2008,7 @@ mod tests {
     /// else's.
     #[test]
     fn many_fibers_wait_on_their_own_sockets() {
-        use crate::reactor::{connected_pair, socket_of, Interest};
+        use crate::reactor::{a_connected_pair, socket_of, Interest};
         use std::io::{Read, Write};
 
         const COUNT: usize = 64;
@@ -1980,7 +2017,7 @@ mod tests {
 
         let pool = Scheduler::new(2);
         for n in 0..COUNT {
-            let (client, peer) = connected_pair();
+            let (client, peer) = a_connected_pair();
             let socket = socket_of(&client);
             let counter = done.clone();
             pool.spawn(Task::new(move || {
@@ -2005,9 +2042,9 @@ mod tests {
     /// cancellable, and its watch must not outlive it.
     #[test]
     fn cancelling_a_fiber_waiting_on_a_socket_wakes_it() {
-        use crate::reactor::{connected_pair, socket_of, Interest};
+        use crate::reactor::{a_connected_pair, socket_of, Interest};
 
-        let (client, _peer) = connected_pair();
+        let (client, _peer) = a_connected_pair();
         let socket = socket_of(&client);
         let noticed = Arc::new(AtomicUsize::new(0));
         let counter = noticed.clone();
@@ -2041,8 +2078,8 @@ mod tests {
     /// know to block the thread as it always did.
     #[test]
     fn waiting_on_a_socket_without_a_scheduler_is_refused() {
-        use crate::reactor::{connected_pair, socket_of, Interest};
-        let (client, _peer) = connected_pair();
+        use crate::reactor::{a_connected_pair, socket_of, Interest};
+        let (client, _peer) = a_connected_pair();
         assert!(!wait_until_ready(socket_of(&client), Interest::Readable));
     }
 

@@ -82,12 +82,38 @@ pub(crate) struct Reactor {
     /// Set while a `poll` is in flight, so a caller can tell whether the
     /// reactor has looked since it registered.
     polling: AtomicBool,
+    /// A socket the reactor also watches, so that registering can interrupt a
+    /// `poll` already in flight. See [`Reactor::nudge`].
+    waker: std::sync::OnceLock<Option<Nudge>>,
+}
+
+/// The two ends of a loopback pair used only to make `poll` return.
+///
+/// **Without this the reactor could not be told anything.** `poll` waits on the
+/// set of sockets it was given, and a socket registered a microsecond later is
+/// not in that set — so a fiber that had just parked waited for the timeout
+/// rather than for its data. At a millisecond that is not a latency, it is a
+/// throughput ceiling: `bench/service` answered 57,467 requests a second with
+/// it and 613,571 with the reactor spinning instead, which is the same
+/// scheduler doing the same work with the waiting taken out.
+///
+/// A loopback pair rather than an `eventfd` or a pipe because the reactor
+/// already speaks sockets on all three platforms, and one mechanism that works
+/// everywhere beats three that are each better.
+struct Nudge {
+    /// Watched by every `poll`. Drained and ignored.
+    listen: std::net::TcpStream,
+    /// Written to by `register`, to end a `poll` that is already waiting.
+    poke: std::net::TcpStream,
 }
 
 impl Reactor {
     /// Records that `fiber` wants `socket` to become ready.
     pub(crate) fn register(&self, watch: Watch) {
         self.watching.lock().expect("the reactor").push(watch);
+        // After the entry is visible, so a `poll` woken by this cannot look
+        // before there is something to see.
+        self.nudge();
     }
 
     /// Forgets everything a fiber was waiting on.
@@ -109,15 +135,38 @@ impl Reactor {
     /// Those entries are removed: a fiber is woken once per registration, and
     /// re-registers if its retry would block again.
     pub(crate) fn poll(&self, timeout: std::time::Duration) -> Vec<usize> {
-        let watching = self.watching.lock().expect("the reactor").clone();
-        if watching.is_empty() {
-            // Nothing to wait on. Sleeping here rather than spinning, because
-            // the alternative is a thread at a hundred per cent doing nothing.
+        // **The waker goes into the set, and it is the reason the timeout can
+        // be generous.** A registration arriving mid-`poll` writes a byte to
+        // it, `poll` returns at once, and the next round includes the new
+        // socket. Without it the only thing that ended a wait was the timeout,
+        // and every fiber that parked a moment too late paid all of it.
+        // **Claimed before the list is read, and the order is the whole
+        // argument.** A registration that sees this false knows the reactor is
+        // not waiting, so the entry it just pushed will be picked up when the
+        // next `poll` reads the list — no nudge needed. A registration that
+        // sees it true may or may not be in the list this round, so it nudges
+        // and the reactor looks again. Reading the list first would leave a
+        // window where a registration is neither in the list nor able to say
+        // so, and that fiber waits for the timeout.
+        self.polling.store(true, Ordering::Release);
+        let mut watching = self.watching.lock().expect("the reactor").clone();
+        let waking = self.waker().map(|nudge| Watch {
+            socket: socket_of(&nudge.listen),
+            interest: Interest::Readable,
+            fiber: WAKER_FIBER,
+        });
+        if watching.is_empty() && waking.is_none() {
+            // Nothing to wait on and no way to be told. Sleeping rather than
+            // spinning, because the alternative is a thread at a hundred per
+            // cent doing nothing.
+            self.polling.store(false, Ordering::Release);
             std::thread::sleep(timeout.min(std::time::Duration::from_millis(1)));
             return Vec::new();
         }
+        if let Some(waking) = waking {
+            watching.push(waking);
+        }
 
-        self.polling.store(true, Ordering::Release);
         let ready = poll_sockets(&watching, timeout);
         self.polling.store(false, Ordering::Release);
 
@@ -127,6 +176,10 @@ impl Reactor {
         let mut woken = Vec::new();
         let mut watching = self.watching.lock().expect("the reactor");
         for index in ready {
+            if index.fiber == WAKER_FIBER {
+                self.drain();
+                continue;
+            }
             let Some(entry) = watching.iter().position(|w| {
                 w.socket == index.socket && w.fiber == index.fiber
             }) else {
@@ -136,7 +189,65 @@ impl Reactor {
         }
         woken
     }
+
+    /// The waker pair, made the first time anything registers.
+    ///
+    /// Late rather than in a constructor because `Reactor` is `Default` and a
+    /// loopback connection is not something to open in one — a program that
+    /// never waits on a socket should never open it.
+    fn waker(&self) -> Option<&Nudge> {
+        self.waker
+            .get_or_init(|| match connected_pair() {
+                Ok((listen, poke)) => {
+                    // Neither end may ever block. A full buffer means a wakeup
+                    // is already pending, which is exactly as good as another.
+                    let _ = listen.set_nonblocking(true);
+                    let _ = poke.set_nonblocking(true);
+                    Some(Nudge { listen, poke })
+                }
+                // No pair, so no waker: the timeout is all there is, which is
+                // slow rather than wrong.
+                Err(_) => None,
+            })
+            .as_ref()
+    }
+
+    /// Ends a `poll` that is already waiting.
+    fn nudge(&self) {
+        // Only when somebody is actually waiting. A nudge is two syscalls —
+        // the write here and the read that drains it — and paying them when
+        // the reactor is between polls buys nothing, because the next poll
+        // reads the list afresh.
+        if !self.polling.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(nudge) = self.waker() {
+            use std::io::Write;
+            // A full buffer is a wakeup already on its way.
+            let _ = (&nudge.poke).write(&[1]);
+        }
+    }
+
+    /// Throws away whatever [`Reactor::nudge`] wrote.
+    fn drain(&self) {
+        if let Some(nudge) = self.waker() {
+            use std::io::Read;
+            let mut bin = [0u8; 256];
+            while let Ok(read) = (&nudge.listen).read(&mut bin) {
+                if read < bin.len() {
+                    break;
+                }
+            }
+        }
+    }
 }
+
+/// The fiber id the waker's own entry carries, which belongs to no fiber.
+///
+/// `usize::MAX` rather than zero: zero is what `block_until_ready` uses for a
+/// wait that has no fiber behind it, and two meanings on one number is how the
+/// wrong one gets woken.
+const WAKER_FIBER: usize = usize::MAX;
 
 /// Every watch whose socket is ready, or an empty list if the wait timed out.
 ///
@@ -250,17 +361,22 @@ pub(crate) fn block_until_ready(
 /// There is no `socketpair` on Windows, so this is a listener, a connect and an
 /// accept — which works everywhere and is what a test actually wants anyway,
 /// since a real socket is the thing under test.
+fn connected_pair() -> std::io::Result<(std::net::TcpStream, std::net::TcpStream)> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let client = std::net::TcpStream::connect(address)?;
+    let (server, _) = listener.accept()?;
+    Ok((client, server))
+}
+
+/// The same, for tests, where a machine that cannot open a loopback socket is
+/// a machine the test cannot run on anyway.
 #[cfg(test)]
-pub(crate) fn connected_pair() -> (std::net::TcpStream, std::net::TcpStream) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
-    let address = listener.local_addr().expect("its address");
-    let client = std::net::TcpStream::connect(address).expect("connecting");
-    let (server, _) = listener.accept().expect("accepting");
-    (client, server)
+pub(crate) fn a_connected_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+    connected_pair().expect("a loopback pair")
 }
 
 /// The platform's handle for a `TcpStream`.
-#[cfg(test)]
 pub(crate) fn socket_of(stream: &std::net::TcpStream) -> Socket {
     #[cfg(windows)]
     {
@@ -282,7 +398,7 @@ mod tests {
 
     #[test]
     fn a_socket_with_nothing_on_it_is_not_ready() {
-        let (client, _server) = connected_pair();
+        let (client, _server) = a_connected_pair();
         let reactor = Reactor::default();
         reactor.register(Watch {
             socket: socket_of(&client),
@@ -296,7 +412,7 @@ mod tests {
 
     #[test]
     fn a_socket_with_something_on_it_wakes_its_fiber() {
-        let (client, mut server) = connected_pair();
+        let (client, mut server) = a_connected_pair();
         let reactor = Reactor::default();
         reactor.register(Watch {
             socket: socket_of(&client),
@@ -313,8 +429,8 @@ mod tests {
     /// connection does not wake the other ninety-nine thousand.
     #[test]
     fn only_the_ready_socket_wakes() {
-        let (quiet, _quiet_peer) = connected_pair();
-        let (busy, mut busy_peer) = connected_pair();
+        let (quiet, _quiet_peer) = a_connected_pair();
+        let (busy, mut busy_peer) = a_connected_pair();
 
         let reactor = Reactor::default();
         reactor.register(Watch {
@@ -333,7 +449,7 @@ mod tests {
     /// that would have blocked comes back to.
     #[test]
     fn a_writable_socket_is_ready_immediately() {
-        let (client, _server) = connected_pair();
+        let (client, _server) = a_connected_pair();
         let reactor = Reactor::default();
         reactor.register(Watch {
             socket: socket_of(&client),
@@ -348,7 +464,7 @@ mod tests {
     /// otherwise every disconnect leaks a fiber.
     #[test]
     fn a_closed_peer_wakes_the_reader() {
-        let (client, server) = connected_pair();
+        let (client, server) = a_connected_pair();
         let reactor = Reactor::default();
         reactor.register(Watch {
             socket: socket_of(&client),
@@ -362,8 +478,8 @@ mod tests {
 
     #[test]
     fn forgetting_a_fiber_takes_all_of_its_watches_off() {
-        let (a, _pa) = connected_pair();
-        let (b, _pb) = connected_pair();
+        let (a, _pa) = a_connected_pair();
+        let (b, _pb) = a_connected_pair();
         let reactor = Reactor::default();
         reactor.register(Watch { socket: socket_of(&a), interest: Interest::Readable, fiber: 4 });
         reactor.register(Watch { socket: socket_of(&b), interest: Interest::Readable, fiber: 4 });
@@ -388,7 +504,7 @@ mod tests {
         let mut peers = Vec::new();
         let reactor = Reactor::default();
         for fiber in 0..8usize {
-            let (client, mut peer) = connected_pair();
+            let (client, mut peer) = a_connected_pair();
             peer.write_all(b"x").expect("writing");
             reactor.register(Watch {
                 socket: socket_of(&client),
@@ -409,7 +525,7 @@ mod tests {
     /// the retry depends on.
     #[test]
     fn the_bytes_are_there_when_the_wake_arrives() {
-        let (mut client, mut server) = connected_pair();
+        let (mut client, mut server) = a_connected_pair();
         let reactor = Reactor::default();
         reactor.register(Watch {
             socket: socket_of(&client),

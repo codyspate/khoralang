@@ -290,7 +290,7 @@ fn fiber(shape: Shape, seed: u64, tally: Arc<Tally>) -> Task {
                 }
             }
             Shape::Socket => {
-                let (mine, peer) = crate::reactor::connected_pair();
+                let (mine, peer) = crate::reactor::a_connected_pair();
                 let watch = crate::reactor::socket_of(&mine);
                 let tally = tally.clone();
                 schedule(Task::new(move || {

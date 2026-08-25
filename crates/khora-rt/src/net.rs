@@ -304,7 +304,7 @@ unsafe fn raw_accept(socket: Socket, address: *mut u8, length: *mut u8) -> isize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reactor::{connected_pair, socket_of};
+    use crate::reactor::{a_connected_pair, socket_of};
     use std::io::Write;
 
     /// Off a scheduler this blocks the thread, so the bytes are there when it
@@ -312,7 +312,7 @@ mod tests {
     /// and what it got before any of this existed.
     #[test]
     fn a_read_off_a_scheduler_blocks_until_the_bytes_arrive() {
-        let (client, mut server) = connected_pair();
+        let (client, mut server) = a_connected_pair();
         let socket = socket_of(&client);
         assert_eq!(khora_net_prepare(socket), 0, "the socket should go non-blocking");
 
@@ -333,7 +333,7 @@ mod tests {
     /// how every reader above this learns the stream ended.
     #[test]
     fn a_closed_peer_reads_zero() {
-        let (client, server) = connected_pair();
+        let (client, server) = a_connected_pair();
         let socket = socket_of(&client);
         assert_eq!(khora_net_prepare(socket), 0);
         drop(server);
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn a_write_off_a_scheduler_reaches_the_peer() {
         use std::io::Read;
-        let (client, mut server) = connected_pair();
+        let (client, mut server) = a_connected_pair();
         let socket = socket_of(&client);
         assert_eq!(khora_net_prepare(socket), 0);
 
@@ -375,7 +375,7 @@ mod tests {
         let pool = Scheduler::new(1);
 
         for n in 0..2usize {
-            let (client, peer) = connected_pair();
+            let (client, peer) = a_connected_pair();
             let socket = socket_of(&client);
             assert_eq!(khora_net_prepare(socket), 0);
             let counter = done.clone();
@@ -413,7 +413,7 @@ mod tests {
     /// A socket nobody prepared still works — it blocks, as it always did.
     #[test]
     fn an_unprepared_socket_still_reads() {
-        let (client, mut server) = connected_pair();
+        let (client, mut server) = a_connected_pair();
         server.write_all(b"z").expect("writing");
 
         let mut buffer = [0u8; 1];
@@ -440,7 +440,7 @@ mod tests {
 
         let pool = Scheduler::new(2);
         pool.spawn(Task::new(move || {
-            let (mine, _peer) = crate::reactor::connected_pair();
+            let (mine, _peer) = a_connected_pair();
             let socket = crate::reactor::socket_of(&mine);
             khora_net_prepare(socket);
             khora_net_set_timeout(socket, 60);
@@ -471,7 +471,7 @@ mod tests {
 
         let pool = Scheduler::new(2);
         pool.spawn(Task::new(move || {
-            let (mine, mut peer) = crate::reactor::connected_pair();
+            let (mine, mut peer) = a_connected_pair();
             let socket = crate::reactor::socket_of(&mine);
             khora_net_prepare(socket);
             std::thread::spawn(move || {
@@ -492,7 +492,7 @@ mod tests {
     /// number does not inherit it.
     #[test]
     fn forgetting_a_socket_clears_its_deadline() {
-        let (mine, _peer) = connected_pair();
+        let (mine, _peer) = a_connected_pair();
         let socket = socket_of(&mine);
         khora_net_set_timeout(socket, 5_000);
         assert!(deadline_for(socket).is_some());

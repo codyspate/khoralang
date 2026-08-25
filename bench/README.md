@@ -71,13 +71,17 @@ One sitting, one machine, `bench/service` only, 48 reused connections:
 
 | | req/s |
 | --- | --- |
-| fibers as threads (the default) | 760,771 |
-| fibers on the scheduler (`KHORA_FIBERS=scheduler`) | 59,965 |
+| fibers as threads (the default) | 782,149 |
+| fibers on the scheduler, wakeable reactor | 429,000 |
+| — the same, before the reactor could be woken | 59,965 |
 
-Twelve times, which is why threads are still the default and why
-`docs/roadmap.md` 11H exists. The two figures were taken minutes apart with
-nothing else changed, which is the only way this file allows a comparison to be
-made.
+Taken minutes apart with nothing else changed, which is the only way this file
+allows a comparison to be made. The scheduler figure is the median of 440,012
+and 418,247; the third row is what it was before 11H and is kept because the
+ratio between the second and third rows is the whole of that entry.
+
+Twelve times slower became 1.8 times slower by making one `poll` interruptible.
+Threads remain the default until the rest of that gap is understood.
 
 **What it is not.** Not correctness — `scripts/http_conformance.sh` passes on
 both, pipelining and header limits included — and not the cost of a fiber,

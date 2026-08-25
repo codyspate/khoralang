@@ -2314,7 +2314,7 @@ deliberately, until the remaining backends land.
 | 11E | a bounded blocking pool, and `std::fs` routed through it |
 | 11F | adversarial soak, a full state audit, and the scale numbers |
 | 11G | `std::net` and `Fiber::spawn` wired to it, behind `KHORA_FIBERS` |
-| 11H | **open** — why a request costs twelve times more on the scheduler |
+| 11H | the reactor could not be woken, and that was the twelve times |
 | — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
 Measured on both platforms now, and they agree to within one per cent. **A
@@ -2528,45 +2528,92 @@ bugs — is a real argument that has not been had.
 and an SBOM are what an audit-heavy buyer asks for next, and `positioning.md`
 names that buyer explicitly.
 
-### 11H — a request costs twelve times more on the scheduler
+### 11H — the reactor could not be woken, and that was the twelve times
 
-`bench/service`: **760,771 req/s on threads, 59,965 on the scheduler.** Same
-machine, same sitting, 48 reused connections, five seconds — the comparison
-`bench/README.md` insists on. `KHORA_FIBERS=scheduler` selects it and threads
-remain the default, because twelve times slower is not a default whatever else
-is true of it.
+`bench/service`, one machine, one sitting, 48 reused connections:
 
-**It is not correctness and it is not the fiber.** `scripts/http_conformance.sh`
-passes on both paths — pipelining, `Connection: close`, a 9 KB header refused
-rather than fatal — and the sixteen compiled fiber tests pass on both in the
-same time to within four per cent. What is left is the path between a socket
-becoming readable and the fiber that wanted it running again, which on threads
-is one blocking `recv` returning and on the scheduler is: `recv` answers
-would-block, the fiber registers with the reactor, parks, a separate reactor
-thread notices readiness in a `poll` over every watched socket, takes the
-parked lock, moves the task to the shared queue, wakes a worker through a
-condvar, and the worker resumes a coroutine.
+| | req/s |
+| --- | --- |
+| threads | 782,149 |
+| scheduler, after this entry | 429,000 |
+| scheduler, before it | 59,965 |
 
-Suspects, none of them measured yet and in the order they are worth measuring:
+**One `poll` that could not be interrupted was the whole of it.** The reactor
+waited on the set of sockets it had been given, and a socket registered a
+microsecond later was not in that set — so a fiber that had just parked waited
+for the timeout rather than for its data. At a millisecond that is not a
+latency, it is a ceiling: 48 connections divided by a millisecond is about the
+number of requests a second that were coming out.
 
-  - **The cross-thread hop itself.** One reactor thread discovers every
-    readiness and hands every fiber back through a condvar. Workers polling the
-    reactor themselves when they have nothing to run is the shape that removes
-    it, and is what other runtimes do.
-  - **`poll`.** O(n) in watched sockets per call, and one syscall per
-    discovery. This is the row the roadmap already reserves for epoll, kqueue
-    and IOCP — and now there is a number to hold them to rather than an
-    expectation.
-  - **A read that need not have waited.** A keep-alive connection is read again
-    the moment its response is written, so the common case is "not yet, but
-    soon". A bounded retry before suspending would turn the expensive path into
-    the rare one, and is cheap to try and easy to get wrong.
+The fix is a loopback pair the reactor also watches. `register` writes a byte
+to it, `poll` returns at once, and the next round includes the new socket. That
+also lets the timeout go from one millisecond to fifty, because it is now a
+backstop rather than the mechanism.
 
-**Measure before choosing.** 11F's rule was not to replace a mechanism until
-the counters showed it was the limiting one; the counters now show *something*
-is, and which of the three it is has not been established. `Snapshot` already
-carries `sockets_ready`, `parks` and `wakes`, and a run of `bench/service` with
-those read at the end is the first thing to do.
+**Claiming `polling` before reading the watch list is the correctness
+argument** for nudging only when somebody is waiting. A registration that sees
+it false knows the reactor is not in a `poll`, so the entry it just pushed will
+be read when the next one starts. A registration that sees it true may not be
+in this round's list, so it nudges. Reading the list first would leave a window
+where a registration is neither visible nor able to announce itself, and that
+fiber waits out the timeout.
+
+### The trail
+
+Kept because the rejections are worth as much as the fix, and because a single
+benchmark number with several changes folded into it says nothing.
+
+| | change | req/s |
+| --- | --- | --- |
+| — | scheduler, as 11G left it | 57,467 |
+| E1 | `BUDGET` 128 → 4,000,000,000, so nothing is preempted | 59,197 |
+| E2 | reactor spins instead of sleeping — diagnostic only | 613,571 |
+| E3 | wakeable reactor, 50 ms backstop | 422,346 |
+| E4 | nudge only while `polling`, claimed before the list is read | 415,708 |
+| E5 | one `recv` retry before parking | 428,874 |
+| — | E4, measured again at the end | 440,012 / 418,247 |
+
+E2 is not a candidate implementation: it is a core at a hundred per cent to
+prove where the time went. E1 and E5 were reverted.
+
+### What did not work, and one of them was my own first answer
+
+**Preemption is not the cost, though it looks like it.** The counters said
+587,130 of 747,963 resumes ended on the safepoint budget running out — 78%,
+about twice per request — which is a striking number and the obvious suspect.
+Raising `BUDGET` from 128 to four billion moved throughput from 57,467 to
+59,197, which is nothing. A preempted fiber goes back on its own worker's queue
+and is picked up again immediately; it never touches the reactor, the parked
+map or another thread. **A large counter is not a large cost**, and the only
+way to tell is to turn the thing off.
+
+**One retry before parking does not help.** Registered, then read again before
+suspending, on the theory that a keep-alive connection is read the moment its
+response is written and the data is nearly there: 428,874 against 415,708,
+inside the eight per cent this repository calls noise. The data is genuinely
+not there a microsecond later. Deleted rather than kept on the grounds that it
+might help somewhere else.
+
+### What is left, in the order worth trying
+
+The gap is now 1.8× rather than 12×, and spinning the reactor instead of
+sleeping gives 613,571 — so roughly half of what remains is still the wake
+path and the rest is elsewhere.
+
+  - **Let workers poll the reactor themselves** when they have nothing to run.
+    Every readiness currently crosses from the reactor thread to a worker
+    through the parked map, the shared queue and a condvar; a worker that
+    polled would run the fiber it just found. This is the largest remaining
+    item and the one that removes an OS-thread handoff from the common path.
+  - **Carry the fiber's state in the `Watch`** rather than looking it up in the
+    `live` map on every readiness. One global `HashMap` lock per wake, for
+    something the registration already had in its hand.
+  - **Batch the wake.** A `poll` that finds thirty ready sockets currently
+    takes the shared queue thirty times and notifies thirty times.
+  - **Then epoll, kqueue and IOCP.** The row above this one in the phase table
+    has been waiting for a measurement to justify it and now has one — but
+    after the three items above, because each of them is cheaper and none of
+    them is made unnecessary by a better `poll`.
 
 ## When can libraries be written?
 

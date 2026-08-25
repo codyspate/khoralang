@@ -8,18 +8,15 @@
 //!
 //! `KHORA_FIBERS=scheduler` picks it. **Threads are the default, and the
 //! reason is a measurement rather than caution**: `bench/service` answers
-//! 760,771 requests a second on threads and 59,965 on the scheduler, on one
-//! machine in one sitting, which is the comparison `bench/README.md` says is
-//! the only kind that travels. Twelve times slower is not a default whatever
-//! else is true of it.
+//! 782,149 requests a second on threads and about 429,000 on the scheduler,
+//! on one machine in one sitting, which is the comparison `bench/README.md`
+//! says is the only kind that travels.
 //!
-//! That is not an argument against the scheduler, which does what it was built
-//! to do — a hundred thousand fibers waiting at once cost 407 MB rather than
-//! the 3.3 GB the same number of threads would, and `crate::soak` runs
-//! millions of them without losing one. It is an argument that something
-//! between a socket becoming readable and a fiber running again is far too
-//! expensive, and `docs/roadmap.md` 11H is where that is chased with this
-//! number attached to it.
+//! It was 59,965 until 11H found that the reactor's `poll` could not be
+//! interrupted by a registration arriving while it waited — twelve times
+//! became 1.8 times by adding a socket the reactor could be poked through.
+//! What is left of the gap is written up there, along with the two things
+//! tried that did not help.
 //!
 //! Both paths are kept because the number is only worth having if it can be
 //! taken again.
