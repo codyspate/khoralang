@@ -131,26 +131,6 @@ fn deadline_for(socket: Socket) -> Option<std::time::Instant> {
     Some(std::time::Instant::now() + std::time::Duration::from_millis(millis))
 }
 
-/// Reports the platform's would-block error, as a timed-out `recv` used to.
-///
-/// The point of doing it this way is that nothing above has to change: `recv`
-/// returning `-1` with `EAGAIN` is exactly what a socket with `SO_RCVTIMEO`
-/// did, so `std::net` and `http.kh` keep the contract they were written
-/// against while the mechanism underneath is a scheduler timer.
-fn report_would_block() {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Networking::WinSock::{WSASetLastError, WSAEWOULDBLOCK};
-        // SAFETY: sets this thread's last winsock error and nothing else.
-        unsafe { WSASetLastError(WSAEWOULDBLOCK) };
-    }
-    #[cfg(not(windows))]
-    {
-        // SAFETY: `__errno_location` returns this thread's own errno slot.
-        unsafe { *libc::__errno_location() = libc::EAGAIN };
-    }
-}
-
 /// How long a receive on `socket` may wait before it reports a timeout.
 ///
 /// Replaces `setsockopt(SO_RCVTIMEO)`. Zero clears it.
@@ -197,8 +177,21 @@ pub unsafe extern "C" fn khora_net_recv(socket: Socket, into: *mut u8, length: i
             return read;
         }
         if !wait(socket, Interest::Readable, deadline) {
-            // Exactly what a socket with `SO_RCVTIMEO` used to do.
-            report_would_block();
+            // **A negative return, and nothing else.** The first version of
+            // this also set `EAGAIN`, to imitate a socket with `SO_RCVTIMEO`
+            // down to the error number. That was unnecessary and unsound.
+            //
+            // Unnecessary because no Khora reads it: `std::net` looks at the
+            // sign and `std::fs` says outright that C's error numbers are a
+            // table it declines to know, so a timeout is a failed read and
+            // that is the whole of the contract.
+            //
+            // Unsound because `errno` is thread-local and a fiber is not. It
+            // is set here on whichever worker is running, and a fiber that
+            // suspends before its caller looks — at any safepoint, which is
+            // every loop back-edge — reads the error off a thread that never
+            // made the call. Any future shim tempted to report through `errno`
+            // has the same problem.
             return -1;
         }
     }
@@ -434,9 +427,9 @@ mod tests {
     ///
     /// The regression `SO_RCVTIMEO` would have become. A connected, silent peer
     /// is exactly the slow client `std::net::http` sets ten seconds against;
-    /// with the socket prepared, the kernel's option can never fire, so the
-    /// scheduler's timer has to — and it has to look identical from Khora:
-    /// `-1`, with the platform reporting would-block.
+    /// with the socket prepared the kernel's option can never fire, so the
+    /// scheduler'''s timer has to — and it has to look from Khora exactly like
+    /// the failed read it replaces, which is a negative return.
     #[test]
     fn a_receive_deadline_reports_a_timeout_the_way_the_kernel_did() {
         use crate::coro::Task;
@@ -456,15 +449,13 @@ mod tests {
             let began = std::time::Instant::now();
             // SAFETY: sixteen writable bytes.
             let read = unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 16) };
-            let blocked = would_block();
             khora_net_forget(socket);
-            *seen.lock().expect("the outcome") = Some((read, blocked, began.elapsed()));
+            *seen.lock().expect("the outcome") = Some((read, began.elapsed()));
         }));
         pool.drain();
 
-        let (read, blocked, took) = outcome.lock().expect("the outcome").expect("it ran");
+        let (read, took) = outcome.lock().expect("the outcome").expect("it ran");
         assert_eq!(read, -1, "a timed-out receive must look like a failed one");
-        assert!(blocked, "and must report would-block, as SO_RCVTIMEO did");
         assert!(took >= std::time::Duration::from_millis(55), "returned early: {took:?}");
     }
 
