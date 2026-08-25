@@ -67,13 +67,11 @@ website/content/docs/
   project/
     release-readiness.md
     documentation-plan.md
-    compatibility.md
-    governance.md
-    security.md
-    contributing.md
+    auto-documentation.md
+    website-operations.md
 ```
 
-File names may evolve when the site implementation lands, but these content families should remain recognizable. The URL contract should be stable even if the frontend framework changes.
+The public content boundary is stable even if the frontend framework changes.
 
 ## Writing principles
 
@@ -81,15 +79,15 @@ File names may evolve when the site implementation lands, but these content fami
 
 The public guide explains what a programmer writes and what behavior they can rely on. It should not make compiler implementation concepts prerequisites.
 
-For example, typed failure should begin from code shaped like:
+For example, typed failure begins from code shaped like:
 
 ```khora
 fn load_user(id: Id) -> User raises DbError
 ```
 
-and explain what callers must handle. Algebraic-effect lowering belongs in an optional design link, not in the first explanation.
+and explains what callers must handle. Algebraic-effect lowering belongs in an optional design link, not in the first explanation.
 
-Capabilities should begin from what authority a function requires and how a handler supplies it. Fiber documentation should begin from structured lifetime and cancellation, not coroutine stack mechanics.
+Capabilities begin from what authority a function requires and how a handler supplies it. Fiber documentation begins from structured lifetime and cancellation, not coroutine stack mechanics.
 
 ### Distinguish tutorial, guide and reference
 
@@ -112,61 +110,78 @@ Pages for unreleased functionality may exist under development docs, but must be
 
 ### Explain failure and cleanup paths
 
-Khora's strongest ideas appear when things go wrong. Examples should not teach only success paths. Database, resource and concurrency pages should show cancellation, typed failure, cleanup and bounded concurrency where they materially affect correctness.
+Khora's strongest ideas appear when things go wrong. Database, resource and concurrency pages should show cancellation, typed failure, cleanup and bounded concurrency where they materially affect correctness.
 
 ## Version model
 
-The public documentation should support three views:
+The public documentation supports three views before the first stable release workflow is finalized:
 
 ```text
-/docs/             current stable release
+/docs/             current stable/current public docs
 /docs/<version>/   immutable docs for a released compiler
 /docs/next/        current development docs
 ```
 
-A release tag should produce both compiler artifacts and the corresponding documentation snapshot. Links copied from a versioned reference page should not silently begin describing a different compiler after an upgrade.
+A release tag should produce both compiler artifacts and the corresponding documentation snapshot. Links copied from a versioned reference page must not silently begin describing a different compiler after an upgrade.
 
-The site should display the current documentation version prominently and make switching versions straightforward.
+## Automatic API documentation
 
-## Standard-library documentation
+Public `std` and package API documentation should be generated from the same source revision as the compiler/package being documented.
 
-Public `std` API documentation should be generated or validated from the same source revision as the compiler release.
+The intended compiler surface is:
 
-At minimum each exported API should expose:
+```text
+khora doc
+khora doc --package
+khora doc --stdlib
+khora doc --format json
+khora doc --check
+```
 
-- declaration/signature;
+The compiler owns extraction and resolution. The website consumes structured output rather than scraping Khora source text.
+
+Each generated symbol should expose at least:
+
+- symbol kind and fully qualified name;
+- resolved declaration/signature;
 - module;
-- documentation comment;
-- effect/failure/capability requirements;
-- important behavioral contracts;
-- examples where usage is not obvious.
+- generics and trait bounds;
+- effect/capability row;
+- typed failure row;
+- `///` Markdown documentation comment;
+- source location;
+- links to referenced symbols;
+- checked examples where usage is not obvious.
 
-Generation must preserve curated conceptual pages. API generation is a reference mechanism, not a substitute for the language guide or cookbook.
+`khora doc --check` compiles fenced examples that claim to be valid Khora. Generated API pages complement, rather than replace, the curated Guide and Cookbook.
+
+The design rule is: **the compiler generates facts; humans write explanations.**
 
 ## Search
 
-Search should index at least:
+Search should index guide pages, language reference, generated standard-library/package symbols, and Cookbook pages. Exact symbols should rank their API page highly; conceptual searches such as “cancellation” or “raises” should prefer conceptual documentation over compiler internals.
 
-- guide pages;
-- language reference;
-- standard-library symbols;
-- cookbook pages.
+## Website implementation
 
-Searching for an exact stdlib symbol should rank that API page highly. Searching for a concept such as “cancellation,” “transaction,” or “raises” should surface the conceptual guide before internal implementation material.
+The public site uses Astro + Starlight. Canonical Markdown remains in `website/content/docs/`; `scripts/sync-docs.mjs` copies it into Starlight's framework-specific content tree for the build.
 
-## Cloudflare deployment
+Astro renders a static site at `/docs`. A small Cloudflare Worker handles top-level routing and delegates static requests to a Workers Static Assets binding.
 
-`khoralang.com` is intended to run on Cloudflare infrastructure. The site implementation should satisfy these properties regardless of framework:
+```text
+website/content/docs/
+        ↓
+npm run sync:docs
+        ↓
+Astro + Starlight
+        ↓
+website/dist/
+        ↓
+Cloudflare Worker / Static Assets
+        ↓
+https://khoralang.com/docs/
+```
 
-- deployment is automated from CI;
-- the repository is the source of truth;
-- the deployed build records its Git revision;
-- production deploys are associated with release tags where applicable;
-- preview deployments can be produced for documentation pull requests;
-- redirects/version URLs are controlled in source;
-- site search and static assets do not require an undocumented external build step.
-
-Cloudflare Workers, Pages, or a combination may implement the site. Choosing between them is a website implementation decision, not a language-design decision.
+The Worker is configured as the Custom Domain origin for `khoralang.com`. `/` redirects to `/docs/` until a separate public homepage is introduced.
 
 ## Required public pages before release
 
