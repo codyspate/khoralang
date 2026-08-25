@@ -214,6 +214,15 @@ impl Task {
     }
 }
 
+/// Whether the caller is running on a fiber stack at all.
+///
+/// The blocking pool asks before it does anything clever: a caller with no
+/// fiber has no worker to give back, so handing its work to another thread and
+/// waiting would be strictly worse than doing the work here.
+pub(crate) fn on_a_fiber() -> bool {
+    !installed().is_null()
+}
+
 /// Gives the worker back to whoever resumed this fiber.
 ///
 /// Returns `false` when nothing is running on a fiber stack — the program's own

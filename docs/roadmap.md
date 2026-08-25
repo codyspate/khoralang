@@ -2298,7 +2298,7 @@ workers and fairness, then the reactor and timers, then stealing, then the
 bounded blocking pool, then soak. Khora stays buildable throughout; threads
 remain the implementation wherever a backend has not landed.
 
-**Where it has got to.** 11A through 11D are built, on Windows and on Linux —
+**Where it has got to.** 11A through 11E are built, on Windows and on Linux —
 the latter through `scripts/check-linux.sh`, which runs the runtime's tests
 under WSL2 and is now part of the baseline. `Fiber::spawn` still makes threads,
 deliberately, until the remaining backends land.
@@ -2311,6 +2311,7 @@ deliberately, until the remaining backends land.
 | 11C.2 | a `poll` reactor, so a socket read suspends a fiber and not a worker |
 | 11C.3 | `recv`, `send` and `accept` that suspend a fiber rather than a worker |
 | 11D | work stealing, so a burst spawned on one worker reaches the others |
+| 11E | a bounded blocking pool, and `std::fs` routed through it |
 | — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
 Two numbers, measured on Windows. **A hundred thousand fibers waiting at once

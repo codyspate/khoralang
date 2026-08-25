@@ -486,6 +486,49 @@ Khora fibers ────┤
 thread-per-fiber under a different name, which is the thing this whole phase
 exists to remove.
 
+11E built it, in `crates/khora-rt/src/blocking.rs`. Two limits: how many
+threads may exist, and how much work may be queued for them. When the queue is
+full the **fiber** waits rather than its worker, so a program that
+oversubscribes the pool gets slower instead of larger — that is the whole of
+what backpressure means here. Threads start on demand and retire after ten
+seconds idle, so a program that never blocks never pays for any of this, and
+one that blocked at startup does not keep the threads for its whole life.
+
+`KHORA_BLOCKING_THREADS` overrides the default of two per core. That default is
+deliberately modest and is a starting point rather than a result; the counters
+below are how it should be argued with.
+
+**A blocking call is not a cancellation point.** A fiber cancelled inside
+`fread` keeps waiting. The pool cannot interrupt foreign code, and returning
+early would mean handing the fiber back while another thread still holds its
+buffer. The cancellation is observed at the next `!`, which is the rule
+safepoints already follow — §1.
+
+**The caller is `std::fs`.** Its `open`, `read`, `write` and `close` used to be
+foreign calls straight to C stdio, which was right while a fiber was a thread
+and became wrong the moment it was one of many on a worker: a read of a cold
+file held the worker and everything queued behind it. They now go through
+`khora_fs_*`, which does the C call on a pool thread. `fseek` and `ftell` stay
+direct — they adjust a buffer rather than reach a disk, and both deal in C's
+`long`, which is thirty-two bits on Windows and a question worth settling on
+its own.
+
+Two things worth keeping from building it:
+
+  - **Wake the fiber last, after the pool's own bookkeeping.** Waking it from
+    inside the job lets it run, finish, and have somebody read the counters
+    while the pool thread has not yet decremented `active` or counted `ran`.
+    The pool never gives itself a wrong answer that way, but an observer sees
+    one, and it failed two tests about one run in ten with `active: 1, ran: 39`
+    after everything had finished. A fiber back from a blocking call should be
+    proof that the call is accounted for.
+  - **Grow when the queue outruns the *idle* threads, not when every thread is
+    busy.** A thread that has been spawned but has not yet reached its first
+    job is neither busy nor able to help, so `active == started` reads as "we
+    are keeping up" at exactly the moment the pool most needs another thread.
+    Forty jobs arriving faster than one thread could pick them up left the pool
+    at a single thread, running the lot in series.
+
 ---
 
 ## 10. The scheduler itself
@@ -579,7 +622,7 @@ Staged so that a failure is attributable to the thing that just changed.
 | **11B** N workers, local and global queues, migration, safepoints — **done** | CPU parallelism, and fairness |
 | **11C** timers, suspend, wake, a `poll` reactor, and socket calls that suspend a fiber — **done** | a hundred thousand waiting on *timers*; sockets need a scalable backend |
 | **11D** work stealing — **done** | locality, once the simple scheduler's behaviour is understood |
-| **11E** bounded blocking pool | that unavoidable blocking cannot stall a worker |
+| **11E** bounded blocking pool — **done** | that unavoidable blocking cannot stall a worker |
 | **11F** scale and soak | the adversarial tests below |
 
 Khora stays buildable throughout. Threads remain the implementation on any
@@ -591,7 +634,9 @@ Cheap counters, sampled or compiled out, not added after something is slow:
 
 workers; runnable, running and waiting fibers; creations and completions;
 steals attempted and succeeded; reactor wakeups; parks and unparks; timers
-outstanding; blocking-pool queued and active; cancellations requested and
+outstanding; blocking-pool queued and active (`khora_blocking_queued`,
+`khora_blocking_active`, `khora_blocking_ran`, `khora_blocking_waited`);
+cancellations requested and
 observed.
 
 Without them a bad result says *a hundred thousand connections is slow*. With

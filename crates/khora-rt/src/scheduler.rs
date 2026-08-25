@@ -455,6 +455,42 @@ pub(crate) fn sleep_until(at: std::time::Instant) -> bool {
     park_current()
 }
 
+/// Makes one particular fiber runnable, from anywhere, later.
+///
+/// **For work that leaves the scheduler entirely.** A blocking-pool thread
+/// holds one of these across a foreign call it cannot interrupt and cannot
+/// reason about, and uses it to hand the fiber back when the call returns. It
+/// keeps the pool from needing to know anything about `Shared`, which is the
+/// only reason that type can stay private.
+pub(crate) struct Waker {
+    shared: Arc<Shared>,
+    fiber: usize,
+}
+
+impl Waker {
+    /// Makes the fiber runnable. Safe whatever it is doing, and safe if it has
+    /// already finished — a wake for a fiber the pool has forgotten is a
+    /// lookup that finds nothing.
+    pub(crate) fn wake(&self) {
+        if let Some(state) = state_of(&self.shared, self.fiber) {
+            wake(&self.shared, self.fiber, state.wait());
+        }
+    }
+}
+
+/// A waker for whatever is running here, if it is a fiber on a worker.
+///
+/// `None` off a worker or outside a fiber, which is the caller's signal that
+/// there is no worker to give back and nothing to be gained by suspending.
+pub(crate) fn waker_for_current() -> Option<Waker> {
+    if !crate::coro::on_a_fiber() {
+        return None;
+    }
+    let shared = shared_pool()?;
+    let fiber = crate::current::current(|f| f.id());
+    Some(Waker { shared, fiber })
+}
+
 /// Makes a waiting fiber runnable.
 ///
 /// Safe to call whatever the fiber is doing: a wake for something not waiting

@@ -98,10 +98,22 @@ export fn read_text(path: String) -> String
 // Not bound per target: these are the C standard library, spelled the same
 // everywhere Khora runs. `FILE *` is a `Ptr`, which is what `Ptr` is for.
 
-extern fn fopen(path: Ptr, mode: Ptr) -> Ptr;
-extern fn fread(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
-extern fn fwrite(from: Ptr, size: Int, count: Int, file: Ptr) -> Int;
-extern fn fclose(file: Ptr) -> I32;
+// The four that touch a disk go through the runtime rather than straight to C,
+// because a fiber is no longer a thread. `khora_fs_read` does the `fread` on a
+// thread from the blocking pool and suspends the calling fiber, so a slow file
+// costs the fiber its turn instead of costing its worker — and every other
+// fiber queued behind that worker nothing at all. Off a scheduler the runtime
+// notices there is no worker to protect and calls straight through.
+// `crates/khora-rt/src/fs.rs`, and `docs/design/scheduler.md` §9.
+extern fn khora_fs_open(path: Ptr, mode: Ptr) -> Ptr;
+extern fn khora_fs_read(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
+extern fn khora_fs_write(from: Ptr, size: Int, count: Int, file: Ptr) -> Int;
+extern fn khora_fs_close(file: Ptr) -> I32;
+
+// These two stay direct. They adjust a buffer rather than reach a disk in the
+// ordinary case, and both deal in C's `long` — thirty-two bits on Windows and
+// sixty-four elsewhere — which is a width worth settling on its own rather
+// than inside a change about scheduling.
 extern fn fseek(file: Ptr, offset: Int, whence: I32) -> I32;
 extern fn ftell(file: Ptr) -> Int;
 
@@ -122,13 +134,13 @@ fn seek_end() -> I32 { I32::of(2) }
 /// The mode is a Khora string turned into a `const char *` for exactly the
 /// duration of the call, which is all `fopen` looks at it for.
 fn open(path: String, mode: String) -> Ptr {
-  String::with_c_string(path, fn p => String::with_c_string(mode, fn m => fopen(p, m)))
+  String::with_c_string(path, fn p => String::with_c_string(mode, fn m => khora_fs_open(p, m)))
 }
 
 /// `fclose` on a null pointer is undefined, and an open that failed hands back
 /// exactly that.
 fn close(file: Ptr) -> () {
-  if Ptr::is_null(file) {} else { fclose(file); }
+  if Ptr::is_null(file) {} else { khora_fs_close(file); }
 }
 
 /// How many bytes the file holds, by going to the end and asking where that is.
@@ -161,7 +173,7 @@ fn read_whole(path: String) -> Array<U8> raises IoError {
         raise IoError::Failed(path)
       } else {
         let bytes: Array<U8> = Array::new(size, 0);
-        let read = Array::with_data(bytes, fn (into, n) => fread(into, 1, n, file));
+        let read = Array::with_data(bytes, fn (into, n) => khora_fs_read(into, 1, n, file));
         if read == size { bytes } else { raise IoError::Failed(path) }
       }
     }
@@ -177,7 +189,7 @@ fn write_whole(path: String, bytes: Array<U8>) -> () raises IoError {
       raise IoError::Failed(path)
     } else {
       let count = Array::length(bytes);
-      let written = Array::with_data(bytes, fn (from, n) => fwrite(from, 1, n, file));
+      let written = Array::with_data(bytes, fn (from, n) => khora_fs_write(from, 1, n, file));
       if written == count {} else { raise IoError::Failed(path) }
     }
   }
