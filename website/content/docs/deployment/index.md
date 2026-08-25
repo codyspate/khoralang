@@ -4,8 +4,10 @@ sidebar:
   order: 0
 ---
 
-Khora's deployment documentation distinguishes compiler output from actually supported runtime targets.
+This section covers deploying **Khora applications**.
 
-Use this section for supported target triples, Linux/container guidance, and Cloudflare deployment. A platform is only labeled supported when the compiler, runtime, linker/sysroot, packaging, and deployment/conformance path work end to end for a release.
+Start with [Supported targets](supported-targets.md) to see which platforms are actually supported by the current toolchain. Platform-specific pages then cover how to build, package, and run Khora programs on those targets.
 
-The documentation website itself is deployed to Cloudflare Workers at `khoralang.com`, independently of the language's future WebAssembly/Workers application target.
+A target is only described as supported when the compiler, runtime, linker/sysroot, packaging, and deployment path work end to end. Compiler code generation by itself does not make a platform deployable.
+
+For native services, see the Linux and container guides. For WebAssembly hosts such as Cloudflare Workers, consult the target page for the current support level before designing around host-specific APIs.
