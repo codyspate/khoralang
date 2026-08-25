@@ -591,6 +591,112 @@ workers spinning on a losing steal can starve the one making progress.
 
 ---
 
+## 10a. Where the reactor should end up
+
+11H established that the reactor's wake path is what a request costs on the
+scheduler, and left the architecture as it was: readiness is discovered on a
+thread of its own and handed to a worker. This is where that should go, written
+before it is built so the reasons survive the building.
+
+**The framing that makes it obvious.** A fiber becomes runnable because a timer
+expired, because a join completed, because a cancellation arrived, or because
+its socket can make progress. Those are four spellings of *this fiber can run
+now* — and three of them already reach the scheduler directly while the fourth
+crosses an operating-system thread first. **I/O readiness is a scheduling
+event**, and the only reason it is treated as an outside interruption is that
+the reactor was easiest to write on its own thread.
+
+So the shape to move toward:
+
+```
+Khora application  — synchronous, direct style, no colour
+        │
+   a blocking-looking call
+        │
+Khora scheduler    — local queue, injection, stealing, timers, I/O progress
+        │
+platform backend   — epoll / kqueue / IOCP
+```
+
+rather than a scheduler and a reactor side by side exchanging queues. That is
+not a call to collapse the modules: `reactor.rs` and its backends stay a clean
+boundary. It is a call to stop making an OS-thread hop mandatory because of how
+the mechanism was first implemented.
+
+### Workers should poll when they have nothing to run
+
+The worker loop becomes local queue, then injection, then steal, then *ask the
+backend for progress*, and only then park. A worker that polls runs the fiber it
+just found, instead of waking another worker to run it.
+
+**Who is allowed to block in the backend is the question that decides whether
+this helps**, and it does not have one answer, which is itself an argument for
+keeping the abstraction operation-oriented. `epoll_wait` from every idle worker
+is a thundering herd unless it is asked for exclusively; an IO completion port
+with several threads dequeuing is IOCP working exactly as designed. The
+plausible shapes are one designated poller among the idle workers, with
+ownership handed on when that worker gets work, or short non-blocking polls by
+any worker with one taking the blocking wait when the whole pool is idle. They
+should be compared, and the comparison belongs behind the backend boundary
+rather than above it.
+
+### Keep the interface operation-oriented, whatever the backend does
+
+§2 already argues this and it becomes load-bearing here. epoll and kqueue
+report *readiness*; IOCP reports *completion*. An interface shaped like the
+first forces the third to pretend, and the pretence is where correctness goes.
+What the scheduler asks for is "tell me when this operation can make progress",
+and what a backend does about that is its own business.
+
+### What may not change to get it
+
+The runtime exists to keep the language simple, so a runtime change that
+complicates the language has the bargain backwards. Any new I/O architecture
+has to leave all of these true:
+
+  - Khora source stays synchronous and direct — no `async`, no `await`, no
+    futures, no second colour of function, no executor handles;
+  - a socket that would block suspends a **fiber**, never a worker;
+  - safepoints stay separate from cancellation points — §1;
+  - cancelling a fiber waiting on I/O makes it runnable, so its finalizers run;
+  - the lost-wakeup invariant holds — `crate::wait`;
+  - nursery and structured-concurrency semantics are untouched;
+  - fibers migrate between workers, and no thread identity is ever a fiber
+    identity;
+  - the thread-local rule survives — see the cached thread-local below;
+  - an `extern` call cannot silently suspend across thread-affine foreign code
+    — §8;
+  - a `Task` has exactly one owner at any instant, which is what `Audit`
+    checks.
+
+**If a design benchmarks better but requires any of those to bend, it is the
+wrong design.** A faster HTTP number bought with `await` in Khora source would
+be a bad trade at any ratio.
+
+### What "good enough" is
+
+Not parity with thread-per-connection on 48 connections, which is a workload
+unusually kind to operating-system threads and unusually unkind to a scheduler
+— the fibers there are never numerous enough for the scheduler's advantage to
+appear. But the scheduler should not keep a gross penalty at low concurrency as
+the price of a hundred thousand waiting fibers.
+
+**Seventy to eighty-five per cent of the thread figure** is the target, which
+against 782,149 is roughly 530,000 to 650,000. E2 reached 613,571 by spinning,
+so the target is known to be mechanically reachable rather than hoped for.
+
+### Measure the stages before rebuilding anything
+
+The remaining gap is 429,000 against 613,571 spinning, and nothing yet says
+which part of the wake path it is. Before the redesign, sample the path in
+stages — registration, nudge, backend return, readiness decoded, wake begun,
+parked task taken, injection, worker receives, `Task::resume` begins — and
+report p50, p90 and p99, with per-request counts of socket waits, injections,
+condvar wakes, `live` lookups and `parked` acquisitions.
+
+That is the same discipline as 11H's trail, and 11H is the argument for it: the
+counter that looked most damning was the one that cost nothing.
+
 ## 11. What is already done that a reader might assume is not
 
 - **Bounded concurrency exists.** `std::core::bounded_nursery(limit, body)`

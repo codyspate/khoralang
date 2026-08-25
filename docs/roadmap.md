@@ -2315,6 +2315,7 @@ deliberately, until the remaining backends land.
 | 11F | adversarial soak, a full state audit, and the scale numbers |
 | 11G | `std::net` and `Fiber::spawn` wired to it, behind `KHORA_FIBERS` |
 | 11H | the reactor could not be woken, and that was the twelve times |
+| 11I | **next** — workers poll the backend, and the backend stops being `poll` |
 | — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
 Measured on both platforms now, and they agree to within one per cent. **A
@@ -2613,7 +2614,19 @@ path and the rest is elsewhere.
   - **Then epoll, kqueue and IOCP.** The row above this one in the phase table
     has been waiting for a measurement to justify it and now has one — but
     after the three items above, because each of them is cheaper and none of
-    them is made unnecessary by a better `poll`.
+    them is made unnecessary by a better `poll`. Not io_uring: nothing yet
+    says it is needed.
+
+`docs/design/scheduler.md` §10a is where that goes, written before it is built:
+the shape to move toward, the invariants a new I/O architecture may not bend to
+get there, who is allowed to block in the backend, and the acceptance criterion
+— seventy to eighty-five per cent of the thread figure, which E2 showed is
+reachable.
+
+**And the measurement to take first.** The remaining gap is 429,000 against
+613,571 spinning, and nothing says which part of the wake path that is. Sample
+the stages, report percentiles, then choose. 11H is the argument: the counter
+that looked most damning was the one that cost nothing.
 
 ## When can libraries be written?
 
