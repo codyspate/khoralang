@@ -2608,7 +2608,12 @@ path and the rest is elsewhere.
     item and the one that removes an OS-thread handoff from the common path.
   - **Carry the fiber's state in the `Watch`** rather than looking it up in the
     `live` map on every readiness. One global `HashMap` lock per wake, for
-    something the registration already had in its hand.
+    something the registration already had in its hand. **A wake token may
+    carry the state and must never carry the `Task`** — enough to mark a fiber
+    runnable, not the thing that gets resumed. Only the scheduler path owns and
+    moves a runnable `Task`, and a token holding one would put a second owner
+    on the far side of the reactor, which is exactly what `Audit::in_hand`
+    exists to catch.
   - **Batch the wake.** A `poll` that finds thirty ready sockets currently
     takes the shared queue thirty times and notifies thirty times.
   - **Then epoll, kqueue and IOCP.** The row above this one in the phase table
