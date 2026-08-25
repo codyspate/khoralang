@@ -2656,7 +2656,37 @@ for something written in C++. It is also the cheapest adoption path there is,
 and it costs a calling convention and a lifetime story rather than a language
 feature.
 
-### 12.7 The compile-time budget
+### 12.7 The compile-time budget — **measured, and it is not a crisis**
+
+`vision.md` non-negotiable 4 calls compile speed a requirement tested from the
+first working compiler, and "cold `khora build` beats `cargo build` on an
+equivalent Rust program" is one of its falsifiable checks. Nobody had run it.
+
+Cold builds of the three reference applications, each including all of `std`
+and the link:
+
+| | lines | cold build |
+| --- | --- | --- |
+| `core_demo` | 43 | 1,382 ms |
+| `risk_analyzer` | 245 | 1,527 ms |
+| `link_shortener` | 430 | 1,723 ms |
+
+**The shape matters more than the numbers.** About 1.3 seconds is fixed —
+`std`, code generation, the link — and 387 extra lines cost about 340 ms. That
+is a fixed-cost-dominated profile, which is what says whole-program
+monomorphization is not yet superlinear at this size. It would be the first
+thing to look at if that line ever bent.
+
+Two honest caveats. These are a **debug** compiler; a release build of `khora`
+would change them substantially and the comparison against `cargo` is not fair
+until it is made. And the corpus is small — the number worth defending is the
+one taken when there is a program big enough to strain it.
+
+Not a crisis, so not a project. Recorded so the next measurement has something
+to be compared against, which was the point of the check.
+
+The original entry:
+
 
 Whole-program monomorphization plus LLVM is superlinear in program size, and
 compile speed is the headline feature of the language Khora is compared to.

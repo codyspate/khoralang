@@ -393,13 +393,28 @@ impl<'ctx> Lower<'_, 'ctx> {
             let ty = self.types.local(id).clone();
             let Some(llvm_ty) = self.be.llvm_type(&ty) else {
                 let range = self.body.local(id).range;
-                self.fail(
+                // **An unknown type and an unsupported one are different
+                // problems**, and saying the second when it is the first sends
+                // the reader to the backend's capabilities instead of to their
+                // own missing annotation. It happened twice while writing
+                // `std/db.kh`: a `transaction` whose body only ever returned
+                // `Err` left its success type undetermined, and the message
+                // talked about what phase 2 can represent — which was not the
+                // matter at all. `vision.md` non-negotiable 4.
+                let message = if matches!(ty, Type::Unknown | Type::Var(_)) {
                     format!(
-                        "`{name}` has no type the backend can represent; phase 2 handles `Int`, \
-                         `Bool`, `String`, `()` and ADTs"
-                    ),
-                    range,
-                );
+                        "the type of `{name}` is not determined — nothing in this function \
+                         says what it is. An annotation on the binding, or on the call that \
+                         produces it, is what settles it; a generic whose result is never used \
+                         is the usual reason"
+                    )
+                } else {
+                    format!(
+                        "`{name}` has type `{ty}`, which the backend cannot represent yet; \
+                         phase 2 handles `Int`, `Bool`, `String`, `()` and ADTs"
+                    )
+                };
+                self.fail(message, range);
                 continue;
             };
             let slot = self.be.builder.build_alloca(llvm_ty, &name).expect("a local slot");
