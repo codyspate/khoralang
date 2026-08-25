@@ -14,12 +14,19 @@
 //! backtrace to read `risk_analyzer.kh:88`, for `lldb` to step, and for a
 //! profiler to attribute samples to source.
 //!
-//! **Not variables.** A `DILocalVariable` needs a `DIType` for every Khora
-//! type, which means describing the heap layout — the header, the tag, the
-//! field words — in DWARF. That is a second piece of work of comparable size
-//! and it is worth having; it is not worth blocking line tables on, because a
-//! backtrace without variables is most of the value and no variables at all is
-//! none of it. Every function therefore shares one empty subroutine type.
+//! **And locals, by name.** Every slot `allocate_slots` makes gets a
+//! `DILocalVariable` and a `dbg.declare`, so `lldb` lists the variables in a
+//! frame and prints the scalar ones. See [`Debug::type_of`] for what a Khora
+//! type becomes and where that stops short: a boxed value is a *pointer* with
+//! the right name and the right address, and not a struct a debugger can walk
+//! into. Describing the heap layout — header, tag, field words — is a third
+//! piece of work, and the second was worth having without it: a frame that
+//! lists `units`, `scale` and `total` with two of them readable is most of the
+//! distance from a bare backtrace.
+//!
+//! Every function still shares one subroutine type. A `DISubroutineType` is
+//! the *signature*, which a backtrace does not print, so paying for it would
+//! buy nothing a caller cannot already see.
 //!
 //! # Why the mapping is per file rather than per program
 //!
@@ -43,11 +50,13 @@ use std::path::Path;
 
 use inkwell::context::Context;
 use inkwell::debug_info::{
-    AsDIScope, DICompileUnit, DIFile, DIFlagsConstants, DISubprogram, DISubroutineType,
+    AsDIScope, DICompileUnit, DIFile, DIFlagsConstants, DISubprogram, DISubroutineType, DIType,
     DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
 };
 use inkwell::module::{FlagBehavior, Module};
 use inkwell::values::FunctionValue;
+use inkwell::values::AsValueRef;
+use khora_types::Type;
 use text_size::TextRange;
 
 /// The debug-info state for one module under construction.
@@ -62,6 +71,14 @@ pub(crate) struct Debug<'ctx> {
     signature: DISubroutineType<'ctx>,
     /// The function currently being emitted, and the file it came from.
     current: Option<(DISubprogram<'ctx>, String)>,
+    /// One `DIType` per Khora type, by how it prints.
+    ///
+    /// Cached because a `DIType` is metadata and two of them for one type are
+    /// two entries in the debug information rather than one, on every local of
+    /// that type in the program.
+    types: HashMap<String, DIType<'ctx>>,
+    /// The pointee every boxed type points at. See [`Debug::type_of`].
+    opaque: Option<DIType<'ctx>>,
 }
 
 impl<'ctx> Debug<'ctx> {
@@ -122,7 +139,15 @@ impl<'ctx> Debug<'ctx> {
             &[],
             DIFlagsConstants::PUBLIC,
         );
-        Debug { builder, unit, files: HashMap::new(), signature, current: None }
+        Debug {
+            builder,
+            unit,
+            files: HashMap::new(),
+            signature,
+            current: None,
+            types: HashMap::new(),
+            opaque: None,
+        }
     }
 
     /// The `DIFile` for `path`, created on first sight.
@@ -198,6 +223,135 @@ impl<'ctx> Debug<'ctx> {
             subprogram.as_debug_info_scope(),
             None,
         ))
+    }
+
+    /// What a Khora type looks like to a debugger.
+    ///
+    /// **Scalars are described exactly; everything else is a pointer.** An
+    /// `Int` is a 64-bit signed integer and prints as one, a `Bool` prints as
+    /// `true`, a `Float` as a number. A `String`, a record, a closure — every
+    /// counted heap value — becomes a pointer with the Khora type's name on
+    /// it, so a frame shows `answer: Result<Int, DbError> = 0x7f...` rather
+    /// than omitting `answer`.
+    ///
+    /// The honest limit: a debugger cannot follow that pointer into the object.
+    /// Doing so means describing `KhoraHeader` and every ADT's field layout as
+    /// DWARF structs — real, and a larger job than this one, and worth
+    /// separating because the name and the address are most of what a frame is
+    /// read for.
+    fn type_of(&mut self, ty: &Type) -> DIType<'ctx> {
+        let key = ty.to_string();
+        if let Some(found) = self.types.get(&key) {
+            return *found;
+        }
+        // DWARF's `DW_ATE_*` encodings. Spelled as numbers because that is what
+        // the C API takes and naming them here would be a second vocabulary.
+        const SIGNED: u32 = 0x05;
+        const UNSIGNED: u32 = 0x07;
+        const FLOAT: u32 = 0x04;
+        const BOOLEAN: u32 = 0x02;
+
+        let made = match ty {
+            Type::Int => self.basic("Int", 64, SIGNED),
+            Type::Bool => self.basic("Bool", 8, BOOLEAN),
+            Type::Float => self.basic("Float", 64, FLOAT),
+            Type::Fixed(kind) => {
+                let bits = u64::from(kind.bits);
+                let encoding = if kind.signed { SIGNED } else { UNSIGNED };
+                self.basic(&kind.name(), bits, encoding)
+            }
+            // `Ptr` is an address the other side owns, and `()` is not a value
+            // — both are a word as far as a frame is concerned.
+            Type::Ptr | Type::Unit => self.basic(&key, 64, UNSIGNED),
+            _ => {
+                let pointee = self.opaque_object();
+                self.builder
+                    .create_pointer_type(&key, pointee, 64, 64, inkwell::AddressSpace::default())
+                    .as_type()
+            }
+        };
+        self.types.insert(key, made);
+        made
+    }
+
+    fn basic(&mut self, name: &str, bits: u64, encoding: u32) -> DIType<'ctx> {
+        self.builder
+            .create_basic_type(name, bits, encoding, DIFlagsConstants::PUBLIC)
+            .expect("a named basic type")
+            .as_type()
+    }
+
+    /// What every boxed value points at.
+    ///
+    /// One byte, unnamed as a layout: a debugger asked to dereference gets a
+    /// byte rather than a lie about the object's shape. When `KhoraHeader` and
+    /// the ADT layouts are described this is what they replace.
+    fn opaque_object(&mut self) -> DIType<'ctx> {
+        if let Some(found) = self.opaque {
+            return found;
+        }
+        let made = self.basic("khora_object", 8, 0x07);
+        self.opaque = Some(made);
+        made
+    }
+
+    /// Names one local, so a debugger can list it in the frame.
+    ///
+    /// `slot` is the `alloca` the local lives in, which is what makes this
+    /// `dbg.declare` rather than `dbg.value`: the address is stable for the
+    /// whole frame and does not have to be tracked through optimization.
+    pub(crate) fn declare_local(
+        &mut self,
+        name: &str,
+        slot: inkwell::values::PointerValue<'ctx>,
+        ty: &Type,
+        at: TextRange,
+        ctx: &'ctx Context,
+        block: inkwell::basic_block::BasicBlock<'ctx>,
+    ) {
+        let Some((subprogram, path)) = self.current.clone() else { return };
+        let Some((file, lines)) = self.files.get(&path) else { return };
+        let (file, line) = (*file, lines.locate(at).0);
+        let di_ty = self.type_of(ty);
+        let variable = self.builder.create_auto_variable(
+            subprogram.as_debug_info_scope(),
+            name,
+            file,
+            line,
+            di_ty,
+            // Kept even when nothing reads it: a variable the program never
+            // uses is exactly the one somebody is stopped in the debugger
+            // asking about.
+            true,
+            DIFlagsConstants::ZERO,
+            0,
+        );
+        let Some(location) = self.location(ctx, at) else { return };
+        let expression = self.builder.create_expression(Vec::new());
+
+        // **Called through `llvm_sys` rather than through inkwell**, and not by
+        // preference. Since LLVM 19 a `dbg.declare` is a *debug record* and not
+        // an instruction; inkwell 0.10 aliases the C entry point to the record
+        // one — correctly — and then wraps its return in an `InstructionValue`,
+        // whose constructor asserts `value.is_instruction()`. Every test that
+        // compiles a function with a local died on that assertion inside the
+        // crate. The record itself is created correctly; only the wrapper is
+        // wrong, so the fix is to not use the wrapper.
+        //
+        // SAFETY: every pointer comes from a live inkwell value whose lifetime
+        // is `'ctx`, which outlives this call, and the arguments are in the
+        // order `LLVMDIBuilderInsertDeclareRecordAtEnd` documents. The returned
+        // record is owned by the module and is not ours to free.
+        unsafe {
+            inkwell::llvm_sys::debuginfo::LLVMDIBuilderInsertDeclareRecordAtEnd(
+                self.builder.as_mut_ptr(),
+                slot.as_value_ref(),
+                variable.as_mut_ptr(),
+                expression.as_mut_ptr(),
+                location.as_mut_ptr(),
+                block.as_mut_ptr(),
+            );
+        }
     }
 
     /// Resolves the metadata. **Before verification**, which reads it.

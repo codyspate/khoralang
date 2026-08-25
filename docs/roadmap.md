@@ -2586,7 +2586,7 @@ already inserts runtime calls at loop back-edges.
 `docs/design/observability.md` has the design. `std` owns propagation and the
 vocabulary; exporters are a package, by the same rule that keeps Postgres out.
 
-### 12.4 Debug information — **line tables done, variables not**
+### 12.4 Debug information — **line tables and locals; heap layout not**
 
 A trap used to say what happened and not where:
 
@@ -2612,11 +2612,32 @@ however deep in an application it was reached from, and a backtrace that walks
 out of user code into `std` should say so. DWARF everywhere, CodeView on an
 MSVC target, chosen by the triple.
 
-**What is not.** Variables. A `DILocalVariable` needs a `DIType` for every
-Khora type, which means describing the heap layout — header, tag, field words —
-in DWARF. That is a second piece of work of comparable size, and worth having;
-it is not worth blocking line tables on, because a backtrace without variables
-is most of the value and no variables at all is none of it.
+**And the locals, since.** Every slot gets a `DILocalVariable` and a
+`dbg.declare`, so a frame lists what is in it:
+
+    units: Int    = 7
+    wide:  U8     = 3
+    flag:  Bool   = true
+    label: String = 0x7ff6...
+
+Scalars are described exactly — `Int` is `DW_ATE_signed` at 64 bits, `Bool` is
+`DW_ATE_boolean`, `U8` is unsigned and eight — so a debugger prints them rather
+than showing a word. A boxed value is a **named pointer**: the type's name and
+the address, which is what a frame can show without the heap layout.
+
+**What is still not there** is following that pointer. Describing `KhoraHeader`
+and every ADT's field layout as DWARF structs is a third piece of work, and
+separating it was right: the names, the lines and the scalars are most of the
+distance from a bare backtrace, and none of them needed the layout.
+
+**One thing cost an hour and is worth knowing.** Since LLVM 19 a `dbg.declare`
+is a *debug record* rather than an instruction. inkwell 0.10 aliases the C
+entry point to the record one — correctly — and then wraps its return in an
+`InstructionValue`, whose constructor asserts `value.is_instruction()`. Every
+test that compiled a function with a local died inside the crate. The record is
+created correctly and only the wrapper is wrong, so `debug.rs` calls
+`LLVMDIBuilderInsertDeclareRecordAtEnd` through `inkwell::llvm_sys` and ignores
+the return.
 
 ### Four places it silently did nothing, which is the story worth keeping
 

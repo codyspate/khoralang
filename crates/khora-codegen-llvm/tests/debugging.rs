@@ -222,3 +222,107 @@ fn main() -> Int {
     );
     assert!(out.contains("overflowed\n"), "no fiber clause: {out}");
 }
+
+// --- and the locals in a frame --------------------------------------------
+
+/// Every local is named, at its own line, with its own type.
+///
+/// **Asserted against the emitted IR, which is weaker than the rest of this
+/// file and is said so deliberately.** Everything above runs a program because
+/// the failure mode was metadata that was perfect and an artefact that could
+/// not use it. The equivalent here would be driving `lldb`, which is not
+/// something a `cargo test` can rely on finding — so this checks the
+/// `DILocalVariable` records and their types, and the artefact-level check
+/// stays the backtrace tests above, which share the same emission path.
+///
+/// What it does prove is the part that was wrong twice: names, the lines they
+/// were declared on, and that a scalar is described *as* a scalar rather than
+/// as an opaque word.
+#[test]
+fn every_local_is_named_with_its_type() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("debug_locals");
+    harness::ensure_runtime();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+
+    let db = KhoraDatabase::new();
+    let source = "module t;
+fn print(value: Int);
+
+fn main() -> Int {
+  let units = 7;
+  let wide: U8 = 3;
+  let flag = true;
+  let ratio = 1.5;
+  let label = \"widgets\";
+  let total = units * 6;
+  print(total);
+  0
+}
+";
+    let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
+    let root = SourceRoot::new(&db, vec![file]);
+
+    // SAFETY-of-a-sort: process-wide, and this is the only test that sets it.
+    unsafe { std::env::set_var("KHORA_EMIT_LLVM", "1") };
+    let outcome = khora_codegen_llvm::compile(&db, root, &exe);
+    unsafe { std::env::remove_var("KHORA_EMIT_LLVM") };
+    outcome.expect("it compiles");
+
+    let ir = std::fs::read_to_string(dir.join(
+        if cfg!(windows) { "program.exe.ll" } else { "program.ll" },
+    ))
+    .expect("the IR was dumped");
+
+    // The file this program is in, so `std`'s thousand locals are not counted.
+    let mine = ir
+        .lines()
+        .find(|l| l.contains("!DIFile(filename: \"main.kh\""))
+        .and_then(|l| l.split(' ').next())
+        .expect("main.kh has a DIFile")
+        .to_string();
+
+    let named: Vec<&str> = ir
+        .lines()
+        .filter(|l| l.contains("!DILocalVariable") && l.contains(&format!("file: {mine},")))
+        .collect();
+
+    for (name, line) in
+        [("units", 5), ("wide", 6), ("flag", 7), ("ratio", 8), ("label", 9), ("total", 10)]
+    {
+        let found = named
+            .iter()
+            .find(|l| l.contains(&format!("name: \"{name}\"")))
+            .unwrap_or_else(|| panic!("`{name}` should be a local, got:\n{}", named.join("\n")));
+        assert!(
+            found.contains(&format!("line: {line},")),
+            "`{name}` should be declared on line {line}: {found}"
+        );
+    }
+
+    // **Scalars are described, not merely counted.** A local whose type is a
+    // word-shaped nothing is a name in a list; one with an encoding prints.
+    assert!(
+        ir.contains(r#"!DIBasicType(name: "Int", size: 64, encoding: DW_ATE_signed"#),
+        "an `Int` is a signed 64-bit integer"
+    );
+    assert!(
+        ir.contains(r#"!DIBasicType(name: "Bool", size: 8, encoding: DW_ATE_boolean"#),
+        "a `Bool` is a boolean"
+    );
+    assert!(
+        ir.contains(r#"!DIBasicType(name: "Float", size: 64, encoding: DW_ATE_float"#),
+        "a `Float` is a float"
+    );
+    assert!(
+        ir.contains(r#"!DIBasicType(name: "U8", size: 8, encoding: DW_ATE_unsigned"#),
+        "a `U8` is unsigned and eight bits"
+    );
+    // And a boxed value is a *named pointer*: the address and the type's name,
+    // which is what a frame can show without the heap layout being described.
+    assert!(
+        ir.contains(r#"DW_TAG_pointer_type, name: "String""#),
+        "a `String` is a pointer that knows what it points at"
+    );
+}

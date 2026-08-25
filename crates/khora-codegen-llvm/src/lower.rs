@@ -420,6 +420,17 @@ impl<'ctx> Lower<'_, 'ctx> {
             let slot = self.be.builder.build_alloca(llvm_ty, &name).expect("a local slot");
             let zero = self.be.zero_value(&ty);
             self.be.builder.build_store(slot, zero).expect("zeroing a local slot");
+            // Named for the debugger while the slot and its type are both in
+            // hand. `dbg.declare` rather than `dbg.value` because an `alloca`
+            // has one address for the whole frame — see `crate::debug`.
+            if self.be.debug.is_some() {
+                let range = self.body.local(id).range;
+                let block = self.be.builder.get_insert_block().expect("a block");
+                let ctx = self.be.ctx;
+                if let Some(debug) = self.be.debug.as_mut() {
+                    debug.declare_local(&name, slot, &ty, range, ctx, block);
+                }
+            }
             self.slots.insert(id, slot);
         }
     }
