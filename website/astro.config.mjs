@@ -9,9 +9,13 @@ export default defineConfig({
     starlight({
       title: 'Khora',
       description: 'Khora language documentation',
-      social: {
-        github: 'https://github.com/codyspate/khoralang',
-      },
+      social: [
+        {
+          icon: 'github',
+          label: 'GitHub',
+          href: 'https://github.com/codyspate/khoralang',
+        },
+      ],
       sidebar: [
         { label: 'Getting Started', autogenerate: { directory: 'getting-started' } },
         { label: 'Guide', autogenerate: { directory: 'guide' } },
