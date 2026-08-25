@@ -69,19 +69,25 @@ is "the request parser got cheaper" and the size of it comes from
 
 One sitting, one machine, `bench/service` only, 48 reused connections:
 
-| | req/s |
-| --- | --- |
-| fibers as threads (the default) | 782,149 |
-| fibers on the scheduler, wakeable reactor | 429,000 |
-| — the same, before the reactor could be woken | 59,965 |
+| | req/s | of threads |
+| --- | --- | --- |
+| fibers as threads (the default) | 816,963 | — |
+| fibers on the scheduler, idle workers polling (11I) | 513,500 | 63% |
+| — with a reactor thread instead (11H) | 429,000 | 55% |
+| — before the reactor could be woken at all (11G) | 59,965 | 7% |
 
-Taken minutes apart with nothing else changed, which is the only way this file
-allows a comparison to be made. The scheduler figure is the median of 440,012
-and 418,247; the third row is what it was before 11H and is kept because the
-ratio between the second and third rows is the whole of that entry.
+The top two rows were taken minutes apart with nothing else changed, which is
+the only way this file allows a comparison to be made; the scheduler figure is
+the median of 512,770 and 514,221. The lower rows are earlier sittings and are
+kept for the shape of the progression rather than for their absolute values —
+the thread control itself read 782,149 in the 11H sitting and 816,963 here,
+which is the machine and not the program, and is why the third column matters
+more than the second.
 
-Twelve times slower became 1.8 times slower by making one `poll` interruptible.
-Threads remain the default until the rest of that gap is understood.
+Twelve times slower became 1.6 times slower in two steps: making one `poll`
+interruptible, then letting the worker that will run the fiber be the one that
+notices its socket. Threads remain the default; 63% is at the lower edge of the
+70–85% band `docs/design/scheduler.md` §10a set, not inside it.
 
 **What it is not.** Not correctness — `scripts/http_conformance.sh` passes on
 both, pipelining and header limits included — and not the cost of a fiber,

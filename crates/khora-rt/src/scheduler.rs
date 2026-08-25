@@ -153,6 +153,14 @@ struct Shared {
     reactor: Reactor,
     /// Wakes a parked worker.
     arrived: Condvar,
+    /// Held by the one idle worker currently waiting on the backend.
+    ///
+    /// **Exactly one, and that is the point.** Every idle worker calling
+    /// `epoll_wait` is a thundering herd, and on a completion port it would be
+    /// right — so who may block is a backend's business and this is the
+    /// conservative answer that suits the one there is.
+    /// `docs/design/scheduler.md` §10a.
+    polling: AtomicBool,
     /// Tasks that belong to no queue at this instant because somebody is
     /// carrying them between two.
     ///
@@ -386,6 +394,7 @@ impl Scheduler {
             timers: Mutex::new(Timers::default()),
             reactor: Reactor::default(),
             arrived: Condvar::new(),
+            polling: AtomicBool::new(false),
             in_transit: AtomicUsize::new(0),
             stopping: AtomicBool::new(false),
             counts: Counts::default(),
@@ -901,6 +910,13 @@ fn state_of(shared: &Arc<Shared>, fiber: usize) -> Option<Arc<crate::current::Fi
 fn inject(shared: &Arc<Shared>, task: Task) {
     shared.queued.lock().expect("the shared queue").push_back(task);
     shared.arrived.notify_one();
+    // **And the worker waiting on the backend, which the condvar cannot
+    // reach.** A worker that is idle now waits in `poll` rather than on
+    // `arrived`, so a task arriving has to be able to end that wait too —
+    // otherwise the one worker best placed to run it is the last to hear.
+    // `docs/design/scheduler.md` §10a: a task becoming runnable and a socket
+    // becoming ready are the same kind of event, so they end the same wait.
+    shared.reactor.nudge();
 }
 
 /// Puts a fiber where the running worker will reach it soonest.
@@ -937,6 +953,12 @@ fn work(shared: Arc<Shared>, me: usize) {
         }
         match next(&shared, &local, me, &mut turn) {
             Some(task) => run(&shared, &local, task),
+            // **An idle worker looks for I/O itself rather than sleeping while
+            // another thread does it.** Readiness discovered here is readiness
+            // discovered by the thread that is about to run the fiber, which
+            // is one operating-system handoff shorter than being told. Only
+            // one worker does this; the rest park as they always did.
+            None if serve_io(&shared) => continue,
             None => {
                 if !park(&shared, &local) {
                     break;
@@ -1092,6 +1114,32 @@ fn run(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>, mut task: Task)
             }
         }
     }
+}
+
+/// Waits on the backend, if nobody else is, and wakes whatever is ready.
+///
+/// True when this worker did the waiting, whether or not it found anything —
+/// the caller goes round again either way, because the queues may have changed
+/// under it while it waited.
+///
+/// **The wait is bounded even though `inject` nudges.** A worker asleep here is
+/// a worker not stealing, and until 11D's local queues can announce themselves
+/// the way the shared one does, going back to look is how work in somebody
+/// else's deque is ever found.
+fn serve_io(shared: &Arc<Shared>) -> bool {
+    if shared.polling.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    let ready = shared.reactor.poll(std::time::Duration::from_millis(10));
+    shared.polling.store(false, Ordering::Release);
+
+    for id in ready {
+        shared.counts.sockets_ready.fetch_add(1, Ordering::Relaxed);
+        if let Some(state) = state_of(shared, id) {
+            wake(shared, id, state.wait());
+        }
+    }
+    true
 }
 
 /// Sleeps until something arrives or the pool stops. False means stop.

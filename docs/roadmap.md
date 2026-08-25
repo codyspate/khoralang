@@ -2315,7 +2315,8 @@ deliberately, until the remaining backends land.
 | 11F | adversarial soak, a full state audit, and the scale numbers |
 | 11G | `std::net` and `Fiber::spawn` wired to it, behind `KHORA_FIBERS` |
 | 11H | the reactor could not be woken, and that was the twelve times |
-| 11I | **next** — workers poll the backend, and the backend stops being `poll` |
+| 11I | idle workers poll the backend themselves — 55% to 63% of threads |
+| 11J | **next** — the wake path's remaining locks, then epoll, kqueue and IOCP |
 | — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
 Measured on both platforms now, and they agree to within one per cent. **A
@@ -2595,17 +2596,40 @@ inside the eight per cent this repository calls noise. The data is genuinely
 not there a microsecond later. Deleted rather than kept on the grounds that it
 might help somewhere else.
 
+### 11I — the worker that will run the fiber is the one that notices its socket
+
+`bench/service`, one sitting: **513,500 against 816,963 on threads, 63%**, from
+429,000 and 55%.
+
+An idle worker now waits on the backend instead of on the condvar, and wakes
+what it finds. Readiness discovered that way is discovered by the thread that
+is about to run the fiber, which is one operating-system handoff shorter than
+being told about it — `scheduler.md` §10a's argument, which is that a socket
+becoming ready and a task being injected are the same kind of event and should
+end the same wait.
+
+Three things make it work and each is load-bearing:
+
+  - **Exactly one worker waits on the backend**, held by a token. Every idle
+    worker in `epoll_wait` is a herd; on a completion port it would be right,
+    which is why who may block stays a backend's business.
+  - **`inject` nudges the reactor**, because a worker waiting in `poll` cannot
+    hear a condvar, and the worker best placed to run an injected task would
+    otherwise be the last to know.
+  - **The reactor thread stays**, as a backstop. A pool that never goes idle
+    would otherwise never poll, and correctness must not depend on a lull.
+
+A ten-millisecond slice rather than one: throughput is the same to within
+noise, and an idle worker wakes a hundredth as often. The nudge is what makes
+the longer slice safe.
+
 ### What is left, in the order worth trying
 
 The gap is now 1.8× rather than 12×, and spinning the reactor instead of
 sleeping gives 613,571 — so roughly half of what remains is still the wake
 path and the rest is elsewhere.
 
-  - **Let workers poll the reactor themselves** when they have nothing to run.
-    Every readiness currently crosses from the reactor thread to a worker
-    through the parked map, the shared queue and a condvar; a worker that
-    polled would run the fiber it just found. This is the largest remaining
-    item and the one that removes an OS-thread handoff from the common path.
+  - ~~Let workers poll the reactor themselves.~~ Done in 11I, above.
   - **Carry the fiber's state in the `Watch`** rather than looking it up in the
     `live` map on every readiness. One global `HashMap` lock per wake, for
     something the registration already had in its hand. **A wake token may

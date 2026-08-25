@@ -213,7 +213,7 @@ impl Reactor {
     }
 
     /// Ends a `poll` that is already waiting.
-    fn nudge(&self) {
+    pub(crate) fn nudge(&self) {
         // Only when somebody is actually waiting. A nudge is two syscalls —
         // the write here and the read that drains it — and paying them when
         // the reactor is between polls buys nothing, because the next poll
