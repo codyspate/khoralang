@@ -3233,6 +3233,154 @@ reachable.
 the stages, report percentiles, then choose. 11H is the argument: the counter
 that looked most damning was the one that cost nothing.
 
+## Phase 13 — What stands between here and a release
+
+Phases 1 to 12 answered "does the language work". This one answers "can a
+stranger use it", which is a different question and mostly not a language
+question at all. The list is the repository owner's, kept in their numbering so
+that 13.7 means item 7 and nothing has to be translated in conversation.
+
+**Two things make this phase unlike the ones above it.** Half of it is
+*finishing* work whose hard part is already decided and written down — those
+entries point at the section that owns the detail rather than restating it. The
+other half is work phases 1 to 12 never touched at all: governance, a licence,
+an install story, documentation for somebody who was not here. Nothing in the
+tree so far has any opinion about those, which is itself the finding.
+
+### Where each item stands
+
+| | | Today |
+| --- | --- | --- |
+| 13.1 | Scheduler and I/O architecture | **Half.** 11I and 11J landed; the next three steps and the acceptance criterion are written in "What is left, in the order worth trying" above and `scheduler.md` §10a. Threads are still the default — making the scheduler one is a decision, not a flag flip |
+| 13.2 | Concurrency under real load | **Started.** 11F's soak covers adversarial execution; overload, backpressure, bounded queues, shutdown and recovery are not covered |
+| 13.3 | DB cancellation safety | **Designed, not built.** 12.5 names it as "the half that matters most" and says it needs `Region`'s `defer` threaded through `transaction` |
+| 13.4 | Trace propagation | **Designed, not built.** `observability.md` §Propagation says a span's parent must survive spawn, steal, suspension, wake and cancellation, and that the fiber carries it. 12.3 built the middle layer only |
+| 13.5 | `Decimal` | **Half.** 12.0 is "done, without the literal". `0.01d` is specified and unbuilt; adversarial overflow and scale-alignment tests do not exist |
+| 13.6 | Runtime soundness audit | **Not started**, and the largest unpriced item on this list. See below |
+| 13.7 | Deployable cross-compilation | **One target of several.** `targets.md` steps 2 and 3 are done for wasm; aarch64 and musl need a sysroot, and step 4 — fetching a runtime — is untouched |
+| 13.8 | WebAssembly product path | **A module exists and runs.** 1.9 MB, hand-built runtime, no deployment example, no host integration |
+| 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
+| 13.10 | Build profiles | **Not started.** `KHORA_DEBUG` is the only knob and it is a boolean. 12.4 says debug info "should become part of an optimization level when there is one"; 12.9 adds that the reproducible build is the one with debug info *off*, so profiles and reproducibility have to be designed together |
+| 13.11 | Public surface audit | **Not started.** `compatibility.md` has the policy; nothing has been checked against it |
+| 13.12 | Production ecosystem | **Not started.** `ecosystem.md` already decided Postgres is a package and not `std`, which this item agrees with |
+| 13.13 | Package distribution | **Half.** 10.2 built resolution, `khora.lock` and a content-addressed store; publishing and discovery have no mechanism |
+| 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
+| 13.15 | User documentation | **Not started.** Every document in `docs/` is written for somebody building the compiler |
+| 13.16 | Editor and tooling | **Half.** 10.4's language server does diagnostics, formatting, completion, hover and navigation; nothing is packaged |
+| 13.17 | Diagnostics pass | **Ongoing, and it works.** Six misleading messages were found and fixed by *using* the language during phase 12. A corpus makes that systematic instead of incidental |
+| 13.18 | Reference applications | **Two of three.** `risk_analyzer` and `link_shortener` exist; neither uses Postgres or tracing, and there is no wasm one |
+| 13.19 | External alpha | **Not started**, and nothing substitutes for it |
+| 13.20 | CI as a hard gate | **Half, and personally earned.** CI runs the suite on three platforms. "Eliminate ways a failed baseline can be accidentally ignored" is here because a commit went out on a red baseline three times, most recently in this session — a shell chain took `grep`'s exit status instead of the script's |
+| 13.21 | Release and security infrastructure | **A tenth.** 12.9 emits an SBOM and builds are reproducible; signing, provenance, releases, `SECURITY.md` and a disclosure process do not exist |
+| 13.22 | Governance | **Not started.** There is no licence file |
+| 13.23 | Performance at scale | **Small-scale only.** Every number in this document comes from one machine, one sitting, and programs of at most 430 lines |
+| 13.24 | Clean-machine release test | **Not started.** The acceptance test for all of the above |
+
+### The three that are bigger than one line makes them look
+
+**13.6, the soundness audit.** `khora-rt` has stackful coroutines, work
+stealing, fiber migration between threads, thread-locals read across stack
+switches, `Send` boundaries around `Task`, an FFI surface, a `longjmp`, and now
+an allocation registry. Phase 11 found three bugs in that neighbourhood by
+running into them — a cached TLS address, a counter underflow, a livelock — and
+the honest reading is that an inventory would find more. This is the item most
+likely to change the shape of the release rather than just add to it.
+
+**13.10, build profiles, is entangled with two decisions already taken.**
+Debug info is on by default because there is no release mode to hang it off;
+the reproducible build is the one with it *off*. Whatever profiles turn out to
+be, they have to answer both, and 12.4's and 12.9's entries are the constraints.
+
+**13.1's last clause is a decision, not a step.** Threads are the default
+deliberately — `fiber.rs` says so in its first paragraph — because the
+scheduler was slower and less proven. Making it the default is the moment that
+stops being true, and it should be taken against the acceptance criterion in
+`scheduler.md` §10a rather than by flipping a boolean.
+
+### One thing the list is missing, and it is a language question
+
+**A cycle leaks, and the thing that breaks one does not exist.**
+
+`docs/design/memory.md` §4 settles the policy and settles it well: a tracing
+collector is ruled out by non-negotiable 5, so a cycle leaks and *a weak
+reference is what breaks it*. It then says weak references "do not exist yet",
+and that they are wanted "the first time somebody writes a parent pointer".
+
+Phase 6.1 shipped mutable fields, so `a.next = b; b.next = a` compiles today.
+The escape hatch the design names has still not been built, and there is no
+diagnostic — nothing in `khora-lint` or `khora-types` mentions a cycle. A
+parent pointer, a doubly-linked list, a back-reference from a child to the
+cache holding it: each is an ordinary thing to write, each leaks, and nothing
+says so.
+
+That matters for a *release* specifically, because §4 anticipates the audience
+it will surprise:
+
+> A Swift developer reads this immediately; a Rust developer knows
+> `Rc`/`Weak`; a TypeScript or Go developer has never had to think about it and
+> will need the diagnostic to be good.
+
+The diagnostic does not exist. The failure is quiet by construction — nothing
+is freed early and nothing is read after free, the memory is simply never
+returned — which is the right failure to have and the hardest kind for somebody
+to attribute to their own code.
+
+**Three ways to close it, smallest first**, and this is a language-surface
+question so it is the repository owner's call rather than one to be taken here:
+
+1. **Document it and leave it**, in 13.15's known-limitations chapter, with
+   `khora_live_count` named as the way to see it. Cheapest, and it makes the
+   limitation the reader's problem the first time they meet it.
+2. **A lint.** A field assignment that could close a cycle is not decidable in
+   general, but the common shapes — assigning into something reachable from the
+   value being assigned — are worth a warning. Catches the accidental case and
+   says nothing about the deliberate one.
+3. **Weak references.** What §4 says the answer is. A language-surface addition
+   with a real design behind it already, and the only one of the three that
+   lets somebody *write* a parent pointer rather than avoid one.
+
+My reading is that 1 is not enough for a language pitched at production
+services, and that 3 is what §4 already promised — but it is a promise about
+the language, so it belongs to whoever makes those.
+
+### Two places the list understates the work
+
+**13.12 is three projects, not one item.** A production Postgres driver is the
+wire protocol, SCRAM-SHA-256, TLS, prepared statements, the type mapping, and a
+connection pool — and then it is a permanent maintenance commitment, because a
+database driver is never finished. An OTLP exporter is protobuf plus a
+transport. An HTTP client is TLS, redirects, timeouts, connection reuse. Each
+is comparable in size to `std::net::http`, which took a phase.
+
+There is a strategic question inside that sizing which the list does not ask:
+**does the Khora project need to own these, or does it need somebody else to be
+able to?** Owning them produces the ecosystem on day one and buys a permanent
+maintenance burden for a language team that is currently one person. Not owning
+them means 13.13's distribution story has to be good enough that a stranger can
+publish a driver and be found — which is work the list already contains.
+
+**13.6 should come before 13.19 and before 13.1's last clause.** An external
+alpha is for finding usability problems; it is a poor and expensive way to find
+memory-safety bugs, and the people it exposes them to did not sign up for that.
+Making the scheduler the default likewise multiplies the blast radius of
+anything the audit would have found. The audit is not just large, it gates two
+other items.
+
+### What the list gets right that this document did not
+
+Five of these correspond to nothing anywhere in phases 1 to 12: **13.15**
+documentation, **13.19** external testing, **13.22** governance, **13.24** the
+clean-machine test, and **13.14** installation as something a person does
+rather than something a developer scripts. That is not an oversight to be
+embarrassed about — a compiler with no users needs none of them — but it does
+mean roughly a fifth of the remaining work has no design behind it yet, and
+estimating the phase without saying so would be wrong.
+
+**And the ordering has one hard edge.** 13.24 is not a task, it is the
+acceptance test for 13.13 through 13.16; 13.19 is worth nothing before them and
+worth a great deal immediately after. Everything else can proceed in whatever
+order the evidence suggests.
+
 ## When can libraries be written?
 
 The question A6 was really about, and the phases answer it in two steps.
@@ -3246,3 +3394,9 @@ the language is good for the job while it is still cheap to change.
 purpose. D12 asked what may not break; 8.5.3 answers it, and the answer names
 package identity as one of the things 1.0 waits for. A minimal package manager could come earlier if
 the goal changes to letting other people start.
+
+**After 13 you can hand it to a stranger**, which is the step this question
+originally stopped short of. "Hand it to someone" meant somebody who could be
+told how; phase 13 is the difference between that and somebody who finds it,
+installs it, and never asks. 13.24 is where that claim is tested, and it is a
+test the project can fail.
