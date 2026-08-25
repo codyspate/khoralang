@@ -1,1 +1,0 @@
-This directory contains the public language reference. Keep exact syntax and semantic claims aligned with the implemented parser/type checker; implementation rationale belongs in repository-level design docs unless it changes behavior users rely on.
