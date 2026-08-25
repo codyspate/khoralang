@@ -243,6 +243,35 @@ What is *not* in `std`: currency codes, exchange rates, allocation and rounding
 policies for splitting a payment, and anything that knows what a fiscal quarter
 is. Those are a package, by the same rule that keeps the type here.
 
+### What was built
+
+`std/decimal.kh`, and it is almost all Khora. `add`, `sub`, `mul`, the
+comparisons and the rescaling are `Int` arithmetic with the scales lined up,
+and they trap on overflow like every other number here. `Show` prints every
+place the scale says, so `1.50` stays `1.50` — a price to two places is a price
+to two places, and dropping the zero is how a total stops lining up in a
+column.
+
+**One operation needed the runtime.** Division has no exact answer in general,
+so it takes a scale and a rounding mode; and reaching that scale means
+computing `left * 10^n / right`, whose numerator overflows sixty-four bits for
+perfectly ordinary money — a hundred pounds to eight places wants twenty-six
+digits on the way to an answer needing ten. `khora_decimal_divide` does that
+intermediate in a Rust `i128` and hands back the one number that fits. Khora
+never sees the hundred and twenty-eight bits and needs no type for them.
+
+**The significand is sixty-four bits, not the hundred and twenty-eight this
+document asked for.** Khora has no 128-bit integer and adding one to carry a
+money type would be a large language change for a small gain: eighteen
+significant digits is every currency amount anybody transacts, to the cent, up
+to ninety-nine thousand trillion.
+
+**The literal is not built.** `Decimal::scaled(1, 2)` and
+`Decimal::of_string("0.01")` are how one is written today. `0.01d` is decided
+and specified above and remains worth doing — an exact *constant* is most of
+the point of the type — but the type without the literal is useful and the
+literal without the type is not, so this is the half that shipped first.
+
 ## Not yet
 
 - **`Float32`.** One float type is enough until something needs the other, and

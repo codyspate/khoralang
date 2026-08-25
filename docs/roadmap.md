@@ -2404,7 +2404,29 @@ decides for each of these whether it is `std`'s, a package's, or neither, and
 most of them are neither — they belong to the compiler or the runtime. Nothing
 below should widen `std`.
 
-### 12.0 `Decimal` — the positioning's own claim
+### 12.0 `Decimal` — the positioning's own claim — **done, without the literal**
+
+`std/decimal.kh` and `crates/khora-rt/src/decimal.rs`. A scaled integer:
+`units` counted in steps of `10^-scale`, exact for anything written in decimal,
+which is what money is. Almost all of it is Khora — add, subtract, multiply,
+compare and rescale are `Int` arithmetic with the scales lined up, trapping on
+overflow like every other number. Only division needed the runtime, because its
+intermediate overflows sixty-four bits for ordinary money and is done in a Rust
+`i128` nobody above has to see.
+
+Seven tests compile and run, and the first is the one that matters:
+`0.1 + 0.2 == 0.3` is `exact`. Also that `1.0` and `1.00` are equal, that `1.50`
+prints as `1.50`, that a hundred pounds splits three ways to `33.33` with a
+penny left over, that half-to-even sends `0.125` down and `0.135` up, and that
+`1e-3` is refused as text because a number in exponent notation has been
+through a float somewhere.
+
+**The literal is not built.** `numbers.md` specifies `0.01d` and it stays
+worth doing — an exact *constant* is most of the point — but the type without
+the literal is useful and the literal without the type is not.
+
+The original entry:
+
 
 `positioning.md` says "particularly well suited to financial reconciliation".
 There is no exact decimal type anywhere: not in `docs/design/numbers.md`, not

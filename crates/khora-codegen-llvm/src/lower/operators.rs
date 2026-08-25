@@ -286,11 +286,24 @@ impl<'ctx> Lower<'_, 'ctx> {
         if !matches!(operand_ty, Type::Int | Type::Fixed(_) | Type::Bool | Type::Unit) {
             self.drop(left, operand_ty);
             self.drop(right, operand_ty);
+            // **Name the operator that was written, and the reason it did
+            // not resolve.** This said the same thing whatever the operator
+            // was: somebody who wrote `==` was told that `<` needs an `Ord`
+            // impl and that `==` reaches an `Eq` impl — which is what they
+            // had just done, and what had just failed. The real cause was
+            // `Eq` not being imported at the comparison, and the message
+            // pointed away from it.
+            let (needed, operators) = match op {
+                BinOp::Eq | BinOp::Ne => ("Eq", "`==` or `!=`"),
+                _ => ("Ord", "`<`, `>`, `<=` or `>=`"),
+            };
             return self.fail(
                 format!(
-                    "two `{operand_ty}` values cannot be ordered with `<`, `>`, `<=` or `>=`; \
-                     that needs an `Ord` impl the operator does not reach yet. `==` and `!=` \
-                     do reach an `Eq` impl"
+                    "two `{operand_ty}` values cannot be compared with {operators}: no \
+                     `{needed}` impl was reachable here. Either there is no \
+                     `impl {needed} for {operand_ty}`, or `{needed}` is not imported in \
+                     this module — an operator only reaches an impl whose trait is in \
+                     scope where the comparison is written"
                 ),
                 range,
             );

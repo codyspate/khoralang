@@ -1,0 +1,304 @@
+module std::decimal;
+
+// Exact decimal arithmetic, for the numbers that are counted rather than
+// measured.
+//
+// `docs/positioning.md` opens by saying Khora is well suited to financial
+// reconciliation, and until this module there was no way to write ten pence.
+// `Float` is IEEE and `docs/design/numbers.md` explains at length why it
+// implements neither `Eq` nor `Ord`: `0.1 + 0.2` is not `0.3` and never was.
+// A ledger cannot be built on a type whose equality is a trap.
+//
+// # What a `Decimal` is
+//
+// A scaled integer: `units` counted in steps of `10^-scale`. `Decimal::scaled(
+// 1, 2)` is one hundredth. That is the representation SQL `NUMERIC`, Java's
+// `BigDecimal` and .NET's `decimal` all approximate, and it is exact for
+// anything written in decimal — which is what money is.
+//
+// **Sixty-four bits of significand rather than a hundred and twenty-eight**,
+// which `numbers.md` names as the ideal. Khora has no 128-bit integer, and
+// adding one to carry a money type would be a large language change for a
+// small gain: eighteen significant digits is every currency amount anybody
+// transacts, to the cent, up to ninety-nine thousand trillion. The intermediate
+// of a division is done in 128 bits inside the runtime, where it is a Rust
+// `i128` and nobody has to see it.
+//
+// # What it does when it cannot answer
+//
+// It stops the program, like every other number in Khora. `numbers.md`
+// §"Overflow traps, in every build" argues that case and none of the argument
+// changes here: a total that silently wrapped is worse than one that never
+// arrived. Division is the exception, because a quotient usually has no exact
+// decimal form — so it takes the scale and the rounding to use, and says so.
+
+import std::core::{Eq, Option, Ord, Ordering, Show};
+
+/// A number counted in steps of `10^-scale`.
+///
+/// The fields are public because a decimal is its representation and hiding it
+/// would only mean writing accessors for both. `scale` is never negative:
+/// `Decimal::scaled` refuses one, because a negative scale is a large number
+/// spelled confusingly and every caller who wants one means a larger `units`.
+export type Decimal = {
+  units: Int,
+  scale: Int,
+};
+
+/// Ten to the `power`, or a stopped program if it does not fit an `Int`.
+///
+/// Eighteen is as far as this goes and the nineteenth would overflow, which is
+/// the same limit as the significand and not a coincidence.
+fn ten_to(power: Int) -> Int {
+  if power <= 0 { 1 } else { 10 * ten_to(power - 1) }
+}
+
+/// How `divide` breaks a tie.
+export type Rounding =
+  /// To the nearer, and to the even one when exactly between.
+  ///
+  /// The default, and the one every accounting standard names: rounding halves
+  /// up biases a long column of figures upward, and over a ledger that bias is
+  /// money.
+  | HalfEven
+  /// To the nearer, and away from zero when exactly between. What most people
+  /// mean by "round it".
+  | HalfUp
+  /// Towards zero, always. What a truncation is.
+  | Towards;
+
+impl Decimal {
+  /// A whole number.
+  export fn of_int(units: Int) -> Decimal {
+    { units: units, scale: 0 }
+  }
+
+  /// `units` counted in steps of `10^-scale`.
+  ///
+  /// The total constructor, and the one a decoder reading a database column or
+  /// a wire format wants: it cannot fail, because both halves are already
+  /// numbers. A negative scale is refused by clamping to zero rather than by
+  /// raising, since it can only arise from a caller that computed it.
+  export fn scaled(units: Int, scale: Int) -> Decimal {
+    { units: units, scale: if scale < 0 { 0 } else { scale } }
+  }
+
+  /// Zero.
+  export fn zero() -> Decimal { { units: 0, scale: 0 } }
+
+  /// The same number at a larger scale.
+  ///
+  /// Exact, and stops the program if the significand cannot hold it — going
+  /// from two decimal places to eighteen is a multiplication by ten thousand
+  /// million million, and most numbers do not survive it.
+  export fn at_scale(self, scale: Int) -> Decimal {
+    if scale <= self.scale {
+      self
+    } else {
+      { units: self.units * ten_to(scale - self.scale), scale: scale }
+    }
+  }
+
+  /// Both numbers at the larger of their two scales.
+  fn align(self, other: Decimal) -> Split2 {
+    let scale = if self.scale > other.scale { self.scale } else { other.scale };
+    { left: Decimal::at_scale(self, scale), right: Decimal::at_scale(other, scale) }
+  }
+
+  /// The sum. Exact, and stops the program if it does not fit.
+  export fn add(self, other: Decimal) -> Decimal {
+    let pair = Decimal::align(self, other);
+    { units: pair.left.units + pair.right.units, scale: pair.left.scale }
+  }
+
+  /// The difference. Exact, and stops the program if it does not fit.
+  export fn sub(self, other: Decimal) -> Decimal {
+    let pair = Decimal::align(self, other);
+    { units: pair.left.units - pair.right.units, scale: pair.left.scale }
+  }
+
+  /// The product, exactly.
+  ///
+  /// **The scales add**, which is what makes this exact and also what makes it
+  /// overflow sooner than people expect: two numbers with four decimal places
+  /// each give one with eight, and the significand has to hold all of them.
+  /// `rounded` afterwards is how a caller comes back to a sensible scale.
+  export fn mul(self, other: Decimal) -> Decimal {
+    { units: self.units * other.units, scale: self.scale + other.scale }
+  }
+
+  /// The quotient, to `scale` decimal places, rounded as asked.
+  ///
+  /// **The one operation that cannot be exact**, so it is the one that makes
+  /// the caller say what it wants. A quotient with no finite decimal form —
+  /// one third — has to be rounded somewhere, and a library that picked
+  /// silently would be picking on behalf of a ledger.
+  ///
+  /// `None` when `other` is zero. Not a trap, because dividing by a quantity
+  /// that turned out to be zero is an ordinary thing for data to do, and
+  /// `numbers.md` reserves stopping the program for a bug.
+  export fn divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal> {
+    if other.units == 0 {
+      Option::None
+    } else {
+      let mode = match how {
+        Rounding::HalfEven => 0,
+        Rounding::HalfUp => 1,
+        Rounding::Towards => 2,
+      };
+      let scale = if scale < 0 { 0 } else { scale };
+      Option::Some({
+          units: khora_decimal_divide(
+            self.units, self.scale, other.units, other.scale, scale, mode),
+          scale: scale,
+        })
+    }
+  }
+
+  /// The same number at `scale` places, rounded as asked.
+  ///
+  /// The way back from `mul`'s widening scales, and the way a total becomes a
+  /// figure somebody can be invoiced for.
+  export fn rounded(self, scale: Int, how: Rounding) -> Decimal {
+    match Decimal::divide(self, Decimal::of_int(1), scale, how) {
+      Option::Some(value) => value,
+      // Dividing by one, so the only `None` is unreachable.
+      Option::None => self,
+    }
+  }
+
+  /// The number with the opposite sign.
+  export fn negate(self) -> Decimal {
+    { units: 0 - self.units, scale: self.scale }
+  }
+
+  /// Whether it is less than zero.
+  export fn is_negative(self) -> Bool { self.units < 0 }
+
+  /// Whether it is exactly zero.
+  export fn is_zero(self) -> Bool { self.units == 0 }
+
+  /// The whole part, towards zero.
+  export fn truncated(self) -> Int {
+    self.units / ten_to(self.scale)
+  }
+
+  /// A decimal written out, or `None` if the text is not one.
+  ///
+  /// Accepts a leading sign, digits, and at most one point. **Rejects
+  /// everything else on purpose**, including the exponent notation `Float`
+  /// takes: a number arriving as `1e-3` is a measurement that has been through
+  /// a float somewhere, and taking it here would launder that history.
+  export fn of_string(text: String) -> Option<Decimal> {
+    let length = String::byte_length(text);
+    if length == 0 { Option::None } else {
+      let first = U8::to_int(String::byte(text, 0));
+      let negative = first == 45;
+      let start = if negative || first == 43 { 1 } else { 0 };
+      if start == length { Option::None } else {
+        read_digits(text, start, length, 0, 0 - 1, negative)
+      }
+    }
+  }
+}
+
+/// Both operands brought to one scale.
+type Split2 = {
+  left: Decimal,
+  right: Decimal,
+};
+
+/// Walks the digits, carrying the value so far and where the point was.
+///
+/// `point` is `-1` until one is seen, so that a second one is a rejection
+/// rather than a silently different number.
+fn read_digits(
+  text: String, at: Int, length: Int, value: Int, point: Int, negative: Bool
+) -> Option<Decimal> {
+  if at == length {
+    if point == 0 - 1 {
+      Option::Some({ units: if negative { 0 - value } else { value }, scale: 0 })
+    } else {
+      Option::Some({
+          units: if negative { 0 - value } else { value },
+          scale: length - point - 1,
+        })
+    }
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    if byte == 46 {
+      if point == 0 - 1 {
+        read_digits(text, at + 1, length, value, at, negative)
+      } else {
+        Option::None
+      }
+    } else if byte >= 48 && byte <= 57 {
+      read_digits(text, at + 1, length, value * 10 + (byte - 48), point, negative)
+    } else {
+      Option::None
+    }
+  }
+}
+
+impl Eq for Decimal {
+  /// **By value, not by representation.** `1.0` and `1.00` are the same number
+  /// written twice, and a ledger that thought otherwise would report a
+  /// difference where there is none. This is the whole reason `Float` cannot
+  /// have an `Eq` and this can.
+  fn eq(self, other: Decimal) -> Bool {
+    let pair = Decimal::align(self, other);
+    pair.left.units == pair.right.units
+  }
+}
+
+impl Ord for Decimal {
+  fn cmp(self, other: Decimal) -> Ordering {
+    let pair = Decimal::align(self, other);
+    if pair.left.units < pair.right.units { Ordering::Less }
+    else if pair.left.units == pair.right.units { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for Decimal {
+  /// Every place the scale says, including trailing zeros.
+  ///
+  /// `Decimal::scaled(150, 2)` shows as `1.50` and not `1.5`, because the
+  /// scale is part of what was meant: a price to two places stays a price to
+  /// two places, and dropping the zero is how a total stops lining up in a
+  /// column.
+  fn show(self) -> String {
+    if self.scale == 0 {
+      Int::to_string(self.units)
+    } else {
+      let negative = self.units < 0;
+      let magnitude = if negative { 0 - self.units } else { self.units };
+      let step = ten_to(self.scale);
+      let whole = magnitude / step;
+      let part = magnitude % step;
+      let sign = if negative { "-" } else { "" };
+      sign + Int::to_string(whole) + "." + padded(Int::to_string(part), self.scale)
+    }
+  }
+}
+
+/// `text` with leading zeros until it is `width` long.
+fn padded(text: String, width: Int) -> String {
+  if String::byte_length(text) >= width {
+    text
+  } else {
+    padded("0" + text, width)
+  }
+}
+
+// The one operation that needs more than sixty-four bits in the middle.
+//
+// `(a / b)` at a given scale is `a * 10^scale / b` with the operands first
+// brought to a common scale, and that numerator overflows an `Int` for
+// perfectly ordinary inputs — a hundred pounds divided to eight places needs
+// twenty-six digits on the way. The runtime does it in a Rust `i128`, which is
+// wide enough for anything an `Int` significand can produce, and hands back the
+// one number that fits.
+extern fn khora_decimal_divide(
+  left: Int, left_scale: Int, right: Int, right_scale: Int, scale: Int, mode: Int
+) -> Int;

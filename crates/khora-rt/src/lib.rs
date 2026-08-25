@@ -129,6 +129,7 @@ mod cancel;
 mod coro;
 mod counters;
 mod current;
+mod decimal;
 mod fiber;
 mod fs;
 mod heap;
