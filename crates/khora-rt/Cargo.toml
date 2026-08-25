@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[build-dependencies]
+# `csrc/guard.c`, and nothing else. See `build.rs`.
+cc = "1"
+
 [dependencies]
 # TLS is bound rather than written — `docs/design/ecosystem.md`. `ring` rather
 # than the default provider because it needs no cmake and no assembler, so a

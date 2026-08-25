@@ -36,6 +36,26 @@ pub(crate) fn render(guard: &str, exports: &[(String, Signature)]) -> String {
     let _ = writeln!(out, "#endif");
     out.push('\n');
 
+    // **The control surface, before the exports.** A host that wants to survive
+    // a trap should not have to hand-write `extern` declarations for functions
+    // the library already publishes — that is how a prototype drifts from the
+    // symbol it names, which is the whole reason this file is generated.
+    // `docs/design/c-export.md` §8.
+    let _ = writeln!(out, "/* Trap containment. Off by default: without the call below a trap");
+    let _ = writeln!(out, "   ends the process, which is what a program wants and a library");
+    let _ = writeln!(out, "   does not. See docs/design/traps.md. */");
+    let _ = writeln!(out, "void khora_set_trap_policy(int contain);");
+    let _ = writeln!(out, "int khora_trapped(void);");
+    let _ = writeln!(out, "void khora_clear_trap(void);");
+    out.push('\n');
+    let _ = writeln!(out, "/* Diagnostic, not a contract: docs/design/compatibility.md says");
+    let _ = writeln!(out, "   allocation behaviour is not part of the language's promise. Here");
+    let _ = writeln!(out, "   because a host just told a trap was contained is entitled to");
+    let _ = writeln!(out, "   check that the memory came back. */");
+    let _ = writeln!(out, "long long khora_live_count(void);");
+    let _ = writeln!(out, "long long khora_alloc_count(void);");
+    out.push('\n');
+
     for (name, signature) in exports {
         let params = if signature.params.is_empty() {
             // **`void`, not `()`.** An empty parameter list in C is a function
@@ -113,6 +133,18 @@ mod tests {
             params,
             ret,
         }
+    }
+
+    /// The trap control surface is declared, so a host needs no hand-written
+    /// `extern` for the functions the library already publishes.
+    #[test]
+    fn the_header_declares_the_trap_controls() {
+        let out = render("x", &[]);
+        assert!(out.contains("void khora_set_trap_policy(int contain);"), "{out}");
+        assert!(out.contains("int khora_trapped(void);"), "{out}");
+        assert!(out.contains("void khora_clear_trap(void);"), "{out}");
+        // And says which half is a promise and which is an instrument.
+        assert!(out.contains("Diagnostic, not a contract"), "{out}");
     }
 
     #[test]

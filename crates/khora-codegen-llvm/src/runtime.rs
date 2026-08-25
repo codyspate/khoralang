@@ -115,6 +115,15 @@ pub struct Runtime<'ctx> {
     pub dup: FunctionValue<'ctx>,
     /// `void khora_drop(void *object, void (*drop_fields)(void *))`
     pub drop: FunctionValue<'ctx>,
+    /// `int khora_contain_enabled(void)` — whether the host asked for a trap
+    /// inside an exported call to be contained. Read by every export's
+    /// wrapper, so the answer has to be cheap.
+    pub contain_enabled: FunctionValue<'ctx>,
+    /// `uint64_t khora_export_call(uint64_t (*body)(void *), void *ctx)`
+    ///
+    /// Runs one exported call under a landing point. See
+    /// `khora-rt/src/contain.rs` and `csrc/guard.c`.
+    pub export_call: FunctionValue<'ctx>,
     /// `void khora_single_threaded(void)` — told to the runtime by `main` when
     /// the compiler counted references non-atomically, so that a spawn is an
     /// abort rather than a race.
@@ -243,6 +252,11 @@ impl<'ctx> Runtime<'ctx> {
             // opaque pointers a function pointer is just `ptr`, so passing
             // null and passing a routine are the same call shape.
             drop: declare("khora_drop", void.fn_type(&[ptr.into(), ptr.into()], false)),
+            contain_enabled: declare("khora_contain_enabled", i32t.fn_type(&[], false)),
+            export_call: declare(
+                "khora_export_call",
+                i64t.fn_type(&[ptr.into(), ptr.into()], false),
+            ),
             single_threaded: declare("khora_single_threaded", void.fn_type(&[], false)),
             drop_last: declare(
                 "khora_drop_last",

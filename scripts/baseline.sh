@@ -62,7 +62,17 @@ sh "$root/scripts/http_conformance.sh"
 # there is no WSL: this is a Windows developer's extra check, not a requirement.
 if command -v wsl >/dev/null 2>&1; then
     step 'the runtime on Linux, through WSL'
-    sh "$root/scripts/check-linux.sh" > /dev/null
+    # **Kept, not discarded.** This was `> /dev/null`, and when the Linux check
+    # exited 101 the baseline log ended mid-sentence with no error anywhere in
+    # it: every `say` header and every summary line that script writes goes to
+    # stdout, so discarding stdout discards the part that names the step. It is
+    # the same mistake the repeat loop inside `check-linux.sh` had, one level up.
+    linux_log="${TMPDIR:-/tmp}/khora-baseline-linux.log"
+    if ! sh "$root/scripts/check-linux.sh" > "$linux_log" 2>&1; then
+        printf '  FAILED  the Linux check, kept at %s\n' "$linux_log" >&2
+        tail -40 "$linux_log" >&2
+        exit 1
+    fi
     printf '  ok    khora-rt passes against the POSIX `poll`\n'
 else
     printf '\n=== skipping the Linux check: no wsl\n'

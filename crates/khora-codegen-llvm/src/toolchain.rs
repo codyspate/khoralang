@@ -137,6 +137,30 @@ pub fn runtime_archive() -> Option<PathBuf> {
 /// *after* the objects and the system libraries after that: a static link
 /// resolves left to right, so an archive listed before its user contributes
 /// nothing.
+/// Runtime symbols a shared library publishes alongside its own exports.
+///
+/// **A library needs a control surface, and it comes from the archive rather
+/// than from generated code.** The Khora functions get `dllexport` where they
+/// are built; these are Rust, in a static archive, and nothing in the emitted
+/// module refers to them — so on Windows they are absent from the export table
+/// and on ELF the archive member holding them is never pulled in at all.
+/// Naming them here fixes both, and naming them *explicitly* rather than
+/// exporting everything keeps the rest of the runtime — and the Rust standard
+/// library it carries — out of the published surface.
+///
+/// The first three are the contract: `docs/design/c-export.md` §8. The
+/// counters are diagnostic, and `docs/design/compatibility.md` is clear that
+/// allocation behaviour is not part of the language's promise — they are here
+/// because a host that has just been told a trap was contained is entitled to
+/// check that the memory actually came back.
+const LIBRARY_CONTROL: &[&str] = &[
+    "khora_set_trap_policy",
+    "khora_trapped",
+    "khora_clear_trap",
+    "khora_live_count",
+    "khora_alloc_count",
+];
+
 /// Whether a build emits debug information.
 ///
 /// On by default, and off with `KHORA_DEBUG=0`. There is no release mode to
@@ -181,6 +205,17 @@ fn drive_clang(
     // exported symbols are the whole interface. `docs/design/c-export.md`.
     if library {
         cmd.arg("-shared");
+        for symbol in LIBRARY_CONTROL {
+            if cfg!(windows) {
+                // Publishes it *and* pulls the archive member in, which are
+                // two problems with one flag.
+                cmd.arg(format!("-Wl,/EXPORT:{symbol}"));
+            } else {
+                // `-u` forces the member to be linked; a shared object's
+                // symbols are visible by default once it is.
+                cmd.arg(format!("-Wl,-u,{symbol}"));
+            }
+        }
     }
     cmd.args(objects).args(archives);
     if !archives.is_empty() {

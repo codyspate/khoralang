@@ -28,12 +28,25 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: usize) -> ! {
         // program's whole run.
         unsafe { std::slice::from_raw_parts(what, len) }
     };
-    let mut err = std::io::stderr().lock();
-    let _ =
-        writeln!(err, "khora: {} overflowed{}", String::from_utf8_lossy(bytes), on_which_fiber());
-    where_from(&mut err);
-    let _ = std::io::stdout().flush();
-    std::process::exit(134)
+    // **The block matters, and it is not style.** On Windows `longjmp` is a
+    // real unwind: it runs SEH cleanup on every frame between the jump and the
+    // landing point, which includes the destructors Rust emits. A `StderrLock`
+    // held across the jump aborted the process with "panic in a function that
+    // cannot unwind" — containment working exactly as designed and the host
+    // dying anyway. So everything with a `Drop` is confined to a block that
+    // ends before `stop` is reached.
+    let contained = {
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "khora: {} overflowed{}",
+            String::from_utf8_lossy(bytes),
+            on_which_fiber()
+        );
+        where_from(&mut err);
+        say_what_happens_next(&mut err)
+    };
+    stop(contained)
 }
 
 /// Reports an index that was not in range, and stops.
@@ -43,14 +56,58 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: usize) -> ! {
 /// and the useful thing to do is say where.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_bounds_fail(index: i64, len: i64) -> ! {
-    let mut err = std::io::stderr().lock();
+    // The same block, for the same reason as `khora_overflow`.
+    let contained = {
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "khora: index {index} is outside an array of {len}{}",
+            on_which_fiber()
+        );
+        where_from(&mut err);
+        say_what_happens_next(&mut err)
+    };
+    stop(contained)
+}
+
+/// Decides what happens after the message, does the freeing, and says so.
+///
+/// Returns whether the call is being contained. **Everything that allocates or
+/// holds a lock happens here**, inside the caller's block, so that by the time
+/// `stop` jumps there is nothing left for an unwind to run.
+///
+/// **The default is unchanged**: a trap ends the process, which is what
+/// `docs/design/traps.md` decided and what a program wants. Containment
+/// happens only when a host has asked for it with `khora_set_trap_policy` and
+/// only inside an exported call, where `crate::contain` documents why
+/// discarding every allocation the call made is sound.
+///
+/// The message is printed either way. A contained trap is still a bug, and a
+/// library that swallowed one in silence would be worse than one that died.
+fn say_what_happens_next(err: &mut impl Write) -> bool {
+    if !crate::contain::can_contain() {
+        return false;
+    }
+    let freed = crate::contain::discard();
     let _ = writeln!(
         err,
-        "khora: index {index} is outside an array of {len}{}",
-        on_which_fiber()
+        "khora: the call was discarded and {freed} object(s) released; the host is still \
+         running. `khora_trapped()` reports this until `khora_clear_trap()`"
     );
-    where_from(&mut err);
+    true
+}
+
+/// Leaves, one way or the other.
+///
+/// Takes a `bool` rather than doing the deciding, because on Windows `longjmp`
+/// is a real unwind — it runs SEH cleanup on every frame between here and the
+/// landing point — and this frame must have nothing for it to run. See the
+/// comment in [`khora_overflow`].
+fn stop(contained: bool) -> ! {
     let _ = std::io::stdout().flush();
+    if contained {
+        crate::contain::khora_guard_jump()
+    }
     std::process::exit(134)
 }
 

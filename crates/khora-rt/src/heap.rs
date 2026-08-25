@@ -56,6 +56,10 @@ pub extern "C" fn khora_alloc(size: usize, tag: u32) -> *mut u8 {
 
     ALLOC_COUNT.fetch_add(1, COUNTER_ORDER);
     LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
+    // Only while a guarded export call is on this thread's stack, which is a
+    // thread-local read and a not-taken branch everywhere else.
+    // `crate::contain` has the cost note.
+    crate::contain::record(ptr);
     ptr
 }
 
@@ -160,6 +164,7 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     unsafe { dealloc(ptr, layout) };
 
     LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    crate::contain::forget(ptr);
 }
 
 /// Releases a reference and, if it was the last, keeps the memory.
@@ -328,6 +333,7 @@ pub unsafe extern "C" fn khora_drop_last(
     // and the callback has released everything the object owned.
     unsafe { dealloc(ptr, layout) };
     LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    crate::contain::forget(ptr);
 }
 
 /// Frees a token nothing spent.
@@ -370,4 +376,31 @@ pub unsafe extern "C" fn khora_refcount(ptr: *const u8) -> usize {
     // SAFETY: `ptr` points at a live object per the contract above, so its
     // header is initialized and valid to read.
     unsafe { (*ptr.cast::<KhoraHeader>()).refcount.load(Ordering::Relaxed) }
+}
+
+/// Frees an object without touching its reference count or its children.
+///
+/// **Only for [`crate::contain::discard`]**, and only sound because of the
+/// invariant that function documents: every object in a discarded call's
+/// registry was allocated during that call, so everything any of them points
+/// at is in the list too and is freed by its own entry. Running drop glue here
+/// would cascade into children that are then visited again, which is a double
+/// free; decrementing instead would leave a tree whose root is gone.
+///
+/// # Safety
+///
+/// `ptr` must be a live object from [`khora_alloc`] that nothing outside the
+/// discarded call can reach, and must be freed exactly once.
+pub(crate) unsafe fn release_raw(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: the caller guarantees a live object, so its header is readable
+    // and `field_bytes` is the one the allocation used.
+    let field_bytes = unsafe { (*ptr.cast::<KhoraHeader>()).field_bytes };
+    let layout = object_layout(field_bytes);
+    // SAFETY: `ptr` came from `alloc_zeroed` with exactly this layout, and the
+    // caller guarantees nothing else reaches it.
+    unsafe { dealloc(ptr, layout) };
+    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
 }

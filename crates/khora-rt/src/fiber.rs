@@ -267,6 +267,13 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     if SINGLE_THREADED.load(Ordering::Relaxed) == 1 {
         fatal("a fiber was spawned in a program compiled as single-threaded");
     }
+    // **A spawn breaks the escape argument containment rests on.** A fiber
+    // outlives the exported call that made it and may hold a reference to
+    // something that call allocated, so discarding the call's registry would
+    // free memory a live fiber is reading. Giving up on containing this call
+    // is the safe direction; freeing under a running fiber is not.
+    // `crate::contain`.
+    crate::contain::disarm();
     let fiber = Fiber::spawned();
     let handed = Handed(body);
     let done = Arc::new(Done::default());

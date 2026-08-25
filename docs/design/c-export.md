@@ -217,44 +217,91 @@ forwarding call and nothing else.
 by picking one — silently, and not necessarily the same one twice. Refused by
 name.
 
-## 8. Containing a trap here, if it is worth it
+## 8. Containing a trap here — **built**
 
 §4 said an export boundary would be a smaller containment problem than a fiber
-and left it there. Working out how much smaller changed the answer enough to
-write down, and `traps.md` §4 has been corrected to match.
+and left it there. It is smaller enough to have done, and `traps.md` §4 has been
+corrected to match.
 
-**The escape argument holds here, and it fails for a fiber.** An exported
-function takes scalars and `Ptr`, returns scalars, cannot `raise`, and — since
-the `with` clause is refused — can be handed no capability. A function that
-holds no capability can reach no effect. There is no module-level mutable
+```c
+khora_set_trap_policy(1);          /* opt in; the default is unchanged */
+
+int64_t v = price(units, scale);
+if (khora_trapped()) {             /* the call was discarded */
+    khora_clear_trap();            /* ...and the host is still running */
+}
+```
+
+**The escape argument holds here and fails for a fiber.** An exported function
+takes scalars and `Ptr`, returns scalars, cannot `raise`, and cannot be handed
+a capability — so it can reach no effect, there is no module-level mutable
 binding to store anything in, and nothing heap-allocated crosses the signature
-in either direction. So **every allocation an exported call makes is reachable
-only from its own stack**, which is exactly the property `traps.md` §4 wanted
-from arenas and could not have for a request fiber.
+either way. **Every allocation an exported call makes is reachable only from
+its own stack.** Discarding all of them is therefore sound without knowing
+anything about what the stack held, which is exactly the property `traps.md`
+§4 wanted from arenas and could not have for a request fiber.
 
-That makes containment here a matter of two mechanisms rather than an unwinder:
+### The three parts
 
-**One: know which allocations belong to the call.** The runtime counts live
-objects — `LIVE_COUNT`, which the leak tests read — and does not list them.
-A list is what discarding a failed call needs. Cheapest shape is a thread-local
-registry that `khora_alloc` pushes to while an exported call is on the stack;
-the branch can be kept off every other program by having a `--lib` build emit
-calls to a tracking allocator, since the backend already knows `Entry::Library`.
+**The registry.** `khora_alloc` records what a guarded call allocates, and
+every free path forgets it so nothing is released twice. `discard` then frees
+each entry **raw** — no reference counting, no drop glue. That is not a
+shortcut: everything a registered object points at is registered too, so
+running drop glue would cascade into children that are then visited again,
+which is a double free, and decrementing instead would leave a tree whose root
+is gone. Freeing each exactly once is the operation the invariant asks for.
 
-**Two: get back to the wrapper.** `catch_unwind` cannot do it: the Khora frames
-in between are LLVM-generated with no personality routine, and unwinding
-through them is undefined. That leaves `longjmp`, whose hazard is not the jump
-but what it skips — which is what mechanism one exists to make recoverable.
-Running exported calls on a `corosensei` fiber and abandoning the stack is the
-alternative, and it trades a hand-rolled unsafe path for a stack allocation per
-call and machinery phase 11 has already debugged.
+**The jump.** `csrc/guard.c`, twelve lines, because Rust has no portable
+`setjmp` and because a `jmp_buf` belongs to the frame that owns it — so the
+frame calling the body has to be the C one. `catch_unwind` cannot substitute:
+the Khora frames in between are LLVM-generated with no personality routine and
+unwinding through them is undefined.
 
-**Three, and it is a real question rather than a mechanism: how does C learn?**
-An export returns a scalar and C has no exceptions. The default must not
-change — a host that opted into nothing should get today's behaviour exactly —
-so this wants `khora_set_trap_policy` to opt in and `khora_trapped()` to query
-after, which is `errno`'s shape and no signature changes.
+**Getting back to C.** Every export's wrapper reads a process-wide flag and
+branches. A host that opted into nothing gets a load, a predictable branch and
+a direct call; one that opted in gets its arguments packed into a struct on the
+frame and an indirect call through `khora_export_call`, because one C function
+cannot be written per Khora signature and a generated thunk can.
 
-None of this is written. It is recorded at this length because the conclusion
-moved: this document and `traps.md` both said containment was blocked on an
-unwinder, and at *this* boundary it is not.
+### The hole, and the guard over it
+
+A spawned fiber outlives the call that made it and may hold a reference to
+something the registry would free. So **a spawn disarms containment** and that
+call traps the way it always did. Refusing to contain is the safe direction;
+freeing under a running fiber is not.
+
+### What it costs, measured
+
+Both allocation hooks sit on the path of every allocation in every program,
+including the overwhelming majority that never export anything — so the
+number that matters is what the uninvolved case pays. On a benchmark that does
+nothing but allocate and free, against the same build with the hooks deleted:
+
+| | overhead |
+| --- | --- |
+| thread-local guard | 12% |
+| the same with a plain `Cell` instead of `RefCell` | 12% |
+| checking the global policy first | **2.6%** |
+
+The middle row is the useful one: swapping the borrow check changed nothing,
+which is how it became clear the expense was the thread-local access itself
+rather than `RefCell`. `POLICY` is a static that was already there, so reading
+it is a load from a fixed address and a branch that is never taken. 2.6% on a
+program that only allocates, and proportionally less on one that also does work.
+
+### Off by default, and why that is not timidity
+
+A host that opted into nothing behaves exactly as it did before any of this
+existed. Containment is a promise about what happens after a bug, and
+`khora_trapped()` is only useful to a caller that checks it — a caller that
+does not would silently take a zero for an answer, which is worse than the
+abort it replaced. The message is printed either way: a contained trap is still
+a bug, and a library that swallowed one in silence would be worse than one that
+died.
+
+### What this does not do
+
+**Fibers.** A server fiber can hold capabilities and reach `Shared` cells, so
+the escape argument does not hold and `traps.md` §3's unwinder is still the
+blocker. Nothing here changes that, and `traps.md` is unchanged in its
+decision.

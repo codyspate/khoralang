@@ -2912,7 +2912,7 @@ Nobody has measured it. The corpus is still small enough that a baseline is
 cheap to take and expensive to reconstruct later — this entry is a measurement
 and a number to defend, not a project.
 
-### 12.8 What a trap does to a process — **argued, and decided against for now**
+### 12.8 What a trap does to a process — **argued, and contained where it can be**
 
 `docs/design/traps.md`. The argument this entry said had not been had, had.
 
@@ -2958,6 +2958,22 @@ and then does is worse than one that never said it.
 rather than permanent: a real service showing traps frequent enough that
 restart is an availability problem; region-backed allocation landing for other
 reasons; or a target with no supervisor to restart anything.
+
+**And the third one arrived**, which is what falsifiable was for. 12.6 put a
+Khora library inside somebody else's process — a Python interpreter, a Node
+runtime — where there is no supervisor and its owner never agreed to run one.
+Working out what containment would cost *there* changed the answer: an exported
+function takes scalars and `Ptr`, returns scalars, cannot raise and cannot hold
+a capability, so it can reach no effect and every allocation it makes is
+reachable only from its own stack. The escape argument that fails for a fiber
+holds here by construction, and §4's second answer — the one rejected as
+unavailable — is available at exactly this boundary.
+
+So it is built: a per-call allocation registry, a `setjmp` landing point in
+twelve lines of C, opt-in per process, 2.6% on the allocation path of programs
+that never use it. `docs/design/c-export.md` §8. **The decision is unchanged
+everywhere else**, because everywhere else the escape argument still fails and
+§3's unwinder is still the blocker.
 
 ### 12.9 Supply chain — **the SBOM, not the signature**
 

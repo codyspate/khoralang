@@ -215,3 +215,159 @@ fn two_exports_of_one_name_are_refused() {
         "expected the collision to be named, got {found:?}"
     );
 }
+
+// --- containing a trap ----------------------------------------------------
+
+/// Allocates, keeps it live, and then overflows. The allocation matters: an
+/// empty registry proves nothing about whether discarding one works.
+const TRAPS: &str = "module t;
+
+import std::core::{Eq, Show};
+
+export extern fn price(units: Int, scale: Int) -> Int {
+  units * scale
+}
+
+export extern fn boom(n: Int) -> Int {
+  let a = n.show() + \"-and-some-more-text-to-allocate\";
+  let b = a + a;
+  let big = 9223372036854775807;
+  let bad = big + n;
+  if b == \"never\" { bad } else { 0 }
+}
+";
+
+/// Compiles a library against the real `std`, since `TRAPS` needs `Show`.
+fn library_with_std(name: &str, source: &str) -> PathBuf {
+    let dir = scratch(name);
+    harness::ensure_runtime();
+    let out = dir.join(format!("lib{name}.{}", std::env::consts::DLL_EXTENSION));
+
+    let db = KhoraDatabase::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut files = Vec::new();
+    let mut stack = vec![root];
+    while let Some(here) = stack.pop() {
+        for entry in std::fs::read_dir(&here).expect("a readable std") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                files.push(SourceFile::new(&db, path, text));
+            }
+        }
+    }
+    files.push(SourceFile::new(&db, dir.join("main.kh"), source.to_string()));
+    let root = SourceRoot::new(&db, files);
+    if let Err(errors) = khora_codegen_llvm::compile_library(&db, root, &out) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling `{name}` failed:\n  {}", messages.join("\n  "));
+    }
+    out
+}
+
+/// Builds and runs a C host against `library`, returning its output.
+fn host(library: &std::path::Path, name: &str, body: &str) -> std::process::Output {
+    let clang = khora_codegen_llvm::toolchain::tool("clang").expect("clang, checked by the caller");
+    let dir = library.parent().expect("a directory").to_path_buf();
+    let header = library
+        .with_extension("h")
+        .file_name()
+        .expect("a name")
+        .to_string_lossy()
+        .into_owned();
+
+    let source = dir.join(format!("{name}.c"));
+    std::fs::write(
+        &source,
+        String::from("#include <stdio.h>\n#include \"") + &header + "\"\n" + body,
+    )
+    .expect("writing the C host");
+
+    let implib = library.with_extension("lib");
+    let link_against = if implib.is_file() { implib } else { library.to_path_buf() };
+    let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let built = std::process::Command::new(&clang)
+        .arg(&source)
+        .arg(&link_against)
+        .arg("-o")
+        .arg(&exe)
+        .current_dir(&dir)
+        .output()
+        .expect("could not run clang");
+    assert!(
+        built.status.success(),
+        "the C host did not link:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    std::process::Command::new(&exe).current_dir(&dir).output().expect("could not run the host")
+}
+
+/// **The whole point.** A host opts in, the library traps, the host is still
+/// there afterwards and the memory came back.
+#[test]
+fn a_contained_trap_leaves_the_host_running() {
+    if khora_codegen_llvm::toolchain::tool("clang").is_none() {
+        eprintln!("no clang in the LLVM toolchain; skipping");
+        return;
+    }
+    let library = library_with_std("contain_survives", TRAPS);
+    let ran = host(
+        &library,
+        "survives",
+        "int main(void) {\n\
+        \x20   khora_set_trap_policy(1);\n\
+        \x20   printf(\"%lld\\n\", (long long) price(3, 4));\n\
+        \x20   long long before = khora_live_count();\n\
+        \x20   boom(1);\n\
+        \x20   printf(\"%s\\n\", khora_trapped() ? \"contained\" : \"NOT contained\");\n\
+        \x20   khora_clear_trap();\n\
+        \x20   printf(\"leaked %lld\\n\", khora_live_count() - before);\n\
+        \x20   printf(\"%lld\\n\", (long long) price(5, 6));\n\
+        \x20   return 0;\n\
+        }\n",
+    );
+
+    assert!(ran.status.success(), "the host should survive, got {:?}", ran.status.code());
+    let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
+    assert_eq!(
+        out, "12\ncontained\nleaked 0\n30\n",
+        "a call before the trap, the trap contained, nothing leaked, a call after"
+    );
+    // The message is still printed. A contained trap is a bug, and a library
+    // that swallowed one in silence would be worse than one that died.
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(said.contains("overflowed"), "it still says what happened: {said}");
+    assert!(said.contains("object(s) released"), "and what it did about it: {said}");
+}
+
+/// **The default is unchanged.** A host that opted into nothing gets exactly
+/// what it got before containment existed, which is the promise that made
+/// opt-in the right shape.
+#[test]
+fn without_opting_in_the_process_still_dies() {
+    if khora_codegen_llvm::toolchain::tool("clang").is_none() {
+        eprintln!("no clang in the LLVM toolchain; skipping");
+        return;
+    }
+    let library = library_with_std("contain_default", TRAPS);
+    let ran = host(
+        &library,
+        "dies",
+        "int main(void) {\n\
+        \x20   printf(\"%lld\\n\", (long long) price(3, 4));\n\
+        \x20   fflush(stdout);\n\
+        \x20   boom(1);\n\
+        \x20   printf(\"unreachable\\n\");\n\
+        \x20   return 0;\n\
+        }\n",
+    );
+
+    assert_eq!(ran.status.code(), Some(134), "a trap still ends the process");
+    let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
+    assert!(out.contains("12"), "the call before the trap ran: {out}");
+    assert!(!out.contains("unreachable"), "and nothing after it did: {out}");
+}

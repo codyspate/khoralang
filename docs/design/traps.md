@@ -96,10 +96,17 @@ here by construction.
 
 So the boundary 12.6 introduced is the one place in the language where §4's
 second answer is *available*, and it is available because the ABI is narrow
-rather than because anything was built for it. What it still needs is a way to
-know which allocations belong to the call — the runtime counts live objects and
-does not list them — and a non-local exit back to the wrapper. Neither is free
-and neither is phase-sized; see `docs/design/c-export.md` §8.
+rather than because anything was built for it. **It is now built** — a
+per-call allocation registry and a `setjmp` landing point, opt-in per process,
+2.6% on the allocation path of programs that never use it. `docs/design/
+c-export.md` §8.
+
+**This does not change the decision below.** A trap still ends the process
+everywhere else, because everywhere else the escape argument fails: a server
+fiber holds capabilities, reaches `Shared` cells, and outlives its own
+allocations. §3's unwinder is still what containing *that* would need. What
+changed is that the one case where a trap took down a process nobody owned now
+has an answer.
 
 **A supervisor outside the process.** A trap kills the process, something
 restarts it. This needs no language change, it is what a container runtime,
@@ -146,13 +153,15 @@ Deliberately falsifiable, in the style of `docs/vision.md`'s non-negotiables:
    a supervisor. §4's third answer, the one this decision leans on hardest, does
    not apply to that use at all.
 
-   This does not overturn the decision, because §3's mechanism is still the
-   blocker and is unchanged. It removes a support, and the honest way to hold
-   that is to say the decision now rests on two arguments rather than three —
-   and that an export boundary is a *smaller* containment problem than a fiber
-   is, with one entry, a scalar return, and no counted values live across it
-   from the caller's side. If containment is ever built, that is where it would
-   be cheapest to start.
+   This did not overturn the decision, because §3's mechanism is still the
+   blocker for a fiber. It removed a support — and then §4 removed the need for
+   one, because containment at *that* boundary turned out not to need §3's
+   mechanism at all. A library no longer takes its host down when a host asks
+   it not to.
+
+   The decision below therefore stands on its original ground, narrowed to
+   where that ground actually holds: a trap ends the process wherever the
+   escape argument fails, which is everywhere except an export.
 
 Absent one of those, more diagnosability is the better spend, and the next
 increment of it is variable-level debug info — 12.4's other half.
