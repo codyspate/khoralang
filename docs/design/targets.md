@@ -114,13 +114,21 @@ The three are not one target and the choice is not obvious:
 | `wasm32-wasip1` | wasmtime, Fastly, Spin | WASI sockets | Fastly Compute, Spin, CLI plugins |
 | components / `wasip2` | wasmtime, jco | WASI 0.2 | anything composing wasm modules |
 
-**One correction worth recording, because it changes the target.** AWS
-CloudFront does not run WebAssembly: CloudFront Functions is a restricted
-JavaScript runtime and Lambda@Edge is Node or Python. *Cloudflare* Workers is
-the wasm-first edge platform, along with Fastly Compute, Deno Deploy, Vercel
-Edge and Spin. If the motivation is Cloudflare, the first target is
-`wasm32-unknown-unknown` with JS glue and the socket question does not arise,
-because the host does the networking.
+**The first target is `wasm32-unknown-unknown`, for Cloudflare Workers.**
+That is the motivating platform and it settles several of the questions above
+at once: the host does the networking through `fetch`, so `std::net`'s sockets
+and `rustls` are not needed and their absence is not a gap; the isolate is
+single-threaded, so the no-fibers build is the right build rather than a
+compromise; and there is no filesystem, so `std::fs` and a `Db` engine are
+satisfied by the host — D1 or KV behind the `Db` capability — rather than by
+SQLite.
+
+One correction worth recording because it is easy to conflate: **AWS CloudFront
+does not run WebAssembly.** CloudFront Functions is a restricted JavaScript
+runtime and Lambda@Edge is Node or Python. Cloudflare Workers, Fastly Compute,
+Deno Deploy, Vercel Edge and Spin are the wasm platforms, and Fastly and Spin
+want `wasip1` rather than the target above — so the second wasm target is a
+separate piece of work and not a rename.
 
 **Components are the interesting long game.** A WIT interface is a record of
 typed functions, which is what a Khora capability already is. An effect could

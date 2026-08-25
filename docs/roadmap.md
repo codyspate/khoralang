@@ -2399,10 +2399,17 @@ in `std`, not in `khora-types`. Only `Int` and `Float`, and `Float` deliberately
 implements neither `Eq` nor `Ord` because its equality is a trap. An engine that
 cannot represent ten pence reconciles nothing.
 
-First because it is `std`'s and partly the language's — a literal needs a
-spelling — and because everything written before it that touches money will have
-to be written again after. `numbers.md` §"Decimal" has the four decisions and
-names the literal syntax as the one needing a language-surface call.
+First because it is `std`'s and partly the language's, and because everything
+written before it that touches money will have to be written again after.
+`numbers.md` §"Decimal" has the four decisions.
+
+**The literal is decided: `0.01` stays a `Float`, and a decimal is `0.01d` or
+`Decimal::of(...)`.** Making bare decimals exact would be the single most
+visible thing about the language and would make it a finance language whatever
+the documentation said — and `positioning.md`'s first paragraph says it is not
+one. Finance is what this is tested against, not what it is. That makes `0.01d`
+the language's first literal suffix, which `numbers.md` spells out along with
+the three lexer traps in it.
 
 ### 12.1 Civil dates and time zones
 
@@ -2433,11 +2440,17 @@ wasm *without* fibers — an isolate is single-threaded anyway, and 11E's
 blocking pool already falls through to inline when there is no worker to
 protect — rather than pay Asyncify's cost on every wasm user.
 
+**The first wasm target is `wasm32-unknown-unknown`, for Cloudflare Workers**,
+which is the motivating platform. It settles several questions at once: the
+host does the networking, so sockets and TLS are not needed; the isolate is
+single-threaded, so the no-fibers build is the right one; and there is no
+filesystem, so `Db` is satisfied by D1 behind the capability rather than by
+SQLite. Fastly and Spin want `wasip1` instead, so a second wasm target is
+separate work rather than a rename.
+
 That document also records a correction worth keeping: **AWS CloudFront does
 not run WebAssembly.** CloudFront Functions is restricted JavaScript and
-Lambda@Edge is Node or Python. Cloudflare Workers, Fastly Compute, Deno Deploy,
-Vercel Edge and Spin are the wasm platforms, and they do not want the same
-target.
+Lambda@Edge is Node or Python.
 
 ### 12.3 Observability
 

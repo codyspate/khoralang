@@ -188,13 +188,56 @@ a scale rather than pretending. Half-even is the default because it is what
 accounting standards specify and what every other decimal type defaults to;
 naming the alternatives explicitly is the point.
 
-**How a literal is written.** `1.10` is already `Float`, so a decimal literal
-needs its own spelling — a suffix (`1.10d`), a constructor
-(`Decimal::of("1.10")`), or making the bare form context-dependent. **This is a
-language-surface change and is not decided here.** The suffix is the smallest
-and matches how `U64` is spelled elsewhere; making bare decimals default to
-`Decimal` would be the boldest and would need `Float` to become the annotated
-one, which is a much larger claim about what the language is for.
+**How a literal is written — decided.** `0.01` stays a `Float`, and a decimal
+is `0.01d` or `Decimal::of(...)`.
+
+The alternative was to make bare decimals `Decimal` and have `Float` be the
+annotated one. It was rejected on the grounds `positioning.md` opens with:
+
+> Khora is a general-purpose language whose design is particularly well suited
+> to financial reconciliation and audit-heavy systems. **It is not a
+> finance-specific language.**
+
+A language where `0.1 + 0.2` is exact is a *finance* language, whatever its
+documentation says. It would be the first thing anybody noticed and the last
+thing they forgot, and it would tax every program that does geometry, physics,
+statistics or graphics to spare the ones that do money. Finance is the domain
+this language is *tested* against because it is the domain its authors know
+well enough to judge the result — that is a reason to make `Decimal` excellent,
+not a reason to make `Float` strange. An engineer arriving from Go or
+TypeScript should find the numbers where they left them.
+
+**`0.01d` would be the language's first literal suffix**, and it is worth being
+clear that this is a real addition rather than a convention already in use.
+`docs/grammar.ebnf` has `IntLiteral ::= [0-9] [0-9_]*` and
+`FloatLiteral ::= IntLiteral "." IntLiteral ( ("e"|"E") ("+"|"-")? [0-9]+ )?`,
+and no suffix anywhere; every other numeric type is *constructed*, as
+`I32::of(0)` and `U64::wrapping(-1)`. So the grammar grows
+
+```
+DecimalLiteral ::= ( IntLiteral | FloatLiteral ) "d" ;
+```
+
+and `Literal` gains it. `1d` is a `Decimal` too, because whole amounts of money
+are the common case and `1.00d` should not be mandatory. Three lexer notes for
+whoever implements it: the suffix goes after any exponent, so `1.5e3d` is one
+token; nothing may lex between the digits and the `d`, so `1 d` is not a
+decimal; and if hexadecimal literals are ever added, the suffix must apply only
+to decimal numerals, or `0x1d` becomes ambiguous with a decimal `0x1`.
+
+**The suffix and the constructor are not two spellings of one thing**, and that
+is the argument for having the suffix at all. `0.01d` is parsed exactly by the
+compiler and cannot fail. `Decimal::of("0.01")` parses at run time, costs
+something at every evaluation, and must return a `Result` because the string
+might not be a number. Without the suffix there would be no way to write an
+exact decimal *constant*, which for this type is most of the point — and the
+obvious workaround, going through a `Float`, throws away the exactness that is
+the entire reason the type exists.
+
+A total constructor is worth having beside the fallible one:
+`Decimal::scaled(110, 2)` for a significand and an exponent, which cannot fail
+and is what a decoder reading a database column or a wire format actually
+wants.
 
 What is *not* in `std`: currency codes, exchange rates, allocation and rounding
 policies for splitting a payment, and anything that knows what a fiscal quarter
