@@ -1,0 +1,1 @@
+This directory contains the public, programmer-facing Khora language guide. Source files here are published through the khoralang.com documentation site; internal compiler/runtime design records remain under the repository-level `docs/` directory.
