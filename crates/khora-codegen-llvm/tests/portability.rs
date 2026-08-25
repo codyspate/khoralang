@@ -8,8 +8,8 @@
 //! platform ever compiles together, and be invisible to the type checker
 //! because each module is fine on its own.
 //!
-//! That is exactly what happened. `std/fs.kh` declares `fn close(file: Ptr)`.
-//! `socket_linux.kh` and `socket_macos.kh` declare `extern fn close(handle:
+//! That is exactly what happened. `std/fs_native.kh` declares `fn close(file:
+//! Ptr)`. `socket_linux.kh` and `socket_macos.kh` declare `extern fn close(handle:
 //! I32)` — POSIX's. `socket_windows.kh` calls the same operation
 //! `closesocket`, so on Windows the two names never met, and every POSIX build
 //! emitted `call void @kh$std$fs$close(i32 %handle)` and was rejected by LLVM.
@@ -69,7 +69,14 @@ fn std_sources(db: &KhoraDatabase, target: &str) -> Vec<SourceFile> {
 fn every_target_generates_a_valid_module() {
     let mut failures: Vec<String> = Vec::new();
 
-    for target in ["windows", "linux", "macos"] {
+    // **WebAssembly is in this list and is not like the others.** The other
+    // three select an operating system's `std`; `wasm` selects the subset that
+    // does not call one — no sockets, no filesystem, no process, no `getenv`.
+    // What this proves is that the subset is *coherent*: that removing those
+    // modules leaves the rest with no dangling import, which is exactly what
+    // it did not before `_native` existed, and what nobody would have noticed
+    // until a Worker build was attempted.
+    for target in ["windows", "linux", "macos", "wasm"] {
         // Safe here for the reason in this function's doc comment, and reset
         // before the next iteration reads it.
         std::env::set_var("KHORA_TARGET", target);

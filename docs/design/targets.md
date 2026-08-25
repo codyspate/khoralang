@@ -147,6 +147,52 @@ become a component import rather than fighting one, and a handler could become
 a component export. That is a better fit than any other language has with WIT,
 and it is worth not foreclosing while the first target is chosen.
 
+## Which `std` a wasm build gets — **decided and implemented**
+
+`family_of` read every non-Windows, non-Apple triple as `linux`, so a wasm
+build selected `socket_linux.kh` and compiled bindings to syscalls that are not
+there. The comment above it said this was wrong and would be the next thing to
+change, which it then was not for a while: a comment admitting a bug is not a
+fix, and this one had the shape of one.
+
+WebAssembly is now its own family. **Naming it is most of the fix**, because
+every file already carrying a `_posix`, `_linux`, `_macos` or `_windows` suffix
+stops being selected the moment `wasm` is none of those — the sockets and the
+process bindings fell out without being touched. What was left was the
+*unsuffixed* modules that call the host anyway, and bare means every target. So
+there is now a `_native` suffix meaning the three families that are an
+operating system, and five files wear it:
+
+| | why |
+| --- | --- |
+| `fs_native.kh` | `fseek`, `ftell`, and a filesystem |
+| `env_native.kh` | `getenv`, `strlen`, `memcpy` |
+| `process_native.kh` | its `std::process::shell` is per-OS |
+| `net/http_native.kh` | needs sockets |
+| `net/tls_native.kh` | needs sockets |
+
+A wasm build selects eight `std` files: `core`, `decimal`, `json`, `time`,
+`trace`, `db`, `ai`, `random`. Every extern left in those is a `khora_*`
+runtime call rather than a libc one, so they are satisfied by whatever
+`khora-rt` a wasm build eventually links — which is step two and not done.
+
+**This decides one of the open questions below.** A `std` module that cannot
+work on a target is *absent* rather than present-and-failing: `import
+std::fs::{...}` in a Worker build is `cannot find module`, at the import, from
+the ordinary resolver. No new mechanism, and the error names the thing that is
+actually wrong.
+
+The coherence of the subset is what `khora-codegen-llvm/tests/portability.rs`
+checks, with `wasm` in the same loop as the other three. Removing modules can
+leave the remainder with a dangling import — `process.kh` importing a
+`std::process::shell` that no longer exists was exactly that, and nobody would
+have found it until a Worker build was attempted.
+
+**`wasm32-wasip1` is deliberately not folded in.** WASI has files, an
+environment and a clock, so it wants most of what `_native` holds; it is a
+`_wasi` family of its own, and pretending it is the same target as a Worker
+would put back the mistake this fixed in a subtler place.
+
 ## Other targets the same mechanism buys
 
 - **`x86_64-unknown-linux-musl`**, for a static binary in a `scratch` image.
@@ -158,5 +204,8 @@ and it is worth not foreclosing while the first target is chosen.
 ## What this document does not decide
 
 The flag's spelling. Whether a target's `khora-rt` is fetched or built. Whether
-`std` modules that cannot work on a target fail at import or at call. Whether
 wasm gets fibers through the stack-switching proposal when it lands, or never.
+
+*(Whether `std` modules that cannot work on a target fail at import or at call
+was on this list, and is answered above: they are absent, and the import is
+what fails.)*

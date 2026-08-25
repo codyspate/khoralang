@@ -161,13 +161,24 @@ impl Db for KhoraDatabase {}
 ///
 /// Ordered longest-first is not needed — the suffixes are disjoint — but they
 /// are listed the way a reader would group them.
-const TARGET_SUFFIXES: [(&str, &[&str]); 4] = [
+const TARGET_SUFFIXES: [(&str, &[&str]); 6] = [
     ("_windows", &["windows"]),
     ("_linux", &["linux"]),
     ("_macos", &["macos"]),
     // The two that share almost everything. A file that works on both says so
     // once rather than existing twice.
     ("_posix", &["linux", "macos"]),
+    ("_wasm", &["wasm"]),
+    // **Everything except WebAssembly.** The other three families are an
+    // operating system with a libc and a filesystem; `wasm32-unknown-unknown`
+    // is a sandbox with neither, so a file that needs `getenv` or `fseek`
+    // belongs to the three and not to the four.
+    //
+    // Marked rather than left bare because bare means *every* target, and that
+    // is what compiled POSIX bindings into a Worker. The default is the right
+    // one for a pure module and the wrong one for a module that calls the
+    // host, so the modules that call the host say so.
+    ("_native", &["windows", "linux", "macos"]),
 ];
 
 /// Whether a source file belongs in a build for `target`.
@@ -200,13 +211,25 @@ pub fn selected_for_target(path: &std::path::Path, target: &str) -> bool {
 /// Which platform's `std` files a triple wants.
 ///
 /// **WebAssembly is its own family and not a Unix.** A Worker has no sockets
-/// and no filesystem, so selecting `socket_linux.kh` for it would compile
-/// bindings to syscalls that are not there — `docs/design/targets.md` argues
-/// the point. Until those files exist it is mapped to `linux`, which is wrong
-/// and is the next thing that has to change; it is written here rather than
-/// discovered later.
+/// and no filesystem, so selecting `socket_linux.kh` for it compiled bindings
+/// to syscalls that are not there — `docs/design/targets.md` argues the point,
+/// and until this it was mapped to `linux`, which the comment here admitted was
+/// wrong while the code went on doing it.
+///
+/// Naming the family is most of the fix by itself: every file already carrying
+/// a `_posix`, `_linux`, `_macos` or `_windows` suffix stops being selected the
+/// moment `wasm` is not one of those, so the sockets and the process bindings
+/// fall out without being touched. What was left is the *unsuffixed* modules
+/// that call the host anyway, and those now say `_native`.
+///
+/// The `wasm32-wasip1` half of this is deliberately not attempted: WASI has
+/// files, an environment and a clock, so it wants most of what `_native` holds
+/// and a `_wasi` family of its own rather than being folded in here. Recorded
+/// in `targets.md` rather than guessed at.
 fn family_of(triple: &str) -> &'static str {
-    if triple.contains("windows") {
+    if triple.contains("wasm") {
+        "wasm"
+    } else if triple.contains("windows") {
         "windows"
     } else if triple.contains("apple") || triple.contains("darwin") {
         "macos"
@@ -252,6 +275,11 @@ pub fn host_target() -> &'static str {
         Some("windows") => return "windows",
         Some("macos") => return "macos",
         Some("linux") => return "linux",
+        // A family of its own since it stopped being read as a Unix. Accepted
+        // bare like the other three, so a build can select WebAssembly's `std`
+        // subset without also asking for a triple this host cannot link for —
+        // which is what checking that subset is coherent needs.
+        Some("wasm") => return "wasm",
         // **A full triple selects the family too.** `KHORA_TARGET` began as
         // three names because all it chose was which `std` files to read;
         // cross-compilation needs the same setting to reach the code
@@ -260,7 +288,7 @@ pub fn host_target() -> &'static str {
         Some(triple) if triple.contains('-') => return family_of(triple),
         Some(other) => panic!(
             "KHORA_TARGET={other:?} is not a target; expected `windows`, `macos`, `linux`, \
-             or a target triple such as `aarch64-unknown-linux-gnu`"
+             `wasm`, or a target triple such as `aarch64-unknown-linux-gnu`"
         ),
         None => {}
     }

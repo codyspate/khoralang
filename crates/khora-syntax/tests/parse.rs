@@ -386,7 +386,7 @@ export fn f({word}: {word}) -> {word} {{
     }
 }
 
-/// The case that motivated the change: `std/net/http.kh` had to rename a
+/// The case that motivated the change: `std/net/http_native.kh` had to rename a
 /// parameter called `handler` to work around the reservation.
 #[test]
 fn a_parameter_named_handler_parses() {

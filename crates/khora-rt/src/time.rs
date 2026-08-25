@@ -10,7 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 // two different headers. Rust's `std::time` has already made that choice on
 // every target this runtime builds for, so binding it here is cheaper and more
 // correct than a `#[cfg]` ladder in Khora would be — and it is the reason this
-// pair lives in the runtime rather than in `std/env.kh` beside `getenv`.
+// pair lives in the runtime rather than in `std/env_native.kh` beside `getenv`.
 //
 // **Two clocks, because they measure two different things**, and the effect
 // exposes both rather than picking one. The wall clock is what a timestamp on a

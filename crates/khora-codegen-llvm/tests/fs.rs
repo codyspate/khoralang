@@ -42,7 +42,7 @@ fn run(name: &str, main: &str) -> Ran {
     let db = KhoraDatabase::new();
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
-        SourceFile::new(&db, dir.join("fs.kh"), std_source("fs.kh")),
+        SourceFile::new(&db, dir.join("fs_native.kh"), std_source("fs_native.kh")),
         SourceFile::new(&db, dir.join("main.kh"), main.replace("@DIR@", &here)),
     ];
     let root = SourceRoot::new(&db, files);
@@ -215,7 +215,7 @@ fn nothing_reaches_a_file_without_the_capability() {
     let db = KhoraDatabase::new();
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
-        SourceFile::new(&db, dir.join("fs.kh"), std_source("fs.kh")),
+        SourceFile::new(&db, dir.join("fs_native.kh"), std_source("fs_native.kh")),
         SourceFile::new(
             &db,
             dir.join("main.kh"),

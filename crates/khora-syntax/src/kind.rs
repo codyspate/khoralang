@@ -363,7 +363,7 @@ keywords! {
 
 // Reserving these four would cost more than it buys: they are the obvious names
 // for a request callback, a dependency bundle, a variable under test and a
-// benchmark input, and `std/net/http.kh` already had to rename a parameter away
+// benchmark input, and `std/net/http_native.kh` already had to rename a parameter away
 // from `handler` once. Rust keeps `test` usable as an identifier for the same
 // reason. Each is a keyword in one position only, and in that position an
 // ordinary identifier is not grammatical, so there is nothing to disambiguate.

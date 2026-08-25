@@ -113,7 +113,7 @@ paths from runtime projection, `Prompt::new` is a path the parser can build
 outright and only `params.get` is left for name resolution to classify. The
 declarations themselves are still missing from §3.
 
-`std/net/http.kh` is not specified at all; the signatures there are reconstructed
+`std/net/http_native.kh` is not specified at all; the signatures there are reconstructed
 from usage and should be treated as provisional.
 
 ## 11. `std.effect` is renamed to `std.core`
