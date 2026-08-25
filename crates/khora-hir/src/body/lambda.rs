@@ -35,23 +35,23 @@ impl<'a> Ctx<'a> {
         self.lambdas.push(local_mark);
         self.lambda_names.push(name);
 
-        let params: Vec<PatId> = e
-            .params()
-            .map(|list| {
-                list.params()
-                    .map(|p| {
-                        let range = p.syntax().text_range();
-                        match p.name().and_then(|n| n.ident()) {
-                            Some(name) => {
-                                let local = self.declare(name, false, range);
-                                self.add_pat(Pat::Bind(local))
-                            }
-                            None => self.add_pat(Pat::Wildcard),
-                        }
-                    })
-                    .collect()
+        let declared: Vec<ast::Param> =
+            e.params().map(|list| list.params().collect()).unwrap_or_default();
+        let param_types: Vec<Option<TypeRef>> =
+            declared.iter().map(|p| p.ty().as_ref().map(TypeRef::of_syntax)).collect();
+        let params: Vec<PatId> = declared
+            .iter()
+            .map(|p| {
+                let range = p.syntax().text_range();
+                match p.name().and_then(|n| n.ident()) {
+                    Some(name) => {
+                        let local = self.declare(name, false, range);
+                        self.add_pat(Pat::Bind(local))
+                    }
+                    None => self.add_pat(Pat::Wildcard),
+                }
             })
-            .unwrap_or_default();
+            .collect();
 
         // A lambda is its own function as far as `return` and `break` are
         // concerned: `return` leaves the lambda, and a `break` inside one
@@ -76,7 +76,7 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        let id = self.add_expr(Expr::Lambda { params, body, captures }, range);
+        let id = self.add_expr(Expr::Lambda { params, param_types, body, captures }, range);
         self.body.lambda_marks.insert(id, local_mark);
         id
     }

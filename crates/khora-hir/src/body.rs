@@ -241,6 +241,17 @@ pub enum Expr {
     /// body.
     Lambda {
         params: Vec<PatId>,
+        /// What each parameter was *annotated* with, positionally, and `None`
+        /// where it was not.
+        ///
+        /// Carried for the same reason [`TypeRef`] exists at all: without it
+        /// `fn (s: String) => s + "b"` was lowered as though the annotation had
+        /// never been written, the parameter got a bare inference variable, and
+        /// `+` defaulted the variable to `Int` and reported `expected Int,
+        /// found String` about a line that says `String` on its face. An
+        /// annotation that is only a comment is worse than no annotation,
+        /// because it is believed.
+        param_types: Vec<Option<TypeRef>>,
         body: ExprId,
         /// Locals from an enclosing scope that the body reads, in first-use
         /// order. Captured **by value**: the closure takes its own reference.

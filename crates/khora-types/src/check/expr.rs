@@ -197,11 +197,29 @@ impl<'a> Checker<'a> {
                 self.infer(inner)
             }
             Expr::Catch { inner, arms } => self.infer_catch(inner, &arms, range),
-            Expr::Lambda { params, body, .. } => {
+            Expr::Lambda { params, param_types, body, .. } => {
                 // A parameter with no annotation gets a variable, so the type
                 // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
                 // learns `x: Int` from `map`'s signature, not from the lambda.
-                let types: Vec<Type> = params.iter().map(|_| self.unifier.fresh()).collect();
+                //
+                // **And one with an annotation gets the annotation.** That
+                // reads as too obvious to write down, which is why it was not:
+                // every parameter got a variable and the written type was
+                // dropped in lowering, so `fn (s: String) => s + "b"` was
+                // checked as though `String` had never been said. Nothing
+                // downstream could recover it — a lambda in a `let`, with no
+                // call yet to hint from, has the annotation as its *only*
+                // source of truth.
+                let types: Vec<Type> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| match param_types.get(i).and_then(|t| t.as_ref()) {
+                        Some(written) => {
+                            type_of_ref(written, &self.signature.generics, &self.types.homes)
+                        }
+                        None => self.unifier.fresh(),
+                    })
+                    .collect();
                 let result = self.unifier.fresh();
 
                 // **Solved from the expected type before the patterns are
@@ -346,25 +364,60 @@ impl<'a> Checker<'a> {
                 if matches!(hint, Some(Type::Fixed(_))) {
                     self.hint = hint;
                 }
+                // **Zonk before asking what the left operand is**, not after.
+                // `infer` hands back whatever variable the operand was given,
+                // and inside a closure a `String` parameter *is* a variable
+                // bound to `Str` rather than `Str` itself — so testing the raw
+                // type here answered "not a string" for every concatenation
+                // that was not two literals, and the arithmetic branch below
+                // then reported `expected Int, found String`. That branch
+                // zonked and this one did not; that difference was the bug.
+                let lhs_range = self.body.range(lhs);
+                let left = self.infer(lhs);
+                let left = self.unifier.zonk(&left);
                 // `+` is also string concatenation, which the reference
                 // program relies on.
-                let left = self.infer(lhs);
                 if op == BinOp::Add && matches!(left, Type::Str) {
                     self.expect(rhs, &Type::Str, "string concatenation");
                     return Type::Str;
+                }
+                // **The left operand decides only when it knows something.**
+                // Where it is still a variable — an unannotated closure
+                // parameter whose call site comes later — the right operand is
+                // the only evidence there is, and a `String` on the right can
+                // only be concatenation: there is no `Int + String` to be
+                // ambiguous with. Defaulting to `Int` first and reporting
+                // `expected Int, found String` against the string literal
+                // named the wrong operand as the problem, in a line where
+                // nothing was wrong.
+                if op == BinOp::Add && matches!(left, Type::Var(_)) {
+                    let right = self.infer(rhs);
+                    let right = self.unifier.zonk(&right);
+                    if matches!(right, Type::Str) {
+                        self.require(&Type::Str, &left, "string concatenation", lhs_range);
+                        return Type::Str;
+                    }
+                    // Inferred once and reused: the arithmetic below requires
+                    // rather than expects, so `rhs` is not visited twice.
+                    let expected = match self.unifier.zonk(&left) {
+                        Type::Float => Type::Float,
+                        Type::Fixed(kind) => Type::Fixed(kind),
+                        _ => Type::Int,
+                    };
+                    self.require(&expected, &left, "arithmetic", lhs_range);
+                    self.require(&expected, &right, "arithmetic", self.body.range(rhs));
+                    return expected;
                 }
                 // Arithmetic is over `Int` or over `Float`, and the left
                 // operand says which. No mixing and no promotion: `1 + 2.0` is
                 // an error rather than a silent conversion, which is what Go
                 // and Rust both do and what stops a rounding surprise from
                 // being invisible.
-                let left = self.unifier.zonk(&left);
                 let expected = match left {
                     Type::Float => Type::Float,
                     Type::Fixed(kind) => Type::Fixed(kind),
                     _ => Type::Int,
                 };
-                let lhs_range = self.body.range(lhs);
                 self.require(&expected, &left, "arithmetic", lhs_range);
                 self.expect(rhs, &expected, "arithmetic");
                 expected

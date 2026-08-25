@@ -2616,11 +2616,15 @@ where it will go.
 
 Writing the tests hit three rough edges, none of them in the database code.
 
-**`+` on `String` does not infer inside a handler's closure.** `soFar +
-"begin;"` in a `Shared<String>` update reported `arithmetic: expected Int,
-found String`, with the parameter annotated `String`, while the identical
-expression is used throughout `std/json.kh`. Worked around by printing rather
-than accumulating. **Not diagnosed**, and it should be.
+**`+` on `String` did not infer inside a closure — since fixed, and it was
+not about handlers.** `soFar + "begin;"` in a `Shared<String>` update reported
+`arithmetic: expected Int, found String` with the parameter annotated `String`.
+Recorded here as a handler problem because that is where it was met; it was
+nothing of the sort. `+` on a `String` failed inside **any** closure, and two
+separate bugs were stacked under it — see "The closure that could not
+concatenate" below. `std/json.kh` was unaffected only because its
+concatenations are of literals and named-function parameters, never of a
+closure's.
 
 **A generic error parameter did not monomorphize.** `transaction<A, E: Show>`
 failed with "`problem` has no type the backend can represent" even where `E`
@@ -2645,6 +2649,68 @@ value types, and **what a transaction does when its fiber is cancelled** belong
 to `std`; the SQLite engine is a first-party package; Postgres is a package.
 The transaction-under-cancellation contract is the middle layer here and the
 only part that fails in production rather than in testing.
+
+### The closure that could not concatenate — two bugs, one symptom
+
+Chased because 12.5 left it undiagnosed, and it was worth the hour: the
+symptom was one line in one test, and underneath it were two independent
+defects, each of which silently mistyped correct programs.
+
+**One: the string check ran before zonking.** `infer_binary` asked
+`matches!(left, Type::Str)` on whatever `infer` handed back, and two lines
+below it the arithmetic branch asked the same question of the *zonked* type.
+A `String` that arrives as a solved inference variable — which is what every
+closure parameter is — answered "not a string", fell through to arithmetic, and
+was reported as `expected Int, found String`. Only two literals worked. That
+one branch zonked and the other did not was the whole of it.
+
+**Two: a closure parameter's annotation was dropped in lowering.**
+`lower_lambda_named` read `p.name()` and never `p.ty()`, so `fn (s: String) =>
+…` reached the checker with the annotation gone and the parameter got a bare
+variable. This is errata 36 exactly — `let x: Bool = 5` compiling clean —
+committed a second time in a different place, and the `TypeRef` doc comment
+that describes the first sits forty lines from the code that repeated it. An
+annotation that is only a comment is worse than no annotation, because it is
+believed.
+
+The two hid each other. Fixing the zonk alone still left `let g = fn (s:
+String) => s + "b"` broken, because a closure in a `let` has no call site yet
+to hint from and the annotation is its only evidence.
+
+**And a third thing, found by fixing the first two.** `fn s => s + "b"`, with
+nothing on the left to go on, defaulted the variable to `Int` and then reported
+the *string literal* as the mismatch — naming the wrong operand in a line where
+nothing is wrong. The left operand decides which arithmetic this is, but it can
+only decide when it knows something; where it is still a variable, a `String`
+on the right settles it, because there is no `Int + String` to be ambiguous
+with. Arithmetic defaults exactly as it did.
+
+Regressions in `khora-types/tests/closures.rs` for each, and one in
+`khora-codegen-llvm/tests/shared.rs` that accumulates a log through
+`Shared::update` — compiled and run, because the original symptom was a program
+and not a judgement.
+
+### Two more of the same class, found while confirming the fix
+
+Neither is fixed and both are worth their own entry. Recorded here because they
+were found by writing down what the compiler *should* say and checking.
+
+**A bound naming a trait that does not exist is accepted in silence.** `fn
+f<A: Wibble>(x: A)` reports nothing until the body calls a method, and then
+reports ``no method `hi` on `A`, whose bounds are `Wibble` `` — which blames
+the method for the bound's problem, and reads as though `Wibble` were a real
+trait that happens to lack `hi`.
+
+**A type name that does not resolve is never reported at all.** `fn f(x:
+Wibble) -> Int { 1 }` type-checks clean. Unresolved names become `Type::Adt {
+home: None }`, whose comment says the error is "already an error where the name
+was resolved" — for *value* names that is true, and `cannot find x in this
+scope` is reported; for type names nothing resolves them and nothing complains.
+The type is nominal and distinct, so it does not unify with anything and real
+mismatches are still caught — but they are reported as ``this function returns
+`Wibble`, but its body has type `Int` ``, which sends the reader looking for a
+mismatch instead of telling them the type does not exist. A typo in a signature
+is the ordinary way to meet this.
 
 ### 12.6 A C export surface
 

@@ -345,3 +345,36 @@ export fn main() -> () {
     );
     assert_eq!(out, "16\n81\n", "all sixteen writers landed and the table reads back");
 }
+
+/// Accumulating a string through `update`, which is the shape a log is.
+///
+/// This is where the closure-concatenation bug was found: `soFar + "begin;"`
+/// inside the closure `update` takes reported `arithmetic: expected Int, found
+/// String`, because the parameter reaches `+` as a solved inference variable
+/// rather than as a literal `String` and the check ran before zonking. The
+/// annotation did not help — it was dropped in lowering. Compiled and run here
+/// rather than only type-checked, so the fix is proved against a program.
+#[test]
+fn a_cell_accumulates_a_string() {
+    let out = run(
+        "shared_string_log",
+        "module main;
+import std::core::{Shared, print};
+
+fn note(log: Shared<String>, what: String) -> () {
+  Shared::update(log, fn (soFar: String) => soFar + what + \";\");
+}
+
+export fn main() -> () {
+  let log = Shared::of(\"\");
+  note(log, \"begin\");
+  note(log, \"execute\");
+  note(log, \"commit\");
+  // And the same with no annotation at all, solved from the other operand.
+  Shared::update(log, fn soFar => soFar + \"done\");
+  print(Shared::get(log))
+}
+",
+    );
+    assert_eq!(out, "begin;execute;commit;done\n");
+}

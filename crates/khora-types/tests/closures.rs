@@ -300,3 +300,87 @@ fn a_lambda_with_no_expected_type_is_still_inferred_from_use() {
          export fn twice(n: Int) -> Int { let f = fn x => x + 1; f(f(n)) }\n",
     );
 }
+
+/// An annotation on a closure parameter is the parameter's type.
+///
+/// It was dropped in lowering — every parameter got a fresh variable and the
+/// written type was never read — so `fn (s: String) => s + "b"` was checked as
+/// though `String` had not been said, `+` defaulted the variable to `Int`, and
+/// the report was `arithmetic: expected Int, found String` against a line that
+/// says `String` on its face.
+///
+/// A closure in a `let` is the case that cannot recover: there is no call yet
+/// to hint from, so the annotation is the only evidence there is.
+#[test]
+fn an_annotated_closure_parameter_keeps_its_annotation() {
+    assert_clean(
+        "module m;\n\
+         export fn f() -> String { let g = fn (s: String) => s + \"b\"; g(\"a\") }\n",
+    );
+    // And it is still *checked*, rather than merely believed.
+    assert_reports(
+        "module m;\n\
+         export fn f() -> Int { let g = fn (s: Int) => s + \"b\"; g(1) }\n",
+        "arithmetic: expected `Int`, found `String`",
+    );
+    assert_reports(
+        "module m;\n\
+         fn ap(f: (String) -> String) -> String { f(\"x\") }\n\
+         export fn g() -> String { ap(fn (s: Int) => s + 1) }\n",
+        "`String` does not match `Int`",
+    );
+}
+
+/// `+` on a `String` is concatenation wherever the string arrives from.
+///
+/// The check ran against the *unzonked* left operand, so it recognised a string
+/// only when one was written literally. A `String` reaching `+` as a solved
+/// inference variable — which is what a closure parameter is — fell through to
+/// the arithmetic path and was reported as `expected Int, found String`.
+#[test]
+fn concatenation_does_not_depend_on_how_the_string_arrived() {
+    assert_clean(
+        "module m;\n\
+         fn ap(f: (String) -> String) -> String { f(\"x\") }\n\
+         export fn g() -> String { ap(fn s => s + \"b\") }\n",
+    );
+    assert_clean(
+        "module m;\n\
+         fn ap<A>(f: (A) -> A, x: A) -> A { f(x) }\n\
+         export fn g() -> String { ap(fn (s: String) => s + \"b\", \"a\") }\n",
+    );
+    // Nested, because the inner closure's operand comes from the outer one's
+    // parameter rather than from its own.
+    assert_clean(
+        "module m;\n\
+         export fn f() -> String {\n\
+           let g = fn (s: String) => { let h = fn (t: String) => t + s; h(\"x\") };\n\
+           g(\"y\")\n\
+         }\n",
+    );
+}
+
+/// An unsolved left operand takes its answer from the right rather than
+/// defaulting.
+///
+/// `fn s => s + "b"` has nothing on the left to go on. Defaulting it to `Int`
+/// and then reporting the string literal as the mismatch named the wrong
+/// operand: there is no `Int + String`, so a `String` on the right settles it.
+#[test]
+fn an_unsolved_operand_learns_from_the_other_side() {
+    assert_clean(
+        "module m;\n\
+         export fn f() -> String { let g = fn s => s + \"b\"; g(\"a\") }\n",
+    );
+    // Arithmetic still defaults the same way it always did.
+    assert_clean(
+        "module m;\n\
+         export fn f() -> Int { let g = fn s => s + 1; g(2) }\n",
+    );
+    // And a caller that disagrees with what the body settled is still caught.
+    assert_reports(
+        "module m;\n\
+         export fn f() -> Int { let g = fn s => s + \"b\"; g(1) }\n",
+        "expected `String`, found `Int`",
+    );
+}
