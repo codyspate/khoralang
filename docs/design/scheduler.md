@@ -652,6 +652,19 @@ not a call to collapse the modules: `reactor.rs` and its backends stay a clean
 boundary. It is a call to stop making an OS-thread hop mandatory because of how
 the mechanism was first implemented.
 
+### What not to touch on the way there
+
+11H measured the scheduler under load and the result points in one direction
+only. **Preemption, work stealing, the context switch itself and the local
+queues are not implicated by any measurement**, and one of them is positively
+exonerated: turning preemption off entirely moved throughput by three per cent,
+on a workload where 78% of resumes ended in it.
+
+So none of them should be optimised on suspicion. If a later measurement
+implicates one, that measurement is the licence; until then, effort spent there
+is effort not spent on the wake path, and a change made there muddies the next
+benchmark.
+
 ### Workers should poll when they have nothing to run
 
 The worker loop becomes local queue, then injection, then steal, then *ask the
@@ -721,7 +734,9 @@ which part of the wake path it is. Before the redesign, sample the path in
 stages — registration, nudge, backend return, readiness decoded, wake begun,
 parked task taken, injection, worker receives, `Task::resume` begins — and
 report p50, p90 and p99, with per-request counts of socket waits, injections,
-condvar wakes, `live` lookups and `parked` acquisitions.
+condvar wakes, `live` lookups, `parked` acquisitions and the syscalls spent
+waking the reactor — the nudge is two of them, a write and the read that drains
+it, and 11H did not measure how often they are actually paid.
 
 That is the same discipline as 11H's trail, and 11H is the argument for it: the
 counter that looked most damning was the one that cost nothing.
@@ -747,6 +762,12 @@ Unless a measurement forces it: io_uring, NUMA awareness, priorities, real-time
 guarantees, lock-free everything, a fiber-specific allocator, user-visible
 `yield`, user-visible worker pinning, `async`/`await` in any form, and a
 fiber-local storage API.
+
+**And speculative busy-spinning, which needs saying because 11H did it.** E2
+spun the reactor instead of sleeping and recovered ten times the throughput;
+that was a diagnostic, spending a core to find out where the time went, and it
+is written up as one. A runtime that burns a core to look fast on a benchmark
+is not a runtime anybody can run several of on one machine.
 
 Each is somewhere a runtime can spend a year for very little.
 
