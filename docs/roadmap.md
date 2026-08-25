@@ -2446,7 +2446,33 @@ one. Finance is what this is tested against, not what it is. That makes `0.01d`
 the language's first literal suffix, which `numbers.md` spells out along with
 the three lexer traps in it.
 
-### 12.1 Civil dates and time zones
+### 12.1 Civil dates and time zones — **done, and the split held**
+
+`std/time.kh`. `Date`, `Time`, `DateTime` and `Offset`, on the proleptic
+Gregorian calendar, with Howard Hinnant's civil-day algorithms — exact over the
+whole range of an `Int`, no tables, and no leap-day special case because
+shifting March to the start of the year removes it from the middle of the
+arithmetic.
+
+Eight tests against dates whose answers are known independently: 1900 is not a
+leap year and 2000 is; the thirty-first of February is refused rather than
+rolled into March; the millisecond before the epoch belongs to 1969, which is
+where a truncating division puts the answer a whole day out; and four weekdays
+including the moon landing.
+
+**The tzdb is not here and cannot be**, exactly as `ecosystem.md` argued.
+`Offset` is minutes east of UTC — an answer — and the rules that produce one
+are a dataset released several times a year, which nothing behind a
+compatibility promise can carry. A program that stores UTC and renders with an
+offset it was handed is correct forever; one that bakes in zone rules is wrong
+the next time a government moves a clock.
+
+One thing found while writing the tests: `2024-02-28` plus 366 days is
+`2025-02-28`, not the first of March, because the span contains the leap day.
+I expected March and the calendar was right.
+
+The original entry:
+
 
 `Clock` gives `unix_millis` and `monotonic_millis`, and that is the whole of
 time. Reconciliation is date-bucketed by its nature — value dates, settlement

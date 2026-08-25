@@ -1,0 +1,329 @@
+module std::time;
+
+// Dates and times as people write them, rather than as a machine counts them.
+//
+// `Clock` gives `unix_millis` and `monotonic_millis` and that is the whole of
+// time in `std` until this module. An instant is enough to measure something
+// and not enough to say when it happened: reconciliation is bucketed by value
+// date and settlement date, a report covers a month, and a log line is read by
+// somebody who wants to know what day it was. None of that is expressible in
+// milliseconds since 1970.
+//
+// # What is here and what is deliberately not
+//
+// The **types** are here — a civil date, a time of day, the two together, and
+// a fixed offset from UTC — because they are vocabulary. Two libraries that
+// disagree about what a date is cannot exchange one, and
+// `docs/design/ecosystem.md` reserves exactly that case for `std`.
+//
+// The **time zone database is not**, and cannot be. It is a dataset: Egypt
+// changes its rules, IANA cuts a release, and every binary already shipped is
+// wrong about the future. Nothing behind this document's compatibility promise
+// can be updated four times a year. So `std` owns `Offset` — the answer — and
+// a package or the host owns the rules that produce one.
+//
+// That is not a limitation dressed up. A program that stores UTC and renders
+// with an offset it was handed is correct forever; a program that bakes in
+// zone rules is wrong the next time a government moves a clock.
+//
+// # The proleptic Gregorian calendar, everywhere
+//
+// One calendar, extended backwards past its adoption, which is what ISO 8601
+// and every database mean by a date. Years before 1 are negative and year zero
+// exists — again ISO's convention, and the one that makes arithmetic work
+// without a special case nobody remembers.
+
+import std::core::{Eq, Option, Ord, Ordering, Show};
+
+/// A date on the proleptic Gregorian calendar.
+///
+/// `month` is 1 to 12 and `day` is 1 to the length of that month. Construct
+/// through `Date::of`, which checks; the fields are public because a date is
+/// its three numbers and hiding them would only mean writing three accessors.
+export type Date = {
+  year: Int,
+  month: Int,
+  day: Int,
+};
+
+/// A time of day, to the millisecond.
+///
+/// **No leap seconds.** `second` is 0 to 59, and a minute is sixty seconds
+/// here as it is in every database and every wire format worth naming. A
+/// calendar that admitted 23:59:60 would push that into every comparison and
+/// every subtraction to be correct about something almost nothing observes.
+export type Time = {
+  hour: Int,
+  minute: Int,
+  second: Int,
+  milli: Int,
+};
+
+/// A date and a time, with no zone attached.
+///
+/// **Not an instant.** "The fourteenth at nine in the morning" is a different
+/// kind of thing from "one and a half billion seconds after 1970": one names a
+/// position on a calendar and the other names a moment, and turning either
+/// into the other needs an offset. Keeping them apart is what stops a program
+/// silently treating local wall time as UTC — the mistake that puts a
+/// midnight-boundary report a day out twice a year.
+export type DateTime = {
+  date: Date,
+  time: Time,
+};
+
+/// Minutes east of UTC.
+///
+/// `Offset::utc()` is zero, India is `+330`, and `-300` is New York in winter.
+/// **A fixed number, not a zone**: a zone is a rule that says which offset
+/// applies on a given date, and that rule is a dataset this module refuses to
+/// carry. A caller gets one of these from a package or from the host and hands
+/// it here.
+export type Offset = {
+  minutes: Int,
+};
+
+/// Days in `month` of `year`, which is only interesting for February.
+export fn days_in_month(year: Int, month: Int) -> Int {
+  if month == 2 {
+    if is_leap(year) { 29 } else { 28 }
+  } else if month == 4 || month == 6 || month == 9 || month == 11 {
+    30
+  } else {
+    31
+  }
+}
+
+/// Whether `year` has a twenty-ninth of February.
+///
+/// Divisible by four, except centuries, except every fourth century. The rule
+/// is written out rather than looked up because it is three comparisons and
+/// every reader can check it.
+export fn is_leap(year: Int) -> Bool {
+  if year % 4 != 0 { false }
+  else if year % 100 != 0 { true }
+  else { year % 400 == 0 }
+}
+
+impl Date {
+  /// A date, or `None` if there is no such day.
+  ///
+  /// The thirty-first of February is refused rather than rolled forward into
+  /// March. Rolling is a policy — some systems clamp, some wrap, some raise —
+  /// and a library that picked silently would be picking for a caller who
+  /// nearly always has bad input rather than an interesting question.
+  export fn of(year: Int, month: Int, day: Int) -> Option<Date> {
+    if month < 1 || month > 12 || day < 1 || day > days_in_month(year, month) {
+      Option::None
+    } else {
+      Option::Some({ year: year, month: month, day: day })
+    }
+  }
+
+  /// Days since the first of January 1970, which may be negative.
+  ///
+  /// Howard Hinnant's `days_from_civil`, which is the algorithm every modern
+  /// date library uses: it is exact for the whole range of an `Int`, it needs
+  /// no table, and its shifts of the year and month are what remove the leap
+  /// day from the middle of the calculation by moving March to the start of
+  /// the year.
+  export fn to_days(self) -> Int {
+    let year = if self.month <= 2 { self.year - 1 } else { self.year };
+    let era = if year >= 0 { year / 400 } else { (year - 399) / 400 };
+    let year_of_era = year - era * 400;
+    let shifted = if self.month > 2 { self.month - 3 } else { self.month + 9 };
+    let day_of_year = (153 * shifted + 2) / 5 + self.day - 1;
+    let day_of_era =
+    year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146097 + day_of_era - 719468
+  }
+
+  /// The date `days` after the first of January 1970.
+  ///
+  /// The inverse of `to_days`, and the other half of Hinnant's pair.
+  export fn of_days(days: Int) -> Date {
+    let shifted = days + 719468;
+    let era = if shifted >= 0 { shifted / 146097 } else { (shifted - 146096) / 146097 };
+    let day_of_era = shifted - era * 146097;
+    let year_of_era =
+    (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year =
+    day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_shifted + 2) / 5 + 1;
+    let month = if month_shifted < 10 { month_shifted + 3 } else { month_shifted - 9 };
+    { year: if month <= 2 { year + 1 } else { year }, month: month, day: day }
+  }
+
+  /// The date `days` later, which may be earlier if `days` is negative.
+  export fn add_days(self, days: Int) -> Date {
+    Date::of_days(Date::to_days(self) + days)
+  }
+
+  /// How many days from `self` to `other`, negative if `other` is earlier.
+  export fn days_until(self, other: Date) -> Int {
+    Date::to_days(other) - Date::to_days(self)
+  }
+
+  /// Monday is 1 and Sunday is 7, which is ISO 8601's numbering.
+  ///
+  /// The first of January 1970 was a Thursday, which is where the 3 comes
+  /// from: it is day zero and Thursday is 4, so the offset that lands Monday
+  /// on 1 is three.
+  export fn weekday(self) -> Int {
+    let shifted = (Date::to_days(self) + 3) % 7;
+    if shifted < 0 { shifted + 8 } else { shifted + 1 }
+  }
+}
+
+impl Time {
+  /// A time of day, or `None` if there is no such moment.
+  export fn of(hour: Int, minute: Int, second: Int, milli: Int) -> Option<Time> {
+    if hour < 0 || hour > 23 || minute < 0 || minute > 59
+    || second < 0 || second > 59 || milli < 0 || milli > 999 {
+      Option::None
+    } else {
+      Option::Some({ hour: hour, minute: minute, second: second, milli: milli })
+    }
+  }
+
+  /// Midnight.
+  export fn midnight() -> Time { { hour: 0, minute: 0, second: 0, milli: 0 } }
+
+  /// Milliseconds since midnight.
+  export fn to_millis(self) -> Int {
+    ((self.hour * 60 + self.minute) * 60 + self.second) * 1000 + self.milli
+  }
+
+  /// The time `millis` after midnight, which must be inside one day.
+  export fn of_millis(millis: Int) -> Time {
+    {
+      hour: millis / 3600000,
+      minute: (millis / 60000) % 60,
+      second: (millis / 1000) % 60,
+      milli: millis % 1000,
+    }
+  }
+}
+
+impl Offset {
+  /// No offset at all.
+  export fn utc() -> Offset { { minutes: 0 } }
+
+  /// `minutes` east of UTC. Positive is ahead, negative is behind.
+  export fn of_minutes(minutes: Int) -> Offset { { minutes: minutes } }
+}
+
+impl DateTime {
+  /// The moment `millis` after 1970, as UTC says it.
+  ///
+  /// **Flooring, not truncating**, which is the whole of what makes dates
+  /// before 1970 come out right: `-1` millisecond is the last millisecond of
+  /// 1969, not the first of 1970 with a minus sign. Truncating division puts
+  /// it a whole day out, and it is the bug this function exists to not have.
+  export fn of_unix_millis(millis: Int) -> DateTime {
+    let day = 86400000;
+    let days = if millis >= 0 { millis / day } else { (millis - (day - 1)) / day };
+    let rest = millis - days * day;
+    { date: Date::of_days(days), time: Time::of_millis(rest) }
+  }
+
+  /// Milliseconds since 1970, reading `self` as UTC.
+  export fn to_unix_millis(self) -> Int {
+    Date::to_days(self.date) * 86400000 + Time::to_millis(self.time)
+  }
+
+  /// The same moment, seen from `offset`.
+  ///
+  /// The one place a zone enters, and it enters as a number somebody else
+  /// worked out.
+  export fn at_offset(millis: Int, offset: Offset) -> DateTime {
+    DateTime::of_unix_millis(millis + offset.minutes * 60000)
+  }
+
+  /// Milliseconds since 1970, reading `self` as a wall clock at `offset`.
+  export fn from_offset(self, offset: Offset) -> Int {
+    DateTime::to_unix_millis(self) - offset.minutes * 60000
+  }
+}
+
+impl Eq for Date {
+  fn eq(self, other: Date) -> Bool {
+    self.year == other.year && self.month == other.month && self.day == other.day
+  }
+}
+
+impl Ord for Date {
+  fn cmp(self, other: Date) -> Ordering {
+    let mine = Date::to_days(self);
+    let theirs = Date::to_days(other);
+    if mine < theirs { Ordering::Less }
+    else if mine == theirs { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Eq for Time {
+  fn eq(self, other: Time) -> Bool {
+    Time::to_millis(self) == Time::to_millis(other)
+  }
+}
+
+impl Ord for Time {
+  fn cmp(self, other: Time) -> Ordering {
+    let mine = Time::to_millis(self);
+    let theirs = Time::to_millis(other);
+    if mine < theirs { Ordering::Less }
+    else if mine == theirs { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for Date {
+  /// ISO 8601: `2026-08-25`. Zero-padded, because a date that is sometimes
+  /// nine characters and sometimes ten does not sort as text and half the
+  /// world sorts dates as text.
+  fn show(self) -> String {
+    padded(self.year, 4) + "-" + padded(self.month, 2) + "-" + padded(self.day, 2)
+  }
+}
+
+impl Show for Time {
+  /// ISO 8601: `09:05:00.000`. The milliseconds are always there, for the same
+  /// reason the zeros are.
+  fn show(self) -> String {
+    padded(self.hour, 2) + ":" + padded(self.minute, 2) + ":" + padded(self.second, 2)
+    + "." + padded(self.milli, 3)
+  }
+}
+
+impl Show for DateTime {
+  /// ISO 8601 with a `T`, and no zone — because there is none. A `Z` here
+  /// would be a claim this type does not make.
+  fn show(self) -> String {
+    self.date.show() + "T" + self.time.show()
+  }
+}
+
+impl Show for Offset {
+  /// `+00:00`, `+05:30`, `-05:00`.
+  fn show(self) -> String {
+    let sign = if self.minutes < 0 { "-" } else { "+" };
+    let magnitude = if self.minutes < 0 { 0 - self.minutes } else { self.minutes };
+    sign + padded(magnitude / 60, 2) + ":" + padded(magnitude % 60, 2)
+  }
+}
+
+/// `value` as text, zero-padded to `width`, with any sign in front.
+fn padded(value: Int, width: Int) -> String {
+  let negative = value < 0;
+  let magnitude = if negative { 0 - value } else { value };
+  let digits = zeros(Int::to_string(magnitude), width);
+  if negative { "-" + digits } else { digits }
+}
+
+/// `text` with leading zeros until it is `width` long.
+fn zeros(text: String, width: Int) -> String {
+  if String::byte_length(text) >= width { text } else { zeros("0" + text, width) }
+}
