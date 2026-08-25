@@ -2298,7 +2298,7 @@ workers and fairness, then the reactor and timers, then stealing, then the
 bounded blocking pool, then soak. Khora stays buildable throughout; threads
 remain the implementation wherever a backend has not landed.
 
-**Where it has got to.** 11A, 11B and 11C are built, on Windows and on Linux —
+**Where it has got to.** 11A through 11D are built, on Windows and on Linux —
 the latter through `scripts/check-linux.sh`, which runs the runtime's tests
 under WSL2 and is now part of the baseline. `Fiber::spawn` still makes threads,
 deliberately, until the remaining backends land.
@@ -2310,6 +2310,7 @@ deliberately, until the remaining backends land.
 | 11C | the wait protocol, timers, park and wake, cancel-while-waiting |
 | 11C.2 | a `poll` reactor, so a socket read suspends a fiber and not a worker |
 | 11C.3 | `recv`, `send` and `accept` that suspend a fiber rather than a worker |
+| 11D | work stealing, so a burst spawned on one worker reaches the others |
 | — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
 Two numbers, measured on Windows. **A hundred thousand fibers waiting at once
@@ -2341,6 +2342,14 @@ Three things found by building it rather than by designing it:
   which perturbed the timing enough to hide it; core dumps and ThreadSanitizer
   did. `docs/design/scheduler.md` has the account, and the rule it produced
   applies to every thread-local this runtime touches.
+- **And the rule was not believed hard enough the first time.** Having found it
+  in the yielder, the design doc asserted that the other four thread-locals had
+  been checked and were fine. Stealing disproved that within a day: `current()`
+  had the identical bug, a fiber asked who it was and was told about a
+  different one, and the worker that panicked took the fiber it was holding
+  with it. Every thread-local in `khora-rt` now goes through an
+  `#[inline(never)]` accessor, with the safepoint budget the one documented
+  exception.
 
 Two things the review assumed were missing and are not. `bounded_nursery`
 already exists, so the backpressure that cheap fibers make necessary has its

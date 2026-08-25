@@ -130,21 +130,66 @@ thread_local! {
     static CURRENT: Cell<*const Fiber> = const { Cell::new(std::ptr::null()) };
 }
 
+/// Reads [`CURRENT`] on *this* thread, right now.
+///
+/// **`#[inline(never)]` is load-bearing, and this is the second bug of the
+/// kind.** A thread-local is reached through a base address the compiler holds
+/// in a register, and it may compute that address once and reuse it for a
+/// whole function — including across a loop. That is sound everywhere except
+/// here, where a fiber can change worker in the middle of one, so the reused
+/// address belongs to the thread that used to be running it.
+///
+/// `coro::installed` says the same thing about the yielder, where the symptom
+/// was a `SIGSEGV` on an unrelated thread. Here it is quieter and worse to
+/// diagnose: a fiber asks who it is, and is told about whichever fiber the
+/// *previous* worker is running now. It failed
+/// `a_fiber_keeps_its_identity_across_workers` with `left: 30, right: 28` as
+/// soon as 11D made migration common — and a wrong answer from here is a
+/// cancellation flag read off the wrong fiber.
+///
+/// Not inlining moves the address computation into the callee, where it runs
+/// on the thread actually executing. The switch's inline assembly then does
+/// the rest: it clobbers memory, so the *value* cannot be carried across a
+/// suspension either.
+#[inline(never)]
+fn running() -> *const Fiber {
+    CURRENT.with(|c| c.get())
+}
+
+/// Installs `fiber` as the running one on this thread. See [`running`].
+#[inline(never)]
+fn set_running(fiber: *const Fiber) {
+    CURRENT.with(|c| c.set(fiber));
+}
+
+/// Installs `fiber` and returns what was there. See [`running`].
+#[inline(never)]
+fn swap_running(fiber: *const Fiber) -> *const Fiber {
+    CURRENT.with(|c| c.replace(fiber))
+}
+
+/// This thread's own root fiber. See [`running`].
+#[inline(never)]
+fn root_fiber() -> Arc<Fiber> {
+    ROOT.with(Arc::clone)
+}
+
 /// The running fiber.
 ///
 /// Never fails: a thread that has not entered one is carrying its own root.
 pub(crate) fn current<T>(body: impl FnOnce(&Fiber) -> T) -> T {
-    let pointer = CURRENT.with(|c| c.get());
+    let pointer = running();
     if !pointer.is_null() {
         // SAFETY: the pointer was installed by `enter`, whose guard restores
         // the previous value before the `Arc` it holds can be dropped, and by
         // the `ROOT` branch below, whose `Arc` lives as long as the thread.
         return body(unsafe { &*pointer });
     }
-    ROOT.with(|root| {
-        CURRENT.with(|c| c.set(Arc::as_ptr(root)));
-        body(root)
-    })
+    // The `Arc` stays alive in `ROOT` for as long as the thread does, so the
+    // pointer left in `CURRENT` outlives this call.
+    let root = root_fiber();
+    set_running(Arc::as_ptr(&root));
+    body(&root)
 }
 
 /// Makes `fiber` the running one until the guard is dropped.
@@ -154,7 +199,7 @@ pub(crate) fn current<T>(body: impl FnOnce(&Fiber) -> T) -> T {
 /// calls: restoring the previous fiber on every path out, including a panic, is
 /// what stops a switch that unwinds from leaving the wrong fiber installed.
 pub(crate) fn enter(fiber: Arc<Fiber>) -> Entered {
-    let previous = CURRENT.with(|c| c.replace(Arc::as_ptr(&fiber)));
+    let previous = swap_running(Arc::as_ptr(&fiber));
     Entered { _fiber: fiber, previous }
 }
 
@@ -167,7 +212,7 @@ pub(crate) struct Entered {
 
 impl Drop for Entered {
     fn drop(&mut self) {
-        CURRENT.with(|c| c.set(self.previous));
+        set_running(self.previous);
     }
 }
 

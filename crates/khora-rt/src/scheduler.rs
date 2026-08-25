@@ -55,6 +55,20 @@ thread_local! {
     /// Per worker rather than per fiber: it is refilled at every resume, so it
     /// describes this turn rather than this fiber, and a fiber that migrates
     /// gets whatever its new worker grants it.
+    ///
+    /// **The one thread-local here that does not need
+    /// [`crate::current::current`]'s `#[inline(never)]` treatment**, and it is
+    /// worth saying why rather than leaving it to look like an oversight. That
+    /// rule exists because a fiber can change thread between two accesses in
+    /// one function. This one is never read across a switch: `refill`, the
+    /// budget check and `withdraw` all run inside `run`, on the worker, and
+    /// `khora_safepoint` reaches it through an `extern "C"` boundary that
+    /// forces the address to be computed afresh on every call. A worker's
+    /// budget is its own, and only its own thread ever touches it.
+    ///
+    /// That matters because this is the one hot path in the file — the
+    /// safepoint is emitted at every loop back-edge — and a call that cannot
+    /// be inlined would show up where nothing else here would.
     static REMAINING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -102,6 +116,15 @@ fn withdraw() {
 struct Shared {
     /// Fibers nobody has a worker for yet: spawned from outside, or woken.
     queued: Mutex<VecDeque<Task>>,
+    /// Every worker's own queue, indexed by worker.
+    ///
+    /// **A worker's queue stops being private in 11D.** Before stealing it was
+    /// a thread-local nobody else could reach, which is why a parked worker
+    /// had to wake on a timer to discover work sitting in somebody else's
+    /// backlog. A thief needs to reach its victim, so the queues live here
+    /// now; the thread-local stays as the fast path for a fiber spawning onto
+    /// its own worker.
+    locals: Vec<Arc<Mutex<VecDeque<Task>>>>,
     /// Every fiber this pool knows about, by id.
     ///
     /// **Separate from `parked`, and the separation is load-bearing.** Looking
@@ -156,6 +179,18 @@ pub(crate) struct Counts {
     pub(crate) sockets_ready: AtomicU64,
     /// Wakes that arrived before the fiber suspended, so it never waited.
     pub(crate) wakes_before_waiting: AtomicU64,
+    /// Sweeps over the other workers looking for something to take.
+    pub(crate) steals_attempted: AtomicU64,
+    /// Sweeps that found something.
+    pub(crate) steals_succeeded: AtomicU64,
+    /// Fibers actually moved from one worker to another.
+    ///
+    /// Separate from the sweep counts because a sweep takes half a queue, so
+    /// the two answer different questions: whether thieves are finding work,
+    /// and how much work is moving. A high attempt count with a low success
+    /// rate is workers spinning; a high fibers-moved with few sweeps is a
+    /// pool sharing out a burst, which is the intended behaviour.
+    pub(crate) fibers_stolen: AtomicU64,
 }
 
 impl Counts {
@@ -171,6 +206,9 @@ impl Counts {
             timers_fired: self.timers_fired.load(Ordering::Relaxed),
             sockets_ready: self.sockets_ready.load(Ordering::Relaxed),
             wakes_before_waiting: self.wakes_before_waiting.load(Ordering::Relaxed),
+            steals_attempted: self.steals_attempted.load(Ordering::Relaxed),
+            steals_succeeded: self.steals_succeeded.load(Ordering::Relaxed),
+            fibers_stolen: self.fibers_stolen.load(Ordering::Relaxed),
         }
     }
 }
@@ -188,6 +226,9 @@ pub(crate) struct Snapshot {
     pub(crate) timers_fired: u64,
     pub(crate) sockets_ready: u64,
     pub(crate) wakes_before_waiting: u64,
+    pub(crate) steals_attempted: u64,
+    pub(crate) steals_succeeded: u64,
+    pub(crate) fibers_stolen: u64,
 }
 
 thread_local! {
@@ -203,6 +244,30 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// This worker's queue, if it is a worker at all.
+///
+/// **`#[inline(never)]`, for the reason in [`crate::current::current`].** A
+/// fiber can change worker between two reads of a thread-local in one
+/// function, and a cached base address would then name the wrong worker's
+/// queue — which would put a spawned fiber on a queue nobody owns.
+#[inline(never)]
+fn local_queue() -> Option<Arc<Mutex<VecDeque<Task>>>> {
+    LOCAL.with(|l| l.borrow().clone())
+}
+
+/// The pool this worker belongs to. See [`local_queue`].
+#[inline(never)]
+fn shared_pool() -> Option<Arc<Shared>> {
+    SHARED.with(|s| s.borrow().clone())
+}
+
+/// Attaches this thread to a pool, or detaches it. See [`local_queue`].
+#[inline(never)]
+fn attach(local: Option<Arc<Mutex<VecDeque<Task>>>>, shared: Option<Arc<Shared>>) {
+    LOCAL.with(|l| *l.borrow_mut() = local);
+    SHARED.with(|s| *s.borrow_mut() = shared);
+}
+
 /// A pool of workers running fibers.
 pub(crate) struct Scheduler {
     shared: Arc<Shared>,
@@ -216,8 +281,14 @@ impl Scheduler {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
             n => n,
         };
+        // Built before the threads, because each worker's queue has to be
+        // reachable by every other worker from the first instant one exists.
+        let locals: Vec<Arc<Mutex<VecDeque<Task>>>> =
+            (0..workers).map(|_| Arc::new(Mutex::new(VecDeque::new()))).collect();
+
         let shared = Arc::new(Shared {
             queued: Mutex::new(VecDeque::new()),
+            locals,
             live: Mutex::new(std::collections::HashMap::new()),
             parked: Mutex::new(std::collections::HashMap::new()),
             timers: Mutex::new(Timers::default()),
@@ -232,7 +303,7 @@ impl Scheduler {
                 let shared = shared.clone();
                 std::thread::Builder::new()
                     .name(format!("khora-worker-{index}"))
-                    .spawn(move || work(shared))
+                    .spawn(move || work(shared, index))
                     .expect("a worker thread")
             })
             .collect();
@@ -356,7 +427,7 @@ impl Drop for Scheduler {
 /// `crate::wait`'s invariant; the worker handling the suspension closes the
 /// second half.
 pub(crate) fn park_current() -> bool {
-    let Some(shared) = SHARED.with(|s| s.borrow().clone()) else { return false };
+    let Some(shared) = shared_pool() else { return false };
     let waiting = crate::current::current(|fiber| {
         if fiber.wait().declare() {
             true
@@ -378,7 +449,7 @@ pub(crate) fn park_current() -> bool {
 
 /// Suspends the running fiber until `at`.
 pub(crate) fn sleep_until(at: std::time::Instant) -> bool {
-    let Some(shared) = SHARED.with(|s| s.borrow().clone()) else { return false };
+    let Some(shared) = shared_pool() else { return false };
     let id = crate::current::current(|fiber| fiber.id());
     shared.timers.lock().expect("the timers").add(at, id);
     park_current()
@@ -423,7 +494,7 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
 /// Returns false off a scheduler, where there is nobody to watch anything and
 /// the caller should block the thread as it always did.
 pub(crate) fn wait_until_ready(socket: Socket, interest: Interest) -> bool {
-    let Some(shared) = SHARED.with(|s| s.borrow().clone()) else { return false };
+    let Some(shared) = shared_pool() else { return false };
     let fiber = crate::current::current(|f| f.id());
 
     shared.reactor.register(Watch { socket, interest, fiber });
@@ -508,8 +579,8 @@ fn inject(shared: &Arc<Shared>, task: Task) {
 /// Falls back to the shared queue when there is no worker — a fiber spawned
 /// from the program's own computation rather than from inside another fiber.
 pub(crate) fn schedule(task: Task) -> bool {
-    let local = LOCAL.with(|l| l.borrow().clone());
-    let shared = SHARED.with(|s| s.borrow().clone());
+    let local = local_queue();
+    let shared = shared_pool();
     match (local, shared) {
         (Some(queue), Some(shared)) => {
             shared.counts.spawned.fetch_add(1, Ordering::Relaxed);
@@ -526,17 +597,16 @@ pub(crate) fn schedule(task: Task) -> bool {
 }
 
 /// One worker's whole life.
-fn work(shared: Arc<Shared>) {
-    let local: Arc<Mutex<VecDeque<Task>>> = Arc::new(Mutex::new(VecDeque::new()));
-    LOCAL.with(|l| *l.borrow_mut() = Some(local.clone()));
-    SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
+fn work(shared: Arc<Shared>, me: usize) {
+    let local = shared.locals[me].clone();
+    attach(Some(local.clone()), Some(shared.clone()));
 
     let mut turn = 0usize;
     loop {
         if shared.stopping.load(Ordering::Acquire) {
             break;
         }
-        match next(&shared, &local, &mut turn) {
+        match next(&shared, &local, me, &mut turn) {
             Some(task) => run(&shared, &local, task),
             None => {
                 if !park(&shared, &local) {
@@ -546,14 +616,14 @@ fn work(shared: Arc<Shared>) {
         }
     }
 
-    LOCAL.with(|l| *l.borrow_mut() = None);
-    SHARED.with(|s| *s.borrow_mut() = None);
+    attach(None, None);
 }
 
 /// The next fiber for this worker, or nothing.
 fn next(
     shared: &Arc<Shared>,
     local: &Arc<Mutex<VecDeque<Task>>>,
+    me: usize,
     turn: &mut usize,
 ) -> Option<Task> {
     *turn = turn.wrapping_add(1);
@@ -569,7 +639,73 @@ fn next(
     if let Some(task) = local.lock().expect("a local queue").pop_front() {
         return Some(task);
     }
-    shared.queued.lock().expect("the shared queue").pop_front()
+    if let Some(task) = shared.queued.lock().expect("the shared queue").pop_front() {
+        return Some(task);
+    }
+    steal(shared, local, me)
+}
+
+/// Takes work from another worker, and returns one fiber to run now.
+///
+/// **Both ends of the deque are load-bearing.** A worker takes its own next
+/// fiber from the front, so a thief takes from the back: the two contend for
+/// the same lock but never for the same fiber, and the thief walks off with
+/// the work its victim would have reached last rather than the one it is about
+/// to touch. Keeping the owner on the front is also what keeps the queue FIFO,
+/// so a fiber that spawns in a loop cannot bury one that arrived earlier —
+/// the fairness the local queue already had, which a LIFO owner would have
+/// traded away for cache warmth.
+///
+/// **Half a queue, not one fiber.** Taking one means the thief is back
+/// contending on the next tick, and a pool sharing out a burst would spend it
+/// all on lock traffic. Half converges in a logarithmic number of steals and
+/// is the usual answer.
+///
+/// Victims are visited starting at `me + 1` rather than zero, so that idle
+/// workers do not all descend on worker 0 together.
+fn steal(
+    shared: &Arc<Shared>,
+    mine: &Arc<Mutex<VecDeque<Task>>>,
+    me: usize,
+) -> Option<Task> {
+    let workers = shared.locals.len();
+    if workers < 2 {
+        return None;
+    }
+    shared.counts.steals_attempted.fetch_add(1, Ordering::Relaxed);
+
+    for offset in 1..workers {
+        let victim = (me + offset) % workers;
+        let mut taken = {
+            let mut queue = shared.locals[victim].lock().expect("a local queue");
+            take_half(&mut queue)
+            // The victim's lock goes here, before ours is taken. Two thieves
+            // holding one queue each and reaching for the other's is a
+            // deadlock, and this is the line that makes it impossible.
+        };
+        let Some(first) = taken.pop_front() else { continue };
+
+        shared.counts.steals_succeeded.fetch_add(1, Ordering::Relaxed);
+        shared.counts.fibers_stolen.fetch_add(taken.len() as u64 + 1, Ordering::Relaxed);
+        if !taken.is_empty() {
+            mine.lock().expect("a local queue").extend(taken);
+        }
+        return Some(first);
+    }
+    None
+}
+
+/// Removes the back half of `queue` and returns it, oldest of the half first.
+///
+/// Rounded up, so that stealing from a queue of one takes the one — an empty
+/// steal from a non-empty victim would leave a fiber stranded behind a worker
+/// that is busy.
+fn take_half(queue: &mut VecDeque<Task>) -> VecDeque<Task> {
+    let half = queue.len().div_ceil(2);
+    if half == 0 {
+        return VecDeque::new();
+    }
+    queue.split_off(queue.len() - half)
 }
 
 /// Gives a fiber a turn, and decides what happens to it afterwards.
@@ -627,15 +763,36 @@ fn park(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>) -> bool {
         if !queued.is_empty() || !local.lock().expect("a local queue").is_empty() {
             return true;
         }
-        // A timeout rather than a plain wait, because until 11D can steal, a
-        // fiber sitting in another worker's local queue produces no
-        // notification this worker will ever see. Waking to look is the cheap
-        // stand-in for stealing, and it goes away when stealing arrives.
-        let (guard, _) = shared
+        // **Waking up means going back to `next`, not looking again here.**
+        // This loop can only see two of the four places work lives — the
+        // shared queue and this worker's own — and stealing is in `next`. A
+        // version that kept re-checking these two and going back to sleep
+        // left three workers asleep through twenty milliseconds of work
+        // sitting in the fourth one's queue, attempting four steals in total
+        // and succeeding at none. Returning is what gives the caller a chance
+        // to sweep.
+        //
+        // The other tempting shape — checking every worker's queue from here
+        // and staying awake if any has something — livelocks instead. Seeing
+        // work elsewhere is not being able to take it: `next` has already
+        // swept and lost the race, so the worker spins between `park` and a
+        // losing steal, and on an unfair lock four spinners can starve the one
+        // making progress. That one hung
+        // `a_fiber_keeps_its_identity_across_workers` outright.
+        //
+        // Sleeping a millisecond and then looking properly is neither. It
+        // bounds how long a thief can sit next to work it could have taken —
+        // `notify_one` wakes exactly one worker, so two pushes that both wake
+        // the same one leave another asleep — and it paces the sweep instead
+        // of spinning it.
+        let (queued_again, timed_out) = shared
             .arrived
             .wait_timeout(queued, std::time::Duration::from_millis(1))
             .expect("the shared queue");
-        queued = guard;
+        if timed_out.timed_out() {
+            return true;
+        }
+        queued = queued_again;
     }
 }
 
@@ -985,6 +1142,110 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         waker.join().expect("the waker");
         assert_eq!(woke.load(Ordering::SeqCst), COUNT);
+    }
+
+    /// `take_half` leaves the front and returns the back, oldest first.
+    ///
+    /// The direction is the whole of 11D's contention argument, so it is
+    /// checked here rather than inferred from a scheduler test that could pass
+    /// with the ends swapped.
+    #[test]
+    fn a_thief_takes_the_back_half_and_leaves_the_front() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut queue: VecDeque<Task> = VecDeque::new();
+        for n in 0..6 {
+            let seen = order.clone();
+            queue.push_back(Task::new(move || seen.lock().expect("order").push(n)));
+        }
+
+        let taken = take_half(&mut queue);
+        assert_eq!(queue.len(), 3, "the front half stays with its owner");
+        assert_eq!(taken.len(), 3);
+
+        // Run both halves to find out which fibers ended up where.
+        for mut task in queue.into_iter().chain(taken) {
+            while task.resume() == Ran::Suspended {}
+        }
+        let ran = order.lock().expect("order").clone();
+        assert_eq!(ran, vec![0, 1, 2, 3, 4, 5], "owner keeps 0..3, thief takes 3..6");
+    }
+
+    /// An odd queue rounds up, so a victim holding one fiber can be robbed.
+    ///
+    /// Rounding down would leave the last fiber stranded behind a busy worker,
+    /// which is the case stealing exists for.
+    #[test]
+    fn stealing_from_a_queue_of_one_takes_the_one() {
+        let mut queue: VecDeque<Task> = VecDeque::new();
+        queue.push_back(Task::new(|| {}));
+        let taken = take_half(&mut queue);
+        assert_eq!(taken.len(), 1);
+        assert!(queue.is_empty());
+    }
+
+    /// **The point of the phase.** One fiber spawns a pile of work onto its
+    /// own worker's queue, and the pool shares it out.
+    ///
+    /// Everything spawned from inside a fiber goes to that fiber's worker, for
+    /// locality. Without stealing the other three workers have no way to reach
+    /// any of it — they would wake on the parking timeout, find the shared
+    /// queue empty, and go back to sleep while one worker did all the work.
+    ///
+    /// **Each child does a little real work, and that is not padding.** With
+    /// instant children the owner can finish all two hundred before a thief
+    /// has woken and swept, so `fibers_stolen` is legitimately zero and the
+    /// test fails for no reason — which it did, about once in twenty. A
+    /// hundred microseconds each puts twenty milliseconds of work in one
+    /// queue, against a millisecond of parking timeout, so a thief that wants
+    /// some cannot miss.
+    #[test]
+    fn a_burst_spawned_on_one_worker_is_shared_out() {
+        const COUNT: usize = 200;
+        const EACH: std::time::Duration = std::time::Duration::from_micros(100);
+
+        let done = Arc::new(AtomicUsize::new(0));
+        let workers = Arc::new(Mutex::new(std::collections::HashSet::new()));
+
+        let pool = Scheduler::new(4);
+        let counter = done.clone();
+        let seen = workers.clone();
+        pool.spawn(Task::new(move || {
+            for _ in 0..COUNT {
+                let counter = counter.clone();
+                let seen = seen.clone();
+                schedule(Task::new(move || {
+                    let until = std::time::Instant::now() + EACH;
+                    while std::time::Instant::now() < until {
+                        std::hint::spin_loop();
+                    }
+                    seen.lock().expect("workers").insert(std::thread::current().id());
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+        }));
+        pool.drain();
+
+        assert_eq!(done.load(Ordering::SeqCst), COUNT);
+        let counts = pool.counts();
+        assert!(counts.fibers_stolen > 0, "nothing was stolen: {counts:?}");
+        assert!(
+            workers.lock().expect("workers").len() > 1,
+            "one worker ran all {COUNT} of them: {counts:?}"
+        );
+    }
+
+    /// A pool with one worker never sweeps, because there is nobody to rob.
+    #[test]
+    fn a_single_worker_does_not_try_to_steal_from_itself() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let counter = ran.clone();
+        let pool = Scheduler::new(1);
+        pool.spawn(Task::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        pool.drain();
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.counts().steals_attempted, 0, "{:?}", pool.counts());
     }
 
     /// Many fibers, many deadlines, all across several workers.

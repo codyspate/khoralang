@@ -505,6 +505,37 @@ worker 0..N   local deque
 **Not NUMA-aware placement, not priorities, not scheduler classes.** Get
 something measurable first.
 
+11D built the third of those. A worker takes from the front of its own deque
+and a thief takes from the back, so the two contend for a lock but never for a
+fiber, and the owner keeps the end it is about to touch. A sweep takes half a
+victim's queue rather than one fiber, because taking one puts the thief
+straight back into contention. Victims are visited starting at `me + 1` so
+that idle workers do not all descend on worker 0.
+
+Measured on Linux, one fiber spawning eight hundred children of a hundred
+microseconds each:
+
+| workers | 1 | 2 | 4 | 8 |
+| --- | --- | --- | --- | --- |
+| time | 99.9 ms | 59.3 ms | 46.9 ms | 34.2 ms |
+| fibers moved | 0 | 396 | 994 | 1,324 |
+
+Sublinear, and the reason is visible in the shape of the test rather than in
+the scheduler: one fiber has to create eight hundred coroutine stacks before
+there is anything to steal, and that part is serial. What the first column
+shows is the point — without stealing every one of these is the one-worker
+number, because everything a fiber spawns lands on its own worker's queue and
+nobody else could reach it.
+
+**Parking is where this went wrong twice**, and both mistakes are recorded in
+`park` because they are easy to make again. A parked worker must return to the
+scheduling loop to steal, since stealing lives there; a version that kept
+re-checking the shared queue and its own from inside the parking loop left
+three workers asleep through twenty milliseconds of work in the fourth one's
+queue. And the opposite fix — check every worker's queue and stay awake if any
+has something — livelocks, because seeing work is not taking it, and four
+workers spinning on a losing steal can starve the one making progress.
+
 ---
 
 ## 11. What is already done that a reader might assume is not
@@ -546,8 +577,8 @@ Staged so that a failure is attributable to the thing that just changed.
 | --- | --- |
 | **11A** context switch, one worker, many fibers, explicit yield, join | stack switching, and the current-fiber pointer replacing thread-locals |
 | **11B** N workers, local and global queues, migration, safepoints — **done** | CPU parallelism, and fairness |
-| **11C** timers, suspend, wake, and a `poll` reactor — **done** | a hundred thousand waiting on *timers*; sockets need a scalable backend |
-| **11D** work stealing | locality, once the simple scheduler's behaviour is understood |
+| **11C** timers, suspend, wake, a `poll` reactor, and socket calls that suspend a fiber — **done** | a hundred thousand waiting on *timers*; sockets need a scalable backend |
+| **11D** work stealing — **done** | locality, once the simple scheduler's behaviour is understood |
 | **11E** bounded blocking pool | that unavoidable blocking cannot stall a worker |
 | **11F** scale and soak | the adversarial tests below |
 
@@ -670,16 +701,41 @@ one — but the load-bearing evidence that the fix works is not TSan. It is 80
 runs of the reduction and 60 of `many_sleeping_fibers_all_wake` without a
 single failure, against roughly one in ten and 17 in 60 before.
 
-**What it means beyond this bug.** Every thread-local this runtime touches is
-now suspect wherever a suspension can happen between two accesses in one
-function — `SHARED`, `LOCAL`, `REMAINING`, `CURRENT`. Each was checked: they
-either read a thread-local into a value before suspending and never touch it
-again, or run entirely on a worker with no switch in between. The rule to
-apply when adding to this file is short:
+**What it means beyond this bug**, and the first version of this paragraph
+got it wrong, which is worth leaving on the record. It said the other
+thread-locals — `CURRENT`, `SHARED`, `LOCAL`, `REMAINING` — had been checked
+and were fine, on the reasoning that each reads into a value before suspending
+and never touches the thread-local again. That reasoning is sound about a
+single call and useless about a loop: the compiler hoists the address
+computation out of one, and then the *caller's* suspension sits between two
+uses of it.
+
+11D proved it within a day. `a_fiber_keeps_its_identity_across_workers` asks a
+fiber who it is in a loop with a suspension in it, and once stealing made
+migration common it started answering with somebody else's identity — `left:
+30, right: 28` — because `current()` was inlined and its address hoisted. The
+worker panicked, and the fiber it was holding went with it, so the visible
+symptom was a scheduler that lost a task and hung in `drain`.
+
+So the rule is applied mechanically now rather than argued site by site:
 
 > **Never let a thread-local address be computed on one side of a suspension
-> and used on the other.** If a function both suspends and touches a
-> thread-local afterwards, the access goes behind `#[inline(never)]`.
+> and used on the other.** In practice: every thread-local in `khora-rt` is
+> reached through an `#[inline(never)]` accessor.
+
+`current.rs` has `running`, `set_running`, `swap_running` and `root_fiber`;
+`coro.rs` has `installed` and `install`; `scheduler.rs` has `local_queue`,
+`shared_pool` and `attach`. `#[inline(never)]` puts the address computation in
+the callee, where it runs on the thread actually executing, and the switch's
+inline assembly clobbers memory so the loaded *value* cannot be carried across
+a suspension either.
+
+**`REMAINING` is the one exception, deliberately.** The safepoint budget is per
+worker, not per fiber: `refill`, the check and `withdraw` all run inside `run`
+on the worker, and `khora_safepoint` reaches it across an `extern "C"` boundary
+that forces a fresh computation on every call. No access to it can straddle a
+switch. It is also the only hot path in the file — one call per loop back-edge
+— so it is the one place where an un-inlinable call would show up.
 
 `coro.rs` also gains
 `a_coroutine_survives_being_resumed_by_a_different_thread`, from the day spent
