@@ -163,8 +163,25 @@ fn drive_clang(objects: &[&Path], archives: &[&Path], out: &Path) -> Result<(), 
 
     let output = cmd.output().map_err(|e| format!("running {}: {e}", clang.display()))?;
     if !output.status.success() {
+        // **A cross build reaches here on its way to a linker that cannot help
+        // it**, and the raw message is baffling: `lld-link` says "unknown file
+        // type" about a perfectly good aarch64 object, because it is an ELF
+        // and the Windows linker reads COFF. Code generation succeeded; what
+        // is missing is a linker and a sysroot for the target, which
+        // `docs/design/targets.md` lists as steps three and four and this is
+        // step one. Saying so beats letting somebody debug their program.
+        let crossing = khora_db::target_triple();
+        let note = match &crossing {
+            Some(triple) => format!(
+                "\n\nThe object was generated for `{triple}` and this host's linker cannot \
+                 read it. Code generation for another target works; linking for one needs a \
+                 linker and a sysroot that this build does not yet fetch — \
+                 `docs/design/targets.md`."
+            ),
+            None => String::new(),
+        };
         return Err(format!(
-            "link failed ({}):\n{}",
+            "link failed ({}):\n{}{note}",
             output.status,
             String::from_utf8_lossy(&output.stderr)
         ));

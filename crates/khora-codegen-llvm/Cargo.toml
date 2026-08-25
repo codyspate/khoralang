@@ -33,6 +33,10 @@ inkwell = { version = "0.10", default-features = false, features = [
     "llvm22-1",
     "target-x86",
     "target-aarch64",
+    # WebAssembly, for `KHORA_TARGET=wasm32-unknown-unknown`. The pinned LLVM
+    # has had the backend compiled in all along — `docs/llvm-setup.md` §4 lists
+    # it — and this was off only because nothing emitted for it.
+    "target-webassembly",
 ], optional = true }
 
 [dev-dependencies]

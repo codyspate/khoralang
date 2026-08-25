@@ -197,6 +197,37 @@ pub fn selected_for_target(path: &std::path::Path, target: &str) -> bool {
     }
 }
 
+/// Which platform's `std` files a triple wants.
+///
+/// **WebAssembly is its own family and not a Unix.** A Worker has no sockets
+/// and no filesystem, so selecting `socket_linux.kh` for it would compile
+/// bindings to syscalls that are not there — `docs/design/targets.md` argues
+/// the point. Until those files exist it is mapped to `linux`, which is wrong
+/// and is the next thing that has to change; it is written here rather than
+/// discovered later.
+fn family_of(triple: &str) -> &'static str {
+    if triple.contains("windows") {
+        "windows"
+    } else if triple.contains("apple") || triple.contains("darwin") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+/// The triple to generate code for.
+///
+/// The host's own unless `KHORA_TARGET` names another. Three-letter families
+/// keep meaning the host triple, because they were only ever choosing `std`
+/// files and a build that quietly changed architecture under them would be a
+/// surprise.
+pub fn target_triple() -> Option<String> {
+    match std::env::var("KHORA_TARGET").ok() {
+        Some(triple) if triple.contains('-') => Some(triple),
+        _ => None,
+    }
+}
+
 /// The target this compiler is running on, named as a file suffix would be.
 ///
 /// Khora generates for the host triple, so the host's name is the target's —
@@ -221,8 +252,15 @@ pub fn host_target() -> &'static str {
         Some("windows") => return "windows",
         Some("macos") => return "macos",
         Some("linux") => return "linux",
+        // **A full triple selects the family too.** `KHORA_TARGET` began as
+        // three names because all it chose was which `std` files to read;
+        // cross-compilation needs the same setting to reach the code
+        // generator, and a triple is what a code generator wants. One variable
+        // rather than two that could disagree about what is being built.
+        Some(triple) if triple.contains('-') => return family_of(triple),
         Some(other) => panic!(
-            "KHORA_TARGET={other:?} is not a target; expected `windows`, `macos` or `linux`"
+            "KHORA_TARGET={other:?} is not a target; expected `windows`, `macos`, `linux`, \
+             or a target triple such as `aarch64-unknown-linux-gnu`"
         ),
         None => {}
     }

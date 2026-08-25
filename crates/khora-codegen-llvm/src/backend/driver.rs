@@ -369,13 +369,26 @@ fn specialized_signature(
 /// afterwards does not go back and fix the instructions. The result still runs
 /// on x86, which is exactly what makes it easy to ship.
 fn target_machine() -> Result<TargetMachine, Vec<HirError>> {
-    Target::initialize_native(&InitializationConfig::default())
-        .map_err(|e| vec![backend_error(format!("initializing the native target: {e}"))])?;
+    // **Every target inkwell was built with, not just this machine's.**
+    // `initialize_native` is enough to compile for the host and nothing else,
+    // which is what `docs/design/targets.md` recorded as the reason there was
+    // no `--target` at all: there was nowhere for it to point. Initializing
+    // the set costs a handful of registrations and is what makes a triple mean
+    // something.
+    Target::initialize_all(&InitializationConfig::default());
 
-    let triple = TargetMachine::get_default_triple();
+    // The host's triple unless `KHORA_TARGET` names another. Both halves of a
+    // cross build move together — `khora_db::host_target` reads the same
+    // variable to pick which `std` files are compiled — so a build cannot
+    // generate for one platform while reading another's bindings.
+    let triple = match khora_db::target_triple() {
+        Some(named) => TargetTriple::create(&named),
+        None => TargetMachine::get_default_triple(),
+    };
     let target = Target::from_triple(&triple).map_err(|e| {
         vec![backend_error(format!(
-            "resolving target {}: {e}",
+            "resolving target {}: {e}. This build can emit for the targets \
+             `crates/khora-codegen-llvm/Cargo.toml` enables on inkwell",
             triple.as_str().to_string_lossy()
         ))]
     })?;

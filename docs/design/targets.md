@@ -1,11 +1,16 @@
 # Targets
 
-Khora compiles for the machine it is running on and nothing else.
-`target_machine` in `crates/khora-codegen-llvm/src/backend/driver.rs` calls
-`Target::initialize_native` and `TargetMachine::get_default_triple`, and
-`crates/khora-codegen-llvm/Cargo.toml` takes inkwell with
-`default-features = false` and only `target-x86` and `target-aarch64`. There is
-no `--target` flag, because there is nowhere for it to point.
+Khora compiled for the machine it was running on and nothing else, because
+`target_machine` initialized only the native target and there was nowhere for a
+`--target` to point. **Step one of the four below is done**: it initializes
+every backend inkwell was built with and takes its triple from `KHORA_TARGET`,
+and `tests/targets.rs` proves an object comes out for the machine that was
+asked for — a WebAssembly module, an aarch64 ELF and an x86-64 ELF, all from a
+Windows host.
+
+Steps two to four are not, so a cross build stops at the link with a message
+that says which target its object was for and that a linker and sysroot are
+what is missing. Nothing here yet *runs* on another machine.
 
 That is a smaller problem than it looks for correctness and a large one for
 adoption: `docs/positioning.md` puts Khora where a team is choosing Go, and
@@ -26,8 +31,14 @@ established; there would just be more of it.
 The temptation is to treat wasm as a special project. It should be the second
 target that works, not the first exception:
 
-1. a `--target` flag, and a `TargetMachine` built from a triple rather than from
-   the host;
+1. ~~a `--target` flag, and a `TargetMachine` built from a triple rather than
+   from the host~~ — **done**, as `KHORA_TARGET`. It reuses the variable that
+   already chose which `std` files a build reads, rather than adding a second
+   one that could disagree with it: a build cannot now generate for one
+   platform while compiling another's bindings. Three-letter families
+   (`linux`, `macos`, `windows`) keep their old meaning of "the host's
+   architecture, that platform's `std`", because a build that quietly changed
+   architecture under somebody would be a surprise;
 2. `khora-rt` cross-compiled for that triple, and its platform bindings selected
    by it rather than by `cfg(windows)` versus `cfg(unix)`;
 3. a linker and sysroot for the target, since `clang` currently drives the host

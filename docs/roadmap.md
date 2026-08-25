@@ -2484,7 +2484,33 @@ The split is the interesting part and `ecosystem.md` argues it: the **types** ar
 several times a year and `std` is behind a compatibility promise that cannot
 move that fast.
 
-### 12.2 Cross-compilation, and WebAssembly as its first consumer
+### 12.2 Cross-compilation — **step one done, and wasm comes out of it**
+
+`KHORA_TARGET` now takes a target triple as well as the three platform names,
+and `target_machine` initializes every backend inkwell was built with rather
+than only the host's. `crates/khora-codegen-llvm/tests/targets.rs` reads the
+first bytes of what comes out: **a WebAssembly module, an aarch64 ELF and an
+x86-64 ELF, all emitted from a Windows host**, and a triple with no backend
+refused by name.
+
+Reusing `KHORA_TARGET` rather than adding a flag beside it is deliberate. It
+already chose which `std` files a build reads; a second setting could disagree
+with it, and then a build would generate for one platform while compiling
+another's bindings.
+
+**Nothing runs on another machine yet.** Steps two to four — a cross-built
+`khora-rt`, a linker and sysroot, and a toolchain that fetches them — are not
+done, so a cross build stops at the link. It now says so usefully: the raw
+failure was `lld-link: unknown file type` about a perfectly good aarch64
+object, and it now names the target the object was for and what is missing.
+
+One thing worth keeping: `family_of` maps `wasm32` to the `linux` `std` files,
+which is **wrong** — a Worker has no sockets and no filesystem. It is written
+down in `khora-db` as the next thing that has to change rather than left to be
+discovered.
+
+The original entry:
+
 
 `khora-codegen-llvm` calls `initialize_native` and `get_default_triple`; there
 is no `--target`. Competing with Go without `GOOS`/`GOARCH` is a losing
