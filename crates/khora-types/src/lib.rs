@@ -620,6 +620,7 @@ mod reporting;
 mod map;
 mod queries;
 mod syntax;
+mod unresolved;
 
 pub use reporting::*;
 pub use map::*;

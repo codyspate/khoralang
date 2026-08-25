@@ -2690,27 +2690,43 @@ Regressions in `khora-types/tests/closures.rs` for each, and one in
 `Shared::update` — compiled and run, because the original symptom was a program
 and not a judgement.
 
-### Two more of the same class, found while confirming the fix
+### A type name that names nothing — **fixed**
 
-Neither is fixed and both are worth their own entry. Recorded here because they
-were found by writing down what the compiler *should* say and checking.
+Found while confirming the concatenation fix, by writing down what the compiler
+*should* say and checking, and the most serious thing this session turned up.
 
-**A bound naming a trait that does not exist is accepted in silence.** `fn
-f<A: Wibble>(x: A)` reports nothing until the body calls a method, and then
-reports ``no method `hi` on `A`, whose bounds are `Wibble` `` — which blames
-the method for the bound's problem, and reads as though `Wibble` were a real
-trait that happens to lack `hi`.
+**`fn f(x: Wibble) -> Int { 1 }` type-checked clean.** Unresolved names become
+`Type::Adt { home: None }`, whose comment says the error is "already an error
+where the name was resolved" — and `TypeHomes::of` says the same thing. For a
+*value* name it is true, and `cannot find x in this scope` is reported. For a
+type name nothing resolved it and nothing complained. Two comments asserting
+that somebody else handles it, and nobody did.
 
-**A type name that does not resolve is never reported at all.** `fn f(x:
-Wibble) -> Int { 1 }` type-checks clean. Unresolved names become `Type::Adt {
-home: None }`, whose comment says the error is "already an error where the name
-was resolved" — for *value* names that is true, and `cannot find x in this
-scope` is reported; for type names nothing resolves them and nothing complains.
-The type is nominal and distinct, so it does not unify with anything and real
-mismatches are still caught — but they are reported as ``this function returns
-`Wibble`, but its body has type `Int` ``, which sends the reader looking for a
-mismatch instead of telling them the type does not exist. A typo in a signature
-is the ordinary way to meet this.
+What kept it alive is that the consequence looks mild. The invented type is
+nominal and distinct from everything, so it never unifies and genuine
+mismatches are still caught — reported as ``this function returns `Wibble`, but
+its body has type `Int` ``, which reads as two real types disagreeing. The
+reader goes looking for a mismatch instead of for a typo, and a typo in a
+signature is the ordinary way to meet this.
+
+The same gap made a bound naming no trait surface as ``no method `hi` on `A`,
+whose bounds are `Wibble` `` — blaming the method for the bound's problem, and
+reading as though `Wibble` were a real trait that happens to lack `hi`. One
+fix covers both, because a bound is a type mention.
+
+`khora-types/src/unresolved.rs`, walked over the syntax rather than over
+resolved types: the point is to report the written name where it was written,
+and by the time a `Type` exists the range is gone. Deliberately narrow in two
+places — every type parameter in a declaration counts as one scope rather than
+being scoped precisely, and a qualified name is passed over — because a
+diagnostic that has never existed before earns its place by never being wrong,
+and both narrowings can only make it report less.
+
+Ten tests, half of them cases that must stay quiet: the builtins, type
+parameters in their own declaration, `Self` and `Self::Item`, function and
+tuple types, positional variant payloads. The real check was the corpus — all
+of `std`, both reference applications and the whole test suite pass with it on,
+which is what says the over-approximations are the right ones.
 
 ### 12.6 A C export surface
 
