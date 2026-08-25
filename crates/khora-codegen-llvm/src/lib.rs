@@ -40,4 +40,4 @@ mod lower;
 mod runtime;
 
 #[cfg(feature = "llvm")]
-pub use backend::{compile, compile_benches, compile_tests, verify_for_target};
+pub use backend::{compile, compile_benches, compile_library, compile_tests, verify_for_target};

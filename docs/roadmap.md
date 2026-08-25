@@ -2812,40 +2812,67 @@ tuple types, positional variant payloads. The real check was the corpus — all
 of `std`, both reference applications and the whole test suite pass with it on,
 which is what says the over-approximations are the right ones.
 
-### 12.6 A C export surface — **designed, not built, and one question for you**
+### 12.6 A C export surface — **done**
 
-`docs/design/c-export.md`. The last Phase 12 item, and the only one whose
-remaining work needs a decision I would rather not take alone.
+`khora build --lib`. `docs/design/c-export.md`.
 
-Three of its four questions turned out to be answered already:
+```khora
+export extern fn price(units: Int, scale: Int) -> Int {
+  units * scale
+}
+```
 
-- **What may cross** is `ffi.md` §1 unchanged — scalars and `Ptr`, nothing
-  else — and the compiler already enforces it. An export surface is that check
-  applied to a function that has a body.
-- **Who owns the result** has a precedent in `std/core.kh`:
-  `khora_float_text(value, into, capacity) -> Int`. The caller provides the
-  buffer, the callee returns the length it wanted. No shared allocator, no
-  `khora_free` in the header, no lifetime rule to document — which is where
-  most FFI bugs live.
-- **When the runtime starts** is lazily, once, on first entry. An explicit
-  `khora_init` is one more thing to forget; a static constructor is shared
-  library load order, which is a debugging subject rather than a mechanism.
+Two words the language already has: `extern` is the C boundary, `export` is
+visible outside. A body tells the directions apart, which is a rule that
+already existed — errata 5 makes a body optional, so `extern fn` without one is
+a symbol to find at link time and with one is a symbol to publish.
 
-**And one that made 12.8 worse.** A trap ends the process, and `traps.md` leans
-on an external supervisor restarting it. A library inside somebody else's
-Python interpreter has no supervisor and did not ask for one — so that support
-does not apply to this use, and `traps.md` §6 now records it. The decision
-stands, because the unwinding mechanism is still the blocker, but it rests on
-two arguments rather than three.
+**The spelling was decided against a manifest section, and the manifest was the
+anti-pattern.** `permissions.md` draws Khora's line: a decidable fact about the
+program goes where the compiler keeps it, a policy about values and trust goes
+in the manifest. `check_extern_allowlist` is the two layers working — the
+source declares `extern fn`, the manifest permits it **by package name**, and
+the manifest never names a function. "Is this part of the C ABI?" is a per-item
+type-level fact that constrains the signature, so a `[lib] exports = [...]`
+list would have been the first manifest key naming functions, imposing a
+constraint on a source line that gives no hint it is special. It would also
+split visibility across two files, when the keyword audit renamed `pub` to
+`export` for exactly that coherence.
 
-**The question: how does a function say it is exported?** Every `export fn`
-with a C-compatible signature (no syntax, but forces the Khora API and the C
-ABI to be one set); a marker in the source, `export "C" fn` (explicit,
-familiar, a language-surface change putting a packaging decision in a
-signature); or a `[lib] exports = [...]` manifest section (no language change,
-and the manifest is already where `[permissions]` and the SBOM put
-cross-boundary promises). The doc argues for the third and does not act on it,
-because it is close enough to the language surface to be worth asking about.
+Three of the four design questions were answered by things already in the tree:
+what may cross is `ffi.md` §1 unchanged; who owns a returned buffer is
+`khora_float_text(value, into, capacity) -> Int`, caller-provided, no shared
+allocator; and the runtime needs no start at all.
+
+**Four things the build turned up**, and the first is why the tests compile and
+run a real C program rather than reading the object:
+
+- **Windows publishes only what carries `dllexport`.** The library built, the
+  header generated, the import library was written, and `lld-link` told the
+  first C caller `undefined symbol: price`. Every artifact present, nothing
+  reachable — 12.4's failure mode again.
+- **A library is never single-threaded.** The host chooses which of its threads
+  calls in and may use several, so reference counting must stay atomic whatever
+  the Khora code contains. It falls out of `Entry::Library`, which is
+  load-bearing rather than incidental: wrong here is a data race in a refcount.
+- **No runtime start is needed.** The heap is lazy and `SINGLE_THREADED`
+  defaults to the atomic answer, so a wrapper is a forwarding call and nothing
+  else.
+- **Two modules cannot publish one C symbol.** The namespace is flat; a linker
+  would pick one silently. Refused by name.
+
+Thirteen tests. Six in the checker — the accepted shapes, `extern` with a body
+and no `export`, a `String` either way, a generic, and the advice about buffers
+— and seven in the backend, ending with a C program compiled against the
+generated header, linked against the library, run, and checked for Khora's
+answers.
+
+**And it made 12.8 harder**, which is worth more than the feature. `traps.md`
+leans on an external supervisor restarting a process that trapped; a library
+inside somebody's Python interpreter has no supervisor and its owner never
+agreed to run one. Recorded in `traps.md` §6, whose third overturning condition
+now names this case. The decision stands — unwinding is still the blocker — but
+it rests on two arguments rather than three.
 
 ### 12.7 The compile-time budget — **measured, and it is not a crisis**
 

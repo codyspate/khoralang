@@ -88,6 +88,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     all.extend(trait_errors(db, file).iter().cloned());
     all.extend(shadowed_name_errors(db, file));
     all.extend(crate::unresolved::unresolved_type_errors(db, file));
+    all.extend(crate::exports::export_errors(db, file));
     all.extend(check_file(db, file).iter().cloned());
     all
 }

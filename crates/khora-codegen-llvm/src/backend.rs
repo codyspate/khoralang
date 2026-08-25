@@ -94,6 +94,20 @@ pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirE
     build(db, root, out, Entry::Main, Stop::AtExecutable)
 }
 
+/// Compiles the program's `export extern fn`s into a shared library.
+///
+/// No `main`, and **never single-threaded**: the host decides which of its
+/// threads calls in, so reference counting has to be atomic whether or not
+/// this program can spawn a fiber of its own. That falls out of `Entry`
+/// rather than being asserted here, and `build` says so where it decides.
+///
+/// A C header is written beside `out`, from the same signatures the checker
+/// validated — generated rather than written, because a header that can drift
+/// from its source is a header that will.
+pub fn compile_library(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Library, Stop::AtExecutable)
+}
+
 /// Generates and verifies a module, and stops before writing anything.
 ///
 /// For checking that code generation works for a platform this host cannot
@@ -153,6 +167,9 @@ enum Entry {
     Tests,
     /// Time every `bench` block and report the distribution.
     Benches,
+    /// No entry point at all: a shared library whose `export extern fn`s are
+    /// the only way in. `docs/design/c-export.md`.
+    Library,
 }
 
 // One module per backend responsibility. This was 2,306 lines in one file, and
@@ -166,8 +183,10 @@ enum Entry {
 mod closures;
 mod driver;
 mod entry;
+mod exports;
 mod functions;
 mod glue;
+mod header;
 mod shims;
 mod statics;
 mod thunks;
@@ -175,80 +194,11 @@ mod types;
 
 use driver::build;
 
-/// Why this type cannot cross the C ABI, or `None` if it can.
-///
-/// **Scalars and pointers only.** The rule comes from errata 35, where a
-/// 16-byte aggregate crossed between generated code and the runtime and the
-/// two sides disagreed about how one comes back — silently, in the direction
-/// that made every failing test report as passing. The runtime is only the
-/// first foreign library; a binding the user writes is the same boundary.
-///
-/// `docs/design/ffi.md` has the full contract.
-fn foreign_obstacle(ty: &Type) -> Option<&'static str> {
-    match ty {
-        Type::Int | Type::Fixed(_) | Type::Float | Type::Bool | Type::Ptr => None,
-        Type::Str => Some(
-            "a `String` is a reference-counted heap object with a header the C side knows \
-             nothing about; pass its bytes and length instead",
-        ),
-        Type::Adt { .. } | Type::Tuple(_) => Some(
-            "a Khora object is a reference-counted heap allocation, so the foreign side \
-             would get a pointer it cannot read and a reference it cannot release",
-        ),
-        Type::Fn { .. } => Some(
-            "a closure is a heap object holding its captures, and C expects a bare function \
-             pointer",
-        ),
-        Type::Param(_) | Type::Applied { .. } | Type::Assoc { .. } | Type::Var(_) => Some(
-            "a generic function has no single machine signature, and there is no body to \
-             specialize",
-        ),
-        Type::Unit => Some("`()` is not a value; a foreign function may only *return* it"),
-        Type::Row { .. } | Type::Const(_) | Type::Never | Type::Unknown => {
-            Some("it is not a type the C ABI has")
-        }
-    }
-}
-
-/// Why this whole signature cannot be a foreign function's, if it cannot.
-///
-/// Checked where the call is generated rather than at the declaration, so an
-/// unused binding to something this target does not have is not an error on a
-/// target that does not need it.
-pub(crate) fn foreign_signature_obstacle(signature: &Signature) -> Option<String> {
-    if !signature.generics.is_empty() {
-        return Some(
-            "it is generic, and a generic function has no single machine signature".to_string(),
-        );
-    }
-    if can_raise(signature) {
-        return Some(
-            "it can raise, and a fallible function returns a tagged pair — which is exactly \
-             the aggregate that must not cross (errata 35). C reports failure in its return \
-             value, and the wrapper that turns that into a raise belongs in Khora"
-                .to_string(),
-        );
-    }
-    for param in &signature.params {
-        if let Some(why) = foreign_obstacle(param) {
-            return Some(format!("its parameter of type `{param}` cannot cross: {why}"));
-        }
-    }
-    if !matches!(signature.ret, Type::Unit) {
-        if let Some(why) = foreign_obstacle(&signature.ret) {
-            return Some(format!("its return type `{}` cannot cross: {why}", signature.ret));
-        }
-    }
-    None
-}
-
-/// Whether a signature's `raises` row has anything in it.
-pub(crate) fn can_raise(signature: &Signature) -> bool {
-    match &signature.raises {
-        Type::Row { fields, tail } => !fields.is_empty() || tail.is_some(),
-        _ => false,
-    }
-}
+// `foreign_obstacle` and `foreign_signature_obstacle` moved to `khora-types`
+// when the export surface needed them: what may cross the C ABI is a fact
+// about types, and the *checker* has to report it now that a function can be
+// exported. Reached here through the re-export below.
+pub(crate) use khora_types::{can_raise, foreign_signature_obstacle};
 
 /// The capabilities a signature requires, in the order they are passed.
 ///
@@ -518,6 +468,7 @@ impl<'ctx> Backend<'ctx> {
         machine: &TargetMachine,
         out: &Path,
         stop: Stop,
+        library: bool,
     ) -> Result<(), Vec<HirError>> {
         // Dumped before verification, so that a module which fails to verify is
         // still there to be read — that is precisely when it is wanted.
@@ -540,7 +491,7 @@ impl<'ctx> Backend<'ctx> {
             .write_to_file(&self.module, FileType::Object, &object)
             .map_err(|e| vec![backend_error(format!("writing {}: {e}", object.display()))])?;
 
-        toolchain::link_with_runtime(&[&object], out).map_err(|e| vec![backend_error(e)])
+        toolchain::link_with_runtime(&[&object], out, library).map_err(|e| vec![backend_error(e)])
     }
 }
 

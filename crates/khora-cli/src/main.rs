@@ -87,6 +87,12 @@ enum Command {
         /// Where to write the executable. Defaults to the source file's stem.
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// Build a shared library instead of an executable.
+        ///
+        /// Its interface is the `export extern fn`s, and a C header is written
+        /// beside it. `docs/design/c-export.md`.
+        #[arg(long)]
+        lib: bool,
     },
     /// Write a software bill of materials for a package's dependencies.
     ///
@@ -149,7 +155,7 @@ fn run() -> Result<bool> {
         Command::Fmt { paths, check } => fmt(&paths, check),
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
-        Command::Build { path, out } => build(&path, out.as_deref()),
+        Command::Build { path, out, lib } => build(&path, out.as_deref(), lib),
         Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
         Command::Lsp => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
@@ -565,7 +571,7 @@ fn bench(_path: &Path, _filter: Option<&str>) -> Result<bool> {
 /// Semantic errors are reported through the same renderer `check` uses, so a
 /// diagnostic reads identically whichever command surfaced it.
 #[cfg(feature = "llvm")]
-fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
+fn build(path: &Path, out: Option<&Path>, lib: bool) -> Result<bool> {
     let (db, inputs, root) = load(path)?;
 
     // The binary is named after the module holding `main`, or after the one
@@ -577,12 +583,21 @@ fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
         .expect("at least one source");
     let target = out.map(Path::to_path_buf).unwrap_or_else(|| {
         let stem = entry.0.file_stem().unwrap_or_default();
-        entry.0.with_file_name(stem).with_extension(std::env::consts::EXE_EXTENSION)
+        entry.0.with_file_name(stem).with_extension(library_extension(lib))
     });
 
-    match khora_codegen_llvm::compile(&db, root, &target) {
+    let outcome = if lib {
+        khora_codegen_llvm::compile_library(&db, root, &target)
+    } else {
+        khora_codegen_llvm::compile(&db, root, &target)
+    };
+    match outcome {
         Ok(()) => {
-            println!("built {} from {} module(s)", target.display(), inputs.len());
+            let what = if lib { "library" } else { "built" };
+            println!("{what} {} from {} module(s)", target.display(), inputs.len());
+            if lib {
+                println!("header {}", target.with_extension("h").display());
+            }
             Ok(true)
         }
         Err(errors) => {
@@ -590,6 +605,16 @@ fn build(path: &Path, out: Option<&Path>) -> Result<bool> {
             Ok(false)
         }
     }
+}
+
+/// What a shared library is called here, or an executable's extension.
+///
+/// Not `std::env::consts::DLL_EXTENSION` alone: that gives the extension but a
+/// Unix shared object also wants a `lib` prefix, which is the linker's
+/// convention rather than a decoration and is what `-lname` looks for. Naming
+/// only the extension produced a file no `-l` flag could find.
+fn library_extension(lib: bool) -> &'static str {
+    if lib { std::env::consts::DLL_EXTENSION } else { std::env::consts::EXE_EXTENSION }
 }
 
 /// Every source under `path`, parsed, in one compilation.
@@ -651,7 +676,7 @@ fn report_build_errors(
 }
 
 #[cfg(not(feature = "llvm"))]
-fn build(_path: &Path, _out: Option<&Path>) -> Result<bool> {
+fn build(_path: &Path, _out: Option<&Path>, _lib: bool) -> Result<bool> {
     anyhow::bail!(
         "this `khora` was built without the LLVM backend. \
          Rebuild with `--features llvm`; see docs/llvm-setup.md."

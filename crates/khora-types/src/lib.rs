@@ -9,6 +9,7 @@
 //! it is noted where it will go.
 
 pub mod derive;
+pub mod foreign;
 pub mod mono;
 pub mod traits;
 pub mod unify;
@@ -616,11 +617,14 @@ fn covers(declared: &[String], written: &[&str]) -> bool {
 // Checker` was 2,350 — a new reader looking for where a call's arguments are
 // checked had no way to find it but to read the file. Roadmap 9.6.3.
 mod check;
+mod exports;
 mod reporting;
 mod map;
 mod queries;
 mod syntax;
 mod unresolved;
+
+pub use foreign::{can_raise, foreign_obstacle, foreign_signature_obstacle};
 
 pub use reporting::*;
 pub use map::*;

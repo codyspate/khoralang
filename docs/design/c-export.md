@@ -3,10 +3,9 @@
 Roadmap 12.6. `docs/design/ffi.md` settles how Khora calls out; this is the
 other direction, and it is not symmetric.
 
-**Nothing here is built.** This is the argument that has to be settled first,
-because two of its three questions are answered by facts already in the tree
-and the third is a decision somebody has to take deliberately. The one place I
-will not decide alone is marked as such at the end.
+**Built.** `khora build --lib` writes a shared library, a header beside it, and
+a C symbol per `export extern fn`. The spelling was the one question this
+document left open, and §6 records how it was settled and why.
 
 ## Why it is worth doing
 
@@ -89,15 +88,19 @@ who missed it in the README.
 and is exactly the mechanism that makes shared-library load order a debugging
 subject. No.
 
-**Lazy, on first entry, once.** Every exported function begins by ensuring the
-runtime exists. The cost is one relaxed atomic load per call against a
-`std::sync::Once`, which is nothing next to a cross-language call, and there is
-nothing for a caller to forget. `khora-rt` already has the pieces: `current.rs`
-hands any thread that has not entered a fiber its own root, which is the same
-problem solved the same way.
+**Lazy, on first entry, once.** Nothing for a caller to forget, and one relaxed
+load against a `Once` is nothing beside a cross-language call.
 
-An explicit `khora_shutdown` should exist anyway, for a host that wants to
-release the heap deliberately, but nothing should require it.
+**And it turned out not to be needed at all** — see §7. There is nothing to
+start: the heap allocates on demand, `current.rs` already hands a thread that
+has not entered a fiber its own root, and the only thing `main` does eagerly is
+*narrow* the runtime by declaring the program single-threaded, which a library
+must never do. So an exported wrapper is a forwarding call and no prologue. The
+option survives here because it is the one to reach for if an export ever does
+need setup, and because the reasoning against the other two does not change.
+
+An explicit `khora_shutdown` may still be worth having for a host that wants to
+release the heap deliberately. Nothing requires it, and nothing offers it yet.
 
 ## 4. What a trap does here — **and this is where 12.8 gets harder**
 
@@ -143,40 +146,73 @@ Mechanically small, given the above:
   Generated rather than written, because a header that can drift from the
   source is a header that will.
 
-## The one open question: how a function says it is exported
+## 6. How a function says it is exported — **`export extern fn`**
 
-Three answers, and the third is my recommendation, but this is close enough to
-the language surface that I would rather ask than decide.
-
-**A. Every `export fn` with a C-compatible signature.** No new syntax at all.
-Also no way to *not* export one, and a package's public Khora API and its C ABI
-are then forced to be the same set — which they are not, because one is
-governed by `compatibility.md`'s semver rules and the other is a promise about
-machine layout.
-
-**B. A marker in the source**, `export "C" fn …` or an attribute. Explicit at
-the definition, familiar from Rust, and the most likely thing a reader would
-guess. It is a language-surface change, and it puts a packaging decision in the
-middle of the code.
-
-**C. A manifest section.**
-
-```toml
-[lib]
-exports = ["price", "risk_of"]
+```khora
+export extern fn price(units: Int, scale: Int) -> Int {
+  units * scale
+}
 ```
 
-No language change; the list of symbols a library promises is a packaging fact
-and lives with the other packaging facts, next to `[permissions]`, which is
-already a manifest-side statement about what code may do. It also makes the ABI
-reviewable in one place, which is what somebody auditing a shared library
-wants — and `khora sbom` and `[permissions]` both argue that this project
-already treats the manifest as where cross-boundary promises live.
+Two words the language already has, no new keyword, no string literal.
 
-Its weakness is real: a name in a manifest is not checked against the source by
-the reader's eye, only by the compiler, and a typo is a build error rather than
-an obvious one.
+The alternative I first recommended was a `[lib] exports = [...]` manifest
+section, and it was wrong. Khora's own line, from `permissions.md`
+§"Why the line falls there", is that a *decidable fact about the program* goes
+where the compiler can keep it and a *policy about values and trust* goes in
+the manifest. `check_extern_allowlist` shows the two layers working: the source
+declares `extern fn`, and the manifest permits it **by package name**. The
+manifest never names an individual function.
 
-I lean to **C**. It is the only one of the three that does not either force the
-Khora API and the C ABI to be the same set or put a packaging decision in a
-function signature.
+"Is this part of the C ABI?" is a per-item, decidable, type-level fact — it
+constrains that function's signature to scalars and `Ptr`, forbids generics,
+forbids raising. A manifest list would have been the first key naming functions
+rather than packages, imposing a constraint on a source line that gives no hint
+it is special. It would also split visibility across two files, when `export fn`
+is already in the source and the keyword audit renamed `pub` to `export`
+precisely *for* that coherence.
+
+Against the audit's three questions, `export extern fn` passes on its own
+terms and is more coherent here than Rust's `extern "C"` is there: Rust
+overloads one spelling for both directions, and Khora already has `import` and
+`export` as its direction vocabulary. `"C"` was dropped because Rust needs it
+to choose between `"system"`, `"stdcall"` and the rest, and Khora has one ABI —
+syntax for a variation that does not exist is what question 3 exists to catch.
+
+**A body is what distinguishes the directions**, which is a rule that already
+existed: errata 5 makes a body optional, so `extern fn` without one is a symbol
+to find at link time and with one is a symbol to publish. `export` in front
+makes that explicit rather than leaving a reader to notice that a body reversed
+the arrow.
+
+The trust layer stays available if it is ever wanted: whether a *dependency*
+may put symbols into your library is package-keyed policy, the same shape as
+the extern allowlist, and belongs in the manifest exactly where that does.
+
+## 7. What building it turned up
+
+**Windows publishes only what carries `dllexport`.** The library built, the
+header generated, the import library was written, and `lld-link` told the first
+C caller `undefined symbol: price`. Every artifact present, nothing reachable.
+`DLLStorageClass::Export` on each wrapper; a no-op on ELF and Mach-O, where a
+shared object's symbols are visible already. This is the same shape as 12.4's
+four silent failures, and the reason the test suite compiles and runs a real C
+program rather than inspecting the object.
+
+**A library is never single-threaded.** `Backend::single_threaded` is set when
+the program cannot spawn a fiber, and reference counting then skips atomics.
+The host decides which of *its* threads calls in, and may use several — so a
+`--lib` build must never claim it, whatever the Khora code contains. It falls
+out of `Entry::Library` failing the comparison in `driver.rs`, which is
+load-bearing rather than incidental: getting it wrong is a data race in a
+refcount.
+
+**No runtime start is needed**, which was §3's question and turned out to have
+a duller answer than any of its three options. The heap is lazy and
+`SINGLE_THREADED` defaults to the atomic answer, so an exported wrapper is a
+forwarding call and nothing else.
+
+**Two functions cannot publish one symbol.** The C namespace is flat, so two
+`export extern fn price` in different modules are a collision a linker resolves
+by picking one — silently, and not necessarily the same one twice. Refused by
+name.

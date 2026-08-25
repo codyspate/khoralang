@@ -37,7 +37,7 @@ pub fn tool(name: &str) -> Option<PathBuf> {
 /// already knows how to find the platform's CRT and system libraries, and it
 /// is the same driver that will handle the cross-targets in Phase 6.
 pub fn link_executable(objects: &[&Path], out: &Path) -> Result<(), String> {
-    drive_clang(objects, &[], out)
+    drive_clang(objects, &[], out, false)
 }
 
 /// File name of the runtime's static archive, as cargo writes it.
@@ -154,17 +154,22 @@ pub fn debug_info_wanted() -> bool {
     !matches!(std::env::var("KHORA_DEBUG").as_deref(), Ok("0") | Ok("off") | Ok("false"))
 }
 
-pub fn link_with_runtime(objects: &[&Path], out: &Path) -> Result<(), String> {
+pub fn link_with_runtime(objects: &[&Path], out: &Path, library: bool) -> Result<(), String> {
     let runtime = runtime_archive().ok_or_else(|| {
         format!(
             "the Khora runtime archive ({RUNTIME_ARCHIVE}) was not found. Build it with \
              `cargo build -p khora-rt`, or point KHORA_RT_LIB at it."
         )
     })?;
-    drive_clang(objects, &[runtime.as_path()], out)
+    drive_clang(objects, &[runtime.as_path()], out, library)
 }
 
-fn drive_clang(objects: &[&Path], archives: &[&Path], out: &Path) -> Result<(), String> {
+fn drive_clang(
+    objects: &[&Path],
+    archives: &[&Path],
+    out: &Path,
+    library: bool,
+) -> Result<(), String> {
     let clang = tool("clang").ok_or_else(|| {
         "clang not found in the LLVM toolchain; set LLVM_SYS_221_PREFIX \
          (see docs/llvm-setup.md)"
@@ -172,6 +177,11 @@ fn drive_clang(objects: &[&Path], archives: &[&Path], out: &Path) -> Result<(), 
     })?;
 
     let mut cmd = std::process::Command::new(&clang);
+    // A shared library rather than an executable: no entry point, and the
+    // exported symbols are the whole interface. `docs/design/c-export.md`.
+    if library {
+        cmd.arg("-shared");
+    }
     cmd.args(objects).args(archives);
     if !archives.is_empty() {
         cmd.args(SYSTEM_LIBS);

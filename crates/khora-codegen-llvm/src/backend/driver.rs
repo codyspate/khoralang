@@ -102,6 +102,14 @@ pub(super) fn build(
     }
     // Tests each get a fiber of their own, so only a `main` build can be
     // single-threaded.
+    //
+    // **A library never is, and this is where that is decided.** The host
+    // chooses which of its threads calls an exported function, and it may
+    // choose several — so reference counting has to be atomic whether or not
+    // this program contains a `Fiber::spawn`. `Entry::Library` failing the
+    // comparison below is what makes that true; it is load-bearing rather than
+    // incidental, and getting it wrong is a data race in a refcount, which is
+    // memory corruption a long way from its cause.
     backend.single_threaded =
         entry_point == Entry::Main && !program_can_spawn(mono, |instance| {
             let home = mono.home(&instance.symbol())?;
@@ -197,6 +205,28 @@ pub(super) fn build(
         backend.end_debug_scope();
     }
 
+    // **The published C symbols, after every body exists.** A wrapper calls a
+    // definition, so nothing may be emitted before the thing it forwards to.
+    let exports: Vec<(String, String)> = mono
+        .instances
+        .iter()
+        .filter(|(instance, _)| {
+            backend.signature_of(&instance.symbol()).is_some_and(|s| s.is_extern)
+                && body_of(instance).is_some_and(|b| b.root.is_some())
+        })
+        .map(|(instance, _)| (instance.function.clone(), instance.symbol()))
+        .collect();
+    if entry_point == Entry::Library && exports.is_empty() {
+        backend.error(
+            "a library has no `export extern fn`, so nothing could call it. Mark the              functions that are its C interface — `docs/design/c-export.md`",
+            text_size::TextRange::empty(0.into()),
+        );
+    }
+    backend.emit_c_exports(&exports);
+    if entry_point == Entry::Library && stop == Stop::AtExecutable {
+        write_the_header(&backend, out, &exports);
+    }
+
     // After every body and every lifted closure, because lowering is what
     // assigns error ids and the last one compiled may add another.
     backend.emit_error_releaser();
@@ -207,6 +237,9 @@ pub(super) fn build(
                 mono.instances.iter().find(|(i, _)| i.function == "main").map(|(i, _)| i.symbol());
             backend.emit_c_main(entry.as_deref());
         }
+        // Nothing to emit. The exported symbols *are* the entry points, and
+        // `emit_c_exports` has already written them.
+        Entry::Library => {}
         Entry::Tests | Entry::Benches => {
             // In written order, per file, which is the order a reader expects
             // a report in even though the test runs themselves overlap.
@@ -245,7 +278,7 @@ pub(super) fn build(
     if let Some(debug) = backend.debug.as_ref() {
         debug.finalize();
     }
-    backend.finish(&machine, out, stop)
+    backend.finish(&machine, out, stop, entry_point == Entry::Library)
 }
 
 /// Opens the debug scope for one emitted function.
@@ -289,6 +322,24 @@ fn enter_debug_scope(
     let Some(function) = backend.definition(symbol) else { return };
     if let Some(debug) = backend.debug.as_mut() {
         debug.enter(function, &instance.function, symbol, &path, &text, at);
+    }
+}
+
+/// Writes the C header beside the library.
+///
+/// A failure here is reported and does not stop the build: the library itself
+/// is the artifact, and a caller who cannot write a header next to it has a
+/// directory problem rather than a compilation one — but saying nothing would
+/// leave them with a library and no prototypes and no reason why.
+fn write_the_header(backend: &Backend<'_>, out: &Path, exports: &[(String, String)]) {
+    let named: Vec<(String, khora_types::Signature)> = exports
+        .iter()
+        .filter_map(|(name, symbol)| Some((name.clone(), backend.signature_of(symbol)?)))
+        .collect();
+    let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let path = out.with_extension("h");
+    if let Err(e) = std::fs::write(&path, crate::backend::header::render(&stem, &named)) {
+        eprintln!("khora: the library was built but its header was not: {}: {e}", path.display());
     }
 }
 
