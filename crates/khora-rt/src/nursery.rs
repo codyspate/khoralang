@@ -116,12 +116,7 @@ pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
 unsafe fn fiber_finished(fiber: *mut u8) -> bool {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return true };
-    let thread = state.thread.lock().unwrap_or_else(|e| e.into_inner());
-    match thread.as_ref() {
-        Some(handle) => handle.is_finished(),
-        // Already joined by somebody, so there is nothing left to wait for.
-        None => true,
-    }
+    state.completion.finished()
 }
 
 /// Makes `fiber` this nursery's responsibility, taking its reference.

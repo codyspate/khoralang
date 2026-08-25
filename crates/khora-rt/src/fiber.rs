@@ -1,18 +1,40 @@
 //! Fibers.
 //!
-//! **A fiber is an operating-system thread today.** `docs/design/fibers.md`
-//! decided that a fiber *is* a stackful coroutine multiplexed onto worker
-//! threads and that the first implementation makes each one a thread, on the
-//! argument that a program cannot tell which it has. It cannot, and the cost is
-//! that a fiber is worth roughly what a thread is worth — about 33 KB — so a
-//! server holds thousands of connections and not hundreds of thousands.
+//! **A fiber is an operating-system thread, and can be a coroutine on
+//! Phase 11's scheduler instead.** `docs/design/fibers.md` decided a fiber
+//! *is* the second of those and that the first would do until the scheduler
+//! existed, on the argument that a program cannot tell which it has. The
+//! scheduler now exists, and this file is where the two meet.
 //!
-//! Replacing this with a scheduler is Phase 11 of `docs/roadmap.md`, and the
-//! whole point of the interface below is that nothing above it changes when
-//! that happens.
+//! `KHORA_FIBERS=scheduler` picks it. **Threads are the default, and the
+//! reason is a measurement rather than caution**: `bench/service` answers
+//! 760,771 requests a second on threads and 59,965 on the scheduler, on one
+//! machine in one sitting, which is the comparison `bench/README.md` says is
+//! the only kind that travels. Twelve times slower is not a default whatever
+//! else is true of it.
+//!
+//! That is not an argument against the scheduler, which does what it was built
+//! to do — a hundred thousand fibers waiting at once cost 407 MB rather than
+//! the 3.3 GB the same number of threads would, and `crate::soak` runs
+//! millions of them without losing one. It is an argument that something
+//! between a socket becoming readable and a fiber running again is far too
+//! expensive, and `docs/roadmap.md` 11H is where that is chased with this
+//! number attached to it.
+//!
+//! Both paths are kept because the number is only worth having if it can be
+//! taken again.
+//!
+//! **One thing a program can tell, on the scheduler**, written here so nobody
+//! has to find it. A thread gets the operating system's stack — two megabytes
+//! on Linux, one on Windows. A coroutine gets `corosensei`'s, which is a
+//! megabyte with a guard page. Khora recursing deeply enough to have been near
+//! the old limit is over the new one, and the failure is a clean fault at the
+//! guard page rather than corruption.
 
 use super::*;
+use crate::coro::Task;
 use crate::current::{enter, Fiber};
+use crate::scheduler::{park_current, Scheduler};
 use crate::heap::SINGLE_THREADED;
 use crate::heap::{khora_alloc, khora_drop};
 use std::sync::atomic::Ordering;
@@ -60,22 +82,163 @@ pub const FAILED_WHICH: u32 = u32::MAX - 1;
 /// it, because two numbers that must agree are one number.
 pub const CANCELLED_WHICH: u32 = u32::MAX;
 
-/// What a fiber handle points at.
-pub(crate) struct FiberState {
-    /// `None` once joined. Joining twice is not an error — the second is a
-    /// no-op — because the handle's release joins whatever `join` did not.
+/// Whether fibers are coroutines on the scheduler rather than threads.
+///
+/// Read once. A program that changed its mind halfway would have handles of
+/// both kinds and no way to tell them apart.
+pub(crate) fn on_the_scheduler() -> bool {
+    static CHOSEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CHOSEN.get_or_init(|| {
+        std::env::var("KHORA_FIBERS").map(|v| v == "scheduler").unwrap_or(false)
+    })
+}
+
+/// How a fiber finishes, which is where the two implementations differ.
+pub(crate) enum Completion {
+    /// A thread to join. `None` once joined: joining twice is not an error,
+    /// because the handle's release joins whatever `join` did not.
     ///
     /// Behind a lock because `Fiber` is `Share`: two fibers may hold one handle
-    /// and both call `join`, and "take the handle if it is there" is exactly
-    /// the read-modify-write that has to happen once. Without it both could see
-    /// `Some` and join the same thread twice.
-    pub(crate) thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// and both call `join`, and "take the handle if it is there" is the
+    /// read-modify-write that has to happen once.
+    Thread(Mutex<Option<std::thread::JoinHandle<()>>>),
+    /// A latch the child closes.
+    Fiber(Arc<Done>),
+}
+
+impl Completion {
+    fn wait(&self) {
+        match self {
+            Completion::Thread(handle) => {
+                let taken = handle.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(thread) = taken {
+                    // A child that panicked has already reported it; there is
+                    // nothing this fiber can do with the payload, and turning
+                    // it into a parent panic would lose the child's message
+                    // behind a second one.
+                    let _ = thread.join();
+                }
+            }
+            Completion::Fiber(done) => done.wait(),
+        }
+    }
+
+    pub(crate) fn finished(&self) -> bool {
+        match self {
+            Completion::Thread(handle) => {
+                match handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                    Some(thread) => thread.is_finished(),
+                    // Already joined by somebody, so nothing is left to wait for.
+                    None => true,
+                }
+            }
+            Completion::Fiber(done) => done.finished(),
+        }
+    }
+}
+
+/// What a fiber handle points at.
+pub(crate) struct FiberState {
+    pub(crate) completion: Completion,
     /// The child's flag, shared with the child so a parent can set it.
     pub(crate) fiber: Arc<Fiber>,
 }
 
+/// A latch a fiber closes once and any number of joiners wait on.
+///
+/// **The completion-to-join handover, which is a two-sided problem.** A joiner
+/// may be a fiber, which must give its worker back rather than hold one while
+/// it waits; or it may be the program's own computation on a thread that is
+/// not a worker at all, which has nothing to give back and must block. Both
+/// happen, so both are here.
+///
+/// Idempotent by construction: a latch that is already closed is not waited on
+/// at all, which is what lets `join` be called twice and lets a handle's
+/// release join whatever an explicit `join` did not.
+#[derive(Default)]
+pub(crate) struct Done {
+    state: Mutex<Latch>,
+    /// For joiners that are threads rather than fibers.
+    closed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct Latch {
+    finished: bool,
+    /// Fibers to make runnable when it closes.
+    waiting: Vec<crate::scheduler::Waker>,
+}
+
+impl Done {
+    /// Closes the latch and releases everyone waiting on it.
+    fn signal(&self) {
+        let waiting = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.finished = true;
+            std::mem::take(&mut state.waiting)
+        };
+        self.closed.notify_all();
+        for waker in waiting {
+            waker.wake();
+        }
+    }
+
+    /// Whether the latch is already closed, without waiting on it.
+    ///
+    /// For a nursery sweeping the children that have finished: asking must not
+    /// wait on the ones that have not.
+    pub(crate) fn finished(&self) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).finished
+    }
+
+    /// Waits for the latch, whatever the caller is.
+    fn wait(&self) {
+        loop {
+            // **The waker is enrolled under the same lock that reads the
+            // flag.** A child that finishes between the two would otherwise
+            // close the latch, find nobody waiting, and leave this fiber
+            // parked for ever.
+            {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.finished {
+                    return;
+                }
+                match crate::scheduler::waker_for_current() {
+                    Some(waker) => state.waiting.push(waker),
+                    // Not a fiber, so there is no worker to give back: this
+                    // thread does the waiting, which is what the program's own
+                    // computation has always done at a `join`.
+                    None => {
+                        while !state.finished {
+                            state = self.closed.wait(state).unwrap_or_else(|e| e.into_inner());
+                        }
+                        return;
+                    }
+                }
+            }
+            park_current();
+        }
+    }
+}
+
 /// The tag every fiber handle carries.
 const FIBER_TAG: u32 = 0;
+
+/// The pool every fiber in the process runs on, started the first time one is
+/// spawned.
+///
+/// **Started lazily, and never stopped.** A program that spawns nothing pays
+/// for nothing; a program that spawns keeps its workers until it exits, which
+/// is when the operating system reclaims them. There is no shutdown because
+/// there is no moment to run one: `main` returning ends the process, and a
+/// pool that joined its workers first would be waiting on fibers nobody is
+/// waiting for.
+///
+/// Zero means one worker per core, which is `Scheduler::new`'s reading of it.
+fn fibers() -> &'static Scheduler {
+    static FIBERS: std::sync::OnceLock<Scheduler> = std::sync::OnceLock::new();
+    FIBERS.get_or_init(|| Scheduler::new(0))
+}
 
 /// Runs `body` on a fiber of its own, returning a handle to it.
 ///
@@ -109,17 +272,21 @@ pub unsafe extern "C" fn khora_fiber_spawn(
     }
     let fiber = Fiber::spawned();
     let handed = Handed(body);
+    let done = Arc::new(Done::default());
+    let closes = done.clone();
     let child = fiber.clone();
 
-    let thread = std::thread::spawn(move || {
+    let run = move || {
         // Named before it is destructured, so the closure captures the wrapper
         // rather than the pointer inside it. Rust captures fields precisely,
         // and a captured `*mut u8` is not `Send` however its container is
         // declared — the wrapper only helps if the wrapper is what moves.
         let handed = handed;
         let Handed(body) = handed;
-        // Installed for as long as this thread runs the fiber. After 11A a
-        // context switch does the same thing, many times, on one thread.
+        // On a thread this installs the identity for as long as the thread
+        // runs the fiber. On the scheduler `Task::resume` has already done it,
+        // around this turn and every other, on whichever worker took it — so
+        // this entry is the outer one and restoring it changes nothing.
         let _entered = enter(child);
 
         // SAFETY: the caller guarantees a live `() -> ()` closure, and this
@@ -141,11 +308,28 @@ pub unsafe extern "C" fn khora_fiber_spawn(
             }
             khora_drop(body, glue);
         }
-    });
+        // Last, and after the closure has been released, so a joiner that
+        // wakes immediately finds the fiber finished in every sense.
+        closes.signal();
+    };
+
+    let completion = if on_the_scheduler() {
+        let task = Task::with_fiber(fiber.clone(), run);
+        // On a worker this goes to that worker's own queue, for the locality
+        // 11D's stealing is built around; off one — the program's own
+        // computation spawning its first fiber — it goes to the pool.
+        if crate::coro::on_a_fiber() {
+            crate::scheduler::schedule(task);
+        } else {
+            fibers().spawn(task);
+        }
+        Completion::Fiber(done)
+    } else {
+        Completion::Thread(Mutex::new(Some(std::thread::spawn(run))))
+    };
 
     let object = khora_alloc(std::mem::size_of::<*mut FiberState>(), FIBER_TAG);
-    let state: Box<FiberState> =
-        Box::new(FiberState { thread: Mutex::new(Some(thread)), fiber });
+    let state: Box<FiberState> = Box::new(FiberState { completion, fiber });
     // SAFETY: `khora_alloc` returned an object with one field's worth of space,
     // zeroed and aligned, and nothing else holds this pointer yet.
     unsafe {
@@ -211,13 +395,7 @@ pub(crate) unsafe fn fiber_state<'a>(fiber: *mut u8) -> Option<&'a FiberState> {
 pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
-    let taken = state.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some(thread) = taken {
-        // A child that panicked has already reported it; there is nothing this
-        // fiber can do with the payload, and turning it into a parent panic
-        // would lose the child's message behind a second one.
-        let _ = thread.join();
-    }
+    state.completion.wait();
 }
 
 /// Asks a fiber to stop at its next cancellation point.
@@ -232,7 +410,17 @@ pub unsafe extern "C" fn khora_fiber_join(fiber: *mut u8) {
 pub unsafe extern "C" fn khora_fiber_cancel(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
-    state.fiber.cancel();
+    if on_the_scheduler() {
+        // Through the pool rather than the flag alone. Setting the flag is
+        // what the child observes at its next `!`; waking it is what gets it
+        // there, and a fiber asleep on a deadline or a socket would otherwise
+        // sit on the cancellation until whatever it was waiting for happened
+        // anyway. A thread blocked in a syscall has no equivalent, which is
+        // one more thing the scheduler buys.
+        fibers().cancel_fiber(state.fiber.id());
+    } else {
+        state.fiber.cancel();
+    }
 }
 
 /// Joins a fiber and frees its handle.
@@ -262,9 +450,6 @@ pub unsafe extern "C" fn khora_fiber_release(fiber: *mut u8) {
         slot.write(std::ptr::null_mut());
 
         let state = Box::from_raw(state);
-        let taken = state.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(thread) = taken {
-            let _ = thread.join();
-        }
+        state.completion.wait();
     }
 }

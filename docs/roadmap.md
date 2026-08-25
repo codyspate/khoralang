@@ -2298,7 +2298,7 @@ workers and fairness, then the reactor and timers, then stealing, then the
 bounded blocking pool, then soak. Khora stays buildable throughout; threads
 remain the implementation wherever a backend has not landed.
 
-**Where it has got to.** 11A through 11F are built, on Windows and on Linux —
+**Where it has got to.** 11A through 11G are built, on Windows and on Linux —
 the latter through `scripts/check-linux.sh`, which runs the runtime's tests
 under WSL2 and is now part of the baseline. `Fiber::spawn` still makes threads,
 deliberately, until the remaining backends land.
@@ -2313,6 +2313,8 @@ deliberately, until the remaining backends land.
 | 11D | work stealing, so a burst spawned on one worker reaches the others |
 | 11E | a bounded blocking pool, and `std::fs` routed through it |
 | 11F | adversarial soak, a full state audit, and the scale numbers |
+| 11G | `std::net` and `Fiber::spawn` wired to it, behind `KHORA_FIBERS` |
+| 11H | **open** — why a request costs twelve times more on the scheduler |
 | — | epoll, kqueue and IOCP, which is what the *socket* scale row waits for |
 
 Measured on both platforms now, and they agree to within one per cent. **A
@@ -2351,6 +2353,15 @@ Three things found by building it rather than by designing it:
   which perturbed the timing enough to hide it; core dumps and ThreadSanitizer
   did. `docs/design/scheduler.md` has the account, and the rule it produced
   applies to every thread-local this runtime touches.
+- **Wiring it up found what six commits of testing could not.** Every number
+  in 11A–11F measures the scheduler in isolation, and all of them are good: a
+  hundred thousand waiting fibers cost 407 MB rather than 3.3 GB, and the soak
+  runs millions of them without losing one. Then `bench/service` went through
+  it and answered **59,965 requests a second against 760,771 on threads**, one
+  machine, one sitting, which is the only comparison `bench/README.md` says
+  travels. Correctness was never the problem — the HTTP conformance suite
+  passes on both paths, pipelining and all — and no amount of soaking would
+  have said so. 11H is that number.
 - **A scheduler's bugs are arithmetic, not answers.** Nothing in 11F was
   found by a test that computed something wrong; every one was a count that
   did not come back to zero, and the instrument that found them —
@@ -2516,6 +2527,46 @@ bugs — is a real argument that has not been had.
 `khora-pkg`'s content-addressed store gives reproducibility. Signing, provenance
 and an SBOM are what an audit-heavy buyer asks for next, and `positioning.md`
 names that buyer explicitly.
+
+### 11H — a request costs twelve times more on the scheduler
+
+`bench/service`: **760,771 req/s on threads, 59,965 on the scheduler.** Same
+machine, same sitting, 48 reused connections, five seconds — the comparison
+`bench/README.md` insists on. `KHORA_FIBERS=scheduler` selects it and threads
+remain the default, because twelve times slower is not a default whatever else
+is true of it.
+
+**It is not correctness and it is not the fiber.** `scripts/http_conformance.sh`
+passes on both paths — pipelining, `Connection: close`, a 9 KB header refused
+rather than fatal — and the sixteen compiled fiber tests pass on both in the
+same time to within four per cent. What is left is the path between a socket
+becoming readable and the fiber that wanted it running again, which on threads
+is one blocking `recv` returning and on the scheduler is: `recv` answers
+would-block, the fiber registers with the reactor, parks, a separate reactor
+thread notices readiness in a `poll` over every watched socket, takes the
+parked lock, moves the task to the shared queue, wakes a worker through a
+condvar, and the worker resumes a coroutine.
+
+Suspects, none of them measured yet and in the order they are worth measuring:
+
+  - **The cross-thread hop itself.** One reactor thread discovers every
+    readiness and hands every fiber back through a condvar. Workers polling the
+    reactor themselves when they have nothing to run is the shape that removes
+    it, and is what other runtimes do.
+  - **`poll`.** O(n) in watched sockets per call, and one syscall per
+    discovery. This is the row the roadmap already reserves for epoll, kqueue
+    and IOCP — and now there is a number to hold them to rather than an
+    expectation.
+  - **A read that need not have waited.** A keep-alive connection is read again
+    the moment its response is written, so the common case is "not yet, but
+    soon". A bounded retry before suspending would turn the expensive path into
+    the rare one, and is cheap to try and easy to get wrong.
+
+**Measure before choosing.** 11F's rule was not to replace a mechanism until
+the counters showed it was the limiting one; the counters now show *something*
+is, and which of the three it is has not been established. `Snapshot` already
+carries `sockets_ready`, `parks` and `wakes`, and a run of `bench/service` with
+those read at the end is the first thing to do.
 
 ## When can libraries be written?
 

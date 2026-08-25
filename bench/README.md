@@ -65,6 +65,26 @@ moved from 507k to 538k against a control that was slower, so the honest claim
 is "the request parser got cheaper" and the size of it comes from
 `docs/design/reuse.md`, not from here.
 
+## Phase 11's scheduler, measured the same way
+
+One sitting, one machine, `bench/service` only, 48 reused connections:
+
+| | req/s |
+| --- | --- |
+| fibers as threads (the default) | 760,771 |
+| fibers on the scheduler (`KHORA_FIBERS=scheduler`) | 59,965 |
+
+Twelve times, which is why threads are still the default and why
+`docs/roadmap.md` 11H exists. The two figures were taken minutes apart with
+nothing else changed, which is the only way this file allows a comparison to be
+made.
+
+**What it is not.** Not correctness — `scripts/http_conformance.sh` passes on
+both, pipelining and header limits included — and not the cost of a fiber,
+since the sixteen compiled fiber tests run in the same time on both to within
+four per cent. It is the path from a socket becoming readable to the fiber that
+wanted it running again.
+
 Two readings, and the second is the useful one.
 
 **The runtime matches Rust.** `floor` measures above `control_keepalive`, and
