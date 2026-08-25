@@ -1,0 +1,20 @@
+{
+  "name": "khora-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync:docs": "node scripts/sync-docs.mjs",
+    "dev": "npm run sync:docs && astro dev",
+    "build": "npm run sync:docs && astro build",
+    "preview": "wrangler dev",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "latest",
+    "astro": "latest",
+    "sharp": "latest"
+  },
+  "devDependencies": {
+    "wrangler": "latest"
+  }
+}
