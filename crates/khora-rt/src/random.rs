@@ -4,6 +4,8 @@
 //! reproducible. `std::random` decides how a program gets one.
 
 use super::*;
+use std::sync::atomic::AtomicUsize;
+
 use crate::counters::COUNTER_ORDER;
 use crate::time::{khora_monotonic_millis, khora_unix_millis};
 

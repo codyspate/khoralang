@@ -105,7 +105,7 @@ extern "C" fn release_shim(region: *mut u8) {
 /// needed a new rule.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_region_open() -> *mut u8 {
-    let object = khora_alloc(std::mem::size_of::<*mut Finalizers>(), REGION_TAG);
+    let object = khora_alloc(std::mem::size_of::<*mut Finalizers>() as u64, REGION_TAG);
     let list: Box<Finalizers> = Box::default();
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.

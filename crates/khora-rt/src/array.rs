@@ -56,7 +56,7 @@ fn array_word(array: *const u8, index: usize) -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_array_new(
     len: i64,
-    fill: usize,
+    fill: u64,
     stride: u8,
     boxed: u8,
     glue: Option<extern "C" fn(*mut u8)>,
@@ -83,7 +83,7 @@ pub extern "C" fn khora_array_new(
         fatal("an array that large cannot be allocated");
     };
 
-    let object = khora_alloc(fields, ARRAY_TAG);
+    let object = khora_alloc(fields as u64, ARRAY_TAG);
     // SAFETY: `khora_alloc` returned space for the header fields and the
     // elements, zeroed and aligned.
     unsafe {

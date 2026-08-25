@@ -73,9 +73,9 @@ pub unsafe extern "C" fn khora_sum_bytes(data: *const u8, len: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_str_find(
     hay: *const u8,
-    hay_len: usize,
+    hay_len: u64,
     needle: *const u8,
-    needle_len: usize,
+    needle_len: u64,
 ) -> i64 {
     if needle_len == 0 {
         return 0;
@@ -86,10 +86,14 @@ pub unsafe extern "C" fn khora_str_find(
     // SAFETY: the caller guarantees both lengths are readable.
     let (hay, needle) = unsafe {
         (
-            std::slice::from_raw_parts(hay, hay_len),
-            std::slice::from_raw_parts(needle, needle_len),
+            std::slice::from_raw_parts(hay, hay_len as usize),
+            std::slice::from_raw_parts(needle, needle_len as usize),
         )
     };
+    // Narrowed once, here, rather than at every index below. The ABI is
+    // fixed-width — see the note on this function's signature — and a slice
+    // index is a `usize`, so exactly one conversion is the right number.
+    let (hay_len, needle_len) = (hay.len(), needle.len());
     // The first byte narrows the candidates before anything longer is compared,
     // which is the whole of why this is not the loop it replaced.
     let first = needle[0];
@@ -126,9 +130,9 @@ pub unsafe extern "C" fn khora_str_find(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_str_eq(
     a: *const u8,
-    a_len: usize,
+    a_len: u64,
     b: *const u8,
-    b_len: usize,
+    b_len: u64,
 ) -> bool {
     if a_len != b_len {
         return false;
@@ -142,7 +146,7 @@ pub unsafe extern "C" fn khora_str_eq(
     // SAFETY: the caller guarantees `len` initialized bytes at each pointer,
     // live and unmodified for this call, and each length came from an
     // allocation so is far below `isize::MAX`.
-    unsafe { std::slice::from_raw_parts(a, a_len) == std::slice::from_raw_parts(b, b_len) }
+    unsafe { std::slice::from_raw_parts(a, a_len as usize) == std::slice::from_raw_parts(b, b_len as usize) }
 }
 
 /// Writes `value` into `into` as text, and says how many bytes that took.

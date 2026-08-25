@@ -11,6 +11,19 @@ license.workspace = true
 cc = "1"
 
 [dependencies]
+
+# **Everything below is for a target that has an operating system.**
+# `wasm32-unknown-unknown` is a sandbox with no sockets, no filesystem, no
+# threads and no clock, so the runtime built for it is the part that does not
+# need one: the heap, reference counting, decimals, string comparison and the
+# traps. `docs/design/targets.md` §"Which `std` a wasm build gets" makes the
+# same split on the Khora side, and the two have to agree — a `std` module
+# that is not compiled has no business having a runtime behind it.
+#
+# Written as a target predicate rather than a feature because it is not a
+# choice: `ring` cannot build for wasm at all, and `corosensei` has assembly
+# for three architectures of which wasm is not one.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 # TLS is bound rather than written — `docs/design/ecosystem.md`. `ring` rather
 # than the default provider because it needs no cmake and no assembler, so a
 # Khora checkout builds with a Rust toolchain and clang and nothing else.

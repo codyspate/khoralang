@@ -243,6 +243,10 @@ pub(crate) struct Backend<'ctx> {
     pub ctx: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
+    /// The bare C names this module publishes, for a linker that has to be
+    /// told each one. See [`crate::toolchain`] on why `--export-dynamic` is
+    /// the wrong answer on a platform with a size limit.
+    pub(crate) c_exports: Vec<String>,
     /// DWARF line tables, or `None` when `KHORA_DEBUG=0`. See [`crate::debug`].
     pub(crate) debug: Option<crate::debug::Debug<'ctx>>,
     pub rt: Runtime<'ctx>,
@@ -372,7 +376,7 @@ impl<'ctx> Backend<'ctx> {
         let target_data = machine.get_target_data();
         module.set_data_layout(&target_data.get_data_layout());
 
-        let rt = Runtime::declare(ctx, &module);
+        let rt = Runtime::declare(ctx, &module, &target_data);
         Backend {
             // Set by `build` once the reachable set is known. Assuming threads
             // until told otherwise is the safe direction.
@@ -380,6 +384,7 @@ impl<'ctx> Backend<'ctx> {
             ctx,
             module,
             builder: ctx.create_builder(),
+            c_exports: Vec::new(),
             // Installed by `build`, which is where the entry file's path is
             // known. `Backend::new` has a module name and not a path.
             debug: None,
@@ -491,7 +496,8 @@ impl<'ctx> Backend<'ctx> {
             .write_to_file(&self.module, FileType::Object, &object)
             .map_err(|e| vec![backend_error(format!("writing {}: {e}", object.display()))])?;
 
-        toolchain::link_with_runtime(&[&object], out, library).map_err(|e| vec![backend_error(e)])
+        toolchain::link_with_runtime(&[&object], out, library, &self.c_exports)
+            .map_err(|e| vec![backend_error(e)])
     }
 }
 

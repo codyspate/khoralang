@@ -44,7 +44,9 @@ const LEAF_TAG: u32 = 7;
 const BOX_TAG: u32 = 9;
 
 /// Bytes of fields in an object holding two machine words.
-const TWO_WORDS: usize = 16;
+// `u64`, like the rest of the runtime's C ABI: fixed width on every target
+// rather than the host's pointer size. See `KhoraHeader::refcount`.
+const TWO_WORDS: u64 = 16;
 
 /// `drop_fields` for an object that owns nothing: it only records that the
 /// runtime reached the teardown step.
@@ -486,14 +488,14 @@ fn printing_accepts_the_edges_of_every_type_it_supports() {
 fn equal_bytes_compare_equal() {
     let a = b"hello";
     let b = b"hello";
-    assert!(unsafe { khora_str_eq(a.as_ptr(), a.len(), b.as_ptr(), b.len()) });
+    assert!(unsafe { khora_str_eq(a.as_ptr(), a.len() as u64, b.as_ptr(), b.len() as u64) });
 }
 
 #[test]
 fn different_bytes_compare_unequal() {
     let a = b"hello";
     let b = b"world";
-    assert!(!unsafe { khora_str_eq(a.as_ptr(), a.len(), b.as_ptr(), b.len()) });
+    assert!(!unsafe { khora_str_eq(a.as_ptr(), a.len() as u64, b.as_ptr(), b.len() as u64) });
 }
 
 /// A prefix is not a match, and length is checked before the bytes are read.
@@ -501,7 +503,7 @@ fn different_bytes_compare_unequal() {
 fn a_prefix_is_not_equal() {
     let a = b"hell";
     let b = b"hello";
-    assert!(!unsafe { khora_str_eq(a.as_ptr(), a.len(), b.as_ptr(), b.len()) });
+    assert!(!unsafe { khora_str_eq(a.as_ptr(), a.len() as u64, b.as_ptr(), b.len() as u64) });
 }
 
 /// A zeroed slot has a null pointer and a zero length, which is what makes it
@@ -516,5 +518,5 @@ fn empty_strings_are_equal_even_when_null() {
 #[test]
 fn an_empty_string_does_not_equal_a_full_one() {
     let b = b"x";
-    assert!(!unsafe { khora_str_eq(std::ptr::null(), 0, b.as_ptr(), b.len()) });
+    assert!(!unsafe { khora_str_eq(std::ptr::null(), 0, b.as_ptr(), b.len() as u64) });
 }

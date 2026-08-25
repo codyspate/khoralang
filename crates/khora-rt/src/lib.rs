@@ -68,7 +68,7 @@
 //! void *khora_drop_reuse(void *object, void (*drop_fields)(void *object));
 //! void *khora_alloc_reuse(void *token, size_t size, uint32_t tag);
 //! void  khora_free_reuse(void *token);
-//! size_t khora_refcount(const void *object);
+//! uint64_t khora_refcount(const void *object);
 //! void  khora_print_int(int64_t value);
 //! void  khora_print_bool(_Bool value);
 //! void  khora_print_str(const uint8_t *bytes, size_t len);
@@ -108,7 +108,7 @@
 //! there is no `Rc`/`Arc` split to opt out with, and phase 9 for the escape
 //! analysis that makes a non-escaping object cheap again.
 //!
-//! The header layout is unchanged: an `AtomicUsize` has the size and alignment
+//! The header layout is unchanged: an `AtomicU64` has the size and alignment
 //! of a `usize`, so the contract with the code generator is untouched.
 
 #![deny(missing_docs, unsafe_op_in_unsafe_fn)]
@@ -123,54 +123,93 @@
 // a C ABI, callers reach it by symbol, and `khora_rt::heap::khora_alloc` would
 // be a second name for one function. Splitting the file was not supposed to add
 // anything to the API and this is what makes sure it did not.
+// **What a Worker has no operating system for.**
+//
+// `wasm32-unknown-unknown` is a sandbox: no sockets, no filesystem, no
+// threads, no clock, no argv. `docs/design/targets.md` §"Which `std` a wasm
+// build gets" makes the same cut on the Khora side, and the two have to agree
+// — a `std` module that is not compiled has no business having a runtime
+// behind it, and a runtime module with nothing to call it is dead weight in an
+// artifact with a size limit.
+//
+// What is left is what the eight `std` files a wasm build selects actually
+// reach: the heap and reference counting, strings, arrays, decimals,
+// randomness, and the traps.
+#[cfg(not(target_family = "wasm"))]
 mod args;
 mod array;
+#[cfg(not(target_family = "wasm"))]
 mod cancel;
 mod contain;
+#[cfg(not(target_family = "wasm"))]
 mod coro;
 mod counters;
+#[cfg(not(target_family = "wasm"))]
 mod current;
 mod decimal;
+#[cfg(not(target_family = "wasm"))]
 mod fiber;
+#[cfg(not(target_family = "wasm"))]
 mod fs;
 mod heap;
+#[cfg(not(target_family = "wasm"))]
 mod net;
+#[cfg(not(target_family = "wasm"))]
 mod nursery;
 mod print;
+#[cfg(not(target_family = "wasm"))]
 mod random;
+#[cfg(not(target_family = "wasm"))]
 mod reactor;
+#[cfg(not(target_family = "wasm"))]
 mod region;
+#[cfg(not(target_family = "wasm"))]
 mod scheduler;
 mod shared;
+#[cfg(not(target_family = "wasm"))]
 mod soak;
+#[cfg(not(target_family = "wasm"))]
 mod benching;
+#[cfg(not(target_family = "wasm"))]
 mod blocking;
+#[cfg(not(target_family = "wasm"))]
 mod testing;
 mod text;
+#[cfg(not(target_family = "wasm"))]
 mod time;
 mod trap;
+#[cfg(not(target_family = "wasm"))]
 mod wait;
+#[cfg(not(target_family = "wasm"))]
 pub mod tls;
 
+#[cfg(not(target_family = "wasm"))]
 pub use args::*;
 pub use array::*;
+#[cfg(not(target_family = "wasm"))]
 pub use cancel::*;
 pub use counters::*;
+#[cfg(not(target_family = "wasm"))]
 pub use fiber::*;
 pub use heap::*;
+#[cfg(not(target_family = "wasm"))]
 pub use nursery::*;
 pub use print::*;
+#[cfg(not(target_family = "wasm"))]
 pub use random::*;
+#[cfg(not(target_family = "wasm"))]
 pub use region::*;
 pub use shared::*;
+#[cfg(not(target_family = "wasm"))]
 pub use testing::*;
 pub use text::*;
+#[cfg(not(target_family = "wasm"))]
 pub use time::*;
 pub use trap::*;
 
 use std::alloc::Layout;
 use std::io::Write;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU64;
 
 /// The header every Khora heap object begins with.
 ///
@@ -182,8 +221,15 @@ use std::sync::atomic::AtomicUsize;
 pub struct KhoraHeader {
     /// Number of live references. An object is freed when this reaches zero.
     ///
-    /// Atomic, and the same width a plain `usize` would be — see the module
-    /// documentation.
+    /// Atomic, and **`u64` on every target rather than `usize`**.
+    ///
+    /// `usize` was right for as long as every target was 64-bit. It makes the
+    /// header 12 bytes on `wasm32` and 16 on the rest, and the code generator
+    /// reads `KHORA_HEADER_SIZE` — a constant compiled for the *host* — so a
+    /// cross build would have offset every field by four bytes and been wrong
+    /// in a way nothing checks. One width means one layout, and the four bytes
+    /// it costs a 32-bit target buy an object header that does not have to be
+    /// recomputed per target. See the module documentation.
     ///
     /// **The first field, and generated code relies on that.** This said that
     /// generated code never touches it and that every change goes through
@@ -195,7 +241,7 @@ pub struct KhoraHeader {
     /// So moving this field is not a layout change the runtime can make on its
     /// own. The two functions below remain the C ABI for anything else linking
     /// against `khora-rt`, and are still what drop glue calls.
-    pub refcount: AtomicUsize,
+    pub refcount: AtomicU64,
     /// Which variant of its ADT the object is. Opaque to the runtime.
     pub tag: u32,
     /// Bytes of fields following the header — the `size` passed to

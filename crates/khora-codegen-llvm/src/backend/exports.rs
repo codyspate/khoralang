@@ -62,6 +62,7 @@ impl<'ctx> Backend<'ctx> {
                 continue;
             }
             self.emit_one_export(name, symbol);
+            self.c_exports.push(name.clone());
         }
     }
 

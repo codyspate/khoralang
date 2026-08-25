@@ -91,7 +91,7 @@ pub extern "C" fn khora_fibers_open() -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
     let limit = if limit > 0 { limit as usize } else { 0 };
-    let object = khora_alloc(std::mem::size_of::<*mut Crew>(), FIBERS_TAG);
+    let object = khora_alloc(std::mem::size_of::<*mut Crew>() as u64, FIBERS_TAG);
     let list: Box<Crew> = Box::new(Mutex::new(Children {
         limit,
         sweep_at: SWEEP_FLOOR,

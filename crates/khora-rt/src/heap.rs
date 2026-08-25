@@ -14,7 +14,7 @@
 use super::*;
 use crate::counters::{ALLOC_COUNT, COUNTER_ORDER, LIVE_COUNT};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Allocates a heap object with `size` bytes of fields and the given `tag`,
 /// with a refcount of 1.
@@ -31,8 +31,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// Aborts if the allocator fails or if `size` exceeds [`MAX_FIELD_BYTES`].
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_alloc(size: usize, tag: u32) -> *mut u8 {
-    if size > MAX_FIELD_BYTES {
+pub extern "C" fn khora_alloc(size: u64, tag: u32) -> *mut u8 {
+    if size > MAX_FIELD_BYTES as u64 {
         fatal("allocation exceeds the maximum object size");
     }
     let field_bytes = size as u32;
@@ -51,7 +51,7 @@ pub extern "C" fn khora_alloc(size: usize, tag: u32) -> *mut u8 {
     // cannot race and cannot clobber an initialized field.
     unsafe {
         ptr.cast::<KhoraHeader>()
-            .write(KhoraHeader { refcount: AtomicUsize::new(1), tag, field_bytes });
+            .write(KhoraHeader { refcount: AtomicU64::new(1), tag, field_bytes });
     }
 
     ALLOC_COUNT.fetch_add(1, COUNTER_ORDER);
@@ -240,11 +240,11 @@ pub unsafe extern "C" fn khora_drop_reuse(
 /// `token` must be null or memory from [`khora_drop_reuse`] that has not been
 /// spent, and `size` must not exceed [`MAX_FIELD_BYTES`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: usize, tag: u32) -> *mut u8 {
+pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: u64, tag: u32) -> *mut u8 {
     if token.is_null() {
         return khora_alloc(size, tag);
     }
-    if size > MAX_FIELD_BYTES {
+    if size > MAX_FIELD_BYTES as u64 {
         fatal("allocation exceeds the maximum object size");
     }
     let field_bytes = size as u32;
@@ -268,7 +268,7 @@ pub unsafe extern "C" fn khora_alloc_reuse(token: *mut u8, size: usize, tag: u32
     unsafe {
         token
             .cast::<KhoraHeader>()
-            .write(KhoraHeader { refcount: AtomicUsize::new(1), tag, field_bytes });
+            .write(KhoraHeader { refcount: AtomicU64::new(1), tag, field_bytes });
     }
     LIVE_COUNT.fetch_add(1, COUNTER_ORDER);
     token
@@ -312,7 +312,7 @@ pub extern "C" fn khora_single_threaded() {
 pub unsafe extern "C" fn khora_drop_last(
     ptr: *mut u8,
     drop_fields: Option<extern "C" fn(*mut u8)>,
-    previous: usize,
+    previous: u64,
 ) {
     if previous == 0 {
         fatal("drop of an object whose refcount is already zero (double free, or a missing dup)");
@@ -369,7 +369,7 @@ pub unsafe extern "C" fn khora_free_reuse(token: *mut u8) {
 ///
 /// `ptr` must be null or a live object from [`khora_alloc`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_refcount(ptr: *const u8) -> usize {
+pub unsafe extern "C" fn khora_refcount(ptr: *const u8) -> u64 {
     if ptr.is_null() {
         return 0;
     }

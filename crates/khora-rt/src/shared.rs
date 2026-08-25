@@ -51,7 +51,7 @@ fn deny_reentry(held: &Held, doing: &str) -> usize {
     // scheduled onto a worker whose previous occupant holds this lock would
     // read that occupant's id, match the recorded holder, and be killed for a
     // re-entry it never performed. `crate::current`.
-    let me = crate::current::current(|fiber| fiber.id());
+    let me = running_fiber();
     if held.holder.load(COUNTER_ORDER) == me {
         fatal(&format!(
             "this fiber is inside `Shared::update` on this cell, so it cannot also {doing} it: \
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn khora_shared_open(
     boxed: bool,
     glue: Option<extern "C" fn(*mut u8)>,
 ) -> *mut u8 {
-    let object = khora_alloc(std::mem::size_of::<*mut Held>(), SHARED_TAG);
+    let object = khora_alloc(std::mem::size_of::<*mut Held>() as u64, SHARED_TAG);
     let held: Box<Held> = Box::new(Held {
         holder: AtomicUsize::new(0),
         cell: Mutex::new(Cell { value, boxed, glue }),
@@ -329,4 +329,20 @@ pub unsafe extern "C" fn khora_shared_release(cell: *mut u8) {
         let cell = held.cell.into_inner().unwrap_or_else(|e| e.into_inner());
         release_word(cell.value, cell.boxed, cell.glue);
     }
+}
+
+/// The running fiber's id, or zero where there are no fibers.
+///
+/// WebAssembly is single-threaded and has no scheduler, so every caller *is*
+/// the same one. Re-entry is still caught — the holder is recorded and
+/// compared — it is simply always the same identity doing the holding, which
+/// is the truth on that target rather than a weakening of the check.
+#[cfg(not(target_family = "wasm"))]
+fn running_fiber() -> usize {
+    crate::current::current(|fiber| fiber.id())
+}
+
+#[cfg(target_family = "wasm")]
+fn running_fiber() -> usize {
+    1
 }

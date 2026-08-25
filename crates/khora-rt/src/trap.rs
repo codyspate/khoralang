@@ -22,11 +22,11 @@ use std::io::Write;
 /// `what` must point at `len` bytes naming the operation — generated code
 /// passes a string literal in `.rodata`, live for the program's whole run.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_overflow(what: *const u8, len: usize) -> ! {
+pub unsafe extern "C" fn khora_overflow(what: *const u8, len: u64) -> ! {
     let bytes = if len == 0 { &[][..] } else {
         // SAFETY: the caller passes a string literal in `.rodata`, live for the
         // program's whole run.
-        unsafe { std::slice::from_raw_parts(what, len) }
+        unsafe { std::slice::from_raw_parts(what, len as usize) }
     };
     // **The block matters, and it is not style.** On Windows `longjmp` is a
     // real unwind: it runs SEH cleanup on every frame between the jump and the
@@ -123,6 +123,7 @@ fn stop(contained: bool) -> ! {
 ///
 /// Empty on the root fiber, where there is nothing to disambiguate and the
 /// number would be noise on every single-threaded program's worst day.
+#[cfg(not(target_family = "wasm"))]
 fn on_which_fiber() -> String {
     crate::current::current(|fiber| {
         if fiber.is_spawned() {
@@ -131,6 +132,12 @@ fn on_which_fiber() -> String {
             String::new()
         }
     })
+}
+
+/// Nothing to disambiguate: a Worker has one instance and no fibers in it.
+#[cfg(target_family = "wasm")]
+fn on_which_fiber() -> String {
+    String::new()
 }
 
 /// Prints where the trap came from, if the program was built to know.

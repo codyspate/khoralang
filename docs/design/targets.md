@@ -39,12 +39,22 @@ target that works, not the first exception:
    (`linux`, `macos`, `windows`) keep their old meaning of "the host's
    architecture, that platform's `std`", because a build that quietly changed
    architecture under somebody would be a surprise;
-2. `khora-rt` cross-compiled for that triple, and its platform bindings selected
-   by it rather than by `cfg(windows)` versus `cfg(unix)`;
-3. a linker and sysroot for the target, since `clang` currently drives the host
-   linker with the host's libraries;
+2. ~~`khora-rt` cross-compiled for that triple, and its platform bindings
+   selected by it rather than by `cfg(windows)` versus `cfg(unix)`~~ —
+   **done for wasm**. The dependencies that need an operating system are behind
+   `cfg(not(target_family = "wasm"))`, and so are the seventeen modules that use
+   them; what is left is the heap, reference counting, strings, arrays,
+   decimals and the traps, which is what the eight `std` files a wasm build
+   selects actually reach;
+3. ~~a linker and sysroot for the target~~ — **done for wasm**, which needs no
+   sysroot: there is no libc to find and no CRT to link, so `wasm-ld` plus the
+   runtime archive is the whole of it. Still open for `aarch64-unknown-linux-gnu`
+   and the musl targets, which do need one;
 4. the toolchain able to *fetch* a target's runtime and sysroot, which is
-   roadmap 10.6's version-management machinery pointed at a second axis.
+   roadmap 10.6's version-management machinery pointed at a second axis. Still
+   open, and now the only thing between here and a `.wasm` that builds on a
+   fresh checkout: today `cargo build -p khora-rt --target wasm32-unknown-unknown`
+   has to be run by hand first.
 
 Doing those four buys `linux/arm64` for containers, `x86_64-unknown-linux-musl`
 for a static binary in a `scratch` image, and macOS from a Linux CI runner —
@@ -187,6 +197,59 @@ checks, with `wasm` in the same loop as the other three. Removing modules can
 leave the remainder with a dangling import — `process.kh` importing a
 `std::process::shell` that no longer exists was exactly that, and nobody would
 have found it until a Worker build was attempted.
+
+## What a wasm build produces — **and it runs**
+
+```
+$ KHORA_TARGET=wasm32-unknown-unknown khora build . --lib
+library src/lib.wasm from 8 module(s)
+header  src/lib.h
+```
+
+```js
+const { instance } = await WebAssembly.instantiate(bytes, {});
+instance.exports.price(3n, 4n)        // 12n
+```
+
+**No imports.** The module carries everything it needs, which is the property
+that makes it deployable to a host that offers nothing.
+
+### Three bugs between "an object is emitted" and that
+
+Every one of them produced an artefact that looked right.
+
+**The runtime ABI was the host's word size.** Seven functions took a Rust
+`usize` and were declared `i64` by the code generator — correct on the three
+64-bit targets and wrong on every other one, and `KhoraHeader::refcount` was a
+`usize` too, so the object header was 12 bytes on `wasm32` and 16 everywhere
+else while the backend read a `KHORA_HEADER_SIZE` compiled for the *host*.
+`wasm-ld` was the first linker to notice, because it checks signatures where an
+ELF or COFF linker matches on the name alone. Fixed by making the ABI
+fixed-width rather than by teaching the backend the pointer size: a contract
+between generated code and the runtime that changes shape per target is one
+more thing to get wrong, and it would have had to be got right again at every
+call site.
+
+**`--allow-undefined` stopped the linker resolving.** It reads as "let the host
+supply what is missing"; what it does is turn an unresolved symbol into an
+import without looking further. `khora_overflow`, `khora_contain_enabled` and
+`khora_export_call` all came out as `env.` imports *while defined in the
+archive on the same command line*. The module linked, validated, and exported
+exactly the right names.
+
+**And the archive was the host's.** `runtime_archive` probes next to the
+`khora` binary first, which is right for a native build and hands a wasm link
+an x86-64 `.lib`. Under `--allow-undefined` that was silent; without it,
+`wasm-ld` says so once per archive member.
+
+### Size
+
+1.9 MB, from `--export=` naming each symbol rather than `--export-dynamic`,
+which published 1,255 of them and defeated dead-code elimination. Most of what
+remains is Rust's formatting and backtrace machinery reached from the trap
+handler — a wasm trap needs neither, and shrinking it is the obvious next
+thing. A Worker's limit is 1 MB compressed on the free plan, so this is close
+rather than comfortable.
 
 **`wasm32-wasip1` is deliberately not folded in.** WASI has files, an
 environment and a clock, so it wants most of what `_native` holds; it is a

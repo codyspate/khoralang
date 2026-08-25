@@ -1,0 +1,83 @@
+#!/bin/sh
+# The Linux half of `check-linux.sh`, run inside WSL as one process.
+#
+# **One invocation, and that is the point.** This was four separate
+# `wsl -e bash -lc '...'` calls from the Windows side, and `wsl.exe` can return
+# before its child has finished writing — so the "sequential" steps overlapped.
+# The evidence was a log with one step's output cut off mid-word, a later
+# step's header, and then the rest of the first step: two processes appending
+# to one file with independent offsets. Every one of them shared
+# `CARGO_TARGET_DIR`, so the next cargo could start against a tree the previous
+# one was still linking into, and about one run in four failed with cargo's
+# exit 101 and nothing in the log to say why. Reproduced on the fourth attempt
+# of eight after being unexplained for two sessions.
+#
+# It is also a plain file rather than a quoted string, which removes a whole
+# class of bug the string form kept producing: a backtick in a comment inside
+# `bash -lc "..."` is command substitution, and one of them ran
+# `docs/design/scheduler.md` as a shell script.
+#
+# Usage:  sh scripts/linux-inner.sh <target-dir> <repeats>
+set -eu
+
+TARGET=${1:?a CARGO_TARGET_DIR}
+REPEATS=${2:?how many times to run the suite}
+
+say() { printf '\n=== %s\n' "$*"; }
+
+. "$HOME/.cargo/env"
+export CARGO_TARGET_DIR="$TARGET"
+
+# **`set -e` matters here and is not decoration.** Without it a failing
+# `cargo test` was followed by a passing `cargo clippy`, the shell returned
+# clippy's status, and the whole check reported success over a segfault. It
+# did, for one commit.
+say 'khora-rt on Linux'
+cargo test -p khora-rt
+cargo clippy -p khora-rt --all-targets -- -D warnings
+
+# **Again, several times, because the scheduler's failures are races.** One
+# green run of a flaky suite is not evidence, and a `poll` that behaves
+# differently under load is exactly what this exists to catch. The binary is
+# copied out first: cargo rebuilds under a different hash often enough that a
+# loop over `cargo test` measures the wrong thing.
+say 'the runtime, repeatedly, because a race needs more than one look'
+cargo test -q -p khora-rt --lib --no-run 2>/dev/null
+bin=$(ls -t "$TARGET"/debug/deps/khora_rt-* | grep -v '[.]d$' | head -1)
+cp "$bin" /tmp/khora-rt-under-test
+chmod +x /tmp/khora-rt-under-test
+
+# **Keep what failed.** This loop once said "1 of 15 runs crashed or failed"
+# and sent the output to /dev/null, and the run was not reproducible
+# afterwards. A flaky-failure reporter that discards its evidence turns a race
+# into a rumour, which is the one thing the scheduler's bug list says not to
+# let happen. Core dumps are on for the same reason: instrumenting these has
+# hidden them before, and a dump is the observation that does not perturb.
+ulimit -c unlimited 2>/dev/null || true
+failures=0
+kept=/tmp/khora-rt-failure.log
+rm -f "$kept"
+run=1
+while [ "$run" -le "$REPEATS" ]; do
+    /tmp/khora-rt-under-test > /tmp/khora-rt-run.log 2>&1
+    # Read immediately. Taken any later it is the status of the test asking
+    # whether a failure has already been kept, which is 0 or 1 and never the
+    # thing that crashed.
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        failures=$((failures + 1))
+        if [ ! -f "$kept" ]; then
+            { echo "run $run of $REPEATS, exit $status"
+              cat /tmp/khora-rt-run.log; } > "$kept"
+        fi
+    fi
+    run=$((run + 1))
+done
+
+if [ "$failures" -ne 0 ]; then
+    echo "  FAILED  $failures of $REPEATS runs crashed or failed" >&2
+    echo "  --- the first one, kept at $kept ---" >&2
+    tail -40 "$kept" >&2
+    exit 1
+fi
+printf '  ok    %s runs, all clean\n' "$REPEATS"

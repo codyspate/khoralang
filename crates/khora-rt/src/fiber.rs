@@ -332,7 +332,7 @@ pub unsafe extern "C" fn khora_fiber_spawn(
         Completion::Thread(Mutex::new(Some(std::thread::spawn(run))))
     };
 
-    let object = khora_alloc(std::mem::size_of::<*mut FiberState>(), FIBER_TAG);
+    let object = khora_alloc(std::mem::size_of::<*mut FiberState>() as u64, FIBER_TAG);
     let state: Box<FiberState> = Box::new(FiberState { completion, fiber });
     // SAFETY: `khora_alloc` returned an object with one field's worth of space,
     // zeroed and aligned, and nothing else holds this pointer yet.

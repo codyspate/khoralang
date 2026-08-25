@@ -233,12 +233,33 @@ pub struct Runtime<'ctx> {
 
 impl<'ctx> Runtime<'ctx> {
     /// Declares the runtime interface into a fresh module.
-    pub fn declare(ctx: &'ctx Context, module: &Module<'ctx>) -> Runtime<'ctx> {
+    pub fn declare(
+        ctx: &'ctx Context,
+        module: &Module<'ctx>,
+        target: &inkwell::targets::TargetData,
+    ) -> Runtime<'ctx> {
         let void = ctx.void_type();
         let i64t = ctx.i64_type();
         let i32t = ctx.i32_type();
         let i8t = ctx.i8_type();
         let ptr = ctx.ptr_type(AddressSpace::default());
+
+        // **The runtime ABI is fixed-width on every target, and `usize` does
+        // not appear in it.** Seven of these took a Rust `usize`, declared here
+        // as `i64` — right on the three 64-bit targets and wrong on every other
+        // one. `wasm-ld` was the first linker to say so, because it checks
+        // signatures where an ELF or COFF linker matches on the name alone and
+        // would have passed a 64-bit argument to a function expecting 32.
+        //
+        // The fix could have been to read the pointer width from the data
+        // layout and emit that. Making the *runtime* fixed-width instead is
+        // better: a contract between generated code and the runtime that
+        // changes shape per target is one more thing to get wrong, and it
+        // would have had to be got right again at every call site. `khora-rt`
+        // takes `u64` and narrows internally where it wants an index. The same
+        // reasoning made `KhoraHeader::refcount` a `u64` rather than a
+        // `usize`, so the object layout is one layout everywhere.
+        let _ = target;
 
         let declare = |name: &str, ty: inkwell::types::FunctionType<'ctx>| {
             module.add_function(name, ty, Some(Linkage::External))
@@ -348,6 +369,8 @@ impl<'ctx> Runtime<'ctx> {
             array_new: declare(
                 "khora_array_new",
                 ptr.fn_type(
+                    // `len` is a Khora `Int` and stays 64-bit; `fill` is a
+                    // `usize` on the Rust side and follows the pointer.
                     &[i64t.into(), i64t.into(), i8t.into(), i8t.into(), ptr.into()],
                     false,
                 ),

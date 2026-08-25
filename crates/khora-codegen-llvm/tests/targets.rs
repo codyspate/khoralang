@@ -122,3 +122,163 @@ fn an_unknown_triple_is_refused() {
         "the refusal should name the triple and where the target list comes from: {said}"
     );
 }
+
+// --- and a module that actually links -------------------------------------
+
+/// The wasm runtime archive, if somebody has built one.
+///
+/// Not built here: `cargo build -p khora-rt --target wasm32-unknown-unknown`
+/// downloads a target's standard library the first time and takes minutes, and
+/// a test that does that on a cold machine is a test nobody runs. Skipped with
+/// a message instead, which is the honest shape for a check whose input is a
+/// build artefact.
+fn wasm_runtime() -> Option<PathBuf> {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let path = workspace
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join("debug")
+        .join("libkhora_rt.a");
+    path.is_file().then_some(path)
+}
+
+/// **A `.wasm` module, linked, with the exports a host would call.**
+///
+/// `targets.md` step three for the one target that needs no sysroot: a wasm
+/// module has no libc to find and no CRT to link, so the runtime archive and
+/// the emitted object are the whole input and `wasm-ld` is the whole linker.
+///
+/// What this asserts is the export section, because that is where the two
+/// mistakes were. `--export-dynamic` published 1,255 symbols from a
+/// three-function library and defeated dead-code elimination — 2.5 MB where
+/// naming them gives 1.9 MB and would give far less without the trap
+/// machinery. And `--allow-undefined` silently turned `khora_overflow`,
+/// `khora_contain_enabled` and `khora_export_call` into `env.` imports the
+/// embedder would have had to supply, *while they were defined in the archive
+/// on the same command line*: the module linked, validated, exported exactly
+/// the right names, and could not have been instantiated.
+#[test]
+fn a_wasm_library_links_and_exports_what_it_should() {
+    let Some(_archive) = wasm_runtime() else {
+        eprintln!(
+            "no wasm khora-rt; skipping. Build it with \
+             `cargo build -p khora-rt --target wasm32-unknown-unknown`"
+        );
+        return;
+    };
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wasm_library");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let out = dir.join("lib.wasm");
+
+    let db = KhoraDatabase::new();
+    let source = "module w;\n\
+                  export extern fn price(units: Int, scale: Int) -> Int { units * scale }\n";
+    let files = vec![SourceFile::new(&db, dir.join("lib.kh"), source.to_string())];
+    let root = SourceRoot::new(&db, files);
+
+    // SAFETY-of-a-sort: process-wide, and held by the lock above.
+    unsafe { std::env::set_var("KHORA_TARGET", "wasm32-unknown-unknown") };
+    let outcome = khora_codegen_llvm::compile_library(&db, root, &out);
+    unsafe { std::env::remove_var("KHORA_TARGET") };
+
+    if let Err(errors) = outcome {
+        let said = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        panic!("a wasm library should link:\n{said}");
+    }
+
+    let bytes = std::fs::read(&out).expect("the module was written");
+    assert_eq!(&bytes[..4], b"\0asm", "it is a wasm module");
+
+    let (exports, imports) = sections_of(&bytes);
+    assert!(exports.contains(&"price".to_string()), "the export is there: {exports:?}");
+    assert!(
+        exports.contains(&"khora_set_trap_policy".to_string()),
+        "and the control surface: {exports:?}"
+    );
+    // Nothing else. A Worker is measured in megabytes and this is a
+    // three-function library.
+    assert!(exports.len() < 20, "only what was asked for, got {}: {exports:?}", exports.len());
+    assert!(
+        !exports.iter().any(|e| e.starts_with("kh$")),
+        "no mangled internals: {exports:?}"
+    );
+
+    // **No imports at all**, which is the whole of the `--allow-undefined`
+    // lesson: everything this module needs, it carries.
+    assert!(imports.is_empty(), "a self-contained module imports nothing, got {imports:?}");
+}
+
+/// The export and import names in a wasm module.
+fn sections_of(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
+    fn uleb(b: &[u8], i: &mut usize) -> u64 {
+        let (mut r, mut s) = (0u64, 0u32);
+        loop {
+            let x = b[*i];
+            *i += 1;
+            r |= u64::from(x & 0x7f) << s;
+            s += 7;
+            if x & 0x80 == 0 {
+                return r;
+            }
+        }
+    }
+    fn name(b: &[u8], i: &mut usize) -> String {
+        let len = uleb(b, i) as usize;
+        let s = String::from_utf8_lossy(&b[*i..*i + len]).into_owned();
+        *i += len;
+        s
+    }
+
+    let (mut exports, mut imports) = (Vec::new(), Vec::new());
+    let mut i = 8;
+    while i < bytes.len() {
+        let id = bytes[i];
+        i += 1;
+        let size = uleb(bytes, &mut i) as usize;
+        let end = i + size;
+        let mut j = i;
+        if id == 7 {
+            let n = uleb(bytes, &mut j);
+            for _ in 0..n {
+                exports.push(name(bytes, &mut j));
+                j += 1;
+                uleb(bytes, &mut j);
+            }
+        } else if id == 2 {
+            let n = uleb(bytes, &mut j);
+            for _ in 0..n {
+                let module = name(bytes, &mut j);
+                let what = name(bytes, &mut j);
+                imports.push(format!("{module}.{what}"));
+                let kind = bytes[j];
+                j += 1;
+                match kind {
+                    0 => {
+                        uleb(bytes, &mut j);
+                    }
+                    1 => {
+                        j += 1;
+                        let limits = uleb(bytes, &mut j);
+                        uleb(bytes, &mut j);
+                        if limits == 1 {
+                            uleb(bytes, &mut j);
+                        }
+                    }
+                    2 => {
+                        let limits = uleb(bytes, &mut j);
+                        uleb(bytes, &mut j);
+                        if limits == 1 {
+                            uleb(bytes, &mut j);
+                        }
+                    }
+                    _ => j += 2,
+                }
+            }
+        }
+        i = end;
+    }
+    (exports, imports)
+}

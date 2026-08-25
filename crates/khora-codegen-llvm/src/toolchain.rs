@@ -109,6 +109,26 @@ pub fn runtime_archive() -> Option<PathBuf> {
     }
 
     let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // **A cross build's archive is looked for first, before anything sitting
+    // next to the compiler.** The probes below find the *host* archive — it is
+    // beside the `khora` binary, which is the common case and the right answer
+    // when building for this machine. For another target it is the wrong file
+    // with the right name, and `wasm-ld` says so a thousand times over:
+    // "archive member is neither Wasm object file nor LLVM bitcode", once per
+    // member. Worse, with `--allow-undefined` it had said nothing at all and
+    // turned every runtime symbol into a host import.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let (Some(triple), Some(workspace)) =
+        (khora_db::target_triple(), manifest_dir.parent().and_then(|c| c.parent()))
+    {
+        for profile in ["debug", "release"] {
+            candidates.push(
+                workspace.join("target").join(&triple).join(profile).join(cross_archive()),
+            );
+        }
+    }
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join(RUNTIME_ARCHIVE));
@@ -129,6 +149,18 @@ pub fn runtime_archive() -> Option<PathBuf> {
     }
 
     candidates.into_iter().find(|p| p.is_file())
+}
+
+/// What cargo calls the archive when it builds for another target.
+///
+/// Not [`RUNTIME_ARCHIVE`], which is named for the *host*: cargo uses the
+/// target's own convention, so a wasm or Linux cross build produces
+/// `libkhora_rt.a` even when the compiler doing the building runs on Windows.
+fn cross_archive() -> &'static str {
+    match khora_db::target_triple() {
+        Some(triple) if triple.contains("windows") => "khora_rt.lib",
+        _ => "libkhora_rt.a",
+    }
 }
 
 /// Links objects with the Khora runtime into an executable.
@@ -178,14 +210,90 @@ pub fn debug_info_wanted() -> bool {
     !matches!(std::env::var("KHORA_DEBUG").as_deref(), Ok("0") | Ok("off") | Ok("false"))
 }
 
-pub fn link_with_runtime(objects: &[&Path], out: &Path, library: bool) -> Result<(), String> {
+pub fn link_with_runtime(
+    objects: &[&Path],
+    out: &Path,
+    library: bool,
+    exports: &[String],
+) -> Result<(), String> {
+    let wasm = khora_db::target_triple().is_some_and(|t| t.contains("wasm"));
     let runtime = runtime_archive().ok_or_else(|| {
+        let (archive, how) = match khora_db::target_triple() {
+            Some(triple) => (
+                cross_archive().to_string(),
+                format!("cargo build -p khora-rt --target {triple}"),
+            ),
+            None => (RUNTIME_ARCHIVE.to_string(), "cargo build -p khora-rt".to_string()),
+        };
         format!(
-            "the Khora runtime archive ({RUNTIME_ARCHIVE}) was not found. Build it with \
-             `cargo build -p khora-rt`, or point KHORA_RT_LIB at it."
+            "the Khora runtime archive ({archive}) was not found for this target. Build it \
+             with `{how}`, or point KHORA_RT_LIB at it."
         )
     })?;
+    if wasm {
+        return drive_wasm_ld(objects, runtime.as_path(), out, exports);
+    }
     drive_clang(objects, &[runtime.as_path()], out, library)
+}
+
+/// Links a WebAssembly module with `wasm-ld`.
+///
+/// **Not through `clang`**, which drives the *host* linker: `lld-link` reads a
+/// perfectly good wasm object and says "unknown file type", which is true and
+/// unhelpful. `wasm-ld` ships in the same LLVM toolchain the rest of this uses.
+///
+/// A wasm module needs no sysroot, which is why this target is reachable while
+/// `aarch64-unknown-linux-gnu` is not: there is no libc to find and no CRT to
+/// link, so the runtime archive and the emitted object are the whole input.
+///
+/// **Exports are named one at a time rather than with `--export-dynamic`.**
+/// Exporting everything published 1,255 symbols from a three-function library
+/// and defeated `wasm-ld`'s own dead-code elimination, which matters on a
+/// platform with a size limit — `docs/design/targets.md` §"Which wasm, though"
+/// puts Cloudflare Workers first, and a Worker is measured in megabytes.
+fn drive_wasm_ld(
+    objects: &[&Path],
+    runtime: &Path,
+    out: &Path,
+    exports: &[String],
+) -> Result<(), String> {
+    let linker = tool("wasm-ld").ok_or_else(|| {
+        "wasm-ld not found in the LLVM toolchain; set LLVM_SYS_221_PREFIX \
+         (see docs/llvm-setup.md)"
+            .to_string()
+    })?;
+
+    let mut cmd = std::process::Command::new(&linker);
+    // No `_start`: a Khora library is called through its exports, and a wasm
+    // module with an entry point the host never calls is a module that fails
+    // to instantiate for want of one.
+    cmd.arg("--no-entry");
+    for symbol in exports.iter().map(String::as_str).chain(LIBRARY_CONTROL.iter().copied()) {
+        cmd.arg(format!("--export={symbol}"));
+    }
+    // **No `--allow-undefined`, and that was a real bug rather than a
+    // preference.** It reads like "let the host supply what is missing", and
+    // what it actually does is stop resolving: `khora_overflow`,
+    // `khora_contain_enabled` and `khora_export_call` are all *defined in the
+    // archive on the command line*, and every one of them came out as an
+    // `env.` import the embedder would have had to provide. The module linked,
+    // validated, exported exactly the right two names, and would have failed
+    // to instantiate on a Worker for want of four functions it already had.
+    //
+    // A link error naming a missing symbol is the better failure by a wide
+    // margin. When a Worker genuinely needs a host import — entropy, a clock —
+    // it will be declared, and declared imports do not need this flag.
+    cmd.args(objects).arg(runtime).arg("-o").arg(out);
+
+    let output = cmd.output().map_err(|e| format!("running {}: {e}", linker.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "wasm-ld failed ({}):\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
 }
 
 fn drive_clang(

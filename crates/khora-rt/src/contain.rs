@@ -42,12 +42,39 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-unsafe extern "C" {
-    /// `csrc/guard.c`. The frame that owns the `jmp_buf` calls the body.
-    pub(crate) safe fn khora_guard_armed() -> i32;
-    /// Jumps to the landing point. Undefined unless armed.
-    pub(crate) safe fn khora_guard_jump() -> !;
+/// The landing point, where there is one.
+///
+/// **WebAssembly has no `setjmp`**, so there is nothing to bind: a non-local
+/// exit there needs the exception-handling proposal or Emscripten's emulation
+/// and `wasm32-unknown-unknown` has neither. Nothing is lost, because a Worker
+/// is the one deployment where `traps.md` §4's third answer holds by
+/// construction — the isolate *is* the containment boundary and the platform
+/// restarts it. `can_contain` returns false there and a trap ends the instance,
+/// which is what the host already expects of it.
+#[cfg(not(target_family = "wasm"))]
+mod guard {
+    unsafe extern "C" {
+        /// `csrc/guard.c`. The frame that owns the `jmp_buf` calls the body.
+        pub(crate) safe fn khora_guard_armed() -> i32;
+        /// Jumps to the landing point. Undefined unless armed.
+        pub(crate) safe fn khora_guard_jump() -> !;
+    }
 }
+
+#[cfg(target_family = "wasm")]
+mod guard {
+    pub(crate) fn khora_guard_armed() -> i32 {
+        0
+    }
+    pub(crate) fn khora_guard_jump() -> ! {
+        // Unreachable: `can_contain` is false without an armed guard, and
+        // nothing else calls this. Aborting beats `unreachable!`, which would
+        // unwind out of an `extern "C"` frame.
+        crate::fatal("a trap tried to jump on a target with no landing point")
+    }
+}
+
+pub(crate) use guard::{khora_guard_armed, khora_guard_jump};
 
 /// Whether the host has asked for containment. Process-wide, set once.
 static POLICY: AtomicUsize = AtomicUsize::new(POLICY_ABORT);
@@ -264,16 +291,29 @@ pub unsafe extern "C" fn khora_export_call(
     if !begin() {
         return body(ctx);
     }
-    let mut trapped: i32 = 0;
-    // SAFETY: `body` and `ctx` are the caller's to vouch for, and `trapped` is
-    // a live local for the duration of the call.
-    let result = unsafe { khora_guarded_call(body, ctx.cast(), &raw mut trapped) };
-    if trapped == 0 {
+    #[cfg(target_family = "wasm")]
+    {
+        // No landing point to run under; see `guard`. The call is still
+        // collected, so a trap frees what it allocated on the way out — the
+        // instance ends either way and the host restarts it.
+        let result = body(ctx);
         end();
+        return result;
     }
-    result
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let mut trapped: i32 = 0;
+        // SAFETY: `body` and `ctx` are the caller's to vouch for, and
+        // `trapped` is a live local for the duration of the call.
+        let result = unsafe { khora_guarded_call(body, ctx.cast(), &raw mut trapped) };
+        if trapped == 0 {
+            end();
+        }
+        result
+    }
 }
 
+#[cfg(not(target_family = "wasm"))]
 unsafe extern "C" {
     /// `csrc/guard.c`. Owns the `jmp_buf` in its own frame, which is the whole
     /// reason it is C.
