@@ -29,6 +29,7 @@
 //! handle is handed over.
 
 use std::io::{Read, Write};
+use crate::reactor::Socket;
 use std::net::TcpStream;
 use std::sync::Arc;
 
@@ -44,8 +45,8 @@ use rustls::{
 /// the same on both, which is why the Khora side has one `TlsConnection` and
 /// not two.
 enum Secured {
-    Serving(StreamOwned<ServerConnection, TcpStream>),
-    Calling(StreamOwned<ClientConnection, TcpStream>),
+    Serving(StreamOwned<ServerConnection, Wire>),
+    Calling(StreamOwned<ClientConnection, Wire>),
 }
 
 impl Secured {
@@ -62,35 +63,125 @@ trait Talking: Read + Write {
     fn say_goodbye(&mut self);
 }
 
-impl Talking for StreamOwned<ServerConnection, TcpStream> {
+impl Talking for StreamOwned<ServerConnection, Wire> {
     fn say_goodbye(&mut self) {
         self.conn.send_close_notify();
     }
 }
 
-impl Talking for StreamOwned<ClientConnection, TcpStream> {
+impl Talking for StreamOwned<ClientConnection, Wire> {
     fn say_goodbye(&mut self) {
         self.conn.send_close_notify();
     }
 }
 
-/// Turns a raw handle into the `TcpStream` that owns it.
+/// The socket under a TLS connection.
 ///
-/// The two platforms spell it differently and mean the same thing. Wrong on
-/// macOS in the same way `std::net::socket` is, and absent for the same reason.
+/// **Not a `TcpStream`, and it cannot be one any more.** `std::net::socket`
+/// prepares every socket it accepts, so by the time a connection reaches here
+/// it is non-blocking — and `TcpStream::read` on a non-blocking socket answers
+/// `WouldBlock` rather than waiting. rustls is written against a transport
+/// that blocks, so it saw an error where there was only "not yet", and both
+/// TLS tests failed the moment `std::net` was rewired.
+///
+/// So the transport is the runtime's own: `khora_net_recv` and
+/// `khora_net_send` do the same call and, when it would block, suspend the
+/// fiber and wait on the reactor rather than holding the worker. rustls gets
+/// the blocking transport it expects, a TLS connection stops costing a worker
+/// while it waits, and the handshake gets both properties for free because
+/// `complete_io` goes through the same two functions.
+struct Wire(Socket);
+
+/// The raw handle, as this platform's socket type.
+///
+/// One cast for both, because `Socket` is the alias that differs — a `usize`
+/// on Windows and an `i32` elsewhere — and `as` narrows to whichever it is.
+#[allow(clippy::unnecessary_cast)]
+fn as_socket(handle: i64) -> Socket {
+    handle as Socket
+}
+
+/// Puts the handle back into the `TcpStream` that will close it.
+///
+/// The one thing `Wire` still borrows from `std`: closing a socket is spelled
+/// differently on each platform and dropping a `TcpStream` over it is the
+/// version already written.
 #[cfg(windows)]
-fn adopt(handle: i64) -> TcpStream {
+fn reclaim(socket: Socket) -> TcpStream {
     use std::os::windows::io::FromRawSocket;
-    // SAFETY: the caller hands over a socket it will not close again, which is
-    // the contract `std::net::tls` states where it calls this.
-    unsafe { TcpStream::from_raw_socket(handle as u64 as std::os::windows::io::RawSocket) }
+    // SAFETY: `Wire` owns the handle and is being dropped, so nothing else
+    // will close it.
+    unsafe { TcpStream::from_raw_socket(socket as u64 as std::os::windows::io::RawSocket) }
 }
 
 #[cfg(not(windows))]
-fn adopt(handle: i64) -> TcpStream {
+fn reclaim(socket: Socket) -> TcpStream {
     use std::os::fd::FromRawFd;
     // SAFETY: as above.
-    unsafe { TcpStream::from_raw_fd(handle as i32) }
+    unsafe { TcpStream::from_raw_fd(socket) }
+}
+
+impl Read for Wire {
+    fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+        // SAFETY: `into` is a live slice of exactly the length passed.
+        let read = unsafe {
+            crate::net::khora_net_recv(self.0, into.as_mut_ptr(), into.len() as isize)
+        };
+        match read {
+            0.. => Ok(read as usize),
+            // **Not `last_os_error`.** `errno` is thread-local and a fiber is
+            // not, so by the time this reads it the fiber may be on another
+            // worker — `docs/design/ffi.md` §2. rustls needs to know that the
+            // read failed and not which number the failure had, and a kind it
+            // might mistake for `WouldBlock` would send it round a loop these
+            // shims have already been round.
+            _ => Err(std::io::Error::other("the socket read failed")),
+        }
+    }
+}
+
+impl Write for Wire {
+    fn write(&mut self, from: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: `from` is a live slice of exactly the length passed.
+        let sent =
+            unsafe { crate::net::khora_net_send(self.0, from.as_ptr(), from.len() as isize) };
+        match sent {
+            0.. => Ok(sent as usize),
+            _ => Err(std::io::Error::other("the socket write failed")),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Nothing is buffered here; rustls does its own.
+        Ok(())
+    }
+}
+
+impl Drop for Wire {
+    fn drop(&mut self) {
+        // The runtime remembers this socket's receive deadline, and handles
+        // are reused.
+        crate::net::khora_net_forget(self.0);
+        drop(reclaim(self.0));
+    }
+}
+
+/// Takes ownership of a raw handle handed over by `std::net::tls`.
+fn adopt(handle: i64) -> Wire {
+    Wire(as_socket(handle))
+}
+
+/// Takes the handle out of a `TcpStream`, so that closing becomes ours.
+#[cfg(windows)]
+fn surrender(stream: TcpStream) -> Socket {
+    use std::os::windows::io::IntoRawSocket;
+    stream.into_raw_socket() as Socket
+}
+
+#[cfg(not(windows))]
+fn surrender(stream: TcpStream) -> Socket {
+    use std::os::fd::IntoRawFd;
+    stream.into_raw_fd()
 }
 
 /// A server's certificate chain and key, ready to accept connections.
@@ -296,9 +387,18 @@ pub unsafe extern "C" fn khora_tls_connect(
     let Ok(mut connection) = ClientConnection::new(Arc::clone(config), name) else {
         return std::ptr::null_mut();
     };
-    let Ok(mut stream) = TcpStream::connect((host, port as u16)) else {
+    // **Still a blocking connect**, and that is a gap rather than a decision:
+    // resolving a name and completing a three-way handshake both hold the
+    // worker. It belongs in the blocking pool that 11E built, and wants a
+    // caller that has noticed it before it is worth the churn.
+    let Ok(connected) = TcpStream::connect((host, port as u16)) else {
         return std::ptr::null_mut();
     };
+    // The handle is taken out of the `TcpStream` so that `Wire` owns it and
+    // closes it, and prepared so that the handshake and everything after it
+    // suspend the fiber rather than the worker.
+    let mut stream = Wire(surrender(connected));
+    crate::net::khora_net_prepare(stream.0);
     if connection.complete_io(&mut stream).is_err() {
         return std::ptr::null_mut();
     }

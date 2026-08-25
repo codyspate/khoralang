@@ -21,12 +21,28 @@ import std::core::{Array, Ptr};
 extern fn socket(family: I32, kind: I32, protocol: I32) -> I32;
 extern fn bind(handle: I32, address: Ptr, length: I32) -> I32;
 extern fn listen(handle: I32, backlog: I32) -> I32;
-extern fn accept(handle: I32, address: Ptr, length: Ptr) -> I32;
-extern fn recv(handle: I32, into: Ptr, length: Int, flags: I32) -> Int;
-extern fn send(handle: I32, from: Ptr, length: Int, flags: I32) -> Int;
 extern fn close(handle: I32) -> I32;
 extern fn shutdown(handle: I32, how: I32) -> I32;
-extern fn setsockopt(handle: I32, level: I32, name: I32, value: Ptr, length: I32) -> I32;
+
+// The runtime's socket calls, which suspend a fiber rather than a worker.
+//
+// A `recv` that would have blocked used to block the thread, which was right
+// while a fiber *was* a thread. Now it is one of many on a worker, and a
+// blocked worker is every fiber queued behind it as well. These do the same
+// call and, when it would block, hand the worker back and wait on the reactor.
+// Off a scheduler they block the calling thread exactly as before, so a
+// program that spawns nothing behaves as it always did.
+//
+// `khora_net_prepare` is what makes a socket non-blocking, and it is called
+// once per socket rather than once per operation because it is a syscall and a
+// read is not. `crates/khora-rt/src/net.rs`, and `docs/design/scheduler.md`
+// §2.
+extern fn khora_net_prepare(handle: I32) -> I32;
+extern fn khora_net_recv(handle: I32, into: Ptr, length: Int) -> Int;
+extern fn khora_net_send(handle: I32, from: Ptr, length: Int) -> Int;
+extern fn khora_net_accept(handle: I32, address: Ptr, length: Ptr) -> I32;
+extern fn khora_net_set_timeout(handle: I32, millis: Int) -> I32;
+extern fn khora_net_forget(handle: I32) -> ();
 
 /// A failed call returns -1, and a handle is never negative.
 export fn invalid_handle() -> Int { 0 - 1 }
@@ -38,6 +54,11 @@ export fn start() -> Bool { true }
 export fn listen_on(port: Int) -> Int {
   // AF_INET, SOCK_STREAM, IPPROTO_TCP.
   let handle = socket(I32::of(2), I32::of(1), I32::of(6));
+  // Non-blocking from here on, so that a fiber waiting for a connection gives
+  // its worker back. A listener that could not be prepared is still a working
+  // listener — the retry loops in the runtime simply never see a would-block —
+  // so this is not worth failing over.
+  khora_net_prepare(handle);
   if I32::to_int(handle) < 0 {
     invalid_handle()
   } else {
@@ -70,45 +91,41 @@ fn sockaddr_in(port: Int) -> Array<U8> {
 
 /// Waits for a connection. [`invalid_handle`] if the wait failed.
 export fn accept_on(server: Int) -> Int {
-  let taken = accept(I32::of(server), Ptr::null(), Ptr::null());
-  if I32::to_int(taken) < 0 { invalid_handle() } else { I32::to_int(taken) }
+  let taken = khora_net_accept(I32::of(server), Ptr::null(), Ptr::null());
+  if I32::to_int(taken) < 0 { invalid_handle() } else {
+    // Prepared here rather than inside the runtime's `accept`, so that every
+    // decision about a new socket is in one visible place instead of half
+    // here and half there.
+    khora_net_prepare(taken);
+    I32::to_int(taken)
+  }
 }
 
 /// How long a read will wait before giving up, in milliseconds.
 ///
-/// See the note on the Windows one for why a server cannot do without it. The
-/// difference here is the shape of the value: Berkeley takes a
-/// `struct timeval`, two 64-bit words on this target, where Winsock takes a
-/// single `DWORD` of milliseconds.
+/// See the note on the Windows one for why a server cannot do without it.
+///
+/// **No longer `SO_RCVTIMEO`, and it could not be.** The kernel's option
+/// applies to a call that would have blocked, and a socket the reactor drives
+/// never has one — so it goes silently inert the moment the socket is
+/// prepared, and the slow client it exists to shed would park a fiber for
+/// ever. The runtime keeps the deadline and a scheduler timer enforces it. A
+/// read that runs out still comes back negative, which is what every caller
+/// here already treats as a connection to give up on.
 export fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
-  let value: Array<U8> = Array::new(16, 0);
-  write_word(value, 0, millis / 1000);
-  write_word(value, 8, (millis % 1000) * 1000);
-  // SOL_SOCKET is 1 and SO_RCVTIMEO is 20, which are Berkeley's numbers.
-  let outcome = Array::with_data(value, fn (from, n) =>
-    I32::to_int(setsockopt(I32::of(handle), I32::of(1), I32::of(20), from, I32::of(n))));
-  outcome == 0
-}
-
-/// A 64-bit value, least significant byte first, which is this target's order.
-fn write_word(into: Array<U8>, at: Int, value: Int) -> () {
-  let mut i = 0;
-  while i < 8 {
-    Array::set(into, at + i, U8::of(Int::and(Int::shr(value, i * 8), 255)));
-    i = i + 1;
-  }
+  khora_net_set_timeout(I32::of(handle), millis) == I32::of(0)
 }
 
 /// Reads what has arrived into `buffer`, and says how many bytes that was.
 ///
 /// Zero means the other end closed; negative means the read failed.
 export fn receive(connection: Int, buffer: Array<U8>) -> Int {
-  Array::with_data(buffer, fn (into, n) => recv(I32::of(connection), into, n, I32::of(0)))
+  Array::with_data(buffer, fn (into, n) => khora_net_recv(I32::of(connection), into, n))
 }
 
 /// Writes `text`, and says how many bytes went. Negative if the write failed.
 export fn transmit(connection: Int, text: String) -> Int {
-  String::with_data(text, fn (from, n) => send(I32::of(connection), from, n, I32::of(0)))
+  String::with_data(text, fn (from, n) => khora_net_send(I32::of(connection), from, n))
 }
 
 /// Closes a connection, letting the other end finish first.
@@ -119,6 +136,10 @@ export fn transmit(connection: Int, text: String) -> Int {
 export fn shut(handle: Int) -> () {
   shutdown(I32::of(handle), I32::of(1));
   drain(handle, 8);
+  // The runtime remembers this socket's receive deadline, and handles are
+  // reused: without this, the next connection handed the same number would
+  // inherit it.
+  khora_net_forget(I32::of(handle));
   close(I32::of(handle));
 }
 
