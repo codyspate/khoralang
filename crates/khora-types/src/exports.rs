@@ -55,6 +55,37 @@ pub(crate) fn export_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
         }
 
         let Some(signature) = signatures.get(&name) else { continue };
+
+        // **A `with` clause reverses meaning across this boundary, and that is
+        // worth its own message.** `ffi.md` §3 says a `with` clause on a
+        // foreign *import* is a permission and nothing is appended to the
+        // call — the requirement governs who may bind the symbol, and the C
+        // function never sees it. Somebody who has read that will reasonably
+        // expect the same of an export, and it is the opposite: an exported
+        // function's body genuinely needs the evidence, evidence is an
+        // appended argument, and C has none to append.
+        //
+        // Without this the wrapper was built from the foreign view of the
+        // signature — no evidence parameters — and called a target that
+        // expected them. LLVM's verifier caught it, which is the good case,
+        // and reported "Incorrect number of arguments passed to called
+        // function!" against line 1 of the file under the heading "which is a
+        // compiler bug". It was a compiler bug. It was not the reader's.
+        if is_open(&signature.requires) {
+            found.push(HirError {
+                message: format!(
+                    "`{name}` is exported to C and has a `with` clause, so it needs evidence \
+                     that C has none of. On a foreign *import* a `with` clause is a \
+                     permission and nothing is passed — `docs/design/ffi.md` §3 — but an \
+                     export runs Khora code, and a capability is an argument. Take what it \
+                     needs as parameters, or wrap it in a function that constructs the \
+                     capability itself"
+                ),
+                range,
+            });
+            continue;
+        }
+
         if let Some(why) = foreign_signature_obstacle(signature) {
             found.push(HirError {
                 message: format!(
@@ -68,4 +99,13 @@ pub(crate) fn export_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
     }
 
     found
+}
+
+/// Whether a row asks for anything: a named field, or a variable that could
+/// still be solved to one.
+fn is_open(row: &crate::Type) -> bool {
+    match row {
+        crate::Type::Row { fields, tail } => !fields.is_empty() || tail.is_some(),
+        _ => false,
+    }
 }

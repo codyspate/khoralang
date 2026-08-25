@@ -97,3 +97,32 @@ fn a_foreign_import_is_left_alone() {
 fn an_ordinary_function_is_untouched() {
     assert_clean("module m;\nexport fn plain(s: String) -> String { s }\n");
 }
+
+/// A `with` clause means the opposite thing on each side of this boundary, and
+/// the message has to say so.
+///
+/// `ffi.md` §3: on a foreign *import* a `with` clause is a permission and
+/// nothing is appended to the call — the requirement governs who may bind the
+/// symbol and the C function never sees it. An **export** runs Khora code, so
+/// its evidence is a real appended argument, and C has none to append.
+///
+/// Left unchecked, the wrapper was built from the foreign view of the
+/// signature — no evidence parameters — and called a target that expected
+/// them. LLVM's verifier caught it and said "Incorrect number of arguments
+/// passed to called function!" against line 1, under a heading calling it a
+/// compiler bug. It was one.
+#[test]
+fn an_export_cannot_require_a_capability() {
+    assert_reports(
+        "module m;\n\
+         export effect Log { note: (Int) -> (), }\n\
+         export extern fn go(n: Int) -> Int with { log: Log } { n }\n",
+        "has a `with` clause, so it needs evidence that C has none of",
+    );
+    // And the import direction is untouched, because there it is a permission.
+    assert_clean(
+        "module m;\n\
+         export effect Fs { open: (Ptr) -> Int, }\n\
+         extern fn sys_open(path: Ptr) -> I32 with { fs: Fs };\n",
+    );
+}
