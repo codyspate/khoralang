@@ -711,8 +711,56 @@ fn wake(shared: &Arc<Shared>, fiber: usize, state: &Wait) {
 /// Returns false off a scheduler, where there is nobody to watch anything and
 /// the caller should block the thread as it always did.
 pub(crate) fn wait_until_ready(socket: Socket, interest: Interest) -> bool {
-    let Some(shared) = shared_pool() else { return false };
+    matches!(wait_until_ready_by(socket, interest, None), Waited::Ready)
+}
+
+/// How a wait for a socket ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Waited {
+    /// Worth trying the operation again. Readiness is a hint, not a promise —
+    /// a spurious wake reports this too, and the retry is what settles it.
+    Ready,
+    /// The deadline passed first.
+    TimedOut,
+    /// No scheduler, so there was no worker to give back and nothing to wait
+    /// on. The caller must block the thread itself.
+    Unscheduled,
+}
+
+/// Suspends the running fiber until `socket` is ready or `deadline` passes.
+///
+/// **This is what replaces `SO_RCVTIMEO`, and it has to.** A socket the reactor
+/// drives is non-blocking, so the kernel's receive timeout can never fire — it
+/// only applies to a call that would have blocked, and none of them do any
+/// more. A server that relied on it to shed a slow client would instead park a
+/// fiber on that client for ever, which is a worse failure than the one the
+/// timeout existed to prevent. `docs/design/scheduler.md` §6 predicted this and
+/// asked for "a different mechanism with the same meaning"; this is the
+/// mechanism, and `crate::net` keeps the meaning by reporting a timeout the way
+/// the kernel used to.
+///
+/// The deadline is absolute, so a spurious wake can re-enter this with the same
+/// one and not extend it.
+pub(crate) fn wait_until_ready_by(
+    socket: Socket,
+    interest: Interest,
+    deadline: Option<std::time::Instant>,
+) -> Waited {
+    let Some(shared) = shared_pool() else { return Waited::Unscheduled };
     let fiber = crate::current::current(|f| f.id());
+
+    if let Some(at) = deadline {
+        if std::time::Instant::now() >= at {
+            return Waited::TimedOut;
+        }
+        // **Registered before the socket, and left to expire on its own.**
+        // Taking it out again costs a rebuild of the heap, which per read is
+        // quadratic — `docs/design/scheduler.md` §6 measures the waste this
+        // leaves instead and calls it bounded. A deadline that fires for a
+        // fiber that has moved on is a spurious wake, and spurious wakes are
+        // already safe here.
+        shared.timers.lock().expect("the timers").add(at, fiber);
+    }
 
     shared.reactor.register(Watch { socket, interest, fiber });
     let parked = park_current();
@@ -720,7 +768,14 @@ pub(crate) fn wait_until_ready(socket: Socket, interest: Interest) -> bool {
     // this one must come off, or a later readiness wakes a fiber that has
     // stopped caring about this socket.
     shared.reactor.forget(fiber);
-    parked
+
+    if !parked {
+        return Waited::Unscheduled;
+    }
+    match deadline {
+        Some(at) if std::time::Instant::now() >= at => Waited::TimedOut,
+        _ => Waited::Ready,
+    }
 }
 
 /// Wakes every fiber whose socket has become ready, for ever.
@@ -1535,6 +1590,101 @@ mod tests {
         let counts = pool.counts();
         assert_eq!(counts.waiting, 0, "the waiting total went negative: {counts:?}");
         assert!(pool.audit().settled(), "{:?}", pool.audit());
+    }
+
+    /// **A socket nobody writes to gives the fiber back at its deadline.**
+    ///
+    /// The whole point of `wait_until_ready_by`. Before it, a reactor-driven
+    /// socket could not time out at all: `SO_RCVTIMEO` applies to a call that
+    /// would have blocked, and a non-blocking socket never has one, so a slow
+    /// client parked a fiber until the process ended.
+    #[test]
+    fn a_socket_wait_ends_at_its_deadline() {
+        let outcome = Arc::new(Mutex::new(None));
+        let seen = outcome.clone();
+
+        let pool = Scheduler::new(2);
+        pool.spawn(Task::new(move || {
+            // Connected, so it stays open, and silent, so it never becomes
+            // readable. Only the deadline can end this.
+            let (mine, _peer) = crate::reactor::connected_pair();
+            let began = std::time::Instant::now();
+            let ended = wait_until_ready_by(
+                crate::reactor::socket_of(&mine),
+                Interest::Readable,
+                Some(began + std::time::Duration::from_millis(60)),
+            );
+            *seen.lock().expect("the outcome") = Some((ended, began.elapsed()));
+        }));
+        pool.drain();
+
+        let (ended, took) = outcome.lock().expect("the outcome").expect("it ran");
+        assert_eq!(ended, Waited::TimedOut);
+        assert!(took >= std::time::Duration::from_millis(55), "returned early: {took:?}");
+        assert!(pool.settle(std::time::Duration::from_secs(2)).settled());
+    }
+
+    /// A deadline that has already gone is not a wait at all.
+    #[test]
+    fn a_deadline_in_the_past_does_not_register_anything() {
+        let outcome = Arc::new(Mutex::new(None));
+        let seen = outcome.clone();
+
+        let pool = Scheduler::new(1);
+        pool.spawn(Task::new(move || {
+            let (mine, _peer) = crate::reactor::connected_pair();
+            *seen.lock().expect("the outcome") = Some(wait_until_ready_by(
+                crate::reactor::socket_of(&mine),
+                Interest::Readable,
+                Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ));
+        }));
+        pool.drain();
+
+        assert_eq!(outcome.lock().expect("the outcome").expect("it ran"), Waited::TimedOut);
+        assert!(pool.settle(std::time::Duration::from_secs(2)).settled());
+    }
+
+    /// A peer that writes in time wins the race against the deadline.
+    #[test]
+    fn readiness_beats_a_deadline_that_has_not_come() {
+        use std::io::Write;
+        let outcome = Arc::new(Mutex::new(None));
+        let seen = outcome.clone();
+
+        let pool = Scheduler::new(2);
+        pool.spawn(Task::new(move || {
+            let (mine, mut peer) = crate::reactor::connected_pair();
+            let socket = crate::reactor::socket_of(&mine);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                let _ = peer.write_all(b"x");
+                // Held open until the write has certainly been seen.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            });
+            *seen.lock().expect("the outcome") = Some(wait_until_ready_by(
+                socket,
+                Interest::Readable,
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            ));
+        }));
+        pool.drain();
+
+        assert_eq!(outcome.lock().expect("the outcome").expect("it ran"), Waited::Ready);
+    }
+
+    /// Off a scheduler it says so, rather than pretending to wait.
+    #[test]
+    fn a_deadline_without_a_scheduler_is_refused() {
+        let (mine, _peer) = crate::reactor::connected_pair();
+        assert_eq!(
+            wait_until_ready_by(
+                crate::reactor::socket_of(&mine),
+                Interest::Readable,
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+            ),
+            Waited::Unscheduled
+        );
     }
 
     /// Many fibers, many deadlines, all across several workers.

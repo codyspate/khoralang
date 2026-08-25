@@ -221,12 +221,28 @@ fn ready<T>(fds: &[T], watching: &[Watch], is_ready: impl Fn(&T) -> bool) -> Vec
 /// For a program with no scheduler to park a fiber on. A socket in
 /// non-blocking mode would otherwise spin, and spinning is worse than the
 /// blocking read this replaced.
-pub(crate) fn block_until_ready(socket: Socket, interest: Interest) {
+pub(crate) fn block_until_ready(
+    socket: Socket,
+    interest: Interest,
+    deadline: Option<std::time::Instant>,
+) -> bool {
     let watch = [Watch { socket, interest, fiber: 0 }];
-    // A long wait rather than an indefinite one, so a socket closed from
-    // another thread does not leave this here for ever. `poll` reports a
-    // hangup, but only if it is looking.
-    while poll_sockets(&watch, std::time::Duration::from_millis(50)).is_empty() {}
+    loop {
+        // A long wait rather than an indefinite one, so a socket closed from
+        // another thread does not leave this here for ever. `poll` reports a
+        // hangup, but only if it is looking.
+        let mut slice = std::time::Duration::from_millis(50);
+        if let Some(at) = deadline {
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            slice = slice.min(left);
+        }
+        if !poll_sockets(&watch, slice).is_empty() {
+            return true;
+        }
+    }
 }
 
 /// A pair of connected sockets over loopback, for tests.

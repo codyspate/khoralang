@@ -85,11 +85,96 @@ fn would_block() -> bool {
 /// The choice is not the caller's and is not visible to it: on a worker the
 /// fiber is parked and the worker goes on to something else, and off one the
 /// thread waits. Both come back when it is worth trying again.
-fn wait(socket: Socket, interest: Interest) {
-    if crate::scheduler::wait_until_ready(socket, interest) {
-        return;
+fn wait(socket: Socket, interest: Interest, deadline: Option<std::time::Instant>) -> bool {
+    match crate::scheduler::wait_until_ready_by(socket, interest, deadline) {
+        crate::scheduler::Waited::Ready => true,
+        crate::scheduler::Waited::TimedOut => false,
+        // No worker to give back, so this thread does the waiting — and has to
+        // honour the same deadline, because a program with no scheduler is
+        // still a program that asked for one.
+        crate::scheduler::Waited::Unscheduled => {
+            crate::reactor::block_until_ready(socket, interest, deadline)
+        }
     }
-    crate::reactor::block_until_ready(socket, interest);
+}
+
+/// Receive deadlines, by socket, in milliseconds.
+///
+/// **This is `SO_RCVTIMEO` moved somewhere it can still work.** The kernel's
+/// receive timeout applies to a call that would have blocked, and a socket the
+/// reactor drives never has one, so the option becomes silently inert the
+/// moment `khora_net_prepare` touches the socket. A server that used it to shed
+/// a slow client — `std::net::http` sets ten seconds in two places — would
+/// instead park a fiber on that client for ever.
+///
+/// Keyed by the raw handle, which is only sound because the entry is removed
+/// when the socket is closed: handles are reused, and a stale deadline
+/// belonging to a closed connection would otherwise be inherited by whatever
+/// opened next. `khora_net_forget` is that removal and `std::net` calls it from
+/// `shut`.
+static TIMEOUTS: std::sync::Mutex<Option<std::collections::HashMap<usize, u64>>> =
+    std::sync::Mutex::new(None);
+
+/// A socket as a table key.
+///
+/// `Socket` is a `usize` on Windows and an `i32` everywhere else, so exactly
+/// one of the two platforms sees this cast as redundant and the other needs
+/// it. One place to say so beats an allow at every use.
+#[allow(clippy::unnecessary_cast)]
+fn key(socket: Socket) -> usize {
+    socket as usize
+}
+
+fn deadline_for(socket: Socket) -> Option<std::time::Instant> {
+    let guard = TIMEOUTS.lock().expect("the receive deadlines");
+    let millis = guard.as_ref()?.get(&key(socket)).copied()?;
+    Some(std::time::Instant::now() + std::time::Duration::from_millis(millis))
+}
+
+/// Reports the platform's would-block error, as a timed-out `recv` used to.
+///
+/// The point of doing it this way is that nothing above has to change: `recv`
+/// returning `-1` with `EAGAIN` is exactly what a socket with `SO_RCVTIMEO`
+/// did, so `std::net` and `http.kh` keep the contract they were written
+/// against while the mechanism underneath is a scheduler timer.
+fn report_would_block() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Networking::WinSock::{WSASetLastError, WSAEWOULDBLOCK};
+        // SAFETY: sets this thread's last winsock error and nothing else.
+        unsafe { WSASetLastError(WSAEWOULDBLOCK) };
+    }
+    #[cfg(not(windows))]
+    {
+        // SAFETY: `__errno_location` returns this thread's own errno slot.
+        unsafe { *libc::__errno_location() = libc::EAGAIN };
+    }
+}
+
+/// How long a receive on `socket` may wait before it reports a timeout.
+///
+/// Replaces `setsockopt(SO_RCVTIMEO)`. Zero clears it.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_set_timeout(socket: Socket, millis: i64) -> i32 {
+    let mut guard = TIMEOUTS.lock().expect("the receive deadlines");
+    let table = guard.get_or_insert_with(std::collections::HashMap::new);
+    if millis <= 0 {
+        table.remove(&key(socket));
+    } else {
+        table.insert(key(socket), millis as u64);
+    }
+    0
+}
+
+/// Forgets everything the runtime remembers about `socket`.
+///
+/// Called when a socket is closed. Not optional: handles are reused, and the
+/// next connection to be handed this number would inherit the deadline.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_net_forget(socket: Socket) {
+    if let Some(table) = TIMEOUTS.lock().expect("the receive deadlines").as_mut() {
+        table.remove(&key(socket));
+    }
 }
 
 /// `recv`, retried until it says something other than "not yet".
@@ -102,13 +187,20 @@ fn wait(socket: Socket, interest: Interest) {
 /// `into` must point at `length` writable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_net_recv(socket: Socket, into: *mut u8, length: isize) -> isize {
+    // Absolute, and taken once: a read that goes round this loop several times
+    // because of a spurious wake must not be granted the whole timeout again.
+    let deadline = deadline_for(socket);
     loop {
         // SAFETY: the caller guarantees `length` writable bytes at `into`.
         let read = unsafe { raw_recv(socket, into, length) };
         if read >= 0 || !would_block() {
             return read;
         }
-        wait(socket, Interest::Readable);
+        if !wait(socket, Interest::Readable, deadline) {
+            // Exactly what a socket with `SO_RCVTIMEO` used to do.
+            report_would_block();
+            return -1;
+        }
     }
 }
 
@@ -129,7 +221,10 @@ pub unsafe extern "C" fn khora_net_send(socket: Socket, from: *const u8, length:
         if written >= 0 || !would_block() {
             return written;
         }
-        wait(socket, Interest::Writable);
+        // A write that cannot proceed is back-pressure from the peer, and the
+        // deadline `std::net` sets is a *receive* timeout. Left alone until
+        // something asks for a send deadline by name.
+        wait(socket, Interest::Writable, None);
     }
 }
 
@@ -157,7 +252,10 @@ pub unsafe extern "C" fn khora_net_accept(
         if accepted >= 0 || !would_block() {
             return accepted;
         }
-        wait(socket, Interest::Readable);
+        // No deadline on `accept`: a listener waiting for the next connection
+        // is not a slow client, and a server that timed out its own accept
+        // loop would be a server that stops serving.
+        wait(socket, Interest::Readable, None);
     }
 }
 
@@ -276,7 +374,7 @@ mod tests {
     fn a_read_on_a_worker_suspends_the_fiber_and_not_the_worker() {
         use crate::coro::Task;
         use crate::scheduler::Scheduler;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::AtomicUsize;
         use std::sync::Arc;
 
         let done = Arc::new(AtomicUsize::new(0));
@@ -295,7 +393,7 @@ mod tests {
                 let read = unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 1) };
                 assert_eq!(read, 1);
                 assert_eq!(buffer[0], n as u8);
-                counter.fetch_add(1, Ordering::SeqCst);
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }));
             peers.push(peer);
         }
@@ -316,7 +414,7 @@ mod tests {
             peer.write_all(&[n as u8]).expect("writing");
         }
         pool.drain();
-        assert_eq!(done.load(Ordering::SeqCst), 2);
+        assert_eq!(done.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// A socket nobody prepared still works — it blocks, as it always did.
@@ -330,5 +428,84 @@ mod tests {
         let read = unsafe { khora_net_recv(socket_of(&client), buffer.as_mut_ptr(), 1) };
         assert_eq!(read, 1);
         assert_eq!(buffer[0], b'z');
+    }
+
+    /// **A receive deadline still fires once the socket is non-blocking.**
+    ///
+    /// The regression `SO_RCVTIMEO` would have become. A connected, silent peer
+    /// is exactly the slow client `std::net::http` sets ten seconds against;
+    /// with the socket prepared, the kernel's option can never fire, so the
+    /// scheduler's timer has to — and it has to look identical from Khora:
+    /// `-1`, with the platform reporting would-block.
+    #[test]
+    fn a_receive_deadline_reports_a_timeout_the_way_the_kernel_did() {
+        use crate::coro::Task;
+        use crate::scheduler::Scheduler;
+
+        let outcome = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen = outcome.clone();
+
+        let pool = Scheduler::new(2);
+        pool.spawn(Task::new(move || {
+            let (mine, _peer) = crate::reactor::connected_pair();
+            let socket = crate::reactor::socket_of(&mine);
+            khora_net_prepare(socket);
+            khora_net_set_timeout(socket, 60);
+
+            let mut buffer = [0u8; 16];
+            let began = std::time::Instant::now();
+            // SAFETY: sixteen writable bytes.
+            let read = unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 16) };
+            let blocked = would_block();
+            khora_net_forget(socket);
+            *seen.lock().expect("the outcome") = Some((read, blocked, began.elapsed()));
+        }));
+        pool.drain();
+
+        let (read, blocked, took) = outcome.lock().expect("the outcome").expect("it ran");
+        assert_eq!(read, -1, "a timed-out receive must look like a failed one");
+        assert!(blocked, "and must report would-block, as SO_RCVTIMEO did");
+        assert!(took >= std::time::Duration::from_millis(55), "returned early: {took:?}");
+    }
+
+    /// A socket with no deadline set waits as long as it takes.
+    #[test]
+    fn without_a_deadline_a_receive_waits() {
+        use crate::coro::Task;
+        use crate::scheduler::Scheduler;
+        use std::io::Write;
+
+        let got = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
+        let seen = got.clone();
+
+        let pool = Scheduler::new(2);
+        pool.spawn(Task::new(move || {
+            let (mine, mut peer) = crate::reactor::connected_pair();
+            let socket = crate::reactor::socket_of(&mine);
+            khora_net_prepare(socket);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                let _ = peer.write_all(b"late");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            });
+            let mut buffer = [0u8; 16];
+            // SAFETY: sixteen writable bytes.
+            seen.store(unsafe { khora_net_recv(socket, buffer.as_mut_ptr(), 16) }, std::sync::atomic::Ordering::SeqCst);
+        }));
+        pool.drain();
+
+        assert_eq!(got.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    /// Closing forgets the deadline, so the next socket to be handed that
+    /// number does not inherit it.
+    #[test]
+    fn forgetting_a_socket_clears_its_deadline() {
+        let (mine, _peer) = connected_pair();
+        let socket = socket_of(&mine);
+        khora_net_set_timeout(socket, 5_000);
+        assert!(deadline_for(socket).is_some());
+        khora_net_forget(socket);
+        assert!(deadline_for(socket).is_none(), "a reused handle would inherit it");
     }
 }
