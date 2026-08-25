@@ -2504,10 +2504,19 @@ done, so a cross build stops at the link. It now says so usefully: the raw
 failure was `lld-link: unknown file type` about a perfectly good aarch64
 object, and it now names the target the object was for and what is missing.
 
-One thing worth keeping: `family_of` maps `wasm32` to the `linux` `std` files,
-which is **wrong** — a Worker has no sockets and no filesystem. It is written
-down in `khora-db` as the next thing that has to change rather than left to be
-discovered.
+One thing worth keeping, **since fixed**: `family_of` mapped `wasm32` to the
+`linux` `std` files, which was wrong — a Worker has no sockets and no
+filesystem. It was written down in `khora-db` as the next thing that had to
+change, and then was not for several entries. A comment admitting a bug reads
+like a decision and is an outstanding defect; this one shipped underneath wasm
+code generation.
+
+WebAssembly is its own family now, and `_native` marks the five unsuffixed
+modules that call an operating system — `fs`, `env`, `process`, `net/http`,
+`net/tls`. A wasm build selects eight `std` files rather than sixteen, and
+`portability.rs` checks that the remainder has no dangling import, which is the
+failure removing modules actually causes. `docs/design/targets.md` §"Which
+`std` a wasm build gets".
 
 The original entry:
 
