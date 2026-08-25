@@ -3339,9 +3339,23 @@ question so it is the repository owner's call rather than one to be taken here:
    with a real design behind it already, and the only one of the three that
    lets somebody *write* a parent pointer rather than avoid one.
 
-My reading is that 1 is not enough for a language pitched at production
-services, and that 3 is what §4 already promised — but it is a promise about
-the language, so it belongs to whoever makes those.
+**Decided: the lint now, weak references when there is evidence somebody needs
+one.** Named rather than numbered — these were presented in a different order
+in conversation, and a decision that depends on which list you are holding is
+not a decision.
+
+The vision asks for the diagnostic more urgently than the feature. §4 predicts
+the reader who will be surprised and says the diagnostic "will need to be
+good"; there is none, and non-negotiable 4 makes a silent failure the worst
+kind there is. Without weak references a programmer restructures their data.
+Without a warning they ship a leak and find out in production, which is the
+outcome the whole document exists to prevent.
+
+Doing the lint first also produces the evidence for whether weak references are
+worth their cost — they touch Perceus, drop glue and reuse, and 11H's lesson is
+that the thing which looks most damning is often the one that costs nothing.
+If the lint fires often on real code, that is the argument for building them.
+If it never fires, that is an answer too.
 
 ### Two places the list understates the work
 
@@ -3358,6 +3372,14 @@ able to?** Owning them produces the ecosystem on day one and buys a permanent
 maintenance burden for a language team that is currently one person. Not owning
 them means 13.13's distribution story has to be good enough that a stranger can
 publish a driver and be found — which is work the list already contains.
+
+**Decided: a package, in this repository for now, moved out later.** Not `std`
+— `ecosystem.md` settled that and nothing here reopens it. It lives in the tree
+while it is being written because the point of writing it is to *use the
+language hard*, which is how phase 12 found six misleading diagnostics; a
+driver that lives elsewhere cannot do that job. Moving it to its own repository
+is then a 13.13 exercise rather than a rewrite, and a good test of whether the
+distribution story works.
 
 **13.6 should come before 13.19 and before 13.1's last clause.** An external
 alpha is for finding usability problems; it is a poor and expensive way to find
@@ -3378,8 +3400,29 @@ estimating the phase without saying so would be wrong.
 
 **And the ordering has one hard edge.** 13.24 is not a task, it is the
 acceptance test for 13.13 through 13.16; 13.19 is worth nothing before them and
-worth a great deal immediately after. Everything else can proceed in whatever
-order the evidence suggests.
+worth a great deal immediately after.
+
+### The order being worked in
+
+Chosen rather than given, on two principles: **use the language before
+polishing it**, because that is what has found every diagnostic bug so far; and
+**audit before exposure**, because an alpha is a poor way to discover
+memory-safety bugs and the people in it did not sign up for that.
+
+1. **The cycle lint** — small, and it closes the gap this section opens.
+2. **13.12's Postgres package** — the largest single piece of Khora anybody has
+   written, and therefore the best available test of the language. Expected to
+   produce more diagnostic and ergonomic findings than any deliberate pass
+   would. 13.3's cancellation safety and 13.18's service application both need
+   it and follow directly.
+3. **13.1 and 13.2** — the scheduler's remaining work and load hardening, which
+   the service application will exercise honestly rather than synthetically.
+4. **13.6** — the soundness audit, before 13.19 and before making the scheduler
+   the default, both of which multiply what it would have caught.
+5. **Everything else**, with 13.24 last because it is the acceptance test.
+
+That order is a plan and not a promise; evidence from any step can reorder what
+follows it.
 
 ## When can libraries be written?
 
