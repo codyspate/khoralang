@@ -24,6 +24,19 @@ bench/**/src/*.ll
 bench/*.exe
 bench/*.pdb
 
+# What `khora test` and `khora bench` leave beside the sources they compiled.
+# `std/khora-tests.exe` was committed — 3.5 MB of build output inside the
+# standard library — because these are written into the directory under test
+# and nothing here named them.
+**/khora-tests
+**/khora-tests.exe
+**/khora-tests.exe.o
+**/khora-tests.pdb
+**/khora-benches
+**/khora-benches.exe
+**/khora-benches.exe.o
+**/khora-benches.pdb
+
 # Written by `scripts/setup-llvm.sh`; `.cargo/config.toml.example` is the
 # template. It names an LLVM prefix and a Windows SDK version, both of which
 # differ per machine.
