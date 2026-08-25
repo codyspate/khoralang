@@ -2812,15 +2812,40 @@ tuple types, positional variant payloads. The real check was the corpus — all
 of `std`, both reference applications and the whole test suite pass with it on,
 which is what says the over-approximations are the right ones.
 
-### 12.6 A C export surface
+### 12.6 A C export surface — **designed, not built, and one question for you**
 
-`docs/design/compatibility.md` is right that there is no stable Khora ABI, and
-that is a different question from whether a Khora library can be *called*.
-Exporting a C ABI — a shared library with a header — is how Khora gets used
-without anybody rewriting anything: a Python extension, a Node addon, a plugin
-for something written in C++. It is also the cheapest adoption path there is,
-and it costs a calling convention and a lifetime story rather than a language
-feature.
+`docs/design/c-export.md`. The last Phase 12 item, and the only one whose
+remaining work needs a decision I would rather not take alone.
+
+Three of its four questions turned out to be answered already:
+
+- **What may cross** is `ffi.md` §1 unchanged — scalars and `Ptr`, nothing
+  else — and the compiler already enforces it. An export surface is that check
+  applied to a function that has a body.
+- **Who owns the result** has a precedent in `std/core.kh`:
+  `khora_float_text(value, into, capacity) -> Int`. The caller provides the
+  buffer, the callee returns the length it wanted. No shared allocator, no
+  `khora_free` in the header, no lifetime rule to document — which is where
+  most FFI bugs live.
+- **When the runtime starts** is lazily, once, on first entry. An explicit
+  `khora_init` is one more thing to forget; a static constructor is shared
+  library load order, which is a debugging subject rather than a mechanism.
+
+**And one that made 12.8 worse.** A trap ends the process, and `traps.md` leans
+on an external supervisor restarting it. A library inside somebody else's
+Python interpreter has no supervisor and did not ask for one — so that support
+does not apply to this use, and `traps.md` §6 now records it. The decision
+stands, because the unwinding mechanism is still the blocker, but it rests on
+two arguments rather than three.
+
+**The question: how does a function say it is exported?** Every `export fn`
+with a C-compatible signature (no syntax, but forces the Khora API and the C
+ABI to be one set); a marker in the source, `export "C" fn` (explicit,
+familiar, a language-surface change putting a packaging decision in a
+signature); or a `[lib] exports = [...]` manifest section (no language change,
+and the manifest is already where `[permissions]` and the SBOM put
+cross-boundary promises). The doc argues for the third and does not act on it,
+because it is close enough to the language surface to be worth asking about.
 
 ### 12.7 The compile-time budget — **measured, and it is not a crisis**
 

@@ -124,5 +124,20 @@ Deliberately falsifiable, in the style of `docs/vision.md`'s non-negotiables:
 3. **A target makes process restart unavailable.** An embedded deployment with
    no supervisor has no fallback, and §4's third answer stops existing.
 
+   **`docs/design/c-export.md` found one, and it is not embedded.** A Khora
+   library exported to C lives inside a process it does not own — a Python
+   interpreter, a Node runtime, somebody's editor. A trap there does not restart
+   a service; it takes down a host belonging to somebody who never agreed to run
+   a supervisor. §4's third answer, the one this decision leans on hardest, does
+   not apply to that use at all.
+
+   This does not overturn the decision, because §3's mechanism is still the
+   blocker and is unchanged. It removes a support, and the honest way to hold
+   that is to say the decision now rests on two arguments rather than three —
+   and that an export boundary is a *smaller* containment problem than a fiber
+   is, with one entry, a scalar return, and no counted values live across it
+   from the caller's side. If containment is ever built, that is where it would
+   be cheapest to start.
+
 Absent one of those, more diagnosability is the better spend, and the next
 increment of it is variable-level debug info — 12.4's other half.
