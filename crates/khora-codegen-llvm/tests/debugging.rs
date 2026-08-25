@@ -165,3 +165,60 @@ fn main() -> Int {
     assert!(out.contains("outside an array"), "it still says what happened: {out}");
     assert!(out.contains("main.kh:12"), "the line that indexed: {out}");
 }
+
+/// A trap on a spawned fiber says which one.
+///
+/// **A trap takes the whole process down** — `docs/design/traps.md` argues why
+/// that is the current answer and what containing it would cost. Until it is
+/// contained, the least a server can be told is which of its concurrent pieces
+/// of work was wrong: "some addition overflowed" and "fiber 2's addition
+/// overflowed" are a different amount of help on a machine running a thousand
+/// at once, because the second can be matched against a request log.
+#[test]
+fn a_trap_on_a_fiber_says_which_fiber() {
+    let out = trap_of(
+        "trap_on_a_fiber",
+        "module t;
+fn print(value: Int);
+
+export type Fiber;
+impl Fiber {
+  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
+  fn join(self) -> ();
+}
+
+fn work() -> () {
+  let big = 9223372036854775807;
+  print(big + 1)
+}
+
+fn main() -> Int {
+  let f = Fiber::spawn(fn () => work());
+  Fiber::join(f);
+  0
+}
+",
+    );
+    assert!(out.contains("overflowed on fiber "), "the fiber is named: {out}");
+    assert!(out.contains("main.kh:12"), "and the line still is: {out}");
+    assert!(out.contains("work"), "on a fiber the frames still resolve: {out}");
+}
+
+/// The root fiber is not numbered. There is nothing to disambiguate, and a
+/// number on every single-threaded program's worst day is noise.
+#[test]
+fn a_trap_on_the_root_fiber_is_not_numbered() {
+    let out = trap_of(
+        "trap_on_the_root",
+        "module t;
+fn print(value: Int);
+
+fn main() -> Int {
+  let big = 9223372036854775807;
+  print(big + 1);
+  0
+}
+",
+    );
+    assert!(out.contains("overflowed\n"), "no fiber clause: {out}");
+}

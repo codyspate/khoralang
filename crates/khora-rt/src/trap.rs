@@ -29,7 +29,8 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: usize) -> ! {
         unsafe { std::slice::from_raw_parts(what, len) }
     };
     let mut err = std::io::stderr().lock();
-    let _ = writeln!(err, "khora: {} overflowed", String::from_utf8_lossy(bytes));
+    let _ =
+        writeln!(err, "khora: {} overflowed{}", String::from_utf8_lossy(bytes), on_which_fiber());
     where_from(&mut err);
     let _ = std::io::stdout().flush();
     std::process::exit(134)
@@ -43,10 +44,36 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: usize) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_bounds_fail(index: i64, len: i64) -> ! {
     let mut err = std::io::stderr().lock();
-    let _ = writeln!(err, "khora: index {index} is outside an array of {len}");
+    let _ = writeln!(
+        err,
+        "khora: index {index} is outside an array of {len}{}",
+        on_which_fiber()
+    );
     where_from(&mut err);
     let _ = std::io::stdout().flush();
     std::process::exit(134)
+}
+
+/// Which fiber trapped, when it is not the one the program started on.
+///
+/// **A trap takes the whole process down** — see `docs/design/traps.md` for why
+/// that is the current answer and what containing it would cost. Until it is
+/// contained, the least a server can be told is which of its concurrent pieces
+/// of work was the one that was wrong: on a machine handling a thousand
+/// requests, "some addition overflowed" and "fiber 4,102's addition overflowed"
+/// are a different amount of help, because the second can be matched against a
+/// request log.
+///
+/// Empty on the root fiber, where there is nothing to disambiguate and the
+/// number would be noise on every single-threaded program's worst day.
+fn on_which_fiber() -> String {
+    crate::current::current(|fiber| {
+        if fiber.is_spawned() {
+            format!(" on fiber {}", fiber.id())
+        } else {
+            String::new()
+        }
+    })
 }
 
 /// Prints where the trap came from, if the program was built to know.

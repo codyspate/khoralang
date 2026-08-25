@@ -2851,14 +2851,52 @@ Nobody has measured it. The corpus is still small enough that a baseline is
 cheap to take and expensive to reconstruct later — this entry is a measurement
 and a number to defend, not a project.
 
-### 12.8 What a trap does to a process
+### 12.8 What a trap does to a process — **argued, and decided against for now**
 
-`khora_overflow` and `khora_bounds_fail` end the process. That is right for a
-command-line tool and wrong for a server or an edge isolate, where one bad
-request should not take the other connections with it. Phase 11 gives fibers an
-identity and a parent; whether a trap can be contained at a fiber boundary —
-and what that means for a language whose traps are meant to be unrecoverable
-bugs — is a real argument that has not been had.
+`docs/design/traps.md`. The argument this entry said had not been had, had.
+
+**A trap ends the process, and that stays true.** Not because containment is
+wrong — a server wants it, and phase 11 already built the boundary it would use
+— but because the mechanism it needs is phase-sized and taxes every program
+that never traps.
+
+**The decisive argument is mechanical, not philosophical.** Containment means
+unwinding, and Khora deliberately has no unwinder: `backend/types.rs` says "no
+landing pads, no personality routine: a raise is a return with a tag". Perceus
+is what makes removing that expensive — every live value between the trap and
+the fiber boundary holds a reference count, so ending a fiber without running
+the decrements leaks everything it touched. On a server that is memory growth
+proportional to the rate of the bug with no allocation site to blame, which is
+the worst possible shape for a production problem. And the unwinding would have
+to cross a `corosensei` stack switch, which is the part with no recipe.
+
+Of the three cheaper answers, two fail and one is already deployed: leaking on
+cancel turns a trap into a denial-of-service primitive an attacker can drive;
+region-backed allocation would sidestep the whole problem and is the
+interesting long-term answer, but allocation is not arena-backed and `Shared`
+outlives its scope by design; and an external supervisor — a container runtime,
+systemd, a Workers isolate — needs no language change and is what operators
+actually run. Its real cost is that in-flight requests on that process are lost
+and not just the bad one, which is the honest weakness of this decision.
+
+**What the decision obliges.** A trap that cannot be contained must be
+maximally diagnosable. 12.4 gave it the line and its callers; this entry adds
+the fiber:
+
+    khora: Int addition overflowed on fiber 4102
+
+Empty on the root, where a number would be noise. On a machine running a
+thousand at once, that clause is what lets a crash be matched against a request
+log instead of guessed at.
+
+And `docs/positioning.md` promises no fault isolation, which this decision means
+it must not start. A language that says one request cannot take the others down
+and then does is worse than one that never said it.
+
+**Three things would overturn it**, written down so the decision is falsifiable
+rather than permanent: a real service showing traps frequent enough that
+restart is an availability problem; region-backed allocation landing for other
+reasons; or a target with no supervisor to restart anything.
 
 ### 12.9 Supply chain
 
