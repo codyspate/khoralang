@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Khora</title>
+  <desc id="desc">A stylized pipe operator made from a vertical bar and flowing forward chevron.</desc>
+  <defs>
+    <linearGradient id="khora-flow-top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="khora-flow-bottom" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#0891b2"/>
+      <stop offset="1" stop-color="#0ea5b7"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="20" height="104" rx="10" fill="#172033"/>
+  <path d="M52 26 L100 56 Q108 61 108 69 Q108 76 100 82 L52 108" fill="none" stroke="url(#khora-flow-top)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M52 108 L92 83 Q101 78 103 70" fill="none" stroke="url(#khora-flow-bottom)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
