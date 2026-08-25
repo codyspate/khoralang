@@ -129,6 +129,33 @@ Three lines, and every reader can see which convention this library uses. A
 compiler-level mapping would have to be configured to say the same thing, in a
 syntax nobody knows, and would be wrong for the next library.
 
+### And `errno` in particular cannot cross, now that a fiber is not a thread
+
+The example above reads the error out of the return value, which is why it
+works. **Reading it out of `errno` would not.**
+
+`errno` is thread-local. A fiber is not: Phase 11 moves it between workers at
+every suspension, and a suspension happens at any safepoint, which is every
+loop back-edge in a program that can spawn. So a shim that sets `errno` and
+returns, and a caller that reads `errno` afterwards, are only reliably on the
+same thread if nothing between them can suspend — and nothing in the type
+system says that.
+
+The same applies to Windows' `GetLastError` and `WSAGetLastError`, and to any
+library that keeps its last error in thread-local storage — which is most of
+the ones that keep it anywhere but the return value.
+
+This was found in 11G by writing a shim that reported a timed-out receive the
+way the kernel used to, with `EAGAIN` beside the `-1`. On Linux the caller read
+`ETIMEDOUT` instead, and the fix was to stop making the promise: `std::net`
+looks at the sign of the return, and `std::fs` says outright that C's error
+numbers are "deliberately coarse" and a table it declines to know. Nothing in
+Khora reads `errno` today, and this is the reason it should stay that way.
+
+Where a library genuinely has no other channel, the error must be read **inside
+the shim**, on the same side of the boundary as the call that set it, and
+returned as a value.
+
 ## 3. Capabilities: required, not passed
 
 **A `with` clause on a foreign function is a permission, and nothing is
