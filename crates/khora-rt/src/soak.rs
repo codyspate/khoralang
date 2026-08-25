@@ -509,6 +509,21 @@ fn adversarial_execution_leaves_nothing_behind() {
     );
     assert!(audit.settled(), "the pool did not come back to empty\n{context}");
     assert_eq!(audit.in_hand(), 0, "{context}");
+    // **Waited for, not sampled.** `settle` watches the audit — spawned equals
+    // completed, every queue empty — and `RESUMING` is decremented by
+    // `ResumedOnce::drop`, which runs *after* the completion it belongs to has
+    // been counted. So there is a window where the audit reads clean and a
+    // worker is still a few instructions from leaving `resume`, and asserting
+    // in it fails a run that did nothing wrong.
+    //
+    // Seen once in a full baseline and not again in thirty-two later runs,
+    // twenty of them of this test alone: rare enough to look like a race in
+    // the scheduler and shallow enough to be neither. The audit in the message
+    // said so — 668 spawned, 668 completed, everything zero except this.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while crate::coro::resuming_now() != 0 && std::time::Instant::now() < until {
+        std::thread::yield_now();
+    }
     assert_eq!(
         crate::coro::resuming_now(),
         0,
