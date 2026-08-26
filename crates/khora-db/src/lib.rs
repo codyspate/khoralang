@@ -1,10 +1,9 @@
 //! The incremental query database.
 //!
 //! Every compiler pass downstream of parsing is a salsa query hanging off this
-//! crate. That is a deliberate structural choice, recorded as decision A3 in
-//! `docs/roadmap.md`: retrofitting incrementality means rewriting every pass's
-//! signature and ownership model, and §6.5 wants sub-15 ms LSP responses, which
-//! is not something that can be bolted on afterwards.
+//! crate — decision A3, taken up front because retrofitting incrementality
+//! means rewriting every pass's signature and ownership model, and sub-15 ms
+//! LSP responses cannot be bolted on afterwards.
 //!
 //! `khora-syntax` stays salsa-free. It is a pure function from text to tree,
 //! and this crate is what makes it incremental. Keeping that boundary means the
@@ -256,20 +255,17 @@ pub fn target_triple() -> Option<String> {
 /// Khora generates for the host triple, so the host's name is the target's —
 /// the same assumption the code generator already makes about word size.
 ///
-/// **`KHORA_TARGET` overrides it**, and the reason is worth stating because the
-/// override cannot produce a runnable program. Which `std` files are selected
-/// is a per-target decision, so a bug that only exists in the combination of
-/// modules some *other* platform compiles is invisible here: `std::fs` declares
-/// `close`, and so does `socket_linux.kh` and `socket_macos.kh`, but
-/// `socket_windows.kh` calls it `closesocket`. A collision between those two
-/// was found by CI on macOS and could not be reproduced by anyone working on
-/// Windows, which is the worst kind of bug to own.
+/// **`KHORA_TARGET` overrides it**, which cannot produce a runnable program and
+/// is not meant to. Which `std` files are selected is a per-target decision, so
+/// a bug that exists only in the combination some *other* platform compiles is
+/// invisible from here — `std::fs` declares `close`, as do `socket_linux.kh`
+/// and `socket_macos.kh`, while `socket_windows.kh` calls it `closesocket`, and
+/// a collision between those is reproducible on exactly one host.
 ///
-/// With this, `khora-codegen-llvm/tests/portability.rs` generates and *verifies*
-/// a module for all three targets from whichever host it runs on. It stops
-/// before linking, which is the honest limit — an unresolved symbol or a wrong
-/// calling convention still needs the real platform, and CI still runs all
-/// three.
+/// With this, `khora-codegen-llvm/tests/portability.rs` generates and
+/// *verifies* a module for all three targets from whichever host it runs on. It
+/// stops before linking, which is the honest limit: an unresolved symbol or a
+/// wrong calling convention still needs the real platform.
 pub fn host_target() -> &'static str {
     match std::env::var("KHORA_TARGET").ok().as_deref() {
         Some("windows") => return "windows",
@@ -305,8 +301,7 @@ pub fn host_target() -> &'static str {
 ///
 /// **`std` is not a dependency anybody declares.** It is found beside the
 /// compiler, the way `rustc` finds its sysroot and `go` finds `GOROOT`, so a
-/// program that has never written a manifest still has one. A line every
-/// package repeats and no package can get wrong is not a line worth writing.
+/// program with no manifest still has one.
 ///
 /// Searched rather than configured, in the same order and for the same reasons
 /// as the runtime archive:

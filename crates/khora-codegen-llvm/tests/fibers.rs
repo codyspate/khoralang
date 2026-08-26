@@ -318,7 +318,6 @@ fn main() -> Int {{
 /// landed. That is a legal interleaving and the test was wrong, not the
 /// runtime: a fiber is an operating-system thread today, so nothing orders
 /// `Fiber::cancel` against the child arriving at its first cancellation point.
-/// The old doc comment claimed it was "not a race to lose".
 ///
 /// What is actually guaranteed, and what this now checks, is that every
 /// outcome is one the program could have produced *without* a cancellation

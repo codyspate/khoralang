@@ -131,7 +131,6 @@ impl<'ctx> Backend<'ctx> {
     /// An ADT's variants with this instantiation's arguments substituted in.
     ///
     /// `Box<String>` has a `String` field; the *declaration* only says `A`.
-    /// A type's variants with its arguments substituted in.
     ///
     /// The declared field of a generic type is a parameter, and a parameter is
     /// never boxed — so anything that reads the declaration instead of this

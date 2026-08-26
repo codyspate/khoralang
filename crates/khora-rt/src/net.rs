@@ -129,9 +129,6 @@ fn deadline_for(socket: Socket) -> Option<std::time::Instant> {
     Some(std::time::Instant::now() + std::time::Duration::from_millis(millis))
 }
 
-/// How long a receive on `socket` may wait before it reports a timeout.
-///
-/// Replaces `setsockopt(SO_RCVTIMEO)`. Zero clears it.
 /// Opens an outbound connection, resolving `host` first.
 ///
 /// **The one place a Khora program dials out.** Written in Khora over
@@ -190,6 +187,10 @@ pub unsafe extern "C" fn khora_net_connect(host: *const u8, host_len: u64, port:
 }
 
 #[unsafe(no_mangle)]
+/// How long a receive on `socket` may wait before it reports a timeout.
+///
+/// Replaces `setsockopt(SO_RCVTIMEO)`, which cannot fire on a socket the
+/// reactor drives. Zero clears it.
 pub extern "C" fn khora_net_set_timeout(socket: Socket, millis: i64) -> i32 {
     let mut guard = TIMEOUTS.lock().expect("the receive deadlines");
     let table = guard.get_or_insert_with(std::collections::HashMap::new);

@@ -1,24 +1,23 @@
 //! Lints that need types.
 //!
-//! Roadmap phase 10.3. Two passes, and the third the roadmap asks for turned
-//! out to exist already: a `match` arm that cannot be reached is a *type
-//! error*, not a lint, reported by `khora-types` out of the same usefulness
-//! algorithm that decides exhaustiveness. Making it a lint as well would give
-//! one mistake two voices.
+//! An unreachable `match` arm is deliberately *not* here: it is a type error,
+//! reported by `khora-types` out of the same usefulness algorithm that decides
+//! exhaustiveness, and making it a lint as well would give one mistake two
+//! voices.
 //!
 //! # What separates a lint from an error here
 //!
-//! An error is a program the compiler will not compile. A lint is a program it
-//! will compile and that somebody probably did not mean. The two below are on
-//! the lint side of that line for the same reason: each is *legal and
-//! occasionally deliberate*. A capability may be declared because a signature
-//! is being kept uniform across a family of handlers; a statement that computes
-//! nothing may be a placeholder mid-edit. Neither is worth refusing to build.
+//! An error is a program the compiler will not compile. A lint is one it will
+//! compile and that somebody probably did not mean, and everything here is on
+//! that side of the line for the same reason: each is *legal and occasionally
+//! deliberate*. A capability may be declared to keep a signature uniform across
+//! a family of handlers; a statement that computes nothing may be a placeholder
+//! mid-edit.
 //!
-//! Both are also chosen to have **no false positives**, which matters more for
-//! a lint than for an error: a warning people learn to ignore is worse than no
-//! warning, and the way that starts is one that is wrong about real code.
-//! Where a judgement was available, this takes the quiet side.
+//! Each is also chosen to have **no false positives**. A warning people learn
+//! to ignore is worse than no warning, and the way that starts is one that is
+//! wrong about real code — so where a judgement was available, this takes the
+//! quiet side.
 //!
 //! # Levels
 //!
@@ -95,32 +94,29 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
 /// A capability the signature asks for and the body cannot be using.
 ///
 /// **Forwarding is what makes this hard.** A capability can be read outright —
-/// `rng.int()` — but it can also be passed along without being named: calling a
-/// function that itself requires `Random` hands this one over, and there is no
-/// `Expr::Local` anywhere for that. A pass that looked only at reads would
-/// report every pass-through function in the standard library.
+/// `rng.int()` — or passed along without being named, since calling a function
+/// that itself requires `Random` hands this one over with no `Expr::Local`
+/// anywhere. A pass that looked only at reads would report every pass-through
+/// function in the standard library.
 ///
-/// Which labels a given call needs is the callee's row. The checker reads it —
-/// it has to, to do the row subtraction — and does not keep it.
-/// `Body::capabilities` is the nearest thing on hand and is not it: lowering
-/// records every label *in scope* at each call site, because lowering runs
-/// before the checker and cannot know which ones the callee wanted.
+/// Which labels a call needs is the callee's row, which the checker reads and
+/// does not keep. `Body::capabilities` is not it: lowering runs before the
+/// checker, so it records every label *in scope* at each call site rather than
+/// the ones the callee wanted.
 ///
-/// So this stays quiet whenever the body contains a call at all, which is the
-/// same conservatism [`is_inert`] uses and for the same reason. What it still
-/// catches is the case worth catching: a signature that demands a capability
-/// over a body that could not possibly use one.
+/// So this stays quiet whenever the body contains a call at all. What it still
+/// catches is the case worth catching — a signature demanding a capability over
+/// a body that could not possibly use one:
 ///
 /// ```khora
 /// fn area(r: Int) -> Int with { clock: Clock } { r * r }
 /// ```
 ///
 /// **To sharpen it**, `BodyTypes` needs a per-call-site record of the labels
-/// the callee required — the checker computes exactly that in
-/// `check/effects.rs` and drops it on the floor. With that, "used" becomes
-/// "read, or required by something this body calls", and the call-free
-/// restriction goes away. `lambda_captures` is the same fact published for a
-/// different consumer, and is the shape to copy.
+/// the callee required; `check/effects.rs` computes exactly that and drops it.
+/// With it, "used" becomes "read, or required by something this body calls" and
+/// the call-free restriction goes away. `lambda_captures` is the same fact
+/// published for a different consumer, and is the shape to copy.
 fn unused_capabilities(body: &Body, out: &mut Vec<Finding>) {
     if body.evidence.is_empty() {
         return;
@@ -216,21 +212,16 @@ fn is_inert(body: &Body, id: khora_hir::body::ExprId) -> bool {
 
 /// A statement that produces a `Result` and drops it on the floor.
 ///
-/// **This has bitten twice in this repository**, which is why it exists.
-/// `expr!` is a mark on the *effect row* and the identity on values, so
+/// **`expr!` is a mark on the effect row and the identity on values**, so
 /// `db.execute(sql, binds)!` as a statement does nothing about the `Result` it
-/// returns — the first draft of `tests/postgres.rs` reported a transaction as
-/// committed when the server had aborted it, and `ledger_service` printed
-/// "schema ready" against a database that was not running. Both looked
-/// finished. Both were reading the outer half of an answer and discarding the
-/// half that said what happened.
+/// returns. That has twice reported success against a database that had aborted
+/// the transaction or was not running at all: the outer half of the answer read
+/// fine, and the half saying what happened went on the floor.
 ///
-/// A lint rather than an error, because dropping one is **occasionally
-/// deliberate** and the language already has the way to say so: `std::db`'s
-/// rollback path drops the rollback's own `Result` on purpose, so that the
-/// engine's complaint about the rollback cannot hide the reason for it. Written
-/// `let _ = db.rollback();`, which says at the call site that the answer was
-/// considered.
+/// A lint rather than an error, because dropping one is occasionally deliberate
+/// and the language already says so with `let _ = db.rollback();` — which
+/// `std::db`'s rollback path uses, so the engine's complaint about the rollback
+/// cannot hide the reason for it.
 ///
 /// # What it sees
 ///
@@ -262,20 +253,16 @@ fn discarded_results(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
 
 /// A field assignment that closes a loop in the heap.
 ///
-/// **Why this is worth a lint at all.** Khora frees memory by counting
-/// references, which works for every shape of data except a loop: in
-/// `a.next = b; b.next = a` each object holds the other, so neither count ever
-/// reaches zero and the memory is never returned. `docs/design/memory.md` §4
-/// decided the policy — a tracing collector is ruled out by non-negotiable 5,
-/// so a cycle leaks and a weak reference is what breaks one — and then weak
-/// references were never built. Mutable fields shipped in phase 6.1, so the
-/// cycle compiles today and there is nothing to reach for instead.
+/// **Why this is worth a lint at all.** Reference counting works for every
+/// shape of data except a loop: in `a.next = b; b.next = a` each object holds
+/// the other, so neither count reaches zero. `docs/design/memory.md` §4 rules
+/// out a tracing collector and names weak references as what breaks a cycle —
+/// and weak references do not exist yet, while mutable fields do, so the cycle
+/// compiles today with nothing to reach for instead.
 ///
-/// That makes the failure **silent**: nothing is freed early, nothing is read
-/// after free, the memory is simply never returned. `memory.md` §4 predicts the
-/// reader it will catch — "a TypeScript or Go developer has never had to think
-/// about it and will need the diagnostic to be good" — and this is that
-/// diagnostic.
+/// The failure is **silent**: nothing is freed early, nothing is read after
+/// free, the memory is simply never returned. This is the diagnostic
+/// `memory.md` §4 asks for.
 ///
 /// # What it sees, and what it does not
 ///

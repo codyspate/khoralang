@@ -502,7 +502,6 @@ impl<'a> Checker<'a> {
         self.instantiations.insert(site, (key, type_args));
     }
 
-    /// The trait's signature for a method key, with `Self` still a parameter.
     /// The type of a block: its tail, or `Never` if anything in it diverges.
     ///
     /// A statement that diverges makes the whole block diverge — `{ return 0; }`

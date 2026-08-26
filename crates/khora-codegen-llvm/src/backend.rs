@@ -7,30 +7,26 @@
 //!
 //! # Symbol names
 //!
-//! Khora functions are emitted as `kh$<name>`. Two reasons, both boring and
-//! both load bearing:
+//! Khora functions are emitted as `kh$<module>$<name>` — `kh$std$fs$close`.
+//! Two reasons for the prefix, both load-bearing:
 //!
-//! - Khora's `main` is not C's `main`. The generated executable needs a C
-//!   `main` returning `i32`, and it calls the Khora one, so the two cannot
-//!   share a symbol.
+//! - Khora's `main` is not C's `main`. The executable needs a C `main`
+//!   returning `i32`, and it calls the Khora one, so the two cannot share a
+//!   symbol.
 //! - An unprefixed name would collide with the C library the executable links
-//!   against — a Khora `fn read` or `fn open` would quietly become someone
-//!   else's `read` or `open`.
+//!   against — a Khora `fn read` or `fn open` quietly becoming someone else's.
 //!
 //! `$` is legal in COFF and ELF symbols and is not something a C library
 //! exports, which makes the prefix collision-proof from both directions.
-//! Module-qualified mangling waits for cross-module linking; phase 2 programs
-//! are a single module.
 //!
 //! # Functions declared without a body
 //!
 //! `docs/errata.md` #5 makes a function's body optional, so `fn print(v: Int);`
-//! is a declaration with no definition. The backend treats those as **externs**
-//! and emits a call to the unmangled C symbol — which is what makes the runtime
-//! reachable from Khora source at all, and is how the leak test calls
-//! `khora_live_count`. `print` is the one exception: it is an intrinsic
-//! dispatched on its argument type, because there is no prelude yet to declare
-//! three differently-typed printers.
+//! is a declaration with no definition. Those are treated as **externs** and
+//! called by their unmangled C symbol, which is what makes the runtime reachable
+//! from Khora source at all. `print` is the exception: an intrinsic dispatched
+//! on its argument type, since there is no prelude to declare three
+//! differently-typed printers.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -68,23 +64,22 @@ const FEATURES: &str = "";
 
 /// Compiles one file to a native executable at `out`.
 ///
-/// Type checking comes first and is absolute: if `khora_types::diagnostics`
-/// reports anything, those errors are returned and nothing is emitted. Every
-/// stage below assumes a well-typed program, and would otherwise turn a type
-/// error into a miscompilation rather than a message.
+/// Type checking comes first and is absolute: anything `khora_types::diagnostics`
+/// reports is returned and nothing is emitted. Every stage below assumes a
+/// well-typed program and would otherwise turn a type error into a
+/// miscompilation.
 ///
-/// The returned errors are also how the backend reports what it cannot yet
-/// lower. Those carry the source range of the offending expression; failures in
-/// LLVM itself or in the linker have no source position and are reported
-/// against the start of the file.
+/// The same errors are how the backend reports what it cannot lower, carrying
+/// the source range of the offending expression. Failures in LLVM or the linker
+/// have no source position and are reported against the start of the file.
 ///
 /// # What it writes
 ///
-/// The executable at `out`, and the object it was linked from, at `out` with
-/// `.o` appended. The object is kept rather than cleaned up: when a generated
-/// program misbehaves, disassembling it is the first thing anyone does. Setting
-/// `KHORA_EMIT_LLVM` also writes the module as `.ll` beside them, before
-/// verification, so a module that fails to verify can still be read.
+/// The executable at `out`, and the object it was linked from at `out` with
+/// `.o` appended. The object is kept, because disassembling it is the first
+/// thing anyone does when a generated program misbehaves. `KHORA_EMIT_LLVM`
+/// also writes the module as `.ll`, *before* verification, so one that fails to
+/// verify can still be read.
 ///
 /// # What it needs on disk
 ///

@@ -13,7 +13,6 @@
 use super::*;
 
 impl<'a> Ctx<'a> {
-    /// `with { ledger: h } { .. }` — the labels bound over a region.
     /// The bindings of the `context` a `with Mock { .. }` names.
     ///
     /// A context is a named `with` row and nothing else, so installing one is
@@ -82,6 +81,7 @@ impl<'a> Ctx<'a> {
         Some(id)
     }
 
+    /// `with { ledger: h } { .. }` — the labels bound over a region.
     pub(super) fn lower_installation(
         &mut self,
         row: Vec<ast::RecordExprField>,

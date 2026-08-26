@@ -9,10 +9,6 @@
 use super::*;
 
 impl<'ctx> Backend<'ctx> {
-    /// One of LLVM's `*.with.overflow` intrinsics, declared on first use.
-    ///
-    /// Each returns `{ i64, i1 }` — the result and whether it wrapped — so the
-    /// check is a branch on a flag the same instruction already produced.
     /// The LLVM integer type of a given width.
     ///
     /// Only four widths exist, so this is a match rather than
@@ -27,6 +23,10 @@ impl<'ctx> Backend<'ctx> {
         }
     }
 
+    /// One of LLVM's `*.with.overflow` intrinsics, declared on first use.
+    ///
+    /// Each returns `{ i64, i1 }` — the result and whether it wrapped — so the
+    /// check is a branch on a flag the same instruction already produced.
     pub fn overflow_intrinsic(&mut self, name: &str, bits: u32) -> FunctionValue<'ctx> {
         if let Some(f) = self.module.get_function(name) {
             return f;
@@ -40,22 +40,6 @@ impl<'ctx> Backend<'ctx> {
         )
     }
 
-    /// A shim that calls a fallible function and hands back its tag.
-    ///
-    /// The runtime cannot call a fallible Khora function directly. Its return
-    /// is a 16-byte aggregate, and how one of those comes back is a target
-    /// decision that LLVM makes for `{ i32, i64 }` and rustc makes for a
-    /// `repr(C)` struct of the same shape — on x86-64 Windows they disagree,
-    /// and the disagreement is silent: the tag reads as zero and every failure
-    /// looks like a pass.
-    ///
-    /// So nothing but scalars crosses the boundary. The aggregate is taken
-    /// apart on *this* side, where both halves of the call are LLVM's and
-    /// agree by construction, and the runtime gets an `i32` back and a
-    /// pointer to write the payload through.
-    ///
-    /// `arity` is how many arguments the callee takes: a test takes none, a
-    /// fiber's thunk takes its closure. One shim per arity, not per callee.
     /// The shim `khora_shared_update` calls the change function through.
     ///
     /// The runtime cannot know `A`. It has the value as the one word every

@@ -34,21 +34,16 @@ pub fn tool(name: &str) -> Option<PathBuf> {
 /// The C driver used to link, wherever it is.
 ///
 /// **An installed toolchain has no `LLVM_SYS_221_PREFIX`**, and the linker is
-/// the one thing a downloaded `khora` cannot bring with it. Everything else it
-/// needs is in the tarball: LLVM is linked into the binary, the runtime
-/// archive sits beside it, and `std` is found the same way. Linking is not,
-/// because it needs the platform's own C runtime and system libraries, and the
-/// driver that knows where those live belongs to the platform.
+/// the one thing a downloaded `khora` cannot bring with it. Everything else is
+/// in the archive — LLVM is linked into the binary, the runtime archive sits
+/// beside it, `std` is found the same way — but linking needs the platform's
+/// own C runtime and system libraries, and the driver that knows where those
+/// live belongs to the platform. `rustup` makes the same trade.
 ///
-/// Every native toolchain makes this trade. `rustup` installs a compiler and
-/// then tells you to install MSVC Build Tools or a `cc`, for this reason and
-/// with this awkwardness.
-///
-/// The pinned prefix comes first, because a build from this tree should use
-/// the LLVM it was built against and nothing else; then `PATH`. On Windows the
-/// fallbacks are clang only — a MinGW `gcc` produces a different ABI from the
-/// MSVC-targeting objects the backend emits, and linking those is a failure a
-/// long way from its cause.
+/// The pinned prefix comes first, so a build from this tree uses the LLVM it
+/// was built against; then `PATH`. On Windows the fallbacks are clang only: a
+/// MinGW `gcc` produces a different ABI from the MSVC-targeting objects the
+/// backend emits, and linking those fails a long way from its cause.
 pub fn linker() -> Option<PathBuf> {
     if let Some(pinned) = tool("clang") {
         return Some(pinned);
@@ -226,28 +221,20 @@ fn cross_archive() -> &'static str {
     }
 }
 
-/// Links objects with the Khora runtime into an executable.
-///
-/// This is what [`crate::compile`] finishes with. The runtime archive goes
-/// *after* the objects and the system libraries after that: a static link
-/// resolves left to right, so an archive listed before its user contributes
-/// nothing.
 /// Runtime symbols a shared library publishes alongside its own exports.
 ///
-/// **A library needs a control surface, and it comes from the archive rather
-/// than from generated code.** The Khora functions get `dllexport` where they
-/// are built; these are Rust, in a static archive, and nothing in the emitted
-/// module refers to them — so on Windows they are absent from the export table
-/// and on ELF the archive member holding them is never pulled in at all.
-/// Naming them here fixes both, and naming them *explicitly* rather than
-/// exporting everything keeps the rest of the runtime — and the Rust standard
-/// library it carries — out of the published surface.
+/// **A library's control surface comes from the archive rather than from
+/// generated code.** Khora functions get `dllexport` where they are built;
+/// these are Rust, in a static archive, and nothing in the emitted module
+/// refers to them — so on Windows they are absent from the export table and on
+/// ELF the archive member holding them is never pulled in. Naming them
+/// *explicitly* rather than exporting everything keeps the rest of the runtime,
+/// and the Rust standard library it carries, out of the published surface.
 ///
-/// The first three are the contract: `docs/design/c-export.md` §8. The
-/// counters are diagnostic, and `docs/design/compatibility.md` is clear that
-/// allocation behaviour is not part of the language's promise — they are here
-/// because a host that has just been told a trap was contained is entitled to
-/// check that the memory actually came back.
+/// The first three are the contract (`docs/design/c-export.md` §8). The
+/// counters are diagnostic — allocation behaviour is not part of the language's
+/// promise — and are here because a host just told a trap was contained is
+/// entitled to check that the memory came back.
 const LIBRARY_CONTROL: &[&str] = &[
     "khora_set_trap_policy",
     "khora_trapped",
@@ -348,6 +335,11 @@ pub fn debug_info_wanted() -> bool {
     Profile::from_env().debug_info()
 }
 
+/// Links objects with the Khora runtime into an executable.
+///
+/// What [`crate::compile`] finishes with. The runtime archive goes *after* the
+/// objects and the system libraries after that: a static link resolves left to
+/// right, so an archive listed before its user contributes nothing.
 pub fn link_with_runtime(
     objects: &[&Path],
     out: &Path,

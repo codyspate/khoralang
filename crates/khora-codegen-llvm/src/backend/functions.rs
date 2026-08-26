@@ -9,7 +9,6 @@
 use super::*;
 
 impl<'ctx> Backend<'ctx> {
-    /// Declares a function the file defines, under its mangled name.
     /// The signature to compile `name` against.
     ///
     /// A specialization is registered under its mangled symbol with its type
@@ -41,6 +40,7 @@ impl<'ctx> Backend<'ctx> {
         self.instance_signatures.insert(symbol.to_string(), signature);
     }
 
+    /// Declares a function the file defines, under its mangled name.
     pub(super) fn declare_definition(&mut self, name: &str) {
         let Some(signature) = self.signature_of(name) else { return };
         let Some(ty) = self.function_type(&signature) else {

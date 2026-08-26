@@ -7,6 +7,11 @@
 
 use super::*;
 
+/// Signatures and ADT shapes for one file.
+///
+/// Read from the syntax tree rather than from `ItemMap`, which records what
+/// exists but not what shape it has. Keeping that in one place avoids growing a
+/// HIR type layer before generics force its shape.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TypeMap {
     pub signatures: HashMap<String, Signature>,
@@ -103,6 +108,35 @@ impl TypeMap {
         self.variant_of(home.as_ref(), name, name)
     }
 
+    /// Whether this file is the one that declares `ty`.
+    pub fn declares(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Applied { head, .. } => self.declares(head),
+            Type::Adt { name, .. } => self.declared_here.contains(name),
+            _ => false,
+        }
+    }
+
+    /// Whether this compiler can see what `ty` holds.
+    ///
+    /// A declared type with no body cannot be looked into, which is the one
+    /// place `impl Share` is allowed to speak. Everything else — a record, a
+    /// variant, a tuple, a primitive — answers for itself.
+    pub fn is_opaque(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Applied { head, .. } => self.is_opaque(head),
+            // Not `adts.contains_key`: an imported type reaches this map
+            // through its impls but not its declaration, so treating an absent
+            // name as *visible* would refuse `impl Share for Fibers` in every
+            // file but the declaring one. A name that exists nowhere is
+            // reported as unknown by resolution instead.
+            Type::Adt { name, .. } => {
+                self.bodies_of(name).next().is_none() && !self.effects.contains(name)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a value of this type may be handed to another fiber.
     ///
     /// False for anything that can be written, transitively: a record with a
@@ -122,44 +156,15 @@ impl TypeMap {
     /// for` literal, where the captures are visible, rather than at every spawn
     /// where they are not.
     ///
-    /// `docs/design/memory.md` §5a and `docs/design/sharing.md`.
     /// **A type the caller chooses answers only if it was asked to.** A generic
     /// function cannot see what `A` will be, so `A` is shareable exactly when
     /// the signature wrote `A: Share`. Otherwise
     /// `fn launder<A>(v: A) -> Fiber { Fiber::spawn(fn () => sink(v)) }` hands
     /// a caller's mutable record to a fiber with nothing to say about it.
-    ///
     /// `bounded` is the parameters of the enclosing signature carrying the
     /// bound, which the checker reads off `bounds_on`.
-    /// Whether this compiler can see what `ty` holds.
     ///
-    /// A declared type with no body cannot be looked into, which is the one
-    /// place `impl Share` is allowed to speak. Everything else — a record, a
-    /// variant, a tuple, a primitive — answers for itself.
-    /// Whether this file is the one that declares `ty`.
-    pub fn declares(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Applied { head, .. } => self.declares(head),
-            Type::Adt { name, .. } => self.declared_here.contains(name),
-            _ => false,
-        }
-    }
-
-    pub fn is_opaque(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Applied { head, .. } => self.is_opaque(head),
-            // Not `adts.contains_key`: an imported type reaches this map
-            // through its impls but not its declaration, so treating an absent
-            // name as *visible* would refuse `impl Share for Fibers` in every
-            // file but the declaring one. A name that exists nowhere is
-            // reported as unknown by resolution instead.
-            Type::Adt { name, .. } => {
-                self.bodies_of(name).next().is_none() && !self.effects.contains(name)
-            }
-            _ => false,
-        }
-    }
-
+    /// `docs/design/memory.md` §5a and `docs/design/sharing.md`.
     pub fn is_shareable(&self, ty: &Type, bounded: &[String]) -> bool {
         self.shareable(ty, &mut Vec::new(), bounded)
     }

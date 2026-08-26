@@ -36,11 +36,10 @@ pub(crate) fn export_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
         let Some(name) = f.name().and_then(|n| n.ident()) else { continue };
         let range = f.syntax().text_range();
 
-        // **`export` is not decoration here.** A C symbol is reachable by
+        // **`pub` is not decoration here.** A C symbol is reachable by
         // anything that links the library, so a private one is a contradiction
-        // rather than a narrower promise — and the reader who wrote `extern fn`
-        // meaning "call out" and got "publish" deserves to be told which one
-        // this is.
+        // rather than a narrower promise — and a reader who wrote `extern fn`
+        // meaning "call out" and got "publish" deserves to be told which.
         if !f.is_exported() {
             found.push(HirError {
                 message: format!(

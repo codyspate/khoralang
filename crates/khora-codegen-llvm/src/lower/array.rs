@@ -24,12 +24,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
-    /// The pointer to element `index`, with the bounds check in front of it.
-    ///
-    /// Checked rather than trusted, and a failure stops the program rather
-    /// than reading whatever is next in memory. Same reasoning as trapping on
-    /// integer overflow: a program that runs off its own array is wrong, and
-    /// the useful thing is to say where.
     /// How many bytes one element of `ty` occupies inside an array.
     ///
     /// Read from the *type* rather than from LLVM's data layout, because it is
@@ -75,6 +69,12 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(ok);
     }
 
+    /// The pointer to element `index`, with the bounds check in front of it.
+    ///
+    /// Checked rather than trusted, and a failure stops the program rather than
+    /// reading whatever is next in memory — the same reasoning as trapping on
+    /// integer overflow. A program that runs off its own array is wrong, and
+    /// the useful thing is to say where.
     pub(super) fn array_slot(
         &mut self,
         array: inkwell::values::PointerValue<'ctx>,

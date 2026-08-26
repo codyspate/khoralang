@@ -313,9 +313,8 @@ impl Formatter {
     }
 }
 
-/// `X` or `X as Y`, with internal whitespace normalized so sorting and
-/// deduplication compare like with like.
-/// One imported name as `X` or `X as Y`.
+/// One imported name as `X` or `X as Y`, with internal whitespace normalized
+/// so that sorting and deduplication compare like with like.
 ///
 /// **Descendants, not children.** A name is a `NAME_REF` node with the `IDENT`
 /// inside it, so the direct tokens of an `IMPORT_ITEM` are just the `as` — and
@@ -341,12 +340,6 @@ fn normalize_import_item(node: &SyntaxNode) -> String {
     }
 }
 
-/// Whether a token starting a line continues the line above rather than
-/// beginning something new. Continuations get one extra level of indent, which
-/// is what §6.2 means by a pipeline aligned to its expression.
-///
-/// This has to consider the parent, because the same token does both jobs:
-/// `with` continues a signature but *starts* a handler region.
 /// Whether the line this comment sits on will be indented as a continuation.
 ///
 /// A doc comment belongs to whatever comes next, so it has to be indented like
@@ -376,6 +369,13 @@ fn introduces_a_continuation(token: &SyntaxToken) -> bool {
     false
 }
 
+/// Whether a token starting a line continues the line above rather than
+/// beginning something new.
+///
+/// Continuations get one extra level of indent, which is what §6.2 means by a
+/// pipeline aligned to its expression. The parent matters, because the same
+/// token does both jobs: `with` continues a signature but *starts* a handler
+/// region.
 fn is_continuation(kind: SyntaxKind, parent: SyntaxKind) -> bool {
     match kind {
         // A pipe indents under what it continues -- except inside a flow,

@@ -299,13 +299,13 @@ fn an_imported_effect_can_be_installed() {
     ]);
 }
 
-// --- `export` on a method -----------------------------------------------
+// --- `pub` on a method ---------------------------------------------------
 
-/// **13.11.** A method without `export` belongs to its module.
+/// A method without `pub` belongs to its module.
 ///
-/// The keyword was parsed and read by nothing, so every method of an exported
-/// type was reachable from everywhere: `Map::rehash` and `List::take_first`
-/// were promises. `docs/design/std-surface.md` has the argument and the count.
+/// Without this the keyword is parsed and read by nothing, so every method of
+/// an exported type is reachable from everywhere and `Map::rehash` and
+/// `List::take_first` are promises. `docs/design/std-surface.md`.
 #[test]
 fn a_method_without_export_is_not_callable_from_another_module() {
     assert_reports(
@@ -372,8 +372,8 @@ fn the_refusal_says_what_to_write_and_where() {
     );
 }
 
-/// A module may always call its own, keyword or not. `export` is a statement
-/// about other modules.
+/// A module may always call its own, keyword or not: `pub` is a statement about
+/// other modules.
 #[test]
 fn a_module_may_call_its_own_unexported_methods() {
     assert_clean(&[(

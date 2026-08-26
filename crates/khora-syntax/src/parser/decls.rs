@@ -60,7 +60,7 @@ fn declaration(p: &mut Parser<'_>) {
             IDENT if p.nth_at_contextual(1, EXTERN_KW) => fn_decl(p),
             _ => p.err_recover(
                 "expected `type`, `trait`, `effect`, `context`, `fn`, `extern` or `const` \
-                 after `export`",
+                 after `pub`",
                 Parser::at_decl_start,
             ),
         },

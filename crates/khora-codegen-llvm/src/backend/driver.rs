@@ -160,24 +160,21 @@ pub(super) fn build(
     // Tests each get a fiber of their own, so only a `main` build can be
     // single-threaded.
     //
-    // **A library never is, and this is where that is decided.** The host
-    // chooses which of its threads calls an exported function, and it may
-    // choose several — so reference counting has to be atomic whether or not
-    // this program contains a `Fiber::spawn`. `Entry::Library` failing the
-    // comparison below is what makes that true; it is load-bearing rather than
-    // incidental, and getting it wrong is a data race in a refcount, which is
-    // memory corruption a long way from its cause.
+    // **A library never is.** The host chooses which of its threads calls an
+    // exported function and may choose several, so reference counting has to be
+    // atomic whether or not this program contains a `Fiber::spawn`.
+    // `Entry::Library` failing the comparison below is what makes that true.
     //
-    // **And a `main` build that publishes a symbol is a library too**, whatever
-    // it was built as. `emit_c_exports` runs for every entry point, so a
-    // program with an `pub extern fn` hands its address to whatever it is
-    // linked against — and a C library that takes a callback will call it on
-    // whichever thread it likes. That program never writes `Fiber::spawn`, so
-    // the spawn check alone said "single-threaded" and generated non-atomic
-    // counting for a function a foreign thread can enter. Found by the phase 13
-    // soundness audit; there is no way to observe it going wrong except as
-    // corruption long afterwards, which is why it is a condition here rather
-    // than a note somewhere.
+    // **And a `main` build that publishes a symbol is a library too.**
+    // `emit_c_exports` runs for every entry point, so a program with a
+    // `pub extern fn` hands its address to whatever it is linked against, and a
+    // C library taking a callback calls it on whichever thread it likes. The
+    // spawn check alone answers "single-threaded" for that program and emits
+    // non-atomic counting for a function a foreign thread can enter.
+    //
+    // Getting either wrong is a data race in a refcount, observable only as
+    // corruption long afterwards, which is why both are conditions here rather
+    // than notes somewhere.
     backend.single_threaded = counts_non_atomically(db, files, mono, entry_point);
 
     // One emitted function per *specialization*, not per source function: a

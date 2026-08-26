@@ -435,10 +435,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
-    /// Moves the incoming arguments into their slots.
-    ///
-    /// Parameters are owned by the callee, so nothing is `dup`ed here; the
-    /// matching `drop` is in the plan's releases for the outermost block.
     /// Records the evidence parameters this specialization receives.
     ///
     /// Capabilities follow the written parameters, in label order, which is
@@ -468,6 +464,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.scopes.push(owned);
     }
 
+    /// Moves the incoming arguments into their slots.
+    ///
+    /// Parameters are owned by the callee, so nothing is `dup`ed here; the
+    /// matching `drop` is in the plan's releases for the outermost block.
     fn bind_parameters(&mut self) {
         for (index, pat) in self.body.params.clone().into_iter().enumerate() {
             let Pat::Bind(local) = self.body.pat(pat).clone() else { continue };

@@ -1,18 +1,18 @@
 //! API documentation, read out of the syntax tree.
 //!
-//! Roadmap 13.15. Two halves that are deliberately separate: [`module_of`]
-//! turns one parsed file into a [`Module`], and [`markdown`] turns a `Module`
-//! into a page. Nothing here reads a file or writes one, which is what lets
-//! every test below be a string in and a string out.
+//! Two halves, deliberately separate: [`module_of`] turns one parsed file into
+//! a [`Module`], and [`markdown`] turns a `Module` into a page. Nothing here
+//! reads or writes a file, which is what lets every test below be a string in
+//! and a string out.
 //!
 //! # Why the syntax tree and not the HIR
 //!
 //! Because the HIR does not have the API in it. `khora_hir::collect_decl`
-//! returns early on `Decl::Impl` -- an impl has no name of its own and
-//! recording one would give two impls for the same type a spurious duplicate --
+//! returns early on `Decl::Impl` — an impl has no name of its own, and
+//! recording one would give two impls for the same type a spurious duplicate —
 //! so **every method in `std` is absent from `item_map`**. `std/core.kh`
-//! declares nine top-level functions and two hundred and thirty-seven methods,
-//! and a reference built on the HIR would document the nine.
+//! declares nine top-level functions and two hundred and thirty-seven methods;
+//! a reference built on the HIR would document the nine.
 //!
 //! The syntax tree has the other thing the HIR throws away, which is the
 //! comments. Rowan keeps every byte, so a `///` block is still sitting in the
@@ -22,17 +22,13 @@
 //!
 //! Exported items, and the members of exported types and traits.
 //!
-//! **`export` on a method means something now**, as of 13.11: a method without
-//! it may only be called by the module that declares it, so it is not part of
-//! anybody's API and does not belong in a reference. This used to ignore the
-//! keyword — it had to, because nothing read it and the two halves of the tree
-//! disagreed about writing it — and the note left here said this would keep
-//! answering correctly once it meant something. It does not, so it now filters
-//! on it.
+//! **`pub` on a method is read.** A method without it may only be called by
+//! the module that declares it, so it is not part of anybody's API and does not
+//! belong in a reference.
 //!
 //! **A trait impl's methods are not filtered.** `impl Show for Decimal` is
-//! reachable through `Show` wherever `Decimal` is, and the keyword is not read
-//! there either; what makes those public is the trait.
+//! reachable through `Show` wherever `Decimal` is, and what makes those public
+//! is the trait rather than the keyword.
 
 mod markdown;
 mod signature;
@@ -141,11 +137,11 @@ pub const SECTIONS: &[Kind] = &[
 
 /// Combines modules that share a path into one.
 ///
-/// **One module, several files.** `std::net::socket` is written three times --
-/// `socket_linux.kh`, `socket_macos.kh`, `socket_windows.kh` -- and exactly one
-/// of them is compiled. They are the same module offering the same API, so a
-/// reference that documented whichever file the directory walk happened to
-/// reach last would be a reference that changed when somebody renamed a file.
+/// **One module, several files.** `std::net::socket` is written three times —
+/// `socket_linux.kh`, `socket_macos.kh`, `socket_windows.kh` — and exactly one
+/// is compiled. They are the same module offering the same API, so documenting
+/// whichever the directory walk reached last would make the reference change
+/// when somebody renamed a file.
 ///
 /// Items are keyed by name and the earliest wins. Callers pass the modules in
 /// a stable order -- `doc` sorts by path -- so "earliest" is a fact about the

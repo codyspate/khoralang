@@ -5,9 +5,9 @@
 //! `for`, resolving expressions, taking patterns apart — is `body`, and builds
 //! on this.
 //!
-//! Everything here is a salsa query, per decision A3. Collecting items for one
-//! file does not read any other file, so editing a function body invalidates
-//! that file's item map and nothing else.
+//! Everything here is a salsa query (decision A3). Collecting items for one
+//! file reads no other file, so editing a body invalidates that file's item map
+//! and nothing else.
 //!
 //! # What resolution means
 //!
@@ -16,10 +16,8 @@
 //! type namespace, with locals deliberately not participating, while `.` is
 //! field-then-method on a value.
 //!
-//! Only the `::` half matters for phase 2 — module paths and variant
-//! constructors — because the vertical slice excludes records and typeclasses.
-//! Associated items report [`Resolution::Unsupported`] rather than being
-//! guessed at, which keeps the rule intact for when they arrive.
+//! An associated item nothing can resolve reports
+//! [`Resolution::Unsupported`] rather than being guessed at.
 
 pub mod body;
 pub mod derive;
@@ -219,23 +217,21 @@ pub struct ApiItem {
 
 /// What a module offers, with nothing in it that moves when a body is edited.
 ///
-/// **This type exists to be compared.** Salsa stops an invalidation from
-/// spreading when a recomputed value equals the old one, so the question that
-/// decides whether this compiler is incremental in practice is which values
-/// change after a keystroke. [`ItemMap`] changes constantly: it carries a
-/// [`TextRange`] per item, and inserting one character into the *first*
-/// function in a file shifts the span of every declaration below it. Anything
-/// downstream of `item_map` therefore re-ran on every edit -- the module graph,
-/// every importer's [`FileScope`], and every type check behind those.
+/// **This type exists to be compared.** Salsa stops an invalidation spreading
+/// when a recomputed value equals the old one, so what decides whether this
+/// compiler is incremental in practice is which values change after a
+/// keystroke. [`ItemMap`] changes constantly — it carries a [`TextRange`] per
+/// item, so inserting one character into the *first* function shifts the span
+/// of every declaration below it, and everything downstream re-runs.
 ///
-/// So the cross-file queries depend on this projection instead. It re-executes
-/// on each edit, costs a walk over the item list, and compares equal, which is
+/// The cross-file queries depend on this projection instead. It re-executes on
+/// each edit, costs a walk over the item list, and compares equal, which is
 /// where the invalidation stops. `item_map` keeps its spans for the things that
-/// genuinely need them: diagnostics, and eventually go-to-definition.
+/// need them: diagnostics, and go-to-definition.
 ///
-/// Measured on the two-file case in `khora-hir/tests/incremental.rs`: before
-/// this, a one-character body edit re-ran `module_graph` and the importing
-/// file's `file_scope`. After it, neither runs.
+/// Measured in `khora-hir/tests/incremental.rs`: a one-character body edit used
+/// to re-run `module_graph` and the importing file's `file_scope`, and now runs
+/// neither.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModuleApi {
     pub module: Option<ModulePath>,
@@ -717,12 +713,11 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
 /// `ToJson` gets its own helpers rather than `std::json`'s.
 ///
 /// Two places are searched there, because a generated body borrows its home
-/// module's whole vocabulary rather than only what that module declared.
-/// `object` and `member` are `std::json`'s own; `List` is one `std::json`
-/// itself imported, and a generated `List::Cons` chain needs it just as much.
-/// Looking through the home module's scope is what makes the second kind
-/// reachable without naming `std::core` here — this file should not know which
-/// module a list happens to live in.
+/// module's whole vocabulary rather than only what that module declared:
+/// `object` and `member` are `std::json`'s own, while `List` is one
+/// `std::json` itself imported and a generated `List::Cons` chain needs it just
+/// as much. Looking through the home module's scope is what reaches the second
+/// kind without naming `std::core` here.
 ///
 /// Nothing is brought that the file already has, so an author who imported
 /// `List` under an alias keeps their spelling and their alias.

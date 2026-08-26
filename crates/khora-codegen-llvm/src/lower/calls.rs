@@ -151,14 +151,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
-    /// `Region::open` and `Region::defer`.
-    ///
-    /// Intrinsics rather than externs for one reason: `defer` has to hand the
-    /// runtime the closure's *drop routine* alongside the closure. A closure's
-    /// routine is generated — one shared function switching on the site tag —
-    /// so nothing but the code generator knows the pointer, and a Khora
-    /// declaration has nowhere to write it. Everything else about a region is
-    /// an ordinary reference-counted object.
     /// Releases an argument, unless the plan passed it as a borrow.
     ///
     /// These intrinsics only *look at* their receiver — the runtime keeps the

@@ -1,7 +1,7 @@
 //! Function bodies, lowered.
 //!
-//! The second half of roadmap phase 2.1. Item collection answered "what exists
-//! and where"; this answers "what does it do".
+//! Item collection answers "what exists and where"; this answers "what does it
+//! do".
 //!
 //! # Why arenas
 //!
@@ -13,21 +13,18 @@
 //!
 //! # Where the decision tree went
 //!
-//! `docs/roadmap.md` 2.1 says `match` is compiled to a decision tree here. It
-//! is not, deliberately. Exhaustiveness and reachability (2.2) are computed by
+//! Not here, deliberately. Exhaustiveness and reachability are computed by
 //! Maranget's usefulness algorithm over a *pattern matrix*, and the decision
-//! tree is compiled from that same matrix. Building the tree first would mean
-//! reconstructing the matrix to check it, so HIR keeps the arms as written and
-//! the tree is compiled later, nearer codegen. This is what rustc does, and it
-//! is the reason the two consumers do not fight over one shape.
+//! tree is compiled from that same matrix — so building the tree first would
+//! mean reconstructing the matrix to check it. HIR keeps the arms as written
+//! and the tree is compiled later, nearer codegen, which is what rustc does and
+//! why the two consumers do not fight over one shape.
 //!
 //! # Scope
 //!
-//! Every expression form in the grammar lowers. There used to be an
-//! `Expr::Unsupported` for the ones that did not — the point of it was that a
-//! later phase could find every hole by grepping for one variant — and `catch`
-//! was the last of them. [`Expr::Missing`] still marks a hole a *parse* error
-//! left, which is a different thing and always will be.
+//! Every expression form in the grammar lowers, so there is no
+//! `Expr::Unsupported`. [`Expr::Missing`] marks a hole a *parse* error left,
+//! which is a different thing and always will be.
 
 use khora_db::{Db, SourceFile};
 use khora_syntax::ast::{self, AstNode};

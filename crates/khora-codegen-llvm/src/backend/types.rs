@@ -65,12 +65,6 @@ impl<'ctx> Backend<'ctx> {
         self.ctx.struct_type(&[self.ctx.i32_type().into(), self.ctx.i64_type().into()], false)
     }
 
-    /// The id of an error type, assigning one if this is the first sight of it.
-    ///
-    /// Encounter order within a single whole-program module, which is
-    /// deterministic for a given program and never crosses a module boundary
-    /// — there is no separate compilation yet, and when there is, this becomes
-    /// a link-time numbering rather than a lazy one.
     /// Releases an error whose type is not known where it is caught.
     ///
     /// `catch { _ => .. }` handles the whole row, tail and all, so the arm has
@@ -145,6 +139,12 @@ impl<'ctx> Backend<'ctx> {
         self.builder.build_return(None).expect("returning from the releaser");
     }
 
+    /// The id of an error type, assigning one if this is the first sight of it.
+    ///
+    /// Encounter order within a single whole-program module, which is
+    /// deterministic for a given program and never crosses a module boundary —
+    /// there is no separate compilation yet, and when there is, this becomes a
+    /// link-time numbering rather than a lazy one.
     pub fn error_id(&mut self, name: &str) -> u32 {
         if let Some(id) = self.error_ids.get(name) {
             return *id;
@@ -274,16 +274,10 @@ impl<'ctx> Backend<'ctx> {
     // ADTs
     // -----------------------------------------------------------------------
 
-    /// The variants of an ADT, in declaration order.
+    /// The variants of an ADT, in declaration order, by name.
     ///
-    /// Order is the whole point: a variant's index in this list *is* its tag,
-    /// which is what `match` switches on and what a constructor stores. It is
-    /// declaration order because `khora_types::type_map` pushes variants as it
-    /// reads them, and nothing between here and there sorts them.
-    /// The same, for a caller that knows which declaration it means.
-    ///
-    /// A `home` of `None` asks by name, which is all a caller holding a bare
-    /// spelling can do. Anything holding a [`Type`] should use
+    /// A `home` of `None` asks by name alone, which is all a caller holding a
+    /// bare spelling can do. Anything holding a [`Type`] should use
     /// [`Backend::variants_for`] instead: two modules may each declare a
     /// `Point`, and by name they are one. Errata 46.
     pub fn variants_in(
@@ -302,7 +296,12 @@ impl<'ctx> Backend<'ctx> {
             .collect()
     }
 
-    /// The variants of the declaration this type *is*.
+    /// The variants of the declaration this type *is*, in declaration order.
+    ///
+    /// Order is the whole point: a variant's index in this list *is* its tag,
+    /// which is what `match` switches on and what a constructor stores. It is
+    /// declaration order because `khora_types::type_map` pushes variants as it
+    /// reads them, and nothing between here and there sorts them.
     pub fn variants_for(&self, ty: &Type) -> Vec<VariantInfo> {
         match ty {
             Type::Adt { name, home, .. } => self.variants_in(home.as_ref(), name),
@@ -310,7 +309,6 @@ impl<'ctx> Backend<'ctx> {
         }
     }
 
-    /// A constructor's tag, and the fields it carries.
     /// A constructor's tag and fields, found by its type *and* its own name.
     ///
     /// The type is not optional. Case names repeat across a program, and a tag

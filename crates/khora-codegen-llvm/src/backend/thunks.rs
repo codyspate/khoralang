@@ -8,6 +8,20 @@
 use super::*;
 
 impl<'ctx> Backend<'ctx> {
+    /// A shim that calls a fallible function and hands back its tag.
+    ///
+    /// The runtime cannot call a fallible Khora function directly. Its return is
+    /// a 16-byte aggregate, and how one of those comes back is a target decision
+    /// LLVM makes for `{ i32, i64 }` and rustc makes for a `repr(C)` struct of
+    /// the same shape — on x86-64 Windows they disagree, silently: the tag reads
+    /// as zero and every failure looks like a pass.
+    ///
+    /// So the aggregate is taken apart on *this* side, where both halves of the
+    /// call are LLVM's and agree by construction, and the runtime gets an `i32`
+    /// back with a pointer to write the payload through.
+    ///
+    /// `arity` is how many arguments the callee takes: a test takes none, a
+    /// fiber's thunk takes its closure. One shim per arity, not per callee.
     pub fn tagged_trampoline(&mut self, arity: usize) -> FunctionValue<'ctx> {
         if let Some(f) = self.trampolines.get(&arity) {
             return *f;

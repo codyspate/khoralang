@@ -7,18 +7,12 @@
 use super::*;
 
 impl<'ctx> Lower<'_, 'ctx> {
-    /// The bit and wrapping operations on `Int`.
-    ///
-    /// Methods rather than operators, for now. `^`, `&`, `|`, `<<` and `>>`
-    /// are five new tokens and `>>` has to be told apart from the end of two
-    /// nested type arguments; none of that is hard and none of it is what a
-    /// hash function is waiting for.
-    ///
-    /// Wrapping arithmetic is here because ordinary arithmetic *traps* — see
-    /// `checked_arithmetic`. A hash, a checksum and a PRNG are the places that
-    /// genuinely want the other behaviour, and asking for it by name is how
-    /// the trap stays the default without being in the way.
     /// The primitive integer operations, at whatever width the owner is.
+    ///
+    /// Methods rather than operators, for now: `^`, `&`, `|`, `<<` and `>>` are
+    /// five new tokens, and `>>` has to be told apart from the end of two
+    /// nested type arguments. None of that is hard and none of it is what a
+    /// hash function is waiting for.
     ///
     /// Three families, and the reason each exists:
     ///
@@ -252,15 +246,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
-    /// Arithmetic that stops the program rather than wrapping.
-    ///
-    /// LLVM's `with.overflow` intrinsics return the result and a flag in one
-    /// go, so the check costs a branch the optimizer can usually see through
-    /// and never a second computation.
-    ///
-    /// Trapping in *every* build is the decision: a program that passes its
-    /// tests and then wraps in production is the failure worth this branch, and
-    /// two behaviours put the difference where it is most expensive to find.
     /// The width and signedness of an integer type, or `None` if it is not one.
     ///
     /// Every arithmetic instruction needs both: LLVM's types carry the width
@@ -296,6 +281,15 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.be.builder.build_unreachable().expect("sealing after an overflow");
     }
 
+    /// Arithmetic that stops the program rather than wrapping.
+    ///
+    /// LLVM's `with.overflow` intrinsics return the result and a flag in one
+    /// go, so the check costs a branch the optimizer can usually see through
+    /// and never a second computation.
+    ///
+    /// Trapping in *every* build is the decision: a program that passes its
+    /// tests and then wraps in production is the failure worth this branch, and
+    /// two behaviours put the difference where it is most expensive to find.
     pub(super) fn checked_arithmetic(
         &mut self,
         intrinsic: &str,

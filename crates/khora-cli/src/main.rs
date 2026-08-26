@@ -1213,9 +1213,7 @@ fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
     }
 }
 
-/// The `khora.toml` governing `start`: in it if it is a directory, beside it if
-/// it is a file, or in the nearest ancestor of either.
-/// `khora doc` -- a page per module, out of the comments already in the source.
+/// A page per module, out of the comments already in the source.
 ///
 /// **The output directory is owned by this command.** Everything it produces is
 /// a pure function of the input -- no timestamp, no version, no path from this
@@ -1469,6 +1467,8 @@ fn looks_like_a_url(argument: &str) -> bool {
         || argument.starts_with('/')
 }
 
+/// The `khora.toml` governing `start`: in it if it is a directory, beside it if
+/// it is a file, or in the nearest ancestor of either.
 fn nearest_manifest(start: &Path) -> Option<PathBuf> {
     let mut here: Option<&Path> = Some(if start.is_dir() {
         start

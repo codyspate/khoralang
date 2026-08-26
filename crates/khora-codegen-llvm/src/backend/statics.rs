@@ -9,11 +9,6 @@
 use super::*;
 
 impl<'ctx> Backend<'ctx> {
-    /// One `String` object per distinct literal, in static storage.
-    ///
-    /// See [`Lower::string_literal`] for why. Cached by text, so a literal
-    /// repeated across a program is one object however many times it is
-    /// written.
     /// The one object a field-less constructor ever produces.
     ///
     /// A case with no fields is entirely described by its tag, so every
@@ -61,6 +56,11 @@ impl<'ctx> Backend<'ctx> {
         pointer
     }
 
+    /// One `String` object per distinct literal, in static storage.
+    ///
+    /// See [`Lower::string_literal`] for why. Cached by text, so a literal
+    /// repeated across a program is one object however many times it is
+    /// written.
     pub fn static_string(&mut self, text: &str) -> PointerValue<'ctx> {
         if let Some(found) = self.static_strings.get(text) {
             return *found;

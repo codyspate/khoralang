@@ -435,11 +435,6 @@ impl VariantInfo {
     }
 }
 
-/// Signatures and ADT shapes for one file.
-///
-/// Read from the syntax tree rather than from `ItemMap`, which records what
-/// exists but not what shape it has. Keeping that in one place here avoids
-/// growing a HIR type layer before generics force its shape.
 /// The marker trait that answers for a type the compiler cannot see inside.
 ///
 /// `docs/design/sharing.md`.

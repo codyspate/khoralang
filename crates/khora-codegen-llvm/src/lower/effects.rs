@@ -8,6 +8,14 @@
 use super::*;
 
 impl<'ctx> Lower<'_, 'ctx> {
+    /// `Region::open` and `Region::defer`.
+    ///
+    /// Intrinsics rather than externs for one reason: `defer` has to hand the
+    /// runtime the closure's *drop routine* alongside the closure. That routine
+    /// is generated — one shared function switching on the site tag — so
+    /// nothing but the code generator knows the pointer, and a Khora
+    /// declaration has nowhere to write it. Everything else about a region is
+    /// an ordinary reference-counted object.
     pub(super) fn region_intrinsic(
         &mut self,
         name: &str,
