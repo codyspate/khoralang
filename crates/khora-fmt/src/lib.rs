@@ -29,6 +29,8 @@
 //! mid-edit, while a brace is unbalanced, is exactly when a formatter can do the
 //! most damage.
 
+#![deny(missing_docs)]
+
 use khora_syntax::{
     ParseError, SyntaxElement, SyntaxKind, SyntaxKind::*, SyntaxNode, SyntaxToken,
 };

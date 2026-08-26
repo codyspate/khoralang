@@ -30,6 +30,8 @@
 //! one process model; the difference is small and silent, and getting it wrong
 //! means a client that hangs on the first message.
 
+#![deny(missing_docs)]
+
 mod surface;
 mod tools;
 
@@ -83,6 +85,7 @@ pub struct Server {
 }
 
 impl Server {
+    /// Reads the standard library's surface, so a tool call can answer from it.
     pub fn new() -> Result<Server> {
         Ok(Server { surface: tools::read_std_surface() })
     }

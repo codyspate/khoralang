@@ -17,6 +17,12 @@
 //! assert!(parse(&db, file).errors().is_empty());
 //! ```
 
+// No `#![deny(missing_docs)]` here, and it is not for want of trying.
+// `salsa::input` generates `new`, a getter and a setter per field into an
+// impl block of its own, and an `#[allow]` on the struct does not reach
+// them -- so the lint fires on five items that have nowhere to carry a doc
+// comment. Every crate that can take it has it; roadmap 15.1 has the rest.
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -29,8 +35,10 @@ pub use salsa::Setter;
 /// database, not in the handle.
 #[salsa::input(debug)]
 pub struct SourceFile {
+    /// Where it came from, and what a diagnostic names.
     #[returns(ref)]
     pub path: PathBuf,
+    /// Its whole contents. Editing this is what invalidates a query.
     #[returns(deref)]
     pub text: String,
 }
@@ -47,6 +55,7 @@ pub struct SourceFile {
 /// answers with the one that was created.
 #[salsa::input(debug, singleton)]
 pub struct SourceRoot {
+    /// Every file in the compilation, `std` included.
     #[returns(deref)]
     pub files: Vec<SourceFile>,
 }
@@ -104,6 +113,7 @@ impl QueryLog {
         self.0.lock().unwrap().len()
     }
 
+    /// Whether nothing has been recorded.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -115,6 +125,7 @@ impl std::fmt::Debug for QueryLog {
     }
 }
 
+/// The database every query hangs off.
 #[salsa::db]
 #[derive(Clone)]
 pub struct KhoraDatabase {
@@ -122,6 +133,7 @@ pub struct KhoraDatabase {
 }
 
 impl KhoraDatabase {
+    /// An empty database, recording nothing.
     pub fn new() -> Self {
         KhoraDatabase { storage: salsa::Storage::new(None) }
     }

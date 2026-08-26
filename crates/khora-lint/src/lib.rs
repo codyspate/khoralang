@@ -33,6 +33,8 @@
 //! has no opinion about how loud it is — the manifest is one project's policy
 //! and these are facts about a file.
 
+#![deny(missing_docs)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use khora_db::{Db, SourceFile};
@@ -45,7 +47,9 @@ use text_size::TextRange;
 pub struct Finding {
     /// The kebab-case name `[lints]` addresses.
     pub lint: &'static str,
+    /// What to tell the reader, in one sentence.
     pub message: String,
+    /// Where in the file to point.
     pub range: TextRange,
 }
 
@@ -54,8 +58,11 @@ pub struct Finding {
 pub const LINTS: &[&str] =
     &[DANGLING_EXPRESSION, DISCARDED_RESULT, REFERENCE_CYCLE, UNUSED_CAPABILITY];
 
+/// A capability a signature asks for that its body cannot be using.
 pub const UNUSED_CAPABILITY: &str = "unused-capability";
+/// A statement that computes something and does nothing with it.
 pub const DANGLING_EXPRESSION: &str = "dangling-expression";
+/// A statement that produces a `Result` and drops it on the floor.
 pub const DISCARDED_RESULT: &str = "discarded-result";
 /// Named for the problem rather than for the fix.
 ///

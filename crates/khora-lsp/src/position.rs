@@ -42,6 +42,7 @@ pub struct LineIndex {
 }
 
 impl LineIndex {
+    /// Indexes where every line of `text` starts.
     pub fn new(text: &str) -> Self {
         let mut starts = vec![0u32];
         for (offset, byte) in text.bytes().enumerate() {
@@ -52,6 +53,7 @@ impl LineIndex {
         LineIndex { starts, text: text.to_string() }
     }
 
+    /// The source this was built from.
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -76,6 +78,7 @@ impl LineIndex {
         Position { line: line as u32, character: character as u32 }
     }
 
+    /// A byte range as the protocol's line-and-column pair.
     pub fn range(&self, range: TextRange, encoding: Encoding) -> Range {
         Range {
             start: self.position(range.start(), encoding),

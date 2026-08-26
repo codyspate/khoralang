@@ -23,6 +23,7 @@ use khora_hir::{ItemKind, ModulePath};
 pub struct Entry {
     /// `std::core`, as written in an `import`.
     pub module: String,
+    /// What it is called, without its module.
     pub name: String,
     /// `function`, `type`, `trait`, `effect`, `constant`.
     pub kind: String,

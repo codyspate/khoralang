@@ -43,6 +43,7 @@ impl ContentHash {
         Self(hex.into())
     }
 
+    /// The whole digest, which is also the directory name in the store.
     pub fn as_str(&self) -> &str {
         &self.0
     }

@@ -1,9 +1,8 @@
 //! Native backend: HIR plus a reference-counting plan, to LLVM IR, to an
 //! executable.
 //!
-//! Roadmap phase 2.5, and the last stage of the vertical slice. [`compile`]
-//! takes a file that has already been parsed, lowered and checked by the
-//! crates upstream and produces a linked native binary.
+//! [`compile`] takes a file that has already been parsed, lowered and checked
+//! by the crates upstream, and produces a linked native binary.
 //!
 //! # What runs, and in what order
 //!
@@ -21,6 +20,8 @@
 //! installation at all, which keeps `cargo test` green for anyone working on
 //! the front end. Only [`toolchain`] is unconditional, because it is just path
 //! arithmetic. See `docs/llvm-setup.md`.
+
+#![deny(missing_docs)]
 
 pub mod toolchain;
 

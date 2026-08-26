@@ -19,6 +19,8 @@
 //! Nothing here compiles anything. It answers "which directories", and the
 //! compiler is handed the answer.
 
+#![deny(missing_docs)]
+
 mod fetch;
 mod hash;
 mod install;

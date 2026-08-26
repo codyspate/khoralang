@@ -17,17 +17,23 @@
 //!   |      ^
 //! ```
 
+#![deny(missing_docs)]
+
 use std::fmt::Write;
 use std::path::Path;
 
 use khora_hir::HirError;
 use khora_syntax::ParseError;
 
-/// How serious a diagnostic is. Parsing and type checking only produce errors
-/// today; the linter in phase 8.1 will produce the rest.
+/// How serious a diagnostic is.
+///
+/// Parsing and type checking produce only errors; `khora-lint` produces the
+/// warnings, at whichever level the project's `[lints]` table asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
+    /// The program will not be compiled.
     Error,
+    /// The program compiles, and somebody probably did not mean it.
     Warning,
 }
 
@@ -43,14 +49,18 @@ impl Severity {
 /// One diagnostic, resolved against its source.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
+    /// Whether this stops the build.
     pub severity: Severity,
+    /// What to tell the reader, in one sentence.
     pub message: String,
-    /// Byte offsets into the source.
+    /// Byte offset of the first character it points at.
     pub start: usize,
+    /// Byte offset one past the last.
     pub end: usize,
 }
 
 impl Diagnostic {
+    /// A parse error, as something with a severity and a span.
     pub fn from_parse_error(err: &ParseError) -> Diagnostic {
         Diagnostic {
             severity: Severity::Error,

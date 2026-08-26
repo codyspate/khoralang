@@ -46,6 +46,7 @@ impl Store {
         Ok(Self { root })
     }
 
+    /// The directory the store keeps its contents under.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -55,6 +56,7 @@ impl Store {
         self.root.join(hash.as_str())
     }
 
+    /// Whether these contents have already been fetched.
     pub fn contains(&self, hash: &ContentHash) -> bool {
         self.path_of(hash).is_dir()
     }

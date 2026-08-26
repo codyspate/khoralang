@@ -41,6 +41,8 @@
 //! assert!(error.with_file("khora.toml").to_string().starts_with("khora.toml:2:8: "));
 //! ```
 
+#![deny(missing_docs)]
+
 mod audit;
 mod error;
 mod model;

@@ -21,8 +21,11 @@ use std::fmt;
 /// A parsed semantic version.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
+    /// Incompatible changes.
     pub major: u64,
+    /// Compatible additions.
     pub minor: u64,
+    /// Compatible fixes.
     pub patch: u64,
     /// `-alpha.1`, without the dash. Ordering ignores it, which is wrong in
     /// general and irrelevant here: nothing compares versions yet, and when

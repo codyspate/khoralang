@@ -26,7 +26,10 @@ pub enum Source {
     /// commit id during resolution, so a lockfile never holds a name that can
     /// move.
     Git {
+        /// What `git clone` is given.
         url: String,
+        /// A branch, tag or commit, resolved to a full commit id on the way
+        /// into the lockfile.
         rev: String,
         /// Where in the repository the package is, if it is not the root.
         ///

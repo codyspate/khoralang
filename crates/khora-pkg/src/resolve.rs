@@ -33,11 +33,15 @@ use crate::store::Store;
 /// One package, resolved to a directory on disk.
 #[derive(Debug, Clone)]
 pub struct Resolved {
+    /// The name its manifest declares.
     pub name: String,
+    /// Where it came from, and what the lockfile records.
     pub source: Source,
     /// Where its files are: in the store for a git package, in place for a path
     /// one.
     pub directory: PathBuf,
+    /// What the contents hashed to. `None` for a path dependency, which is a
+    /// working copy and is expected to change.
     pub checksum: Option<ContentHash>,
     /// Which packages asked for it, for an error message that names them.
     pub requested_by: Vec<String>,
@@ -46,7 +50,9 @@ pub struct Resolved {
 /// Everything a build needs, plus the lockfile that records it.
 #[derive(Debug)]
 pub struct Resolution {
+    /// Everything the build compiles, dependencies included.
     pub packages: Vec<Resolved>,
+    /// What should be on disk after this resolution.
     pub lockfile: Lockfile,
     /// Whether the lockfile differs from the one that was read.
     pub changed: bool,

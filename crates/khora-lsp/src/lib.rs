@@ -28,6 +28,8 @@
 //! the roadmap's list and are not here — each needs an index this does not
 //! build yet, and a half-answering completion is worse than none.
 
+#![deny(missing_docs)]
+
 mod position;
 mod transport;
 

@@ -136,8 +136,10 @@ pub struct Permissions {
 /// `[permissions.fs]`: reading and writing are not the same grant.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct FsGrants {
+    /// Paths the package may read.
     #[serde(default)]
     pub read: Vec<String>,
+    /// Paths the package may write.
     #[serde(default)]
     pub write: Vec<String>,
 }
@@ -188,8 +190,11 @@ impl Permissions {
 /// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
+    /// The file system.
     Fs,
+    /// Outbound and inbound sockets.
     Network,
+    /// The process environment.
     Env,
 }
 

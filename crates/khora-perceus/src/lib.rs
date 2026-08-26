@@ -33,6 +33,8 @@
 //! The output is a side table keyed by [`ExprId`] and [`LocalId`] rather than a
 //! new IR, so code generation walks the same HIR the checker did.
 
+#![deny(missing_docs)]
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use khora_db::{Db, SourceFile};
@@ -98,10 +100,12 @@ pub struct RcPlan {
 }
 
 impl RcPlan {
+    /// Whether this expression's value has to be `dup`ed where it is used.
     pub fn needs_dup(&self, expr: ExprId) -> bool {
         self.dups.contains(&expr)
     }
 
+    /// Locals to release at the end of this block.
     pub fn drops_for(&self, block: ExprId) -> &[LocalId] {
         self.drops.get(&block).map(|v| v.as_slice()).unwrap_or(&[])
     }
@@ -121,6 +125,8 @@ impl RcPlan {
         self.reuse.get(&arm).copied()
     }
 
+    /// Whether this local holds a reference-counted object rather than a
+    /// machine word, and so has to be released at all.
     pub fn is_boxed(&self, local: LocalId) -> bool {
         self.boxed.contains(&local)
     }

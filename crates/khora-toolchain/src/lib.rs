@@ -38,6 +38,8 @@
 //! A default is a machine-wide preference and a pin is a project's
 //! requirement, so a pin always wins — see [`wanted_version`].
 
+#![deny(missing_docs)]
+
 pub mod install;
 
 use std::path::{Path, PathBuf};
@@ -94,6 +96,7 @@ pub fn toolchains_dir() -> Result<PathBuf> {
 /// One installed toolchain.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Toolchain {
+    /// The version it is filed under, which is the directory's name.
     pub version: String,
     /// The executable to run.
     pub binary: PathBuf,
@@ -158,7 +161,12 @@ pub enum Decision {
     /// Hand over to another toolchain.
     Handover(Toolchain),
     /// The pin names something not installed.
-    Missing { wanted: String, available: Vec<String> },
+    Missing {
+        /// The version the project asked for.
+        wanted: String,
+        /// What is installed instead, for the message.
+        available: Vec<String>,
+    },
 }
 
 /// Decides what a `khora` invocation should do about the project's pin.

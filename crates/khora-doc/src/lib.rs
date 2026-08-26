@@ -30,6 +30,8 @@
 //! reachable through `Show` wherever `Decimal` is, and what makes those public
 //! is the trait rather than the keyword.
 
+#![deny(missing_docs)]
+
 mod markdown;
 mod signature;
 
@@ -45,13 +47,16 @@ pub struct Module {
     pub path: Option<String>,
     /// The `//!` block, one entry per line, comment markers removed.
     pub doc: Vec<String>,
+    /// Everything the module documents, in the order it was declared.
     pub items: Vec<Item>,
 }
 
 /// A documented declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
+    /// What it is called. For an impl, the type or `Trait for Type`.
     pub name: String,
+    /// Which kind of declaration it is, which decides how it is headed.
     pub kind: Kind,
     /// The declaration as it should be read: a signature for a function, the
     /// whole declaration for a type. See `signature`.
@@ -63,13 +68,20 @@ pub struct Item {
     pub members: Vec<Item>,
 }
 
+/// What kind of declaration an [`Item`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    /// `type Decimal = ..`, record or variant.
     Type,
+    /// `trait Show { .. }`.
     Trait,
+    /// `effect Ledger { .. }`.
     Effect,
+    /// `context Testing { .. }`.
     Context,
+    /// A free function.
     Function,
+    /// `const MAX: Int = ..`.
     Const,
     /// `impl Writer { .. }` -- the methods of a type.
     Methods,

@@ -44,6 +44,8 @@ pub struct Lockfile {
     /// A reader that does not know a version refuses the file rather than
     /// guessing, because guessing here means building the wrong source.
     pub version: u32,
+    /// Every package the build resolved to, sorted by name so two runs over
+    /// unchanged input produce identical bytes.
     #[serde(default, rename = "package")]
     pub packages: Vec<LockedPackage>,
 }
@@ -54,6 +56,7 @@ pub const FORMAT_VERSION: u32 = 1;
 /// One resolved package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedPackage {
+    /// The name its own manifest declares, not the one that asked for it.
     pub name: String,
     /// `git`, or `path`.
     pub source: String,
@@ -75,6 +78,7 @@ pub struct LockedPackage {
 }
 
 impl Lockfile {
+    /// Reads a lockfile, refusing one written by a newer toolchain.
     pub fn read(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
@@ -94,6 +98,7 @@ impl Lockfile {
         Ok(parsed)
     }
 
+    /// Writes it, header comment and all.
     pub fn write(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self)
             .context("serialising the lockfile")?;
