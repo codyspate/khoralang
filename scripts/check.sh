@@ -23,12 +23,30 @@ step() {
     printf '\n=== %s\n' "$1"
 }
 
+# `cargo nextest` when it is installed, `cargo test` when it is not. The whole
+# workspace takes 116s under nextest against 271s under `cargo test`, because
+# `cargo test` runs one test *binary* at a time; the tests that cannot take a
+# process of their own are named in `.config/nextest.toml`. A fallback rather
+# than a requirement, so that a fresh clone can run this with nothing installed.
+#
+# The second command is the doctests, which nextest drives libtest binaries to
+# run and rustdoc does not produce: without it the examples in the
+# documentation stop being compiled at all.
+suite() {
+    if command -v cargo-nextest > /dev/null 2>&1; then
+        cargo nextest run "$@"
+        cargo test --workspace --doc
+    else
+        cargo test "$@"
+    fi
+}
+
 # The front end needs no LLVM, and this is where most mistakes are: the lexer,
 # the parser, name resolution, inference, rows, traits, exhaustiveness,
 # monomorphization, the formatter and the reference-counting plan. Twenty
 # seconds, and it catches anything that is not about emitting machine code.
 step 'front end'
-cargo test --workspace
+suite --workspace
 
 # `khora-types`'s own portability test lives in that run and checks `std` for
 # every target from this host, so a mistake in a platform file is caught here
@@ -44,7 +62,7 @@ fi
 # whole compiler and LLVM, and because the tests that matter most here start a
 # process and talk to it over a socket.
 step 'code generation, and programs that run'
-cargo test --workspace --features llvm
+suite --workspace --features llvm
 
 printf '\n%s\n' "native clean. \`sh scripts/baseline.sh\` adds clippy, the corpus check, \
 the reference applications and the HTTP conformance suite."

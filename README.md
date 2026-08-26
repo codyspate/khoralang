@@ -292,6 +292,18 @@ The script also writes `.cargo/config.toml` from the committed template. That
 file is not in the repository because both settings in it — where LLVM lives,
 and which Windows SDK to link against — differ per machine.
 
+**Optional, and it halves the wait:** [`cargo nextest`](https://nexte.st) runs
+the suite in 116 s where `cargo test` takes 271 s, because it gives each test a
+process rather than each test *binary* one. `scripts/check.sh` and
+`scripts/baseline.sh` use it when it is there and fall back when it is not, so
+this is a convenience rather than a prerequisite.
+
+```bash
+cargo install cargo-nextest
+cargo nextest run --workspace --features llvm
+cargo test --workspace --doc   # nextest cannot run doctests; four of them exist
+```
+
 ```bash
 cargo build -p khora-rt && cargo run -p khora-cli --features llvm -- build examples/core_demo
 ```

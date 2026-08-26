@@ -1,0 +1,30 @@
+# How `cargo nextest` should run this suite.
+#
+# nextest gives each test its own process and runs many at once, where
+# `cargo test` runs one binary at a time and parallelises only inside it. That
+# is most of the speed-up and it breaks two kinds of test here.
+
+# Tests that start a server and then measure how it behaves need the machine.
+# `a_server_under_more_load_than_it_can_serve_answers_everybody` asserts that
+# twenty-four clients overlapped; under nextest's default parallelism its
+# client threads were starved by sixteen other test processes and arrived one
+# at a time, so the server never saw two at once and the test correctly refused
+# to pass. The guard did its job — this is how it is given what it needs.
+[[profile.default.overrides]]
+filter = 'test(=a_server_under_more_load_than_it_can_serve_answers_everybody)'
+threads-required = 'num-test-threads'
+
+# Everything that binds a socket, kept to a few at a time. The ports are all
+# distinct, so this is not about collisions: it is that a dozen servers and
+# their clients on one machine make every one of them slow, and the timeouts
+# these tests use to notice a hung server start firing on a healthy one.
+[test-groups.networked]
+max-threads = 4
+
+[[profile.default.overrides]]
+filter = '''
+    binary(http) or binary(http_layers) or binary(http_client)
+    or binary(reference) or binary(sockets) or binary(tls)
+    or binary(postgres) or binary(load)
+'''
+test-group = 'networked'

@@ -49,10 +49,18 @@ fn machine_of(bytes: &[u8]) -> String {
 ///
 /// `KHORA_TARGET` is process-wide, so these run one at a time behind a lock —
 /// the same reasoning `portability.rs` gives for the same variable.
+///
+/// **A directory per triple, and the lock is not what makes that safe.** These
+/// wrote one `program.exe.o` between them and relied on the mutex above to
+/// keep them apart, which holds only while they are threads in one process.
+/// `cargo nextest` gives each test a process of its own, so the lock guarded
+/// nothing and the aarch64 test read the object the x86_64 test had written —
+/// a failure that says "ELF x86-64" where it wanted "ELF aarch64" and looks
+/// like a code generation bug. An in-process lock cannot guard a path.
 fn emitted_for(triple: &str) -> String {
     let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
 
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("targets");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("targets").join(triple);
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
     let exe = dir.join("program.exe");

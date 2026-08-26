@@ -69,7 +69,18 @@ jobs:
       # No LLVM here, so no `.cargo/config.toml` is needed — `setup-llvm.sh`
       # writes it and this job does not run it.
       - run: cargo build --workspace --all-targets
-      - run: cargo test --workspace
+
+      # A prebuilt binary, not `cargo install`: this is the difference between
+      # seconds and a compile of nextest itself on every runner. It pays for
+      # itself either way — the workspace suite is 116s under nextest against
+      # 271s under `cargo test`, which runs one test *binary* at a time.
+      # `.config/nextest.toml` names the tests that cannot have a process each.
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace
+      # nextest drives libtest binaries and rustdoc does not produce one, so
+      # the doctests are not in that run. Eleven seconds, and without it the
+      # examples in the documentation stop being compiled at all.
+      - run: cargo test --workspace --doc
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
       # No `cargo fmt --check`. This source is deliberately not rustfmt output —
@@ -152,7 +163,12 @@ jobs:
         run: |
           cargo rustc -p khora-rt --crate-type staticlib -- --print native-static-libs 2>&1             | grep -A2 native-static-libs || true
 
-      - run: cargo test --workspace --features llvm
+      # Installed but not run here: `scripts/baseline.sh` prefers nextest when
+      # it is on PATH and falls back to `cargo test` when it is not, so this
+      # step is what decides whether the baseline below takes 116s or 271s over
+      # the suite. The separate `cargo test --workspace --features llvm` that
+      # used to stand here was the baseline's own first step run twice.
+      - uses: taiki-e/install-action@nextest
 
       # The whole baseline: the suite, clippy, the corpus check and formatter
       # over `std`, every reference application built, and twelve HTTP

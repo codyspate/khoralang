@@ -43,7 +43,30 @@ step() {
 }
 
 step 'the native suite'
-cargo test --workspace --features llvm
+# `cargo nextest` when it is installed, and `cargo test` when it is not.
+#
+# **Measured, not assumed: 116s against 271s** for the same 1527 tests on the
+# same machine. `cargo test` runs one test *binary* at a time and parallelises
+# only within it, which is why 271 seconds of wall clock sat on 262 seconds of
+# in-binary time; nextest gives each test its own process and runs many at
+# once. `.config/nextest.toml` is where the tests that cannot take that are
+# named.
+#
+# A fallback rather than a requirement, because a contributor who has just
+# cloned this should be able to run the gate without installing anything.
+if command -v cargo-nextest > /dev/null 2>&1; then
+    cargo nextest run --workspace --features llvm --no-fail-fast
+    # **And the doctests, which nextest does not run and will not.** It drives
+    # libtest binaries; rustdoc compiles each example into a program of its own
+    # and has no such binary to drive. There are four, in `khora-db`,
+    # `khora-manifest` and `khora-syntax`, and none of them need LLVM — eleven
+    # seconds to not quietly lose the examples in the documentation.
+    cargo test --workspace --doc
+else
+    printf '  cargo-nextest is not installed; falling back to cargo test.\n'
+    printf '  It is about 2.3x slower: cargo install cargo-nextest\n'
+    cargo test --workspace --features llvm
+fi
 
 step 'clippy, all targets'
 cargo clippy --workspace --features llvm --all-targets -- -D warnings

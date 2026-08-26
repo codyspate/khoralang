@@ -4121,6 +4121,8 @@ Measured rather than felt:
 | `cargo test --workspace --features llvm` | **271 s**, 1507 tests, 133 test binaries |
 | of which `khora-codegen-llvm` | **~247 s — 94%** |
 | `sh scripts/baseline.sh` | **319 s** on a warm tree |
+| the same suite under `cargo nextest` | **116 s** — 14.31, done |
+| `sh scripts/baseline.sh` since | **~175 s** |
 
 The baseline is the suite plus clippy, the corpus check, the formatter check,
 the generated reference check, the package tests, four example builds, twelve
@@ -4147,15 +4149,46 @@ process start and a link of the test harness.
 | --- | --- | --- |
 | 14.28 | **One database per test binary** | `std` parsed and checked once instead of once per test. No product change, and it is what A3 bought |
 | 14.29 | **Stop before the linker when nothing is run** | `Stop::AtVerification` already exists. A test asserting that something compiles pays for a `clang` invocation it never uses |
-| 14.30 | **Fewer, larger test binaries** | Modules inside one binary rather than 51 binaries cargo starts sequentially. Removes process starts and lets the existing in-binary parallelism cover more tests |
-| 14.31 | **`cargo nextest`** | Runs binaries in parallel. Configuration, not code, and the sequential-binaries finding says it is the cheapest item here |
+| 14.30 | ~~**Fewer, larger test binaries**~~ | **Dropped by 14.31.** The rationale was that cargo starts binaries sequentially. Under nextest it does not, and merging binaries would only take work away from the scheduler |
+| 14.31 | ✅ **`cargo nextest`** | **271 s → 116 s.** See below |
 | 14.32 | **Split the baseline** | A fast gate and a full gate, the way `scripts/check.sh` and `scripts/baseline.sh` already almost are. The receipt from 13.20 makes "which one passed" a fact rather than a memory |
 
-**Measure each before doing it.** Which of the four dominates is not known —
-the 94% figure says *where*, not *why*, and 14.28 and 14.31 could plausibly
-each be most of it. The instrumentation is one timing harness and it should
-come first, because the alternative is optimising the part that was easiest to
-see.
+**Measure each before doing it.** Which of the rest dominates is not known —
+the 94% figure says *where*, not *why*. The instrumentation is one timing
+harness and it should come first, because the alternative is optimising the
+part that was easiest to see.
+
+#### 14.31, done: 271 s → 116 s
+
+The cheapest item was the cheapest item. `.config/nextest.toml` and two lines
+in each of `scripts/baseline.sh`, `scripts/check.sh` and `.github/workflows/ci.yml`
+— no product code — for 1527 tests in **116 s against 271 s**, stable over three
+runs (110, 112, 116). The sequential-binaries reading was right: nextest gives
+each test a process rather than each *binary* one, so the 262 s of in-binary
+time now overlaps.
+
+Three things came out of it that are worth keeping:
+
+**It found a real bug.** `crates/khora-codegen-llvm/tests/targets.rs` guarded a
+shared `program.exe.o` with a `Mutex` — which holds only while the contenders
+are threads in one process. Given a process each, the aarch64 test read the
+object the x86_64 test had just written, and failed saying "ELF x86-64" where
+it wanted aarch64: a filesystem race wearing a codegen bug's clothes. An
+in-process lock cannot guard a path, and it is now a directory per triple.
+
+**A test that must have the machine to itself has to say so.**
+`a_server_under_more_load_than_it_can_serve_answers_everybody` correctly failed
+under the new scheduler — its own guard reported `peaks: [1,1,1,…]`, "the load
+never actually overlapped", because it was sharing cores with 20 other test
+processes. `threads-required = 'num-test-threads'` is how that is declared, and
+the networked binaries are capped at four at a time in the same file.
+
+**Doctests are not in the run and never will be.** nextest drives libtest
+binaries; rustdoc compiles each example into a program of its own and produces
+no such binary. There are four, in `khora-db`, `khora-manifest` and
+`khora-syntax`. Every place that switched now runs `cargo test --workspace
+--doc` beside it — eleven seconds — because a speed-up that silently stops
+compiling the examples in the documentation is not a speed-up.
 
 ### What this phase deliberately does not include
 
