@@ -576,6 +576,7 @@ dependencies = [
  "khora-codegen-llvm",
  "khora-db",
  "khora-diagnostics",
+ "khora-doc",
  "khora-fmt",
  "khora-hir",
  "khora-lint",
@@ -617,6 +618,13 @@ name = "khora-diagnostics"
 version = "0.1.0"
 dependencies = [
  "khora-hir",
+ "khora-syntax",
+]
+
+[[package]]
+name = "khora-doc"
+version = "0.1.0"
+dependencies = [
  "khora-syntax",
 ]
 

@@ -2,26 +2,26 @@ module std::fs;
 
 import std::core::{Array, Ptr, Region, Scope, acquire};
 
-// The file system, over ISO C.
-//
-// Two layers, and the split is the point.
-//
-// *Inside* this module are the foreign declarations — `fopen`, `fread` and the
-// rest — and the code that gets their conventions right: a null `FILE *` means
-// the open failed, a short read means something went wrong, and a file has to
-// be closed on the path where it failed as much as on the path where it did
-// not. That code is not exported. This module is the trusted boundary, in the
-// same way that Rust's standard library is the place `unsafe` lives so that
-// nothing above it needs to.
-//
-// *Outside* is the `Fs` effect, and nothing reaches a file without one. That
-// buys two things at once. It is a **permission**: a function that reads a file
-// says so in its signature, all the way up to the `main` that decided to allow
-// it. And it is a **seam**: a test installs its own handler and the code under
-// test cannot tell, which is the thing a file system mock is usually a poor
-// imitation of.
-//
-// `docs/design/ffi.md` for the boundary rules this obeys.
+//! The file system, over ISO C.
+//!
+//! Two layers, and the split is the point.
+//!
+//! *Inside* this module are the foreign declarations — `fopen`, `fread` and the
+//! rest — and the code that gets their conventions right: a null `FILE *` means
+//! the open failed, a short read means something went wrong, and a file has to
+//! be closed on the path where it failed as much as on the path where it did
+//! not. That code is not exported. This module is the trusted boundary, in the
+//! same way that Rust's standard library is the place `unsafe` lives so that
+//! nothing above it needs to.
+//!
+//! *Outside* is the `Fs` effect, and nothing reaches a file without one. That
+//! buys two things at once. It is a **permission**: a function that reads a file
+//! says so in its signature, all the way up to the `main` that decided to allow
+//! it. And it is a **seam**: a test installs its own handler and the code under
+//! test cannot tell, which is the thing a file system mock is usually a poor
+//! imitation of.
+//!
+//! `docs/design/ffi.md` for the boundary rules this obeys.
 
 // ---------------------------------------------------------------------------
 // The interface

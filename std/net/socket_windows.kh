@@ -2,20 +2,12 @@ module std::net::socket;
 
 import std::core::{Array, Ptr};
 
-// Sockets, on Windows.
-//
-// The Berkeley names with Winsock's differences: `WSAStartup` before anything
-// else, `closesocket` rather than `close`, and a `SOCKET` that is a pointer-
-// sized handle rather than a small `int`. `socket_posix.kh` is the same module
-// for everywhere else, and only one of the two is ever in a build —
-// `docs/design/permissions.md` is unrelated but `khora_db::selected_for_target`
-// is the rule.
-//
-// **No struct crosses the boundary.** `bind` wants a `sockaddr_in`, which is
-// sixteen bytes; those sixteen bytes are laid out here, in an `Array<U8>`, and
-// lent as a `Ptr` for exactly the duration of the call. That is what
-// `docs/design/ffi.md` says a pointer is for, and it is why binding a socket
-// needs nothing added to the runtime.
+//! # On Windows
+//!
+//! The Berkeley names with Winsock's differences: `WSAStartup` before anything
+//! else -- which is what `start` is for, and why it is not a no-op here --
+//! `closesocket` rather than `close`, and a `SOCKET` that is a pointer-sized
+//! handle rather than a small `int`.
 
 extern fn WSAStartup(version: U16, data: Ptr) -> I32;
 extern fn socket(family: I32, kind: I32, protocol: I32) -> Int;

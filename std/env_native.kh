@@ -2,25 +2,25 @@ module std::env;
 
 import std::core::{Array, List, Option, Ptr};
 
-// What a program was told, and what time it is.
-//
-// The smallest thing that separates a program from a demo: until this existed,
-// nothing a Khora program did could depend on anything outside its own source.
-// Every path, every port, every setting was compiled in.
-//
-// Two capabilities, and the split is the one `docs/design/permissions.md`
-// draws. `Env` is what the process was handed — its arguments and its
-// variables — and `Clock` is the time, which is a different kind of access and
-// a different thing to want to deny a dependency.
-//
-// The C side is almost all ISO C: `getenv`, `strlen`, `memcpy`. There are two
-// exceptions, and both are things C has no portable answer for. The argument
-// vector is not returned by any C function, because it arrives through `main`
-// and is gone — so the generated `main` hands it to the runtime, and
-// `khora_arg` gives it back. And the clock is milliseconds, which is
-// `GetSystemTimeAsFileTime` on Windows and `clock_gettime` on Unix; ISO C's
-// `time` is whole seconds and there is nothing finer that is spelled the same
-// everywhere. The runtime already knows which target it was built for.
+//! What a program was told, and what time it is.
+//!
+//! The smallest thing that separates a program from a demo: until this existed,
+//! nothing a Khora program did could depend on anything outside its own source.
+//! Every path, every port, every setting was compiled in.
+//!
+//! Two capabilities, and the split is the one `docs/design/permissions.md`
+//! draws. `Env` is what the process was handed — its arguments and its
+//! variables — and `Clock` is the time, which is a different kind of access and
+//! a different thing to want to deny a dependency.
+//!
+//! The C side is almost all ISO C: `getenv`, `strlen`, `memcpy`. There are two
+//! exceptions, and both are things C has no portable answer for. The argument
+//! vector is not returned by any C function, because it arrives through `main`
+//! and is gone — so the generated `main` hands it to the runtime, and
+//! `khora_arg` gives it back. And the clock is milliseconds, which is
+//! `GetSystemTimeAsFileTime` on Windows and `clock_gettime` on Unix; ISO C's
+//! `time` is whole seconds and there is nothing finer that is spelled the same
+//! everywhere. The runtime already knows which target it was built for.
 
 extern fn getenv(name: Ptr) -> Ptr;
 extern fn strlen(text: Ptr) -> Int;

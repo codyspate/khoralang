@@ -2,19 +2,19 @@ module std::json;
 
 import std::core::{Array, Chain, List, Map, Option, Result, Show};
 
-// JSON, written in Khora.
-//
-// Nothing here is an intrinsic and nothing here is foreign: the encoder walks
-// bytes with `String::byte` and the parser is recursive descent over the same.
-// That is the point as much as the module is — if reading a config file needed
-// the compiler's help, so would every format above it.
-//
-// **Runs of ordinary text are copied with `String::slice`, never byte by
-// byte.** A lone continuation byte is not valid UTF-8, so `String::from_bytes`
-// on one stops the program; slicing at an escape is safe because every byte
-// JSON escapes is below 128 and so never appears inside a multi-byte
-// character. Getting that wrong is a crash on the first non-English string,
-// which is exactly the input nobody tests with.
+//! JSON, written in Khora.
+//!
+//! Nothing here is an intrinsic and nothing here is foreign: the encoder walks
+//! bytes with `String::byte` and the parser is recursive descent over the same.
+//! That is the point as much as the module is — if reading a config file needed
+//! the compiler's help, so would every format above it.
+//!
+//! **Runs of ordinary text are copied with `String::slice`, never byte by
+//! byte.** A lone continuation byte is not valid UTF-8, so `String::from_bytes`
+//! on one stops the program; slicing at an escape is safe because every byte
+//! JSON escapes is below 128 and so never appears inside a multi-byte
+//! character. Getting that wrong is a crash on the first non-English string,
+//! which is exactly the input nobody tests with.
 
 /// A JSON value.
 ///

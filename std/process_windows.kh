@@ -2,22 +2,16 @@ module std::process::shell;
 
 import std::core::{Ptr};
 
-// Starting a shell, on Windows.
-//
-// **This file is not `std::process`.** It declares `std::process::shell`, and
-// `process.kh` — which is in every build — is the module a caller imports.
-// The name looks like the whole-module split `std/net/socket_windows.kh` does,
-// and it is deliberately not that: three calls differ between the targets, and
-// `khora_db::selected_for_target` says in as many words that when two targets
-// share ninety per cent of a file the ten per cent belongs behind a function
-// they both call. This is the ten per cent. `process_posix.kh` is its twin and
-// exports the same three names.
-//
-// The differences are all spelling and all Microsoft's. `popen` and `pclose`
-// are POSIX names that the UCRT does not export — a program that asks for them
-// gets `undefined symbol: popen` out of the linker, which is measured rather
-// than assumed — so the underscore-prefixed spellings are the only ones there
-// are. `system` is ISO C and is itself on both.
+//! # On Windows
+//!
+//! The differences are all spelling and all Microsoft's. `popen` and `pclose`
+//! are POSIX names that the UCRT does not export -- a program that asks for them
+//! gets `undefined symbol: popen` out of the linker, which is measured rather
+//! than assumed -- so the underscore-prefixed spellings are the only ones there
+//! are. `system` is ISO C and is itself on both.
+//!
+//! What comes back is an exit code already, so there is no wait status to take
+//! apart.
 
 extern fn _popen(command: Ptr, mode: Ptr) -> Ptr;
 extern fn _pclose(stream: Ptr) -> I32;

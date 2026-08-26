@@ -155,14 +155,17 @@ the `extern` boundary.
 | `khora-codegen-llvm` | LLVM backend behind the `llvm` feature. |
 | `khora-pkg` | Resolution, `khora.lock`, the content-addressed store, the task DAG. |
 | `khora-lint` | Lints that need types. |
+| `khora-doc` | The API reference, read out of the syntax tree's `///` and `//!` comments. |
 | `khora-lsp` | A language server over the same queries. |
 | `khora-toolchain` | Several Khora versions on one machine, and which one a project wants. |
 | `khora-mcp` | A Model Context Protocol server, so an agent can ask the compiler. |
-| `khora-cli` | `check`, `fmt`, `lex`, `parse`, `lsp`, `mcp`, `toolchain`, `test`, `bench`, and `build` with `--features llvm`. |
+| `khora-cli` | `check`, `fmt`, `doc`, `install`, `lex`, `parse`, `lsp`, `mcp`, `toolchain`, `test`, `bench`, and `build` with `--features llvm`. |
 
-1,101 tests pass, `clippy -D warnings` is clean, and `khora check` and
-`khora fmt --check` pass over all of `std/`, `examples/` and `bench/` — with
-no lint warnings anywhere in them.
+1,376 Rust tests and 18 Khora ones pass, `clippy -D warnings` is clean, and
+`khora check` and `khora fmt --check` pass over all of `std/`, `examples/`,
+`bench/` and `packages/` — with no lint warnings anywhere in them.
+`khora doc --check` holds the generated standard library reference to the
+source it was generated from.
 `sh scripts/baseline.sh` runs the lot, including twelve HTTP conformance checks
 against a real `curl`.
 

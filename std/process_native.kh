@@ -3,40 +3,40 @@ module std::process;
 import std::core::{Array, Ptr};
 import std::process::shell::{close_pipe, open_pipe, run};
 
-// Running another program.
-//
-// The last thing on the "not yet" list that a program needs before it can be
-// the thing that drives other things: a build script, a test runner, a
-// deployment step. Until this existed a Khora program could read a file, read
-// the clock and talk to a socket, and the one thing it could not do was ask
-// the machine it was already running on to do something.
-//
-// **It goes through a shell, and that is the honest headline rather than a
-// footnote.** ISO C offers `system` and `popen`, and both of them hand a
-// *command line* to `cmd.exe` or `/bin/sh` and let it decide what the words
-// mean. So the caller is not naming a program and its arguments; the caller is
-// writing a line of shell, and everything true of a line of shell is true
-// here — a path with a space in it needs quoting, a `&&` chains, a `>`
-// redirects, and a file name that came from somewhere untrusted can end the
-// command and start another one. That is a real difference from an
-// argv-based spawn and a reader deserves to be told rather than find out.
-//
-// What would fix it: `spawn(program, arguments)`, where the arguments are a
-// list Khora holds and no shell ever parses. That needs `CreateProcess` on
-// Windows and `posix_spawn` on Unix, neither of which can be reached from
-// here — `CreateProcess` takes a `STARTUPINFO` and returns a
-// `PROCESS_INFORMATION`, and errata 35 says no struct crosses the C ABI. It is
-// a runtime function, and it is the follow-up. When it arrives it joins this
-// effect as a third operation rather than replacing it, because the permission
-// a caller is granting — "may start another program" — is the same one either
-// way.
-//
-// **No quoting helper, deliberately.** An `escaped(argument)` would be the
-// obvious kindness and it would be a lie: `cmd.exe` and `sh` disagree about
-// backslashes, about carets, about what a quote inside a quote means, and a
-// helper that is subtly wrong on one host is worse than no helper at all
-// because it reads as though the problem has been handled. A caller building a
-// command line out of untrusted text should wait for `spawn`.
+//! Running another program.
+//!
+//! The last thing on the "not yet" list that a program needs before it can be
+//! the thing that drives other things: a build script, a test runner, a
+//! deployment step. Until this existed a Khora program could read a file, read
+//! the clock and talk to a socket, and the one thing it could not do was ask
+//! the machine it was already running on to do something.
+//!
+//! **It goes through a shell, and that is the honest headline rather than a
+//! footnote.** ISO C offers `system` and `popen`, and both of them hand a
+//! *command line* to `cmd.exe` or `/bin/sh` and let it decide what the words
+//! mean. So the caller is not naming a program and its arguments; the caller is
+//! writing a line of shell, and everything true of a line of shell is true
+//! here — a path with a space in it needs quoting, a `&&` chains, a `>`
+//! redirects, and a file name that came from somewhere untrusted can end the
+//! command and start another one. That is a real difference from an
+//! argv-based spawn and a reader deserves to be told rather than find out.
+//!
+//! What would fix it: `spawn(program, arguments)`, where the arguments are a
+//! list Khora holds and no shell ever parses. That needs `CreateProcess` on
+//! Windows and `posix_spawn` on Unix, neither of which can be reached from
+//! here — `CreateProcess` takes a `STARTUPINFO` and returns a
+//! `PROCESS_INFORMATION`, and errata 35 says no struct crosses the C ABI. It is
+//! a runtime function, and it is the follow-up. When it arrives it joins this
+//! effect as a third operation rather than replacing it, because the permission
+//! a caller is granting — "may start another program" — is the same one either
+//! way.
+//!
+//! **No quoting helper, deliberately.** An `escaped(argument)` would be the
+//! obvious kindness and it would be a lie: `cmd.exe` and `sh` disagree about
+//! backslashes, about carets, about what a quote inside a quote means, and a
+//! helper that is subtly wrong on one host is worse than no helper at all
+//! because it reads as though the problem has been handled. A caller building a
+//! command line out of untrusted text should wait for `spawn`.
 
 // ---------------------------------------------------------------------------
 // The interface

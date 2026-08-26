@@ -2,24 +2,19 @@ module std::net::socket;
 
 import std::core::{Array, Ptr};
 
-// Sockets, on macOS.
-//
-// The same module as `socket_linux.kh` and `socket_windows.kh`, and only one of
-// the three is ever in a build. Against the Linux one there are exactly two
-// differences, both of them below and both of them BSD's rather than Apple's:
-// a `sockaddr_in` begins with a length byte, and the socket-option numbers are
-// the BSD ones. Everything else — the calls, the sizes, the byte order — is the
-// same, which is why this file is otherwise a copy.
-//
-// **A copy, and that is the mechanism working as designed.** File suffixes
-// select a whole file (`khora-db::selected_for_target`), so a target that
-// differs in two lines still needs a file of its own. `_posix` exists for the
-// case where Linux and macOS agree completely, and sockets are not that case.
-// The cost is that a fix to one of these belongs in both.
-//
-// **No struct crosses the boundary.** `bind` wants a `sockaddr_in`, which is
-// sixteen bytes; those sixteen bytes are laid out here, in an `Array<U8>`, and
-// lent as a `Ptr` for exactly the duration of the call. `docs/design/ffi.md`.
+//! # On macOS
+//!
+//! Two differences from Linux, both of them BSD's rather than Apple's: a
+//! `sockaddr_in` begins with a length byte where the Linux one puts the low half
+//! of the family, and the socket-option numbers are the BSD ones. Everything
+//! else -- the calls, the sizes, the byte order -- is the same, which is why this
+//! file is otherwise a copy of `socket_linux.kh`.
+//!
+//! **A copy, and that is the mechanism working as designed.** A file suffix
+//! selects a whole file, so a target that differs in two lines still needs a
+//! file of its own. `_posix` exists for the case where Linux and macOS agree
+//! completely, and sockets are not that case. The cost is that a fix to one of
+//! these usually belongs in both.
 
 extern fn socket(family: I32, kind: I32, protocol: I32) -> I32;
 extern fn bind(handle: I32, address: Ptr, length: I32) -> I32;

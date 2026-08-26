@@ -3,6 +3,7 @@
 //! Only the front-end commands are wired up so far: everything past parsing
 //! reports honestly that it is not implemented rather than pretending.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -108,6 +109,25 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Generate API documentation from `///` and `//!` comments.
+    ///
+    /// One markdown page per module, written into `--out`. That directory is
+    /// *owned* by this command: pages for modules that no longer exist are
+    /// deleted, so a stale page cannot outlive the code it documented.
+    Doc {
+        /// One or more `.kh` files, or directories to walk.
+        #[arg(default_value = "std")]
+        paths: Vec<PathBuf>,
+        /// Where the pages go.
+        #[arg(short, long, default_value = "website/content/docs/stdlib/api")]
+        out: PathBuf,
+        /// Report what would change and write nothing.
+        ///
+        /// The exit status is what CI reads: non-zero means the checked-in
+        /// documentation no longer matches the source.
+        #[arg(long)]
+        check: bool,
+    },
     /// Add a package to this project, or fetch what it already asks for.
     ///
     /// A git URL is the whole address, because there is no registry to look a
@@ -179,6 +199,7 @@ fn run() -> Result<bool> {
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out, lib } => build(&path, out.as_deref(), lib),
         Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
+        Command::Doc { paths, out, check } => doc(&paths, &out, check),
         Command::Install { url, rev, subdir, path } => {
             install(url.as_deref(), &rev, subdir.as_deref(), &path).map(|()| true)
         }
@@ -1002,6 +1023,187 @@ fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
 
 /// The `khora.toml` governing `start`: in it if it is a directory, beside it if
 /// it is a file, or in the nearest ancestor of either.
+/// `khora doc` -- a page per module, out of the comments already in the source.
+///
+/// **The output directory is owned by this command.** Everything it produces is
+/// a pure function of the input -- no timestamp, no version, no path from this
+/// machine -- and anything under `out` that this run did not produce is
+/// deleted. Both halves are needed for the same reason: a generated tree is
+/// only reviewable if regenerating it after no change produces no diff, and a
+/// page for a module somebody deleted is worse than no page at all.
+fn doc(paths: &[PathBuf], out: &Path, check: bool) -> Result<bool> {
+    let files = documentable(paths)?;
+    if files.is_empty() {
+        anyhow::bail!("no `.kh` files found");
+    }
+
+    let mut read = Vec::new();
+    for path in &files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let parsed = khora_syntax::parse(&text);
+        if !parsed.ok() {
+            anyhow::bail!(
+                "{} does not parse, so there is nothing to document. Run `khora check` on it",
+                path.display()
+            );
+        }
+        read.push(khora_doc::module_of(&parsed.source_file()));
+    }
+
+    let mut pages: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let mut undocumented: Vec<String> = Vec::new();
+    for module in khora_doc::merge(read) {
+        let Some(module_path) = module.path.clone() else { continue };
+        if module.doc.is_empty() {
+            undocumented.push(module_path.clone());
+        }
+        // `std::net::socket` becomes `net/socket.md`, so the sidebar nests the
+        // way the module path does. The leading segment is the package and is
+        // already the name of the directory this writes into.
+        let mut segments: Vec<&str> = module_path.split("::").collect();
+        if segments.len() > 1 {
+            segments.remove(0);
+        }
+        let mut file = out.to_path_buf();
+        for segment in &segments[..segments.len() - 1] {
+            file.push(segment);
+        }
+        file.push(format!("{}.md", segments[segments.len() - 1]));
+        pages.insert(file, khora_doc::markdown(&module));
+    }
+
+    let stale = existing_pages(out).into_iter().filter(|p| !pages.contains_key(p));
+    let mut changed: Vec<String> = Vec::new();
+    for path in stale {
+        changed.push(format!("  delete {}", path.display()));
+        if !check {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    for (path, page) in &pages {
+        let before = std::fs::read_to_string(path).ok();
+        if before.as_deref() == Some(page.as_str()) {
+            continue;
+        }
+        changed.push(format!(
+            "  {} {}",
+            if before.is_some() { "update" } else { "write " },
+            path.display()
+        ));
+        if !check {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::write(path, page)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
+    }
+
+    if !check {
+        prune_empty(out);
+    }
+
+    for module in &undocumented {
+        eprintln!("warning: `{module}` has no `//!` block, so its page has no introduction");
+    }
+
+    if check {
+        if changed.is_empty() {
+            println!("{} page(s) up to date", pages.len());
+            return Ok(true);
+        }
+        println!("{} page(s) out of date:", changed.len());
+        for line in &changed {
+            println!("{line}");
+        }
+        println!("Run `khora doc` and commit the result.");
+        return Ok(false);
+    }
+
+    println!("{} page(s) in {}", pages.len(), out.display());
+    Ok(true)
+}
+
+/// The `.kh` files to document, which is not the same set a build would use.
+///
+/// Two differences from [`collect_sources`], and both matter.
+///
+/// **Every platform's files, not this machine's.** A build reads
+/// `socket_windows.kh` and never opens `socket_linux.kh`; documentation has to
+/// read all three, or the published reference for `std::net::socket` is
+/// whichever platform the person who ran the command happened to be on, and
+/// `--check` fails in CI for no reason anybody can see. [`khora_doc::merge`]
+/// puts the variants back together.
+///
+/// **No `std` and no dependencies.** A build needs them to resolve a name;
+/// documentation of `packages/postgres` that also emitted fifteen pages of
+/// `std` would be documenting something nobody asked about.
+fn documentable(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let roots: Vec<PathBuf> =
+        if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let mut out = Vec::new();
+    for root in &roots {
+        if root.is_dir() {
+            every_source(root, &mut out)?;
+        } else {
+            out.push(root.clone());
+        }
+    }
+    // Sorted, because `merge` settles a disagreement between two files of one
+    // module by taking the earlier, and "earlier" has to mean something stable.
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+fn every_source(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target" || n == ".git") {
+                continue;
+            }
+            every_source(&path, out)?;
+        } else if path.extension().is_some_and(|e| e == "kh") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Every `.md` already under `out`, so the ones this run did not write can go.
+fn existing_pages(out: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![out.to_path_buf()];
+    while let Some(here) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&here) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Removes directories left behind by a deleted module.
+fn prune_empty(out: &Path) {
+    let Ok(entries) = std::fs::read_dir(out) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            prune_empty(&path);
+            let _ = std::fs::remove_dir(&path);
+        }
+    }
+}
+
 /// `khora install [url]` -- add a dependency, or fetch the declared ones.
 ///
 /// Two commands sharing a name, and they belong together: both end at "the

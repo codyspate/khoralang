@@ -3265,7 +3265,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.12 | Production ecosystem | **Postgres under way.** Wire protocol, both query protocols, bound parameters, `Cell` mapping; no SCRAM, TLS or pool. HTTP client and OTLP not started |
 | 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
 | 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
-| 13.15 | User documentation | **Not started.** Every document in `docs/` is written for somebody building the compiler |
+| 13.15 | User documentation | **API reference generated; the rest not started.** `khora doc` writes a page per `std` module from `///` and `//!`, gated by `--check` in the baseline. Getting Started, the guide and the cookbook are the docs agent's `website/` work |
 | 13.16 | Editor and tooling | **Half.** 10.4's language server does diagnostics, formatting, completion, hover and navigation; nothing is packaged |
 | 13.17 | Diagnostics pass | **Ongoing, and it works.** Six misleading messages were found and fixed by *using* the language during phase 12. A corpus makes that systematic instead of incidental |
 | 13.18 | Reference applications | **Two of three.** `risk_analyzer` and `link_shortener` exist; neither uses Postgres or tracing, and there is no wasm one |
@@ -3438,6 +3438,57 @@ memory-safety bugs and the people in it did not sign up for that.
 
 That order is a plan and not a promise; evidence from any step can reorder what
 follows it.
+
+### 13.15 — a standard-library reference that cannot drift
+
+`khora doc` reads the `///` and `//!` comments already in the source and writes
+one markdown page per module into `website/content/docs/stdlib/api`. Fifteen
+pages, four thousand lines, out of prose that was already written and until now
+only reachable by opening `std/`. `docs/design/documentation.md` is the
+reasoning.
+
+**`//!` for module documentation**, which is the one language-surface change
+and the only one worth asking about. `///` was already the convention and
+needed no decision; module-level prose was the problem. Seventeen of eighteen
+`std` files opened with a `//` block explaining what the module is — the best
+writing in the project — and nothing distinguished it from the note two lines
+below saying which function is slow. The alternatives were publishing the first
+`//` block, which cannot tell documentation from an internal note, and skipping
+module prose, which leaves every page without the part a newcomer reads first.
+`//!` needed no lexer change, so the whole cost was rewriting seventeen
+headers, and what it buys is permanent: **`///` and `//!` are published, `//`
+is not**, visible to whoever is writing the line.
+
+**Read out of the syntax tree, because the HIR does not have the API in it.**
+`collect_decl` returns early on `Decl::Impl` — an impl has no name of its own,
+and recording one would give two impls for a type a spurious duplicate — so
+every method in `std` is absent from `item_map`. `std/core.kh` declares nine
+top-level functions and two hundred and thirty-seven methods; a reference built
+on the HIR would have documented the nine. The tree also still has the comments
+in it, which is the other half of why.
+
+**Gated rather than trusted.** The output is a pure function of the input — no
+timestamp, no version, no path from the machine that ran it — so regenerating
+after no change produces no diff, and `khora doc --check` runs in the baseline
+and fails when the checked-in pages no longer match the source. Without both
+halves the gate is unusable: a generated tree that always differs from itself
+fails on every commit and gets switched off within a week.
+
+**Two things writing it found.** Documentation cannot use the build's file
+list: a build reads `socket_windows.kh` and never opens `socket_linux.kh`, so
+the published page for `std::net::socket` would have been whichever platform
+generated it, and `--check` would fail in CI for a reason nobody could see.
+Documentation reads all three and merges them, keeping every distinct `//!`
+block — each one describes its own platform, and publishing the first as though
+it were the module's would have been Linux's notes on a Windows reader's page.
+The five platform files were rewritten so the merged pages read as one document
+with `# On Linux` / `# On macOS` / `# On Windows` sections, which also fixed a
+stale reference to a `socket_posix.kh` that does not exist.
+
+**Compiled examples are the next slice and were deliberately not done here.**
+A ` ```khora ` block in a doc comment is prose today, so an example can be
+wrong and nothing notices — which is the one remaining way this reference can
+lie to somebody. Cross-links are the slice after that.
 
 ### 13.12 — bound parameters, which was the driver's one unacceptable gap
 

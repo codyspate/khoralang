@@ -1,5 +1,29 @@
 module std::ai;
 
+//! Model inference as a capability, and tensors whose shapes are checked.
+//!
+//! Two things that look unrelated and are the same argument. A program that
+//! calls a model is a program that reaches the network, spends money and
+//! returns something different every time, so `LLMService` is an effect and
+//! the `with` clause says which functions can do it. A program that multiplies
+//! two tensors is a program where a shape mismatch is discoverable before it
+//! runs, so `Tensor` carries its device, its shape and its element type in
+//! the type and `matmul` unifies the shared dimension.
+//!
+//! # What this is not
+//!
+//! **Not an implementation of anything.** There is no HTTP here, no tokenizer,
+//! no BLAS. `docs/design/ecosystem.md` puts numeric kernels and vendor clients
+//! in packages for the reason it puts database drivers there: what belongs in
+//! `std` is the vocabulary two packages must agree on to exchange a value, and
+//! the effect declaration that lets a caller say what it needs without naming
+//! a provider.
+//!
+//! `extract` is the shape of the whole module. A caller writes
+//! `let report: Report = extract(prompt)!` and `LLMService` never learns that
+//! reports exist -- the handler answers `complete: Prompt -> String`, and
+//! `Extract` turns that string into the type the call site asked for.
+
 import std::core::{List, Option, Show};
 
 export type Device =

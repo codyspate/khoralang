@@ -1,36 +1,36 @@
 module std::decimal;
 
-// Exact decimal arithmetic, for the numbers that are counted rather than
-// measured.
-//
-// `docs/positioning.md` opens by saying Khora is well suited to financial
-// reconciliation, and until this module there was no way to write ten pence.
-// `Float` is IEEE and `docs/design/numbers.md` explains at length why it
-// implements neither `Eq` nor `Ord`: `0.1 + 0.2` is not `0.3` and never was.
-// A ledger cannot be built on a type whose equality is a trap.
-//
-// # What a `Decimal` is
-//
-// A scaled integer: `units` counted in steps of `10^-scale`. `Decimal::scaled(
-// 1, 2)` is one hundredth. That is the representation SQL `NUMERIC`, Java's
-// `BigDecimal` and .NET's `decimal` all approximate, and it is exact for
-// anything written in decimal — which is what money is.
-//
-// **Sixty-four bits of significand rather than a hundred and twenty-eight**,
-// which `numbers.md` names as the ideal. Khora has no 128-bit integer, and
-// adding one to carry a money type would be a large language change for a
-// small gain: eighteen significant digits is every currency amount anybody
-// transacts, to the cent, up to ninety-nine thousand trillion. The intermediate
-// of a division is done in 128 bits inside the runtime, where it is a Rust
-// `i128` and nobody has to see it.
-//
-// # What it does when it cannot answer
-//
-// It stops the program, like every other number in Khora. `numbers.md`
-// §"Overflow traps, in every build" argues that case and none of the argument
-// changes here: a total that silently wrapped is worse than one that never
-// arrived. Division is the exception, because a quotient usually has no exact
-// decimal form — so it takes the scale and the rounding to use, and says so.
+//! Exact decimal arithmetic, for the numbers that are counted rather than
+//! measured.
+//!
+//! `docs/positioning.md` opens by saying Khora is well suited to financial
+//! reconciliation, and until this module there was no way to write ten pence.
+//! `Float` is IEEE and `docs/design/numbers.md` explains at length why it
+//! implements neither `Eq` nor `Ord`: `0.1 + 0.2` is not `0.3` and never was.
+//! A ledger cannot be built on a type whose equality is a trap.
+//!
+//! # What a `Decimal` is
+//!
+//! A scaled integer: `units` counted in steps of `10^-scale`. `Decimal::scaled(
+//! 1, 2)` is one hundredth. That is the representation SQL `NUMERIC`, Java's
+//! `BigDecimal` and .NET's `decimal` all approximate, and it is exact for
+//! anything written in decimal — which is what money is.
+//!
+//! **Sixty-four bits of significand rather than a hundred and twenty-eight**,
+//! which `numbers.md` names as the ideal. Khora has no 128-bit integer, and
+//! adding one to carry a money type would be a large language change for a
+//! small gain: eighteen significant digits is every currency amount anybody
+//! transacts, to the cent, up to ninety-nine thousand trillion. The intermediate
+//! of a division is done in 128 bits inside the runtime, where it is a Rust
+//! `i128` and nobody has to see it.
+//!
+//! # What it does when it cannot answer
+//!
+//! It stops the program, like every other number in Khora. `numbers.md`
+//! §"Overflow traps, in every build" argues that case and none of the argument
+//! changes here: a total that silently wrapped is worse than one that never
+//! arrived. Division is the exception, because a quotient usually has no exact
+//! decimal form — so it takes the scale and the rounding to use, and says so.
 
 import std::core::{Eq, Option, Ord, Ordering, Show};
 

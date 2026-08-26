@@ -1,53 +1,53 @@
 module std::trace;
 
-// Spans, and the context that has to survive a fiber changing worker.
-//
-// A service that cannot be traced is not a candidate, and `docs/positioning.md`
-// claims Khora should be one wherever a team compares Go, backend TypeScript
-// or application Rust. Nothing in `std` emitted so much as a log line before
-// this module.
-//
-// # Why this is `std`'s and the exporter is not
-//
-// `docs/design/observability.md` argues it in full and the short version is
-// `ecosystem.md`'s rule: what belongs here is the layer everyone would
-// otherwise re-derive subtly wrong, and for tracing that is two things.
-//
-// **The vocabulary**, because two packages that disagree about what a span is
-// cannot compose into one trace. And **propagation** — a span's parent
-// surviving a spawn, a steal, a wake and a cancellation — which is not a
-// library concern at all: it is a property of the scheduler, and it is exactly
-// where every other ecosystem's tracing leaks.
-//
-// What is *not* here: OTLP, Datadog's protocol, Prometheus, batching, retry,
-// and every sampling policy beyond a head sampler. All of it is a vendor's
-// release cadence attached to a network protocol, which is the same argument
-// that keeps Postgres out of `std`.
-//
-// # The model is OpenTelemetry's, and that is a one-way decision
-//
-// Datadog spans are a service, a resource and flat string tags; OpenTelemetry
-// spans carry typed attributes, events and a status. Rendering OTel into
-// Datadog loses information and the reverse cannot be done at all — which is
-// why Datadog ships an OTel exporter and not the other way round. So the model
-// is the superset and the narrower vendor drops what it cannot hold.
-//
-// # What makes this cheap in Khora specifically
-//
-// A capability is an interception point. Instrumenting one is another handler:
-//
-// ```text
-// fn traced(inner: Fs, tracer: Tracer) -> Fs {
-//   handler for Fs {
-//     read: fn path => around(tracer, "fs.read", fn () => inner.read(path)),
-//     ..
-//   }
-// }
-// ```
-//
-// Every existing caller of `Fs` is instrumented and none of them changed.
-// That is what OpenTelemetry achieves with bytecode agents, and here it falls
-// out of capability-passing because that is what a capability *is*.
+//! Spans, and the context that has to survive a fiber changing worker.
+//!
+//! A service that cannot be traced is not a candidate, and `docs/positioning.md`
+//! claims Khora should be one wherever a team compares Go, backend TypeScript
+//! or application Rust. Nothing in `std` emitted so much as a log line before
+//! this module.
+//!
+//! # Why this is `std`'s and the exporter is not
+//!
+//! `docs/design/observability.md` argues it in full and the short version is
+//! `ecosystem.md`'s rule: what belongs here is the layer everyone would
+//! otherwise re-derive subtly wrong, and for tracing that is two things.
+//!
+//! **The vocabulary**, because two packages that disagree about what a span is
+//! cannot compose into one trace. And **propagation** — a span's parent
+//! surviving a spawn, a steal, a wake and a cancellation — which is not a
+//! library concern at all: it is a property of the scheduler, and it is exactly
+//! where every other ecosystem's tracing leaks.
+//!
+//! What is *not* here: OTLP, Datadog's protocol, Prometheus, batching, retry,
+//! and every sampling policy beyond a head sampler. All of it is a vendor's
+//! release cadence attached to a network protocol, which is the same argument
+//! that keeps Postgres out of `std`.
+//!
+//! # The model is OpenTelemetry's, and that is a one-way decision
+//!
+//! Datadog spans are a service, a resource and flat string tags; OpenTelemetry
+//! spans carry typed attributes, events and a status. Rendering OTel into
+//! Datadog loses information and the reverse cannot be done at all — which is
+//! why Datadog ships an OTel exporter and not the other way round. So the model
+//! is the superset and the narrower vendor drops what it cannot hold.
+//!
+//! # What makes this cheap in Khora specifically
+//!
+//! A capability is an interception point. Instrumenting one is another handler:
+//!
+//! ```text
+//! fn traced(inner: Fs, tracer: Tracer) -> Fs {
+//!   handler for Fs {
+//!     read: fn path => around(tracer, "fs.read", fn () => inner.read(path)),
+//!     ..
+//!   }
+//! }
+//! ```
+//!
+//! Every existing caller of `Fs` is instrumented and none of them changed.
+//! That is what OpenTelemetry achieves with bytecode agents, and here it falls
+//! out of capability-passing because that is what a capability *is*.
 
 import std::core::{Eq, List, Option, Result, Show};
 

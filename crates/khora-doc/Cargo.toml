@@ -1,0 +1,10 @@
+[package]
+name = "khora-doc"
+description = "API documentation read out of the syntax tree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+khora-syntax.workspace = true

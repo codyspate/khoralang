@@ -4,26 +4,26 @@ import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, Result, Scop
 import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 import std::net::tls::{TlsConnection, TlsError, TlsServer, receive as tls_receive, secure, server as tls_server, shut as tls_shut, transmit as tls_transmit};
 
-// HTTP/1.1, over the sockets in `std::net::socket`.
-//
-// The specification does not define `std::net::http`; the shape here was
-// reconstructed from how the reference application uses it, and every line
-// below it is Khora over `String::slice`, `String::index_of` and `Map`.
-//
-// What it does: a request line with its query string, headers, a body read to
-// the length the headers promised, routing on method and path with `:name`
-// segments, and a response that can carry headers of its own.
-//
-// What it does not: chunked transfer, content negotiation, or multipart
-// bodies. Each is absent deliberately rather than forgotten. Keep-alive and
-// TLS *are* here — the comment said otherwise for a while after each arrived.
-//
-// A connection is reached through a `Transport`, which is three closures, so
-// that the serving path is written once and `Router::listen` and
-// `Router::listen_tls` differ only in what they hand it.
-//
-// It does answer on a fiber per connection, which took a language feature to
-// reach rather than a line here: see `Router::serve_once`.
+//! HTTP/1.1, over the sockets in `std::net::socket`.
+//!
+//! The specification does not define `std::net::http`; the shape here was
+//! reconstructed from how the reference application uses it, and every line
+//! below it is Khora over `String::slice`, `String::index_of` and `Map`.
+//!
+//! What it does: a request line with its query string, headers, a body read to
+//! the length the headers promised, routing on method and path with `:name`
+//! segments, and a response that can carry headers of its own.
+//!
+//! What it does not: chunked transfer, content negotiation, or multipart
+//! bodies. Each is absent deliberately rather than forgotten. Keep-alive and
+//! TLS *are* here — the comment said otherwise for a while after each arrived.
+//!
+//! A connection is reached through a `Transport`, which is three closures, so
+//! that the serving path is written once and `Router::listen` and
+//! `Router::listen_tls` differ only in what they hand it.
+//!
+//! It does answer on a fiber per connection, which took a language feature to
+//! reach rather than a line here: see `Router::serve_once`.
 
 export type Method =
   | Get

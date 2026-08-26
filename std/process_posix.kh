@@ -2,23 +2,28 @@ module std::process::shell;
 
 import std::core::{Ptr};
 
-// Starting a shell, everywhere that is not Windows.
-//
-// `_posix` rather than `_linux`, because nothing below is Linux's: `popen`,
-// `pclose`, `system` and the layout of a wait status are the same on macOS,
-// and naming the file for one of them would have meant writing it twice.
-// `khora_db::selected_for_target` reads the suffix.
-//
-// **This file is not `std::process`.** It declares `std::process::shell`, and
-// `process.kh` — which is in every build — is the module a caller imports.
-// See the head of `process_windows.kh` for why the split is three functions
-// rather than the whole module.
-//
-// Two things differ from Windows, and only one of them is a spelling. The
-// names here are the POSIX ones without an underscore, and the number that
-// comes back from `pclose` and `system` is a *wait status* rather than an exit
-// code — a packed word that has to be taken apart, which is what
-// [`exit_status`] is for and what the other target has no need of.
+//! Starting a shell.
+//!
+//! **This module is not `std::process`.** It declares `std::process::shell`, and
+//! `process.kh` -- which is in every build -- is the module a caller imports.
+//! Two files declare this one, `process_posix.kh` and `process_windows.kh`, and
+//! exactly one is ever in a build.
+//!
+//! The split is three functions rather than the whole module, which is the
+//! opposite of what `std::net::socket` does and deliberately so:
+//! `khora_db::selected_for_target` says that when two targets share ninety per
+//! cent of a file, the ten per cent belongs behind a function they both call.
+//! This is the ten per cent.
+//!
+//! # Everywhere that is not Windows
+//!
+//! `_posix` rather than `_linux`, because nothing here is Linux's: `popen`,
+//! `pclose`, `system` and the layout of a wait status are the same on macOS, and
+//! naming the file for one of them would have meant writing it twice.
+//!
+//! The number that comes back from `pclose` and `system` is a *wait status*
+//! rather than an exit code -- a packed word that has to be taken apart, which is
+//! what [`exit_status`] is for and what Windows has no need of.
 
 extern fn popen(command: Ptr, mode: Ptr) -> Ptr;
 extern fn pclose(stream: Ptr) -> I32;

@@ -1,15 +1,25 @@
 module std::core;
 
-// Khora tracks effects as rows on the signature rather than as a wrapper type,
-// so there is no `Effect<A, R, E>` here. A computation's requirements live in
-// its `with` clause and its failures in its `raises` clause; both are inferred
-// on private functions and written out on exported ones.
-//
-// The module is `std::core` rather than `std::effect` for two reasons: there is
-// no longer an `Effect` type to name it after, and `effect` is now a reserved
-// word, so `std::effect` will not lex as a path.
-//
-// See docs/design/effects.md.
+//! The vocabulary every Khora program starts with.
+//!
+//! `Option` and `Result`, the comparison and display traits, lists, arrays,
+//! strings, vectors, maps and dictionaries, and the pieces structured
+//! concurrency is built out of -- regions, fibers, nurseries and `Shared`.
+//! Nothing here is optional in the way the rest of `std` is: two libraries
+//! that disagree about what an `Option` is cannot exchange one.
+//!
+//! # Where the effects went
+//!
+//! Khora tracks effects as rows on the signature rather than as a wrapper
+//! type, so there is no `Effect<A, R, E>` here. A computation's requirements
+//! live in its `with` clause and its failures in its `raises` clause; both are
+//! inferred on private functions and written out on exported ones.
+//!
+//! The module is `std::core` rather than `std::effect` for two reasons: there
+//! is no longer an `Effect` type to name it after, and `effect` is now a
+//! reserved word, so `std::effect` will not lex as a path.
+//!
+//! See docs/design/effects.md.
 
 // ---------------------------------------------------------------------------
 // Comparison and display

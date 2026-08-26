@@ -1,37 +1,37 @@
 module std::time;
 
-// Dates and times as people write them, rather than as a machine counts them.
-//
-// `Clock` gives `unix_millis` and `monotonic_millis` and that is the whole of
-// time in `std` until this module. An instant is enough to measure something
-// and not enough to say when it happened: reconciliation is bucketed by value
-// date and settlement date, a report covers a month, and a log line is read by
-// somebody who wants to know what day it was. None of that is expressible in
-// milliseconds since 1970.
-//
-// # What is here and what is deliberately not
-//
-// The **types** are here — a civil date, a time of day, the two together, and
-// a fixed offset from UTC — because they are vocabulary. Two libraries that
-// disagree about what a date is cannot exchange one, and
-// `docs/design/ecosystem.md` reserves exactly that case for `std`.
-//
-// The **time zone database is not**, and cannot be. It is a dataset: Egypt
-// changes its rules, IANA cuts a release, and every binary already shipped is
-// wrong about the future. Nothing behind this document's compatibility promise
-// can be updated four times a year. So `std` owns `Offset` — the answer — and
-// a package or the host owns the rules that produce one.
-//
-// That is not a limitation dressed up. A program that stores UTC and renders
-// with an offset it was handed is correct forever; a program that bakes in
-// zone rules is wrong the next time a government moves a clock.
-//
-// # The proleptic Gregorian calendar, everywhere
-//
-// One calendar, extended backwards past its adoption, which is what ISO 8601
-// and every database mean by a date. Years before 1 are negative and year zero
-// exists — again ISO's convention, and the one that makes arithmetic work
-// without a special case nobody remembers.
+//! Dates and times as people write them, rather than as a machine counts them.
+//!
+//! `Clock` gives `unix_millis` and `monotonic_millis` and that is the whole of
+//! time in `std` until this module. An instant is enough to measure something
+//! and not enough to say when it happened: reconciliation is bucketed by value
+//! date and settlement date, a report covers a month, and a log line is read by
+//! somebody who wants to know what day it was. None of that is expressible in
+//! milliseconds since 1970.
+//!
+//! # What is here and what is deliberately not
+//!
+//! The **types** are here — a civil date, a time of day, the two together, and
+//! a fixed offset from UTC — because they are vocabulary. Two libraries that
+//! disagree about what a date is cannot exchange one, and
+//! `docs/design/ecosystem.md` reserves exactly that case for `std`.
+//!
+//! The **time zone database is not**, and cannot be. It is a dataset: Egypt
+//! changes its rules, IANA cuts a release, and every binary already shipped is
+//! wrong about the future. Nothing behind this document's compatibility promise
+//! can be updated four times a year. So `std` owns `Offset` — the answer — and
+//! a package or the host owns the rules that produce one.
+//!
+//! That is not a limitation dressed up. A program that stores UTC and renders
+//! with an offset it was handed is correct forever; a program that bakes in
+//! zone rules is wrong the next time a government moves a clock.
+//!
+//! # The proleptic Gregorian calendar, everywhere
+//!
+//! One calendar, extended backwards past its adoption, which is what ISO 8601
+//! and every database mean by a date. Years before 1 are negative and year zero
+//! exists — again ISO's convention, and the one that makes arithmetic work
+//! without a special case nobody remembers.
 
 import std::core::{Eq, Option, Ord, Ordering, Show};
 

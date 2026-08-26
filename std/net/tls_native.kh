@@ -2,27 +2,27 @@ module std::net::tls;
 
 import std::core::{Array, Ptr, Result, Scope, Share, acquire};
 
-// TLS, over the sockets in `std::net::socket`.
-//
-// **Bound, not written.** `docs/design/ecosystem.md` puts TLS in the short list
-// of things Khora does not implement — "correctness is a specialist matter and
-// a bug is a breach" — so this is `rustls`, reached through the runtime that
-// every Khora executable already links. Nothing here is cryptography; it is a
-// handshake, two buffers and a lifetime.
-//
-// **No new type crossed the compiler for this.** A configuration and a
-// connection are opaque machine addresses, the way an open file is in
-// `std::fs`, and their lifetimes are tied to a scope with `acquire`. The code
-// generator did not have to learn a thing.
-//
-// What it does: both ends. A *server* takes a certificate chain and a key in
-// PEM and secures accepted sockets. A *client* trusts the machine's own root
-// certificates and connects by name, verifying that the certificate says so.
-// Reads and writes look like the plain ones on either side.
-//
-// What it does not: client certificates, ALPN, session resumption, and choosing
-// a cipher suite. Deliberate, all of them — `rustls` picks safe defaults, and a
-// knob that lets somebody pick worse ones is not a feature.
+//! TLS, over the sockets in `std::net::socket`.
+//!
+//! **Bound, not written.** `docs/design/ecosystem.md` puts TLS in the short list
+//! of things Khora does not implement — "correctness is a specialist matter and
+//! a bug is a breach" — so this is `rustls`, reached through the runtime that
+//! every Khora executable already links. Nothing here is cryptography; it is a
+//! handshake, two buffers and a lifetime.
+//!
+//! **No new type crossed the compiler for this.** A configuration and a
+//! connection are opaque machine addresses, the way an open file is in
+//! `std::fs`, and their lifetimes are tied to a scope with `acquire`. The code
+//! generator did not have to learn a thing.
+//!
+//! What it does: both ends. A *server* takes a certificate chain and a key in
+//! PEM and secures accepted sockets. A *client* trusts the machine's own root
+//! certificates and connects by name, verifying that the certificate says so.
+//! Reads and writes look like the plain ones on either side.
+//!
+//! What it does not: client certificates, ALPN, session resumption, and choosing
+//! a cipher suite. Deliberate, all of them — `rustls` picks safe defaults, and a
+//! knob that lets somebody pick worse ones is not a feature.
 
 extern fn khora_tls_server_open(cert: Ptr, cert_len: Int, key: Ptr, key_len: Int) -> Ptr;
 extern fn khora_tls_server_close(server: Ptr) -> ();
