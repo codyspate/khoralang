@@ -262,7 +262,7 @@ fn show(self) -> String
 ### around
 
 ```khora
-export fn around<A, 'c>(tracer: Tracer, name: String, body: () -> A with 'c) -> A with 'c
+export fn around<A, 'c, 'r>(tracer: Tracer, name: String, body: () -> A with 'c raises 'r) -> A with 'c raises 'r
 ```
 
 Runs `body` inside a span, and ends the span whichever way it leaves.
@@ -271,17 +271,40 @@ The scoped form, as a plain function rather than a field on the effect, so
 that no rank-2 type is needed. Takes the tracer explicitly because that is
 what makes it ordinary.
 
-**The span is finished on the way out, including when `body` raises.**
-A `defer` would be the way to say that once Khora's `Region` is threaded
-here; until then the caller of a fallible body should use `around_result`.
+#### Whichever way it leaves
+
+Three ways out, and the two that matter are the ones a `let` and a call
+cannot see. This used to be `start`, `body()`, `finish` in a row, which
+finishes the span exactly when nothing goes wrong — and a span that is only
+closed on the happy path is worse than no span, because a trace with a
+dangling parent is read as *still running*.
+
+So the finish is registered with a region before the body starts, the same
+way `std::db::transaction` registers its rollback, and for the same reason:
+a region's finalizers run on every path out because every path out already
+releases the binding holding the region. A body that returns marks the span
+`Ok` and settles it; a body that raises or is cancelled leaves the
+finalizer to close it, and it closes as `Failed` because that is what
+happened.
+
+`raises 'r` is the other half. `docs/design/effect-runtime.md` §6: a
+cancellation point is a `!` in a function that can raise, so a body with no
+row has none, nothing inside the span can be interrupted, and no frame here
+could carry the interruption if it were. A body that does no fallible work
+instantiates the row empty and needs no `!` at the call.
 
 ### around_result
 
 ```khora
-export fn around_result<A, E: Show, 'c>(tracer: Tracer, name: String, body: () -> Result<A, E> with 'c) -> Result<A, E> with 'c
+export fn around_result<A, E: Show, 'c, 'r>(tracer: Tracer, name: String, body: () -> Result<A, E> with 'c raises 'r) -> Result<A, E> with 'c raises 'r
 ```
 
-The same, for a body whose failure should mark the span failed.
+The same, for a body that reports its failure as a value.
+
+The difference from `around` is what reaches the span's status: this reads
+the `Result` and puts the error's own text on it, where `around` can only
+say that the body did not return. Reach for this when the failure has
+something to say, which is most of the time.
 
 ### text
 

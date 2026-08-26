@@ -155,6 +155,15 @@ wrappers rather than by hand, so the exposed surface is small; and the linter
 (roadmap 10.3) can carry a "span started and not finished" rule. **This wants
 deciding before the API is written, not after.**
 
+*Answered by an ordinary function.* `around` takes the tracer as an argument
+rather than being a field on the effect, which gets the scoping with no rank-2
+type. What it needed to be *correct* arrived later, with 13.3: the finish is
+registered with a region before the body runs, so a span closes on every way
+out — including a raise, and including a cancellation, which is the way out
+that no `match` written inside `around` could ever observe. A span left open is
+read as one that is still running, which is the most misleading thing a
+dashboard can be told about a request that failed.
+
 **How much of this the runtime must know.** If `khora-rt` emits fiber-lifetime
 spans, it needs the span type, and that is a coupling between the runtime and a
 `std` data type that nothing else in the tree has. The alternative is a thinner
