@@ -32,37 +32,36 @@
           <a class="button primary" href="/docs/getting-started/">Get started <span>→</span></a>
           <a class="button secondary" href="/docs/">Read the docs</a>
         </div>
-        <div class="hero-meta">
+        <div class="hero-meta" aria-label="Khora runtime characteristics">
           <span>Native LLVM compilation</span>
           <span>Structured concurrency</span>
-          <span>Compiler-backed MCP</span>
+          <span>No VM or tracing GC</span>
         </div>
       </div>
 
-      <div class="code-card" aria-label="Khora code example">
+      <div class="code-card" aria-label="Khora function signature example">
         <div class="window-bar">
           <span class="lights"><i></i><i></i><i></i></span>
           <span>service.kh</span>
         </div>
         <pre><code><span class="kw">export fn</span> <span class="fn">load_user</span>(id: Id) -&gt; User
   <span class="kw">with</span> { db: Db }
-  <span class="kw">raises</span> DbError
-{
-  db.find_user(id)<span class="op">!</span>
-  <span class="op">|&gt;</span> User::normalize
-}</code></pre>
+  <span class="kw">raises</span> DbError</code></pre>
+        <p class="signature-caption">Before you read the implementation, the function type already tells you two important things:</p>
         <div class="signature-notes">
-          <div><span class="dot capability"></span><strong>with</strong><small>declares authority</small></div>
-          <div><span class="dot failure"></span><strong>raises</strong><small>declares recoverable failure</small></div>
-          <div><span class="dot native"></span><strong>native</strong><small>compiles ahead of time</small></div>
+          <div><span class="dot capability"></span><strong>with</strong><small>the capabilities this function requires</small></div>
+          <div><span class="dot failure"></span><strong>raises</strong><small>the recoverable failures it can produce</small></div>
         </div>
       </div>
     </section>
 
     <section class="feature-section shell">
       <div class="section-heading">
-        <p class="eyebrow">The language should tell the truth</p>
-        <h2>The important parts of a program belong in the type.</h2>
+        <div>
+          <p class="eyebrow">The language should tell the truth</p>
+          <p class="section-intro">The signature above shows two examples. Khora applies the same principle to concurrency, resources, and memory: important behavior should be visible rather than hidden in convention.</p>
+        </div>
+        <h2>The important parts of a program belong in its model.</h2>
       </div>
       <div class="feature-grid">
         <a class="feature-card" href="/docs/guide/effects-and-capabilities/">
@@ -94,13 +93,13 @@
 
     <section class="split-section shell">
       <div class="split-copy">
-        <p class="eyebrow">Functional where it matters</p>
-        <h2>Powerful semantics without a monadic surface.</h2>
+        <p class="eyebrow">Direct style, functional core</p>
+        <h2>Functional ideas without a monadic surface.</h2>
         <p>Khora keeps algebraic data types, immutable values, typed effects, row polymorphism, and composable pipelines while presenting them in code that reads like ordinary application logic.</p>
         <a class="text-link" href="/docs/guide/">Learn the language →</a>
       </div>
-      <div class="pipeline-card">
-        <span class="pipeline-label">pipeline</span>
+      <div class="pipeline-card" aria-label="Khora pipeline example">
+        <span class="pipeline-label">transform a collection</span>
         <div class="pipeline-row"><code>orders</code><span>|&gt;</span><code>List::map(normalize)</code></div>
         <div class="pipeline-row indent"><span>|&gt;</span><code>List::filter(is_valid)</code></div>
         <div class="pipeline-row indent"><span>|&gt;</span><code>List::map(price)</code></div>
@@ -112,38 +111,50 @@
         <div>
           <p class="eyebrow">One toolchain</p>
           <h2>The compiler stays the source of truth.</h2>
-          <p>Check, test, format, generate API docs, run the language server, and expose compiler-backed intelligence to coding agents from the same Khora toolchain.</p>
+          <p>The commands you use every day and the integrations your editor or coding agent starts all talk to the same Khora compiler.</p>
         </div>
-        <div class="command-grid" aria-label="Khora commands">
-          <code>khora check</code>
-          <code>khora test</code>
-          <code>khora fmt</code>
-          <code>khora doc</code>
-          <code>khora lsp</code>
-          <code>khora mcp</code>
+        <div class="toolchain-groups">
+          <div class="toolchain-group">
+            <span class="toolchain-label">Developer workflow</span>
+            <div class="command-grid" aria-label="Khora developer commands">
+              <code>khora check</code>
+              <code>khora build</code>
+              <code>khora test</code>
+              <code>khora fmt</code>
+              <code>khora doc</code>
+            </div>
+          </div>
+          <div class="toolchain-group integrations">
+            <span class="toolchain-label">Started by your tools</span>
+            <div class="integration-row"><code>khora lsp</code><small>Your editor starts the language server.</small></div>
+            <div class="integration-row"><code>khora mcp</code><small>Your coding agent starts the compiler-backed MCP server.</small></div>
+          </div>
         </div>
       </div>
     </section>
 
     <section class="paths-section shell">
       <div class="section-heading compact">
-        <p class="eyebrow">Start here</p>
-        <h2>Pick the path that matches what you need.</h2>
+        <div>
+          <p class="eyebrow">Where next?</p>
+          <p class="section-intro">Choose the path based on what you want to do, rather than where a page happens to live in the documentation tree.</p>
+        </div>
+        <h2>Go from first program to exact answers.</h2>
       </div>
       <div class="path-list">
-        <a href="/docs/getting-started/"><span>01</span><strong>Getting started</strong><small>Install Khora and build your first program.</small><b>→</b></a>
-        <a href="/docs/"><span>02</span><strong>Documentation</strong><small>Browse every user-facing part of the Khora docs.</small><b>→</b></a>
-        <a href="/docs/guide/"><span>03</span><strong>Language guide</strong><small>Learn syntax, types, effects, resources, and concurrency.</small><b>→</b></a>
-        <a href="/docs/stdlib/"><span>04</span><strong>Standard library</strong><small>Use the generated API reference kept in sync with source.</small><b>→</b></a>
+        <a href="/docs/getting-started/"><span>01</span><strong>Build your first program</strong><small>Install Khora, create a project, build it, run it, and test it.</small><b>→</b></a>
+        <a href="/docs/guide/"><span>02</span><strong>Learn the language</strong><small>Work through values, types, pipelines, effects, resources, and concurrency.</small><b>→</b></a>
+        <a href="/docs/reference/"><span>03</span><strong>Look up exact behavior</strong><small>Use the language reference when you need precise syntax or semantics.</small><b>→</b></a>
+        <a href="/docs/stdlib/"><span>04</span><strong>Find a standard API</strong><small>Browse the curated stdlib overview and generated API reference.</small><b>→</b></a>
       </div>
     </section>
 
     <section class="final-cta shell">
       <div>
-        <p class="eyebrow">Khora</p>
+        <p class="eyebrow">Start with the language</p>
         <h2>Write the program. Let the type tell the truth.</h2>
       </div>
-      <a class="button primary" href="/docs/getting-started/">Get started <span>→</span></a>
+      <a class="button primary" href="/docs/getting-started/">Get started <span aria-hidden="true">→</span></a>
     </section>
   </main>
 
