@@ -65,6 +65,12 @@ impl<'ctx> Backend<'ctx> {
             return self.rt.shared_release.as_global_value().as_pointer_value();
         }
 
+        // A channel's release frees the queue and everything abandoned in it,
+        // for the same reason: the values are behind a lock the runtime owns.
+        if name == runtime::CHANNEL_TYPE {
+            return self.rt.channel_release.as_global_value().as_pointer_value();
+        }
+
         // An array's release loops over its elements. The loop is the
         // runtime's because the length is a run-time value; what to do with
         // one element is generated, and travels in the object.

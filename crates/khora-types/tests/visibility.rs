@@ -96,3 +96,99 @@ fn a_field_of_an_imported_type_reads() {
     );
     assert!(found.is_empty(), "expected no errors, got {found:?}");
 }
+
+// --- shareability is a fact about a type, not about the importer -------------
+
+/// Three modules, because two are not enough to show the bug: `deep` declares
+/// the type, `middle` holds one in a field, and `user` asks whether `middle`'s
+/// type may cross into a fiber.
+fn errors_in_three(deep: &str, middle: &str, user: &str) -> Vec<String> {
+    let db = KhoraDatabase::new();
+    let deep = SourceFile::new(&db, "deep.kh".into(), deep.to_string());
+    let middle = SourceFile::new(&db, "middle.kh".into(), middle.to_string());
+    let user = SourceFile::new(&db, "user.kh".into(), user.to_string());
+    SourceRoot::new(&db, vec![deep, middle, user]);
+    khora_types::diagnostics(&db, user).iter().map(|e| e.message.clone()).collect()
+}
+
+const DEEP: &str = "module deep;\n\
+                    export type Amount = { units: Int };\n";
+
+const MIDDLE: &str = "module middle;\n\
+                      import deep::{Amount};\n\
+                      export type Cell = | Nothing | Money(Amount);\n\
+                      export type Holder = { cells: List<Cell> };\n\
+                      export type List<A> = | Nil | Cons(head: A, tail: List<A>);\n";
+
+/// **The bug this exists for.** Whether two fibers may hold a `Cell` is a fact
+/// about `Cell`. It was answered by looking inside, and the looking stopped at
+/// the edge of what the *importing* file happened to name — so a file that
+/// imported `Cell` without also importing `Amount` was told `Cell` could not
+/// be shared, and one that imported both was told it could. Same type, same
+/// question, two answers, decided by an unrelated line at the top of the file.
+///
+/// Found by `packages/postgres`: `std::db`'s `Cell` holds a `Decimal`, and a
+/// `Channel<Cell>` was refused in every file that did not also import
+/// `std::decimal`.
+#[test]
+fn a_types_shareability_does_not_depend_on_what_the_importer_imported() {
+    let user = "module user;\n\
+                export trait Share {}\n\
+                import middle::{Cell};\n\
+                fn takes<A: Share>(value: A) -> () { }\n\
+                fn use_it(c: Cell) -> () { takes(c) }\n";
+    let found = errors_in_three(DEEP, MIDDLE, user);
+    assert!(found.is_empty(), "a `Cell` is shareable whoever is asking: {found:?}");
+}
+
+/// The same, one level deeper and through a generic: `Holder` holds a
+/// `List<Cell>`, so answering needs `List`'s *parameter names* as well as its
+/// body — without them the substitution was empty, `A` stayed a type the
+/// caller chooses, and a list of anything was unshareable.
+#[test]
+fn shareability_reaches_through_a_generic_the_importer_never_named() {
+    let user = "module user;\n\
+                export trait Share {}\n\
+                import middle::{Holder};\n\
+                fn takes<A: Share>(value: A) -> () { }\n\
+                fn use_it(h: Holder) -> () { takes(h) }\n";
+    let found = errors_in_three(DEEP, MIDDLE, user);
+    assert!(found.is_empty(), "a `Holder` is shareable whoever is asking: {found:?}");
+}
+
+/// The widening must not make an unshareable type shareable. A `mut` field is
+/// still a race however far away it is written.
+#[test]
+fn a_mutable_field_two_modules_away_still_refuses() {
+    let deep = "module deep;\n\
+                export type Counter = { mut n: Int };\n";
+    let middle = "module middle;\n\
+                  import deep::{Counter};\n\
+                  export type Wrapper = { inner: Counter };\n";
+    let user = "module user;\n\
+                export trait Share {}\n\
+                import middle::{Wrapper};\n\
+                fn takes<A: Share>(value: A) -> () { }\n\
+                fn use_it(w: Wrapper) -> () { takes(w) }\n";
+    let found = errors_in_three(deep, middle, user);
+    assert!(
+        found.iter().any(|e| e.contains("does not implement `Share`")),
+        "a `mut` field two modules away is still a race: {found:?}"
+    );
+}
+
+/// And the names that came along for the ride are **not in scope**. Carrying
+/// bodies for the shareability walk must not quietly widen what a file can
+/// name, or a record literal could infer as a type the file cannot write.
+#[test]
+fn a_reachable_type_is_visible_to_the_checker_and_not_to_the_program() {
+    let user = "module user;\n\
+                export trait Share {}\n\
+                import middle::{Cell};\n\
+                fn make() -> Amount { { units: 1 } }\n";
+    let found = errors_in_three(DEEP, MIDDLE, user);
+    assert!(
+        !found.is_empty(),
+        "`Amount` was never imported, so naming it should still fail: {found:?}"
+    );
+}

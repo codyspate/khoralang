@@ -615,3 +615,143 @@ fn main() -> Int {
         "and the connection survived it: {out}"
     );
 }
+
+/// The `Db` capability, against a real server, through a transaction.
+///
+/// This is the whole point of the driver: `std::db::transaction` is written
+/// against `Db` and has never heard of PostgreSQL, and it commits and rolls
+/// back correctly anyway. It also exercises the arrangement that makes it
+/// possible -- one fiber owns the connection, the handler holds a channel --
+/// which is what `docs/design/channels.md` exists for.
+///
+/// Skipped without `KHORA_POSTGRES`, like its neighbours.
+#[test]
+fn the_db_capability_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and bring up \
+             packages/postgres/docker-compose.yml to run this"
+        );
+        return;
+    }
+
+    let main = "module demo::main;
+import std::core::{Channel, Fiber, Fibers, List, Option, Result, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import postgres::db::{Request, Settings, over, serve};
+
+export effect Nursery { adopt: (Fiber) -> (), }
+
+fn one(c: Cell) -> List<Cell> { List::Cons(c, List::Nil) }
+
+fn show(answer: Result<List<Row>, DbError>) -> String {
+  match answer {
+    Result::Err(why) => match why {
+      DbError::Rejected(m) => \"rejected: \" + m,
+      DbError::Disconnected(m) => \"disconnected: \" + m,
+      DbError::RolledBack(m) => \"rolled back: \" + m,
+    },
+    Result::Ok(rows) => match rows {
+      List::Nil => \"no rows\",
+      List::Cons(row, _) => match row.cells {
+        List::Nil => \"no cells\",
+        List::Cons(cell, _) => match cell {
+          Cell::Number(n) => Int::to_string(n),
+          Cell::Text(t) => t,
+          Cell::Flag(b) => if b { \"t\" } else { \"f\" },
+          Cell::Null => \"null\",
+          Cell::Money(_) => \"money\",
+        },
+      },
+    },
+  }
+}
+
+/// Every `Result` is matched rather than marked. `expr!` is a mark on the
+/// *effect row* and the identity on values, so `db.execute(..)!` as a
+/// statement discards the answer -- which is how the first draft of this test
+/// reported a transaction as committed when the server had aborted it.
+fn insert(db: Db, n: Int) -> Result<Int, DbError> {
+  db.execute(\"insert into kept (n) values ($1)\", one(Cell::Number(n)))
+}
+
+fn good(db: Db) -> Result<Int, DbError> { insert(db, 1) }
+
+fn bad(db: Db) -> Result<Int, DbError> {
+  match insert(db, 2) {
+    Result::Err(why) => Result::Err(why),
+    // A statement the server refuses, after a good one. The insert above is
+    // the thing that must not survive.
+    Result::Ok(_) => match db.query(\"select * from nowhere\", List::Nil) {
+      Result::Err(why) => Result::Err(why),
+      Result::Ok(_) => Result::Ok(0),
+    },
+  }
+}
+
+/// A transaction that succeeds. The row it inserts survives the commit.
+fn keeps(db: Db) -> () {
+  match transaction(db, fn () => good(db)) {
+    Result::Ok(_) => print(\"committed\"),
+    Result::Err(_) => print(\"NOT committed\"),
+  };
+  print(show(db.query(\"select count(*)::int4 from kept\", List::Nil)));
+}
+
+/// A transaction whose body fails. Nobody wrote the rollback.
+fn discards(db: Db) -> () {
+  match transaction(db, fn () => bad(db)) {
+    Result::Err(DbError::RolledBack(_)) => print(\"rolled back\"),
+    Result::Err(_) => print(\"failed, but not as a rollback\"),
+    Result::Ok(_) => print(\"NOT rolled back\"),
+  };
+  // Still one row: the first transaction's. The second left nothing behind.
+  print(show(db.query(\"select count(*)::int4 from kept\", List::Nil)));
+}
+
+fn work(requests: Channel<Request>) -> () {
+  let db = over(requests);
+  match db.execute(\"drop table if exists kept\", List::Nil) {
+    Result::Ok(_) => (),
+    Result::Err(_) => print(\"could not drop\"),
+  };
+  match db.execute(\"create table kept (n int4)\", List::Nil) {
+    Result::Ok(_) => (),
+    Result::Err(_) => print(\"could not create\"),
+  };
+  keeps(db);
+  discards(db);
+}
+
+fn main() -> Int {
+  let settings: Settings = {
+    host: \"127.0.0.1\",
+    port: 5433,
+    user: \"khora\",
+    database: \"khora\",
+    secret: \"khora\",
+  };
+  let requests: Channel<Request> = Channel::bounded(4);
+  let crew = Fibers::open();
+  with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
+    nursery.adopt(Fiber::spawn(fn () => serve(settings, requests)));
+  };
+  work(requests);
+  // Closing the requests is what ends the serving fiber, which closes the
+  // connection on its way out -- and `wait` is what waits for that.
+  Channel::close(requests);
+  Fibers::wait(crew);
+  0
+}
+";
+
+    let exe = build("postgres_capability", main);
+    let ran = std::process::Command::new(&exe).output().expect("the program should run");
+    let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
+    assert_eq!(ran.status.code(), Some(0), "the client should succeed: {out}");
+    assert_eq!(
+        out,
+        "committed\n1\nrolled back\n1\n",
+        "the first transaction's row survives and the second's does not: {out}"
+    );
+}

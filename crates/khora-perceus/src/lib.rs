@@ -247,6 +247,11 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
         ("Region", "defer") => RECEIVER,
         // A cell is read or written through; the handle stays the caller's.
         ("Shared", "get" | "set" | "update" | "modify") => RECEIVER,
+        // The same for a channel, and `send` is the one that matters: it hands
+        // over the *value* -- the queue owns it from then on -- while the
+        // handle it went through stays the caller's. A serving fiber sends in
+        // a loop, so a reference taken per call would be taken per reply.
+        ("Channel", "send" | "receive" | "close" | "depth") => RECEIVER,
         // Joining or cancelling looks at a handle. *Releasing* one is what
         // joins, and that is the binding's business rather than the call's.
         ("Fiber", "join" | "cancel") => RECEIVER,

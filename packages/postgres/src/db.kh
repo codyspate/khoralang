@@ -1,0 +1,289 @@
+module postgres::db;
+
+//! `std::db`'s `Db` capability, over a PostgreSQL connection.
+//!
+//! This is the join between the driver and the rest of the world. Everything
+//! above it -- `std::db::transaction`, a service's business logic, a test
+//! double -- is written against `Db` and never learns that PostgreSQL exists.
+//!
+//! # One fiber owns the connection
+//!
+//! Not a design flourish. A handler must be safe to hand to another fiber, so
+//! it may not capture anything writable, and a `Connection` is writable -- it
+//! buffers the bytes that arrived and were not yet a whole message. It is also
+//! **strictly serial**: two fibers writing one socket interleave their frames
+//! and desynchronise the stream, so even a `Connection` the compiler let
+//! through would be wrong.
+//!
+//! So `serve` owns the connection and nothing else touches it, and the handler
+//! captures a `Channel<Request>`, which is `Share`. Requests queue; answers
+//! come back on a reply channel the caller made. `docs/design/channels.md` was
+//! written for this case, and this package is why it exists.
+//!
+//! That arrangement is also what makes the transaction contract hold. `begin`,
+//! the statements between it and `commit`, and the commit itself all reach the
+//! same backend because there is only one, and they arrive in the order the
+//! caller made them because a channel is a queue.
+//!
+//! # The serving fiber opens its own connection
+//!
+//! `serve` takes `Settings` and not a `Connection`, which looks like an
+//! inconvenience and is the only thing that works. A spawned fiber's captures
+//! are *copied* -- `docs/design/sharing.md` calls this `Sync` rather than
+//! `Send`, and names a consuming spawn as still open -- so handing a
+//! connection to the fiber that will own it needs the connection to be
+//! shareable, which is exactly what it is not.
+//!
+//! Opening it inside is better anyway, and not only because it compiles. The
+//! connection's lifetime becomes exactly the fiber's: it cannot be used before
+//! the fiber starts, cannot outlive it, and cannot be left open by a caller
+//! who forgot. A connection that never opened is not an error a caller has to
+//! remember to check either -- every request gets the reason as its answer.
+//!
+//! # Not a pool
+//!
+//! One handler is one connection, and a second fiber's statements queue behind
+//! the first's. `pool.kh` is how a service gets concurrency: several
+//! connections, each with a serving fiber, and a channel of the idle ones.
+
+import std::core::{Channel, List, Option, Result};
+import std::db::{Cell, Db, DbError, Row};
+import postgres::conn::{Answer, Connection, PgError, ask, close, open, run};
+
+/// What a caller wants done.
+export type Work =
+  /// Rows back.
+  | Query(sql: String, values: List<Cell>)
+  /// A count back.
+  | Execute(sql: String, values: List<Cell>)
+  | Begin
+  | Commit
+  | Rollback;
+
+/// What comes back.
+///
+/// One variant per shape of answer, because a channel carries one type and
+/// `Db`'s five operations do not agree on what they return. A caller reads the
+/// variant it asked for and treats the others as a broken server -- which they
+/// would be, since `serve` answers each `Work` with its matching `Reply` and
+/// nothing else can put anything on that reply channel.
+export type Reply =
+  | Rows(Result<List<Row>, DbError>)
+  | Counted(Result<Int, DbError>)
+  | Finished(Result<(), DbError>);
+
+/// One question and where to put the answer.
+export type Request = {
+  work: Work,
+  /// **Made by the caller, one per request, capacity one.** A shared reply
+  /// channel would hand a fiber somebody else's answer the moment two requests
+  /// were in flight, and this is the cheapest thing that cannot.
+  reply: Channel<Reply>,
+};
+
+/// Where to connect and as whom.
+///
+/// A record rather than five arguments because it crosses into the serving
+/// fiber, and one shareable value is easier to reason about than five.
+export type Settings = {
+  host: String,
+  port: Int,
+  user: String,
+  database: String,
+  secret: String,
+};
+
+/// Opens a connection, serves requests on it until the channel closes, and
+/// closes it.
+///
+/// **Run this on a fiber of its own.** It is the only thing that ever touches
+/// the connection, which is what makes the arrangement safe, and the
+/// connection's lifetime is exactly this call's.
+///
+/// A connection that will not open is not a failure a caller has to remember
+/// to check: every request is answered with the reason, in the terms
+/// `std::db` speaks, until somebody closes the channel.
+export fn serve(settings: Settings, requests: Channel<Request>) -> () {
+  match open(settings.host, settings.port, settings.user, settings.database, settings.secret) {
+    Result::Err(why) => refuse(requests, PgError::to_db(why)),
+    Result::Ok(c) => {
+      answer_all(c, requests);
+      close(c);
+    },
+  }
+}
+
+fn answer_all(c: Connection, requests: Channel<Request>) -> () {
+  let mut going = true;
+  while going {
+    match Channel::receive(requests) {
+      Option::None => going = false,
+      Option::Some(request) => {
+        Channel::send(request.reply, answer(c, request.work));
+        // Closed by the server rather than the caller, so a caller that gave
+        // up -- cancelled, or raised on the way to its receive -- still leaves
+        // a channel that will be released rather than one somebody is expected
+        // to come back for.
+        Channel::close(request.reply);
+      },
+    }
+  };
+}
+
+/// Answers every request with the same failure, until the channel closes.
+///
+/// The alternative is to close the request channel and let each caller
+/// discover a dead server, which says *that* something is wrong and never
+/// *what* -- and "could not reach 127.0.0.1:5433" is the whole of what a
+/// person needs here.
+fn refuse(requests: Channel<Request>, why: DbError) -> () {
+  let mut going = true;
+  while going {
+    match Channel::receive(requests) {
+      Option::None => going = false,
+      Option::Some(request) => {
+        Channel::send(request.reply, apology(request.work, why));
+        Channel::close(request.reply);
+      },
+    }
+  };
+}
+
+fn apology(work: Work, why: DbError) -> Reply {
+  match work {
+    Work::Query(_, _) => Reply::Rows(Result::Err(why)),
+    Work::Execute(_, _) => Reply::Counted(Result::Err(why)),
+    Work::Begin => Reply::Finished(Result::Err(why)),
+    Work::Commit => Reply::Finished(Result::Err(why)),
+    Work::Rollback => Reply::Finished(Result::Err(why)),
+  }
+}
+
+fn answer(c: Connection, work: Work) -> Reply {
+  match work {
+    Work::Query(sql, values) => Reply::Rows(rows(c, sql, values)),
+    Work::Execute(sql, values) => Reply::Counted(affected(c, sql, values)),
+    // The transaction verbs take no parameters, so they are simple queries.
+    // `run` is the right call and not a shortcut: `BEGIN` through the extended
+    // protocol would be five frames for a statement with nothing to bind.
+    Work::Begin => Reply::Finished(statement(c, "BEGIN")),
+    Work::Commit => Reply::Finished(statement(c, "COMMIT")),
+    Work::Rollback => Reply::Finished(statement(c, "ROLLBACK")),
+  }
+}
+
+/// A `Db` that sends its work to whoever is serving `requests`.
+export fn over(requests: Channel<Request>) -> Db {
+  handler for Db {
+    query: fn (sql, values) => ask_rows(requests, Work::Query(sql, values)),
+    execute: fn (sql, values) => ask_count(requests, Work::Execute(sql, values)),
+    begin: fn () => ask_done(requests, Work::Begin),
+    commit: fn () => ask_done(requests, Work::Commit),
+    rollback: fn () => ask_done(requests, Work::Rollback),
+  }
+}
+
+/// Sends one request and waits for its answer.
+///
+/// `None` means the server is gone: either the channel was closed before the
+/// request could be sent, or it closed with the request unanswered. Both are
+/// the same fact to a caller, and `Disconnected` is what `std::db` calls it.
+fn exchange(requests: Channel<Request>, work: Work) -> Option<Reply> {
+  let reply: Channel<Reply> = Channel::bounded(1);
+  if !Channel::send(requests, { work: work, reply: reply }) {
+    Option::None
+  } else {
+    Channel::receive(reply)
+  }
+}
+
+fn gone() -> DbError {
+  DbError::Disconnected("the connection's serving fiber has stopped")
+}
+
+fn ask_rows(requests: Channel<Request>, work: Work) -> Result<List<Row>, DbError> {
+  match exchange(requests, work) {
+    Option::Some(Reply::Rows(answer)) => answer,
+    Option::Some(_) => Result::Err(confused()),
+    Option::None => Result::Err(gone()),
+  }
+}
+
+fn ask_count(requests: Channel<Request>, work: Work) -> Result<Int, DbError> {
+  match exchange(requests, work) {
+    Option::Some(Reply::Counted(answer)) => answer,
+    Option::Some(_) => Result::Err(confused()),
+    Option::None => Result::Err(gone()),
+  }
+}
+
+fn ask_done(requests: Channel<Request>, work: Work) -> Result<(), DbError> {
+  match exchange(requests, work) {
+    Option::Some(Reply::Finished(answer)) => answer,
+    Option::Some(_) => Result::Err(confused()),
+    Option::None => Result::Err(gone()),
+  }
+}
+
+/// The reply did not match the request.
+///
+/// Unreachable through `serve`, which answers each `Work` with its matching
+/// `Reply` and is the only thing that can write to a reply channel. Named
+/// rather than ignored because "unreachable" is a claim about today's code and
+/// a silent wrong answer would be the worst way to find out it changed.
+fn confused() -> DbError {
+  DbError::Rejected("the serving fiber answered a different question")
+}
+
+// --- doing the work ---------------------------------------------------------
+
+fn rows(c: Connection, sql: String, values: List<Cell>) -> Result<List<Row>, DbError> {
+  match ask(c, sql, values) {
+    Result::Ok(answer) => Result::Ok(answer.rows),
+    Result::Err(why) => Result::Err(PgError::to_db(why)),
+  }
+}
+
+fn affected(c: Connection, sql: String, values: List<Cell>) -> Result<Int, DbError> {
+  match ask(c, sql, values) {
+    Result::Ok(answer) => Result::Ok(changed(answer.tag)),
+    Result::Err(why) => Result::Err(PgError::to_db(why)),
+  }
+}
+
+fn statement(c: Connection, sql: String) -> Result<(), DbError> {
+  match run(c, sql) {
+    Result::Ok(_) => Result::Ok(()),
+    Result::Err(why) => Result::Err(PgError::to_db(why)),
+  }
+}
+
+/// How many rows a `CommandComplete` tag says were affected.
+///
+/// The tag is the verb and then its numbers: `UPDATE 3`, `DELETE 2`,
+/// `SELECT 5`, and `INSERT 0 1` -- which is an OID that has been zero since
+/// PostgreSQL 12 followed by the count. **The number wanted is always the last
+/// one**, which is why this reads from the end rather than counting fields.
+///
+/// A tag with no number is zero: `BEGIN`, `COMMIT` and `SET` have none, and
+/// they did not affect any rows, so zero is the answer and not a failure.
+export fn changed(tag: String) -> Int {
+  let width = String::byte_length(tag);
+  let mut at = width;
+  while at > 0 && is_digit(String::byte(tag, at - 1)) {
+    at = at - 1
+  };
+  if at == width {
+    0
+  } else {
+    match Int::of_string(String::slice(tag, at, width)) {
+      Option::Some(count) => count,
+      Option::None => 0,
+    }
+  }
+}
+
+fn is_digit(byte: U8) -> Bool {
+  let value = U8::to_int(byte);
+  value >= 48 && value <= 57
+}

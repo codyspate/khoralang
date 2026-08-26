@@ -207,6 +207,218 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// `Channel::bounded`, `send`, `receive`, `close` and `depth`.
+    ///
+    /// Intrinsics for the same reason `Shared`'s are: the values sit in a queue
+    /// the runtime owns behind a lock, and generated code cannot reach through
+    /// one. What crosses is the value as a single word, plus -- once, when the
+    /// channel is opened -- how to release it, since the runtime cannot know
+    /// `A`. `docs/design/channels.md`.
+    pub(super) fn channel_intrinsic(
+        &mut self,
+        site: ExprId,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        match (name, args) {
+            ("bounded", [capacity]) => {
+                // The element type is not in the arguments -- `bounded` takes a
+                // number -- so it comes from what the call site was inferred
+                // to produce, which is where `Channel<A>` is known.
+                let held = self.channel_contents(site, &self.types.of(site).clone(), range)?;
+                let room = self.expr(*capacity)?;
+                let boxed =
+                    self.be.ctx.bool_type().const_int(u64::from(is_boxed(&held)), false);
+                let glue = self.be.drop_glue(&held);
+                let open = self.be.rt.channel_open;
+                Some(
+                    self.be
+                        .builder
+                        .build_call(
+                            open,
+                            &[room.into(), boxed.into(), glue.into()],
+                            "channel",
+                        )
+                        .expect("opening a channel")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("a channel is a value"),
+                )
+            }
+            ("send", [channel, value]) => {
+                let channel_ty = self.types.of(*channel).clone();
+                let handle = self.expr(*channel)?;
+                let held = self.expr(*value)?;
+                let word = self.be.to_word(held);
+                let send = self.be.rt.channel_send;
+                let answered = self
+                    .be
+                    .builder
+                    .build_call(send, &[handle.into(), word.into()], "sent")
+                    .expect("sending on a channel")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a send answers");
+                // The value was handed over -- the queue owns it now, and
+                // releases it if the channel was closed. The handle was only
+                // borrowed.
+                self.release_unless_lent(*channel, handle, &channel_ty);
+                Some(answered)
+            }
+            ("receive", [channel]) => {
+                let channel_ty = self.types.of(*channel).clone();
+                let held = self.channel_contents(site, &channel_ty, range)?;
+                let handle = self.expr(*channel)?;
+
+                // Somewhere for the runtime to put the word. A stack slot
+                // rather than a return value because the call has two things
+                // to say -- the value, and whether there was one -- and a
+                // sentinel word would be a value some `A` could legitimately
+                // be.
+                let slot = self
+                    .be
+                    .builder
+                    .build_alloca(self.be.ctx.i64_type(), "received")
+                    .expect("a slot for the received word");
+                let receive = self.be.rt.channel_receive;
+                let arrived = self
+                    .be
+                    .builder
+                    .build_call(receive, &[handle.into(), slot.into()], "arrived")
+                    .expect("receiving from a channel")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a receive answers")
+                    .into_int_value();
+                let word = self
+                    .be
+                    .builder
+                    .build_load(self.be.ctx.i64_type(), slot, "word")
+                    .expect("reading the received word")
+                    .into_int_value();
+                self.release_unless_lent(*channel, handle, &channel_ty);
+                self.option_of_word(arrived, word, &held)
+            }
+            ("close", [channel]) => {
+                let channel_ty = self.types.of(*channel).clone();
+                let handle = self.expr(*channel)?;
+                let close = self.be.rt.channel_close;
+                self.be
+                    .builder
+                    .build_call(close, &[handle.into()], "")
+                    .expect("closing a channel");
+                self.release_unless_lent(*channel, handle, &channel_ty);
+                Some(self.be.unit_value())
+            }
+            ("depth", [channel]) => {
+                let channel_ty = self.types.of(*channel).clone();
+                let handle = self.expr(*channel)?;
+                let depth = self.be.rt.channel_depth;
+                let answer = self
+                    .be
+                    .builder
+                    .build_call(depth, &[handle.into()], "depth")
+                    .expect("asking a channel its depth")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a depth is a number");
+                self.release_unless_lent(*channel, handle, &channel_ty);
+                Some(answer)
+            }
+            _ => self.fail(
+                format!("`Channel::{name}` is not a channel operation the backend knows"),
+                range,
+            ),
+        }
+    }
+
+    /// `Option::Some(word)` when `present`, and `Option::None` otherwise.
+    ///
+    /// The first intrinsic to build an ADT out of a value the runtime produced
+    /// rather than out of expressions the source wrote. Everything returning an
+    /// `Option` until now -- `Vector::get`, `String::index_of` -- was written in
+    /// Khora over an intrinsic that could not fail, and a channel cannot be:
+    /// "closed and drained" is an answer no `A` can stand in for.
+    fn option_of_word(
+        &mut self,
+        present: inkwell::values::IntValue<'ctx>,
+        word: inkwell::values::IntValue<'ctx>,
+        held: &Type,
+    ) -> Flow<'ctx> {
+        let (some_tag, some) = self.be.variant_in(None, "Option", "Some")?;
+        let (none_tag, _) = self.be.variant_in(None, "Option", "None")?;
+        let field_ty = some.fields.first().cloned().unwrap_or_else(|| held.clone());
+
+        let function = self
+            .be
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("a function to build in");
+        let some_block = self.be.ctx.append_basic_block(function, "received.some");
+        let none_block = self.be.ctx.append_basic_block(function, "received.none");
+        let after = self.be.ctx.append_basic_block(function, "received.end");
+
+        self.be
+            .builder
+            .build_conditional_branch(present, some_block, none_block)
+            .expect("branching on whether a value arrived");
+
+        self.be.builder.position_at_end(some_block);
+        let value = self.be.word_to_value(word, &field_ty);
+        let object = self.allocate(1, some_tag, "Some");
+        self.store_field(object, 0, value, &field_ty);
+        let some_value: BasicValueEnum<'ctx> = object.into();
+        self.be.builder.build_unconditional_branch(after).expect("leaving the some arm");
+        let some_end = self.be.builder.get_insert_block().expect("the some arm's end");
+
+        self.be.builder.position_at_end(none_block);
+        let none_value: BasicValueEnum<'ctx> =
+            self.be.static_variant("Option", "None", none_tag).into();
+        self.be.builder.build_unconditional_branch(after).expect("leaving the none arm");
+        let none_end = self.be.builder.get_insert_block().expect("the none arm's end");
+
+        self.be.builder.position_at_end(after);
+        let merged = self
+            .be
+            .builder
+            .build_phi(some_value.get_type(), "received.option")
+            .expect("merging the two arms");
+        merged.add_incoming(&[(&some_value, some_end), (&none_value, none_end)]);
+        Some(merged.as_basic_value())
+    }
+
+    /// What a `Channel<A>` carries, at this instantiation.
+    pub(super) fn channel_contents(
+        &mut self,
+        site: ExprId,
+        channel: &Type,
+        range: TextRange,
+    ) -> Option<Type> {
+        if let Type::Adt { name, args, .. } = channel {
+            if name == runtime::CHANNEL_TYPE {
+                if let Some(first) = args.first() {
+                    return Some(first.clone());
+                }
+            }
+        }
+        // A `bounded` whose receiver type is not known, but whose result is:
+        // the call site says `Channel<A>` even when the argument is a number.
+        if let Type::Adt { name, args, .. } = &self.types.of(site).clone() {
+            if name == runtime::CHANNEL_TYPE {
+                if let Some(first) = args.first() {
+                    return Some(first.clone());
+                }
+            }
+        }
+        // Same shape as `shared_contents`: report through `fail` for the
+        // diagnostic and answer `None`, because the caller wants a type and
+        // `fail` answers with a value.
+        self.fail(format!("`{channel}` is not a channel"), range);
+        None
+    }
+
     /// What a `Shared<A>` holds, at this instantiation.
     pub(super) fn shared_contents(&mut self, site: ExprId, cell: &Type, range: TextRange) -> Option<Type> {
         if let Type::Adt { name, args, .. } = cell {

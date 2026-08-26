@@ -140,6 +140,10 @@ mod args;
 mod array;
 #[cfg(not(target_family = "wasm"))]
 mod cancel;
+// The scheduler is what a waiting fiber gives its worker back to, and there is
+// no scheduler on wasm -- see `scheduler`'s own gate.
+#[cfg(not(target_family = "wasm"))]
+mod channel;
 mod contain;
 #[cfg(not(target_family = "wasm"))]
 mod coro;

@@ -407,6 +407,61 @@ What `Shared::modify` asks its change function for. A record rather than a
 tuple because a tuple literal has no expression form yet, and named halves
 read better than positional ones at the call anyway.
 
+### Channel
+
+```khora
+export type Channel<A>;
+```
+
+A bounded queue one fiber puts values into and another takes them out of.
+
+**`Shared<A>` is a cell; this is a hand-off.** The two answer different
+questions and the difference is what a value *is* while it is in flight. A
+cell holds one value that anybody may read or replace. A channel holds a
+queue of values that each go to exactly one taker, and — the part that
+matters — a fiber waiting at either end **gives its worker back** rather
+than spinning or blocking a thread.
+
+#### What it is for
+
+Three things, and they are the same thing seen from different sides.
+
+**Owning a resource that cannot be shared.** A handler may not capture
+anything writable, and a database connection is writable *and* strictly
+serial — two fibers writing one socket interleave their frames. So one
+fiber owns the connection and the others send it requests. The handler
+captures the channel, which is `Share`, and never the connection, which is
+not. This is why the type exists: `packages/postgres` could not be finished
+without it.
+
+**Backpressure.** A full channel stops the sender until a taker catches up.
+That is not a limitation to be worked around; it is how a service under
+more load than it can serve declines work at the edge instead of queueing
+it until memory runs out.
+
+**A pool.** A channel holding the four idle workers *is* the pool: taking
+one is a receive, giving it back is a send, and waiting for one is what the
+channel already does.
+
+#### Closing
+
+`close` says nothing more will be sent and releases everybody waiting. A
+receive then drains what is already queued **before** answering `None`,
+because values already sent are still worth having. Closing twice is
+allowed: the fiber that owns a channel and the fiber that finishes with it
+are often different code, and neither should have to know which went first.
+
+#### What it does not do
+
+**No rendezvous.** `bounded(0)` gets a capacity of one rather than a
+channel where a send waits for a receive. Zero is a useful thing and it is
+not this thing; building it here would mean a sender waiting on a receiver
+that is waiting on a sender, and getting that wrong is a hang rather than
+an error.
+
+**No select.** Waiting on the first of several channels wants a primitive
+of its own, and nothing has needed one yet.
+
 ### Shared
 
 ```khora
@@ -1621,6 +1676,63 @@ fn call(self, argument: A) -> B raises 'e
 ```
 
 Calls it. A plain closure call; the wrapper costs nothing at runtime.
+
+### Channel<A>
+
+```khora
+impl<A: Share> Channel<A>
+```
+
+#### bounded
+
+```khora
+fn bounded(capacity: Int) -> Channel<A>
+```
+
+A channel that will hold at most `capacity` values.
+
+Below one is one — see the type's note on rendezvous.
+
+#### send
+
+```khora
+fn send(self, value: A) -> Bool
+```
+
+Puts a value in, waiting while the channel is full.
+
+False when the channel is closed, in which case the value is released
+rather than kept: a send with nowhere to put its value must not be the
+quietest possible leak.
+
+#### receive
+
+```khora
+fn receive(self) -> Option<A>
+```
+
+Takes a value out, waiting while the channel is empty.
+
+`None` only when the channel is closed *and* drained.
+
+#### close
+
+```khora
+fn close(self) ->()
+```
+
+Says nothing more will be sent, and releases everybody waiting.
+
+#### depth
+
+```khora
+fn depth(self) -> Int
+```
+
+How many values are waiting to be taken.
+
+**Stale the moment it is given**, which is true of every such count. For
+a pool reporting its depth and for tests; nothing should branch on it.
 
 ### Shared<A>
 

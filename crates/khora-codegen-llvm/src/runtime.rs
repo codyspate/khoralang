@@ -75,6 +75,9 @@ pub const FIBERS_TYPE: &str = "Fibers";
 /// The synchronized cell. `docs/design/shared.md`.
 pub const SHARED_TYPE: &str = "Shared";
 
+/// The bounded channel. `docs/design/channels.md`.
+pub const CHANNEL_TYPE: &str = "Channel";
+
 /// The certified-closure wrapper, which is a closure and nothing else.
 pub const SHARED_FN_TYPE: &str = khora_types::SHARED_FN_TYPE;
 
@@ -181,6 +184,18 @@ pub struct Runtime<'ctx> {
     pub shared_modify: FunctionValue<'ctx>,
     /// `void khora_shared_release(void *cell)`, a `drop_fields` callback.
     pub shared_release: FunctionValue<'ctx>,
+    /// `void *khora_channel_open(int64_t capacity, bool boxed, void (*glue)(void *))`
+    pub channel_open: FunctionValue<'ctx>,
+    /// `bool khora_channel_send(void *channel, uint64_t value)`
+    pub channel_send: FunctionValue<'ctx>,
+    /// `bool khora_channel_receive(void *channel, uint64_t *out)`
+    pub channel_receive: FunctionValue<'ctx>,
+    /// `void khora_channel_close(void *channel)`
+    pub channel_close: FunctionValue<'ctx>,
+    /// `int64_t khora_channel_depth(void *channel)`
+    pub channel_depth: FunctionValue<'ctx>,
+    /// `void khora_channel_release(void *channel)`, a `drop_fields` callback.
+    pub channel_release: FunctionValue<'ctx>,
     /// `void *khora_fiber_spawn(void *body, void (*glue)(void *),
     ///                            uint32_t (*call)(const void *, void *, uint64_t *))`
     pub fiber_spawn: FunctionValue<'ctx>,
@@ -340,6 +355,24 @@ impl<'ctx> Runtime<'ctx> {
                 i64t.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
             ),
             shared_release: declare("khora_shared_release", void.fn_type(&[ptr.into()], false)),
+            channel_open: declare(
+                "khora_channel_open",
+                ptr.fn_type(&[i64t.into(), ctx.bool_type().into(), ptr.into()], false),
+            ),
+            channel_send: declare(
+                "khora_channel_send",
+                ctx.bool_type().fn_type(&[ptr.into(), i64t.into()], false),
+            ),
+            channel_receive: declare(
+                "khora_channel_receive",
+                ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            channel_close: declare("khora_channel_close", void.fn_type(&[ptr.into()], false)),
+            channel_depth: declare("khora_channel_depth", i64t.fn_type(&[ptr.into()], false)),
+            channel_release: declare(
+                "khora_channel_release",
+                void.fn_type(&[ptr.into()], false),
+            ),
             fiber_spawn: declare(
                 "khora_fiber_spawn",
                 ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),

@@ -59,6 +59,8 @@ before the phase that depends on it starts.
 | --- | --- | --- |
 | D15 | **When Khora needs a core IR.** Today there is one semantic representation — HIR — and everything else is a side table keyed back to it: inferred types, resolutions, effect evidence, the reference-counting plan, borrows, reuse sites, closure layouts, monomorphization substitutions. That is deliberate and it is why the language could move this fast: no second representation drifts. But the tables accumulate, and at some point "HIR plus nine maps" *is* an IR, assembled implicitly and worse than one designed on purpose. The trigger, from an outside review and worth adopting because it is measurable: **introduce a post-typecheck core IR when code generation must reconstruct semantics from three or more independently-computed side tables to lower one ordinary expression.** Not before — a second IR now would be premature — and not by feel, because inertia argues for "not yet" forever. | phase 12 or later; watch it during 10 and 11 |
 
+| D16 | **The flow operator, `||>`.** `||> a |> b |> c` as sugar for `fn x => x |> a |> b |> c`, so an anonymous pipeline needs no name for a value nobody reads. Specified in full in `docs/design/flow-operator.md`, including the three things to settle when building it: the spelling (`||` is logical-or and used in `std`, so `||>` carries a permanent visual collision that `fn |> a |> b` would not), that the operator is greedy over the `|>` that follow it, and that a one-stage flow wants a lint rather than only a paragraph. **Wanted for evidence outside this repository** -- the same shape is `Array.map(xs, flow(f, g, h))` in Effect TypeScript, which is where the name comes from, and it is reported as frequent in production reconciliation software, the domain `positioning.md` opens by naming. Not built, because syntax is the one decision that cannot be walked back. | nothing; the trigger is 13.18 |
+
 D13 and D14, the two before it, were both language-surface holes that parsed
 and type-checked and then failed somewhere further down. Both are closed
 below.
@@ -3253,7 +3255,7 @@ tree so far has any opinion about those, which is itself the finding.
 | --- | --- | --- |
 | 13.1 | Scheduler and I/O architecture | **Half.** 11I and 11J landed; the next three steps and the acceptance criterion are written in "What is left, in the order worth trying" above and `scheduler.md` §10a. Threads are still the default — making the scheduler one is a decision, not a flag flip |
 | 13.2 | Concurrency under real load | **Started.** 11F's soak covers adversarial execution; overload, backpressure, bounded queues, shutdown and recovery are not covered |
-| 13.3 | DB cancellation safety | **Designed, not built.** 12.5 names it as "the half that matters most" and says it needs `Region`'s `defer` threaded through `transaction` |
+| 13.3 | DB cancellation safety | **Half.** A body that *fails* now rolls back, tested against a real server through `postgres::db`. A body whose *fiber is cancelled* still does not — that is the half 12.5 named, and it needs `Region`'s `defer` threaded through `transaction` |
 | 13.4 | Trace propagation | **Designed, not built.** `observability.md` §Propagation says a span's parent must survive spawn, steal, suspension, wake and cancellation, and that the fiber carries it. 12.3 built the middle layer only |
 | 13.5 | `Decimal` | **Half.** 12.0 is "done, without the literal". `0.01d` is specified and unbuilt; adversarial overflow and scale-alignment tests do not exist |
 | 13.6 | Runtime soundness audit | **Not started**, and the largest unpriced item on this list. See below |
@@ -3262,13 +3264,13 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
 | 13.10 | Build profiles | **Not started.** `KHORA_DEBUG` is the only knob and it is a boolean. 12.4 says debug info "should become part of an optimization level when there is one"; 12.9 adds that the reproducible build is the one with debug info *off*, so profiles and reproducibility have to be designed together |
 | 13.11 | Public surface audit | **Not started.** `compatibility.md` has the policy; nothing has been checked against it |
-| 13.12 | Production ecosystem | **Postgres under way.** Wire protocol, both query protocols, bound parameters, `Cell` mapping; no SCRAM, TLS or pool. HTTP client and OTLP not started |
+| 13.12 | Production ecosystem | **Postgres speaks `std::db` now.** Wire protocol, both query protocols, bound parameters, `Cell` mapping, and the `Db` capability with `transaction` verified against a real server; no pool, SCRAM or TLS. HTTP client and OTLP not started |
 | 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
 | 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
 | 13.15 | User documentation | **API reference generated; the rest not started.** `khora doc` writes a page per `std` module from `///` and `//!`, gated by `--check` in the baseline. Getting Started, the guide and the cookbook are the docs agent's `website/` work |
 | 13.16 | Editor and tooling | **Half.** 10.4's language server does diagnostics, formatting, completion, hover and navigation; nothing is packaged |
 | 13.17 | Diagnostics pass | **Ongoing, and it works.** Six misleading messages were found and fixed by *using* the language during phase 12. A corpus makes that systematic instead of incidental |
-| 13.18 | Reference applications | **Two of three.** `risk_analyzer` and `link_shortener` exist; neither uses Postgres or tracing, and there is no wasm one |
+| 13.18 | Reference applications | **Two of three.** `risk_analyzer` and `link_shortener` exist; neither uses Postgres or tracing, and there is no wasm one. Also the trigger for D16: the first program here big enough to say whether the flow operator earns its spelling |
 | 13.19 | External alpha | **Not started**, and nothing substitutes for it |
 | 13.20 | CI as a hard gate | **Half, and personally earned.** CI runs the suite on three platforms. "Eliminate ways a failed baseline can be accidentally ignored" is here because a commit went out on a red baseline three times, most recently in this session — a shell chain took `grep`'s exit status instead of the script's |
 | 13.21 | Release and security infrastructure | **A tenth.** 12.9 emits an SBOM and builds are reproducible; signing, provenance, releases, `SECURITY.md` and a disclosure process do not exist |
@@ -3438,6 +3440,57 @@ memory-safety bugs and the people in it did not sign up for that.
 
 That order is a plan and not a promise; evidence from any step can reorder what
 follows it.
+
+### The channel, and the gap that made it necessary
+
+Not on the list, and it had to come first. `docs/design/channels.md` is the
+reasoning; this is what happened.
+
+`std::db`'s `Db` is an effect, so its handler must be safe to hand to another
+fiber and may not capture anything writable. A PostgreSQL `Connection` is
+writable — it buffers the bytes that arrived and were not yet a whole message —
+and is also strictly serial, since two fibers writing one socket interleave
+their frames. **So the capability could not be written at all.** `Shared<A>`
+does not help: it requires `A: Share`, and its change function is forbidden
+from failing precisely so that no lock is ever held across I/O. Three doors,
+all correctly locked, and `sharing.md`'s list of open questions did not mention
+this one.
+
+The answer is a **bounded channel** in `std::core`: one fiber owns the
+resource, the others send it requests, and the handler captures the channel
+rather than the connection. A mutex would have been smaller and was rejected
+twice over — a lock held across a network round trip is the exact hazard
+`shared.rs` warns about, and 13.2 needs bounded queues and backpressure anyway,
+which a channel *is*. Runtime, intrinsic, `std::core` declaration, seven
+end-to-end tests including two that assert on the live-object count, because
+this is the class of mistake that shows up as a slow leak rather than a wrong
+answer.
+
+**Three findings came out of building it**, and they are the reason writing a
+real package was worth the time.
+
+*A type's shareability depended on who was asking.* `Cell` holds a `Decimal`,
+so answering "may two fibers hold a `Cell`" means looking inside `Decimal` —
+and the looking stopped at the edge of what the *importing* file happened to
+name. A file that imported `Cell` without also importing `std::decimal` was
+told `Cell` could not be shared. Same type, same question, two answers, decided
+by an unrelated line at the top of the file. Fixed by carrying the reachable
+bodies across the import boundary, in a list of their own so the names stay out
+of scope.
+
+*A spawned fiber cannot be handed a connection.* Captures are copied — `Sync`,
+not `Send`, which `sharing.md` already lists as open — so `serve` takes
+connection *settings* and opens its own. That is better than the workaround it
+started as: the connection's lifetime becomes exactly the serving fiber's, so
+it cannot be used before the fiber starts, cannot outlive it, and cannot be
+left open by a caller who forgot.
+
+*`expr!` is the identity on values.* It marks the effect row; it does nothing
+to a `Result`. So `db.execute(..)!` as a statement **silently discards the
+answer** — which is how the first draft of the transaction test reported a
+commit that PostgreSQL had actually aborted. The test now matches every
+`Result` explicitly. A discarded `Result` should be a lint; it is not one, and
+that belongs to 13.11 and 13.17.
 
 ### 13.15 — a standard-library reference that cannot drift
 

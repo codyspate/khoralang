@@ -562,12 +562,13 @@ pub const SHARED_FN_TYPE: &str = "SharedFn";
 /// to conflict — a marker trait is empty and `std::core`'s declaration and a
 /// user's are the same three characters. It is listed because it is
 /// compiler-known, not because the check below can act on it.
-pub const COMPILER_KNOWN: [&str; 12] = [
+pub const COMPILER_KNOWN: [&str; 13] = [
     SHARE,
     FIBER_TYPE,
     SHARED_FN_TYPE,
     "Fibers",
     "Shared",
+    "Channel",
     "Array",
     "Int",
     "I64",

@@ -11,6 +11,28 @@ use super::*;
 pub struct TypeMap {
     pub signatures: HashMap<String, Signature>,
     pub variants: Vec<VariantInfo>,
+    /// Bodies this module never named, reachable from the ones it did.
+    ///
+    /// **Whether a type is shareable is a fact about the type, not about the
+    /// importer.** `std::db`'s `Cell` holds a `Decimal`, so answering "may two
+    /// fibers hold a `Cell`" means looking inside `Decimal` -- and a module
+    /// that imported `Cell` without also importing `Decimal` could not, so it
+    /// got `false`. The same type, the same question, two answers depending on
+    /// an unrelated line at the top of the file.
+    ///
+    /// Kept apart from [`TypeMap::variants`] rather than merged into it because
+    /// these names are deliberately **not in scope**: a record literal must not
+    /// infer as a type the file cannot name, and `Decimal::scaled` must still
+    /// be an unknown path. Only the shareability walk reads this, through
+    /// [`TypeMap::bodies_of`].
+    pub(crate) reachable: Vec<VariantInfo>,
+    /// The type parameters of those bodies.
+    ///
+    /// Needed for the same reason and kept apart for the same reason. Without
+    /// it `Row`'s `List<Cell>` found `List`'s body but not that its parameter
+    /// is called `A`, so the substitution was empty, `A` stayed a type the
+    /// caller chooses, and a list of anything was unshareable.
+    pub(crate) reachable_adts: HashMap<String, Vec<String>>,
     /// Generic parameters of each declared type, by name.
     pub adts: HashMap<String, Vec<String>>,
     /// The traits and impls this file declares.
@@ -141,8 +163,7 @@ impl TypeMap {
             // declared it. A name that exists nowhere is reported as unknown
             // by resolution, which is the diagnostic that helps.
             Type::Adt { name, .. } => {
-                !self.variants.iter().any(|v| &v.type_name == name)
-                    && !self.effects.contains(name)
+                self.bodies_of(name).next().is_none() && !self.effects.contains(name)
             }
             _ => false,
         }
@@ -172,7 +193,7 @@ impl TypeMap {
             );
         }
         if let Type::Adt { name, .. } = ty {
-            if !self.variants.iter().any(|v| &v.type_name == name) && !self.effects.contains(name) {
+            if self.bodies_of(name).next().is_none() && !self.effects.contains(name) {
                 return format!(
                     "`{ty}` is declared without a body, so nothing here can see whether it \
                      can be written — and `Array` and `Ptr` both can. A type that is safe \
@@ -211,9 +232,7 @@ impl TypeMap {
                 }
                 visiting.push(name.clone());
                 let found = self
-                    .variants
-                    .iter()
-                    .filter(|v| &v.type_name == name)
+                    .bodies_of(name)
                     .any(|v| v.fields.iter().any(|t| self.holds_a_closure(t, visiting)));
                 visiting.pop();
                 found
@@ -224,6 +243,22 @@ impl TypeMap {
 
     fn shareable(&self, ty: &Type, visiting: &mut Vec<String>, bounded: &[String]) -> bool {
         self.shareable_with(ty, visiting, bounded, false)
+    }
+
+    /// Every known body for `name`, in scope or merely reachable.
+    ///
+    /// The one place [`TypeMap::reachable`] is read. See its note for why the
+    /// two lists are separate.
+    fn bodies_of<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a VariantInfo> + 'a {
+        self.variants.iter().chain(self.reachable.iter()).filter(move |v| v.type_name == name)
+    }
+
+    /// The type parameters of `name`, in scope or merely reachable.
+    fn params_of(&self, name: &str) -> Vec<String> {
+        match self.adts.get(name) {
+            Some(found) => found.clone(),
+            None => self.reachable_adts.get(name).cloned().unwrap_or_default(),
+        }
     }
 
     /// Whether this module may *assert* that two fibers can hold `ty`.
@@ -264,11 +299,11 @@ impl TypeMap {
     /// Whether `ty`'s *contents* allow sharing, ignoring any assertion on `ty`.
     fn structurally_shareable(&self, ty: &Type, pointers_ok: bool) -> bool {
         let Type::Adt { name, args, .. } = ty else { return false };
-        let parameters = self.adts.get(name).cloned().unwrap_or_default();
+        let parameters = self.params_of(name);
         let mapping: HashMap<&str, Type> =
             parameters.iter().map(String::as_str).zip(args.iter().cloned()).collect();
         let mut visiting = vec![name.clone()];
-        self.variants.iter().filter(|v| &v.type_name == name).all(|v| {
+        self.bodies_of(name).all(|v| {
             !v.has_mutable_field()
                 && v.fields.iter().all(|t| {
                     let t = unify::substitute(t, &mapping);
@@ -354,7 +389,7 @@ impl TypeMap {
                 // actually supplied before anything is asked about them.
                 // Reading `A` as a rigid parameter of the caller made every
                 // generic container unshareable, `List` included.
-                let parameters = self.adts.get(name).cloned().unwrap_or_default();
+                let parameters = self.params_of(name);
                 let mapping: HashMap<&str, Type> = parameters
                     .iter()
                     .map(String::as_str)
@@ -362,9 +397,7 @@ impl TypeMap {
                     .collect();
                 visiting.push(name.clone());
                 let ok = self
-                    .variants
-                    .iter()
-                    .filter(|v| &v.type_name == name)
+                    .bodies_of(name)
                     .all(|v| {
                         !v.has_mutable_field()
                             && v.fields.iter().all(|t| {
@@ -677,6 +710,13 @@ pub(crate) fn import_types(
                 map.variants.extend(
                     exported.variants.iter().filter(|v| &v.type_name == name).cloned(),
                 );
+                // And the bodies those fields reach, which are not in scope
+                // here but have to be *visible* -- see `TypeMap::reachable`.
+                let (bodies, generics) = reachable_from(exported, name);
+                map.reachable.extend(bodies);
+                for (reached, parameters) in generics {
+                    map.reachable_adts.entry(reached).or_insert(parameters);
+                }
                 // **An impl travels with its type as well as with its
                 // trait.** Importing a trait brings the impls that satisfy it,
                 // which is right: you ask for `Show`, you get the instances.
@@ -833,4 +873,70 @@ pub fn as_written(key: &str) -> String {
         Some((_, rest)) => rest.to_string(),
         None => key.to_string(),
     }
+}
+
+/// Every body reachable from `name`'s fields, minus `name`'s own.
+///
+/// A worklist over type names rather than a recursion, because a type may
+/// contain itself and the visited set is the termination argument.
+///
+/// **Only what `exported` already has.** A module's own map holds the bodies it
+/// imported, so `std::db`'s map has `Decimal` in it — that is how `Cell` was
+/// checkable inside `std::db` and not outside it. Nothing is fetched from a
+/// third module here; this closes the gap by carrying forward what the exporter
+/// already saw, which is exactly the set the exporter used to answer the same
+/// question.
+fn reachable_from(
+    exported: &TypeMap,
+    name: &str,
+) -> (Vec<VariantInfo>, Vec<(String, Vec<String>)>) {
+    let mut seen: Vec<String> = vec![name.to_string()];
+    let mut queue: Vec<String> = vec![name.to_string()];
+    let mut found = Vec::new();
+    let mut generics = Vec::new();
+
+    while let Some(here) = queue.pop() {
+        for variant in exported.variants.iter().filter(|v| v.type_name == here) {
+            for field in &variant.fields {
+                for mentioned in type_names(field) {
+                    if seen.contains(&mentioned) {
+                        continue;
+                    }
+                    seen.push(mentioned.clone());
+                    queue.push(mentioned.clone());
+                    found.extend(
+                        exported.variants.iter().filter(|v| v.type_name == mentioned).cloned(),
+                    );
+                    if let Some(parameters) = exported.adts.get(&mentioned) {
+                        generics.push((mentioned.clone(), parameters.clone()));
+                    }
+                }
+            }
+        }
+    }
+    (found, generics)
+}
+
+/// Every ADT name a type mentions, at any depth.
+fn type_names(ty: &Type) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(ty: &Type, out: &mut Vec<String>) {
+        match ty {
+            Type::Adt { name, args, .. } => {
+                out.push(name.clone());
+                args.iter().for_each(|t| walk(t, out));
+            }
+            Type::Tuple(items) => items.iter().for_each(|t| walk(t, out)),
+            Type::Applied { head, args } => {
+                walk(head, out);
+                args.iter().for_each(|t| walk(t, out));
+            }
+            // A function's parameters and result say nothing about what a
+            // closure captured, which is the whole reason a closure is
+            // unshareable. Walking into one would suggest otherwise.
+            _ => {}
+        }
+    }
+    walk(ty, &mut out);
+    out
 }
