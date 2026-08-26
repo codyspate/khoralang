@@ -378,7 +378,13 @@ fn introduces_a_continuation(token: &SyntaxToken) -> bool {
 
 fn is_continuation(kind: SyntaxKind, parent: SyntaxKind) -> bool {
     match kind {
-        PIPE_GT | DOT | THIN_ARROW => true,
+        // A pipe indents under what it continues -- except inside a flow,
+        // where the stages are siblings of the `||>` rather than a
+        // continuation of an expression before it. Aligning them is what makes
+        // the shape of the pipeline visible; indenting the first stage's
+        // successors under nothing would not.
+        PIPE_GT => parent != FLOW_EXPR,
+        DOT | THIN_ARROW => true,
         PIPE => parent == VARIANT_CASE,
         WITH_KW => matches!(parent, WITH_CLAUSE | WITH_EXPR),
         RAISES_KW => parent == RAISES_CLAUSE,

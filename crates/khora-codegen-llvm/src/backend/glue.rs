@@ -78,7 +78,7 @@ impl<'ctx> Backend<'ctx> {
             return self.rt.array_release.as_global_value().as_pointer_value();
         }
 
-        let key = ty.to_string();
+        let key = type_key(ty);
 
         if let Some(cached) = self.drop_glue.get(&key) {
             return match cached {
@@ -186,7 +186,7 @@ impl<'ctx> Backend<'ctx> {
     /// belongs to the allocator. The runtime documentation says this outright,
     /// and it is the single most expensive mistake available here.
     pub(super) fn emit_drop_glue(&mut self, ty: &Type) {
-        let f = match self.drop_glue.get(&ty.to_string()) {
+        let f = match self.drop_glue.get(&type_key(ty)) {
             Some(Some(f)) => *f,
             _ => return,
         };
@@ -239,4 +239,47 @@ impl<'ctx> Backend<'ctx> {
     // -----------------------------------------------------------------------
     // Entry point
     // -----------------------------------------------------------------------
+}
+
+/// A key that tells apart two types which *print* the same.
+///
+/// **`Display` is for people and deliberately leaves the module out.**
+/// `Request` reads better than `std.net.http.Request` in a type error, and
+/// that is the right call for a message. It is the wrong call for a cache key
+/// about a *layout*.
+///
+/// Two modules exporting a type of the same name is ordinary --
+/// `examples/ledger_service` imports `std::net::http`'s `Request` and
+/// `postgres::db`'s in the same file -- and keying drop glue by the printed
+/// name gave them one routine. One record's fields were then released through
+/// the other's field list, which is memory corruption reported several frames
+/// away from anything that looks related: the crash that found this named
+/// `#Tracer::none` as the drop routine of a database request.
+///
+/// The arguments are keyed the same way, recursively, so `Channel<Request>`
+/// separates on the same grounds its element does.
+pub fn type_key(ty: &Type) -> String {
+    match ty {
+        Type::Adt { name, home, args } => {
+            let mut key = String::new();
+            if let Some(home) = home {
+                key.push_str(&home.to_string());
+                key.push('.');
+            }
+            key.push_str(name);
+            if !args.is_empty() {
+                let inner: Vec<String> = args.iter().map(type_key).collect();
+                key.push('<');
+                key.push_str(&inner.join(", "));
+                key.push('>');
+            }
+            key
+        }
+        // A tuple has no name to collide, but its elements do.
+        Type::Tuple(items) => {
+            let inner: Vec<String> = items.iter().map(type_key).collect();
+            format!("({})", inner.join(", "))
+        }
+        other => other.to_string(),
+    }
 }

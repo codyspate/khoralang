@@ -53,6 +53,18 @@ export type Pool = {
   /// The ones nobody is using. A connection is *in* this channel exactly when
   /// it is free, which is the whole of the bookkeeping.
   idle: Channel<Channel<Request>>,
+  /// The fibers doing the serving.
+  ///
+  /// **Held here because a pool that did not hold them would stop working on
+  /// its way out of `open`.** A caller with no later use for its nursery hands
+  /// over its last reference, so the nursery is released when `open` returns —
+  /// and releasing a nursery cancels its children and waits for them, which is
+  /// every serving fiber this just started. The symptom is a pool that hangs
+  /// before it is ever used, and the cause is two rooms away.
+  ///
+  /// Keeping it is also the honest ownership: these fibers exist for this pool
+  /// and end with it, which is what `close` then has something to wait for.
+  crew: Fibers,
 };
 
 /// Opens `count` connections and adopts a serving fiber for each into `crew`.
@@ -79,7 +91,7 @@ export fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
     Channel::send(idle, requests);
     made = made + 1
   };
-  { idle: idle }
+  { idle: idle, crew: crew }
 }
 
 /// Runs `body` with a `Db` over one of the pool's connections.
@@ -130,14 +142,15 @@ fn give_back(idle: Channel<Channel<Request>>, requests: Channel<Request>) -> () 
   Channel::send(idle, requests);
 }
 
-/// Stops every serving fiber and closes every connection.
+/// Stops every serving fiber and waits for them.
 ///
-/// **Only the idle ones**, which is deliberate rather than a limitation: a
-/// connection somebody is using is one whose statement is still running, and
-/// closing its request channel underneath the fiber holding it would answer a
-/// live query with `Disconnected`. Wait for the nursery afterwards; a lease
-/// returned to a closed pool releases its connection, and the serving fiber
-/// ends when its request channel does.
+/// The request channels are closed **only for the idle ones**, which is
+/// deliberate rather than a limitation: a connection somebody is using is one
+/// whose statement is still running, and closing its channel underneath the
+/// fiber holding it would answer a live query with `Disconnected`. A lease
+/// returned to a closed pool is released rather than queued, and its serving
+/// fiber ends when its request channel does — so waiting on the crew is what
+/// makes this a shutdown rather than a request to shut down.
 export fn close(pool: Pool) -> () {
   Channel::close(pool.idle);
   let mut going = true;
@@ -147,4 +160,5 @@ export fn close(pool: Pool) -> () {
       Option::Some(requests) => Channel::close(requests),
     }
   };
+  Fibers::wait(pool.crew);
 }

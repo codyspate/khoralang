@@ -346,9 +346,16 @@ impl<'ctx> Lower<'_, 'ctx> {
         word: inkwell::values::IntValue<'ctx>,
         held: &Type,
     ) -> Flow<'ctx> {
-        let (some_tag, some) = self.be.variant_in(None, "Option", "Some")?;
+        let (some_tag, _) = self.be.variant_in(None, "Option", "Some")?;
         let (none_tag, _) = self.be.variant_in(None, "Option", "None")?;
-        let field_ty = some.fields.first().cloned().unwrap_or_else(|| held.clone());
+
+        // **`held`, and never `Option::Some`'s declared field.** That field is
+        // the type parameter `A` as written in `std::core`, not the type this
+        // instantiation carries -- so using it built the payload and chose its
+        // drop routine for a type that does not exist at runtime. The symptom
+        // was a released object calling an unrelated function as its glue,
+        // three frames from anything to do with channels.
+        let field_ty = held.clone();
 
         let function = self
             .be

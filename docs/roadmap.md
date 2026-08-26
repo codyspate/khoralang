@@ -59,7 +59,9 @@ before the phase that depends on it starts.
 | --- | --- | --- |
 | D15 | **When Khora needs a core IR.** Today there is one semantic representation — HIR — and everything else is a side table keyed back to it: inferred types, resolutions, effect evidence, the reference-counting plan, borrows, reuse sites, closure layouts, monomorphization substitutions. That is deliberate and it is why the language could move this fast: no second representation drifts. But the tables accumulate, and at some point "HIR plus nine maps" *is* an IR, assembled implicitly and worse than one designed on purpose. The trigger, from an outside review and worth adopting because it is measurable: **introduce a post-typecheck core IR when code generation must reconstruct semantics from three or more independently-computed side tables to lower one ordinary expression.** Not before — a second IR now would be premature — and not by feel, because inertia argues for "not yet" forever. | phase 12 or later; watch it during 10 and 11 |
 
-| D16 | **The flow operator, `||>`.** `||> a |> b |> c` as sugar for `fn x => x |> a |> b |> c`, so an anonymous pipeline needs no name for a value nobody reads. Specified in full in `docs/design/flow-operator.md`, including the three things to settle when building it: the spelling (`||` is logical-or and used in `std`, so `||>` carries a permanent visual collision that `fn |> a |> b` would not), that the operator is greedy over the `|>` that follow it, and that a one-stage flow wants a lint rather than only a paragraph. **Wanted for evidence outside this repository** -- the same shape is `Array.map(xs, flow(f, g, h))` in Effect TypeScript, which is where the name comes from, and it is reported as frequent in production reconciliation software, the domain `positioning.md` opens by naming. Not built, because syntax is the one decision that cannot be walked back. | nothing; the trigger is 13.18 |
+| ~~D16~~ | **The flow operator, `||>`. Built.** `||> a |> b |> c` is sugar for `fn x => x |> a |> b |> c`, desugared during HIR lowering so nothing past that point knows a flow was written. Spelling settled as `||>` over `fn |> a |> b` despite the visual collision with logical-or; greedy over the pipes that follow it, so `(||> a) |> b` needs its parentheses; the one-stage lint is left to 13.17. `docs/design/flow-operator.md`. | closed |
+
+| D17 | **Multiline string literals**, spelled with backticks. A string literal is one line, and the first program to embed SQL found out by not parsing — `examples/ledger_service` carries its schema as one long line with a comment saying why. Decided: backticks, because JavaScript and Go readers know them and the alternatives are worse. `docs/design/multiline-strings.md` has the three things to settle: whether `${...}` interpolates inside one (recommended yes, matching `"..."`), whether the common indentation is stripped (recommended yes, as Java and Swift do), and that `\n` and `` \` `` still escape. Touches the lexer and the formatter and nothing else — the result is a `String` exactly as today's literal is. | nothing; wanted by every service that embeds SQL |
 
 D13 and D14, the two before it, were both language-surface holes that parsed
 and type-checked and then failed somewhere further down. Both are closed
@@ -3270,7 +3272,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.15 | User documentation | **API reference generated; the rest not started.** `khora doc` writes a page per `std` module from `///` and `//!`, gated by `--check` in the baseline. Getting Started, the guide and the cookbook are the docs agent's `website/` work |
 | 13.16 | Editor and tooling | **Half.** 10.4's language server does diagnostics, formatting, completion, hover and navigation; nothing is packaged |
 | 13.17 | Diagnostics pass | **Ongoing, and it works.** Six misleading messages were found and fixed by *using* the language during phase 12. A corpus makes that systematic instead of incidental |
-| 13.18 | Reference applications | **Two of three.** `risk_analyzer` and `link_shortener` exist; neither uses Postgres or tracing, and there is no wasm one. Also the trigger for D16: the first program here big enough to say whether the flow operator earns its spelling |
+| 13.18 | Reference applications | **The service exists.** `ledger_service` is HTTP + PostgreSQL + a pool + transactions + tracing, verified against a real server; `risk_analyzer` and `link_shortener` alongside it. The wasm one is still missing |
 | 13.19 | External alpha | **Not started**, and nothing substitutes for it |
 | 13.20 | CI as a hard gate | **Half, and personally earned.** CI runs the suite on three platforms. "Eliminate ways a failed baseline can be accidentally ignored" is here because a commit went out on a red baseline three times, most recently in this session — a shell chain took `grep`'s exit status instead of the script's |
 | 13.21 | Release and security infrastructure | **A tenth.** 12.9 emits an SBOM and builds are reproducible; signing, provenance, releases, `SECURITY.md` and a disclosure process do not exist |
@@ -3491,6 +3493,41 @@ answer** — which is how the first draft of the transaction test reported a
 commit that PostgreSQL had actually aborted. The test now matches every
 `Result` explicitly. A discarded `Result` should be a lint; it is not one, and
 that belongs to 13.11 and 13.17.
+
+### 13.18 — the service, and the two bugs it found
+
+`examples/ledger_service` answers HTTP from PostgreSQL, over a pool, in
+transactions, under tracing. Four routes, integer minor units, every value a
+bound parameter. It works against a real server: posting an account named
+`a'; drop table entries; --` stores that text and the table survives, which is
+the demonstration the whole of 13.12 was for.
+
+It exists to be the first program here that puts those pieces together, and
+what it was worth is what it found on the way.
+
+**Drop glue was keyed by the type's printed name.** `Display` leaves the module
+out on purpose — `Request` reads better than `std.net.http.Request` in an error
+— and this file imports `std::net::http`'s `Request` *and* `postgres::db`'s. So
+they shared one drop routine, and one record's fields were released through the
+other's field list. The crash named `#Tracer::none` as the drop routine of a
+database request, three frames from anything related; the quiet version of the
+same bug is a leak. Keyed by module and name now, arguments included,
+recursively, and the same flaw is fixed in the change-shim cache. A test with
+two modules exporting differently-shaped types of one name pins it, and fails
+without the fix.
+
+**A nursery handed to a function is released there.** `open_pool(crew, …)` was
+the caller's last use of `crew`, so Perceus moved it — and releasing a nursery
+cancels its children and waits, which is every serving fiber the pool had just
+started. The pool hung before it was ever used, two rooms from the cause. The
+`Pool` holds its crew now, which is the honest ownership as well as the fix:
+those fibers exist for that pool, and `close` finally has something to wait on.
+
+**One smaller thing.** `Option::Some`'s *declared* field type is the parameter
+`A`, not the type an instantiation carries, so building an `Option` in the
+backend from a runtime word chose its payload's layout for a type that does not
+exist. Only the channel's `receive` builds one that way, so only it was
+affected.
 
 ### The pool, and a lease that outlived its call
 

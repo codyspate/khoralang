@@ -65,6 +65,9 @@ fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
 }
 
 fn unary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    if p.at(PIPE_PIPE_GT) {
+        return flow_expr(p);
+    }
     if p.at(MINUS) || p.at(BANG) {
         let m = p.start();
         p.bump_any();
@@ -74,6 +77,47 @@ fn unary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         return Some(m.complete(p, PREFIX_EXPR));
     }
     postfix_expr(p)
+}
+
+/// `||> a |> b |> c` — the flow operator.
+///
+/// **Greedy over the pipes that follow it.** Every `|>` after the first stage
+/// belongs to the flow, which is the only reading that makes the operator
+/// worth having: it exists for multi-stage pipelines, and one that stopped at
+/// the first stage would need parentheses at every use. Piping the *function*
+/// somewhere else is the rare case and is what parentheses are for:
+/// `(||> a) |> b`.
+///
+/// Each stage is parsed at `PIPE_GT`'s own left binding power, so the stage
+/// grabs everything that binds tighter than a pipe and stops at the next one.
+/// That is how `||> enrich(config) |> save` and `||> a + 1` both come out the
+/// way they read, and it is the existing precedence rather than a second one.
+fn flow_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    const STAGE: u8 = 3;
+
+    let m = p.start();
+    p.bump(PIPE_PIPE_GT);
+
+    if expr_bp(p, STAGE).is_none() {
+        // Named for what was written, not for the lambda it would have become:
+        // the desugaring is an implementation detail and a reader cannot act
+        // on it.
+        p.error("expected the first stage of the pipeline after `||>`");
+        return Some(m.complete(p, FLOW_EXPR));
+    }
+
+    while p.at(PIPE_GT) {
+        if !p.tick() {
+            break;
+        }
+        p.bump(PIPE_GT);
+        if expr_bp(p, STAGE).is_none() {
+            p.error("expected a pipeline stage after `|>`");
+            break;
+        }
+    }
+
+    Some(m.complete(p, FLOW_EXPR))
 }
 
 fn postfix_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {

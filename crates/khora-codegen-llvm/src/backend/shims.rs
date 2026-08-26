@@ -66,7 +66,7 @@ impl<'ctx> Backend<'ctx> {
     ///
     /// `uint64_t shim(void *code, void *closure, uint64_t value)`.
     pub fn change_shim(&mut self, value_ty: &Type) -> Option<FunctionValue<'ctx>> {
-        let key = value_ty.to_string();
+        let key = super::glue::type_key(value_ty);
         if let Some(f) = self.change_shims.get(&key) {
             return Some(*f);
         }

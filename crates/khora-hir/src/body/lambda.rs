@@ -81,6 +81,72 @@ impl<'a> Ctx<'a> {
         id
     }
 
+    /// `||> a |> b |> c` — the flow operator.
+    ///
+    /// Desugars to `fn x => x |> a |> b |> c` and then stops existing. Nothing
+    /// past this function knows a flow was written: inference, effect rows,
+    /// failure rows, capture analysis, monomorphization and code generation
+    /// all see the lambda they would have seen if somebody had typed it.
+    ///
+    /// The scaffolding is `lower_lambda_named`'s, deliberately duplicated
+    /// rather than shared, because the two differ in exactly the interesting
+    /// place: a lambda reads its parameters out of the source and this one
+    /// invents its only parameter. Threading an "invent a parameter" flag
+    /// through the other function would hide that difference in a boolean.
+    ///
+    /// **The parameter's name cannot collide with anything.** A space is not
+    /// valid in an identifier, so no source can declare `flow value` and no
+    /// source can refer to it; the name exists so that a debugger and an error
+    /// message have something readable to show. The reference is built here as
+    /// an `Expr::Local` rather than resolved by name, so nothing looks it up
+    /// anyway.
+    pub(super) fn lower_flow(&mut self, e: &ast::FlowExpr, range: TextRange) -> ExprId {
+        let local_mark = self.body.locals.len();
+        let expr_mark = self.body.exprs.len();
+
+        self.scopes.push(Vec::new());
+        self.lambdas.push(local_mark);
+        self.lambda_names.push(None);
+
+        let local = self.declare("flow value".to_string(), false, range);
+        let params = vec![self.add_pat(Pat::Bind(local))];
+
+        let outer_loops = std::mem::take(&mut self.loop_depth);
+        let mut value = self.add_expr(Expr::Local(local), range);
+        let mut stages = 0;
+        for stage in e.stages() {
+            value = self.pipe_into(value, &stage, stage.syntax().text_range());
+            stages += 1;
+        }
+        if stages == 0 {
+            // The parser has already said what was wrong. Producing the
+            // identity rather than `Missing` keeps one bad flow from becoming
+            // a second error everywhere its result is used.
+            value = self.add_expr(Expr::Missing, range);
+        }
+        self.loop_depth = outer_loops;
+
+        self.lambdas.pop();
+        self.lambda_names.pop();
+        self.scopes.pop();
+
+        let mut captures: Vec<LocalId> = Vec::new();
+        for expr in &self.body.exprs[expr_mark..] {
+            if let Expr::Local(found) = expr {
+                if found.index() < local_mark && !captures.contains(found) {
+                    captures.push(*found);
+                }
+            }
+        }
+
+        let id = self.add_expr(
+            Expr::Lambda { params, param_types: vec![None], body: value, captures },
+            range,
+        );
+        self.body.lambda_marks.insert(id, local_mark);
+        id
+    }
+
     /// Whether `name` is the name of the lambda currently being lowered.
     pub(super) fn is_own_lambda(&self, name: &str) -> bool {
         matches!(self.lambda_names.last(), Some(Some(own)) if own == name)

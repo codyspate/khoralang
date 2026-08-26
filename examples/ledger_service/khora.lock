@@ -1,0 +1,13 @@
+# Written by Khora. Commit this file.
+#
+# It records the exact source every dependency resolved to, so that this
+# project builds the same way on another machine and in six months. Editing it
+# by hand is not useful: the next resolution rewrites what it disagrees with,
+# and a checksum you change yourself only makes the build refuse to start.
+
+version = 1
+
+[[package]]
+name = "postgres"
+source = "path"
+path = "examples/ledger_service/../../packages/postgres"

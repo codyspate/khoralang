@@ -195,6 +195,7 @@ ast_node!(CallExpr, CALL_EXPR);
 ast_node!(ArgList, ARG_LIST);
 ast_node!(FieldExpr, FIELD_EXPR);
 ast_node!(PipeExpr, PIPE_EXPR);
+ast_node!(FlowExpr, FLOW_EXPR);
 ast_node!(BinExpr, BIN_EXPR);
 ast_node!(PrefixExpr, PREFIX_EXPR);
 
@@ -226,6 +227,7 @@ ast_enum!(Expr {
     Call(CallExpr),
     Field(FieldExpr),
     Pipe(PipeExpr),
+    Flow(FlowExpr),
     Bin(BinExpr),
     Prefix(PrefixExpr),
     Block(Block),
@@ -808,6 +810,16 @@ impl FieldExpr {
     }
     pub fn field(&self) -> Option<NameRef> {
         child(&self.0)
+    }
+}
+
+impl FlowExpr {
+    /// The stages, in the order they were written.
+    ///
+    /// The value they pipe from is not among them: the flow operator's whole
+    /// job is that nobody had to name it, so it is made during lowering.
+    pub fn stages(&self) -> impl Iterator<Item = Expr> {
+        children(&self.0)
     }
 }
 

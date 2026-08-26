@@ -101,6 +101,7 @@ impl<'a> Ctx<'a> {
                 self.add_call(Expr::Call { callee, args }, range)
             }
             ast::Expr::Pipe(e) => self.lower_pipe(e, range),
+            ast::Expr::Flow(e) => self.lower_flow(e, range),
             ast::Expr::Bin(e) => self.lower_binary(e, range),
             ast::Expr::Assign(e) => {
                 let target = match e.target() {
@@ -471,6 +472,25 @@ impl<'a> Ctx<'a> {
         let Some(rhs) = e.rhs() else {
             return self.add_expr(Expr::Missing, range);
         };
+
+        self.pipe_into(piped, &rhs, range)
+    }
+
+    /// One pipeline stage, over a value that is already lowered.
+    ///
+    /// Split out of [`Self::lower_pipe`] for the flow operator, whose first
+    /// stage pipes from a parameter the source never wrote. **Sharing this
+    /// function is what makes `||> a |> b` and `fn x => x |> a |> b` the same
+    /// program** rather than two things that happen to agree today: call
+    /// insertion, the `_` placeholder, and where a `!` ends up are decided
+    /// here, once.
+    pub(super) fn pipe_into(
+        &mut self,
+        piped: ExprId,
+        rhs: &ast::Expr,
+        range: TextRange,
+    ) -> ExprId {
+        let rhs = rhs.clone();
 
         // `x |> f(y)!` means `f(x, y)!`. The other reading — `x |> (f(y)!)` —
         // is never meaningful: `f(y)` on the right of a pipe is a call with a

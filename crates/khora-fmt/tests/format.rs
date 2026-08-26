@@ -257,3 +257,40 @@ fn formatting_a_documented_variant_twice_is_formatting_it_once() {
     let once = format(messy).unwrap();
     assert_eq!(format(&once).unwrap(), once, "not idempotent:\n{once}");
 }
+
+// --- the flow operator -------------------------------------------------------
+
+/// Short enough to read on one line stays on one line.
+#[test]
+fn a_short_flow_stays_compact() {
+    let src = "module m;\nfn f() { apply(||> normalize |> validate, 1) }\n";
+    assert_eq!(format(src).unwrap(), src, "nothing to break up");
+}
+
+/// **The stages align with the operator**, rather than indenting under it.
+/// `||>` is not a continuation of anything -- there is no expression before it
+/// -- so a pipe that follows it is a sibling, and lining them up is what makes
+/// the shape of the pipeline visible.
+#[test]
+fn a_multiline_flow_aligns_its_stages() {
+    let src = "module m;\nfn f() {\n  apply(\n    ||> normalize\n|> validate\n|> persist\n  , 1)\n}\n";
+    let out = format(src).unwrap();
+    assert!(out.contains("    ||> normalize\n    |> validate\n    |> persist"), "{out}");
+}
+
+/// And an ordinary pipeline still indents under what it continues, which is
+/// the case the flow rule must not disturb.
+#[test]
+fn an_ordinary_pipeline_still_indents() {
+    let src = "module m;\nfn f() {\n  xs\n|> map(g)\n|> filter(h)\n}\n";
+    let out = format(src).unwrap();
+    assert!(out.contains("  xs\n    |> map(g)\n    |> filter(h)"), "{out}");
+}
+
+#[test]
+fn a_flow_survives_a_round_trip() {
+    let src = "module m;\nfn f() {\n  apply(\n    ||> normalize\n    |> validate\n    |> persist\n    , 1)\n}\n";
+    let once = format(src).unwrap();
+    assert_eq!(format(&once).unwrap(), once, "formatting is idempotent");
+    assert!(is_formatted(&once).unwrap(), "and reports itself formatted");
+}

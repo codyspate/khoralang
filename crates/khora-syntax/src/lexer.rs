@@ -41,6 +41,10 @@ enum Tok {
     ColonColon,
     #[token(":")]
     Colon,
+    // Before `||`, so the longer one wins. `a || > b` has no valid parse, so
+     // nothing legitimate is taken away by preferring it.
+    #[token("||>")]
+    PipePipeGt,
     #[token("|>")]
     PipeGt,
     #[token("||")]
@@ -193,6 +197,7 @@ fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
         Tok::Dot => S::DOT,
         Tok::ColonColon => S::COLON_COLON,
         Tok::Colon => S::COLON,
+        Tok::PipePipeGt => S::PIPE_PIPE_GT,
         Tok::PipeGt => S::PIPE_GT,
         Tok::PipePipe => S::PIPE_PIPE,
         Tok::Pipe => S::PIPE,

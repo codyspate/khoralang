@@ -37,7 +37,13 @@ cargo clippy --workspace --features llvm --all-targets -- -D warnings
 
 step 'the corpus checks'
 "$khora" check std
-"$khora" check examples
+# One at a time, because each example is its own package: `ledger_service`
+# depends on `packages/postgres`, and a check over the whole directory would
+# resolve one manifest for four programs and find neither the dependency nor
+# the reason it was missing.
+for app in examples/*/; do
+    "$khora" check "$app"
+done
 "$khora" check bench
 # Packages live in the tree while they are written — `docs/roadmap.md` 13.12
 # says why — so the baseline has to see them or they are not covered by it.
@@ -62,7 +68,11 @@ step 'the packages pass their own tests'
 "$khora" test packages/postgres
 
 step 'every reference application builds'
-for app in examples/core_demo examples/risk_analyzer examples/link_shortener; do
+# `ledger_service` is here for the same reason the packages are: it depends on
+# `packages/postgres`, so building it is what catches a package change that
+# breaks its only real consumer. It is not *run* here -- that needs a database,
+# which `crates/khora-codegen-llvm/tests/postgres.rs` gates on KHORA_POSTGRES.
+for app in examples/core_demo examples/risk_analyzer examples/link_shortener examples/ledger_service; do
     "$khora" build "$app"
 done
 

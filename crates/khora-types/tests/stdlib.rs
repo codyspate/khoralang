@@ -83,9 +83,18 @@ fn the_standard_library_type_checks() {
 /// that story, the `Unknown` audit is what ended it, and
 /// `docs/design/polymorphic-operations.md` is the decision that made the
 /// program true rather than the test lenient.
+/// `packages/` is in the source set because `examples/ledger_service` depends
+/// on `postgres`. A real build resolves that through the manifest; this test
+/// has no resolver, so it is handed the whole tree — which is also closer to
+/// what it is asserting, that everything in the repository agrees with
+/// everything else.
 #[test]
 fn the_reference_application_type_checks() {
-    let found = errors_under(&[std_dir(), repo_dir().join("examples")]);
+    let found = errors_under(&[
+        std_dir(),
+        repo_dir().join("examples"),
+        repo_dir().join("packages"),
+    ]);
     assert!(
         found.is_empty(),
         "the reference application does not type check:\n  {}",

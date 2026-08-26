@@ -1,0 +1,22 @@
+[package]
+name = "ledger_service"
+version = "0.1.0"
+edition = "2026"
+
+# What this program may reach outside itself.
+#
+# The database is a *package*, not `std`, so nothing here declares an
+# `extern fn` and there is no `[permissions] extern` entry. What it does need
+# is the network — for the port it answers on and for the one it dials
+# PostgreSQL on. `docs/design/permissions.md`.
+[permissions]
+network = ["0.0.0.0:8080", "127.0.0.1:5433"]
+env = ["PORT", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "POOL"]
+
+[dependencies]
+postgres = { path = "../../packages/postgres" }
+
+[fmt]
+indent-style = "space"
+indent-width = 2
+explicit-semicolons = true

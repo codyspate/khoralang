@@ -115,6 +115,12 @@ const khora = {
     operators: {
       patterns: [
         {
+          // Before the pipe and before logical-or: `||>` starts with both, and
+          // the first pattern that matches wins rather than the longest.
+          name: 'keyword.operator.flow.khora',
+          match: '\\|\\|>',
+        },
+        {
           name: 'keyword.operator.pipe.khora',
           match: '\\|>',
         },

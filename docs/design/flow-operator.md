@@ -1,7 +1,8 @@
 # D16 — the flow operator, `||>`
 
-**Proposed, not built.** This is the specification and the case for it, written
-down while it is fresh so the decision is ready when the evidence is.
+**Built.** This was the specification; it now describes what exists. The
+sections on what to settle are kept, with what was settled recorded in them,
+because the reasoning is the part worth having later.
 
 `||>` is **the flow operator**, and that is what to call it everywhere: in the
 documentation, in diagnostics, and in conversation. Not "flow lambda", which
@@ -86,24 +87,29 @@ row.
 
 ## Three things to settle when building it
 
-**The spelling.** `||` is logical-or and is used about fifteen times in `std`
-(`if digit < 0 || digit > 9`). `||>` is unambiguous to the parser — it appears
-only in prefix position, and `a || > b` has no valid parse — but a reader
-scanning `||>` sees `||` first, and that cost is paid at every use forever.
-`fn |> a |> b` is worth weighing against it: one character longer, no
-collision, and it reuses a keyword that already means "a function starts here".
-Against that, `||>` *looks* like a pipeline with an open left end, which is
-exactly what it is, and it is the spelling the name was chosen with.
+**The spelling — settled as `||>`.** `||` is logical-or and is used about
+fifteen times in `std` (`if digit < 0 || digit > 9`), so a reader scanning
+`||>` sees `||` first and that cost is paid at every use. `fn |> a |> b` was
+the alternative: one character longer, no collision. `||>` was chosen anyway,
+because it *looks* like a pipeline with an open left end, which is exactly what
+it is, and because the operator's name came from `flow` and the shape reads as
+one.
+
+The lexer is unambiguous either way: `||>` is one token, listed before `||` so
+the longer match wins, and `a || > b` has no valid parse so nothing legitimate
+was taken away. A test asserts that logical-or still lexes as itself, since
+that is the thing the spelling puts at risk.
 
 **The flow operator is greedy**, consuming every following `|>`. So piping the
 function it makes somewhere else needs parentheses: `(||> a) |> b`. That is the
 only sensible rule and it needs to be a documented one with a test, rather than
 an accident of the parser.
 
-**A one-stage flow should be a lint.** `List::map(||> normalize)` and
-`List::map(normalize)` behave identically and the first allocates a closure.
-The documentation will say to prefer the second; a diagnostic says it where it
-matters.
+**A one-stage flow should be a lint — not built.** `List::map(||> normalize)`
+and `List::map(normalize)` behave identically and the first allocates a
+closure. The documentation says to prefer the second; a diagnostic would say it
+where it matters. Left for the diagnostics pass, 13.17, because it is a lint
+and not a language question.
 
 ## Diagnostics
 
@@ -141,14 +147,28 @@ List::map(
 )
 ```
 
-## Why it is not built yet
+## What it cost
 
-Syntax is the one decision that cannot be walked back — `compatibility.md` is
-the reason, and 13.11 is the item that exists to hold the public surface to it.
-The cost of waiting is small and the cost of a spelling somebody regrets is
-permanent.
+Six small changes and nothing deep, which is the whole argument for doing it as
+sugar. One lexer token; one syntax kind for the node and one for the token; a
+parser function of thirty lines; a lowering that builds the lambda; one line in
+the formatter; and the two syntax highlighters.
 
-**The trigger:** write 13.18's HTTP + Postgres + tracing service, the first
-program in this repository large enough to have real pipelines. Build this when
-that application wants it — by then the spelling will have been felt rather
-than guessed.
+The lowering shares `pipe_into` with `lower_pipe` rather than reimplementing
+it. **That sharing is what makes the two spellings the same program** instead
+of two things that agree today: call insertion, the `_` placeholder and where a
+`!` ends up are decided in one place, once.
+
+The parameter is called `flow value` — with a space, so no source can declare
+it and no source can refer to it. The reference is built as a resolved local
+rather than looked up by name, so nothing tries.
+
+## Tests
+
+`crates/khora-syntax/tests/flow.rs` for the token and the tree, including that
+logical-or is untouched and that ordinary `|>` parsing is unchanged.
+`crates/khora-codegen-llvm/tests/flow.rs` end to end, where several tests run
+*both* spellings in one binary and compare — a test that only checked the
+flow's answer would pass just as happily if the desugaring quietly meant
+something slightly different. The formatter's are in
+`crates/khora-fmt/tests/format.rs`.

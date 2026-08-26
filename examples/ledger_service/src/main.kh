@@ -1,0 +1,418 @@
+module main;
+
+import std::core::{Channel, Fibers, List, Map, Option, Result, SharedFn, Show, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import std::env::{Clock, Env, variable_or};
+import std::json::{Json, JsonError, parse};
+import std::net::http::{HttpError, Params, Request, Response, Router};
+import std::trace::{Attribute, Status, Tracer, around_result, number, text};
+import postgres::db::{Request as PgRequest, Settings};
+import postgres::pool::{Pool, open as open_pool, with_db};
+
+// A ledger, and the third program here meant to be *run* rather than to
+// demonstrate a feature. Roadmap 13.18.
+//
+// `link_shortener` answers HTTP from a store in memory. This one answers HTTP
+// from PostgreSQL, under tracing, over a connection pool — which is the
+// combination a production service actually is, and the combination nothing
+// in this repository had put together. Everything it uses landed in the last
+// few days: bound parameters, the `Db` capability, the channel the capability
+// is built on, and the pool the channel makes almost free.
+//
+// What it does:
+//
+//   POST /entries    {"account": "...", "amount": 1250, "memo": "..."}
+//   GET  /entries?account=...            -> that account's entries, newest first
+//   GET  /balance/:account               -> one number, computed by the server
+//   GET  /health                         -> whether the database answers
+//
+// Amounts are integer minor units — pence, cents — and never floats.
+// `docs/design/numbers.md` is emphatic about why, and a ledger is the example
+// it uses.
+//
+// What it does not do: authentication, pagination, or currency. Each is absent
+// because it would add a shape already exercised elsewhere.
+
+// ---------------------------------------------------------------------------
+// What an entry is
+// ---------------------------------------------------------------------------
+
+derive(Show)
+export type Entry = {
+  id: Int,
+  account: String,
+  /// Minor units. See the note at the head of this file.
+  amount: Int,
+  memo: String,
+};
+
+impl Entry {
+  /// The JSON a client sees.
+  fn as_json(self) -> Json {
+    let fields = Map::new();
+    Map::insert(fields, "id", Json::Number(Int::to_float(self.id)));
+    Map::insert(fields, "account", Json::Text(self.account));
+    Map::insert(fields, "amount", Json::Number(Int::to_float(self.amount)));
+    Map::insert(fields, "memo", Json::Text(self.memo));
+    Json::Object(fields)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reading a row
+// ---------------------------------------------------------------------------
+//
+// **Every cell is matched, and a surprise is a failure rather than a zero.**
+// A row that does not have the shape the query asked for means the schema and
+// this file disagree, and the useful thing to do about that is say so at the
+// edge — not to serve a plausible-looking entry with an amount of nothing.
+
+fn cell_at(cells: List<Cell>, index: Int) -> Option<Cell> {
+  let mut rest = cells;
+  let mut at = 0;
+  let mut found: Option<Cell> = Option::None;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(head, tail) => {
+        if at == index {
+          found = Option::Some(head);
+          going = false
+        } else {
+          at = at + 1;
+          rest = tail
+        }
+      },
+    }
+  };
+  found
+}
+
+fn number_at(cells: List<Cell>, index: Int) -> Option<Int> {
+  match cell_at(cells, index) {
+    Option::Some(Cell::Number(n)) => Option::Some(n),
+    Option::Some(_) => Option::None,
+    Option::None => Option::None,
+  }
+}
+
+fn text_at(cells: List<Cell>, index: Int) -> Option<String> {
+  match cell_at(cells, index) {
+    Option::Some(Cell::Text(t)) => Option::Some(t),
+    Option::Some(_) => Option::None,
+    Option::None => Option::None,
+  }
+}
+
+fn entry_of(row: Row) -> Option<Entry> {
+  match number_at(row.cells, 0) {
+    Option::None => Option::None,
+    Option::Some(id) => match text_at(row.cells, 1) {
+      Option::None => Option::None,
+      Option::Some(account) => match number_at(row.cells, 2) {
+        Option::None => Option::None,
+        Option::Some(amount) => match text_at(row.cells, 3) {
+          Option::None => Option::None,
+          Option::Some(memo) =>
+          Option::Some({ id: id, account: account, amount: amount, memo: memo }),
+        },
+      },
+    },
+  }
+}
+
+/// Every row that had the shape asked for, in order.
+///
+/// A row that did not is dropped rather than failing the request, and the
+/// count is what says so: `entries` reports how many it read and how many it
+/// could use, and they differ exactly when the schema has moved.
+fn entries_of(rows: List<Row>) -> List<Entry> {
+  match rows {
+    List::Nil => List::Nil,
+    List::Cons(row, rest) => match entry_of(row) {
+      Option::Some(entry) => List::Cons(entry, entries_of(rest)),
+      Option::None => entries_of(rest),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The statements
+// ---------------------------------------------------------------------------
+//
+// **Every value is a bound parameter.** Not one of these builds SQL by
+// concatenation, which is the whole reason `ask` exists and the reason `Db`'s
+// operations take a `List<Cell>`.
+
+/// One line, because a string literal is one line. Written the way it would be
+/// in a migration otherwise.
+const SCHEMA: String = "create table if not exists entries (id serial primary key, account text not null, amount int4 not null, memo text not null)";
+
+fn insert_entry(db: Db, account: String, amount: Int, memo: String) -> Result<Int, DbError> {
+  let values =
+  List::Cons(Cell::Text(account),
+    List::Cons(Cell::Number(amount),
+      List::Cons(Cell::Text(memo), List::Nil)));
+  db.execute("insert into entries (account, amount, memo) values ($1, $2, $3)", values)
+}
+
+fn entries_for(db: Db, account: String) -> Result<List<Row>, DbError> {
+  db.query(
+    "select id::int4, account, amount, memo from entries where account = $1 order by id desc",
+    List::Cons(Cell::Text(account), List::Nil),
+  )
+}
+
+/// The balance, summed **by the server**.
+///
+/// `coalesce` because `sum` over no rows is NULL rather than zero, and an
+/// account nobody has posted to has a balance of nothing rather than no
+/// balance.
+fn balance_for(db: Db, account: String) -> Result<List<Row>, DbError> {
+  db.query(
+    "select coalesce(sum(amount), 0)::int4 from entries where account = $1",
+    List::Cons(Cell::Text(account), List::Nil),
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Turning a failure into a response
+// ---------------------------------------------------------------------------
+
+/// What a client is told, and what it is not.
+///
+/// **The engine's message does not cross the boundary.** A `DbError` can carry
+/// a constraint name, a column, a hint about the schema; a client asking for a
+/// balance has no use for any of it and an attacker has several. The status
+/// carries the actionable part — 400 when the request was wrong, 503 when the
+/// database was — and the detail belongs in the span.
+fn refused(why: DbError) -> Response {
+  let fields = Map::new();
+  match why {
+    DbError::Rejected(_) => {
+      Map::insert(fields, "error", Json::Text("the request could not be satisfied"));
+      Response::json(400, Json::Object(fields))
+    },
+    DbError::Disconnected(_) => {
+      Map::insert(fields, "error", Json::Text("the ledger is unavailable"));
+      Response::json(503, Json::Object(fields))
+    },
+    DbError::RolledBack(_) => {
+      Map::insert(fields, "error", Json::Text("the change was rolled back"));
+      Response::json(409, Json::Object(fields))
+    },
+  }
+}
+
+fn json_list(items: List<Json>) -> Response {
+  Response::json(200, Json::Array(items))
+}
+
+// ---------------------------------------------------------------------------
+// The routes
+// ---------------------------------------------------------------------------
+
+/// `POST /entries` — one entry, in a transaction.
+///
+/// A single insert does not need a transaction and has one anyway, because
+/// this is the shape a second statement gets added to and the version without
+/// one is the version somebody extends without noticing. `transaction` rolls
+/// back when the body fails, including when the fiber running it is cancelled
+/// — which is roadmap 13.3 and the half that is still the server's rather than
+/// Khora's.
+fn create(pool: Pool, tracer: Tracer, request: Request) -> Response {
+  match parse(request.body) {
+    Result::Err(_) => Response::text(400, "the body is not JSON"),
+    Result::Ok(document) => match posted(document) {
+      Option::None => Response::text(400, "expected account, amount and memo"),
+      Option::Some(entry) => stored(pool, tracer, entry),
+    },
+  }
+}
+
+/// The three fields, or nothing. A memo is optional and defaults to empty; an
+/// account and an amount are not.
+fn posted(document: Json) -> Option<Entry> {
+  match Json::field(document, "account") {
+    Option::Some(Json::Text(account)) => match Json::field(document, "amount") {
+      Option::Some(Json::Number(amount)) => {
+        let memo = match Json::field(document, "memo") {
+          Option::Some(Json::Text(written)) => written,
+          Option::Some(_) => "",
+          Option::None => "",
+        };
+        Option::Some({
+            id: 0,
+            account: account,
+            amount: Float::to_int(amount),
+            memo: memo,
+          })
+      },
+      Option::Some(_) => Option::None,
+      Option::None => Option::None,
+    },
+    Option::Some(_) => Option::None,
+    Option::None => Option::None,
+  }
+}
+
+fn stored(pool: Pool, tracer: Tracer, entry: Entry) -> Response {
+  let attempted = around_result(tracer, "entries.create", fn () =>
+    with_db(pool, fn db => transaction(db, fn () =>
+        insert_entry(db, entry.account, entry.amount, entry.memo))));
+
+  match attempted {
+    Result::Err(why) => refused(why),
+    Result::Ok(inner) => match inner {
+      Result::Err(why) => refused(why),
+      Result::Ok(_) => {
+        let fields = Map::new();
+        Map::insert(fields, "stored", Json::Bool(true));
+        Map::insert(fields, "account", Json::Text(entry.account));
+        Response::json(201, Json::Object(fields))
+      },
+    },
+  }
+}
+
+/// `GET /entries?account=...`
+///
+/// **The flow operator earning its place.** Reading an answer is three steps
+/// with no interesting name between them — take the rows, keep the ones that
+/// have the shape, render each — and naming the value twice to say so was the
+/// whole of what `fn value => value |> ..` bought.
+fn listing(pool: Pool, tracer: Tracer, request: Request) -> Response {
+  match Map::get(request.queries, "account") {
+    Option::None => Response::text(400, "expected an `account` query parameter"),
+    Option::Some(account) => {
+      let asked = around_result(tracer, "entries.list", fn () =>
+        with_db(pool, fn db => entries_for(db, account)));
+      match asked {
+        Result::Err(why) => refused(why),
+        Result::Ok(inner) => match inner {
+          Result::Err(why) => refused(why),
+          Result::Ok(rows) => rows |> (||> entries_of |> as_documents |> json_list),
+        },
+      }
+    },
+  }
+}
+
+fn as_documents(entries: List<Entry>) -> List<Json> {
+  match entries {
+    List::Nil => List::Nil,
+    List::Cons(entry, rest) => List::Cons(Entry::as_json(entry), as_documents(rest)),
+  }
+}
+
+/// `GET /balance/:account`
+fn balance(pool: Pool, tracer: Tracer, request: Request) -> Response {
+  match Map::get(request.params.bound, "account") {
+    Option::None => Response::text(400, "expected an account"),
+    Option::Some(account) => {
+      let asked = around_result(tracer, "entries.balance", fn () =>
+        with_db(pool, fn db => balance_for(db, account)));
+      match asked {
+        Result::Err(why) => refused(why),
+        Result::Ok(inner) => match inner {
+          Result::Err(why) => refused(why),
+          Result::Ok(rows) => answered(account, rows),
+        },
+      }
+    },
+  }
+}
+
+fn answered(account: String, rows: List<Row>) -> Response {
+  let total = match rows {
+    List::Nil => 0,
+    List::Cons(row, _) => match number_at(row.cells, 0) {
+      Option::Some(n) => n,
+      Option::None => 0,
+    },
+  };
+  let fields = Map::new();
+  Map::insert(fields, "account", Json::Text(account));
+  Map::insert(fields, "balance", Json::Number(Int::to_float(total)));
+  Json::Object(fields) |> Response::json(200, _)
+}
+
+/// `GET /health`
+///
+/// **Asks the database.** A health check that answers 200 because the process
+/// is running tells a load balancer nothing it did not already know from the
+/// connection being accepted.
+fn health(pool: Pool, tracer: Tracer, request: Request) -> Response {
+  let asked = around_result(tracer, "health", fn () =>
+    with_db(pool, fn db => db.query("select 1::int4", List::Nil)));
+  let fields = Map::new();
+  match asked {
+    Result::Err(_) => {
+      Map::insert(fields, "database", Json::Text("unreachable"));
+      Response::json(503, Json::Object(fields))
+    },
+    Result::Ok(inner) => match inner {
+      Result::Err(_) => {
+        Map::insert(fields, "database", Json::Text("unreachable"));
+        Response::json(503, Json::Object(fields))
+      },
+      Result::Ok(_) => {
+        Map::insert(fields, "database", Json::Text("ready"));
+        Response::json(200, Json::Object(fields))
+      },
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Starting
+// ---------------------------------------------------------------------------
+
+fn setting(name: String, fallback: String) -> String with { env: Env } {
+  variable_or(name, fallback)
+}
+
+fn number_setting(name: String, fallback: Int) -> Int with { env: Env } {
+  match Int::of_string(variable_or(name, Int::to_string(fallback))) {
+    Option::Some(chosen) => chosen,
+    // An operator's typo is worth saying so about and not worth refusing to
+    // start over. `link_shortener` makes the same call for the same reason.
+    Option::None => {
+      print(name + " is not a number; using " + Int::to_string(fallback));
+      fallback
+    },
+  }
+}
+
+export fn main() raises HttpError {
+  with { env: Env::real(), clock: Clock::real() } {
+    let settings: Settings = {
+      host: setting("PGHOST", "127.0.0.1"),
+      port: number_setting("PGPORT", 5433),
+      user: setting("PGUSER", "khora"),
+      database: setting("PGDATABASE", "khora"),
+      secret: setting("PGPASSWORD", "khora"),
+    };
+
+    // The serving fibers live for the whole program, so the crew is opened
+    // here and never waited on: a pool that outlives `main` is not a thing,
+    // and `Router::listen` does not return.
+    let crew = Fibers::open();
+    let pool = open_pool(crew, settings, number_setting("POOL", 4));
+    let tracer = Tracer::none();
+
+    match with_db(pool, fn db => db.execute(SCHEMA, List::Nil)) {
+      Result::Ok(_) => print("schema ready"),
+      Result::Err(_) => print("could not reach the ledger; starting anyway"),
+    };
+
+    print("ledger listening");
+    Router::new()
+      |> Router::post("/entries", SharedFn::of(fn request => create(pool, tracer, request)))
+      |> Router::get("/entries", SharedFn::of(fn request => listing(pool, tracer, request)))
+      |> Router::get("/balance/:account", SharedFn::of(fn request => balance(pool, tracer, request)))
+      |> Router::get("/health", SharedFn::of(fn request => health(pool, tracer, request)))
+      |> Router::listen(number_setting("PORT", 8080))!
+  }
+}

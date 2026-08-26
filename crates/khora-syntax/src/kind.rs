@@ -76,6 +76,8 @@ pub enum SyntaxKind {
     PIPE,
     /// `|>`
     PIPE_GT,
+    /// `||>` — the flow operator.
+    PIPE_PIPE_GT,
     /// `->`
     THIN_ARROW,
     /// `=>`
@@ -214,6 +216,9 @@ pub enum SyntaxKind {
     ARG_LIST,
     FIELD_EXPR,
     PIPE_EXPR,
+    /// `||> a |> b` -- the flow operator's anonymous pipeline. Its children are
+    /// the stages; the parameter they pipe from is made during lowering.
+    FLOW_EXPR,
     BIN_EXPR,
     PREFIX_EXPR,
     BLOCK_EXPR,

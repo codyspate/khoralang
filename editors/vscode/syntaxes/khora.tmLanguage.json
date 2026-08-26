@@ -398,6 +398,11 @@
     "operators": {
       "patterns": [
         {
+          "comment": "The flow operator, before the pipe and before logical-or: it starts with both of them, and TextMate takes the first pattern that matches rather than the longest.",
+          "name": "keyword.operator.flow.khora",
+          "match": "\\|\\|>"
+        },
+        {
           "comment": "The pipe operator gets its own scope: it is the language's signature operator and deserves to stand out.",
           "name": "keyword.operator.pipe.khora",
           "match": "\\|>"

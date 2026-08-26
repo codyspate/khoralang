@@ -397,3 +397,55 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "40\n49\n1521\n-1\n");
     assert_eq!(ran.code, Some(0));
 }
+
+/// **Two modules exporting a type of the same name must not share a layout.**
+///
+/// Drop glue was cached by the type's *printed* name, and `Display` leaves the
+/// module out on purpose — `Request` reads better than `std.net.http.Request`
+/// in an error message. So `alpha::Holder` and `beta::Holder` got one drop
+/// routine: whichever was emitted first. One record's fields were then
+/// released through the other's field list.
+///
+/// The layouts here differ in the way that makes that fatal: one holds a
+/// boxed value where the other holds a number, so releasing the wrong one
+/// treats an integer as a pointer. `khora_live_count` is the assertion because
+/// the *quiet* version of this bug is a leak; the loud version is the crash
+/// that found it, several frames from anything that looks related.
+#[test]
+fn two_modules_may_export_a_type_of_the_same_name() {
+    let alpha = "module alpha;
+impl String { fn byte_length(self) -> Int; }
+export type Holder = { text: String };
+export fn make_alpha(t: String) -> Holder { { text: t } }
+export fn width(h: Holder) -> Int { String::byte_length(h.text) }
+";
+    let beta = "module beta;
+export type Holder = { count: Int };
+export fn make_beta(n: Int) -> Holder { { count: n } }
+export fn value(h: Holder) -> Int { h.count }
+";
+    let main = "module main;
+import alpha::{Holder as Boxed, make_alpha, width};
+import beta::{Holder as Counted, make_beta, value};
+fn print(value: Int);
+extern fn khora_live_count() -> Int;
+
+fn use_both() -> Int {
+  let a = make_alpha(\"twelve chars\");
+  let b = make_beta(7);
+  width(a) + value(b)
+}
+
+fn main() -> Int {
+  print(use_both());
+  print(khora_live_count());
+  0
+}
+";
+    let ran = run(
+        "same_name_types",
+        &[("alpha.kh", alpha), ("beta.kh", beta), ("main.kh", main)],
+    );
+    assert_eq!(ran.stdout, "19\n0\n", "12 + 7, and nothing left alive: {}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
