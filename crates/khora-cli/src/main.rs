@@ -163,6 +163,16 @@ enum Command {
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Get the newest Khora and make it the default.
+    ///
+    /// `khora toolchain install` plus `khora toolchain default`, which is what
+    /// somebody wants almost every time. The version this replaces stays
+    /// installed, so going back is `khora toolchain default <old>`.
+    Update {
+        /// Consider release candidates too.
+        #[arg(long)]
+        pre: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -185,17 +195,44 @@ fn main() -> ExitCode {
 enum ToolchainCommand {
     /// Show what is installed, and which one is running.
     List,
+    /// Download and unpack a published release.
+    ///
+    /// With no version, the newest stable one. Installing a version does not
+    /// switch to it; `khora toolchain default` does that.
+    Install {
+        /// The version to get. Defaults to the newest release.
+        version: Option<String>,
+        /// Consider release candidates too.
+        ///
+        /// A candidate is published as a pre-release, which the newest-stable
+        /// lookup skips. This means "candidates as well", not "candidates
+        /// only": the day after a stable release, the newest release of any
+        /// kind is that stable one.
+        #[arg(long)]
+        pre: bool,
+    },
+    /// Choose which version a directory with no pin gets.
+    ///
+    /// A project's own `[toolchain]` pin always wins over this.
+    Default {
+        /// The version to use. Left out, this says which one is set.
+        version: Option<String>,
+        /// Go back to using whatever is on the path.
+        #[arg(long, conflicts_with = "version")]
+        none: bool,
+    },
     /// Register a Khora executable as the toolchain for a version.
     ///
-    /// There is no `install`, because there is nothing to download from yet.
+    /// For a version you built yourself. `install` is the one that downloads.
     Link {
         /// The version it will be known as.
         version: String,
         /// The executable to register. It is copied, not pointed at.
         path: PathBuf,
     },
-    /// Forget a registered toolchain.
-    Unlink { version: String },
+    /// Remove an installed toolchain.
+    #[command(alias = "unlink")]
+    Remove { version: String },
     /// Say which toolchain this directory would use, and why.
     Which {
         #[arg(default_value = ".")]
@@ -221,6 +258,7 @@ fn run() -> Result<bool> {
         Command::Lsp => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
         Command::Toolchain { command } => toolchain(command),
+        Command::Update { pre } => update(pre),
         Command::Test { path, filter } => test(&path, filter.as_deref()),
         Command::Bench { path, filter } => bench(&path, filter.as_deref()),
     }
@@ -354,17 +392,89 @@ fn toolchain(command: ToolchainCommand) -> Result<bool> {
             let installed = khora_toolchain::installed()?;
             if installed.is_empty() {
                 println!(
-                    "no toolchains registered; this is Khora {} and it is the only one \
-                     that will run.\n\n    khora toolchain link {} <path-to-khora>",
+                    "nothing installed here; this is Khora {} and it is the only one \
+                     that will run.\n\n    khora toolchain install <version>   \
+                     get a published release\n    \
+                     khora toolchain link <version> <path>   register one you built",
                     khora_toolchain::RUNNING,
-                    khora_toolchain::RUNNING
                 );
                 return Ok(true);
             }
+            let default = khora_toolchain::install::default_version();
+            // **The one on the path is a toolchain too**, and it is not under
+            // `toolchains/`: `install.sh` unpacks it into `~/.khora` directly,
+            // and that is the whole point — it is the bootstrap, and everything
+            // installed afterwards sits beside it rather than replacing it.
+            // Leaving it out of this list makes "go back to the one I had"
+            // look impossible after the first `khora update`.
+            if !installed.iter().any(|t| t.version == khora_toolchain::RUNNING) {
+                // No default at all also means this one: an unpinned directory
+                // runs whatever is on the path, which is this.
+                let chosen = match default.as_deref() {
+                    None | Some(khora_toolchain::RUNNING) => "running, default",
+                    Some(_) => "running",
+                };
+                println!("{}  ({chosen}, on your path)", khora_toolchain::RUNNING);
+            }
             for entry in installed {
-                let running =
-                    if entry.version == khora_toolchain::RUNNING { "  (running)" } else { "" };
-                println!("{}{running}", entry.version);
+                let mut notes = Vec::new();
+                if entry.version == khora_toolchain::RUNNING {
+                    notes.push("running");
+                }
+                if default.as_deref() == Some(entry.version.as_str()) {
+                    notes.push("default");
+                }
+                let notes =
+                    if notes.is_empty() { String::new() } else { format!("  ({})", notes.join(", ")) };
+                println!("{}{notes}", entry.version);
+            }
+            Ok(true)
+        }
+        ToolchainCommand::Install { version, pre } => {
+            let wanted = match version {
+                Some(exact) => khora_toolchain::install::Wanted::Exactly(exact),
+                None if pre => khora_toolchain::install::Wanted::Newest,
+                None => khora_toolchain::install::Wanted::Latest,
+            };
+            let version = khora_toolchain::install::resolve(&wanted)?;
+            if version == khora_toolchain::RUNNING {
+                println!("Khora {version} is already what is running.");
+            }
+            println!("Khora {version} for {}", khora_toolchain::install::TARGET);
+            println!("  downloading and verifying");
+            let at = khora_toolchain::install::install(&version)?;
+            println!("  installed at {}", at.display());
+
+            // The first toolchain installed becomes the default, because
+            // somebody who has installed exactly one of something did not mean
+            // to leave it unused.
+            if khora_toolchain::install::default_version().is_none() {
+                khora_toolchain::install::set_default(&version)?;
+                println!("  and is now the default");
+            } else {
+                println!("\nUse it everywhere:  khora toolchain default {version}");
+                println!("Or in one project:  [toolchain] version = \"{version}\" in khora.toml");
+            }
+            Ok(true)
+        }
+        ToolchainCommand::Default { version, none } => {
+            if none {
+                khora_toolchain::install::clear_default()?;
+                println!("no default; whatever is on the path runs.");
+                return Ok(true);
+            }
+            match version {
+                Some(version) => {
+                    khora_toolchain::install::set_default(&version)?;
+                    println!("Khora {version} is now the default.");
+                }
+                None => match khora_toolchain::install::default_version() {
+                    Some(version) => println!("{version}"),
+                    None => println!(
+                        "no default; whatever is on the path runs. This is Khora {}.",
+                        khora_toolchain::RUNNING
+                    ),
+                },
             }
             Ok(true)
         }
@@ -373,15 +483,30 @@ fn toolchain(command: ToolchainCommand) -> Result<bool> {
             println!("registered Khora {version} at {}", at.display());
             Ok(true)
         }
-        ToolchainCommand::Unlink { version } => {
+        ToolchainCommand::Remove { version } => {
             khora_toolchain::unlink(&version)?;
-            println!("forgot Khora {version}");
+            // A default naming something that is gone would refuse every
+            // command in every unpinned directory, which is a hard state to get
+            // out of when the command that fixes it is one of them.
+            if khora_toolchain::install::default_version().as_deref() == Some(version.as_str()) {
+                khora_toolchain::install::clear_default()?;
+                println!("removed Khora {version}, which was the default; there is no default now");
+            } else {
+                println!("removed Khora {version}");
+            }
             Ok(true)
         }
         ToolchainCommand::Which { path } => {
-            match khora_toolchain::pinned_version(&path) {
+            // Both halves, and which one answered: "0.2.0 because this project
+            // says so" and "0.2.0 because you chose it once" are different
+            // facts, and saying which is the whole point of this command.
+            let pinned = khora_toolchain::pinned_version(&path);
+            let because =
+                if pinned.is_some() { "this project pins it" } else { "it is your default" };
+            match pinned.or_else(khora_toolchain::install::default_version) {
                 None => println!(
-                    "no pin here, so whatever is on the path runs. This is Khora {}.",
+                    "no pin here and no default, so whatever is on the path runs. \
+                     This is Khora {}.",
                     khora_toolchain::RUNNING
                 ),
                 Some(wanted) => {
@@ -393,10 +518,10 @@ fn toolchain(command: ToolchainCommand) -> Result<bool> {
                         &installed,
                     ) {
                         khora_toolchain::Decision::Proceed => {
-                            println!("pinned to {wanted}, which is what is running")
+                            println!("{wanted}, because {because} — and that is what is running")
                         }
                         khora_toolchain::Decision::Handover(t) => println!(
-                            "pinned to {wanted}, at {}\nthis is {}, which would hand over",
+                            "{wanted}, because {because}, at {}\nthis is {}, which would hand over",
                             t.binary.display(),
                             khora_toolchain::RUNNING
                         ),
@@ -409,6 +534,35 @@ fn toolchain(command: ToolchainCommand) -> Result<bool> {
             Ok(true)
         }
     }
+}
+
+/// `khora update`.
+///
+/// The newest release, installed and made the default. The version it replaces
+/// is left on disk: an update that deletes the thing you were using is one you
+/// cannot undo at the moment you discover you need to.
+fn update(pre: bool) -> Result<bool> {
+    let wanted = if pre {
+        khora_toolchain::install::Wanted::Newest
+    } else {
+        khora_toolchain::install::Wanted::Latest
+    };
+    let version = khora_toolchain::install::resolve(&wanted)?;
+
+    if version == khora_toolchain::RUNNING
+        && khora_toolchain::install::default_version().as_deref() == Some(version.as_str())
+    {
+        println!("Khora {version} is the newest release, and is what you have.");
+        return Ok(true);
+    }
+
+    println!("Khora {} → {version}", khora_toolchain::RUNNING);
+    println!("  downloading and verifying");
+    khora_toolchain::install::install(&version)?;
+    khora_toolchain::install::set_default(&version)?;
+    println!("  installed, and now the default");
+    println!("\nGo back with:  khora toolchain default {}", khora_toolchain::RUNNING);
+    Ok(true)
 }
 
 /// Hands this invocation to the toolchain the project pins, if that is not us.
@@ -429,7 +583,9 @@ fn hand_over_if_pinned() {
     // missing, the pin would refuse to let the command that installs it run.
     // `which` would also report on the toolchain that answered rather than on
     // the decision being asked about.
-    if std::env::args().nth(1).as_deref() == Some("toolchain") {
+    // `khora update` is the other one, for the same reason: it is how a broken
+    // default gets replaced.
+    if matches!(std::env::args().nth(1).as_deref(), Some("toolchain") | Some("update")) {
         return;
     }
 
@@ -439,10 +595,18 @@ fn hand_over_if_pinned() {
     let active = std::env::var(khora_toolchain::ACTIVE).ok();
     let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let pin = khora_toolchain::pinned_version(&here);
+    // **A missing pin and a missing default are not the same failure.** A pin
+    // is what the project requires, so a version that is not installed stops
+    // the command. A default is a preference expressed once, possibly on
+    // another day about a toolchain since removed — refusing every command in
+    // every unpinned directory over that would be a machine somebody has to
+    // repair before they can use it.
+    let from_pin = pin.is_some();
+    let wanted = pin.or_else(khora_toolchain::install::default_version);
 
     let installed = khora_toolchain::installed().unwrap_or_default();
     let decision = khora_toolchain::decide(
-        pin.as_deref(),
+        wanted.as_deref(),
         khora_toolchain::RUNNING,
         active.as_deref(),
         &installed,
@@ -450,6 +614,14 @@ fn hand_over_if_pinned() {
 
     match decision {
         khora_toolchain::Decision::Proceed => {}
+        khora_toolchain::Decision::Missing { wanted, .. } if !from_pin => {
+            eprintln!(
+                "khora: your default is Khora {wanted}, which is not installed. \
+                 Running {} instead.\n       Fix it with `khora toolchain install {wanted}` \
+                 or `khora toolchain default --none`.",
+                khora_toolchain::RUNNING
+            );
+        }
         khora_toolchain::Decision::Missing { wanted, available } => {
             eprintln!("khora: {}", khora_toolchain::missing_message(&wanted, &available));
             std::process::exit(1);

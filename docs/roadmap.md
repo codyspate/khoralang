@@ -2137,6 +2137,29 @@ Ordered by value, not by §6's numbering.
   failure the feature exists to prevent: a build that quietly used a different
   compiler looks like it worked.
 
+  **`khora` installs `khora`.** `khora toolchain install [version]` downloads
+  a published release, verifies it against the checksum published beside it,
+  and unpacks it into `toolchains/<version>/`; `khora update` is that plus
+  making it the default, which is what somebody wants nearly every time. There
+  is no second program, which is 13.25's whole argument: Rust makes a newcomer
+  learn that `rustup` and `cargo` are different things before they can use
+  either, and nothing here needs that split.
+
+  **The bootstrap toolchain is the one on the path**, where `install.sh` put
+  it, and is never replaced. Everything installed afterwards sits beside it
+  under `toolchains/`, and `<home>/default` — one line, one version — chooses
+  between them. So going back after a bad update is
+  `khora toolchain default <old>` rather than a reinstall, and
+  `khora toolchain list` shows the bootstrap alongside the rest so that the old
+  version is visible to go back *to*.
+
+  **A default and a pin are not the same kind of thing.** A pin is what the
+  project requires, so a pinned version that is not installed stops the
+  command. A default is a preference somebody expressed once, possibly about a
+  toolchain since removed, so a missing one warns and runs what is on the path
+  — refusing every command in every unpinned directory would be a machine that
+  has to be repaired before it can be used.
+
   Two things worth knowing before extending it. `khora toolchain ...` never
   hands over, because otherwise standing in a project whose pin is missing
   leaves you unable to run the command that installs it — the pin becomes a
@@ -3279,7 +3302,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.11 | Public surface audit | **Done.** 390 items in `std` reviewed; 94 said nothing and now say something, held by a test. **`export` means something inside an `impl`** as of this item — a method without it is its module's — so 24 helpers that were promises by accident are private, and the refusal names the one-word fix. 241 methods gained the keyword. `docs/design/std-surface.md` |
 | 13.12 | Production ecosystem | **Postgres and an HTTP client.** The driver: wire protocol, both query protocols, bound parameters, `Cell` mapping, the `Db` capability with `transaction`, and a pool — all against a real server; no SCRAM or TLS. And `HttpClient`, a capability from `Call` to `Answer`, reading all three of the ways an answer can be framed; no connection pool and no redirects. OTLP not started |
 | 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
-| 13.14 | Installation | **Done, pending a release being cut.** `scripts/package.sh` assembles a toolchain, `.github/workflows/release.yml` builds one per platform and attaches them to a draft release somebody created — publishing is a person's decision and only publishing makes it the release `install.sh` finds — and `install.sh` / `install.ps1` are the `curl | sh`, with `--pre` for a candidate. Two channels, out of GitHub's own pre-release flag: a candidate is installable by name and invisible to `/releases/latest`. The compiler was already relocatable — `standard_library()` and `runtime_archive()` both probe beside the binary. The one thing not in the download is a linker, and that is the platform's. **Not yet:** the installer puts one toolchain in `~/.khora` and does not meet `khora-toolchain`'s side-by-side `toolchains/<version>/` layout, so per-project pinning still needs `khora toolchain link` by hand |
+| 13.14 | Installation | **Done, pending a release being cut.** `scripts/package.sh` assembles a toolchain, `.github/workflows/release.yml` builds one per platform and attaches them to a draft release somebody created — publishing is a person's decision and only publishing makes it the release `install.sh` finds — and `install.sh` / `install.ps1` are the `curl | sh`, with `--pre` for a candidate. Two channels, out of GitHub's own pre-release flag: a candidate is installable by name and invisible to `/releases/latest`. The compiler was already relocatable — `standard_library()` and `runtime_archive()` both probe beside the binary. The one thing not in the download is a linker, and that is the platform's. **13.25 closed the gap between the installer and the side-by-side layout**: the bootstrap toolchain stays where `install.sh` put it, on the path, and `khora toolchain install` puts every later one under `toolchains/<version>/` beside it |
 | 13.15 | User documentation | **API reference generated; the rest not started.** `khora doc` writes a page per `std` module from `///` and `//!`, gated by `--check` in the baseline. Getting Started, the guide and the cookbook are the docs agent's `website/` work |
 | 13.16 | Editor and tooling | **Less than half, and this row overstated it.** The language server answers diagnostics and hover. Not formatting, not completion, not navigation — none of those exist. And the VS Code extension is grammar-only: no `main`, no client, so **nothing has ever connected to the server**. Packaging an extension that speaks to it is the release blocker; Phase 14 is where the rest is planned |
 | 13.17 | Diagnostics pass | **Ongoing, and it works.** Six misleading messages were found and fixed by *using* the language during phase 12, and the `discarded-result` lint by two real bugs that a message could not have caught — `expr!` is the identity on values, so a discarded `Result` looks handled. A corpus makes that systematic instead of incidental |
@@ -3290,6 +3313,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.22 | Governance | **Licensed.** `LICENSE-MIT` and `LICENSE-APACHE`, matching what `Cargo.toml` always claimed, with the inbound-equals-outbound line in the README. A contribution guide, the language-change process and ownership rules are not written |
 | 13.23 | Performance at scale | **Small-scale, and the harness was the ceiling.** `bench/compare.py` walks a ladder of connection counts and refuses to report a rate that is still climbing — which every fast figure this repository had published was. Khora's server is somewhere above 1.7M req/s and this rig cannot say where; Go, C#, Java and Node *are* measurable and are in `bench/README.md`. Two machines is the real fix |
 | 13.24 | Clean-machine release test | **Not started.** The acceptance test for all of the above |
+| 13.25 | A toolchain that manages itself | **Done.** `khora toolchain install`, `khora toolchain default`, `khora toolchain remove` and `khora update`. `curl \| sh` is now only the bootstrap: it puts one `khora` on the path and everything after that is `khora`'s own job, so there is no `khoraup` to learn about. Downloads are verified against the checksum published beside them, in-process rather than through a `sha256sum` that may not be there. `curl`, `wget` and `tar` are shelled out to, following `khora-pkg`'s decision about `git`, rather than linking an HTTP client, a TLS stack, gzip and zip into a compiler that needs none of them |
 
 ### The three that are bigger than one line makes them look
 

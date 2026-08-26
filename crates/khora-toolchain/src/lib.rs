@@ -26,12 +26,19 @@
 //! quietly used a different compiler than the one the project asked for is
 //! worse than no pin at all, because it looks like it worked.
 //!
-//! # Why there is no `install` that downloads anything
+//! # Two ways a toolchain gets here
 //!
-//! There are no releases yet. `link` registers a toolchain already on disk,
-//! which is what somebody with two checkouts actually needs, and is honest
-//! about the fact that nothing is being fetched. When releases exist, `install`
-//! goes beside it and this comment goes away.
+//! [`install`](install::install) downloads a published release. `link`
+//! registers one already on disk, which is what somebody with two checkouts of
+//! this repository needs and what no download can provide.
+//!
+//! # What an unpinned directory gets
+//!
+//! Whatever is on `PATH`, unless [`install::set_default`] has said otherwise.
+//! A default is a machine-wide preference and a pin is a project's
+//! requirement, so a pin always wins — see [`wanted_version`].
+
+pub mod install;
 
 use std::path::{Path, PathBuf};
 
@@ -93,7 +100,7 @@ pub struct Toolchain {
 }
 
 /// The name a Khora executable has on this platform.
-fn executable() -> String {
+pub(crate) fn executable() -> String {
     format!("khora{}", std::env::consts::EXE_SUFFIX)
 }
 
@@ -179,9 +186,9 @@ pub fn decide(pin: Option<&str>, running: &str, active: Option<&str>, have: &[To
 
 /// What to tell somebody whose pinned version is not installed.
 ///
-/// Names the version, what is there, and the command that fixes it. A message
-/// that only says "not found" leaves them guessing at both the directory layout
-/// and the subcommand.
+/// Names the version, what is there, and the command that fixes it. "Not
+/// found" on its own leaves them guessing at both the directory layout and the
+/// subcommand.
 pub fn missing_message(wanted: &str, available: &[String]) -> String {
     let mut out = format!(
         "this project pins Khora {wanted}, which is not installed.\n\n\
@@ -190,12 +197,28 @@ pub fn missing_message(wanted: &str, available: &[String]) -> String {
          no pin at all, because it looks like it worked.\n"
     );
     if available.is_empty() {
-        out.push_str("\nNo toolchains are registered. Register one you have built:\n");
+        out.push_str("\nNo other toolchains are installed.\n");
     } else {
-        out.push_str(&format!("\nRegistered: {}\n\nRegister another:\n", available.join(", ")));
+        out.push_str(&format!("\nInstalled: {}\n", available.join(", ")));
     }
-    out.push_str(&format!("\n    khora toolchain link {wanted} <path-to-khora>\n"));
+    out.push_str(&format!(
+        "\nGet it:\n\n    khora toolchain install {wanted}\n\n\
+         Or register one you built yourself:\n\n    \
+         khora toolchain link {wanted} <path-to-khora>\n"
+    ));
     out
+}
+
+/// The version this directory should be built with, and why.
+///
+/// A project's pin first, then the machine's default. **A pin always wins**:
+/// a default is a preference somebody expressed once, and a pin is a
+/// requirement the project restates every time it is built.
+///
+/// `None` means neither, which is the ordinary case and the one where the
+/// `khora` on `PATH` simply runs.
+pub fn wanted_version(start: &Path) -> Option<String> {
+    pinned_version(start).or_else(install::default_version)
 }
 
 /// Registers an executable as the toolchain for `version`.
@@ -295,6 +318,16 @@ mod tests {
     #[test]
     fn the_missing_message_copes_with_nothing_installed() {
         let text = missing_message("0.3.0", &[]);
-        assert!(text.contains("No toolchains are registered"), "{text}");
+        assert!(text.contains("No other toolchains are installed"), "{text}");
+    }
+
+    /// Both ways of getting one, because somebody who has neither installed it
+    /// nor built it needs to be told which of the two they want.
+    #[test]
+    fn the_missing_message_offers_the_download_first() {
+        let text = missing_message("0.3.0", &[]);
+        let install = text.find("toolchain install 0.3.0").expect("the download: {text}");
+        let link = text.find("toolchain link 0.3.0").expect("the local one: {text}");
+        assert!(install < link, "the download should come first:\n{text}");
     }
 }

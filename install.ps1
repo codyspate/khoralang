@@ -15,6 +15,10 @@
 # Downloads the release for this machine, checks it against the published
 # checksum, and unpacks it into %USERPROFILE%\.khora. Nothing is compiled,
 # nothing needs administrator, and `Remove-Item -Recurse ~\.khora` undoes it.
+#
+# Run this once. After it, `khora` manages itself: `khora update` gets the next
+# release, `khora toolchain install` gets a particular one, and
+# `khora toolchain default` chooses between them.
 [CmdletBinding()]
 param(
     [string] $Version = "",
@@ -137,6 +141,7 @@ if (-not $onPath) {
 Write-Host ""
 Write-Host "  khora --help        what it can do"
 Write-Host "  khora build .       compile the package in this directory"
+Write-Host "  khora update        get the next release, when there is one"
 if ($candidate) {
     Write-Host ""
     Write-Host "  This is a candidate. Please report what breaks:"

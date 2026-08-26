@@ -137,7 +137,10 @@ fn list_with_nothing_registered_says_what_to_do() {
     let w = world(None);
     let (ok, output) = khora(&w, &w.project, &["toolchain", "list"]);
     assert!(ok, "{output}");
-    assert!(output.contains("no toolchains registered"), "{output}");
+    assert!(output.contains("nothing installed here"), "{output}");
+    // Both ways of getting one, because somebody with neither a release nor a
+    // build of their own needs to be told which of the two they want.
+    assert!(output.contains("khora toolchain install"), "{output}");
     assert!(output.contains("khora toolchain link"), "{output}");
 }
 
@@ -146,17 +149,19 @@ fn which_reports_no_pin_outside_a_project() {
     let w = world(None);
     let (ok, output) = khora(&w, &w.project, &["toolchain", "which"]);
     assert!(ok, "{output}");
-    assert!(output.contains("no pin here"), "{output}");
+    assert!(output.contains("no pin here and no default"), "{output}");
 }
 
 #[test]
-fn unlink_forgets_and_says_so() {
+fn remove_forgets_and_says_so() {
     let w = world(None);
     link(&w, "0.99.0");
 
+    // `unlink` is what this was called before `install` existed, and is kept
+    // as an alias so a script written against it still runs.
     let (ok, output) = khora(&w, &w.project, &["toolchain", "unlink", "0.99.0"]);
     assert!(ok, "{output}");
-    assert!(output.contains("forgot Khora 0.99.0"), "{output}");
+    assert!(output.contains("removed Khora 0.99.0"), "{output}");
 
     let (ok, output) = khora(&w, &w.project, &["toolchain", "list"]);
     assert!(ok, "{output}");
@@ -170,4 +175,134 @@ fn a_pin_applies_from_a_subdirectory() {
     let (ok, output) = khora(&w, &w.project.join("src"), &["check", "main.kh"]);
     assert!(!ok, "the pin should still apply one level down: {output}");
     assert!(output.contains("pins Khora 9.9.9"), "{output}");
+}
+
+// --- the default ------------------------------------------------------------
+
+/// **A default is obeyed where there is no pin**, which is what makes
+/// `khora update` mean anything: the bootstrap toolchain stays on the path, and
+/// this is how a newer one installed beside it gets used.
+#[test]
+fn a_default_is_used_when_the_project_pins_nothing() {
+    let w = world(None);
+    link(&w, "0.99.0");
+
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "default", "0.99.0"]);
+    assert!(ok, "{output}");
+
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "which"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("0.99.0"), "{output}");
+    assert!(output.contains("it is your default"), "{output}");
+    assert!(output.contains("would hand over"), "{output}");
+}
+
+/// **A pin beats a default**, because a default is a preference somebody
+/// expressed once and a pin is what the project requires every time.
+#[test]
+fn a_pin_wins_over_a_default() {
+    let w = world(Some("9.9.9"));
+    link(&w, "9.9.9");
+    link(&w, "0.99.0");
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "default", "0.99.0"]);
+    assert!(ok, "{output}");
+
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "which"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("this project pins it"), "{output}");
+    assert!(output.contains("9.9.9"), "{output}");
+    assert!(!output.contains("0.99.0"), "the default should not appear: {output}");
+}
+
+/// And the refusal names the *pin*, not the default that lost to it.
+///
+/// A message naming the wrong version sends somebody to install a toolchain
+/// they already have.
+#[test]
+fn a_missing_pin_is_reported_rather_than_the_default() {
+    let w = world(Some("9.9.9"));
+    link(&w, "0.99.0");
+    let (ok, _) = khora(&w, &w.project, &["toolchain", "default", "0.99.0"]);
+    assert!(ok);
+
+    let (ok, output) = khora(&w, &w.project, &["check", "src/main.kh"]);
+    assert!(!ok, "a missing pin must stop the build: {output}");
+    assert!(output.contains("pins Khora 9.9.9"), "{output}");
+}
+
+/// **A default naming something that is gone warns and carries on.**
+///
+/// The opposite of what a missing *pin* does, and deliberately: a default may
+/// name a toolchain removed months ago, and refusing every command in every
+/// unpinned directory would be a machine somebody has to repair before they can
+/// use it — including with the command that repairs it.
+#[test]
+fn a_default_that_is_not_installed_does_not_stop_anything() {
+    let w = world(None);
+    std::fs::create_dir_all(&w.home).expect("the home directory");
+    std::fs::write(w.home.join("default"), "9.9.9\n").expect("the default");
+
+    let (ok, output) = khora(&w, &w.project, &["check", "src/main.kh"]);
+    assert!(ok, "a missing default must not stop a build: {output}");
+    assert!(output.contains("your default is Khora 9.9.9"), "{output}");
+    assert!(output.contains("toolchain default --none"), "{output}");
+}
+
+/// Removing the default toolchain clears the default with it.
+///
+/// Otherwise the machine is left naming a version that cannot be run, which is
+/// a state nothing else here can produce and nobody would expect.
+#[test]
+fn removing_the_default_toolchain_clears_the_default() {
+    let w = world(None);
+    link(&w, "0.99.0");
+    let (ok, _) = khora(&w, &w.project, &["toolchain", "default", "0.99.0"]);
+    assert!(ok);
+
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "remove", "0.99.0"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("which was the default"), "{output}");
+
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "default"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("no default"), "{output}");
+}
+
+/// A default naming a version nobody has is refused at the point of setting it,
+/// where the person is still there to read why.
+#[test]
+fn a_default_must_name_something_that_exists() {
+    let w = world(None);
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "default", "9.9.9"]);
+    assert!(!ok, "{output}");
+    assert!(output.contains("khora toolchain install 9.9.9"), "{output}");
+}
+
+/// **`khora toolchain` and `khora update` never hand over.**
+///
+/// They are how a broken default or a missing pin is repaired, so a handover
+/// that refused to run them would make the situation they exist for
+/// unrecoverable.
+#[test]
+fn the_commands_that_repair_a_toolchain_are_never_handed_over() {
+    let w = world(Some("9.9.9"));
+    for command in [["toolchain", "list"], ["toolchain", "default"]] {
+        let (ok, output) = khora(&w, &w.project, &command);
+        assert!(ok, "{command:?} should run despite the missing pin: {output}");
+    }
+}
+
+/// The bootstrap toolchain is listed even though it is not under `toolchains/`.
+///
+/// `install.sh` unpacks it into `~/.khora` directly, and everything installed
+/// later sits beside it — so leaving it out of the list makes "go back to the
+/// one I had" look impossible after the first update.
+#[test]
+fn the_toolchain_on_the_path_is_listed_too() {
+    let w = world(None);
+    link(&w, "0.99.0");
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "list"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("on your path"), "{output}");
+    assert!(output.contains("0.99.0"), "{output}");
 }

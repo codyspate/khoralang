@@ -8,6 +8,12 @@
 # thing written outside that directory is a PATH line appended to whichever of
 # ~/.profile, ~/.bashrc and ~/.zshrc already exist.
 #
+# **Run this once.** After it, `khora` manages itself: `khora update` gets the
+# next release, `khora toolchain install` gets a particular one, and
+# `khora toolchain default` chooses between them. There is no second program to
+# learn -- what this script exists for is the moment before there is a `khora`
+# at all.
+#
 #     --pre                 the newest release, candidates included
 #     --version 0.2.0-rc.1  a particular release, latest or not
 #     --to DIR              somewhere other than ~/.khora
@@ -227,6 +233,8 @@ fi
 say ""
 say "  khora --help        what it can do"
 say "  khora build .       compile the package in this directory"
+say "  khora update        get the next release, when there is one"
+
 case "$NUMBER" in
     *-*)
         say ""

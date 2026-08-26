@@ -4,17 +4,93 @@ sidebar:
   order: 1
 ---
 
-Khora is pre-release. Until signed compiler binaries are published, the supported development installation is a source build from the Khora repository.
+One command, then `khora` looks after itself. There is no separate version
+manager to install first.
 
-## Requirements
+## Install
 
-- Git
-- a current Rust toolchain
-- LLVM 22.1.8 for native code generation
+```bash
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh
+```
 
-The parser, type checker, formatter, and most compiler tests do not need LLVM. Building Khora programs into native executables does.
+On Windows, in PowerShell:
 
-## Build the compiler
+```powershell
+irm https://raw.githubusercontent.com/codyspate/khoralang/main/install.ps1 | iex
+```
+
+This downloads the build for your platform, checks it against the checksum
+published beside it, and unpacks it into `~/.khora`. Nothing is compiled,
+nothing needs administrator, and `rm -rf ~/.khora` undoes it.
+
+### What you need on the machine
+
+A C toolchain, and only for its **linker**. Khora compiles to a native object
+file, and turning one into an executable needs the platform's own C runtime and
+system libraries — the same requirement `rustc` has, for the same reason.
+
+| | |
+| --- | --- |
+| macOS | `xcode-select --install` |
+| Debian, Ubuntu | `apt install clang` — or `build-essential` |
+| Fedora, RHEL | `dnf install clang` |
+| Windows | Visual Studio Build Tools with "Desktop development with C++", or [LLVM](https://releases.llvm.org) |
+
+The installer checks for one before downloading and tells you if it is missing.
+You do not need LLVM: it is linked into `khora` itself, not called as a program.
+
+## Keeping up to date
+
+```bash
+khora update                      # the newest release, and use it
+khora toolchain install 0.2.0     # a particular one
+khora toolchain default 0.1.0     # go back to one you already have
+khora toolchain list              # what is on this machine
+```
+
+An update never removes the version it replaces, so going back is a command
+rather than a reinstall.
+
+### Release candidates
+
+A candidate is published as a pre-release, which the ordinary install skips.
+`--pre` means "candidates as well", not "candidates only" — the day after a
+stable release, the newest release of any kind is that stable one.
+
+```bash
+khora toolchain install --pre
+khora update --pre
+```
+
+Candidates are versions of their own: `0.2.0-rc.1`, then `-rc.2`, and finally
+`0.2.0` built from the same commit as the last candidate. Nothing is promoted
+in place, so a version number never changes meaning.
+
+## Pinning a version for one project
+
+```toml
+# khora.toml
+[toolchain]
+version = "0.2.0"
+```
+
+`khora` hands the command over to that version before it parses any arguments,
+so a project pinning a release with flags your build has never heard of still
+works. A pin always wins over your default — and a pinned version you do not
+have **stops** the command rather than falling back, because a build that
+quietly used a different compiler is worse than one that refused.
+
+```bash
+khora toolchain which     # which version this directory gets, and why
+```
+
+## Building from source
+
+For working on Khora itself, or on a platform with no published build.
+
+**Requirements:** Git, a current Rust toolchain, and LLVM 22.1.8 for native code
+generation. The parser, type checker, formatter and most compiler tests do not
+need LLVM; compiling Khora programs to executables does.
 
 ```bash
 git clone https://github.com/codyspate/khoralang.git
@@ -24,29 +100,30 @@ cargo build -p khora-cli --features llvm
 cargo build -p khora-rt
 ```
 
-The LLVM setup script installs or locates the pinned LLVM version and writes the machine-specific Cargo configuration used by the backend.
-
-## Verify the toolchain
+`scripts/setup-llvm.sh` installs or locates the pinned LLVM and writes the
+machine-specific Cargo configuration the backend needs.
 
 ```bash
-cargo test --workspace --features llvm
 cargo run -p khora-cli --features llvm -- check std examples
 ```
 
-For repository development, `sh scripts/baseline.sh` is the full gate.
-
-## Running `khora`
-
-During source development you can invoke the CLI through Cargo:
+To use a compiler you built as a pinned version:
 
 ```bash
-cargo run -p khora-cli --features llvm -- --help
+khora toolchain link 0.2.0 target/debug/khora
 ```
 
-You can also register a locally built compiler with Khora's toolchain shim once the executable is on disk.
+It is copied rather than pointed at, so a later `cargo clean` cannot leave the
+registration dangling.
 
-## Release installations
+### Running the tests
 
-The public release will provide versioned compiler artifacts so ordinary users do not need Rust or a compiler checkout. Released projects will be able to pin the compiler version they expect in `khora.toml`.
+```bash
+cargo nextest run --workspace --features llvm
+cargo test --workspace --doc
+```
 
-Until those artifacts exist, this page intentionally describes the source-build path rather than pretending an installer exists.
+`cargo nextest` is optional and roughly halves the wait; a plain
+`cargo test --workspace --features llvm` does the same work, doctests included.
+`sh scripts/baseline.sh` is the full gate, and prefers nextest when it is
+installed.

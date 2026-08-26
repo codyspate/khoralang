@@ -9,6 +9,9 @@ license.workspace = true
 [dependencies]
 khora-manifest.workspace = true
 anyhow.workspace = true
+# For verifying a download against its published checksum. Already in the tree
+# for the package store, so this adds nothing to the dependency graph.
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
