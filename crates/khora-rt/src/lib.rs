@@ -1,11 +1,12 @@
 //! The Khora runtime: reference-counted allocation and intrinsics.
 //!
-//! Every executable the compiler produces links against this archive. It is
-//! deliberately tiny — there is no collector, no scheduler and no object graph
-//! walker here, because Perceus (`khora-perceus`, roadmap 2.3) inserts precise
-//! `dup`/`drop` at compile time. All this crate owns is the heap layout those
-//! instructions agree on, plus the handful of intrinsics that have to exist as
-//! machine code rather than as generated IR.
+//! Every executable the compiler produces links against this archive.
+//!
+//! **There is no collector and no object graph walker**, because Perceus
+//! (`khora-perceus`, roadmap 2.3) inserts precise `dup`/`drop` at compile time.
+//! What this crate owns is the heap layout those instructions agree on, the
+//! intrinsics that have to be machine code rather than generated IR, and — for
+//! fibers — a work-stealing scheduler and a poll-based reactor.
 //!
 //! # The heap object layout
 //!
@@ -113,28 +114,16 @@
 
 #![deny(missing_docs, unsafe_op_in_unsafe_fn)]
 
-// One module per runtime responsibility. They were one file until the section
-// banners inside it started disagreeing with their contents — strings under
-// "Allocation and reference counting", the process arguments under "arrays" —
-// which is the point at which a banner is worse than no banner. Roadmap 9.6.1.
+// Every module is private and re-exported wholesale: this crate's API is a C
+// ABI reached by symbol, so `khora_rt::heap::khora_alloc` would be a second
+// name for one function.
 //
-// **Private, and re-exported wholesale.** The public surface is every
-// `khora_rt::khora_*` there has ever been and nothing else: this crate's API is
-// a C ABI, callers reach it by symbol, and `khora_rt::heap::khora_alloc` would
-// be a second name for one function. Splitting the file was not supposed to add
-// anything to the API and this is what makes sure it did not.
-// **What a Worker has no operating system for.**
-//
-// `wasm32-unknown-unknown` is a sandbox: no sockets, no filesystem, no
-// threads, no clock, no argv. `docs/design/targets.md` §"Which `std` a wasm
-// build gets" makes the same cut on the Khora side, and the two have to agree
-// — a `std` module that is not compiled has no business having a runtime
-// behind it, and a runtime module with nothing to call it is dead weight in an
-// artifact with a size limit.
-//
-// What is left is what the eight `std` files a wasm build selects actually
-// reach: the heap and reference counting, strings, arrays, decimals,
-// randomness, and the traps.
+// **The wasm gates.** `wasm32-unknown-unknown` has no sockets, filesystem,
+// threads, clock or argv. `docs/design/targets.md` §"Which `std` a wasm build
+// gets" makes the same cut on the Khora side and the two have to agree: a
+// runtime module with nothing to call it is dead weight in an artifact with a
+// size limit. What is left is what the eight `std` files a wasm build selects
+// reach — the heap, strings, arrays, decimals, randomness and the traps.
 #[cfg(not(target_family = "wasm"))]
 mod args;
 mod array;
@@ -225,26 +214,16 @@ use std::sync::atomic::AtomicU64;
 pub struct KhoraHeader {
     /// Number of live references. An object is freed when this reaches zero.
     ///
-    /// Atomic, and **`u64` on every target rather than `usize`**.
+    /// Atomic, and **`u64` on every target rather than `usize`**: the code
+    /// generator reads `KHORA_HEADER_SIZE`, a constant compiled for the *host*,
+    /// so a width that varied would offset every field by four bytes on a
+    /// 32-bit cross build and be wrong in a way nothing checks.
     ///
-    /// `usize` was right for as long as every target was 64-bit. It makes the
-    /// header 12 bytes on `wasm32` and 16 on the rest, and the code generator
-    /// reads `KHORA_HEADER_SIZE` — a constant compiled for the *host* — so a
-    /// cross build would have offset every field by four bytes and been wrong
-    /// in a way nothing checks. One width means one layout, and the four bytes
-    /// it costs a 32-bit target buy an object header that does not have to be
-    /// recomputed per target. See the module documentation.
-    ///
-    /// **The first field, and generated code relies on that.** This said that
-    /// generated code never touches it and that every change goes through
-    /// [`khora_dup`] and [`khora_drop`]. It no longer does: the call was a
-    /// large fraction of what reference counting cost, so the backend emits the
-    /// add and the subtract inline against offset zero and only the last
-    /// reference calls [`khora_drop_last`]. `docs/design/reuse.md` §3.
-    ///
-    /// So moving this field is not a layout change the runtime can make on its
-    /// own. The two functions below remain the C ABI for anything else linking
-    /// against `khora-rt`, and are still what drop glue calls.
+    /// **The first field, and generated code relies on that.** The backend
+    /// emits the add and the subtract inline against offset zero — the call was
+    /// a large fraction of what reference counting cost — and only the last
+    /// reference calls [`khora_drop_last`] (`docs/design/reuse.md` §3). Moving
+    /// this field is therefore not a change the runtime can make alone.
     pub refcount: AtomicU64,
     /// Which variant of its ADT the object is. Opaque to the runtime.
     pub tag: u32,
@@ -289,21 +268,16 @@ fn object_layout(field_bytes: u32) -> Layout {
     let size = KHORA_HEADER_SIZE + field_bytes as usize;
     match Layout::from_size_align(size, KHORA_HEADER_ALIGN) {
         Ok(layout) => layout,
-        // Unreachable: `size` is at most `u32::MAX + 16` and the alignment is a
-        // valid power of two, so the only failure mode `Layout` has is out of
-        // reach. Aborting beats an `unwrap` panic, which would unwind out of an
-        // `extern "C"` frame.
+        // Unreachable: `size` is at most `u32::MAX + 16`. `fatal` rather than
+        // `unwrap`, which would unwind out of an `extern "C"` frame.
         Err(_) => fatal("object layout overflowed"),
     }
 }
 
 /// Reports a violated runtime invariant and terminates the process.
 ///
-/// Aborts rather than panicking: these functions are called from generated
-/// machine code across a C ABI boundary, where unwinding is not something the
-/// caller has frames for. A wrong `dup`/`drop` pairing corrupts the heap
-/// silently, so failing loudly at the first detected inconsistency is worth far
-/// more than limping on.
+/// Aborts rather than panics: the caller is generated machine code across a C
+/// ABI boundary, which has no frames to unwind through.
 fn fatal(message: &str) -> ! {
     let _ = writeln!(std::io::stderr(), "khora runtime: {message}");
     std::process::abort()

@@ -1,18 +1,15 @@
 //! Workers, queues, and whose turn it is.
 //!
-//! Phase 11B. Fibers get stacks in [`crate::coro`]; this is what runs them on
-//! more than one core.
+//! Fibers get stacks in [`crate::coro`]; this is what runs them on more than
+//! one core.
 //!
-//! # Deliberately the simple version
+//! # Where a worker looks for work
 //!
-//! A worker takes from its own queue, then from the shared one, then parks.
-//! There is **no work stealing**, which means a worker with a full local queue
-//! can be busy while another sleeps. That is 11D, and it is separate on purpose:
-//! stealing is where the subtle bugs live, and putting it in now would make
-//! every failure ambiguous between "the scheduler is wrong" and "the stealing
-//! is wrong".
+//! Its own queue, then the shared one, then a victim's — [`steal`] takes half,
+//! rounded up — then it parks. Local queues therefore live in [`Shared`] rather
+//! than in a thread-local, because a thief has to be able to reach one.
 //!
-//! # Fairness has two halves and only one of them is here
+//! # Fairness has two halves
 //!
 //! **Between queues.** A fiber that spawns in a loop pushes to its worker's
 //! local queue every time, and a worker that always drained local first would
@@ -118,26 +115,18 @@ struct Shared {
     queued: Mutex<VecDeque<Task>>,
     /// Every worker's own queue, indexed by worker.
     ///
-    /// **A worker's queue stops being private in 11D.** Before stealing it was
-    /// a thread-local nobody else could reach, which is why a parked worker
-    /// had to wake on a timer to discover work sitting in somebody else's
-    /// backlog. A thief needs to reach its victim, so the queues live here
-    /// now; the thread-local stays as the fast path for a fiber spawning onto
-    /// its own worker.
+    /// **Here rather than in a thread-local, because a thief has to reach its
+    /// victim.** The thread-local stays as the fast path for a fiber spawning
+    /// onto its own worker.
     locals: Vec<Arc<Mutex<VecDeque<Task>>>>,
     /// Every fiber this pool knows about, by id.
     ///
-    /// **Separate from `parked`, and the separation is load-bearing.** Looking
-    /// a fiber up in `parked` to wake or cancel it is a race: a fiber that has
-    /// suspended but whose worker has not yet filed it is in neither map, so
-    /// the lookup finds nothing and the wake is silently dropped. It hung
-    /// `cancelling_a_sleeping_fiber_wakes_it_to_notice` — the fiber was
-    /// counted as waiting, the cancel found no entry and did nothing, and the
-    /// fiber slept for ever.
-    ///
-    /// A waker needs the *state* to set `NOTIFIED` on, which exists from the
-    /// moment the fiber does; whether anybody is holding its `Task` yet is a
-    /// separate question, and one the protocol already answers.
+    /// **Separate from `parked`, and the separation is load-bearing.** A fiber
+    /// that has suspended but whose worker has not yet filed it is in `parked`
+    /// under neither key, so waking it through that map drops the wake and it
+    /// sleeps for ever — `cancelling_a_sleeping_fiber_wakes_it_to_notice`.
+    /// A waker needs the *state* to set `NOTIFIED` on, and that exists from the
+    /// moment the fiber does.
     live: Mutex<std::collections::HashMap<usize, Arc<crate::current::Fiber>>>,
     /// Fibers waiting for something, by fiber id.
     ///
@@ -155,22 +144,19 @@ struct Shared {
     arrived: Condvar,
     /// Held by the one idle worker currently waiting on the backend.
     ///
-    /// **Exactly one, and that is the point.** Every idle worker calling
-    /// `epoll_wait` is a thundering herd, and on a completion port it would be
-    /// right — so who may block is a backend's business and this is the
-    /// conservative answer that suits the one there is.
+    /// **Exactly one, and that is the point:** every idle worker calling
+    /// `epoll_wait` is a thundering herd. On a completion port all of them
+    /// would be right, so who may block is a backend's business —
     /// `docs/design/scheduler.md` §10a.
     polling: AtomicBool,
     /// Tasks that belong to no queue at this instant because somebody is
     /// carrying them between two.
     ///
-    /// **The sixth place a fiber can be, and the audit was wrong without it.**
-    /// A waker takes a task out of `parked` and holds it until `inject`; a
-    /// thief takes half a queue and holds it until it reaches its own. Neither
-    /// is a worker, so neither is bounded by the worker count, and 11F's soak
-    /// found ten fibers unaccounted for on four workers by assuming otherwise.
-    /// Counting them is what lets `Audit::in_hand` mean "a worker is running
-    /// this" rather than "somewhere, we think".
+    /// **The sixth place a fiber can be, and the audit is wrong without it.**
+    /// A waker holds a task between `parked` and `inject`; a thief holds half a
+    /// queue between two deques. Neither is a worker, so neither is bounded by
+    /// the worker count, which is what `Audit::in_hand` would otherwise
+    /// assume.
     in_transit: AtomicUsize,
     stopping: AtomicBool,
     counts: Counts,
@@ -208,20 +194,12 @@ impl Audit {
 
     /// Fibers nobody has filed: being run by a worker, or carried by a waker.
     ///
-    /// **Only meaningful when the pool is quiescent**, and that is not a
-    /// limitation of the arithmetic but of reading five places without a lock
-    /// across them. A task moving from `parked` into a waker's hands is
-    /// removed from one and added to the other, and an audit that reads the
-    /// source before the destination sees it twice. So this can read negative
-    /// on a busy pool with nothing wrong, and 11F spent a while proving that
-    /// to itself.
-    ///
-    /// Making it sound while busy would mean one counter maintained at every
-    /// push and pop — an atomic on the hottest path in the file, to catch
-    /// something [`Audit::settled`] catches for free the moment the pool goes
-    /// quiet, and that `crate::coro::ResumedOnce` catches at the instant it
-    /// happens rather than afterwards. `docs/design/scheduler.md` §6's rule
-    /// about measuring before redesigning applies to instruments too.
+    /// **Only meaningful when the pool is quiescent.** Five places are read
+    /// without a lock across them, so a task moving between two of them is
+    /// counted twice and this reads negative on a busy pool with nothing wrong.
+    /// Making it sound while busy costs an atomic on the hottest path in the
+    /// file, to catch what [`Audit::settled`] catches free once the pool goes
+    /// quiet.
     pub(crate) fn in_hand(&self) -> i64 {
         self.outstanding() - (self.queued + self.local + self.parked + self.in_transit) as i64
     }
@@ -281,11 +259,9 @@ pub(crate) struct Counts {
     pub(crate) timers_dead: AtomicU64,
     /// Fibers actually moved from one worker to another.
     ///
-    /// Separate from the sweep counts because a sweep takes half a queue, so
-    /// the two answer different questions: whether thieves are finding work,
-    /// and how much work is moving. A high attempt count with a low success
-    /// rate is workers spinning; a high fibers-moved with few sweeps is a
-    /// pool sharing out a burst, which is the intended behaviour.
+    /// Separate from the sweep counts because a sweep takes half a queue: a
+    /// high attempt count with a low success rate is workers spinning, and a
+    /// high fibers-moved with few sweeps is a pool sharing out a burst.
     pub(crate) fibers_stolen: AtomicU64,
 }
 
@@ -432,13 +408,11 @@ impl Scheduler {
                 .expect("the timer thread"),
         );
 
-        // **A way to read the counters out of a program that does not end.**
-        // `docs/design/scheduler.md` §14 says the instruments exist so a slow
-        // result can say why it was slow, and until now nothing outside this
-        // crate's tests could see them: a server runs until it is killed, so
-        // there is no moment to print them at. `KHORA_SCHEDULER_REPORT=500`
-        // prints every five hundred milliseconds to stderr, and the difference
-        // between two lines is the interesting part.
+        // How the counters are read out of a program that does not end: a
+        // server runs until it is killed, so there is no moment to print them
+        // at. `KHORA_SCHEDULER_REPORT=500` prints to stderr every five hundred
+        // milliseconds, and the difference between two lines is the
+        // interesting part. `docs/design/scheduler.md` §14.
         if let Some(every) = std::env::var("KHORA_SCHEDULER_REPORT")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -485,9 +459,8 @@ impl Scheduler {
 
     /// Waits until every fiber handed over has finished.
     ///
-    /// For tests and for a program's own shutdown. A production scheduler
-    /// wants this to be a nursery's business rather than the pool's, which is
-    /// what 11C's integration with `Fibers::wait` is for.
+    /// For tests and for a program's own shutdown; a nursery's `Fibers::wait`
+    /// is what a program actually uses.
     pub(crate) fn drain(&self) {
         loop {
             let counts = self.shared.counts.snapshot();
@@ -529,15 +502,12 @@ impl Scheduler {
 
     /// Everywhere a fiber can be at one instant, for 11F.
     ///
-    /// **The point is the arithmetic, not any single number.** A `Task` is a
-    /// value that is moved, so at any moment it is in exactly one of five
-    /// places: the shared queue, a worker's queue, the parked map, a worker's
-    /// hand, or gone. Nothing counts `in_hand` directly — a worker holding a
-    /// task holds it in a stack frame — so it is derived, and that is what
-    /// makes this an audit rather than a report. If the derivation goes
-    /// negative or fails to reach zero when everything is finished, a task has
-    /// been lost or run twice, and no amount of staring at the individual
-    /// counters would have said so.
+    /// **The point is the arithmetic, not any single number.** A `Task` is
+    /// moved, so at any moment it is in exactly one place: the shared queue, a
+    /// worker's queue, the parked map, somebody's hand, or gone. `in_hand` is
+    /// derived rather than counted, because a worker holds its task in a stack
+    /// frame — so a derivation that goes negative, or fails to reach zero when
+    /// everything has finished, means a task was lost or run twice.
     pub(crate) fn audit(&self) -> Audit {
         // **The order of these reads is the whole soundness argument.** There
         // is no lock held across all of them — taking one would mean ordering
@@ -552,10 +522,10 @@ impl Scheduler {
         //     injects it, so everything found filed below is already included.
         //
         // That makes `outstanding` an over-estimate and never an under-one,
-        // so `in_hand` can read high while the pool is busy but cannot read
-        // negative. A negative answer is then real: a task in two places.
-        // Reading them the other way round gave `in_hand: -1` under a
-        // concurrent spawner, which looked exactly like the bug it was not.
+        // so `in_hand` can read high on a busy pool but never negative — and a
+        // negative answer is therefore real. The other order gives `in_hand:
+        // -1` under a concurrent spawner, which looks exactly like the bug it
+        // is not.
         let completed = self.shared.counts.completed.load(Ordering::Acquire);
         let queued = self.shared.queued.lock().expect("the shared queue").len();
         let local: usize = self
@@ -588,26 +558,20 @@ impl Scheduler {
     /// Cancels a fiber, and wakes it if it is asleep.
     ///
     /// **Setting the flag is not enough.** Cancellation is observed by running
-    /// code, which was sufficient while every fiber was a thread the operating
-    /// system would schedule regardless. A fiber waiting on something that will
-    /// never happen never runs again, so a flag it never reads is a leak with
-    /// good intentions rather than a cancellation. `docs/design/scheduler.md`
-    /// §5.
+    /// code, and a fiber waiting on something that will never happen never runs
+    /// again — so a flag it cannot reach is a leak with good intentions.
+    /// `docs/design/scheduler.md` §5.
     ///
-    /// The order matters: the flag first, then the wake. A fiber woken before
-    /// the flag was set would look, see nothing, and go back to sleep.
-    ///
-    /// What happens after is unchanged, which is the point — the fiber resumes,
-    /// observes the cancellation at its next cancellation point, and unwinds
-    /// through ordinary Khora finalizers. The scheduler only guarantees it gets
-    /// another chance to look.
+    /// The order matters: flag, then wake. A fiber woken before the flag was
+    /// set looks, sees nothing, and goes back to sleep. All this guarantees is
+    /// another chance to look; the fiber still observes the cancellation at its
+    /// own next cancellation point.
     pub(crate) fn cancel_fiber(&self, fiber: usize) {
         let Some(state) = state_of(&self.shared, fiber) else { return };
 
         state.cancel();
-        // Its deadline and its sockets are no longer interesting, and a
-        // hundred thousand cancelled sleepers would otherwise hold the heap
-        // and the watch list open.
+        // Otherwise a hundred thousand cancelled sleepers hold the heap and
+        // the watch list open.
         self.shared.timers.lock().expect("the timers").forget(fiber);
         self.shared.reactor.forget(fiber);
         wake(&self.shared, fiber, state.wait());
@@ -620,13 +584,11 @@ impl Scheduler {
 
     /// Wakes a fiber by id, from outside.
     ///
-    /// **Only a fiber this pool has been told about**, which means one that
-    /// has been through `spawn`. A wake for an id the pool does not know is
-    /// dropped, and that is deliberate: remembering notifications for fibers
-    /// that might never arrive is a leak with no bound. It does make an
-    /// ordering trap for callers that publish an id before handing over the
-    /// task — 11F's soak did exactly that and stranded a fiber about twice in
-    /// a hundred runs.
+    /// **Only a fiber this pool has been told about** — one that has been
+    /// through `spawn`. A wake for an unknown id is dropped rather than
+    /// remembered, because remembering notifications for fibers that may never
+    /// arrive is an unbounded leak. So a caller that publishes an id before
+    /// handing over the task strands the fiber; publish it after.
     pub(crate) fn wake_fiber(&self, fiber: usize) {
         if let Some(state) = state_of(&self.shared, fiber) {
             wake(&self.shared, fiber, state.wait());
@@ -689,10 +651,9 @@ pub(crate) fn sleep_until(at: std::time::Instant) -> bool {
 /// Makes one particular fiber runnable, from anywhere, later.
 ///
 /// **For work that leaves the scheduler entirely.** A blocking-pool thread
-/// holds one of these across a foreign call it cannot interrupt and cannot
-/// reason about, and uses it to hand the fiber back when the call returns. It
-/// keeps the pool from needing to know anything about `Shared`, which is the
-/// only reason that type can stay private.
+/// holds one across a foreign call it cannot interrupt, and hands the fiber
+/// back when the call returns — without needing to know what `Shared` is,
+/// which is what keeps that type private.
 pub(crate) struct Waker {
     shared: Arc<Shared>,
     fiber: usize,
@@ -785,14 +746,11 @@ pub(crate) enum Waited {
 /// Suspends the running fiber until `socket` is ready or `deadline` passes.
 ///
 /// **This is what replaces `SO_RCVTIMEO`, and it has to.** A socket the reactor
-/// drives is non-blocking, so the kernel's receive timeout can never fire — it
-/// only applies to a call that would have blocked, and none of them do any
-/// more. A server that relied on it to shed a slow client would instead park a
-/// fiber on that client for ever, which is a worse failure than the one the
-/// timeout existed to prevent. `docs/design/scheduler.md` §6 predicted this and
-/// asked for "a different mechanism with the same meaning"; this is the
-/// mechanism, and `crate::net` keeps the meaning by reporting a timeout the way
-/// the kernel used to.
+/// drives is non-blocking, so the kernel's receive timeout can never fire: it
+/// applies only to a call that would have blocked, and none of them do any
+/// more. A server relying on it to shed a slow client would park a fiber on
+/// that client for ever. `crate::net` keeps the meaning by reporting a timeout
+/// the way the kernel used to. `docs/design/scheduler.md` §6.
 ///
 /// The deadline is absolute, so a spurious wake can re-enter this with the same
 /// one and not extend it.
@@ -864,13 +822,10 @@ fn tick(shared: Arc<Shared>) {
                 // The fiber may have been woken by something else and moved
                 // on, in which case its state says so and this is a no-op.
                 Some(state) => wake(&shared, id, state.wait()),
-                // **A deadline belonging to a fiber that has gone.** Released
-                // early and then finished, so the entry sat in the heap until
-                // it came due. Bounded — by how long deadlines are and how
-                // often sleepers are released early — rather than a leak, but
-                // this is the number to look at before believing that. A heap
-                // mostly full of these is `docs/design/scheduler.md` §6's cue
-                // to stop using a heap.
+                // A deadline whose fiber was released early and then
+                // finished, so the entry sat in the heap until it came due.
+                // Bounded rather than a leak — and a heap mostly full of these
+                // is the cue to stop using a heap.
                 None => {
                     shared.counts.timers_dead.fetch_add(1, Ordering::Relaxed);
                 }
@@ -927,9 +882,8 @@ pub(crate) fn schedule(task: Task) -> bool {
             shared.counts.spawned.fetch_add(1, Ordering::Relaxed);
             remember(&shared, &task);
             queue.lock().expect("a local queue").push_back(task);
-            // Somebody else may be parked with nothing to do while this
-            // worker's queue grows. Until 11D can steal, the wake is what
-            // keeps that from being permanent.
+            // A parked worker cannot steal from a queue it is not awake to
+            // look at, so pushing locally still has to nudge.
             shared.arrived.notify_one();
             true
         }
@@ -994,19 +948,14 @@ fn next(
 
 /// Takes work from another worker, and returns one fiber to run now.
 ///
-/// **Both ends of the deque are load-bearing.** A worker takes its own next
-/// fiber from the front, so a thief takes from the back: the two contend for
-/// the same lock but never for the same fiber, and the thief walks off with
-/// the work its victim would have reached last rather than the one it is about
-/// to touch. Keeping the owner on the front is also what keeps the queue FIFO,
-/// so a fiber that spawns in a loop cannot bury one that arrived earlier —
-/// the fairness the local queue already had, which a LIFO owner would have
-/// traded away for cache warmth.
+/// **Both ends of the deque are load-bearing.** The owner takes from the front
+/// and a thief from the back, so the two contend for the lock but never for the
+/// same fiber. Front-for-the-owner is also what keeps the queue FIFO: a fiber
+/// spawning in a loop cannot bury one that arrived earlier, which a LIFO owner
+/// would trade away for cache warmth.
 ///
-/// **Half a queue, not one fiber.** Taking one means the thief is back
-/// contending on the next tick, and a pool sharing out a burst would spend it
-/// all on lock traffic. Half converges in a logarithmic number of steals and
-/// is the usual answer.
+/// **Half a queue, not one fiber**, or the thief is back contending on the next
+/// tick and a pool sharing out a burst spends it all on lock traffic.
 ///
 /// Victims are visited starting at `me + 1` rather than zero, so that idle
 /// workers do not all descend on worker 0 together.
@@ -1118,10 +1067,9 @@ fn run(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>, mut task: Task)
 /// the caller goes round again either way, because the queues may have changed
 /// under it while it waited.
 ///
-/// **The wait is bounded even though `inject` nudges.** A worker asleep here is
-/// a worker not stealing, and until 11D's local queues can announce themselves
-/// the way the shared one does, going back to look is how work in somebody
-/// else's deque is ever found.
+/// **The wait is bounded even though `inject` nudges.** A local queue has no
+/// way to announce itself the way the shared one does, so going back to look is
+/// how work in somebody else's deque is ever found.
 fn serve_io(shared: &Arc<Shared>) -> bool {
     if shared.polling.swap(true, Ordering::AcqRel) {
         return false;
@@ -1150,27 +1098,20 @@ fn park(shared: &Arc<Shared>, local: &Arc<Mutex<VecDeque<Task>>>) -> bool {
             return true;
         }
         // **Waking up means going back to `next`, not looking again here.**
-        // This loop can only see two of the four places work lives — the
-        // shared queue and this worker's own — and stealing is in `next`. A
-        // version that kept re-checking these two and going back to sleep
-        // left three workers asleep through twenty milliseconds of work
-        // sitting in the fourth one's queue, attempting four steals in total
-        // and succeeding at none. Returning is what gives the caller a chance
-        // to sweep.
+        // This loop sees only two of the four places work lives, and stealing
+        // is in `next`. Re-checking these two and going back to sleep left
+        // three workers asleep through twenty milliseconds of work sitting in
+        // the fourth one's queue.
         //
-        // The other tempting shape — checking every worker's queue from here
-        // and staying awake if any has something — livelocks instead. Seeing
-        // work elsewhere is not being able to take it: `next` has already
-        // swept and lost the race, so the worker spins between `park` and a
-        // losing steal, and on an unfair lock four spinners can starve the one
-        // making progress. That one hung
+        // Checking every worker's queue from here instead livelocks: seeing
+        // work elsewhere is not being able to take it, so the worker spins
+        // between `park` and a losing steal, and four spinners on an unfair
+        // lock starve the one making progress. That hung
         // `a_fiber_keeps_its_identity_across_workers` outright.
         //
-        // Sleeping a millisecond and then looking properly is neither. It
-        // bounds how long a thief can sit next to work it could have taken —
-        // `notify_one` wakes exactly one worker, so two pushes that both wake
-        // the same one leave another asleep — and it paces the sweep instead
-        // of spinning it.
+        // A millisecond and then a proper look is neither. `notify_one` wakes
+        // exactly one worker, so two pushes that wake the same one leave
+        // another asleep, and this bounds how long that lasts.
         let (queued_again, timed_out) = shared
             .arrived
             .wait_timeout(queued, std::time::Duration::from_millis(1))
@@ -1231,9 +1172,8 @@ mod tests {
         assert_eq!(pool.counts().completed, COUNT as u64);
     }
 
-    /// The point of having more than one worker. Fibers that each take a
-    /// little wall-clock time must overlap, or this is a very complicated way
-    /// to run things one at a time.
+    /// The point of having more than one worker: fibers that each take a
+    /// little wall-clock time must overlap.
     #[test]
     fn fibers_run_on_more_than_one_worker() {
         let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
@@ -1253,8 +1193,7 @@ mod tests {
         assert!(workers > 1, "everything ran on one worker: {:?}", seen.lock().unwrap());
     }
 
-    /// A fiber that suspends without a budget still comes back. This is the
-    /// ordinary I/O shape, before there is any I/O.
+    /// A fiber that suspends without a budget still comes back.
     #[test]
     fn a_suspended_fiber_is_resumed_until_it_finishes() {
         let steps = Arc::new(AtomicUsize::new(0));
@@ -1363,8 +1302,8 @@ mod tests {
 
     // --- waiting -----------------------------------------------------------
 
-    /// A fiber sleeps on a deadline and the scheduler wakes it. Nothing blocks
-    /// a worker: this is the shape all of 11C's I/O will take.
+    /// A fiber sleeps on a deadline and the scheduler wakes it, with no worker
+    /// blocked — the shape every I/O wait takes.
     #[test]
     fn a_sleeping_fiber_is_woken_by_its_deadline() {
         let woke = Arc::new(AtomicUsize::new(0));
@@ -1411,7 +1350,7 @@ mod tests {
         pool.drain();
     }
 
-    /// Waking by hand, which is what a reactor will do when a socket becomes
+    /// Waking by hand, the way the reactor does when a socket becomes
     /// readable.
     #[test]
     fn a_parked_fiber_is_woken_from_outside() {
@@ -1531,9 +1470,8 @@ mod tests {
 
     /// `take_half` leaves the front and returns the back, oldest first.
     ///
-    /// The direction is the whole of 11D's contention argument, so it is
-    /// checked here rather than inferred from a scheduler test that could pass
-    /// with the ends swapped.
+    /// The direction is the whole contention argument, and a scheduler test
+    /// would pass with the ends swapped.
     #[test]
     fn a_thief_takes_the_back_half_and_leaves_the_front() {
         let order = Arc::new(Mutex::new(Vec::new()));
@@ -1683,12 +1621,9 @@ mod tests {
         assert!(pool.audit().settled(), "{:?}", pool.audit());
     }
 
-    /// **A socket nobody writes to gives the fiber back at its deadline.**
-    ///
-    /// The whole point of `wait_until_ready_by`. Before it, a reactor-driven
-    /// socket could not time out at all: `SO_RCVTIMEO` applies to a call that
-    /// would have blocked, and a non-blocking socket never has one, so a slow
-    /// client parked a fiber until the process ended.
+    /// **A socket nobody writes to gives the fiber back at its deadline** —
+    /// the whole point of `wait_until_ready_by`, since `SO_RCVTIMEO` cannot
+    /// fire on a socket that never blocks.
     #[test]
     fn a_socket_wait_ends_at_its_deadline() {
         let outcome = Arc::new(Mutex::new(None));
@@ -1780,9 +1715,9 @@ mod tests {
 
     /// Many fibers, many deadlines, all across several workers.
     ///
-    /// This is the test that caught the cached-TLS bug, by dying of `SIGSEGV`
-    /// in seventeen runs out of sixty on Linux while passing every time on
-    /// Windows. It is green on both now; the reduction above says why.
+    /// The test that caught the cached-thread-local bug: `SIGSEGV` in
+    /// seventeen runs out of sixty on Linux, and green every time on Windows.
+    /// See `local_queue`'s `#[inline(never)]`.
     #[test]
     fn many_sleeping_fibers_all_wake() {
         const COUNT: usize = 400;
@@ -1801,9 +1736,8 @@ mod tests {
         assert_eq!(woke.load(Ordering::SeqCst), COUNT);
     }
 
-    /// A fiber that sleeps repeatedly exercises park and wake over and over,
-    /// which is where a lost wakeup would show as a hang rather than a wrong
-    /// answer.
+    /// Park and wake over and over, where a lost wakeup shows as a hang rather
+    /// than a wrong answer.
     #[test]
     fn a_fiber_can_sleep_many_times() {
         let rounds = Arc::new(AtomicUsize::new(0));
@@ -1820,17 +1754,13 @@ mod tests {
         assert_eq!(rounds.load(Ordering::SeqCst), 50);
     }
 
-    /// **The phase's criterion, at a tenth of scale.** Ten thousand fibers all
-    /// waiting at once on two workers, then all woken.
+    /// **Ten thousand fibers waiting at once on two workers, then all woken.**
     ///
-    /// A tenth because this belongs in the ordinary suite. The full hundred
-    /// thousand was measured separately and is in `docs/design/scheduler.md`:
-    /// 418 MB resident, about 4,240 bytes each, and every one of them woke.
-    ///
-    /// What it guards is that waiting is *cheap and correct together*. A
-    /// scheduler that parked fibers but lost one wake in ten thousand would
-    /// hang here rather than fail an assertion, which is why the loop below
-    /// has a deadline rather than waiting for ever.
+    /// A tenth of the phase's criterion, because this belongs in the ordinary
+    /// suite; the full hundred thousand is measured in
+    /// `docs/design/scheduler.md` at 418 MB resident, about 4,240 bytes each.
+    /// A lost wake in ten thousand hangs rather than fails, which is why the
+    /// loop below has a deadline.
     #[test]
     fn ten_thousand_fibers_wait_at_once_and_all_wake() {
         const COUNT: usize = 10_000;
@@ -1976,8 +1906,8 @@ mod tests {
 
     /// A fiber waits on a socket, and is woken when bytes arrive.
     ///
-    /// The shape every Khora `read()!` will take once `std::net::socket` calls
-    /// through here: try, would block, park, wake, retry.
+    /// The shape every Khora `read()!` takes: try, would block, park, wake,
+    /// retry.
     #[test]
     fn a_fiber_waiting_on_a_socket_is_woken_by_its_peer() {
         use crate::reactor::{a_connected_pair, socket_of, Interest};

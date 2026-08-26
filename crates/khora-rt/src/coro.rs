@@ -1,12 +1,5 @@
 //! The context switch: a fiber that is not a thread.
 //!
-//! Phase 11A. This builds the mechanism and tests it in isolation; it is not
-//! yet what `Fiber::spawn` uses, and that is deliberate. A single worker
-//! running many fibers cooperatively deadlocks the moment one of them makes a
-//! blocking read, so switching `spawn` over waits for the reactor in 11C.
-//! Until then the two live side by side and every existing test keeps passing
-//! against threads.
-//!
 //! # Why a dependency, when the rest of this repository writes its own
 //!
 //! `semver` is hand-written here, and so is the git plumbing, because getting
@@ -33,16 +26,10 @@
 //! # What a fiber is here
 //!
 //! A stack, a body, and the [`Fiber`] identity that follows it across
-//! switches. Resuming installs that identity so `khora_cancelled` and
+//! switches. Resuming installs that identity, so `khora_cancelled` and
 //! `Shared::update` answer about the fiber rather than about the worker
-//! carrying it — which is what `crate::current` is for and why it landed
-//! first.
+//! carrying it — see `crate::current`.
 
-// Nothing outside the tests below calls any of this yet, and that is 11A's
-// whole shape: the mechanism is built and proven before anything depends on
-// it, because switching `Fiber::spawn` over without a reactor deadlocks the
-// first program that reads a socket. The attribute comes off in 11B, when a
-// scheduler resumes these.
 #![allow(dead_code)]
 
 use std::cell::Cell;
@@ -85,12 +72,11 @@ thread_local! {
     static YIELDER: Cell<*const Yielder<(), ()>> = const { Cell::new(std::ptr::null()) };
 }
 
-/// A fiber with a stack of its own.
 /// Reads the yielder installed on *this* thread, right now.
 ///
 /// **`#[inline(never)]` is the whole point of this function.** A thread-local
 /// is reached through a register-held base address, and the compiler is
-/// entitled to compute that address once and reuse it â€” it has no reason to
+/// entitled to compute that address once and reuse it — it has no reason to
 /// think the thread could change underneath. Here it can: every call to
 /// [`suspend`] may come back on a different worker. Inlined, the address
 /// computed before a switch gets reused after it, and the access lands in the
@@ -106,7 +92,7 @@ thread_local! {
 ///
 /// The consequence is worse than a lost write. The thread that should have
 /// been given the yielder never gets it, so it keeps a stale one, and the next
-/// suspension switches to a stack pointer belonging to some other worker â€”
+/// suspension switches to a stack pointer belonging to some other worker —
 /// which is a `SIGSEGV` a quarter of the time, on another thread, much later.
 ///
 /// Not inlining puts the address computation inside the callee, where it runs
@@ -128,15 +114,14 @@ fn install(yielder: *const Yielder<(), ()>) {
 
 /// Set while a `Task` is inside `resume`, in debug builds only.
 ///
-/// **Two workers resuming one coroutine is the failure this cannot detect
-/// after the fact.** Both switch to the same stack, and what comes out is a
-/// crash somewhere unrelated, minutes later, with nothing left to say what
-/// happened. So it is checked at the door instead. 11F's soak runs in debug,
-/// which is where this is on; release builds have neither the flag nor the
-/// branch.
+/// **Two workers resuming one coroutine cannot be detected after the fact:**
+/// both switch to the same stack, and what comes out is an unrelated crash
+/// minutes later. So it is checked at the door. Release builds have neither
+/// the flag nor the branch.
 #[cfg(debug_assertions)]
 static RESUMING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// A fiber with a stack of its own.
 pub(crate) struct Task {
     fiber: Arc<Fiber>,
     coroutine: Coroutine<(), (), ()>,
@@ -171,9 +156,8 @@ unsafe impl Send for Task {}
 impl Task {
     /// Builds a fiber that will run `body` when it is first resumed.
     ///
-    /// Nothing runs here. A fiber that is never resumed costs its stack and no
-    /// instructions, which is the property a hundred thousand of them depend
-    /// on.
+    /// Nothing runs here: an unresumed fiber costs its stack and no
+    /// instructions, which is what a hundred thousand of them depend on.
     pub(crate) fn new(body: impl FnOnce() + Send + 'static) -> Task {
         Task::with_fiber(Fiber::spawned(), body)
     }
@@ -202,10 +186,9 @@ impl Task {
     /// Runs the fiber until it suspends or finishes.
     ///
     /// Installing the identity around the resume is the whole integration with
-    /// [`crate::current`]: inside, `khora_cancelled` reads this fiber's flag,
-    /// and `Shared::update` sees this fiber's id, whichever worker is carrying
-    /// it. The guard puts the previous one back on the way out, including if
-    /// the body panics.
+    /// [`crate::current`]: inside, `khora_cancelled` reads this fiber's flag
+    /// whichever worker is carrying it. The guard restores the previous one on
+    /// the way out, panic included.
     pub(crate) fn resume(&mut self) -> Ran {
         #[cfg(debug_assertions)]
         let _once = ResumedOnce::claim(&self.fiber);
@@ -229,9 +212,8 @@ impl Task {
 
 /// Whether the caller is running on a fiber stack at all.
 ///
-/// The blocking pool asks before it does anything clever: a caller with no
-/// fiber has no worker to give back, so handing its work to another thread and
-/// waiting would be strictly worse than doing the work here.
+/// The blocking pool asks first: a caller with no fiber has no worker to give
+/// back, so handing the work to another thread would be strictly worse.
 pub(crate) fn on_a_fiber() -> bool {
     !installed().is_null()
 }
@@ -279,12 +261,10 @@ pub(crate) fn resuming_now() -> usize {
 /// nowhere to yield *to* and pretending otherwise would abort a correct
 /// program.
 ///
-/// **This is a safepoint, not a cancellation point.** It cannot fail, nothing
-/// unwinds through it, and a fiber that yields is not thereby cancellable.
-/// `docs/design/scheduler.md` §1 is about why those have to be different
-/// things: a cancellation is observed at `!` in something that can raise, so an
-/// infallible loop has no cancellation point and would otherwise own a worker
-/// until the process ended.
+/// **This is a safepoint, not a cancellation point.** It cannot fail and
+/// nothing unwinds through it — which is what lets an infallible loop, which
+/// has no cancellation point at all, be preempted.
+/// `docs/design/scheduler.md` §1.
 pub(crate) fn suspend() -> bool {
     let yielder = installed();
     if yielder.is_null() {
@@ -295,13 +275,10 @@ pub(crate) fn suspend() -> bool {
     // it on exit, and the line below keeps it right across a wake.
     unsafe { (*yielder).suspend(()) };
 
-    // Resumed, and possibly not where we left off: this may be a different
-    // worker entirely. Two things have to be put right. Somebody else ran on
-    // whichever worker this is and installed their own yielder, so this
-    // fiber's has to go back before it can suspend again — and the write has
-    // to reach *this* thread's slot, which is why it goes through `install`
-    // rather than touching `YIELDER` here. See `installed` for what happens
-    // when it does not.
+    // Resumed, possibly on a different worker, where somebody else installed
+    // their own yielder. This one has to go back before the next suspension —
+    // and through `install`, so the write reaches *this* thread's slot. See
+    // `installed` for what happens when it does not.
     install(yielder);
     true
 }
@@ -314,19 +291,14 @@ mod tests {
 
     /// **Four hundred coroutines, four threads, and every one of them moves.**
     ///
-    /// This exists to answer one question, because a crash in `scheduler`
-    /// hinges on it: is corosensei safe when a coroutine is resumed by a
-    /// thread other than the one that resumed it last? Its `Yielder` is
-    /// documented as a parent link updated on every resume, and its docs warn
-    /// that *references* to a yielder must not cross threads — which is not
-    /// the same claim, and the difference matters to every fiber this
-    /// scheduler migrates.
+    /// One question: is corosensei safe when a coroutine is resumed by a
+    /// thread other than the one that resumed it last? Its docs warn that
+    /// *references* to a `Yielder` must not cross threads, which is not the
+    /// same claim, and the difference matters to every fiber that migrates.
     ///
-    /// So: no scheduler, no wait states, no timers. A queue, four threads
-    /// pulling from it, and the same install-on-entry, re-install-after-wake
-    /// dance `suspend` does. If this ever fails, the bug is underneath us. It
-    /// does not fail, which is why `scheduler.md` can say the Linux crash is
-    /// ours.
+    /// So no scheduler, no wait states, no timers — a queue, four threads, and
+    /// the same install-on-entry, re-install-after-wake dance `suspend` does.
+    /// If this ever fails, the bug is underneath us.
     #[test]
     fn a_coroutine_survives_being_resumed_by_a_different_thread() {
         const COUNT: usize = 400;
