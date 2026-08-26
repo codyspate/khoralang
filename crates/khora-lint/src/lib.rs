@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use khora_db::{Db, SourceFile};
-use khora_types::BodyTypes;
+use khora_types::{BodyTypes, Type};
 use khora_hir::body::{Body, Expr, LocalId, Pat, Stmt};
 use text_size::TextRange;
 
@@ -52,10 +52,12 @@ pub struct Finding {
 
 /// Every lint's name, so that a manifest naming one that does not exist can be
 /// told what does.
-pub const LINTS: &[&str] = &[DANGLING_EXPRESSION, REFERENCE_CYCLE, UNUSED_CAPABILITY];
+pub const LINTS: &[&str] =
+    &[DANGLING_EXPRESSION, DISCARDED_RESULT, REFERENCE_CYCLE, UNUSED_CAPABILITY];
 
 pub const UNUSED_CAPABILITY: &str = "unused-capability";
 pub const DANGLING_EXPRESSION: &str = "dangling-expression";
+pub const DISCARDED_RESULT: &str = "discarded-result";
 /// Named for the problem rather than for the fix.
 ///
 /// The advice this gives will change — today it is "restructure or accept the
@@ -83,6 +85,7 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
         // has nothing useful to say without it.
         if let Some((_, types)) = checked.bodies.iter().find(|(n, _)| n == name) {
             reference_cycles(body, types, &mut out);
+            discarded_results(body, types, &mut out);
         }
     }
     out.sort_by_key(|f| (f.range.start(), f.range.end()));
@@ -206,6 +209,52 @@ fn is_inert(body: &Body, id: khora_hir::body::ExprId) -> bool {
         // parse and resolution failures, and a lint on top of an error is
         // noise.
         _ => false,
+    }
+}
+
+// --- a `Result` nobody looked at --------------------------------------------
+
+/// A statement that produces a `Result` and drops it on the floor.
+///
+/// **This has bitten twice in this repository**, which is why it exists.
+/// `expr!` is a mark on the *effect row* and the identity on values, so
+/// `db.execute(sql, binds)!` as a statement does nothing about the `Result` it
+/// returns — the first draft of `tests/postgres.rs` reported a transaction as
+/// committed when the server had aborted it, and `ledger_service` printed
+/// "schema ready" against a database that was not running. Both looked
+/// finished. Both were reading the outer half of an answer and discarding the
+/// half that said what happened.
+///
+/// A lint rather than an error, because dropping one is **occasionally
+/// deliberate** and the language already has the way to say so: `std::db`'s
+/// rollback path drops the rollback's own `Result` on purpose, so that the
+/// engine's complaint about the rollback cannot hide the reason for it. Written
+/// `let _ = db.rollback();`, which says at the call site that the answer was
+/// considered.
+///
+/// # What it sees
+///
+/// A statement-position expression whose type is a `Result`, anywhere but the
+/// tail of a block — the tail is the block's value and is not discarded.
+/// Matched on the name rather than on the declaring module: a `Result` a
+/// program declared itself is the same mistake, and the checker has already
+/// agreed the name refers to one type.
+fn discarded_results(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
+    for (_, expr) in body.exprs() {
+        let Expr::Block { stmts, .. } = expr else { continue };
+        for stmt in stmts {
+            let Stmt::Expr(id) = stmt else { continue };
+            let Type::Adt { name, .. } = types.of(*id) else { continue };
+            if name != "Result" {
+                continue;
+            }
+            out.push(Finding {
+                lint: DISCARDED_RESULT,
+                message: "this produces a `Result` and nothing looks at it, so a failure here is silent. `match` it, mark it with `!` in a function that can raise, or write `let _ =` to say the answer was considered"
+                    .to_string(),
+                range: body.range(*id),
+            });
+        }
     }
 }
 

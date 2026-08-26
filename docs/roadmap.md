@@ -2020,22 +2020,33 @@ Ordered by value, not by §6's numbering.
     everything, and `khora-cli/tests/permissions.rs` holds both the refusal and
     the two cases saying the hole is no wider than documented.
 
-- **10.3 Linter — done, two of three.** `crates/khora-lint`, wired to the
-  `[lints]` table through `khora check`. The third the entry asked for already
-  existed: a `match` arm that cannot be reached is a *type error*, out of the
-  same usefulness algorithm that decides exhaustiveness, and making it a lint
-  as well would give one mistake two voices.
+- **10.3 Linter — done, two of three, plus one 13.17 added.**
+  `crates/khora-lint`, wired to the `[lints]` table through `khora check`. The
+  third the entry asked for already existed: a `match` arm that cannot be
+  reached is a *type error*, out of the same usefulness algorithm that decides
+  exhaustiveness, and making it a lint as well would give one mistake two
+  voices.
 
-  `std`, all three examples and `bench/service` are clean.
+  `std`, all three examples, `packages/` and `bench/service` are clean.
 
-  **Both are narrow on purpose.** A lint people learn to ignore is worse than
+  **They are narrow on purpose.** A lint people learn to ignore is worse than
   no lint, so where a judgement was available each takes the quiet side.
   `dangling-expression` reports only an expression that *cannot* do anything —
   no call, no assignment, nothing that could raise — which leaves out the
-  interesting case of a call whose result is discarded, because deciding that
+  general case of a call whose result is discarded, because deciding *that*
   needs a purity analysis rather than a table. `unused-capability` stays silent
   whenever the body contains any call, because a call may be forwarding the
   capability without naming it.
+
+  **`discarded-result` is the narrow slice of the general case that is worth
+  taking**, added under 13.17 because it had already cost twice. `expr!` is a
+  mark on the effect row and the identity on values, so `db.execute(..)!` as a
+  statement does nothing about the `Result` — `tests/postgres.rs` reported a
+  transaction as committed when the server had aborted it, and
+  `ledger_service` printed "schema ready" against a database that was not
+  running. No purity analysis is needed: the *type* is the signal, and the
+  escape is `let _ =`, which `std::db`'s deliberate rollback discard now
+  writes.
 
   Sharpening the second is a small, well-defined piece of work: `BodyTypes`
   needs a per-call-site record of the labels the callee required. The checker
@@ -3271,7 +3282,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
 | 13.15 | User documentation | **API reference generated; the rest not started.** `khora doc` writes a page per `std` module from `///` and `//!`, gated by `--check` in the baseline. Getting Started, the guide and the cookbook are the docs agent's `website/` work |
 | 13.16 | Editor and tooling | **Half.** 10.4's language server does diagnostics, formatting, completion, hover and navigation; nothing is packaged |
-| 13.17 | Diagnostics pass | **Ongoing, and it works.** Six misleading messages were found and fixed by *using* the language during phase 12. A corpus makes that systematic instead of incidental |
+| 13.17 | Diagnostics pass | **Ongoing, and it works.** Six misleading messages were found and fixed by *using* the language during phase 12, and the `discarded-result` lint by two real bugs that a message could not have caught — `expr!` is the identity on values, so a discarded `Result` looks handled. A corpus makes that systematic instead of incidental |
 | 13.18 | Reference applications | **The service exists.** `ledger_service` is HTTP + PostgreSQL + a pool + transactions + tracing, verified against a real server; `risk_analyzer` and `link_shortener` alongside it. The wasm one is still missing |
 | 13.19 | External alpha | **Not started**, and nothing substitutes for it |
 | 13.20 | CI as a hard gate | **Most of it, and personally earned.** CI runs the suite on three platforms. The accidental-ignore half is closed: the baseline leaves a receipt naming the tree it passed for, `scripts/gate.sh` asks whether one exists for the tree as it stands, and `scripts/install-hooks.sh` puts that in a pre-push hook — a status can be dropped by the shell chain around a script and a file cannot. Required checks on the branch are a GitHub setting nobody here can commit |

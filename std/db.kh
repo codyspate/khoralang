@@ -184,7 +184,7 @@ fn guarded<A, 'c, 'r>(
       // which is the fact they have to act on; the engine's complaint about
       // the rollback is a second problem and a worse thing to report.
       settled.done = true;
-      db.rollback();
+      let _ = db.rollback();
       Result::Err(DbError::RolledBack(problem.show()))
     },
     // Settled *before* the commit is attempted, so a refused commit is
@@ -206,7 +206,7 @@ fn guarded<A, 'c, 'r>(
 /// Reached on the way out of the region, which is every way out — including
 /// the cancellation that never touched a line of `guarded`.
 fn undo(db: Db, settled: Settled) -> () {
-  if settled.done { () } else { db.rollback(); () }
+  if settled.done { () } else { let _ = db.rollback(); () }
 }
 
 impl Cell {

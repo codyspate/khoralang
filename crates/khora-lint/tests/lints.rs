@@ -7,7 +7,10 @@
 //! that is perfectly fine.
 
 use khora_db::{Db, KhoraDatabase, SourceFile};
-use khora_lint::{findings, Finding, DANGLING_EXPRESSION, REFERENCE_CYCLE, UNUSED_CAPABILITY};
+use khora_lint::{
+    findings, Finding, DANGLING_EXPRESSION, DISCARDED_RESULT, REFERENCE_CYCLE,
+    UNUSED_CAPABILITY,
+};
 
 fn lint(db: &dyn Db, text: &str) -> Vec<Finding> {
     let file = SourceFile::new(db, "a.kh".into(), text.to_string());
@@ -347,5 +350,82 @@ fn a_variant_holding_the_target_is_still_reported() {
     // and the shape is here to prove a constructor is still walked at all.
     let found: Vec<&Finding> =
         findings(&db, file).iter().filter(|f| f.lint == REFERENCE_CYCLE).collect();
+    assert!(found.is_empty(), "{found:?}");
+}
+
+// --- a `Result` nobody looked at --------------------------------------------
+
+/// A `Result` and something that produces one.
+const RESULTS: &str = "module m;\n\
+                       export type Result<A, E> = | Ok(value: A) | Err(error: E);\n\
+                       export type Oops = | Bad;\n\
+                       fn work() -> Result<Int, Oops> { Result::Ok(1) }\n";
+
+/// **The case that bit twice.** A statement that produces a `Result` and does
+/// not look at it hides whatever the failure was.
+#[test]
+fn a_discarded_result_is_reported() {
+    let db = KhoraDatabase::new();
+    let found = lint(&db, &format!("{RESULTS}\nfn f() -> Int {{ work(); 0 }}\n"));
+    assert_eq!(names(&found), [DISCARDED_RESULT], "{found:?}");
+}
+
+/// **And with `!` on it**, which is the shape that actually shipped. `expr!` is
+/// a mark on the effect row and the identity on values, so it does nothing at
+/// all about the `Result` — which is exactly why somebody writing it believes
+/// the failure is handled.
+#[test]
+fn a_marked_call_that_still_returns_a_result_is_reported() {
+    let db = KhoraDatabase::new();
+    let found = lint(
+        &db,
+        &format!(
+            "{RESULTS}\nfn g() -> Result<Int, Oops> raises Oops {{ work() }}\n\
+             fn f() -> Int raises Oops {{ g()!; 0 }}\n"
+        ),
+    );
+    assert_eq!(names(&found), [DISCARDED_RESULT], "{found:?}");
+}
+
+/// `let _ =` is how a program says the answer was considered, and it is quiet.
+#[test]
+fn a_result_bound_to_a_wildcard_is_not_reported() {
+    let db = KhoraDatabase::new();
+    let found = lint(&db, &format!("{RESULTS}\nfn f() -> Int {{ let _ = work(); 0 }}\n"));
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// The tail of a block is the block's value, not a discarded one.
+#[test]
+fn a_result_that_is_the_blocks_value_is_not_reported() {
+    let db = KhoraDatabase::new();
+    let found =
+        lint(&db, &format!("{RESULTS}\nfn f() -> Result<Int, Oops> {{ work() }}\n"));
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// A `match` on it is looking at it, which is the whole point.
+#[test]
+fn a_matched_result_is_not_reported() {
+    let db = KhoraDatabase::new();
+    let found = lint(
+        &db,
+        &format!(
+            "{RESULTS}\nfn f() -> Int {{\n  \
+             match work() {{ Result::Ok(n) => n, Result::Err(e) => 0 }}\n}}\n"
+        ),
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// A statement producing anything else is somebody else's business — a
+/// `()`-returning call is the ordinary way to do something for its effect.
+#[test]
+fn a_discarded_unit_is_not_reported() {
+    let db = KhoraDatabase::new();
+    let found = lint(
+        &db,
+        &format!("{RESULTS}\nfn side() -> () {{ () }}\nfn f() -> Int {{ side(); 0 }}\n"),
+    );
     assert!(found.is_empty(), "{found:?}");
 }
