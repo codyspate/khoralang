@@ -130,13 +130,14 @@ says so.
 
 ## ThreadSanitizer
 
-`sh scripts/tsan.sh`. Thirty-five tests across five modules, **no warnings**.
+`sh scripts/tsan.sh`. Thirty-eight tests across six modules, **no warnings**.
 
 | Module | What it covers |
 | --- | --- |
 | `channel` | A bounded queue with senders and receivers on real threads — the newest primitive here, and the one carrying values between fibers |
 | `wait` | The park/wake protocol, whose entire content is the race between a suspension and the wake that beats it |
 | `contain` | Thread-locals and the trap flag |
+| `region` | Finalizers, which two fibers may defer to at once, and the cancellation shield 13.3 added beside them |
 | `decimal`, `trap` | Single-threaded; cheap to include |
 
 **It cannot see through a stack switch, and that is not a theoretical
@@ -169,6 +170,13 @@ Three things about the setup are worth keeping, because each cost time:
   `test result: ok`, every filter returned zero when run alone, and the
   invocation still came back `1`. The script now says `KHORA_TSAN_ALL_CLEAR` in
   words and the caller greps for it.
+
+**Read the report, not the terminal.** `${TMPDIR:-/tmp}/khora-tsan-report.txt`
+is what `tee` writes and what the sentinel is grepped out of; a run piped
+somewhere else can arrive with most of it missing, because the inner shell's
+stdout is block-buffered through WSL while cargo's stderr is not. The file on
+disk has every filter's block in order. The verdict is unaffected either way —
+it is read from the file.
 
 ## Finding 4 — `attempt` turned a cancellation into a typed null
 

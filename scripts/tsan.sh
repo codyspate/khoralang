@@ -75,7 +75,12 @@ build_std="-Zbuild-std"
 
 # The tests that race between real threads. Named rather than "everything
 # minus", so that a new test is included on purpose rather than by accident.
-FILTERS="channel:: wait:: contain:: decimal:: trap::"
+#
+# `region::` joined the list with 13.3: a region is shareable, two fibers may
+# defer to one at the same moment, and the cancellation shield added a second
+# per-fiber word that a finalizer reads while somebody else may be writing the
+# first.
+FILTERS="channel:: wait:: contain:: decimal:: trap:: region::"
 
 # Where the run is kept, so the verdict can be read out of it below.
 report=${TMPDIR:-/tmp}/khora-tsan-report.txt
