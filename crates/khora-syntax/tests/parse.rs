@@ -732,3 +732,27 @@ fn export_is_an_ordinary_identifier() {
     let parsed = parse("module m;\n\nfn f(export: Int) -> Int { export + 1 }\n");
     assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
 }
+
+/// **A byte order mark is whitespace, not a declaration that went wrong.**
+///
+/// Windows editors put U+FEFF at the front of a UTF-8 file, and PowerShell's
+/// `Out-File -Encoding utf8` does it too. Without this the first token of the
+/// file is a lex error and the message is "expected a declaration" pointing at
+/// a `module` line that is correct and *looks* correct — the mark does not
+/// print. Found by installing a release on a clean machine and writing the
+/// first program with the shell that was already open.
+#[test]
+fn a_byte_order_mark_is_not_an_error() {
+    let parsed = parse("\u{feff}module m;\n\nfn f() -> Int { 1 }\n");
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert!(parsed.debug_tree().contains("FN_DECL"), "{}", parsed.debug_tree());
+}
+
+/// And the tree still round-trips, because a lossless CST that drops three
+/// bytes is not lossless.
+#[test]
+fn a_byte_order_mark_survives_a_round_trip() {
+    let src = "\u{feff}module m;\n\nfn f() -> Int { 1 }\n";
+    let parsed = parse(src);
+    assert_eq!(parsed.syntax().text().to_string(), src);
+}

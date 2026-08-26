@@ -12,7 +12,13 @@ use crate::kind::SyntaxKind;
 
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq)]
 enum Tok {
-    #[regex(r"[ \t\r\n\x0c]+")]
+    // U+FEFF is in there because a file saved by a Windows editor starts with
+    // one. It is ZERO WIDTH NO-BREAK SPACE, so whitespace is what it is —
+    // and without this the lexer reports "expected a declaration" against a
+    // `module` line that is perfectly good and looks it, since a byte order
+    // mark does not print. Anywhere rather than only at the start, because a
+    // file concatenated from two others has one in the middle.
+    #[regex(r"[ \t\r\n\x0c\u{feff}]+")]
     Whitespace,
     #[regex(r"//[^\r\n]*")]
     LineComment,

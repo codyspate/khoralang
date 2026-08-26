@@ -1304,3 +1304,49 @@ future tense — which section 4 did, and section 1 did not.
 Found by auditing the design notes for stale messaging, which is the same pass
 8.5.4 ran over the README and did not extend to `docs/design/`.
 
+
+## 49. The first program written on Windows did not parse
+
+**What was believed:** that a `.kh` file is a `.kh` file, and the first thing
+somebody does after installing Khora is write one.
+
+**What is true:** on Windows the first thing they write starts with three bytes
+nobody typed. `ef bb bf` — U+FEFF, the byte order mark — is what PowerShell's
+`Out-File -Encoding utf8` emits, what Notepad emits, and what Visual Studio and
+VS Code emit when configured for "UTF-8 with BOM". The lexer had no rule for it,
+so it became a `LEX_ERROR` and the parser said:
+
+```
+error: expected a declaration
+ --> src\main.kh:1:1
+  |
+1 | module main;
+  | ^
+```
+
+**The mark does not print**, which is the whole of why this is worth an entry.
+The message names the right line, points at the right column, and describes a
+line that is correct. There is nothing in the diagnostic, in the file, or in an
+editor to look at. The only way to see it is to hexdump the first four bytes,
+which is not the fourth thing a newcomer tries.
+
+**The fix is one character in a regex.** U+FEFF is ZERO WIDTH NO-BREAK SPACE, so
+whitespace is what it is, and the lexer's whitespace class now contains it.
+Anywhere rather than only at offset zero — a file concatenated from two others
+has one in the middle, and it means the same nothing there. The CST stays
+lossless because the mark is emitted as a whitespace token like any other, which
+`a_byte_order_mark_survives_a_round_trip` pins.
+
+**How it was found, which is the part that generalises.** By installing
+`v0.1.0-rc.1` from the published release on a machine with no Khora checkout on
+its `PATH`, and writing the first program with the shell that was already open.
+Every test in this repository writes its sources with Rust's `fs::write`, which
+does not emit a BOM; every `.kh` file in `std/`, `examples/` and `packages/` was
+written by an editor that does not either. So the entire corpus — 16 modules,
+1,545 tests, three platforms in CI — could not have caught this, and would not
+have caught it at any scale, because the corpus is not where the input comes
+from.
+
+13.24 exists for exactly this class, and this is its first finding: a
+clean-machine test is not the same test as a green suite, and the difference is
+not thoroughness. It is that a user's file gets made by a user's tools.

@@ -32,7 +32,12 @@ $Repo = "codyspate/khoralang"
 $Home_ = if ($To) { $To } elseif ($env:KHORA_HOME) { $env:KHORA_HOME }
          else { Join-Path $env:USERPROFILE ".khora" }
 
-function Fail($message) { Write-Error "install: $message"; exit 1 }
+function Fail($message) {
+    Write-Host ""
+    Write-Host "install: $message" -ForegroundColor Red
+    Write-Host ""
+    exit 1
+}
 
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { "x86_64" }
@@ -63,17 +68,48 @@ if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
 # "include candidates" rather than "only candidates" — the narrower reading
 # would install the candidate that preceded a stable release the day after it
 # shipped.
+#
+# **A 404 from `/releases/latest` is an answer, not a failure**, and it is the
+# answer whenever every release so far is a candidate. `Invoke-RestMethod`
+# throws on one, and `$ErrorActionPreference = "Stop"` turns that into a page
+# of PowerShell exception text ending in `WebCmdletWebResponseException` --
+# which sends the reader to look at their network for something that is
+# working exactly as designed. So it is caught, and what is said instead names
+# the candidate that does exist and the command that installs it.
+function Ask($url) {
+    try {
+        Invoke-RestMethod -Uri $url -Headers @{ "User-Agent" = "khora-install" }
+    } catch {
+        $null
+    }
+}
+
 if ($Version) {
     $tag = "v" + $Version.TrimStart("v")
 } elseif ($Pre) {
-    $all = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases"
+    $all = Ask "https://api.github.com/repos/$Repo/releases"
     $tag = ($all | Select-Object -First 1).tag_name
     if (-not $tag) { Fail "nothing has been released yet.`nSee https://github.com/$Repo/releases" }
 } else {
-    $latest = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
-    $tag = $latest.tag_name
+    $tag = (Ask "https://api.github.com/repos/$Repo/releases/latest").tag_name
     if (-not $tag) {
-        Fail "could not find a stable release. Is there one yet?`nThere may be a candidate: try -Pre, or see https://github.com/$Repo/releases"
+        # Distinguish "nothing at all" from "candidates only", because the two
+        # want different things from the reader.
+        $any = Ask "https://api.github.com/repos/$Repo/releases"
+        $newest = ($any | Select-Object -First 1).tag_name
+        if ($newest) {
+            Fail @"
+no stable release yet. The newest is $newest, which is a candidate.
+
+Install it with:
+
+    irm https://raw.githubusercontent.com/$Repo/main/install.ps1 -OutFile i.ps1
+    ./i.ps1 -Pre
+
+iex cannot pass arguments, which is why this takes two lines.
+"@
+        }
+        Fail "nothing has been released yet.`nSee https://github.com/$Repo/releases"
     }
 }
 $number = $tag.TrimStart("v")

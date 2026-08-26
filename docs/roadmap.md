@@ -3312,7 +3312,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.21 | Release and security infrastructure | **A fifth.** 12.9 emits an SBOM and builds are reproducible, and `SECURITY.md` names a disclosure channel — GitHub private advisories, no address published. Signing, provenance and automated releases do not exist |
 | 13.22 | Governance | **Licensed.** `LICENSE-MIT` and `LICENSE-APACHE`, matching what `Cargo.toml` always claimed, with the inbound-equals-outbound line in the README. A contribution guide, the language-change process and ownership rules are not written |
 | 13.23 | Performance at scale | **Small-scale, and the harness was the ceiling.** `bench/compare.py` walks a ladder of connection counts and refuses to report a rate that is still climbing — which every fast figure this repository had published was. Khora's server is somewhere above 1.7M req/s and this rig cannot say where; Go, C#, Java and Node *are* measurable and are in `bench/README.md`. Two machines is the real fix |
-| 13.24 | Clean-machine release test | **Not started.** The acceptance test for all of the above |
+| 13.24 | Clean-machine release test | **Begun, and it found something on the first try.** `v0.1.0-rc.1` installs from the published release, verifies its checksum, unpacks, finds its own `std/`, and compiles and runs a program. Two defects came out of the attempt: `install.ps1` reported "no stable release yet" as a page of PowerShell exception text, because `Invoke-RestMethod` throws on the 404 that a candidates-only repository returns; and **the first program written on Windows did not parse**, because every editor there writes a byte order mark and the lexer had no rule for it (errata 49). Still to do on a machine with no toolchain at all: the linker check, which this one cannot answer |
 | 13.25 | A toolchain that manages itself | **Done.** `khora toolchain install`, `khora toolchain default`, `khora toolchain remove` and `khora update`. `curl \| sh` is now only the bootstrap: it puts one `khora` on the path and everything after that is `khora`'s own job, so there is no `khoraup` to learn about. Downloads are verified against the checksum published beside them, in-process rather than through a `sha256sum` that may not be there. `curl`, `wget` and `tar` are shelled out to, following `khora-pkg`'s decision about `git`, rather than linking an HTTP client, a TLS stack, gzip and zip into a compiler that needs none of them |
 
 ### The three that are bigger than one line makes them look
@@ -4304,11 +4304,72 @@ The test for each comment is one question: **would deleting this cause somebody
 to make a change that compiles and is wrong?** If yes it stays and may grow. If
 no it goes to the commit message.
 
+#### 15.1, done
+
+Every crate rewritten, code untouched, `cargo clippy --workspace --features
+llvm --all-targets -D warnings` clean throughout. `crates/` went from 19,876
+comment lines to 19,630 — which is a much smaller number than the framing above
+implies, and the framing was wrong about where the problem was.
+
+**The ratio was measuring the wrong thing.** A file that is mostly `pub`
+declarations is *supposed* to be mostly comment, and `khora-perceus/src/lib.rs`
+at 70% was not the worst offender but one of the better-documented files in the
+tree. What actually needed cutting was concentrated and measurable:
+
+  - 117 comment blocks of 15 lines or more that were **not** module
+    documentation, totalling 2,254 lines — 11% of the comment lines, not all of
+    them.
+  - 473 paragraphs across 142 files opening with a bolded lede. Individually
+    fine; at that density a tic, and the single most recognisable
+    machine-written signature in the tree. Thinned where a paragraph was doing
+    ordinary work, kept where it is a genuine warning.
+
+The rule that removed the most was the one written above: narration goes to the
+commit message. Retelling how a bug was found, what a comment used to say, and
+restating a design document one line below the link to it.
+
+**Six stale claims, which is the part worth the exercise on its own.** The
+scheduler's module documentation said there was no work stealing, two hundred
+lines above `steal`. `khora-rt`'s crate documentation said there was no
+scheduler in it. `unify.rs` opened by describing a transition from phase 2 that
+had finished. `khora-types/src/lib.rs` said row unification "arrives in phase
+4", ninety lines above `Type::Row`. `khora-doc` and `khora-types/src/exports.rs`
+still called the visibility keyword `export`, which 13.11 renamed. And
+`parser/decls.rs` refused a bad `pub` with a diagnostic naming `export` — a
+keyword the language does not have, at a reader looking straight at `pub`.
+
+#### The defect underneath it, and the guard now in place
+
+**Eighteen doc comments were attached to the wrong item.** Rust joins a
+contiguous run of `///` lines into one comment for whatever follows, so a
+summary written above an existing one — with no item between — merges the two
+and leaves the *earlier* item documented nowhere. `khora-types/src/map.rs` had
+four in a row: `is_shareable` and `is_opaque` had no documentation at all, and
+`declares` carried three paragraphs about sharing.
+
+It has no reliable syntactic signature — a stacked summary and ordinary wrapped
+prose are the same two lines — so a detector for it is a one-off script that
+needs a person to read the hits. What *does* catch it is `missing_docs`, which
+fires the moment an item loses its comment.
+
+**`#![deny(missing_docs)]` is now on twelve of the sixteen crates**:
+`khora-codegen-llvm`, `khora-diagnostics`, `khora-doc`, `khora-fmt`,
+`khora-lint`, `khora-lsp`, `khora-manifest`, `khora-mcp`, `khora-perceus`,
+`khora-pkg`, `khora-rt`, `khora-toolchain`. Four are left, and the counts are
+what the work would be:
+
+| crate | undocumented public items | why it is not done |
+| --- | --- | --- |
+| `khora-db` | 5 | Not fixable. `salsa::input` generates `new`, a getter and a setter per field into an impl block of its own, and an `#[allow]` on the struct does not reach them |
+| `khora-types` | 73 | Ordinary work |
+| `khora-hir` | 170 | Ordinary work, mostly `ItemMap` and `Body` accessors |
+| `khora-syntax` | 381 | Largely the generated AST layer, where a summary per accessor is close to worthless. Worth an `#[allow]` on that module and the lint on the rest |
+
 ### The rest of the review
 
 | # | Dimension | What it means here |
 | --- | --- | --- |
-| 15.1 | **Comments** | Above. The largest single item and the one with a measurable before and after |
+| 15.1 | ✅ **Comments** | Done — see above. Six stale claims and eighteen misattached doc comments fell out of it, and `#![deny(missing_docs)]` is now on twelve of sixteen crates |
 | 15.2 | **Consistency** | One way to do each thing. Error construction, naming, module layout, how a crate exposes its queries. `std-surface.md` Finding 3 is the same problem one level up |
 | 15.3 | **Organization** | Seventeen crates. Does each have one job, and could a newcomer predict which one a change belongs in? The answer for `khora-db`, `khora-syntax` and `khora-rt` is obviously yes; for others it has never been asked |
 | 15.4 | **Function and file size** | `khora-types/src/check/calls.rs` and `khora-codegen-llvm/src/backend/driver.rs` are where the work is; both have grown by accretion. Long functions are where the reviewer's attention runs out |
