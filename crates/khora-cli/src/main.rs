@@ -503,7 +503,25 @@ fn toolchain(command: ToolchainCommand) -> Result<bool> {
             let pinned = khora_toolchain::pinned_version(&path);
             let because =
                 if pinned.is_some() { "this project pins it" } else { "it is your default" };
-            match pinned.or_else(khora_toolchain::install::default_version) {
+            // **The same rule `hand_over_if_pinned` uses**, or this reports a
+            // handover that will not happen. A command whose whole job is to
+            // say what would run has to agree with what runs.
+            let default = if managed_binary() {
+                khora_toolchain::install::default_version()
+            } else {
+                None
+            };
+            if pinned.is_none() && khora_toolchain::install::default_version().is_some() && default.is_none()
+            {
+                println!(
+                    "no pin here. Your default is Khora {}, but this is a build of the \
+                     compiler rather than an installed one, so it runs as itself: Khora {}.",
+                    khora_toolchain::install::default_version().unwrap_or_default(),
+                    khora_toolchain::RUNNING
+                );
+                return Ok(true);
+            }
+            match pinned.or(default) {
                 None => println!(
                     "no pin here and no default, so whatever is on the path runs. \
                      This is Khora {}.",
@@ -565,6 +583,26 @@ fn update(pre: bool) -> Result<bool> {
     Ok(true)
 }
 
+/// Whether the running executable is one `KHORA_HOME` manages.
+///
+/// True for the bootstrap `~/.khora/bin/khora` the installer unpacks and for
+/// anything under `~/.khora/toolchains/`; false for a `target/debug/khora`
+/// somebody built. See [`hand_over_if_pinned`] for what turns on it.
+///
+/// Both paths are canonicalized, because on Windows one side arrives with a
+/// `\\?\` prefix and the other without, and comparing them as written answers
+/// `false` for a binary that is plainly inside the directory. A path that
+/// cannot be canonicalized — a home that does not exist yet, which is the
+/// ordinary case before the first install — answers `false`, which is the safe
+/// direction: it declines to redirect rather than redirecting wrongly.
+fn managed_binary() -> bool {
+    let Ok(home) = khora_toolchain::home() else { return false };
+    let Ok(home) = home.canonicalize() else { return false };
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let Ok(exe) = exe.canonicalize() else { return false };
+    exe.starts_with(&home)
+}
+
 /// Hands this invocation to the toolchain the project pins, if that is not us.
 ///
 /// **Before `clap` sees anything**, so that a project pinning a version with
@@ -602,7 +640,28 @@ fn hand_over_if_pinned() {
     // every unpinned directory over that would be a machine somebody has to
     // repair before they can use it.
     let from_pin = pin.is_some();
-    let wanted = pin.or_else(khora_toolchain::install::default_version);
+    // **A machine default may only redirect a managed binary**, and a compiler
+    // you built and ran by path is not one.
+    //
+    // Without this, anybody who develops Khora *and* has Khora installed loses
+    // their own build silently: `khora update` writes a version into
+    // `~/.khora/default`, and from then on `./target/debug/khora` hands every
+    // command to the installed release. It surfaced as this repository's own
+    // baseline failing with "no linker found" against
+    // `~/.khora/toolchains/0.1.0-rc.1/std/ai.kh` — a path from a toolchain
+    // nobody in that command had mentioned.
+    //
+    // A **pin** still redirects anything, because that is a project stating a
+    // requirement rather than a machine stating a preference, and the one
+    // project that would suffer for it is this one, which pins nothing.
+    //
+    // rustup draws the same line by a different mechanism: its shims are what
+    // redirect, and a binary you built yourself is never a shim.
+    let wanted = match pin {
+        Some(version) => Some(version),
+        None if managed_binary() => khora_toolchain::install::default_version(),
+        None => None,
+    };
 
     let installed = khora_toolchain::installed().unwrap_or_default();
     let decision = khora_toolchain::decide(

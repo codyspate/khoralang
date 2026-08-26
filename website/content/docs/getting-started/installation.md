@@ -53,13 +53,38 @@ rather than a reinstall.
 
 ### Release candidates
 
-A candidate is published as a pre-release, which the ordinary install skips.
-`--pre` means "candidates as well", not "candidates only" — the day after a
-stable release, the newest release of any kind is that stable one.
+**Before there is a stable release, this is the install.** A candidate is
+published as a GitHub pre-release, which `/releases/latest` excludes — so the
+plain command above cannot reach one, and says so rather than failing oddly.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --pre
+```
+
+```powershell
+irm https://raw.githubusercontent.com/codyspate/khoralang/main/installrc.ps1 | iex
+```
+
+Two different shapes because `iex` cannot pass an argument to what it is piped,
+where `sh -s --` can. `installrc.ps1` is `install.ps1` with `-Pre`, and nothing
+else — it forwards rather than copying, so there is one implementation of
+installing and no second file to keep true about checksums and layout.
+
+`--pre` and `-Pre` mean "candidates as well", not "candidates only". The day
+after a stable release they install that stable release, which is the right
+answer for somebody who ran this once and left it in a script.
+
+A particular one, by name:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --version 0.1.0-rc.2
+```
+
+Once a candidate is installed, `khora` does the rest itself:
 
 ```bash
-khora toolchain install --pre
-khora update --pre
+khora toolchain install --pre    # a newer candidate, alongside this one
+khora update --pre               # and make it the default
 ```
 
 Candidates are versions of their own: `0.2.0-rc.1`, then `-rc.2`, and finally

@@ -2,11 +2,13 @@
 #
 #     irm https://raw.githubusercontent.com/codyspate/khoralang/main/install.ps1 | iex
 #
-# For a release candidate, which needs the script on disk because `iex` takes
-# no arguments:
+# For a release candidate, `installrc.ps1` is this with `-Pre`:
 #
-#     irm https://raw.githubusercontent.com/codyspate/khoralang/main/install.ps1 -OutFile i.ps1
-#     ./i.ps1 -Pre
+#     irm https://raw.githubusercontent.com/codyspate/khoralang/main/installrc.ps1 | iex
+#
+# It exists because `iex` cannot pass an argument to what it is piped, and the
+# alternative -- save to disk, run with a flag -- is three lines in the place
+# where somebody is deciding whether this is worth ten minutes.
 #
 # The counterpart to `install.sh`, which cannot run here: `curl | sh` needs a
 # shell Windows does not have, and telling people to install one first is a
@@ -103,10 +105,9 @@ no stable release yet. The newest is $newest, which is a candidate.
 
 Install it with:
 
-    irm https://raw.githubusercontent.com/$Repo/main/install.ps1 -OutFile i.ps1
-    ./i.ps1 -Pre
+    irm https://raw.githubusercontent.com/$Repo/main/installrc.ps1 | iex
 
-iex cannot pass arguments, which is why this takes two lines.
+Or from here, with -Pre.
 "@
         }
         Fail "nothing has been released yet.`nSee https://github.com/$Repo/releases"
@@ -133,7 +134,18 @@ try {
         Invoke-WebRequest "$base/$bundle" -OutFile (Join-Path $work $bundle)
         Invoke-WebRequest "$base/$bundle.sha256" -OutFile (Join-Path $work "$bundle.sha256")
     } catch {
-        Fail "no build for $triple in $tag. See https://github.com/$Repo/releases/$tag"
+        # `/releases/tag/<tag>`, not `/releases/<tag>`, which 404s. And the
+        # second sentence, because the likeliest reason to be here is not a
+        # missing platform: it is a release whose artifacts are still being
+        # built, which is the window the draft-first flow exists to close.
+        Fail @"
+no build for $triple in $tag yet.
+
+If that release was just created, its artifacts are still building -- try again
+in a few minutes. Otherwise this platform was not published for it.
+
+See https://github.com/$Repo/releases/tag/$tag for what is there.
+"@
     }
 
     Write-Host "  verifying"

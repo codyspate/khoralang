@@ -51,6 +51,39 @@ fn khora(w: &World, cwd: &Path, args: &[&str]) -> (bool, String) {
     )
 }
 
+/// Puts this executable where `install.sh` puts the bootstrap one, and returns
+/// it.
+///
+/// The difference matters: a machine default only redirects a binary that lives
+/// under `KHORA_HOME`, so a test about defaults has to run one that does.
+/// `CARGO_BIN_EXE_khora` is in `target/`, which is the developer's own build
+/// and is deliberately left alone.
+fn bootstrap(w: &World) -> std::path::PathBuf {
+    let bin = w.home.join("bin");
+    std::fs::create_dir_all(&bin).expect("the bin directory");
+    let exe = bin.join(if cfg!(windows) { "khora.exe" } else { "khora" });
+    std::fs::copy(env!("CARGO_BIN_EXE_khora"), &exe).expect("copying the bootstrap");
+    exe
+}
+
+/// Runs a particular `khora`, rather than the one under test.
+fn run(w: &World, exe: &Path, cwd: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(exe)
+        .args(args)
+        .current_dir(cwd)
+        .env("KHORA_HOME", &w.home)
+        .output()
+        .expect("running khora");
+    (
+        out.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
 /// Registers this very executable under `version`.
 fn link(w: &World, version: &str) {
     let (ok, output) =
@@ -186,11 +219,12 @@ fn a_pin_applies_from_a_subdirectory() {
 fn a_default_is_used_when_the_project_pins_nothing() {
     let w = world(None);
     link(&w, "0.99.0");
+    let installed = bootstrap(&w);
 
     let (ok, output) = khora(&w, &w.project, &["toolchain", "default", "0.99.0"]);
     assert!(ok, "{output}");
 
-    let (ok, output) = khora(&w, &w.project, &["toolchain", "which"]);
+    let (ok, output) = run(&w, &installed, &w.project, &["toolchain", "which"]);
     assert!(ok, "{output}");
     assert!(output.contains("0.99.0"), "{output}");
     assert!(output.contains("it is your default"), "{output}");
@@ -239,10 +273,10 @@ fn a_missing_pin_is_reported_rather_than_the_default() {
 #[test]
 fn a_default_that_is_not_installed_does_not_stop_anything() {
     let w = world(None);
-    std::fs::create_dir_all(&w.home).expect("the home directory");
+    let installed = bootstrap(&w);
     std::fs::write(w.home.join("default"), "9.9.9\n").expect("the default");
 
-    let (ok, output) = khora(&w, &w.project, &["check", "src/main.kh"]);
+    let (ok, output) = run(&w, &installed, &w.project, &["check", "src/main.kh"]);
     assert!(ok, "a missing default must not stop a build: {output}");
     assert!(output.contains("your default is Khora 9.9.9"), "{output}");
     assert!(output.contains("toolchain default --none"), "{output}");
@@ -305,4 +339,48 @@ fn the_toolchain_on_the_path_is_listed_too() {
     assert!(ok, "{output}");
     assert!(output.contains("on your path"), "{output}");
     assert!(output.contains("0.99.0"), "{output}");
+}
+
+/// **A machine default does not redirect a compiler somebody built.**
+///
+/// The regression this exists for cost a green baseline. `khora update` writes
+/// a version into `~/.khora/default`, and a developer of Khora is exactly the
+/// person likely to have run it — so from then on `./target/debug/khora` handed
+/// every command to the installed release, and this repository's own gate
+/// failed with "no linker found" against a path inside
+/// `~/.khora/toolchains/`, naming a toolchain nobody in that command had
+/// mentioned.
+///
+/// The binary under test is `target/debug/khora`, which is not under the
+/// temporary `KHORA_HOME` these tests hand it — the same shape as a developer's
+/// build against their real one.
+#[test]
+fn a_default_does_not_capture_a_build_of_the_compiler() {
+    let w = world(None);
+    link(&w, "0.99.0");
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "default", "0.99.0"]);
+    assert!(ok, "{output}");
+
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "which"]);
+    assert!(ok, "{output}");
+    assert!(
+        output.contains("runs as itself"),
+        "an unmanaged binary should say it keeps the command: {output}"
+    );
+    assert!(!output.contains("would hand over"), "{output}");
+}
+
+/// And a **pin** still redirects it, because that is the project stating a
+/// requirement rather than the machine stating a preference.
+///
+/// The two are deliberately different, and this is the pair that says so.
+#[test]
+fn a_pin_still_captures_a_build_of_the_compiler() {
+    let w = world(Some("0.99.0"));
+    link(&w, "0.99.0");
+
+    let (ok, output) = khora(&w, &w.project, &["toolchain", "which"]);
+    assert!(ok, "{output}");
+    assert!(output.contains("this project pins it"), "{output}");
+    assert!(output.contains("would hand over"), "{output}");
 }

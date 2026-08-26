@@ -49,15 +49,34 @@ The installer checks before downloading anything and says so.
 
 ### Release candidates
 
+**Before there is a stable release, this is the install.** A candidate is
+published as a GitHub pre-release, which `/releases/latest` excludes — so the
+plain command above cannot reach one, and says so rather than failing oddly.
+
 ```sh
-curl -fsSL .../install.sh | sh -s -- --pre     # the newest build, candidates included
-curl -fsSL .../install.sh | sh -s -- --version 0.2.0-rc.1
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --pre
 ```
 
-A candidate is published as a GitHub **pre-release**, which is installable by
-name and is excluded from `/releases/latest` — so a plain `curl | sh` never
-reaches one, and `--pre` is how somebody volunteers to test. `khora --version`
-reports what it was published as.
+```powershell
+irm https://raw.githubusercontent.com/codyspate/khoralang/main/installrc.ps1 | iex
+```
+
+Two different shapes because `iex` cannot pass an argument to what it is piped,
+where `sh -s --` can. `installrc.ps1` is `install.ps1` with `-Pre`, and nothing
+else — it forwards rather than copying, so there is one implementation of
+installing and no second file to keep true about checksums and layout.
+
+`--pre` and `-Pre` mean "candidates as well", not "candidates only". The day
+after a stable release they install that stable release, which is the right
+answer for somebody who ran this once and left it in a script.
+
+A particular one, by name:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --version 0.1.0-rc.2
+```
+
+`khora --version` reports what it was published as.
 
 Candidates are versions of their own: `0.2.0-rc.1`, then `-rc.2`, then `0.2.0`
 cut from the same commit as the last candidate. Nothing is promoted in place. A

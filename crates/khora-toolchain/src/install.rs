@@ -163,8 +163,11 @@ pub fn install(version: &str) -> Result<PathBuf> {
     // "`curl` could not fetch it" adds nothing to it.
     fetch(&format!("{base}/{archive}"), &bundle).map_err(|_| {
         anyhow::anyhow!(
-            "no build for {TARGET} in v{version}.\n\
-             See https://github.com/{repo}/releases/tag/v{version} for what was published."
+            "no build for {TARGET} in v{version} yet.\n\n\
+             If that release was just created, its artifacts are still building — \
+             try again in a few minutes.\n\
+             Otherwise this platform was not published for it.\n\n\
+             See https://github.com/{repo}/releases/tag/v{version} for what is there."
         )
     })?;
 

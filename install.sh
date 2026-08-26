@@ -33,6 +33,34 @@
 # it.
 set -eu
 
+# **Not `sed "$0"`, which is how this was written and why `--help` was broken.**
+# Piped into a shell there is no script file to read back -- `$0` is `sh` --
+# so the documented form printed `sed: can't read sh` and exited 0. It was also
+# pinned to a line range, so editing the header above silently changed what the
+# help said.
+usage() {
+    cat <<'END'
+Installs the Khora toolchain into ~/.khora.
+
+    curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh
+
+    --pre                 the newest release, candidates included
+    --version 0.1.0-rc.2  a particular release, latest or not
+    --to DIR              somewhere other than ~/.khora
+    --no-modify-path      never touch a shell profile
+
+Arguments need `sh -s --` when this is piped:
+
+    curl -fsSL .../install.sh | sh -s -- --pre
+
+A candidate is published as a pre-release, which the API's idea of "latest"
+excludes -- so a plain run never reaches one, and --pre is how somebody
+volunteers to test. It means "candidates as well", not "candidates only".
+
+Nothing is compiled, nothing needs root, and `rm -rf ~/.khora` undoes it.
+END
+}
+
 REPO="codyspate/khoralang"
 HOME_DIR="${KHORA_HOME:-$HOME/.khora}"
 VERSION=""
@@ -45,7 +73,7 @@ while [ $# -gt 0 ]; do
         --pre|--prerelease) PRERELEASE=1; shift ;;
         --to) HOME_DIR="$2"; shift 2 ;;
         --no-modify-path) MODIFY_PATH=0; shift ;;
-        -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -190,8 +218,12 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 
 say "  downloading"
 fetch "$BASE/$BUNDLE" "$WORK/$BUNDLE" \
-    || die "no build for $TRIPLE in $TAG.
-See https://github.com/$REPO/releases/tag/$TAG for what was published."
+    || die "no build for $TRIPLE in $TAG yet.
+
+If that release was just created, its artifacts are still building -- try again
+in a few minutes. Otherwise this platform was not published for it.
+
+See https://github.com/$REPO/releases/tag/$TAG for what is there."
 fetch "$BASE/$BUNDLE.sha256" "$WORK/$BUNDLE.sha256" \
     || die "the release has no checksum for $BUNDLE, so it cannot be verified"
 
