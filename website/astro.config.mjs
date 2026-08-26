@@ -20,6 +20,7 @@ export default defineConfig({
         alt: 'Khora pipe operator mark',
       },
       favicon: '/favicon.svg',
+      customCss: ['./src/styles/custom.css'],
       social: [
         {
           icon: 'github',
