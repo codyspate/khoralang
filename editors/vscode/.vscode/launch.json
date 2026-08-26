@@ -1,18 +1,27 @@
 {
-  // Open the `editors/vscode` folder in VS Code and press F5. That launches an
-  // Extension Development Host — a second window with the extension loaded
-  // live — which is the normal way to work on an extension. No packaging, no
-  // install, and no npm, because this extension contributes only declarative
-  // grammar and configuration.
+  // Open the `editors/vscode` folder in VS Code, run `npm install` once, and
+  // press F5. That launches an Extension Development Host — a second window
+  // with the extension loaded live — which is the normal way to work on an
+  // extension.
   //
-  // After editing the grammar, restart the host window to pick it up.
+  // `npm install` is needed now that there is a client: `vscode-languageclient`
+  // is a runtime dependency, and without it activation fails with a module it
+  // cannot resolve.
+  //
+  // Reload the host window after editing `src/`. Restart it after editing the
+  // grammar.
+  //
+  // The host runs whatever `khora` is on PATH, so it is the installed release
+  // rather than your build unless `khora.server.path` says otherwise. That is
+  // usually the wrong one while working on the compiler.
   "version": "0.2.0",
   "configurations": [
     {
       "name": "Run Khora extension",
       "type": "extensionHost",
       "request": "launch",
-      "args": ["--extensionDevelopmentPath=${workspaceFolder}"]
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/src/**/*.js"]
     }
   ]
 }

@@ -374,7 +374,7 @@ fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintL
 fn mcp() -> Result<()> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprintln!(
-            "khora mcp speaks the Model Context Protocol on stdin and stdout, so it is 
+            "khora mcp speaks the Model Context Protocol on stdin and stdout, so it is \
              waiting for a JSON message rather than for you. Point an agent at it instead."
         );
     }
@@ -719,9 +719,9 @@ fn hand_over_if_pinned() {
 fn lsp() -> Result<()> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprintln!(
-            "khora lsp speaks the Language Server Protocol on stdin and stdout, so it is 
-             waiting for a `Content-Length` header rather than for you. Point an editor at 
-             it instead."
+            "khora lsp speaks the Language Server Protocol on stdin and stdout, so it is \
+             waiting for a `Content-Length` header rather than for you. Point an editor \
+             at it instead."
         );
     }
     let stdin = std::io::stdin();

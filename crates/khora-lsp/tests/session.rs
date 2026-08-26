@@ -384,3 +384,119 @@ fn shutdown_is_answered_and_exit_stops_the_loop() {
         "nothing after `exit` should be answered: {replies:?}"
     );
 }
+
+// --- formatting -------------------------------------------------------------
+
+fn formatting(path: &Path, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/formatting",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }
+    })
+}
+
+/// The result of the request with this id.
+fn result_of(replies: &[Value], id: i64) -> Value {
+    replies
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_i64) == Some(id))
+        .and_then(|m| m.get("result").cloned())
+        .unwrap_or(Value::Null)
+}
+
+#[test]
+fn the_server_offers_to_format() {
+    let w = workspace(&[("src/main.kh", "module main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let caps = result_of(&replies, 1);
+    assert_eq!(
+        caps.pointer("/capabilities/documentFormattingProvider"),
+        Some(&json!(true)),
+        "{caps}"
+    );
+}
+
+/// **The whole file, as one edit.** A minimal diff is what preserves a cursor,
+/// and computing one honestly needs a tree diff — so this returns the document
+/// and lets the editor keep the cursor, which VS Code does well.
+#[test]
+fn formatting_returns_the_whole_file() {
+    let path_text = "module main;\n\n\n\nfn f( ) ->Int{1}\n";
+    let w = workspace(&[("src/main.kh", path_text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, path_text), formatting(&file, 2), exit()]);
+
+    let edits = result_of(&replies, 2);
+    let edits = edits.as_array().expect("a list of edits");
+    assert_eq!(edits.len(), 1, "one edit over the whole document: {edits:?}");
+
+    let edit = &edits[0];
+    assert_eq!(edit.pointer("/range/start/line"), Some(&json!(0)));
+    assert_eq!(edit.pointer("/range/start/character"), Some(&json!(0)));
+
+    let new_text = edit.get("newText").and_then(Value::as_str).expect("newText");
+    assert_eq!(new_text, khora_fmt::format(path_text).expect("it parses"));
+    assert!(new_text.contains("fn f() -> Int"), "{new_text}");
+}
+
+/// A file already in canonical form produces nothing, so saving an untouched
+/// file records no change and no undo step.
+#[test]
+fn formatting_an_already_formatted_file_is_no_edits() {
+    let text = khora_fmt::format("module main;\n\nfn f() -> Int { 1 }\n").expect("it parses");
+    let w = workspace(&[("src/main.kh", text.as_str())]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, &text), formatting(&file, 2), exit()]);
+    assert_eq!(result_of(&replies, 2), json!([]), "nothing to do");
+}
+
+/// **A file that does not parse is left exactly as it is**, which is the same
+/// decision `khora fmt` makes. Format-on-save runs while somebody is mid-edit,
+/// when a brace is unbalanced more often than not, and a formatter that
+/// rewrites a half-written file is one people turn off.
+#[test]
+fn formatting_a_broken_file_changes_nothing() {
+    let broken = "module main;\n\nfn f( -> Int { 1\n";
+    let w = workspace(&[("src/main.kh", broken)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, broken), formatting(&file, 2), exit()]);
+    assert_eq!(result_of(&replies, 2), Value::Null, "no edits for a file that does not parse");
+
+    // And the reason is on screen already, rather than only in this refusal.
+    assert!(!last_diagnostics(&replies).is_empty(), "the parse error should be reported");
+}
+
+/// It formats what the client last *sent*, not what is on disk — which is the
+/// whole point, since format-on-save runs against an unsaved buffer.
+#[test]
+fn formatting_uses_the_edited_buffer_rather_than_the_file() {
+    let on_disk = "module main;\n\nfn f() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", on_disk)]);
+    let file = w.root.join("src/main.kh");
+    let edited = "module main;\n\nfn f( ) ->Int{2}\n";
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, on_disk),
+        did_change(&file, edited),
+        formatting(&file, 2),
+        exit(),
+    ]);
+
+    let edits = result_of(&replies, 2);
+    let new_text = edits
+        .as_array()
+        .and_then(|e| e.first())
+        .and_then(|e| e.get("newText"))
+        .and_then(Value::as_str)
+        .expect("an edit");
+    assert!(new_text.contains('2'), "the buffer, not the file: {new_text}");
+}

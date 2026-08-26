@@ -22,11 +22,12 @@
 //!
 //! # What it answers
 //!
-//! Diagnostics, and hover. Both come from queries that already existed:
-//! `khora_db::parse`, `khora_types::diagnostics`, `khora_lint::findings`, and
-//! the checker's `BodyTypes`. Completion, rename and capability inlay hints are
-//! the roadmap's list and are not here — each needs an index this does not
-//! build yet, and a half-answering completion is worse than none.
+//! Diagnostics, hover, and formatting. All three come from things that already
+//! existed: `khora_db::parse`, `khora_types::diagnostics`, `khora_lint::findings`,
+//! the checker's `BodyTypes`, and `khora_fmt`. Completion, rename and capability
+//! inlay hints are the roadmap's list and are not here — each needs an index
+//! this does not build yet, and a half-answering completion is worse than
+//! none.
 
 #![deny(missing_docs)]
 
@@ -42,8 +43,8 @@ use khora_db::{KhoraDatabase, Setter, SourceFile, SourceRoot};
 use khora_manifest::LintLevel;
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, Hover, HoverContents, HoverProviderCapability,
-    InitializeResult, MarkupContent, MarkupKind, PositionEncodingKind, ServerCapabilities,
-    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
+    InitializeResult, MarkupContent, MarkupKind, OneOf, Position, PositionEncodingKind, Range,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
 };
 use serde_json::{json, Value};
 use url::Url;
@@ -111,6 +112,9 @@ impl Server {
             ("textDocument/hover", Some(id)) => {
                 vec![ok(id, self.hover(&params).map_or(Value::Null, to_value))]
             }
+            ("textDocument/formatting", Some(id)) => {
+                vec![ok(id, self.formatting(&params).map_or(Value::Null, to_value))]
+            }
             ("exit", _) => {
                 self.finished = true;
                 Vec::new()
@@ -165,6 +169,7 @@ impl Server {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -318,6 +323,46 @@ impl Server {
             });
         }
         out
+    }
+
+    /// The whole file, formatted, as one edit.
+    ///
+    /// **One edit over the whole document rather than a minimal diff.** A
+    /// minimal diff is what preserves a cursor and a selection, and computing
+    /// one honestly needs a tree diff; computing one dishonestly — matching
+    /// common prefixes and suffixes — is where formatters put the cursor
+    /// somewhere surprising. VS Code already keeps the cursor sensibly across a
+    /// full-document edit, so the trade is a cheap correct answer against an
+    /// expensive one nobody has asked for yet.
+    ///
+    /// **A file that does not parse is left exactly as it is.** `khora fmt`
+    /// makes the same decision for the same reason: format-on-save runs while
+    /// somebody is mid-edit, when a brace is unbalanced more often than not,
+    /// and a formatter that rewrites a half-written file is one people turn
+    /// off. `None` here means "no edits", which is what the protocol wants —
+    /// the errors are already on screen from `publishDiagnostics`.
+    ///
+    /// Nothing is returned when the text is already canonical either, so an
+    /// editor that saves an untouched file records no change and no undo step.
+    fn formatting(&self, params: &Value) -> Option<Vec<TextEdit>> {
+        let url = url_of(params)?;
+        let index = self.lines.get(&url)?;
+        let text = index.text();
+
+        let formatted = khora_fmt::format(text).ok()?;
+        if formatted == text {
+            return Some(Vec::new());
+        }
+
+        // The end of the document, in the client's own units. `LineIndex`
+        // answers that from the text it was built with, which is the text the
+        // client last sent — so the range cannot name a position the client
+        // does not have.
+        let end = index.position(text_size::TextSize::of(text), self.encoding);
+        Some(vec![TextEdit {
+            range: Range { start: Position { line: 0, character: 0 }, end },
+            new_text: formatted,
+        }])
     }
 
     /// The type of the smallest expression covering the cursor.

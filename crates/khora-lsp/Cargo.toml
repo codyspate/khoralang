@@ -11,6 +11,7 @@ khora-db.workspace = true
 khora-hir.workspace = true
 khora-types.workspace = true
 khora-lint.workspace = true
+khora-fmt.workspace = true
 khora-manifest.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -20,6 +21,7 @@ text-size.workspace = true
 url = "2"
 
 [dev-dependencies]
+khora-fmt.workspace = true
 serde_json = "1"
 tempfile = "3"
 url = "2"

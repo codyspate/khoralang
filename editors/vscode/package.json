@@ -1,12 +1,15 @@
 {
   "name": "khora",
   "displayName": "Khora",
-  "description": "Syntax highlighting for the Khora language (.kh)",
-  "version": "0.1.0",
+  "description": "Language support for Khora (.kh): errors as you type, hover types, and format on save.",
+  "version": "0.2.0",
   "publisher": "khora-lang",
   "license": "MIT OR Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/codyspate/khoralang" },
   "engines": { "vscode": "^1.75.0" },
-  "categories": ["Programming Languages"],
+  "categories": ["Programming Languages", "Formatters"],
+  "main": "./src/extension.js",
+  "activationEvents": ["onLanguage:khora"],
   "contributes": {
     "languages": [
       {
@@ -22,6 +25,47 @@
         "scopeName": "source.khora",
         "path": "./syntaxes/khora.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Khora",
+      "properties": {
+        "khora.server.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `khora` executable. Empty means look on `PATH`, which is where the installer puts it."
+        },
+        "khora.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Log the traffic between this extension and the server, into the Khora output channel."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "khora.restartServer",
+        "title": "Khora: Restart Language Server"
+      },
+      {
+        "command": "khora.showOutput",
+        "title": "Khora: Show Language Server Output"
+      }
+    ],
+    "configurationDefaults": {
+      "[khora]": {
+        "editor.formatOnSave": true
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.2.1"
+  },
+  "scripts": {
+    "package": "vsce package --allow-missing-repository -o khora-lang.khora.vsix"
   }
 }

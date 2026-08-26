@@ -587,7 +587,9 @@ dependencies = [
  "khora-syntax",
  "khora-toolchain",
  "khora-types",
+ "serde_json",
  "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -665,6 +667,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "khora-db",
+ "khora-fmt",
  "khora-hir",
  "khora-lint",
  "khora-manifest",

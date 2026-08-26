@@ -1,32 +1,58 @@
 # Khora for VS Code
 
-Syntax highlighting and editor configuration for `.kh` files.
+Errors as you type, hover types, format on save, and syntax highlighting for
+`.kh` files.
+
+**Everything but the highlighting comes from the compiler.** The extension
+starts `khora lsp` — a subcommand of the toolchain rather than a second program
+to install — and shows what it says. So a diagnostic in the editor is the same
+diagnostic `khora check` gives, from the same query, and there is no second
+implementation to drift.
+
+Requires `khora` on `PATH`, which both installers arrange. Point
+`khora.server.path` at an executable to use a different one, which is what to
+do when working on the compiler itself.
+
+## What it does
+
+| | from |
+| --- | --- |
+| Errors and warnings as you type | `khora_types::diagnostics` and `khora_lint::findings` |
+| Hover: the type of the thing under the cursor | the checker's `BodyTypes` |
+| Format on save | `khora_fmt`, the same formatter the baseline gates on |
+| Highlighting, comment toggling, bracket matching | the TextMate grammar here |
+
+Format on save is on by default for `.kh` and nothing else — `package.json`
+scopes it under `[khora]`, so it cannot turn the setting on for a language
+somebody has deliberately left it off for.
+
+Two commands, both under **Khora:** in the palette — *Restart Language Server*,
+for after rebuilding the compiler, and *Show Language Server Output*, which is
+where the server's own complaints go. `khora.trace.server` puts the protocol
+traffic in the same place.
 
 ## Working on it
 
-Open **this folder** (`editors/vscode`) in VS Code and press **F5**. That
-launches an Extension Development Host — a second window with the extension
-loaded live — which is how VS Code extensions are normally developed. No
-packaging, no install, and no npm, because this extension contributes only
-declarative grammar and configuration.
-
-Restart the host window after editing the grammar.
+Open **this folder** (`editors/vscode`) in VS Code, run `npm install` once, and
+press **F5**. That launches an Extension Development Host — a second window with
+the extension loaded live. Reload the host window after editing `src/`.
 
 ## Installing it for real
 
 ```bash
-powershell -NoProfile -ExecutionPolicy Bypass -File editors/vscode/install.ps1
+cd editors/vscode
+npm install
+npm run package
+code --install-extension khora-lang.khora.vsix --force
 ```
 
 Then **fully quit and reopen VS Code** — extensions are scanned at startup, so
 reloading the window is not enough. Confirm with `code --list-extensions`, which
 should list `khora-lang.khora`.
 
-The script packages a `.vsix` and installs it through the VS Code CLI. It exists
-because this machine has no Node; the standard tool is
-`npm i -g @vscode/vsce` then `vsce package`, and that is what to use for
-publishing. A `.vsix` is a zip with an OPC manifest, which is why PowerShell can
-build one at all.
+`install.ps1` builds a `.vsix` without npm, by hand, from PowerShell. It was
+written when this machine had no Node and is kept for a machine that has none;
+it packages the declarative half only, so it cannot produce a working client.
 
 **Do not just drop the folder into `~/.vscode/extensions`.** That was the first
 approach here and it silently did nothing: the extension never entered VS Code's
@@ -43,10 +69,11 @@ Syntax support is three separate layers, and this file is only the first:
 | Tree-sitter | Neovim, Helix, Zed, Emacs 29+, GitHub code navigation | Incremental parser, grammar in JS compiled to C |
 | LSP semantic tokens | Every editor with an LSP client | Driven by the actual compiler |
 
-**Semantic tokens over LSP is the real answer** (roadmap phase 8.4). It is
+**Semantic tokens over LSP is the real answer** (roadmap 14.5). It is
 editor-agnostic by construction and reuses the compiler instead of duplicating
 it, which is the only way `Type.member` can be colored correctly — see the
-limits section below.
+limits section below. The client half is now here, so what that needs is the
+server half.
 
 A tree-sitter grammar would mean maintaining a *second* parser alongside the
 `rowan` one. The cost of even a single duplicate is visible here: the
@@ -57,7 +84,7 @@ Helix or Zed users are wanted before the language server ships.
 The TextMate grammar earns its place regardless of the LSP, because GitHub
 Linguist uses it to highlight `.kh` in the repository and on the web.
 
-## What it does
+## What the grammar covers
 
 - Highlighting for keywords, types, functions, strings, numbers, row variables
   (`'r`) and operators, with `|>` scoped separately so the language's signature

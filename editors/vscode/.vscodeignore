@@ -1,0 +1,9 @@
+# What does not belong in the package.
+#
+# `node_modules` is *not* here: an extension ships its runtime dependencies,
+# and `vscode-languageclient` is the only one. `vsce` prunes dev dependencies
+# on its own.
+.vscode/**
+.gitignore
+install.ps1
+*.vsix

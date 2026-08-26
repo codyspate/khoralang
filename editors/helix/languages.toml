@@ -1,0 +1,31 @@
+# Khora in Helix.
+#
+# Merge into `~/.config/helix/languages.toml`, or `%AppData%\helix\languages.toml`
+# on Windows. Helix has an LSP client built in, so there is nothing to install
+# beyond `khora` itself.
+#
+#     hx --health khora
+#
+# says whether it found the binary.
+#
+# No `grammar` entry, because Khora has no tree-sitter grammar and Helix takes
+# its highlighting from one. Diagnostics, hover and formatting all work without
+# it; what is missing is colour. Roadmap 14.5 is the answer that does not mean
+# maintaining a second parser -- semantic tokens from the server the rest of
+# this file already points at.
+
+[language-server.khora]
+command = "khora"
+args = ["lsp"]
+
+[[language]]
+name = "khora"
+scope = "source.khora"
+file-types = ["kh"]
+comment-token = "//"
+block-comment-tokens = { start = "/*", end = "*/" }
+indent = { tab-width = 4, unit = "    " }
+language-servers = ["khora"]
+# The formatter is the same one `khora fmt` runs and the baseline gates on, so
+# formatting on save cannot disagree with the repository's own check.
+auto-format = true

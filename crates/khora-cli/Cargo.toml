@@ -36,3 +36,5 @@ llvm = ["khora-codegen-llvm/llvm"]
 [dev-dependencies]
 khora-manifest.workspace = true
 tempfile = "3"
+serde_json = "1"
+url = "2"
