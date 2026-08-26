@@ -1,7 +1,9 @@
 //! The `khora` toolchain driver.
 //!
-//! Only the front-end commands are wired up so far: everything past parsing
-//! reports honestly that it is not implemented rather than pretending.
+//! One binary for everything a person does with the language: check, format,
+//! build, test, bench, document, add a dependency, and pick which version of
+//! itself a project gets. `khora toolchain` is the part that manages the
+//! others, so there is nothing else to install first.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -142,10 +144,9 @@ enum Command {
     },
     /// Add a package to this project, or fetch what it already asks for.
     ///
-    /// A git URL is the whole address, because there is no registry to look a
-    /// name up in. What this saves over editing `khora.toml` by hand is finding
-    /// out the package's real name, and whether it offers itself at all, before
-    /// the entry is written rather than after.
+    /// A git URL is the whole address; there is no registry to look a name up
+    /// in. Over editing `khora.toml` by hand, this finds out the package's real
+    /// name and whether it offers itself at all *before* writing the entry.
     Install {
         /// The git URL of the repository holding the package.
         ///
@@ -231,9 +232,8 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
         anyhow::bail!("no `.kh` files found");
     }
 
-    // Everything goes through the query database, including one-shot CLI runs.
-    // A second code path that parsed files directly would drift from the one
-    // the language server uses, and the drift would be invisible until it bit.
+    // Through the query database even for a one-shot run, so there is no
+    // second code path to drift from the one the language server uses.
     let db = KhoraDatabase::new();
     let mut inputs = Vec::with_capacity(files.len());
     for path in &files {
@@ -242,9 +242,8 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
     }
     SourceRoot::new(&db, inputs.iter().map(|(_, f)| *f).collect());
 
-    // One project's policy about how loud each lint is, read once. A file
-    // outside any package gets the defaults, which is right: `khora check
-    // scratch.kh` should work without a manifest.
+    // Read once. A file outside any package gets the defaults, so `khora check
+    // scratch.kh` works without a manifest.
     let levels = lint_levels(paths.first().map(PathBuf::as_path));
 
     let mut total = 0usize;
@@ -268,9 +267,8 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
             total += semantic.len();
             eprintln!("{}", render_hir_errors(path, text, semantic));
             eprintln!();
-            // Lints on a file with type errors are noise: the reader has real
-            // problems to fix, and half of what a lint sees downstream of one
-            // is an artefact of it.
+            // Half of what a lint sees downstream of a type error is an
+            // artefact of it.
             continue;
         }
 
@@ -313,14 +311,12 @@ fn check(paths: &[PathBuf]) -> Result<bool> {
 
 /// How loud each lint is, from the `[lints]` table nearest `start`.
 ///
-/// A lint the manifest does not mention warns. That is the useful default for
-/// this set — both are quiet enough to be worth hearing about and neither is
-/// worth failing a build over — and `[lints]` is where a project disagrees.
+/// A lint the manifest does not mention warns: this set is quiet enough to be
+/// worth hearing and not worth failing a build over.
 ///
 /// A manifest that cannot be read contributes nothing rather than failing the
-/// command, which is the same rule `dependencies_of` follows and for the same
-/// reason: `khora check` on the manifest is the thing whose job it is to
-/// complain about the manifest.
+/// command — complaining about the manifest is `khora check`'s job, not every
+/// other command's.
 fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintLevel> {
     let mut out = std::collections::BTreeMap::new();
     let Some(manifest_path) = start.and_then(nearest_manifest) else { return out };
@@ -428,19 +424,18 @@ fn toolchain(command: ToolchainCommand) -> Result<bool> {
 /// process tree and nowhere else.
 fn hand_over_if_pinned() {
     // **`khora toolchain ...` never hands over.** It is about the machine
-    // rather than the project, and handing it over makes the one situation it
-    // exists for unrecoverable: standing inside a project whose pinned version
-    // is missing, unable to run the command that installs it because the pin
-    // refuses to let anything run. `which` has the same problem in the other
-    // direction -- it would report on the toolchain that answered rather than
-    // on the decision being asked about.
+    // rather than the project, and handing it over makes the situation it
+    // exists for unrecoverable: inside a project whose pinned version is
+    // missing, the pin would refuse to let the command that installs it run.
+    // `which` would also report on the toolchain that answered rather than on
+    // the decision being asked about.
     if std::env::args().nth(1).as_deref() == Some("toolchain") {
         return;
     }
 
-    // A handover already happened. Whatever we are, we are what was asked for
-    // -- and re-deciding here is how a mislinked toolchain becomes an infinite
-    // chain of `exec`s that presents as a hang.
+    // A handover already happened, so we are what was asked for. Re-deciding
+    // here is how a mislinked toolchain becomes an infinite chain of `exec`s
+    // that presents as a hang.
     let active = std::env::var(khora_toolchain::ACTIVE).ok();
     let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let pin = khora_toolchain::pinned_version(&here);
@@ -577,9 +572,8 @@ type CompileHarness =
 /// Builds a harness executable and runs it.
 ///
 /// **The filter is passed on the command line rather than through the
-/// environment**, so the executable this leaves behind behaves the same when
-/// somebody runs it directly. A test binary that only obeys its filter when a
-/// build tool sets a variable is one nobody can debug by hand.
+/// environment**, so the executable left behind behaves the same when somebody
+/// runs it directly.
 #[cfg(feature = "llvm")]
 fn harness(
     path: &Path,
@@ -683,10 +677,8 @@ fn build(path: &Path, out: Option<&Path>, lib: bool, release: bool) -> Result<bo
 
 /// What a shared library is called here, or an executable's extension.
 ///
-/// Not `std::env::consts::DLL_EXTENSION` alone: that gives the extension but a
-/// Unix shared object also wants a `lib` prefix, which is the linker's
-/// convention rather than a decoration and is what `-lname` looks for. Naming
-/// only the extension produced a file no `-l` flag could find.
+/// Not `std::env::consts::DLL_EXTENSION` alone: a Unix shared object also wants
+/// the `lib` prefix, which is what `-lname` looks for.
 fn library_extension(lib: bool) -> &'static str {
     if lib { std::env::consts::DLL_EXTENSION } else { std::env::consts::EXE_EXTENSION }
 }
@@ -735,9 +727,9 @@ fn load(path: &Path) -> Result<Loaded> {
 
 /// Reports what the backend refused.
 ///
-/// Errors can come from any module, and a span is only meaningful against the
-/// file it came from. Without a file on the error there is no honest way to
-/// place it, so the first source is used and the count is printed either way.
+/// A span is only meaningful against the file it came from, and these errors
+/// do not carry one — so the first source is used and the count is printed
+/// either way.
 #[cfg(feature = "llvm")]
 fn report_build_errors(
     inputs: &[(PathBuf, String, SourceFile)],
@@ -803,8 +795,8 @@ fn read(path: &Path) -> Result<String> {
 ///
 /// 1. What was named. A directory is walked; a file is taken as written.
 /// 2. Each `path` entry in the nearest `khora.toml`'s `[dependencies]`,
-///    resolved relative to that manifest. A `version` entry needs a registry,
-///    which is phase 10.
+///    resolved relative to that manifest. A `version` entry would need a
+///    registry, which 13.13 decided against for now.
 /// 3. The standard library, always and without being asked — see
 ///    [`khora_db::standard_library`].
 ///
