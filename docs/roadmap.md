@@ -3277,7 +3277,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
 | 13.10 | Build profiles | **Done.** `debug` and `release`, `khora build --release` or `KHORA_PROFILE`. Release runs `default<O2>`, drops debug information, and is bit-for-bit reproducible **including the executable** — which is what 12.9 could only claim with a variable set by hand. Debug is unchanged, deliberately. `docs/design/profiles.md` |
 | 13.11 | Public surface audit | **Done.** 390 items in `std` reviewed; 94 said nothing and now say something, held by a test. **`export` means something inside an `impl`** as of this item — a method without it is its module's — so 24 helpers that were promises by accident are private, and the refusal names the one-word fix. 241 methods gained the keyword. `docs/design/std-surface.md` |
-| 13.12 | Production ecosystem | **Postgres speaks `std::db` now, with a pool.** Wire protocol, both query protocols, bound parameters, `Cell` mapping, the `Db` capability with `transaction`, and a connection pool -- all verified against a real server; no SCRAM or TLS. HTTP client and OTLP not started |
+| 13.12 | Production ecosystem | **Postgres and an HTTP client.** The driver: wire protocol, both query protocols, bound parameters, `Cell` mapping, the `Db` capability with `transaction`, and a pool — all against a real server; no SCRAM or TLS. And `HttpClient`, a capability from `Call` to `Answer`, reading all three of the ways an answer can be framed; no connection pool and no redirects. OTLP not started |
 | 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
 | 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
 | 13.15 | User documentation | **API reference generated; the rest not started.** `khora doc` writes a page per `std` module from `///` and `//!`, gated by `--check` in the baseline. Getting Started, the guide and the cookbook are the docs agent's `website/` work |
@@ -3479,7 +3479,7 @@ extension that nobody can install.
 13.21's signing, 13.22's governance documents, 13.7 and 13.8's remaining
 targets.
 
-#### The next one should be the HTTP client
+#### The next one should be the HTTP client — **done**
 
 **Khora can serve HTTP and cannot call it.** `std::net::http` is a server —
 `Router`, `Request`, `Response`, TLS, a fiber per connection — and there is no
@@ -3491,12 +3491,30 @@ application Rust, and a service language that cannot make a request is not one.
 It is also the last real *capability* hole. Everything else left in this phase
 is infrastructure around a language that already works.
 
-The shape is settled by what exists. Sockets, TLS and header parsing are
-already here; the client should be an **effect** — `with { http: HttpClient }`
-— so that it is mockable in a test, interceptable by the tracing wrapper the
-way `Fs` is in `observability.md`, and covered by `[permissions] network`. That
-is the same shape `Db` has, which 13.12 proved works. It can be tested against
-the link shortener already in the tree, and then against something real.
+The shape was settled by what existed. Sockets, TLS and header parsing were
+already here; the client is an **effect** — `with { http: HttpClient }` — so
+that it is mockable in a test, interceptable by the tracing wrapper the way
+`Fs` is in `observability.md`, and covered by `[permissions] network` once that
+is enforced rather than recorded. The same shape `Db` has.
+
+**What it cost, and the one thing that surprised me.** The transport was free:
+`Transport` is three closures and `over_socket`/`over_tls` already existed, so
+the client dials with the same two lines the server accepts with. The parsing
+was not. A *response* has three framings and the server only ever needed one —
+`Content-Length`, a chunked body, or nothing at all, where the close is the
+frame. The third is how HTTP/1.0 and a few proxies still answer, and a client
+that did not read it would be broken against them with no error to show for it.
+So `read_answer` is a second loop rather than a reuse of `read_request`, and
+chunked decoding is new code. That asymmetry is worth remembering: the server
+has needed one framing for a year and the client needed all three on day one.
+
+**No connection pool**, which is the deliberate limitation. Every call carries
+`Connection: close`, so the answer is framed by the close and there is no
+keep-alive state, no pipelining, and no half-read connection handed back to a
+pool. It costs a handshake per call — and a TLS handshake and a trust-store
+load per `https` call. The fix is known and is not invented: `postgres::pool`
+is a channel of connections with a fiber owning each, and nothing about it was
+specific to Postgres.
 
 #### The case for doing 13.2 before the alpha instead
 

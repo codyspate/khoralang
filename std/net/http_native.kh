@@ -1,29 +1,35 @@
 module std::net::http;
 
-import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery};
-import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
-import std::net::tls::{TlsConnection, TlsError, TlsServer, receive as tls_receive, secure, server as tls_server, shut as tls_shut, transmit as tls_transmit};
+import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery, scoped};
+import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
+import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect as tls_connect, receive as tls_receive, secure, server as tls_server, shut as tls_shut, transmit as tls_transmit};
 
-//! HTTP/1.1, over the sockets in `std::net::socket`.
+//! HTTP/1.1, over the sockets in `std::net::socket`. Both directions.
 //!
 //! The specification does not define `std::net::http`; the shape here was
 //! reconstructed from how the reference application uses it, and every line
 //! below it is Khora over `String::slice`, `String::index_of` and `Map`.
 //!
-//! What it does: a request line with its query string, headers, a body read to
-//! the length the headers promised, routing on method and path with `:name`
-//! segments, and a response that can carry headers of its own.
+//! **Answering**: a request line with its query string, headers, a body read
+//! to the length the headers promised, routing on method and path with `:name`
+//! segments, and a response that can carry headers of its own. On a fiber per
+//! connection, which took a language feature to reach rather than a line here
+//! — see `Router::serve_once`.
 //!
-//! What it does not: chunked transfer, content negotiation, or multipart
-//! bodies. Each is absent deliberately rather than forgotten. Keep-alive and
-//! TLS *are* here — the comment said otherwise for a while after each arrived.
+//! **Asking**: `HttpClient`, a capability, from `Call` to `Answer`. A service
+//! that cannot call another service is not one, and this half arrived a long
+//! way after the first.
+//!
+//! What neither does: content negotiation, multipart bodies, compression, or
+//! following a redirect. Each is absent deliberately rather than forgotten.
+//! Chunked transfer is *read* by the client and not written by the server,
+//! which is the split real traffic has: a response of unknown length is
+//! ordinary and a request of unknown length is not.
 //!
 //! A connection is reached through a `Transport`, which is three closures, so
-//! that the serving path is written once and `Router::listen` and
-//! `Router::listen_tls` differ only in what they hand it.
-//!
-//! It does answer on a fiber per connection, which took a language feature to
-//! reach rather than a line here: see `Router::serve_once`.
+//! that the serving path is written once, `Router::listen` and
+//! `Router::listen_tls` differ only in what they hand it, and the client
+//! reuses both without knowing which it has.
 
 /// The five verbs this server routes on.
 ///
@@ -1374,3 +1380,660 @@ impl Router {
 }
 
 fn print(value: String);
+
+// ---------------------------------------------------------------------------
+// Calling somebody else
+// ---------------------------------------------------------------------------
+
+//! Everything above this line answers requests. Everything below makes them.
+//!
+//! **Four message types rather than two**, and the asymmetry is the point. A
+//! request that *arrives* carries route parameters and a decoded query that a
+//! caller has no use for; a request that *leaves* carries a URL, which an
+//! arriving one has already been split into pieces. Reading headers wants a
+//! `Map` keyed by lowercased name; writing them wants a list, because
+//! `Set-Cookie` may repeat. So: `Request` and `Response` for the server,
+//! `Call` and `Answer` for the client, and no type pretending to be two things.
+
+/// Where a call is going.
+pub type Url = {
+  /// Whether to put TLS in front of the socket.
+  secure: Bool,
+  host: String,
+  port: Int,
+  /// Path and query, together, beginning with `/`. What goes on the request
+  /// line unchanged — a client that re-encodes what it was given is a client
+  /// that breaks somebody's signed URL.
+  target: String,
+};
+
+/// A request this program is making.
+pub type Call = {
+  method: Method,
+  url: String,
+  /// A list rather than a map, matching `Response`: two headers of the same
+  /// name are legal on the way out and a map would keep one.
+  headers: List<Header>,
+  body: String,
+};
+
+/// What came back.
+///
+/// Headers keyed by the **lowercased** name, as `Request`'s are and for the
+/// same reason: HTTP header names are case-insensitive and a map is not.
+pub type Answer = {
+  status: Int,
+  headers: Map<String, String>,
+  body: String,
+};
+
+/// What can go wrong reaching somebody else.
+///
+/// Separate from `HttpError`, which is what goes wrong *being* a server —
+/// a port that would not bind, a request that could not be read. Nothing that
+/// matches one has any use for the cases of the other.
+pub type CallError =
+  /// The URL could not be read.
+  | BadUrl(String)
+  /// No connection: the name did not resolve, or nothing answered.
+  | Unreachable(String)
+  /// The TLS handshake did not complete.
+  | Insecure(String)
+  /// The peer went away before the answer was whole.
+  | Closed(String)
+  /// Something arrived and it was not an HTTP answer this can read.
+  | Malformed(String)
+  /// The answer was longer than the client was willing to hold.
+  | TooLarge(Int);
+
+/// Making requests, as a capability.
+///
+/// **An effect rather than a function**, for the reason `std::db`'s `Db` is
+/// one. A program that says `with { http: HttpClient }` can be handed a
+/// recording double in a test, a client that only reaches one host, or one
+/// wrapped for tracing — and every caller above is unchanged, because a
+/// capability *is* an interception point. `docs/design/observability.md` shows
+/// the wrapper.
+///
+/// One operation. `Call` carries everything a request is, so a second would
+/// only be a shorter way to build one, and `Call::get` is already that.
+pub effect HttpClient {
+  send: (Call) -> Result<Answer, CallError>,
+}
+
+impl Call {
+  /// A GET of `url`, with no headers of its own.
+  pub fn get(url: String) -> Call {
+    { method: Method::Get, url: url, headers: List::Nil, body: "" }
+  }
+
+  /// A POST of `body`, with no content type.
+  ///
+  /// Deliberately none: a POST of form data and a POST of JSON differ in
+  /// exactly that header, and guessing it for the caller is how a client ends
+  /// up sending `application/json` over a form. `json` below is the one that
+  /// guesses, because there the name says what it guessed.
+  pub fn post(url: String, body: String) -> Call {
+    { method: Method::Post, url: url, headers: List::Nil, body: body }
+  }
+
+  /// A POST of `body` as `application/json`.
+  pub fn json(url: String, body: String) -> Call {
+    Call::with_header(Call::post(url, body), "Content-Type", "application/json")
+  }
+
+  /// Any method, which is what the four above are shorthand for.
+  pub fn of(method: Method, url: String, body: String) -> Call {
+    { method: method, url: url, headers: List::Nil, body: body }
+  }
+
+  /// The same call with one more header on it.
+  ///
+  /// A new call rather than a changed one, like `Response::with_header` and
+  /// for the same reason: a half-built request cannot be shared and then
+  /// altered underneath whoever else is holding it.
+  pub fn with_header(self, name: String, value: String) -> Call {
+    {
+      method: self.method,
+      url: self.url,
+      headers: List::Cons({ name: name, value: value }, self.headers),
+      body: self.body,
+    }
+  }
+}
+
+impl Answer {
+  /// The header under `name`, matched without regard to case.
+  pub fn header(self, name: String) -> Option<String> {
+    Map::get(self.headers, lowered(name))
+  }
+
+  /// Whether the status is one of the 2xx.
+  ///
+  /// Not "did the call work" — a 404 arrived successfully and is not `ok`,
+  /// and a `CallError` is the other thing entirely.
+  pub fn ok(self) -> Bool {
+    self.status >= 200 && self.status < 300
+  }
+}
+
+/// How much of an answer this client will hold, when nobody says otherwise.
+///
+/// 64 KiB, and it is a buffer allocated per call rather than per connection —
+/// a hundred fibers each making a request is a hundred of these at once, which
+/// is why it is not measured in megabytes. `HttpClient::bounded` raises it for
+/// a caller who knows they are fetching something bigger.
+pub fn default_answer_limit() -> Int { 65536 }
+
+/// How long to wait for bytes that are not arriving, in milliseconds.
+///
+/// **Only on the plain path.** `set_receive_timeout` takes a socket, and the
+/// TLS client hands back a session with the socket already inside it, so an
+/// `https` call has no deadline yet. That is a real gap and it is named here
+/// rather than in a comment nobody reads: a TLS server that accepts the
+/// connection and then says nothing holds the fiber until the process ends.
+pub fn default_answer_timeout() -> Int { 30000 }
+
+impl HttpClient {
+  /// A client that really connects, holding up to `default_answer_limit`.
+  pub fn real() -> HttpClient {
+    HttpClient::bounded(default_answer_limit())
+  }
+
+  /// The same, holding up to `limit` bytes of answer.
+  pub fn bounded(limit: Int) -> HttpClient {
+    handler for HttpClient {
+      send: fn call => perform(call, limit),
+    }
+  }
+}
+
+/// One call, start to finish.
+///
+/// Connect, write, read until the answer is whole, close. **No connection is
+/// kept**, which is why every request carries `Connection: close` — see the
+/// note on `render` for what that costs and what it buys.
+fn perform(call: Call, limit: Int) -> Result<Answer, CallError> {
+  match parse_url(call.url) {
+    Option::None => Result::Err(CallError::BadUrl(call.url)),
+    // **A region per call**, because `std::net::tls`'s client is registered
+    // with `acquire` and ends with the scope that made it. The whole
+    // conversation happens inside it, so the trust store outlives the session
+    // that was opened from it.
+    Option::Some(url) => scoped(fn () => attempted(url, call, limit)),
+  }
+}
+
+/// One call, with a scope to hold the trust store.
+fn attempted(url: Url, call: Call, limit: Int) -> Result<Answer, CallError>
+  with { scope: Scope }
+{
+  match dial(url) {
+    Result::Err(why) => Result::Err(why),
+    Result::Ok(transport) => {
+      let answer = converse(transport, call, url, limit);
+      transport.shut();
+      answer
+    },
+  }
+}
+
+/// Opens a transport to `url`, secured or not.
+///
+/// **The trust store is built per call**, which is the second cost of having
+/// no connection pool and is named beside the first on `render`. Loading the
+/// operating system's roots is comparable to the handshake it precedes, so
+/// while every call is already paying for a handshake it is not the thing to
+/// fix first — and both are fixed by the same pool.
+fn dial(url: Url) -> Result<Transport, CallError>
+  with { scope: Scope }
+{
+  if url.secure {
+    match attempt(fn () => tls_connect(tls_client()!, url.host, url.port)!) {
+      Result::Err(why) => Result::Err(CallError::Insecure(tls_reason(why))),
+      Result::Ok(session) => Result::Ok(over_tls(session)),
+    }
+  } else {
+    let socket = connect_to(url.host, url.port);
+    if socket == invalid_handle() {
+      Result::Err(CallError::Unreachable(url.host + ":" + Int::to_string(url.port)))
+    } else {
+      set_receive_timeout(socket, default_answer_timeout());
+      Result::Ok(over_socket(socket))
+    }
+  }
+}
+
+/// What a `TlsError` says, in one line.
+fn tls_reason(why: TlsError) -> String {
+  match why {
+    TlsError::BadCertificate => "the certificate chain was not readable",
+    TlsError::BadKey => "the key was not readable",
+    TlsError::Handshake => "the handshake failed",
+    TlsError::Unreachable(host) => host,
+  }
+}
+
+/// Write the request, read the answer.
+fn converse(
+  transport: Transport, call: Call, url: Url, limit: Int
+) -> Result<Answer, CallError> {
+  if transport.transmit(render(call, url)) < 0 {
+    Result::Err(CallError::Closed("the request could not be sent"))
+  } else {
+    match read_answer(transport, limit) {
+      Result::Err(why) => Result::Err(why),
+      Result::Ok(text) => parse_answer(text),
+    }
+  }
+}
+
+/// The request, as bytes on the wire.
+///
+/// **`Connection: close` on every request**, which is the one decision here
+/// worth arguing about. It costs a TCP handshake — and a TLS handshake — per
+/// call, which for a chatty caller is most of the time spent. What it buys is
+/// that the answer is framed by the close: no keep-alive state, no pipelining,
+/// no half-read connection returned to a pool in an unknown state, and no
+/// second implementation of the framing rules that the `Content-Length` path
+/// already gets right.
+///
+/// A pool belongs here eventually and the shape is known — `postgres::pool` is
+/// a channel of connections with a fiber owning each, and nothing about it was
+/// specific to Postgres. It is not this commit.
+///
+/// `Host` omits the port when it is the scheme's default, because some servers
+/// route on the header verbatim and `example.com:443` is not `example.com`.
+fn render(call: Call, url: Url) -> String {
+  let host = if url.port == default_port(url.secure) {
+    url.host
+  } else {
+    url.host + ":" + Int::to_string(url.port)
+  };
+  method_name(call.method) + " " + url.target + " HTTP/1.1\r\n"
+  + "Host: " + host + "\r\n"
+  + "Content-Length: " + Int::to_string(String::byte_length(call.body)) + "\r\n"
+  + "Connection: close\r\n"
+  + rendered_headers(call.headers)
+  + "\r\n"
+  + call.body
+}
+
+/// The caller's own headers, one per line.
+fn rendered_headers(headers: List<Header>) -> String {
+  match headers {
+    List::Nil => "",
+    List::Cons(head, rest) =>
+    head.name + ": " + head.value + "\r\n" + rendered_headers(rest),
+  }
+}
+
+/// The verb as it goes on the wire.
+fn method_name(method: Method) -> String {
+  match method {
+    Method::Get => "GET",
+    Method::Post => "POST",
+    Method::Put => "PUT",
+    Method::Patch => "PATCH",
+    Method::Delete => "DELETE",
+  }
+}
+
+fn default_port(secure: Bool) -> Int { if secure { 443 } else { 80 } }
+
+// ---------------------------------------------------------------------------
+// Reading an answer
+// ---------------------------------------------------------------------------
+
+/// Reads until the answer is whole, or until the peer stops talking.
+///
+/// Three ways an answer can end and all three are here, because a client meets
+/// all three in a morning: a `Content-Length`, a chunked body ending in a
+/// zero-length chunk, or the connection closing. The server upstairs needs
+/// only the first, which is why this loop is not that one.
+fn read_answer(transport: Transport, limit: Int) -> Result<String, CallError> {
+  let into: Array<U8> = Array::new(limit, 0);
+  let scratch: Array<U8> = Array::new(chunk(), 0);
+  let mut filled = 0;
+  let mut want = 0 - 1;
+  let mut closed = false;
+  let mut full = false;
+  let mut going = true;
+  while going {
+    if want >= 0 && filled >= want {
+      going = false;
+    } else if filled >= Array::length(into) {
+      full = true;
+      going = false;
+    } else {
+      let read = transport.receive(scratch);
+      if read <= 0 {
+        closed = true;
+        going = false;
+      } else {
+        let room = Array::length(into) - filled;
+        let taken = if read > room { room } else { read };
+        copy_at(scratch, into, taken, filled);
+        filled = filled + taken;
+        if want < 0 { want = answer_length(into, filled); }
+      }
+    }
+  };
+  if full && (want < 0 || want > Array::length(into)) {
+    Result::Err(CallError::TooLarge(limit))
+  } else if filled == 0 {
+    Result::Err(CallError::Closed("nothing came back"))
+  } else if closed && want >= 0 && filled < want {
+    Result::Err(CallError::Closed("the answer stopped short of its length"))
+  } else {
+    Result::Ok(String::from_bytes(Array::prefix(into, filled)))
+  }
+}
+
+/// How long the whole answer is, or -1 while that is not yet knowable.
+///
+/// Mirrors `request_length` and differs in the one way responses differ:
+/// `Transfer-Encoding: chunked` frames the body instead of a length, and an
+/// answer with neither is framed by the close.
+fn answer_length(bytes: Array<U8>, filled: Int) -> Int {
+  let after = end_of_headers(bytes, filled);
+  if after < 0 {
+    0 - 1
+  } else {
+    let head = String::from_bytes(Array::prefix(bytes, after));
+    if is_chunked(head) {
+      let body = String::from_bytes(Array::prefix(bytes, filled));
+      let ends = chunked_end(body, after);
+      if ends < 0 { 0 - 1 } else { ends }
+    } else {
+      match declared_length(head) {
+        Option::None => 0 - 1,
+        Option::Some(length) => after + length,
+      }
+    }
+  }
+}
+
+/// Whether the head says the body is chunked.
+///
+/// Substring rather than equality: the header is a *list*, and
+/// `gzip, chunked` is legal and means chunked. Nothing here decompresses, so a
+/// `gzip` body arrives as bytes the caller must deal with — named in the module
+/// note rather than pretended about.
+fn is_chunked(head: String) -> Bool {
+  match String::split_once(head, "\r\n") {
+    Option::None => false,
+    Option::Some(lines) => match Map::get(parse_headers(lines.rest), "transfer-encoding") {
+      Option::None => false,
+      Option::Some(value) => String::index_of(lowered(value), "chunked").is_some(),
+    },
+  }
+}
+
+/// `Content-Length`, or `None` when the head does not carry one.
+///
+/// Distinct from the server's `content_length`, which answers zero for a
+/// missing header. For a *response* the difference matters: no header means
+/// "read until I close", and reading zero bytes instead would return an empty
+/// body for every HTTP/1.0 answer.
+fn declared_length(head: String) -> Option<Int> {
+  match String::split_once(head, "\r\n") {
+    Option::None => Option::None,
+    Option::Some(lines) => match Map::get(parse_headers(lines.rest), "content-length") {
+      Option::None => Option::None,
+      Option::Some(value) => Option::Some(digits_of(value)),
+    },
+  }
+}
+
+/// Where a chunked body ends, counting from the start of the whole answer, or
+/// -1 while the terminating chunk has not arrived.
+fn chunked_end(text: String, from: Int) -> Int {
+  let mut at = from;
+  let mut answer = 0 - 1;
+  let mut going = true;
+  while going {
+    match chunk_header(text, at) {
+      Option::None => going = false,
+      Option::Some(header) => {
+        if header.size == 0 {
+          // The last chunk, then a trailer section ending in a blank line.
+          match String::index_of(String::slice(text, header.after, String::byte_length(text)), "\r\n") {
+            Option::None => going = false,
+            Option::Some(_) => {
+              answer = trailer_end(text, header.after);
+              going = false;
+            },
+          }
+        } else {
+          let next = header.after + header.size + 2;
+          if next > String::byte_length(text) { going = false } else { at = next }
+        }
+      },
+    }
+  };
+  answer
+}
+
+/// One chunk's size, and where its data begins.
+type ChunkHeader = { size: Int, after: Int };
+
+/// Reads `1a3\r\n`, or `1a3;ext=1\r\n`, at `at`.
+fn chunk_header(text: String, at: Int) -> Option<ChunkHeader> {
+  let length = String::byte_length(text);
+  if at >= length {
+    Option::None
+  } else {
+    let line = String::find(text, "\r\n", at);
+    if line < 0 {
+      Option::None
+    } else {
+      let raw = String::slice(text, at, line);
+      // A chunk size may carry extensions after a `;`. Nothing uses them and
+      // ignoring them is what the specification asks for.
+      let digits = match String::index_of(raw, ";") {
+        Option::None => raw,
+        Option::Some(semi) => String::slice(raw, 0, semi),
+      };
+      match hex_of(trimmed(digits)) {
+        Option::None => Option::None,
+        Option::Some(size) => Option::Some({ size: size, after: line + 2 }),
+      }
+    }
+  }
+}
+
+/// Where the trailer section after the final chunk ends.
+fn trailer_end(text: String, from: Int) -> Int {
+  let rest = String::slice(text, from, String::byte_length(text));
+  match String::index_of(rest, "\r\n\r\n") {
+    // No trailers: the final chunk's CRLF is immediately the terminating one.
+    Option::None => if String::starts_with(rest, "\r\n") { from + 2 } else { 0 - 1 },
+    Option::Some(at) => if at == 0 { from + 2 } else { from + at + 4 },
+  }
+}
+
+/// A hexadecimal number, or `None` if it is not one.
+fn hex_of(text: String) -> Option<Int> {
+  let length = String::byte_length(text);
+  if length == 0 {
+    Option::None
+  } else {
+    let mut at = 0;
+    let mut total = 0;
+    let mut ok = true;
+    while at < length {
+      match hex_value(String::byte(text, at)) {
+        Option::None => { ok = false; at = length },
+        Option::Some(value) => {
+          total = total * 16 + value;
+          at = at + 1
+        },
+      }
+    };
+    if ok { Option::Some(total) } else { Option::None }
+  }
+}
+
+/// Splits an answer into its status, its headers and its body.
+fn parse_answer(text: String) -> Result<Answer, CallError> {
+  match String::split_once(text, "\r\n") {
+    Option::None => Result::Err(CallError::Malformed("no status line")),
+    Option::Some(first) => match status_of(first.head) {
+      Option::None => Result::Err(CallError::Malformed(first.head)),
+      Option::Some(status) => {
+        let headers = parse_headers(first.rest);
+        let body = body_of(first.rest);
+        let whole = if is_chunked(text) { dechunked(body) } else { body };
+        Result::Ok({ status: status, headers: headers, body: whole })
+      },
+    },
+  }
+}
+
+/// The number in `HTTP/1.1 200 OK`.
+///
+/// The version is checked as far as `HTTP/1.`, and no further: a server that
+/// answers `HTTP/1.0` to a `1.1` request is doing something legal, and a
+/// client that refused it would be wrong about the specification rather than
+/// strict.
+fn status_of(line: String) -> Option<Int> {
+  if String::starts_with(line, "HTTP/1.") {
+    match String::split_once(String::slice(line, 9, String::byte_length(line)), " ") {
+      // `HTTP/1.1 200` with no phrase is legal; the phrase is advisory.
+      Option::None => Option::None,
+      Option::Some(rest) => Option::Some(digits_of(trimmed(rest.head))),
+    }
+  } else {
+    Option::None
+  }
+}
+
+/// A chunked body, with the framing taken back out.
+fn dechunked(body: String) -> String {
+  let mut at = 0;
+  let mut out = "";
+  let mut going = true;
+  while going {
+    match chunk_header(body, at) {
+      Option::None => going = false,
+      Option::Some(header) => {
+        if header.size == 0 {
+          going = false
+        } else {
+          let end = header.after + header.size;
+          if end > String::byte_length(body) {
+            going = false
+          } else {
+            out = out + String::slice(body, header.after, end);
+            at = end + 2
+          }
+        }
+      },
+    }
+  };
+  out
+}
+
+// ---------------------------------------------------------------------------
+// URLs
+// ---------------------------------------------------------------------------
+
+/// Reads `https://host:port/path?query`.
+///
+/// **Only what a client needs to dial and ask.** No fragment, because a
+/// fragment never leaves the browser; no userinfo, because credentials in a
+/// URL are deprecated and accepting them would mean deciding how to encode
+/// them; and no normalisation of the path, because a server may have signed
+/// exactly the bytes it was given.
+pub fn parse_url(text: String) -> Option<Url> {
+  match String::split_once(text, "://") {
+    Option::None => Option::None,
+    Option::Some(split) => {
+      let scheme = lowered(split.head);
+      if scheme == "http" || scheme == "https" {
+        let secure = scheme == "https";
+        let cut = String::find(split.rest, "/", 0);
+        let authority = if cut < 0 {
+          split.rest
+        } else {
+          String::slice(split.rest, 0, cut)
+        };
+        let target = if cut < 0 {
+          "/"
+        } else {
+          String::slice(split.rest, cut, String::byte_length(split.rest))
+        };
+        match split_authority(authority, secure) {
+          Option::None => Option::None,
+          Option::Some(where_) =>
+          Option::Some({
+              secure: secure,
+              host: where_.host,
+              port: where_.port,
+              target: target,
+            }),
+        }
+      } else {
+        Option::None
+      }
+    },
+  }
+}
+
+/// A host and a port, however the authority spelled them.
+type Where = { host: String, port: Int };
+
+/// `host`, `host:port`, `[::1]` or `[::1]:port`.
+fn split_authority(authority: String, secure: Bool) -> Option<Where> {
+  if String::byte_length(authority) == 0 {
+    Option::None
+  } else if String::starts_with(authority, "[") {
+    let close = String::find(authority, "]", 0);
+    if close < 0 {
+      Option::None
+    } else {
+      let host = String::slice(authority, 1, close);
+      let rest = String::slice(authority, close + 1, String::byte_length(authority));
+      if String::byte_length(rest) == 0 {
+        Option::Some({ host: host, port: default_port(secure) })
+      } else if String::starts_with(rest, ":") {
+        port_of(host, String::slice(rest, 1, String::byte_length(rest)), secure)
+      } else {
+        Option::None
+      }
+    }
+  } else {
+    match String::split_once(authority, ":") {
+      Option::None => Option::Some({ host: authority, port: default_port(secure) }),
+      Option::Some(split) => port_of(split.head, split.rest, secure),
+    }
+  }
+}
+
+/// A port that has to be digits, because `host:` and `host:abc` are mistakes
+/// worth naming rather than defaulting past.
+fn port_of(host: String, text: String, secure: Bool) -> Option<Where> {
+  let length = String::byte_length(text);
+  if length == 0 || String::byte_length(host) == 0 {
+    Option::None
+  } else {
+    let mut at = 0;
+    let mut ok = true;
+    while at < length {
+      let byte = U8::to_int(String::byte(text, at));
+      if byte < 48 || byte > 57 { ok = false };
+      at = at + 1
+    };
+    if ok {
+      let port = digits_of(text);
+      if port > 0 && port < 65536 {
+        Option::Some({ host: host, port: port })
+      } else {
+        Option::None
+      }
+    } else {
+      Option::None
+    }
+  }
+}
