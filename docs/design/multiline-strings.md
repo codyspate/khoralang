@@ -1,6 +1,6 @@
 # D17 — multiline string literals
 
-**Proposed, not built.** Decided: **backticks**.
+**Built.** Backticks.
 
 ```khora
 const SCHEMA = `
@@ -16,7 +16,7 @@ const SCHEMA = `
 ## Why
 
 A string literal is one line, and the first program that embedded SQL found out
-by not parsing. `examples/ledger_service` currently carries this:
+by not parsing. `examples/ledger_service` carried this until this landed:
 
 ```khora
 const SCHEMA: String = "create table if not exists entries (id serial primary key, account text not null, amount int4 not null, memo text not null)";
@@ -33,9 +33,9 @@ because the two spellings Khora could otherwise use are both taken or worse:
 followed by a string, and a `\` continuation makes the source uglier than the
 problem.
 
-## Three things to settle when building it
+## Three things settled while building it
 
-**Does `${...}` interpolate inside one?** `"..."` already does, so consistency
+**`${...}` interpolates — decided yes.** `"..."` already does, so consistency
 says yes and a TypeScript reader expects it. Against that: the whole point is
 embedding *other languages*, and a shell script or a Makefile fragment full of
 `${VAR}` would interpolate by surprise. Two ways out — interpolate and require
@@ -44,7 +44,7 @@ interpolating form. **Recommendation: interpolate**, matching `"..."`, because
 one string with two escaping rules is worse than one rule with an escape, and
 because `$1` — the shape that actually appears in SQL — is not `${`.
 
-**Is the leading indentation stripped?** A literal written inside a function is
+**The indentation is stripped — decided yes.** A literal written inside a function is
 indented to match the code around it, and those spaces are not part of the
 string. Java's text blocks, Swift's `"""` and Rust's `indoc` all strip the
 common prefix. **Recommendation: strip**, measured from the least-indented
@@ -52,24 +52,39 @@ non-blank line, and drop a first line that is empty — so the example at the to
 of this page is exactly the SQL and nothing else. A raw form that keeps every
 byte can come later if something needs it.
 
-**Do `\n` and friends still work?** They should, for the same reason
-interpolation should: two kinds of string with two escaping rules is a thing to
-look up. A literal backtick is then `` \` ``.
+**`\n` and friends still work**, for the same reason interpolation does: two
+kinds of string with two escaping rules is a thing to look up. A literal
+backtick is `` \` ``, and `\$` still escapes a hole.
 
-## What it touches
+## What it touched
 
-The lexer, which is the whole of it: one more token shape, and
-`literal_of`/`has_interpolation` learn to accept it. Nothing in the parser, the
-HIR, the type checker or the backend changes, because the result is a `String`
-exactly as today's literal is — which is the same argument the flow operator
-made and the reason both are cheap.
+The lexer, and one funnel in lowering. A backtick literal is the **same token**
+as a quoted one — `STRING_LIT` — so the parser, the type checker, ownership and
+the backend never learn there were two spellings. `strip_quotes` is where the
+delimiter is recognised, and every consumer already went through it.
 
-The formatter must leave the inside of one alone, which is the one place this
-is not free: it currently re-indents by token, and a multiline literal is a
-token whose interior is content.
+**The formatter needed nothing.** A string is one token, and the formatter
+re-indents between tokens, so a literal's interior is untouched by
+construction. Worth checking rather than assuming, because a formatter that
+re-indented the inside of one would silently change what the program means; a
+test pins it.
 
-## Why it is not built yet
+**Interpolation and the dedent were the one hard part.** The `${..}` splitter
+computes offsets into the *file* so that a diagnostic inside a hole points at
+the right column — so the body cannot be dedented before splitting, or every
+hole moves. The indent is measured over the whole body and taken off each text
+piece as it is lowered, and the opening and closing blank lines are trimmed
+from whichever piece carries them. A literal that opens with a hole has no
+first text piece and nothing to trim, which is the right answer rather than a
+special case.
 
-Nothing blocks it and nothing is waiting on it — the one place it is wanted has
-a one-line workaround with a comment saying so. It is written down now because
-the decision is made and the reasoning is cheap to lose.
+## What it does not do
+
+**No raw form.** Escapes work inside a backtick literal, so a Windows path or a
+regular expression still doubles its backslashes. A second marker for a raw
+string is the obvious extension and nothing has wanted it.
+
+**A literal that opens on the same line as its content strips nothing**, since
+that line's indentation is zero and zero is the minimum. That is the documented
+way to opt out, and it is why the recommended shape puts the delimiter on its
+own line.

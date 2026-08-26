@@ -201,7 +201,7 @@ fn arg_list(p: &mut Parser<'_>) {
 
 fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     let cm = match p.current() {
-        INT_LIT | FLOAT_LIT | STRING_LIT | TRUE_KW | FALSE_KW => {
+        INT_LIT | FLOAT_LIT | DECIMAL_LIT | STRING_LIT | TRUE_KW | FALSE_KW => {
             let m = p.start();
             p.bump_any();
             m.complete(p, LITERAL_EXPR)

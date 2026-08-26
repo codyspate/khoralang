@@ -173,10 +173,18 @@ RecordPatField ::= Ident ( ":" Pattern )? ;
 
 Ident          ::= [A-Za-z_] [A-Za-z0-9_]* ;            (* minus keywords     *)
 RowVar         ::= "'" Ident ;
-Literal        ::= IntLiteral | FloatLiteral | StringLiteral | "true" | "false" ;
+Literal        ::= IntLiteral | FloatLiteral | DecimalLiteral | StringLiteral
+                 | "true" | "false" ;
 IntLiteral     ::= [0-9] [0-9_]* ;
 FloatLiteral   ::= IntLiteral "." IntLiteral ( ( "e" | "E" ) ( "+" | "-" )? [0-9]+ )? ;
-StringLiteral  ::= '"' ( ~["\] | "\" . )* '"' ;
+(* The language's only literal suffix. Nothing may lex between the digits and
+   the "d", and the suffix goes after any exponent. docs/design/numbers.md. *)
+DecimalLiteral ::= ( IntLiteral | FloatLiteral ) "d" ;
+StringLiteral  ::= QuotedString | BacktickString ;
+QuotedString   ::= '"' ( ~["\] | "\" . )* '"' ;
+(* Crosses lines, and its indentation is the source's rather than the
+   string's. docs/design/multiline-strings.md. *)
+BacktickString ::= '`' ( ~[`\] | "\" . )* '`' ;
 Comment        ::= "//" ~[\r\n]* | "/*" ( Comment | . )* "*/" ;  (* nesting   *)
 
 (* Hard keywords: never usable as an identifier. *)

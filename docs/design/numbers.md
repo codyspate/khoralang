@@ -207,8 +207,9 @@ well enough to judge the result — that is a reason to make `Decimal` excellent
 not a reason to make `Float` strange. An engineer arriving from Go or
 TypeScript should find the numbers where they left them.
 
-**`0.01d` would be the language's first literal suffix**, and it is worth being
-clear that this is a real addition rather than a convention already in use.
+**`0.01d` is the language's only literal suffix** — built in 13.5 — and it is
+worth being clear that this was a real addition rather than a convention
+already in use.
 `docs/grammar.ebnf` has `IntLiteral ::= [0-9] [0-9_]*` and
 `FloatLiteral ::= IntLiteral "." IntLiteral ( ("e"|"E") ("+"|"-")? [0-9]+ )?`,
 and no suffix anywhere; every other numeric type is *constructed*, as
@@ -224,6 +225,28 @@ whoever implements it: the suffix goes after any exponent, so `1.5e3d` is one
 token; nothing may lex between the digits and the `d`, so `1 d` is not a
 decimal; and if hexadecimal literals are ever added, the suffix must apply only
 to decimal numerals, or `0x1d` becomes ambiguous with a decimal `0x1`.
+
+**All three are tests**, in `crates/khora-syntax/tests/decimal_literal.rs`; the
+third is a note to the future rather than a test, since there are no
+hexadecimal literals to conflict with yet.
+
+Two things the implementation had to decide that this section did not.
+
+**The scale is the number of digits written**, not the value's magnitude, so
+`1.50d` is `scaled(150, 2)` and keeps its trailing zero. That is the same
+reading `Show for Decimal` already takes: a price to two places stays a price
+to two places, and dropping the zero is how a total stops lining up in a
+column.
+
+**An exponent moves the point rather than producing a negative scale.**
+`Decimal::scaled` refuses a negative scale — it is a large number spelled
+confusingly — so `1.5e3d` is fifteen hundred at scale zero, not fifteen at
+scale minus two.
+
+It desugars to `Decimal::scaled(units, scale)` during HIR lowering, so nothing
+downstream has a case for it, and `Decimal` must be in scope exactly as `List`
+must be for `[a, b]` — `desugar.rs`'s note explains why that is the rule rather
+than a name the compiler knows and the program cannot see.
 
 **The suffix and the constructor are not two spellings of one thing**, and that
 is the argument for having the suffix at all. `0.01d` is parsed exactly by the

@@ -301,4 +301,28 @@ check the other target's version at all.
   top-level function may be passed as a callback, which is a restriction the
   type system can state. `qsort` and every `on_event` want it; nothing does
   yet.
+
+  **Whoever builds this has to answer one more thing, and the type system
+  cannot.** `docs/design/scheduler.md` §8 says a fiber may not suspend inside
+  an `extern` call: a suspended stack moves to another worker, and C frames
+  sitting on it resume on a thread that is not the one that made them — wrong
+  `errno`, wrong thread-locals, a lock held by nobody. Today that is
+  unenforced and unreachable, because there is no way for foreign code to
+  re-enter Khora. A callback is exactly that way.
+
+  The cheap answer does not work. "A callback must have an empty `with` row"
+  sounds sufficient and is not: `std::net::socket`'s `receive` and `connect_to`
+  declare no capability at all and suspend, because they take raw handles
+  rather than a capability. **Suspension is not in the effect row**, so no
+  signature can be read to mean "this cannot suspend".
+
+  So the mechanism has to be dynamic: a per-thread depth the code generator
+  raises around a foreign call and the scheduler checks before it parks, so a
+  callback that tries to suspend stops the program with a message naming what
+  it did instead of migrating a C stack. That costs two counter updates per
+  foreign call, which is nothing beside a foreign call. It is not built,
+  because building a guard against something nothing can express yet would be
+  untestable machinery — and it is written here rather than in a commit
+  message so that the feature cannot land without meeting it.
+  `docs/design/soundness.md`.
 - Nothing, for now. `extern` landed; see below.

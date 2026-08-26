@@ -145,9 +145,16 @@ fn entries_of(rows: List<Row>) -> List<Entry> {
 // concatenation, which is the whole reason `ask` exists and the reason `Db`'s
 // operations take a `List<Cell>`.
 
-/// One line, because a string literal is one line. Written the way it would be
-/// in a migration otherwise.
-const SCHEMA: String = "create table if not exists entries (id serial primary key, account text not null, amount int4 not null, memo text not null)";
+/// Written the way it would be in a migration, which is what the backtick
+/// literal is for.
+const SCHEMA: String = `
+  create table if not exists entries (
+    id serial primary key,
+    account text not null,
+    amount int4 not null,
+    memo text not null
+  )
+`;
 
 fn insert_entry(db: Db, account: String, amount: Int, memo: String) -> Result<Int, DbError> {
   let values =
@@ -402,9 +409,18 @@ export fn main() raises HttpError {
     let pool = open_pool(crew, settings, number_setting("POOL", 4));
     let tracer = Tracer::none();
 
+    // **Both results, and the inner one is the statement's.** `with_db` answers
+    // whether a *connection* was available; what was done with it comes back
+    // inside that. Matching only the outer one printed "schema ready" against
+    // a database that was not running, which is the more dangerous half of the
+    // two to get wrong -- a start-up line that lies about the thing it just
+    // checked.
     match with_db(pool, fn db => db.execute(SCHEMA, List::Nil)) {
-      Result::Ok(_) => print("schema ready"),
-      Result::Err(_) => print("could not reach the ledger; starting anyway"),
+      Result::Err(_) => print("no connection for the schema; starting anyway"),
+      Result::Ok(inner) => match inner {
+        Result::Ok(_) => print("schema ready"),
+        Result::Err(_) => print("could not create the schema; starting anyway"),
+      },
     };
 
     print("ledger listening");

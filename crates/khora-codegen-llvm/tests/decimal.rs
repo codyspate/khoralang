@@ -71,6 +71,50 @@ fn main() -> () {{
     String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
 }
 
+/// [`run`], for a body that is *supposed* to stop the program.
+///
+/// Separate rather than a flag, because "this program ends badly" is a
+/// different claim from "this program prints x" and a test should say which
+/// one it is making. Answers what was printed before it stopped, and whether
+/// it stopped.
+fn run_until_it_stops(name: &str, body: &str) -> (String, bool) {
+    let main = format!(
+        r#"module demo::main;
+import std::core::{{Eq, Option, Show, print}};
+import std::decimal::{{Decimal, Rounding}};
+
+fn main() -> () {{
+{body}
+}}
+"#
+    );
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let db = KhoraDatabase::new();
+    let files = vec![
+        SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
+        SourceFile::new(&db, dir.join("decimal.kh"), std_source("decimal.kh")),
+        SourceFile::new(&db, dir.join("main.kh"), main),
+    ];
+    let root = SourceRoot::new(&db, files);
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<String> = errors
+            .into_iter()
+            .map(|e| format!("{:?}: {}", e.range, e.message))
+            .collect();
+        panic!("compiling `{name}` failed:\n  {}", messages.join("\n  "));
+    }
+
+    let out = std::process::Command::new(&exe).output().expect("the program should run");
+    let printed = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    (printed, out.status.code() != Some(0))
+}
+
 /// **The sum that motivates the whole module.**
 ///
 /// `0.1 + 0.2` is not `0.3` in IEEE 754, in any language, which is why
@@ -184,4 +228,126 @@ fn reading_a_decimal_from_text() {
   print(shown(Decimal::of_string("")));"#,
     );
     assert_eq!(out, "12.34\n-0.05\n7\nNone\nNone\nNone\n");
+}
+
+// --- the literal ------------------------------------------------------------
+//
+// 13.5. `docs/design/numbers.md` decides the spelling and `0.01` stays a
+// `Float`: making bare decimals exact would be the most visible thing about
+// the language and would make it a finance language whatever the
+// documentation said.
+
+/// The whole point of having a suffix: an exact decimal *constant*.
+/// `Decimal::of("0.01")` parses at run time, costs something at every
+/// evaluation, and returns a `Result` because a string might not be a number.
+#[test]
+fn a_decimal_literal_is_exact() {
+    let out = run(
+        "decimal_literal",
+        r#"  print(Decimal::show(0.01d));
+  print(Decimal::show(Decimal::add(0.01d, 0.02d)));"#,
+    );
+    assert_eq!(out, "0.01\n0.03\n", "the sum every float gets wrong");
+}
+
+/// **The scale is the digits written, not the value's magnitude.** `1.50d`
+/// keeps its trailing zero, because a price to two places stays a price to two
+/// places — the same reasoning `Show for Decimal` gives for printing it.
+#[test]
+fn the_written_scale_is_kept() {
+    let out = run(
+        "decimal_literal_scale",
+        r#"  print(Decimal::show(1.50d));
+  print(Decimal::show(1.5d));
+  print(Decimal::show(1d));
+  print(Decimal::show(0.000000d));"#,
+    );
+    assert_eq!(out, "1.50\n1.5\n1\n0.000000\n");
+}
+
+/// A whole amount of money is the common case, so `1.00d` is not mandatory.
+#[test]
+fn an_integer_literal_may_carry_the_suffix() {
+    let out = run(
+        "decimal_literal_int",
+        r#"  print(Decimal::show(Decimal::add(1d, 0.5d)));
+  print(Decimal::show(1_000_000d));"#,
+    );
+    assert_eq!(out, "1.5\n1000000\n", "and underscores separate here too");
+}
+
+/// **The exponent moves the point rather than becoming a negative scale.**
+/// `Decimal::scaled` has no negative scale — it is a large number spelled
+/// confusingly — so `1.5e3d` is fifteen hundred at scale zero.
+#[test]
+fn an_exponent_becomes_a_whole_number() {
+    let out = run(
+        "decimal_literal_exponent",
+        r#"  print(Decimal::show(1.5e3d));
+  print(Decimal::show(1.5e1d));
+  print(Decimal::show(1.25e1d));"#,
+    );
+    assert_eq!(out, "1500\n15\n12.5\n");
+}
+
+// --- what a ledger does to a decimal ----------------------------------------
+
+/// **Adding two scales aligns to the larger.** A penny added to a price in
+/// mills is a price in mills; going the other way would throw a digit away
+/// silently, which is the failure this type exists to prevent.
+#[test]
+fn addition_aligns_to_the_larger_scale() {
+    let out = run(
+        "decimal_align",
+        r#"  print(Decimal::show(Decimal::add(0.01d, 0.001d)));
+  print(Decimal::show(Decimal::add(0.001d, 0.01d)));
+  print(Decimal::show(Decimal::sub(1.00d, 0.001d)));
+  print(Decimal::show(Decimal::add(1d, 0.01d)));"#,
+    );
+    assert_eq!(out, "0.011\n0.011\n0.999\n1.01\n", "and it commutes");
+}
+
+/// Multiplication adds the scales, which is what the arithmetic says and not
+/// a choice: two prices to two places multiply to four.
+#[test]
+fn multiplication_adds_the_scales() {
+    let out = run(
+        "decimal_multiply_scale",
+        r#"  print(Decimal::show(Decimal::mul(1.10d, 1.10d)));
+  print(Decimal::show(Decimal::mul(2d, 0.005d)));"#,
+    );
+    assert_eq!(out, "1.2100\n0.010\n");
+}
+
+/// Comparison is by value and not by representation. `1.5d` and `1.50d` are
+/// the same number written twice, and a ledger that said otherwise would be
+/// unusable.
+#[test]
+fn the_same_number_at_two_scales_compares_equal() {
+    let out = run(
+        "decimal_compare_scales",
+        r#"  if Decimal::eq(1.5d, 1.50d) { print("equal") } else { print("NOT equal") };
+  if Decimal::eq(1d, 1.000d) { print("equal") } else { print("NOT equal") };
+  if Decimal::eq(0.1d, 0.2d) { print("equal") } else { print("NOT equal") };"#,
+    );
+    assert_eq!(out, "equal\nequal\nNOT equal\n");
+}
+
+/// **The significand is sixty-four bits and the limit is real.** Eighteen
+/// digits is every currency amount anybody transacts, and `numbers.md` says
+/// so; what matters is that going past it stops rather than wrapping. A wrong
+/// number in a ledger is worse than no number.
+#[test]
+fn a_scale_that_cannot_be_reached_stops_the_program() {
+    let (printed, stopped) = run_until_it_stops(
+        "decimal_overflow_scale",
+        r#"  print(Decimal::show(Decimal::at_scale(1d, 3)));
+  print(Decimal::show(Decimal::at_scale(9300000000000000d, 3)));
+  print("reached the end");"#,
+    );
+    // Nine point three quintillion does not fit sixty-four bits. The first
+    // line succeeds; the second cannot, and the program ends there rather than
+    // printing something plausible.
+    assert_eq!(printed, "1.000\n", "nothing after the overflow should print");
+    assert!(stopped, "an unrepresentable scale must stop rather than wrap");
 }

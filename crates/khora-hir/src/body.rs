@@ -895,9 +895,96 @@ fn has_interpolation(text: &str) -> bool {
     false
 }
 
+/// A literal's body, whichever delimiter it used.
+///
+/// **One funnel, deliberately.** `has_interpolation`, the `${..}` splitter and
+/// `unescape` all start here, so a backtick literal reaches every one of them
+/// as an ordinary body and none of them had to learn a second spelling.
 fn strip_quotes(text: &str) -> &str {
+    if text.starts_with('`') {
+        let inner = text.strip_prefix('`').unwrap_or(text);
+        return inner.strip_suffix('`').unwrap_or(inner);
+    }
     let inner = text.strip_prefix('"').unwrap_or(text);
     inner.strip_suffix('"').unwrap_or(inner)
+}
+
+/// A backtick literal's body, with the source's indentation taken off.
+///
+/// A multiline literal is written inside a function, indented to match the
+/// code around it, and those spaces are not part of the string. Java's text
+/// blocks, Swift and `indoc` all strip them; so does this.
+///
+/// **The common prefix, measured over the non-blank lines**, so relative
+/// indentation inside the string survives — a nested `create table (` body
+/// stays nested. A blank line contributes nothing to the measurement and comes
+/// out empty rather than as leftover spaces.
+///
+/// A first line that is empty is dropped, so the delimiter can sit on its own
+/// line where it reads best, and so can the closing one.
+pub(crate) fn dedent(body: &str) -> String {
+    let trimmed = trim_close(trim_open(body));
+    let common = common_indent(trimmed);
+    let out: Vec<String> =
+        trimmed.split('\n').map(|l| strip_indent(l, common)).collect();
+    out.join("\n")
+}
+
+/// A leading blank line removed, so an opening delimiter can sit on its own.
+///
+/// The newline after the backtick is punctuation, not content -- which is what
+/// lets the literal be written where it reads best.
+pub(crate) fn trim_open(text: &str) -> &str {
+    match text.find('\n') {
+        Some(at) if text[..at].trim().is_empty() => &text[at + 1..],
+        _ => text,
+    }
+}
+
+/// A trailing blank line removed, so a closing delimiter can sit on its own.
+pub(crate) fn trim_close(text: &str) -> &str {
+    match text.rfind('\n') {
+        Some(at) if text[at + 1..].trim().is_empty() => &text[..at],
+        _ => text,
+    }
+}
+
+/// The indentation every non-blank line shares.
+///
+/// A blank line contributes nothing: it has no content to be indented, and
+/// counting its zero would make every literal with a paragraph break in it
+/// strip nothing at all.
+pub(crate) fn common_indent(body: &str) -> usize {
+    body.split('\n')
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0)
+}
+
+/// One line with `common` leading bytes removed, or emptied if it is blank.
+///
+/// A line shorter than the common indent can only be one made of spaces, and
+/// it comes out empty rather than panicking on the slice.
+pub(crate) fn strip_indent(line: &str, common: usize) -> String {
+    if line.trim().is_empty() {
+        return String::new();
+    }
+    // A text piece from `split_interpolation` may begin mid-line -- everything
+    // after a `${..}` hole -- and that fragment has no indentation to take
+    // off. Only a line that actually starts with the shared prefix loses it.
+    let mut out = String::with_capacity(line.len());
+    for (i, part) in line.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if part.len() >= common && part.chars().take(common).all(|c| c == ' ') {
+            out.push_str(&part[common..]);
+        } else {
+            out.push_str(part);
+        }
+    }
+    out
 }
 
 /// Splits a literal's body into the text around its `${..}` holes.
@@ -967,6 +1054,9 @@ fn unescape_body(inner: &str) -> String {
 
 fn unescape(text: &str) -> String {
     let inner = strip_quotes(text);
+    if text.starts_with('`') {
+        return unescape_inner(&dedent(inner));
+    }
     unescape_inner(inner)
 }
 
@@ -986,6 +1076,7 @@ fn unescape_inner(inner: &str) -> String {
             Some('\\') => out.push('\\'),
             Some('"') => out.push('"'),
             Some('\'') => out.push('\''),
+            Some('`') => out.push('`'),
             // A literal dollar, so a template for another tool still fits in a
             // Khora string now that `${` means something.
             Some('$') => out.push('$'),
@@ -1012,6 +1103,8 @@ fn literal_of(node: &khora_syntax::SyntaxNode) -> Option<Literal> {
         INT_LIT => Literal::Int(text),
         FLOAT_LIT => Literal::Float(text),
         STRING_LIT => Literal::Str(unescape(&text)),
+        // Interpolated literals do not come through here -- `lower_expr`
+        // catches them first -- so the dedent for those is in `parts_of`.
         TRUE_KW => Literal::Bool(true),
         FALSE_KW => Literal::Bool(false),
         _ => return None,

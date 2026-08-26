@@ -4,9 +4,12 @@ Roadmap 13.6. An inventory of every place the runtime steps outside what the
 compiler checks, what each one depends on, and which of those dependencies is
 enforced rather than merely believed.
 
-**Three defects found, all fixed. Two of them were reachable.** The third was a
-mis-declaration rather than a live bug, and is the kind that makes the next one
+**Three defects found, all fixed. One was reachable.** The other two were
+mis-declarations rather than live bugs, and are the kind that make the next one
 invisible.
+
+ThreadSanitizer found nothing in the thirty-five tests it can run. It cannot
+run the scheduler's, which is recorded below rather than glossed over.
 
 ## The surface
 
@@ -125,14 +128,75 @@ safety work: it is why a single-threaded program has no pool thread touching
 its non-atomic reference counts. Written down here because nothing at the site
 says so.
 
+## ThreadSanitizer
+
+`sh scripts/tsan.sh`. Thirty-five tests across five modules, **no warnings**.
+
+| Module | What it covers |
+| --- | --- |
+| `channel` | A bounded queue with senders and receivers on real threads — the newest primitive here, and the one carrying values between fibers |
+| `wait` | The park/wake protocol, whose entire content is the race between a suspension and the wake that beats it |
+| `contain` | Thread-locals and the trap flag |
+| `decimal`, `trap` | Single-threaded; cheap to include |
+
+**It cannot see through a stack switch, and that is not a theoretical
+reservation.** TSan keeps shadow state per thread; `corosensei` moves a whole
+stack between workers without telling it. Pointed at `blocking::`, whose tests
+run their work on a `Scheduler`, it does not produce false positives — it dies:
+
+```text
+ThreadSanitizer: SEGV on unknown address 0x7ffff6a00000
+ThreadSanitizer: nested bug in the same thread, aborting.
+```
+
+That is the sanitizer reading a fiber's guard page, before any test result. So
+**the scheduler, the fibers, the reactor and the blocking pool are not covered
+here** — not because they are trusted but because the tool cannot answer for
+them. Annotating the switch with `__tsan_switch_to_fiber` is the supported
+answer and is not reachable from safe Rust today; it is what would extend this.
+
+Three things about the setup are worth keeping, because each cost time:
+
+- **`-Zbuild-std` is not optional.** The host and target are the same triple,
+  so the toolchain's precompiled `std` is a link candidate and was built
+  without the sanitizer. `rustc` refuses that as an ABI mismatch on the first
+  dependency it reaches.
+- **The flags must be target-scoped.** Plain `RUSTFLAGS` instruments build
+  scripts and proc macros too, and those link against the host `std`. The fix
+  is `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`.
+- **The verdict is a sentinel line, not an exit status.** Run through
+  `wsl -e bash -lc`, the inner status is lost: every module printed
+  `test result: ok`, every filter returned zero when run alone, and the
+  invocation still came back `1`. The script now says `KHORA_TSAN_ALL_CLEAR` in
+  words and the caller greps for it.
+
 ## What is still open
 
 **A fiber must not suspend inside an `extern` call**, or a C library's
-thread-affine state is live across a migration. This is `scheduler.md` §8's
-policy and nothing enforces it. It is not currently violable from Khora — an
-`extern fn` body is foreign code, and Khora cannot suspend from inside one —
-but it becomes violable the moment a foreign function takes a Khora callback
-that can suspend. Worth a check when that becomes expressible.
+thread-affine state is live across a migration: wrong `errno`, wrong
+thread-locals, a lock held by nobody. This is `scheduler.md` §8's policy and
+nothing enforces it.
+
+It is **unreachable today**, and that was checked rather than assumed. The only
+way to suspend with C frames on the stack is for foreign code to re-enter
+Khora, and it cannot: `docs/design/ffi.md` records under "still open" that a
+Khora function cannot yet be passed as a C callback. An `extern fn` call is one
+instruction into foreign code with no Khora frame inside it.
+
+**The cheap fix does not work**, which is worth knowing before somebody reaches
+for it. "A callback must have an empty `with` row" sounds sufficient: a
+function that declares no capability should not be able to reach a socket. It
+is not sufficient — `std::net::socket`'s `receive` and `connect_to` take raw
+handles, declare nothing, and suspend. Suspension is not in the effect row, so
+no signature can be read to mean "this cannot suspend".
+
+So the mechanism has to be dynamic: a per-thread depth raised around a foreign
+call by the code generator and checked by the scheduler before it parks. Two
+counter updates per foreign call, which is nothing beside a foreign call. It is
+**not built**, because a guard against something no program can express is
+machinery no test can exercise — the requirement is recorded in `ffi.md` beside
+the feature that would make it reachable, so that feature cannot land without
+it.
 
 **33 `unsafe` blocks had no note; 28 remain**, most of them test helpers
 calling the C API. The five in the code generator are now annotated, and they
@@ -143,11 +207,9 @@ generated**. Nothing a Rust reader sees locally discharges it — what does is a
 and the compiler still builds, still passes its Rust tests, and starts emitting
 programs that read off the end of a string.
 
-**No sanitiser has been run.** `core-dumps-beat-assertions-on-races` records
-that instrumenting the runtime hides at least one heisenbug, so TSan under WSL2
-is the tool and it has not been pointed at the channel or the pool yet. That is
-the largest remaining piece of 13.6 and it is a machine-time job rather than a
-reading job.
+**The scheduler has not been sanitised**, and cannot be until the stack switch
+is annotated — see the section above. That is the largest remaining gap in this
+document, and it is a tooling problem rather than an unread piece of code.
 
 **Nothing here checked the scheduler's work-stealing** beyond the invariants
 its own soak asserts. 13.2 is where that belongs.

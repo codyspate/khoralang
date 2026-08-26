@@ -142,16 +142,48 @@ impl<'a> Ctx<'a> {
         // Offsets are into the file, so the opening quote is where the literal
         // starts and the body is one byte past it.
         let body_at = u32::from(range.start()) + 1;
-        let parts = split_interpolation(strip_quotes(text));
+        let body = strip_quotes(text);
+        let parts = split_interpolation(body);
+
+        // **A backtick literal's indentation is the source's, not the
+        // string's**, and it comes off here rather than in `strip_quotes`
+        // because these spans are offsets into the file: dedenting the body
+        // first would move every hole's position and point each diagnostic at
+        // the wrong column. Measured over the whole body so relative
+        // indentation survives, then taken off each text piece as it is
+        // lowered. The span stays as written, which covers slightly more than
+        // the value -- harmless, and better than a span that is wrong.
+        let common = if text.starts_with('`') { Some(common_indent(body)) } else { None };
+
+        // The opening and closing blank lines belong to the *body*, not to any
+        // one piece, so they are trimmed off whichever text piece happens to
+        // carry them -- the first and the last. A literal that opens with a
+        // hole has no first text piece and nothing to trim, which is correct:
+        // there was no blank line to remove.
+        let first_text = parts.iter().position(|p| matches!(p, Part::Text(_)));
+        let last_text = parts.iter().rposition(|p| matches!(p, Part::Text(_)));
 
         let mut joined: Option<ExprId> = None;
-        for part in parts {
+        for (index, part) in parts.into_iter().enumerate() {
             let piece = match part {
                 Part::Text(raw) => {
                     let at = body_at + raw.at;
                     let width = raw.text.len() as u32;
                     let span = TextRange::at(TextSize::from(at), TextSize::from(width));
-                    self.add_expr(Expr::Literal(Literal::Str(unescape_body(&raw.text))), span)
+                    let text = match common {
+                        Some(indent) => {
+                            let mut body = raw.text.as_str();
+                            if first_text == Some(index) {
+                                body = trim_open(body);
+                            }
+                            if last_text == Some(index) {
+                                body = trim_close(body);
+                            }
+                            strip_indent(body, indent)
+                        }
+                        None => raw.text.clone(),
+                    };
+                    self.add_expr(Expr::Literal(Literal::Str(unescape_body(&text))), span)
                 }
                 Part::Hole(raw) => self.lower_fragment(&raw.text, body_at + raw.at),
             };
@@ -249,6 +281,72 @@ impl<'a> Ctx<'a> {
         chain
     }
 
+    /// `0.01d` is `Decimal::scaled(1, 2)`.
+    ///
+    /// **The language's only literal suffix**, and `docs/design/numbers.md`
+    /// says why it earns the exception: without it there is no way to write an
+    /// exact decimal *constant*. `Decimal::of("0.01")` parses at run time,
+    /// costs something at every evaluation, and returns a `Result` because a
+    /// string might not be a number; going through a `Float` throws away the
+    /// exactness the type exists for.
+    ///
+    /// Desugared here for the reason the list literal is: by the time anything
+    /// downstream sees one it is an ordinary call, so inference,
+    /// monomorphization, reference counting and reuse all work on it without
+    /// being told a literal existed.
+    ///
+    /// **The scale is the number of digits written**, not the value's
+    /// magnitude, so `1.50d` is `scaled(150, 2)` and keeps its trailing zero —
+    /// a price to two places stays a price to two places, which is the same
+    /// reasoning `Show for Decimal` gives. An exponent shifts the point:
+    /// `1.5e3d` is `1500` at scale zero rather than `15` at scale minus two,
+    /// because a negative scale is a large number spelled confusingly and
+    /// `Decimal::scaled` refuses one.
+    ///
+    /// `Decimal` has to be in scope, exactly as `List` does for `[a, b]`.
+    pub(super) fn lower_decimal(&mut self, text: &str, range: TextRange) -> ExprId {
+        let Some((units, scale)) = decimal_parts(text) else {
+            self.error(
+                format!("`{text}` is not a decimal this compiler can read"),
+                range,
+            );
+            return self.add_expr(Expr::Missing, range);
+        };
+
+        let Some(scaled) = self.decimal_scaled() else {
+            self.error(
+                "a `0.01d` literal builds a `Decimal`; import it from `std::decimal`"
+                    .to_string(),
+                range,
+            );
+            return self.add_expr(Expr::Missing, range);
+        };
+
+        let callee = self.add_expr(Expr::Path(scaled), range);
+        let units = self.add_expr(Expr::Literal(Literal::Int(units.to_string())), range);
+        let scale = self.add_expr(Expr::Literal(Literal::Int(scale.to_string())), range);
+        self.add_expr(Expr::Call { callee, args: vec![units, scale] }, range)
+    }
+
+    /// `Decimal::scaled`, if a `Decimal` is in scope.
+    ///
+    /// Looked for as a type rather than as a function: the constructor is an
+    /// inherent method, and what a program imports is the type it hangs off.
+    fn decimal_scaled(&self) -> Option<crate::Resolution> {
+        // By *name in scope*, not through `variants_of`: a `Decimal` is a
+        // record, and an `ItemMap` records constructors only for variant
+        // types — so the check that works for `List` finds nothing here.
+        let declared = self.map.item("Decimal").is_some();
+        let imported = self.scope.origins.iter().any(|o| o.local == "Decimal");
+        if !declared && !imported {
+            return None;
+        }
+        Some(crate::Resolution::TraitItem {
+            owner: "Decimal".to_string(),
+            name: "scaled".to_string(),
+        })
+    }
+
     /// `List::Cons` or `List::Nil`, if a `List` declaring them is in scope.
     pub(super) fn list_case(&self, case: &str) -> Option<crate::Resolution> {
         let found = self
@@ -311,4 +409,49 @@ impl<'a> Ctx<'a> {
             None => crate::Resolution::Unsupported(STEP_IS_MISSING),
         }
     }
+}
+
+/// The significand and the scale a decimal literal denotes.
+///
+/// `1d` is `(1, 0)`, `0.01d` is `(1, 2)`, `1.50d` is `(150, 2)` — the trailing
+/// zero is written down, so it is part of what was meant. `1.5e3d` is
+/// `(1500, 0)`: the exponent moves the point rather than becoming a negative
+/// scale, because `Decimal::scaled` has none and a negative one is a large
+/// number spelled confusingly.
+///
+/// Underscores are separators, as they are in every other numeral here.
+fn decimal_parts(text: &str) -> Option<(i128, u32)> {
+    let body = text.strip_suffix('d')?.replace('_', "");
+
+    let (mantissa, exponent) = match body.find(['e', 'E']) {
+        Some(at) => {
+            let power: i32 = body[at + 1..].parse().ok()?;
+            (body[..at].to_string(), power)
+        }
+        None => (body, 0),
+    };
+
+    let (digits, written) = match mantissa.find('.') {
+        Some(at) => {
+            let whole = &mantissa[..at];
+            let fraction = &mantissa[at + 1..];
+            (format!("{whole}{fraction}"), fraction.len() as i32)
+        }
+        None => (mantissa, 0),
+    };
+
+    let units: i128 = digits.parse().ok()?;
+    let scale = written - exponent;
+
+    // A negative scale is a whole number with zeros on the end, which is what
+    // multiplying by ten to the power says. `1.5e3d` is `1500`, not `15` at a
+    // scale nothing can represent.
+    if scale < 0 {
+        let mut value = units;
+        for _ in 0..(-scale) {
+            value = value.checked_mul(10)?;
+        }
+        return Some((value, 0));
+    }
+    Some((units, scale as u32))
 }

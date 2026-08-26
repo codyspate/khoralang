@@ -65,8 +65,17 @@ impl<'a> Ctx<'a> {
         match expr {
             ast::Expr::Literal(e) => {
                 let text = e.syntax().text().to_string();
-                if text.starts_with('"') && has_interpolation(&text)
-                {
+                // The one literal that is not a value of its own: a decimal is
+                // a call, desugared here so nothing downstream has a case.
+                if e.syntax().first_token().is_some_and(|t| t.kind() == khora_syntax::SyntaxKind::DECIMAL_LIT) {
+                    return self.lower_decimal(&text, range);
+                }
+                // Either delimiter interpolates. A reader who has written
+                // `"${name}"` will write it in a backtick literal too and be
+                // right, and one string with two escaping rules is worse than
+                // one rule.
+                let quoted = text.starts_with('"') || text.starts_with('`');
+                if quoted && has_interpolation(&text) {
                     return self.lower_interpolation(&text, range);
                 }
                 match literal_of(e.syntax()) {

@@ -256,6 +256,8 @@ scripts/
   check.sh             the fast loop: front end in ~30s, `native` for the rest
   baseline.sh          everything that must keep working, ~2m
   http_conformance.sh  what an ordinary client gets, checked with curl
+  check-linux.sh       the runtime's tests on Linux, through WSL2
+  tsan.sh              the runtime under ThreadSanitizer; see soundness.md
 .github/workflows/
   ci.yml               the three-platform matrix
 ```
@@ -327,3 +329,17 @@ thousands of connections and not hundreds of thousands, and that is the last
 thing standing between the positioning and the truth.
 
 `docs/roadmap.md` has the order, the reasons, and what each one costs.
+
+## Licence
+
+MIT or Apache-2.0, at your option — `LICENSE-MIT` and `LICENSE-APACHE`. The
+Rust ecosystem's default pair, and what `Cargo.toml` has declared since the
+first commit.
+
+Unless you say otherwise, a contribution you deliberately submit for inclusion
+is licensed the same way, with no additional terms.
+
+## Security
+
+`SECURITY.md`. Report through GitHub's private vulnerability reporting rather
+than a public issue; there is no address to email.

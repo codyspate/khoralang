@@ -61,7 +61,7 @@ before the phase that depends on it starts.
 
 | ~~D16~~ | **The flow operator, `||>`. Built.** `||> a |> b |> c` is sugar for `fn x => x |> a |> b |> c`, desugared during HIR lowering so nothing past that point knows a flow was written. Spelling settled as `||>` over `fn |> a |> b` despite the visual collision with logical-or; greedy over the pipes that follow it, so `(||> a) |> b` needs its parentheses; the one-stage lint is left to 13.17. `docs/design/flow-operator.md`. | closed |
 
-| D17 | **Multiline string literals**, spelled with backticks. A string literal is one line, and the first program to embed SQL found out by not parsing — `examples/ledger_service` carries its schema as one long line with a comment saying why. Decided: backticks, because JavaScript and Go readers know them and the alternatives are worse. `docs/design/multiline-strings.md` has the three things to settle: whether `${...}` interpolates inside one (recommended yes, matching `"..."`), whether the common indentation is stripped (recommended yes, as Java and Swift do), and that `\n` and `` \` `` still escape. Touches the lexer and the formatter and nothing else — the result is a `String` exactly as today's literal is. | nothing; wanted by every service that embeds SQL |
+| ~~D17~~ | **Multiline string literals, spelled with backticks. Built.** The same `STRING_LIT` token as a quoted literal, so nothing past the lexer learned a second spelling; `${...}` interpolates and the source's indentation is stripped, both as recommended. The formatter needed no change — a string is one token — and a test says so, because a formatter that re-indented the inside of one would change what a program means. `docs/design/multiline-strings.md`. | closed |
 
 D13 and D14, the two before it, were both language-surface holes that parsed
 and type-checked and then failed somewhere further down. Both are closed
@@ -3259,8 +3259,8 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.2 | Concurrency under real load | **Started.** 11F's soak covers adversarial execution; overload, backpressure, bounded queues, shutdown and recovery are not covered |
 | 13.3 | DB cancellation safety | **Half.** A body that *fails* now rolls back, tested against a real server through `postgres::db`. A body whose *fiber is cancelled* still does not — that is the half 12.5 named, and it needs `Region`'s `defer` threaded through `transaction` |
 | 13.4 | Trace propagation | **Designed, not built.** `observability.md` §Propagation says a span's parent must survive spawn, steal, suspension, wake and cancellation, and that the fiber carries it. 12.3 built the middle layer only |
-| 13.5 | `Decimal` | **Half.** 12.0 is "done, without the literal". `0.01d` is specified and unbuilt; adversarial overflow and scale-alignment tests do not exist |
-| 13.6 | Runtime soundness audit | **Read and fixed; not yet sanitised.** Three defects found, one reachable — `docs/design/soundness.md`. The FFI boundary and the atomicity decision are now enforced by tests. TSan under WSL2 is the remaining half |
+| 13.5 | `Decimal` | **Done.** `0.01d` is built — the language's only literal suffix, desugared to `Decimal::scaled` during lowering — with the scale-alignment and overflow tests 13.5 asked for. `docs/design/numbers.md` |
+| 13.6 | Runtime soundness audit | **Done, with one gap the tool cannot close.** Three defects found and fixed, one reachable; the FFI boundary and the atomicity decision are enforced by tests; ThreadSanitizer is clean over thirty-five tests (`sh scripts/tsan.sh`). It cannot see through a stack switch, so the scheduler is unsanitised — `docs/design/soundness.md` |
 | 13.7 | Deployable cross-compilation | **One target of several.** `targets.md` steps 2 and 3 are done for wasm; aarch64 and musl need a sysroot, and step 4 — fetching a runtime — is untouched |
 | 13.8 | WebAssembly product path | **A module exists and runs.** 1.9 MB, hand-built runtime, no deployment example, no host integration |
 | 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
@@ -3275,8 +3275,8 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.18 | Reference applications | **The service exists.** `ledger_service` is HTTP + PostgreSQL + a pool + transactions + tracing, verified against a real server; `risk_analyzer` and `link_shortener` alongside it. The wasm one is still missing |
 | 13.19 | External alpha | **Not started**, and nothing substitutes for it |
 | 13.20 | CI as a hard gate | **Half, and personally earned.** CI runs the suite on three platforms. "Eliminate ways a failed baseline can be accidentally ignored" is here because a commit went out on a red baseline three times, most recently in this session — a shell chain took `grep`'s exit status instead of the script's |
-| 13.21 | Release and security infrastructure | **A tenth.** 12.9 emits an SBOM and builds are reproducible; signing, provenance, releases, `SECURITY.md` and a disclosure process do not exist |
-| 13.22 | Governance | **Not started.** There is no licence file |
+| 13.21 | Release and security infrastructure | **A fifth.** 12.9 emits an SBOM and builds are reproducible, and `SECURITY.md` names a disclosure channel — GitHub private advisories, no address published. Signing, provenance and automated releases do not exist |
+| 13.22 | Governance | **Licensed.** `LICENSE-MIT` and `LICENSE-APACHE`, matching what `Cargo.toml` always claimed, with the inbound-equals-outbound line in the README. A contribution guide, the language-change process and ownership rules are not written |
 | 13.23 | Performance at scale | **Small-scale only.** Every number in this document comes from one machine, one sitting, and programs of at most 430 lines |
 | 13.24 | Clean-machine release test | **Not started.** The acceptance test for all of the above |
 

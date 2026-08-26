@@ -19,11 +19,26 @@ enum Tok {
     #[token("/*", lex_block_comment)]
     BlockComment,
 
+    // **Before the float and the int**, because `logos` prefers the longer
+    // match and these are longer by exactly the suffix. `1d` must not lex as
+    // `1` followed by an identifier `d`.
+    //
+    // The suffix goes after any exponent, so `1.5e3d` is one token. Nothing
+    // may lex between the digits and the `d`, so `1 d` is not a decimal --
+    // which falls out of these being single regexes rather than a token pair.
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?d")]
+    #[regex(r"[0-9][0-9_]*d")]
+    DecimalLit,
+
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?")]
     FloatLit,
     #[regex(r"[0-9][0-9_]*")]
     IntLit,
     #[token("\"", lex_string)]
+    // A backtick literal is the *same token*: a `String` either way, so the
+    // parser, the type checker and the backend never learn there were two
+    // spellings. What differs is where it ends -- see `lex_backtick`.
+    #[token("`", lex_backtick)]
     StringLit,
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
@@ -175,6 +190,54 @@ fn lex_string(lex: &mut Lexer<Tok>) -> bool {
     true
 }
 
+/// A backtick string, which may cross lines.
+///
+/// The same scanner as [`lex_string`] with two differences, and they are the
+/// whole of the feature: a newline is ordinary rather than the end, and the
+/// delimiter is a backtick.
+///
+/// Interpolation works, because a reader who has seen `"${name}"` will write
+/// it here and be right. `\` escapes a literal backtick, and `\$` a literal
+/// dollar, which is what a template for some other tool needs.
+///
+/// **An unterminated one runs to the end of the file**, which sounds worse
+/// than it is: so does an unterminated block comment, and the parser reports a
+/// literal that swallowed the rest of the program far more clearly than a
+/// lexer could. `lex_string` stops at a newline precisely because a `"` is
+/// usually a typo when it reaches one; a backtick that reaches one is doing
+/// its job.
+fn lex_backtick(lex: &mut Lexer<Tok>) -> bool {
+    let rest = lex.remainder();
+    let mut escaped = false;
+    let mut holes = 0usize;
+    let mut nested = false;
+    let mut chars = rest.char_indices().peekable();
+
+    while let Some((i, c)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '$' if !nested && chars.peek().map(|(_, c)| *c) == Some('{') => {
+                chars.next();
+                holes += 1;
+            }
+            '{' if holes > 0 && !nested => holes += 1,
+            '}' if holes > 0 && !nested => holes -= 1,
+            '"' if holes > 0 => nested = !nested,
+            '`' if holes == 0 => {
+                lex.bump(i + 1);
+                return true;
+            }
+            _ => {}
+        }
+    }
+    lex.bump(rest.len());
+    true
+}
+
 fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
     use SyntaxKind as S;
     match tok {
@@ -183,6 +246,7 @@ fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
         Tok::BlockComment => S::BLOCK_COMMENT,
         Tok::FloatLit => S::FLOAT_LIT,
         Tok::IntLit => S::INT_LIT,
+        Tok::DecimalLit => S::DECIMAL_LIT,
         Tok::StringLit => S::STRING_LIT,
         Tok::RowVar => S::ROW_VAR,
         Tok::Ident => {
