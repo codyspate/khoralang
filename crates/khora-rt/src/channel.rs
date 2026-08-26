@@ -333,6 +333,10 @@ pub unsafe extern "C" fn khora_channel_release(handle: *mut u8) {
 
 #[cfg(test)]
 mod tests {
+    // SAFETY, for every call below: each handle comes from `open` in the same
+    // test, is used only while that test holds it, and is released exactly
+    // once at the end. The channels are opened unboxed, so no value in them is
+    // a pointer and no glue is called.
     use super::*;
 
     fn open(capacity: i64) -> *mut u8 {

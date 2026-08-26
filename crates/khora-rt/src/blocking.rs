@@ -265,7 +265,16 @@ where
     // either: `declare` refuses to wait when one is pending, so `park_current`
     // returns at once and the next look finds the value.
     loop {
-        if let Some(value) = slot.lock().expect("the result slot").take() {
+        // **Taken into a local before the `if`, so the guard is visibly gone
+        // by the suspension.** It was already gone -- a temporary in an
+        // `if let` scrutinee drops at the end of the `if let` -- but a
+        // `MutexGuard` held across a suspension is released on whichever
+        // worker resumes the fiber rather than the one that took it, which is
+        // the residual obligation `unsafe impl Send for Task` leaves on Rust
+        // bodies. A safety property should not rest on a temporary-scope rule
+        // the reader has to recall.
+        let arrived = slot.lock().expect("the result slot").take();
+        if let Some(value) = arrived {
             return value;
         }
         park_current();

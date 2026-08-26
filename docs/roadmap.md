@@ -3260,7 +3260,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.3 | DB cancellation safety | **Half.** A body that *fails* now rolls back, tested against a real server through `postgres::db`. A body whose *fiber is cancelled* still does not — that is the half 12.5 named, and it needs `Region`'s `defer` threaded through `transaction` |
 | 13.4 | Trace propagation | **Designed, not built.** `observability.md` §Propagation says a span's parent must survive spawn, steal, suspension, wake and cancellation, and that the fiber carries it. 12.3 built the middle layer only |
 | 13.5 | `Decimal` | **Half.** 12.0 is "done, without the literal". `0.01d` is specified and unbuilt; adversarial overflow and scale-alignment tests do not exist |
-| 13.6 | Runtime soundness audit | **Not started**, and the largest unpriced item on this list. See below |
+| 13.6 | Runtime soundness audit | **Read and fixed; not yet sanitised.** Three defects found, one reachable — `docs/design/soundness.md`. The FFI boundary and the atomicity decision are now enforced by tests. TSan under WSL2 is the remaining half |
 | 13.7 | Deployable cross-compilation | **One target of several.** `targets.md` steps 2 and 3 are done for wasm; aarch64 and musl need a sysroot, and step 4 — fetching a runtime — is untouched |
 | 13.8 | WebAssembly product path | **A module exists and runs.** 1.9 MB, hand-built runtime, no deployment example, no host integration |
 | 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
@@ -3493,6 +3493,44 @@ answer** — which is how the first draft of the transaction test reported a
 commit that PostgreSQL had actually aborted. The test now matches every
 `Result` explicitly. A discarded `Result` should be a lint; it is not one, and
 that belongs to 13.11 and 13.17.
+
+### 13.6 — the audit, and what reading found that running had not
+
+`docs/design/soundness.md` is the record: 179 `unsafe` blocks, 100 exported C
+symbols, three `unsafe impl Send`, six thread-locals, four places a fiber
+suspends from Rust. Three defects, of which one was reachable.
+
+**A `main` program that publishes a C symbol was counting references without
+atomics.** The proof of single-threadedness was "this is a `main` build and
+nothing mentions `Fiber::spawn`" — and `emit_c_exports` runs for every entry
+point, so a program with an `export extern fn` hands its address to whatever it
+is linked against, and a C library calls the callback it was given on whichever
+thread it likes. Non-atomic counting for a function a foreign thread can enter.
+There is no way to see it go wrong except as corruption long afterwards, so the
+decision is now a named function, `counts_non_atomically`, with a test per way
+a second thread arrives.
+
+**Five exported functions declared no preconditions and had them.** All four of
+`std::fs`'s shims, each already carrying a `SAFETY` comment discharging an
+obligation that had never been given to anybody — a safe `extern "C" fn` says
+there is nothing to get wrong — and `khora_array_new`, which keeps a drop
+routine and calls it once per element. That last one is the same shape as the
+code generator's type-key collision from the week before: a glue routine
+belonging to another type, releasing values through the wrong field list.
+
+**The enforcement is the point.** `crates/khora-rt/tests/ffi_surface.rs` reads
+the runtime's own sources and fails if an export takes a pointer, or keeps a
+`glue`, without being `unsafe`. Reverting the array fix makes it fail, which is
+how it was checked.
+
+What was read and found sound is written up rather than summarised here: the
+`Send` claim on a suspended stack, thread-affinity, why trap containment cannot
+span a migration, the reference-counting orderings, unwinding, and the line in
+the blocking pool that quietly guarantees a single-threaded program has no pool
+thread. Two things are recorded as still open — the policy that a fiber may not
+suspend inside an `extern` call, which nothing enforces, and that no sanitiser
+has been run. The second is the larger half of 13.6 and is machine time rather
+than reading time.
 
 ### 13.18 — the service, and the two bugs it found
 

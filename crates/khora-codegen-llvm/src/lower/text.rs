@@ -5,6 +5,20 @@
 //! pointer and a length for exactly the duration of a call, and is how a string
 //! reaches a foreign function without anything escaping. `docs/design/ffi.md`.
 
+//! # The `unsafe` here is a different kind
+//!
+//! Every `unsafe` block below is `build_in_bounds_gep`, which `inkwell` marks
+//! unsafe because an out-of-bounds `inbounds` GEP is undefined behaviour **in
+//! the program being generated** rather than in this one. Nothing a Rust
+//! reader can see locally discharges it; what discharges it is an instruction
+//! emitted a few lines above — a `check_index`, a `clamp`, a comparison
+//! guarding the branch, or an allocation whose size is the bound.
+//!
+//! So each site says which. That is worth the words: delete the bounds check
+//! and this file still compiles, still passes its Rust tests, and starts
+//! emitting programs that read off the end of a string. The phase 13 soundness
+//! audit found these were the only `unsafe` blocks in the compiler with no
+//! note at all. `docs/design/soundness.md`.
 use super::*;
 
 impl<'ctx> Lower<'_, 'ctx> {
@@ -73,6 +87,9 @@ impl<'ctx> Lower<'_, 'ctx> {
             );
             let to = match offset {
                 None => out,
+                // SAFETY: `out` was just allocated with room for both halves,
+                // and `at` is the first half's length — so the second half
+                // starts inside the allocation by construction.
                 Some(at) => unsafe {
                     self.be
                         .builder
@@ -503,6 +520,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                     runtime::STRING_BYTES_OFFSET,
                     "str.bytes",
                 );
+                // SAFETY: `check_index` above emits the branch that stops the
+                // program before this runs with `at` outside the string.
                 let slot = unsafe {
                     self.be
                         .builder
@@ -607,6 +626,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             runtime::STRING_BYTES_OFFSET,
             "str.bytes",
         );
+        // SAFETY: `start` is the clamped value above, so it is between zero
+        // and the length.
         let hay = unsafe {
             self.be
                 .builder
@@ -759,6 +780,9 @@ impl<'ctx> Lower<'_, 'ctx> {
             STRING_BYTES_OFFSET,
             "slice.bytes",
         );
+        // SAFETY: `start` was clamped into the source before the slice's
+        // length was computed from it, and the destination was allocated for
+        // exactly that length.
         let source = unsafe {
             self.be
                 .builder
@@ -827,6 +851,8 @@ impl<'ctx> Lower<'_, 'ctx> {
             .builder
             .build_int_compare(IntPredicate::SLT, at, length, "cut.inside")
             .expect("is there a byte here");
+        // SAFETY: reached only on the branch the comparison above takes when
+        // `at` is inside the string.
         let slot = unsafe {
             self.be
                 .builder

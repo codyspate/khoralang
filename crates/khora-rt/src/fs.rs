@@ -28,6 +28,13 @@
 //! until the call has returned. The addresses cross as `usize` so that the
 //! reasoning has to be written down at the cast rather than hidden in a
 //! blanket `unsafe impl Send`.
+//!
+//! **All four are `unsafe fn`**, which they were not until the phase 13
+//! soundness audit. Each already carried a `SAFETY` comment discharging the
+//! dereference — but the obligation those comments discharge was never placed
+//! on anybody, because a safe `extern "C" fn` says it has no preconditions.
+//! Generated code cannot tell the difference; a Rust caller could, and the
+//! other fifty-six exported functions that take a pointer say so.
 
 use crate::blocking::blocking;
 use core::ffi::c_void;
@@ -44,8 +51,14 @@ unsafe extern "C" {
 /// Opening is the slowest of these on a cold path — a name lookup, a directory
 /// walk, possibly a network filesystem — and the one most worth not doing on a
 /// scheduler thread.
+///
+/// # Safety
+///
+/// `path` and `mode` must be NUL-terminated strings that stay valid until this
+/// returns, which they do because their owner is the fiber suspended for the
+/// whole call.
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_fs_open(path: *const u8, mode: *const u8) -> *mut c_void {
+pub unsafe extern "C" fn khora_fs_open(path: *const u8, mode: *const u8) -> *mut c_void {
     let (path, mode) = (path as usize, mode as usize);
     blocking(move || {
         // SAFETY: both strings belong to a fiber that is suspended until this
@@ -55,8 +68,14 @@ pub extern "C" fn khora_fs_open(path: *const u8, mode: *const u8) -> *mut c_void
 }
 
 /// `fread`, off the worker.
+///
+/// # Safety
+///
+/// `into` must be writable for `size * count` bytes and `file` must be a live
+/// handle from [`khora_fs_open`]. Both stay valid for the call because their
+/// owner is suspended.
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_fs_read(
+pub unsafe extern "C" fn khora_fs_read(
     into: *mut u8,
     size: usize,
     count: usize,
@@ -71,8 +90,13 @@ pub extern "C" fn khora_fs_read(
 }
 
 /// `fwrite`, off the worker.
+///
+/// # Safety
+///
+/// `from` must be readable for `size * count` bytes and `file` must be a live
+/// handle from [`khora_fs_open`].
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_fs_write(
+pub unsafe extern "C" fn khora_fs_write(
     from: *const u8,
     size: usize,
     count: usize,
@@ -90,8 +114,13 @@ pub extern "C" fn khora_fs_write(
 ///
 /// Closing flushes, so it writes, so it blocks — which is easy to forget when
 /// reading a program that only ever seems to read.
+///
+/// # Safety
+///
+/// `file` must be a live handle from [`khora_fs_open`], and must not be closed
+/// twice.
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_fs_close(file: *mut c_void) -> i32 {
+pub unsafe extern "C" fn khora_fs_close(file: *mut c_void) -> i32 {
     let file = file as usize;
     // SAFETY: the handle belongs to a suspended fiber and is not closed twice
     // — `std::fs` checks for null and drops its reference after this returns.
@@ -110,17 +139,25 @@ mod tests {
         path.push(format!("khora-fs-{}.txt", std::process::id()));
         let name = format!("{}\0", path.display());
 
-        let file = khora_fs_open(name.as_ptr(), c"wb".as_ptr().cast());
-        assert!(!file.is_null(), "could not open {}", path.display());
         let text = b"the pool stays out of the way";
-        assert_eq!(khora_fs_write(text.as_ptr(), 1, text.len(), file), text.len());
-        assert_eq!(khora_fs_close(file), 0);
+        // SAFETY: `name` is NUL-terminated and outlives every call, the mode
+        // strings are literals, each buffer is sized by the length passed with
+        // it, and each handle is used only between its open and its one close.
+        unsafe {
+            let file = khora_fs_open(name.as_ptr(), c"wb".as_ptr().cast());
+            assert!(!file.is_null(), "could not open {}", path.display());
+            assert_eq!(khora_fs_write(text.as_ptr(), 1, text.len(), file), text.len());
+            assert_eq!(khora_fs_close(file), 0);
+        }
 
-        let file = khora_fs_open(name.as_ptr(), c"rb".as_ptr().cast());
-        assert!(!file.is_null());
         let mut into = vec![0u8; text.len()];
-        assert_eq!(khora_fs_read(into.as_mut_ptr(), 1, into.len(), file), text.len());
-        assert_eq!(khora_fs_close(file), 0);
+        // SAFETY: as above.
+        unsafe {
+            let file = khora_fs_open(name.as_ptr(), c"rb".as_ptr().cast());
+            assert!(!file.is_null());
+            assert_eq!(khora_fs_read(into.as_mut_ptr(), 1, into.len(), file), text.len());
+            assert_eq!(khora_fs_close(file), 0);
+        }
         assert_eq!(&into, text);
 
         let _ = std::fs::remove_file(&path);
@@ -145,11 +182,18 @@ mod tests {
 
         let scheduler = Scheduler::new(2);
         scheduler.spawn(Task::new(move || {
-            let file = khora_fs_open(name.as_ptr(), c"rb".as_ptr().cast());
-            assert!(!file.is_null());
             let mut into = [0u8; 7];
-            count.store(khora_fs_read(into.as_mut_ptr(), 1, 7, file), Ordering::SeqCst);
-            khora_fs_close(file);
+            // SAFETY: `name` is NUL-terminated and owned by this fiber, `into`
+            // is seven bytes and seven are asked for, and the handle is closed
+            // once. The fiber suspends inside each call, which is the property
+            // the module note rests on -- it cannot touch `into` while the pool
+            // thread has it.
+            unsafe {
+                let file = khora_fs_open(name.as_ptr(), c"rb".as_ptr().cast());
+                assert!(!file.is_null());
+                count.store(khora_fs_read(into.as_mut_ptr(), 1, 7, file), Ordering::SeqCst);
+                khora_fs_close(file);
+            }
         }));
         scheduler.drain();
 

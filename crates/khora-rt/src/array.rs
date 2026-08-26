@@ -53,8 +53,21 @@ fn array_word(array: *const u8, index: usize) -> usize {
 ///
 /// Zeroed matters: a null slot is what makes releasing an array that was never
 /// filled a no-op rather than a wild free, the same reason `khora_alloc` zeroes.
+///
+/// # Safety
+///
+/// `fill` must be null or a live Khora object when `boxed`, and `glue` must be
+/// the drop routine **for that element type**. The glue is kept and called
+/// once per slot when the array is released, so a routine belonging to another
+/// type reads this array's elements through the wrong field list -- which is
+/// memory corruption, and is not hypothetical: `khora doc`'s first run found
+/// exactly that mistake in the code generator, where drop glue was cached by a
+/// type's printed name and two modules exported a `Request`.
+///
+/// The same obligation `khora_shared_open` and `khora_channel_open` state.
+/// This one did not, until the phase 13 soundness audit.
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_array_new(
+pub unsafe extern "C" fn khora_array_new(
     len: i64,
     fill: u64,
     stride: u8,

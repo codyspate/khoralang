@@ -38,6 +38,62 @@ fn program_can_spawn<'a>(
     })
 }
 
+/// Whether generated code may count references without atomics.
+///
+/// **The single most dangerous question this compiler answers**, which is why
+/// it is a named function with tests rather than an expression inside `build`.
+/// Answering yes wrongly is a data race in every reference count in the
+/// program: memory corruption, arbitrarily far from its cause, with nothing
+/// left to say what happened.
+///
+/// Three conditions, and each one is a way a second thread gets in.
+pub(super) fn counts_non_atomically(
+    db: &dyn Db,
+    files: &[SourceFile],
+    mono: &khora_types::mono::Instances,
+    entry_point: Entry,
+) -> bool {
+    // Tests and benches each get a fiber of their own, and a library's host
+    // chooses which of its threads calls in.
+    if entry_point != Entry::Main {
+        return false;
+    }
+    // A `main` build that publishes a symbol is a library too, whatever it was
+    // built as.
+    if program_publishes_a_symbol(db, files) {
+        return false;
+    }
+    // And the original condition: a program that starts a fiber has workers.
+    !program_can_spawn(mono, |instance| {
+        let home = mono.home(&instance.symbol())?;
+        khora_hir::body::bodies(db, home)
+            .iter()
+            .find(|(n, _)| n == &instance.function)
+            .map(|(_, b)| b)
+    })
+}
+
+/// Whether this program publishes a C symbol anybody could call.
+///
+/// An `export extern fn` is one with `is_extern` *and* a body: without a body
+/// it is a declaration of somebody else's symbol, which is an import rather
+/// than an export. That is the same pair `build` filters exports by, said
+/// earlier — here it has to be answered before any body is emitted, because
+/// reference counting is chosen before the first `khora_dup` is written.
+///
+/// Conservative on purpose. It asks whether a symbol is *published*, not
+/// whether anything calls it on another thread, because nothing here can know
+/// the second and being wrong about it is memory corruption.
+fn program_publishes_a_symbol(db: &dyn Db, files: &[SourceFile]) -> bool {
+    files.iter().any(|file| {
+        let types = khora_types::type_map(db, *file);
+        khora_hir::body::bodies(db, *file).iter().any(|(name, body)| {
+            body.root.is_some()
+                && types.signatures.get(name.as_str()).is_some_and(|s| s.is_extern)
+        })
+    })
+}
+
 pub(super) fn build(
     db: &dyn Db,
     root: SourceRoot,
@@ -110,14 +166,18 @@ pub(super) fn build(
     // comparison below is what makes that true; it is load-bearing rather than
     // incidental, and getting it wrong is a data race in a refcount, which is
     // memory corruption a long way from its cause.
-    backend.single_threaded =
-        entry_point == Entry::Main && !program_can_spawn(mono, |instance| {
-            let home = mono.home(&instance.symbol())?;
-            khora_hir::body::bodies(db, home)
-                .iter()
-                .find(|(n, _)| n == &instance.function)
-                .map(|(_, b)| b)
-        });
+    //
+    // **And a `main` build that publishes a symbol is a library too**, whatever
+    // it was built as. `emit_c_exports` runs for every entry point, so a
+    // program with an `export extern fn` hands its address to whatever it is
+    // linked against — and a C library that takes a callback will call it on
+    // whichever thread it likes. That program never writes `Fiber::spawn`, so
+    // the spawn check alone said "single-threaded" and generated non-atomic
+    // counting for a function a foreign thread can enter. Found by the phase 13
+    // soundness audit; there is no way to observe it going wrong except as
+    // corruption long afterwards, which is why it is a condition here rather
+    // than a note somewhere.
+    backend.single_threaded = counts_non_atomically(db, files, mono, entry_point);
 
     // One emitted function per *specialization*, not per source function: a
     // generic body has no machine representation until its type arguments are
@@ -548,3 +608,96 @@ fn target_machine() -> Result<TargetMachine, Vec<HirError>> {
 /// The key the shared closure `drop_fields` is cached under. Not a legal Khora
 /// type name, so it can never collide with an ADT's.
 pub(super) const CLOSURE_GLUE: &str = "$closure";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use khora_db::KhoraDatabase;
+
+    /// The decision, for one program.
+    fn non_atomic(entry_point: Entry, sources: &[&str]) -> bool {
+        let db = KhoraDatabase::new();
+        let files: Vec<SourceFile> = sources
+            .iter()
+            .enumerate()
+            .map(|(i, text)| SourceFile::new(&db, format!("m{i}.kh").into(), (*text).to_string()))
+            .collect();
+        let root = SourceRoot::new(&db, files.clone());
+        let mono = khora_types::mono::program_instances(&db, root);
+        assert!(mono.errors.is_empty(), "the fixture should compile: {:?}", mono.errors);
+        counts_non_atomically(&db, &files, mono, entry_point)
+    }
+
+    const PLAIN: &str = "module main;\nfn main() -> Int { 0 }\n";
+
+    /// The case the optimisation exists for.
+    #[test]
+    fn a_main_that_neither_spawns_nor_publishes_may_count_without_atomics() {
+        assert!(non_atomic(Entry::Main, &[PLAIN]));
+    }
+
+    #[test]
+    fn a_main_that_spawns_may_not() {
+        let source = "module main;
+export type Fiber;
+impl Fiber { fn spawn<'e>(body: () -> () raises 'e) -> Fiber; fn join(self) -> (); }
+fn work() -> () { }
+fn main() -> Int { Fiber::join(Fiber::spawn(fn () => work())); 0 }
+";
+        assert!(!non_atomic(Entry::Main, &[source]));
+    }
+
+    /// **The audit finding.** `emit_c_exports` runs for every entry point, so a
+    /// `main` build with an `export extern fn` hands its address to whatever it
+    /// is linked against — and a C library that takes a callback calls it on
+    /// whichever thread it likes. Such a program never writes `Fiber::spawn`,
+    /// so the spawn check alone called it single-threaded and emitted
+    /// non-atomic counting for a function a foreign thread can enter.
+    #[test]
+    fn a_main_that_publishes_a_symbol_may_not() {
+        let source = "module main;
+export extern fn price(n: Int) -> Int { n * 2 }
+fn main() -> Int { 0 }
+";
+        assert!(
+            !non_atomic(Entry::Main, &[source]),
+            "an exported symbol can be called from a thread this program never made"
+        );
+    }
+
+    /// An `extern fn` *without* a body is an import — somebody else's symbol,
+    /// which nothing can call back into. Distinguishing the two is the whole of
+    /// what `export extern fn` means, and treating every `extern` as published
+    /// would give up the optimisation for every program that reads a file.
+    #[test]
+    fn declaring_a_foreign_symbol_is_not_publishing_one() {
+        let source = "module main;
+extern fn getpid() -> Int;
+fn main() -> Int { getpid(); 0 }
+";
+        assert!(non_atomic(Entry::Main, &[source]));
+    }
+
+    /// A published symbol anywhere in the program counts, not only in the file
+    /// that happens to hold `main`.
+    #[test]
+    fn a_symbol_published_by_another_module_counts() {
+        let library = "module lib;\nexport extern fn price(n: Int) -> Int { n * 2 }\n";
+        let main = "module main;\nfn main() -> Int { 0 }\n";
+        assert!(!non_atomic(Entry::Main, &[library, main]));
+    }
+
+    #[test]
+    fn a_library_never_counts_without_atomics() {
+        let source = "module main;
+export extern fn price(n: Int) -> Int { n * 2 }
+";
+        assert!(!non_atomic(Entry::Library, &[source]));
+    }
+
+    #[test]
+    fn tests_and_benches_never_do_either() {
+        assert!(!non_atomic(Entry::Tests, &[PLAIN]));
+        assert!(!non_atomic(Entry::Benches, &[PLAIN]));
+    }
+}
