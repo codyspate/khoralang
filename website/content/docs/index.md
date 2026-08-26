@@ -56,14 +56,14 @@ hero:
       <span class="khora-card-link">Explore typed failure →</span>
     </a>
 
-    <a class="khora-feature-card" href="/docs/guide/concurrency/">
+    <a class="khora-feature-card" href="/docs/guide/fibers-and-nurseries/">
       <span class="khora-feature-icon" aria-hidden="true">⋈</span>
       <h3>Structured concurrency</h3>
       <p>Fibers belong to lexical lifetimes. Cancellation, cleanup, and joining are designed into the shape of concurrent code.</p>
       <span class="khora-card-link">Explore concurrency →</span>
     </a>
 
-    <a class="khora-feature-card" href="/docs/reference/ownership/">
+    <a class="khora-feature-card" href="/docs/reference/memory-and-resources/">
       <span class="khora-feature-icon" aria-hidden="true">◇</span>
       <h3>Native without ownership ceremony</h3>
       <p>Khora compiles to native code and derives the ownership plan from ordinary functional programs instead of asking you to write one.</p>
@@ -120,7 +120,7 @@ hero:
         <span><strong>Browse the standard library</strong><small>Generated API reference kept in sync with the compiler source.</small></span>
         <span aria-hidden="true">→</span>
       </a>
-      <a href="/docs/migration/effect-typescript/">
+      <a href="/docs/migration/from-typescript-effect/">
         <span class="khora-path-number">04</span>
         <span><strong>Coming from Effect TypeScript?</strong><small>Map the concepts you already know onto Khora's direct-style model.</small></span>
         <span aria-hidden="true">→</span>
