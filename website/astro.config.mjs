@@ -19,7 +19,7 @@ export default defineConfig({
         src: './src/assets/khora-mark.svg',
         alt: 'Khora pipe operator mark',
       },
-      favicon: '/docs/favicon.svg',
+      favicon: '/favicon.svg',
       social: [
         {
           icon: 'github',
