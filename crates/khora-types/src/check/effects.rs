@@ -159,15 +159,14 @@ impl<'a> Checker<'a> {
 
     /// Takes the failures demanded since `before` as a closure's own row.
     ///
-    /// A closure cannot charge its failures to whoever wrote it — it may be
-    /// called anywhere, and by then that function has returned. So the demands
-    /// its body raised become part of *its* type, and the enclosing function
-    /// is left answering only what it was asked directly.
+    /// A closure cannot charge its failures to whoever wrote it: it may be
+    /// called anywhere, and by then that function has returned. So they become
+    /// part of *its* type, and the enclosing function answers only what it was
+    /// asked directly.
     ///
     /// The demands stay in the list with their rows emptied rather than being
-    /// removed, because they are also what checks that a fallible call wore
-    /// its `!`. A closure does not excuse the mark any more than a `catch`
-    /// does.
+    /// removed, because they are also what checks that a fallible call wore its
+    /// `!`. A closure no more excuses the mark than a `catch` does.
     pub(super) fn absorb_raises(&mut self, before: usize) -> Type {
         let window: Vec<Demand> = self.demanded.split_off(before);
         let mut fields: Vec<(String, Type)> = Vec::new();
@@ -194,27 +193,27 @@ impl<'a> Checker<'a> {
     /// Takes the capabilities a closure could not resolve lexically as its own.
     ///
     /// **Resolve if you can, require if you cannot.** A lambda written where
-    /// `ledger` is in scope captures it, and its requirement row stays empty —
-    /// that is the common case and it is left alone, so `List::map` does not
-    /// have to become row-polymorphic to accept a callback that logs.
+    /// `ledger` is in scope captures it and its requirement row stays empty, so
+    /// `List::map` does not have to be row-polymorphic to accept a callback
+    /// that logs.
     ///
-    /// A lambda written where the capability does *not* exist yet is the other
-    /// case, and it is every library that installs one for its callback:
+    /// The other case is every library that installs a capability for its
+    /// callback:
     ///
     /// ```khora
     /// nursery(fn () => serve()!)
     /// ```
     ///
-    /// `serve` needs a nursery, `nursery` is what will supply one, and the
-    /// thunk was written before the binding existed. Charging that to the
-    /// enclosing function was wrong twice over — it does not have a nursery,
-    /// and it is not the one being asked. So the demand becomes the *closure's*
-    /// requirement instead, which is exactly what a named function does with
-    /// its `with` clause, and is why `nursery(serve)` already worked while its
-    /// own eta-expansion did not.
+    /// `serve` needs a nursery, `nursery` will supply one, and the thunk was
+    /// written before the binding existed. Charging that to the enclosing
+    /// function is wrong twice over: it has no nursery, and it is not the one
+    /// being asked. So the demand becomes the *closure's* requirement — what a
+    /// named function does with its `with` clause, and why `nursery(serve)`
+    /// works where its own eta-expansion would not.
     ///
     /// Closed, not open: these are exactly what this body needs, the same
-    /// promise a written `with` clause makes. `docs/design/capability-passing.md`.
+    /// promise a written `with` clause makes.
+    /// `docs/design/capability-passing.md`.
     pub(super) fn absorb_requires(&mut self, before: usize) -> Type {
         let window: Vec<Demand> = self.demanded.split_off(before);
         let mut mine: Vec<(String, Type)> = Vec::new();
@@ -334,18 +333,17 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            // A demand whose tail is a *rigid* variable cannot be opened —
-            // there is no fresh tail to absorb what the promise has extra,
-            // because the demand already stands for "whatever `'r` is". It is
+            // A demand whose tail is a *rigid* variable cannot be opened:
+            // there is no fresh tail to absorb the promise's extra labels,
+            // since the demand already stands for "whatever `'r` is". It is
             // satisfied when the promise carries the same tail and at least the
-            // same labels, which is what subsumption means when neither side
-            // knows what the tail holds.
+            // same labels — subsumption, where neither side knows the tail.
             //
-            // This is what a row-polymorphic library function needs the moment
-            // it adds a capability of its own: `listen` promising
-            // `{ 'r | scope: Scope }` and calling something needing `'r` is
-            // ordinary, and unification alone reads it as `'r` being asked to
-            // equal `{ scope: Scope | 'r }`.
+            // Every row-polymorphic library function needs this the moment it
+            // adds a capability of its own: `listen` promising
+            // `{ 'r | scope: Scope }` and calling something that needs `'r`
+            // reads to unification alone as `'r` being asked to equal
+            // `{ scope: Scope | 'r }`.
             if self.demand_is_carried(&row, &promise) {
                 continue;
             }

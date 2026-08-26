@@ -1,6 +1,6 @@
 //! How a fiber says it is waiting, and how a wake is never lost.
 //!
-//! Phase 11C. A fiber that suspends for fairness will be resumed because its
+//! A fiber that suspends for fairness will be resumed because its
 //! worker put it back on a queue. A fiber that suspends to *wait* will not:
 //! somebody else has to say when. That somebody races the suspension, and the
 //! race is the whole content of this module.

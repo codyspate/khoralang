@@ -1,36 +1,32 @@
 //! A bounded channel: the one way a value moves from one fiber to another.
 //!
 //! `Shared<A>` is a cell two fibers may both change. This is the other half of
-//! the problem, and the reason it exists is worth stating precisely, because
-//! `docs/design/sharing.md` did not list it as open and it took writing a
-//! database driver to find.
+//! the problem, and `docs/design/sharing.md` does not list it — it took writing
+//! a database driver to find.
 //!
 //! # What was missing
 //!
 //! An effect handler must be safe to hand to another fiber, so it may not
-//! capture anything writable. That rule is deliberate and correct. But a
-//! PostgreSQL connection *is* writable — it buffers the bytes that arrived and
-//! were not yet a whole message — and it is also **strictly serial**: two
-//! fibers writing to one socket interleave their frames and corrupt the
-//! stream. So a `Db` capability over a connection could not be written at all:
+//! capture anything writable. A PostgreSQL connection *is* writable — it
+//! buffers bytes that arrived and were not yet a whole message — and is also
+//! **strictly serial**, since two fibers writing one socket interleave their
+//! frames. So a `Db` capability over a connection cannot be written at all:
 //!
 //! - the handler cannot capture the connection, because it is not `Share`;
 //! - `Shared<Connection>` cannot hold it, because `Shared<A>` needs `A: Share`;
 //! - and running the query inside `Shared::update` is refused by design — a
 //!   change function has no error row, so it cannot fail and cannot do I/O.
 //!
-//! The missing piece was never a lock. It was a way for **one fiber to own the
-//! resource** and for the others to ask it. That is what this is.
+//! The missing piece was never a lock but a way for **one fiber to own the
+//! resource** and the others to ask it.
 //!
 //! # Why a channel and not a mutex
 //!
-//! A mutex would have worked and would have been smaller. It was not chosen,
-//! for two reasons that are the same reason twice. A lock held across a network
-//! round trip is a lock held across code the lock's author did not write, which
-//! is exactly the hazard `shared.rs` calls out about its own critical section.
-//! And a bounded channel is *already needed elsewhere*: roadmap 13.2 wants
-//! bounded queues and backpressure, and a pool of workers is a channel of idle
-//! ones. One primitive, three uses.
+//! A mutex would have worked and been smaller. But a lock held across a network
+//! round trip is a lock held across code its author did not write — the hazard
+//! `shared.rs` calls out about its own critical section — and a bounded channel
+//! is needed elsewhere anyway: backpressure is a bounded queue, and a pool of
+//! workers is a channel of idle ones. One primitive, three uses.
 //!
 //! # The shape
 //!
@@ -40,9 +36,8 @@
 //! that reads the state**, or a value that arrives between the two leaves a
 //! fiber parked for ever on an event that already happened.
 //!
-//! A thread that is not a fiber blocks on a condition variable instead, because
-//! it has no worker to give back. Both happen — `main` is not a fiber — so both
-//! are here, which is the same accommodation `Done` makes.
+//! A thread that is not a fiber blocks on a condition variable instead, having
+//! no worker to give back. Both happen, since `main` is not a fiber.
 //!
 //! # What crosses
 //!

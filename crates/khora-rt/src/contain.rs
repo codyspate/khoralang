@@ -3,10 +3,10 @@
 //! `docs/design/c-export.md` §8, and the correction to `docs/design/traps.md`
 //! §4 that made it possible.
 //!
-//! A trap ends the process, and for a program that is right. For a **library**
-//! it means taking down a host that never agreed to run a supervisor — a
-//! Python interpreter, a Node runtime, somebody's editor — which is the one
-//! support `traps.md` leaned on that does not apply here.
+//! A trap ends the process, which is right for a program. For a **library** it
+//! takes down a host that never agreed to run a supervisor — a Python
+//! interpreter, a Node runtime, somebody's editor — which is the one support
+//! `traps.md` leaned on that does not reach here.
 //!
 //! # Why this can work here and not for a fiber
 //!
@@ -14,13 +14,12 @@
 //! live reference counts between the trap and the boundary, and dropping a
 //! fiber without running them leaks everything it touched.
 //!
-//! An **export** escapes that argument by construction. Its signature is
-//! scalars and `Ptr` in, scalars out; it cannot `raise`; and it cannot be
-//! handed a capability, so it can reach no effect. There is no module-level
-//! mutable binding to store a value in and nothing heap-allocated crosses the
-//! signature either way, so **every allocation an exported call makes is
-//! reachable only from its own stack**. Discarding all of them is therefore
-//! sound, and needs no knowledge of what the stack held.
+//! An export escapes that argument by construction: scalars and `Ptr` in,
+//! scalars out, no `raise`, no capability and so no effect, no module-level
+//! mutable binding, and nothing heap-allocated crossing the signature either
+//! way. So **every allocation an exported call makes is reachable only from its
+//! own stack**, and discarding all of them needs no knowledge of what that
+//! stack held.
 //!
 //! # The one hole, and the guard over it
 //!
@@ -32,11 +31,9 @@
 //!
 //! # Off by default, and why
 //!
-//! A host that opted into nothing gets exactly today's behaviour. Containment
-//! is a promise about what happens after a bug, and a promise nobody asked for
-//! is one nobody has designed around — `khora_trapped()` returning non-zero is
-//! only useful to a caller that checks it, and a caller that does not check it
-//! would silently take a zero for an answer. So it is opt-in, per process,
+//! A host that opted into nothing keeps today's behaviour. `khora_trapped()`
+//! is only useful to a caller that checks it, and one that does not would
+//! silently take a zero for an answer — so containment is opt-in, per process,
 //! through `khora_set_trap_policy`.
 
 use std::cell::RefCell;
@@ -132,24 +129,21 @@ thread_local! {
 
 /// Records an allocation, if a guarded call is collecting them.
 ///
-/// **The global check comes first, and that is the whole of the cost story.**
-/// Both hooks sit on the path of every allocation in every program, including
-/// the overwhelming majority that never export anything — so what matters is
-/// what the uninvolved case pays.
+/// **The global check comes first, and that is the whole cost story.** Both
+/// hooks sit on the path of every allocation in every program, including the
+/// majority that export nothing, so what matters is what the uninvolved case
+/// pays.
 ///
-/// A thread-local read is not it. Measured on a benchmark that does nothing
-/// but allocate and free — two million iterations, two strings each — against
-/// the same build with the hooks deleted: a thread-local guard cost **12%**,
-/// and swapping the `RefCell` for a plain `Cell` changed nothing, because the
-/// expense was the thread-local access and not the borrow check. Reading
-/// `POLICY` first — a static that was already there — is a load from a fixed
-/// address and a branch that is never taken, and brings it to **2.6%** on that
-/// benchmark and proportionally less on any program that also does work.
+/// Measured against the same build with the hooks deleted, on two million
+/// iterations allocating two strings each: a thread-local guard costs **12%**,
+/// and a plain `Cell` in place of the `RefCell` changes nothing, because the
+/// expense is the thread-local access rather than the borrow check. Reading
+/// `POLICY` first — a static already there — is a load from a fixed address and
+/// a branch never taken, and brings it to **2.6%**.
 ///
-/// The alternative considered and rejected was a second allocator symbol
-/// emitted only by `--lib` builds. It would have missed every allocation the
-/// runtime makes on the program's behalf, and so leaked exactly the objects
-/// that are hardest to account for.
+/// The rejected alternative was a second allocator symbol emitted only by
+/// `--lib` builds. It would miss every allocation the runtime makes on the
+/// program's behalf, which is exactly the set hardest to account for.
 #[inline]
 pub(crate) fn record(ptr: *mut u8) {
     if POLICY.load(Ordering::Relaxed) != POLICY_CONTAIN {

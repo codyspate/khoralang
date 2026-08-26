@@ -1,16 +1,14 @@
 //! TLS, bound rather than written.
 //!
 //! `docs/design/ecosystem.md` decides this outright — "TLS, crypto:
-//! correctness is a specialist matter and a bug is a breach" — so the only
-//! question was what to bind and where. It is `rustls` here in the runtime,
-//! for the same reason `memmem` and float formatting are: the runtime is
-//! already the place where Rust does the work Khora should not.
+//! correctness is a specialist matter and a bug is a breach" — leaving only
+//! what to bind and where. `rustls`, here in the runtime, for the same reason
+//! `memmem` and float formatting are.
 //!
-//! **Not OpenSSL through `extern fn`.** That would be the more literal reading
-//! of "bound", and it fails the test that matters: a Khora program would then
-//! need `libssl` present to link and to run, which on Windows means most people
-//! cannot build it. `rustls` is compiled into the runtime that every executable
-//! already carries, so TLS works wherever Khora does.
+//! **Not OpenSSL through `extern fn`**, which is the more literal reading of
+//! "bound" and fails the test that matters: a Khora program would need `libssl`
+//! present to link and to run, which on Windows means most people cannot build
+//! it. `rustls` compiles into the runtime every executable already carries.
 //!
 //! # What crosses the boundary
 //!
@@ -22,11 +20,10 @@
 //!
 //! # The socket
 //!
-//! A connection **takes** the socket it is handed and closes it. Khora's
-//! `shut` must not also close it, or the second close is on a descriptor the
-//! operating system may have reissued — a bug that shows up as one connection
-//! reading another's bytes, months later. `std::net::tls` says so where the
-//! handle is handed over.
+//! A connection **takes** the socket it is handed and closes it. Khora's `shut`
+//! must not also close it, or the second close lands on a descriptor the
+//! operating system may have reissued — which shows up as one connection
+//! reading another's bytes, months later.
 
 use std::io::{Read, Write};
 use crate::reactor::Socket;
@@ -77,19 +74,17 @@ impl Talking for StreamOwned<ClientConnection, Wire> {
 
 /// The socket under a TLS connection.
 ///
-/// **Not a `TcpStream`, and it cannot be one any more.** `std::net::socket`
-/// prepares every socket it accepts, so by the time a connection reaches here
-/// it is non-blocking — and `TcpStream::read` on a non-blocking socket answers
-/// `WouldBlock` rather than waiting. rustls is written against a transport
-/// that blocks, so it saw an error where there was only "not yet", and both
-/// TLS tests failed the moment `std::net` was rewired.
+/// **Not a `TcpStream`, and it cannot be one.** `std::net::socket` prepares
+/// every socket it accepts, so a connection reaching here is non-blocking — and
+/// `TcpStream::read` on one answers `WouldBlock` rather than waiting, which
+/// rustls, written against a transport that blocks, reads as an error.
 ///
-/// So the transport is the runtime's own: `khora_net_recv` and
-/// `khora_net_send` do the same call and, when it would block, suspend the
-/// fiber and wait on the reactor rather than holding the worker. rustls gets
-/// the blocking transport it expects, a TLS connection stops costing a worker
-/// while it waits, and the handshake gets both properties for free because
-/// `complete_io` goes through the same two functions.
+/// So the transport is the runtime's own: `khora_net_recv` and `khora_net_send`
+/// make the same call and, when it would block, suspend the fiber and wait on
+/// the reactor rather than holding the worker. rustls gets the blocking
+/// transport it expects, a TLS connection stops costing a worker while it
+/// waits, and the handshake gets both for free, since `complete_io` goes
+/// through the same two functions.
 struct Wire(Socket);
 
 /// The raw handle, as this platform's socket type.
@@ -190,10 +185,9 @@ fn surrender(stream: TcpStream) -> Socket {
 /// file, from a secret store, from Let's Encrypt. Taking DER would make every
 /// caller convert.
 ///
-/// Returns null if either is unreadable or they do not agree, which the caller
-/// reports as its own error — the reason is not passed back because there are
-/// exactly two ("the certificate" and "the key") and a `rustls` message is not
-/// something a Khora program should be reading.
+/// Returns null if either is unreadable or they do not agree. The reason is not
+/// passed back: there are exactly two, and a `rustls` message is not something
+/// a Khora program should be reading.
 ///
 /// # Safety
 ///

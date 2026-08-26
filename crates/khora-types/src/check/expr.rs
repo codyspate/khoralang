@@ -198,18 +198,16 @@ impl<'a> Checker<'a> {
             }
             Expr::Catch { inner, arms } => self.infer_catch(inner, &arms, range),
             Expr::Lambda { params, param_types, body, .. } => {
-                // A parameter with no annotation gets a variable, so the type
+                // A parameter with no annotation gets a variable, so its type
                 // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
-                // learns `x: Int` from `map`'s signature, not from the lambda.
+                // learns `x: Int` from `map`'s signature.
                 //
-                // **And one with an annotation gets the annotation.** That
-                // reads as too obvious to write down, which is why it was not:
-                // every parameter got a variable and the written type was
-                // dropped in lowering, so `fn (s: String) => s + "b"` was
-                // checked as though `String` had never been said. Nothing
-                // downstream could recover it — a lambda in a `let`, with no
-                // call yet to hint from, has the annotation as its *only*
-                // source of truth.
+                // **And one with an annotation gets the annotation**, which
+                // reads as too obvious to write down and is not: a lambda in a
+                // `let`, with no call yet to hint from, has its annotation as
+                // the only source of truth, and dropping it in lowering means
+                // `fn (s: String) => s + "b"` is checked as though `String` had
+                // never been said.
                 let types: Vec<Type> = params
                     .iter()
                     .enumerate()
@@ -224,21 +222,16 @@ impl<'a> Checker<'a> {
 
                 // **Solved from the expected type before the patterns are
                 // bound, and long before the body is inferred.** `expect`
-                // already worked out what this argument has to be; using it
-                // only afterwards, in the `require` at the end, is too late for
-                // anything inside.
+                // already knows what this argument has to be; using it only in
+                // the `require` at the end is too late for anything inside.
                 //
-                // What went wrong without it: a `match` in the body destructures
-                // the parameter, and `bind_pattern` cannot take apart a type
-                // that is still a variable — so the binding got `Unknown`, and
-                // every field read off it got `Unknown` too. Silently, because
-                // an unsolved owner is exactly the case a field read declines
-                // to complain about. The program then failed the `Unknown`
-                // audit at the end, pointing at `found.url` and saying that its
-                // type was never worked out, about a line with nothing wrong
-                // with it. The same body as a *named* function was fine, which
-                // is the tell: a declared parameter has its type from the
-                // start.
+                // Without it, a `match` in the body destructures a parameter
+                // whose type is still a variable, `bind_pattern` cannot take
+                // that apart, and the binding and every field read off it get
+                // `Unknown` — silently, because an unsolved owner is exactly
+                // the case a field read declines to complain about. The failure
+                // surfaces in the `Unknown` audit at the end, blaming a line
+                // with nothing wrong with it.
                 //
                 // Silent unification, for the reason `hint_at` is: a hint that
                 // does not fit is not itself the error, and the `require` below
@@ -313,15 +306,12 @@ impl<'a> Checker<'a> {
 
     /// `-x`, over any number.
     ///
-    /// Two things it has to get right. The type is whatever is being negated
-    /// rather than always `Int`, so `-1.5` is a `Float` and `-b` on a `U8` is
-    /// refused for the better reason.
+    /// The type is whatever is being negated rather than always `Int`, so
+    /// `-1.5` is a `Float` and `-b` on a `U8` is refused for the better reason.
     ///
-    /// And a negated *literal* is checked as one number, not as a negation
-    /// applied to another: `-128` is an `I8` even though `128` is not, and
-    /// there is no other way to write that type's smallest value. Folding it
-    /// here is what makes the sign part of the literal, which is what a reader
-    /// already assumes it is.
+    /// And a negated *literal* is one number rather than a negation applied to
+    /// another: `-128` is an `I8` even though `128` is not, and there is no
+    /// other way to write that type's smallest value.
     pub(super) fn infer_negation(&mut self, operand: ExprId, hint: Option<Type>, range: TextRange) -> Type {
         if let (Some(Type::Fixed(kind)), Expr::Literal(Literal::Int(text))) =
             (&hint, self.body.expr(operand).clone())
@@ -364,14 +354,13 @@ impl<'a> Checker<'a> {
                 if matches!(hint, Some(Type::Fixed(_))) {
                     self.hint = hint;
                 }
-                // **Zonk before asking what the left operand is**, not after.
-                // `infer` hands back whatever variable the operand was given,
-                // and inside a closure a `String` parameter *is* a variable
-                // bound to `Str` rather than `Str` itself — so testing the raw
-                // type here answered "not a string" for every concatenation
-                // that was not two literals, and the arithmetic branch below
-                // then reported `expected Int, found String`. That branch
-                // zonked and this one did not; that difference was the bug.
+                // **Zonk before asking what the left operand is.** `infer`
+                // hands back whatever variable the operand was given, and
+                // inside a closure a `String` parameter *is* a variable bound
+                // to `Str` rather than `Str` itself — so the raw type answers
+                // "not a string" for every concatenation that is not two
+                // literals, and the arithmetic branch below then reports
+                // `expected Int, found String`.
                 let lhs_range = self.body.range(lhs);
                 let left = self.infer(lhs);
                 let left = self.unifier.zonk(&left);
@@ -384,12 +373,10 @@ impl<'a> Checker<'a> {
                 // **The left operand decides only when it knows something.**
                 // Where it is still a variable — an unannotated closure
                 // parameter whose call site comes later — the right operand is
-                // the only evidence there is, and a `String` on the right can
-                // only be concatenation: there is no `Int + String` to be
-                // ambiguous with. Defaulting to `Int` first and reporting
-                // `expected Int, found String` against the string literal
-                // named the wrong operand as the problem, in a line where
-                // nothing was wrong.
+                // the only evidence there is, and a `String` there can only be
+                // concatenation, since no `Int + String` exists to be ambiguous
+                // with. Defaulting to `Int` instead blames the string literal
+                // for a line where nothing is wrong.
                 if op == BinOp::Add && matches!(left, Type::Var(_)) {
                     let right = self.infer(rhs);
                     let right = self.unifier.zonk(&right);
@@ -456,15 +443,14 @@ impl<'a> Checker<'a> {
     /// Resolves the impl that a comparison operator on this type will call.
     ///
     /// **`==` on a scalar is a machine instruction; on anything else it is
-    /// `Eq::eq`, and `<` is `Ord::cmp`.** That keeps one meaning for each
-    /// operator rather than two: a type decides what equality and order mean
-    /// for it, in Khora, in a function a reader can go and look at.
-    /// `impl Eq for Int` is written *in terms of* `==` and not the other way
-    /// round, which is what stops the rule being circular — and is why `Float`
-    /// can have the operators without the traits.
+    /// `Eq::eq`, and `<` is `Ord::cmp`.** So a type decides what equality and
+    /// order mean for it, in Khora, in a function a reader can go and look at.
+    /// `impl Eq for Int` is written *in terms of* `==` rather than the other way
+    /// round, which is what stops the rule being circular — and why `Float` can
+    /// have the operators without the traits.
     ///
-    /// Recorded as an instantiation so that monomorphization emits the impl and
-    /// the code generator can find it, exactly as a written `a.eq(b)` would.
+    /// Recorded as an instantiation, so monomorphization emits the impl and the
+    /// code generator can find it, exactly as a written `a.eq(b)` would.
     pub(super) fn require_comparison(
         &mut self,
         site: ExprId,
@@ -745,21 +731,17 @@ impl<'a> Checker<'a> {
 
     /// `f()! catch { .. }` — handles part of the error row.
     ///
-    /// The subtraction is by error *type*, named by the arms' constructors. So
-    /// this is not a `match` on a result: the arms do not see a value the
-    /// operand produced, they see the error it left with, and the ones they
-    /// name stop being the enclosing function's problem.
+    /// The subtraction is by error *type*, named by the arms' constructors, so
+    /// this is not a `match` on a result: the arms see the error the operand
+    /// left with rather than a value it produced, and the ones they name stop
+    /// being the enclosing function's problem.
     ///
-    /// **A `_` arm subtracts the whole row, including its tail.** That is the
-    /// one thing naming constructors cannot express, and a general-purpose
-    /// language needs it: a supervisor — a server answering a request, a queue
-    /// running a job — has to recover from work whose failures it does not know
-    /// the shape of, because they are the *caller's* choice. Every neighbour
-    /// has the form (`catch_unwind`, `recover`, `catchAll`); this one is
-    /// checked rather than dynamic, and it costs what it should — the arm
-    /// learns nothing about what went wrong, since there is no name to learn
-    /// it under. Name the constructors when they are known; `_` is for when
-    /// they cannot be.
+    /// **A `_` arm subtracts the whole row, including its tail** — the one
+    /// thing naming constructors cannot express, and what a supervisor needs: a
+    /// server answering a request, or a queue running a job, has to recover
+    /// from work whose failures are the *caller's* choice. It costs what it
+    /// should, since an arm with no name to learn under learns nothing about
+    /// what went wrong. Name the constructors where they are known.
     pub(super) fn infer_catch(
         &mut self,
         inner: ExprId,

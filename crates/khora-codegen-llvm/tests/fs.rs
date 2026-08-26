@@ -2,10 +2,10 @@
 
 //! `std::fs`, against the real file system.
 //!
-//! Phase 8's first module, and the first test of whether Khora is pleasant to
-//! write a library in — which is a question no amount of compiler work
-//! answers. Everything under test is written in Khora: the C conventions, the
-//! region that closes the file, the effect that gates access to it.
+//! The first test of whether Khora is pleasant to write a library in — a
+//! question no amount of compiler work answers. Everything under test is
+//! written in Khora: the C conventions, the region that closes the file, the
+//! effect that gates access to it.
 
 mod harness;
 

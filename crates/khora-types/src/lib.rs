@@ -5,8 +5,8 @@
 //! `docs/design/associated-items.md` and it is what keeps errors local — but
 //! everything inside a body is solved.
 //!
-//! Row unification for effects arrives in phase 4; the shape [`Type`] needs for
-//! it is noted where it will go.
+//! Effect rows unify the same way — see [`Type::Row`], which carries both the
+//! capabilities a function requires and the errors it may raise.
 
 pub mod derive;
 pub mod foreign;
@@ -27,14 +27,12 @@ use usefulness::{ColumnType, Ctor, FieldType, Pattern};
 
 /// A fixed-width integer type: `U8`, `I32`, and the rest.
 ///
-/// **`Int` is not one of these.** `Int` is the 64-bit signed integer, and
-/// `I64` is a second spelling of it rather than a distinct type — two
-/// different 64-bit signed integers would mean a conversion between them that
-/// can never fail and never does anything, which is a tax with no payer.
+/// **`Int` is not one of these**, and `I64` is a second spelling of it rather
+/// than a distinct type: two different 64-bit signed integers would need a
+/// conversion between them that can never fail and never does anything.
 ///
-/// Everything else is here because `Int` alone cannot describe a byte, and a
-/// byte is what a wire format, a file and a string are made of.
-/// `docs/design/numbers.md`.
+/// The rest exist because `Int` cannot describe a byte, and a byte is what a
+/// wire format, a file and a string are made of. `docs/design/numbers.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IntKind {
     pub signed: bool,
@@ -110,11 +108,10 @@ pub enum Type {
     Fixed(IntKind),
     /// IEEE-754 double precision.
     ///
-    /// Note what does *not* follow: `Float` implements neither `Eq` nor `Ord`.
-    /// `==` and `<` on floats are primitive and mean what IEEE says they mean,
-    /// which is what every reader expects — and exactly why the *traits* are
-    /// withheld, since `NaN == NaN` is false and a law-abiding `Eq` cannot say
-    /// so. `docs/design/numbers.md`.
+    /// `Float` implements neither `Eq` nor `Ord`. `==` and `<` on floats are
+    /// primitive and mean what IEEE says, which is what a reader expects — and
+    /// is exactly why the traits are withheld, since a law-abiding `Eq` cannot
+    /// say `NaN == NaN` is false. `docs/design/numbers.md`.
     Float,
     Bool,
     Str,
@@ -122,43 +119,40 @@ pub enum Type {
     /// An opaque machine address: a `void *`.
     ///
     /// **Not counted, not dereferenceable from Khora, and never a pointer into
-    /// Khora's own heap.** It exists so that a foreign function can hand back
-    /// a handle — a `FILE *`, an `SSL_CTX *` — and be given it again later.
+    /// Khora's own heap.** It carries a handle a foreign function handed back —
+    /// a `FILE *`, an `SSL_CTX *` — so it can be given to that side again.
     /// Nothing in the language produces one from a Khora value, which is what
-    /// makes it impossible to create a dangling one: the only pointers that
-    /// exist came from the other side, and their lifetimes are that side's
-    /// business.
+    /// makes a dangling one impossible: every pointer that exists came from the
+    /// other side, and its lifetime is that side's business.
     ///
-    /// Lending a *buffer* — `Array<U8>`'s bytes — is the harder question and is
-    /// deliberately not answered by this type. `docs/design/ffi.md`.
+    /// Lending a *buffer* — `Array<U8>`'s bytes — is the harder question, and
+    /// this type deliberately does not answer it. `docs/design/ffi.md`.
     Ptr,
     /// A user-declared variant type, with its type arguments.
     ///
     /// **`home` is what makes this an identity rather than a spelling.** Two
-    /// modules may each declare a `Point`, and without the module they were one
-    /// type: the importer looked its fields up by name, found its own
-    /// declaration, and was told that `Point` has no field `label` about a
-    /// value that has exactly that field. An alias had the mirror problem —
-    /// `import other::{Point as Other}` keyed the import under `Other`, so a
-    /// rename invented a type. Errata 46.
+    /// modules may each declare a `Point`; without the module they are one type,
+    /// and an importer looking up fields by name finds its own declaration and
+    /// is told `Point` has no field `label` about a value that has exactly that
+    /// field. An alias is the mirror of it: `import other::{Point as Other}`
+    /// keyed under `Other` invents a type. Errata 46.
     ///
-    /// `None` for a name that did not resolve to a declaration, which is a type
-    /// error already reported. It deliberately does *not* mean "any module":
-    /// two unresolved names are equal to each other and to nothing else, so a
-    /// failure here cannot quietly satisfy a comparison.
+    /// `None` for a name that did not resolve, which is an error already
+    /// reported. It does *not* mean "any module" — two unresolved names are
+    /// equal to each other and to nothing else, so a failure here cannot
+    /// quietly satisfy a comparison.
     ///
-    /// [`std::fmt::Display`] prints `name` alone. A reader wants `Point`, and
-    /// the two places where that is genuinely ambiguous — a message naming two
-    /// types that print alike — ask for [`Type::qualified`] instead.
+    /// [`std::fmt::Display`] prints `name` alone, because a reader wants
+    /// `Point`. A message naming two types that print alike asks for
+    /// [`Type::qualified`] instead.
     Adt { name: String, home: Option<khora_hir::ModulePath>, args: Vec<Type> },
     /// A function *value*'s type, effects included.
     ///
     /// The rows are why a function that needs capabilities can be passed as a
-    /// value at all: without them, mentioning `analyze` would have to charge
-    /// its requirements to whatever function wrote the name, rather than to
-    /// whoever eventually calls it. `List::map(analyze)` working is the single
-    /// largest ergonomic difference from a monadic design — see
-    /// `docs/design/effects.md`.
+    /// value at all: without them, mentioning `analyze` charges its
+    /// requirements to whatever function wrote the name rather than to whoever
+    /// calls it. `List::map(analyze)` working is the largest ergonomic
+    /// difference from a monadic design. `docs/design/effects.md`.
     Fn { params: Vec<Type>, ret: Box<Type>, requires: Box<Type>, raises: Box<Type> },
     /// A hole inference is free to fill.
     Var(unify::TypeVar),
@@ -170,21 +164,20 @@ pub enum Type {
     /// is known.
     ///
     /// The head is a [`Type::Param`] when rigid and a [`Type::Var`] when the
-    /// caller still gets to choose it. Solving that variable against a concrete
-    /// `Option<Int>` is what decides `F := Option` and `B := Int`, and the
-    /// application collapses into an ordinary [`Type::Adt`] as soon as it does —
-    /// so nothing downstream of instance selection ever sees one.
+    /// caller still chooses it. Solving that variable against a concrete
+    /// `Option<Int>` decides `F := Option` and `B := Int`, and the application
+    /// collapses into an ordinary [`Type::Adt`] — so nothing downstream of
+    /// instance selection ever sees one.
     Applied { head: Box<Type>, args: Vec<Type> },
     /// A set of labelled requirements: `{ ledger: Ledger | 'e }`.
     ///
     /// Serves both effect clauses. A capability row labels each field with the
     /// name the caller supplies it under; an error row labels each with the
-    /// error's own type name, since two errors of one type cannot be told
-    /// apart and by-name is how they are handled.
+    /// error's own type name, since two errors of one type cannot be told apart
+    /// and by-name is how they are handled.
     ///
     /// `tail` is what else may be present: a variable for an open row, `None`
-    /// for a closed one. `{}` is the closed empty row, which is what an
-    /// entry point must reduce to.
+    /// for a closed one. `{}` is what an entry point must reduce to.
     Row {
         /// Sorted by label, so two rows written in different orders are one
         /// type without unification having to sort them.
@@ -198,10 +191,9 @@ pub enum Type {
     Tuple(Vec<Type>),
     /// An associated type projected off another type: `Self::Item`.
     ///
-    /// Normalizes to whatever the owner's impl bound the name to as soon as the
-    /// owner is known — `Range::Item` becomes `Int` given
-    /// `impl Iterator for Range { type Item = Int; }`. Until then it stands for
-    /// itself, and unifies only with the same projection.
+    /// Normalizes as soon as the owner is known: `Range::Item` becomes `Int`
+    /// given `impl Iterator for Range { type Item = Int; }`. Until then it
+    /// stands for itself and unifies only with the same projection.
     Assoc { owner: Box<Type>, name: String },
     /// A type-level integer, as in `Matrix<3, 4>`.
     ///
@@ -302,11 +294,10 @@ impl Type {
 
     /// A nullary ADT whose declaring module is not known here.
     ///
-    /// Two callers, and both are legitimate. The backend works on names
-    /// monomorphization has already made unique, so there is nothing left for a
-    /// module to disambiguate. And a handful of types are the compiler's own —
-    /// [`FAILED`] is produced by `assert` and caught by a test, and no source
-    /// declares it.
+    /// Two legitimate callers. The backend works on names monomorphization has
+    /// already made unique, so there is nothing left to disambiguate; and a few
+    /// types are the compiler's own, like [`FAILED`], which `assert` produces
+    /// and no source declares.
     ///
     /// Anything reading a name a *program* wrote wants [`Type::adt_in`], or the
     /// two `Point`s of errata 46 become one type again.
@@ -361,8 +352,7 @@ impl Type {
 pub struct Signature {
     /// Whether this names a C symbol rather than a Khora body.
     ///
-    /// Read by the code generator, which is the only thing that can tell the
-    /// difference: to the type checker a declaration is a declaration, and a
+    /// Only the code generator can tell the difference: to the type checker a
     /// signature written ahead of its implementation is a perfectly good one to
     /// check against. `docs/design/ffi.md`.
     pub is_extern: bool,
@@ -401,13 +391,11 @@ pub struct VariantInfo {
     pub type_name: String,
     /// The module that declares `type_name`.
     ///
-    /// Without it, a file that declares a `Point` and imports another module's
-    /// `Point` has one key for two declarations, and whichever arrived first
-    /// answers for both — which is how the importer was told its own type had
-    /// no field `label`. Errata 46.
+    /// Without it, a file declaring a `Point` and importing another module's
+    /// has one key for two declarations and whichever arrived first answers for
+    /// both. Errata 46.
     ///
-    /// `None` for a declaration whose module is not known, which is only the
-    /// compiler's own.
+    /// `None` only for the compiler's own declarations.
     pub home: Option<khora_hir::ModulePath>,
     pub name: String,
     pub fields: Vec<Type>,
@@ -459,14 +447,14 @@ pub const SHARE: &str = "Share";
 
 /// What each type name written in one file actually refers to.
 ///
-/// A name is a spelling and a type is a declaration, and this is the map
-/// between them. Two things follow that did not work before it existed
-/// (errata 46): a file's own `Point` is distinct from one it imports, and an
-/// alias resolves to the *declared* name, so `import other::{Point as Other}`
-/// gives `Other` and `other::Point` one identity instead of two.
+/// A name is a spelling and a type is a declaration; this is the map between
+/// them. Two things follow (errata 46): a file's own `Point` is distinct from
+/// one it imports, and an alias resolves to the *declared* name, so
+/// `import other::{Point as Other}` gives `Other` and `other::Point` one
+/// identity rather than two.
 ///
-/// A file's own declaration wins over an import of the same name, which is
-/// what shadowing means everywhere else in the language.
+/// A file's own declaration wins over an import of the same name, which is what
+/// shadowing means everywhere else in the language.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TypeHomes {
     /// Local spelling to the module that declares it and the name it is
@@ -539,29 +527,23 @@ pub const SHARED_FN_TYPE: &str = "SharedFn";
 
 /// Every declaration the compiler treats specially, by the name it goes by.
 ///
-/// **These are matched by name, and a name is not an identity.** A type is a
-/// [`Type::Adt`] carrying a bare `String`, so `Array` declared in a user's
-/// module and `Array` declared in `std::core` are one type to everything
-/// downstream — which meant a user's `Array` was given the runtime's array
-/// layout and dropping one read a garbage element width and aborted the
-/// process. Not "no privilege": memory corruption.
+/// **These are matched by name, and a name is not an identity.** A user's
+/// `Array` and `std::core`'s are one type to everything downstream, so without
+/// a check the user's would be given the runtime's array layout and dropping
+/// one would read a garbage element width and abort the process. Not "no
+/// privilege": memory corruption.
 ///
-/// [`collides_with_a_builtin`] refuses the collision, which closes that hole
-/// without pretending the underlying problem is solved. It is not. Two modules
-/// that each declare a `Point` still collide, and an alias still splits one
-/// type into two — see D13's neighbours in `docs/roadmap.md` and errata 46.
-/// The real fix is for a type to carry the declaration it resolved to, and it
-/// changes how every type in the program is keyed.
+/// [`collides_with_a_builtin`] refuses that collision. It does not solve the
+/// underlying problem, which is that a type is keyed by a bare `String` — see
+/// errata 46 for what a `home` on [`Type::Adt`] fixes and what it does not.
 ///
-/// `Int`, `Float`, `Bool`, `String` and `Ptr` are here for the same reason
-/// even though they are not ADTs: [`named_type`] answers with the builtin
-/// before it ever consults what the file declared, so a user's `type String`
-/// silently never existed.
+/// `Int`, `Float`, `Bool`, `String` and `Ptr` are listed although they are not
+/// ADTs: [`named_type`] answers with the builtin before consulting the file, so
+/// a user's `type String` would silently never exist.
 ///
-/// `Share` is a trait rather than a type, so no *definition* of it can exist
-/// to conflict — a marker trait is empty and `std::core`'s declaration and a
-/// user's are the same three characters. It is listed because it is
-/// compiler-known, not because the check below can act on it.
+/// `Share` is a trait, so no *definition* of it can conflict — a marker trait
+/// is empty, and two declarations of it are the same three characters. It is
+/// listed as compiler-known, not as something the check below acts on.
 pub const COMPILER_KNOWN: [&str; 13] = [
     SHARE,
     FIBER_TYPE,
@@ -580,18 +562,17 @@ pub const COMPILER_KNOWN: [&str; 13] = [
 
 /// Whether declaring `name` with a definition would collide with the compiler.
 ///
-/// **Only a definition collides.** `pub type Array<A>;` with no right-hand
-/// side is how the builtin is *named* — it is what `std::core` writes, and what
-/// every backend test writes to reach an array without importing the standard
-/// library. Nothing is claimed by it that the compiler does not already
-/// provide, so nothing conflicts.
+/// **Only a definition collides.** `pub type Array<A>;` with no right-hand side
+/// is how the builtin is *named*, which is what `std::core` writes and what
+/// every backend test writes to reach an array without importing `std`. It
+/// claims nothing the compiler does not already provide.
 ///
-/// `type Array = { label: String }` is the other thing entirely: a shape the
-/// compiler will ignore in favour of the runtime's, on a name it will hand an
-/// array's layout. That is the case worth refusing, and it is the only one.
+/// `type Array = { label: String }` is the other thing: a shape the compiler
+/// ignores in favour of the runtime's, on a name it will hand an array's
+/// layout. That is the only case worth refusing.
 ///
-/// So the rule needs no exemption for `std` and no notion of a blessed module,
-/// which is just as well — there is nothing finer than a module path to check
+/// So the rule needs no exemption for `std` and no blessed module — which is
+/// just as well, since there is nothing finer than a module path to check
 /// against until a package has an identity of its own (roadmap 10.2).
 pub fn collides_with_a_builtin(name: &str) -> bool {
     COMPILER_KNOWN.contains(&name)

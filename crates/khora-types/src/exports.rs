@@ -1,20 +1,19 @@
 //! `pub extern fn` — a function C can call.
 //!
-//! `docs/design/c-export.md`. The marker is two words the language already
-//! has: `extern` means the C boundary, `export` means visible outside. A body
-//! is what tells the two directions apart, which is a rule that already
-//! existed — errata 5 makes a body optional, so `extern fn` without one is a
-//! symbol to be found at link time and with one is a symbol to be published.
+//! `docs/design/c-export.md`. The marker is two words the language already has:
+//! `extern` for the C boundary, `pub` for visible outside. A body tells the two
+//! directions apart, by a rule that already existed — errata 5 makes a body
+//! optional, so `extern fn` without one is a symbol to find at link time and
+//! with one is a symbol to publish.
 //!
 //! # Why this is checked here and not where a call is generated
 //!
 //! Foreign *imports* are checked at the call site on purpose: a binding to
 //! something one target does not have should not be an error on a target that
-//! never calls it. An **export** is the other way round. It is part of the
-//! library's published ABI whether or not any Khora code calls it — that is
-//! the entire point of writing one — so a signature C could not call is wrong
-//! at the declaration, and `khora check` should say so rather than leaving it
-//! to whoever eventually runs a `--lib` build.
+//! never calls it. An export is the other way round — it is part of the
+//! library's published ABI whether or not any Khora code calls it — so a
+//! signature C could not call is wrong at the declaration, and `khora check`
+//! should say so rather than leaving it to a `--lib` build.
 
 use khora_db::SourceFile;
 use khora_hir::HirError;
@@ -56,21 +55,18 @@ pub(crate) fn export_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
 
         let Some(signature) = signatures.get(&name) else { continue };
 
-        // **A `with` clause reverses meaning across this boundary, and that is
-        // worth its own message.** `ffi.md` §3 says a `with` clause on a
-        // foreign *import* is a permission and nothing is appended to the
-        // call — the requirement governs who may bind the symbol, and the C
-        // function never sees it. Somebody who has read that will reasonably
-        // expect the same of an export, and it is the opposite: an exported
-        // function's body genuinely needs the evidence, evidence is an
-        // appended argument, and C has none to append.
+        // **A `with` clause reverses meaning across this boundary**, which is
+        // why it gets its own message. On a foreign *import* it is a permission
+        // governing who may bind the symbol, and nothing is appended to the
+        // call (`ffi.md` §3). On an export it is the opposite: the body
+        // genuinely needs the evidence, evidence is an appended argument, and C
+        // has none to append.
         //
-        // Without this the wrapper was built from the foreign view of the
-        // signature — no evidence parameters — and called a target that
-        // expected them. LLVM's verifier caught it, which is the good case,
-        // and reported "Incorrect number of arguments passed to called
-        // function!" against line 1 of the file under the heading "which is a
-        // compiler bug". It was a compiler bug. It was not the reader's.
+        // Without this the wrapper is built from the foreign view — no evidence
+        // parameters — and calls a target that expects them. LLVM's verifier
+        // catches it and reports "Incorrect number of arguments passed to
+        // called function!" against line 1, under a heading blaming the
+        // compiler.
         if is_open(&signature.requires) {
             found.push(HirError {
                 message: format!(

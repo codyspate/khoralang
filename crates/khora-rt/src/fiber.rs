@@ -1,32 +1,22 @@
 //! Fibers.
 //!
-//! **A fiber is an operating-system thread, and can be a coroutine on
-//! Phase 11's scheduler instead.** `docs/design/fibers.md` decided a fiber
-//! *is* the second of those and that the first would do until the scheduler
-//! existed, on the argument that a program cannot tell which it has. The
-//! scheduler now exists, and this file is where the two meet.
+//! **A fiber is an operating-system thread, or a coroutine on the scheduler.**
+//! `docs/design/fibers.md` decided a fiber *is* the second and that the first
+//! would do until the scheduler existed, on the argument that a program cannot
+//! tell which it has. This file is where the two meet, and
+//! `KHORA_FIBERS=scheduler` picks the coroutine.
 //!
-//! `KHORA_FIBERS=scheduler` picks it. **Threads are the default, and the
-//! reason is a measurement rather than caution**: `bench/service` answers
-//! 782,149 requests a second on threads and about 429,000 on the scheduler,
-//! on one machine in one sitting, which is the comparison `bench/README.md`
-//! says is the only kind that travels.
+//! **Threads are the default, and the reason is a measurement**: `bench/service`
+//! answers 782,149 requests a second on threads against about 429,000 on the
+//! scheduler, on one machine in one sitting — the only kind of comparison
+//! `bench/README.md` says travels. Both paths are kept because a number is only
+//! worth having if it can be taken again.
 //!
-//! It was 59,965 until 11H found that the reactor's `poll` could not be
-//! interrupted by a registration arriving while it waited — twelve times
-//! became 1.8 times by adding a socket the reactor could be poked through.
-//! What is left of the gap is written up there, along with the two things
-//! tried that did not help.
-//!
-//! Both paths are kept because the number is only worth having if it can be
-//! taken again.
-//!
-//! **One thing a program can tell, on the scheduler**, written here so nobody
-//! has to find it. A thread gets the operating system's stack — two megabytes
-//! on Linux, one on Windows. A coroutine gets `corosensei`'s, which is a
-//! megabyte with a guard page. Khora recursing deeply enough to have been near
-//! the old limit is over the new one, and the failure is a clean fault at the
-//! guard page rather than corruption.
+//! **One thing a program can tell, on the scheduler.** A thread gets the
+//! operating system's stack — two megabytes on Linux, one on Windows — and a
+//! coroutine gets `corosensei`'s megabyte with a guard page. Recursion that was
+//! near the old limit is over the new one, and the failure is a clean fault at
+//! the guard page rather than corruption.
 
 use super::*;
 use crate::coro::Task;
@@ -242,11 +232,6 @@ fn fibers() -> &'static Scheduler {
 /// Takes ownership of `body`: the fiber releases it when it finishes, so the
 /// caller hands over a reference of its own.
 ///
-/// The fiber is an operating-system thread today and a stackful coroutine
-/// later. `docs/design/fibers.md` decides that, and the decision is that a
-/// program cannot tell which — the handle is the same, and so is everything a
-/// program can do with it.
-///
 /// `call` is null for a thunk that cannot fail, and otherwise the trampoline
 /// that runs it and hands back its tag. A thunk with no error row has no
 /// channel to say it was cancelled on, and so cannot be stopped part-way.
@@ -344,16 +329,14 @@ pub unsafe extern "C" fn khora_fiber_spawn(
 
 /// What to do with how a fiber ended.
 ///
-/// A cancellation is the ordinary way for a stopped fiber to finish and needs
-/// no announcement — it carries no payload either, so there is nothing to
-/// release. An *error* nobody is waiting for is a different matter: it is
-/// reported here rather than dropped in silence, which is what a panicking
-/// thread does everywhere else.
+/// A cancellation is the ordinary way for a stopped fiber to finish, needs no
+/// announcement, and carries no payload to release. An *error* nobody is
+/// waiting for is reported here rather than dropped in silence.
 ///
-/// The error object is freed but not its fields, because the runtime cannot
-/// know a value's drop routine and the row said `'e`. That is a bounded leak
-/// on a path that should not survive nurseries, where the error goes to a
-/// parent who knows exactly what it is.
+/// The error object is freed but not its fields: the runtime cannot know a
+/// value's drop routine and the row said `'e`. A bounded leak, on a path that
+/// should not survive nurseries — there the error goes to a parent who knows
+/// exactly what it is.
 ///
 /// # Safety
 ///

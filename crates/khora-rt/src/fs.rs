@@ -1,10 +1,10 @@
 //! File operations that suspend a fiber rather than a worker.
 //!
-//! Phase 11E's caller. `std::fs` used to declare `fopen`, `fread`, `fwrite` and
-//! `fclose` as foreign functions and call them directly, which is correct and
-//! was fine while a fiber was a thread. Once a fiber is one of many on a
-//! worker, a read of a cold file holds that worker — and everything queued
-//! behind it — for as long as the disk takes.
+//! `std::fs` used to declare `fopen`, `fread`, `fwrite` and `fclose` as foreign
+//! functions and call them directly, which is correct and was fine while a
+//! fiber was a thread. Once a fiber is one of many on a worker, a read of a
+//! cold file holds that worker — and everything queued behind it — for as long
+//! as the disk takes.
 //!
 //! So `std::fs` calls these instead. Each one hands the real C call to
 //! [`crate::blocking`] and suspends; off a scheduler there is no worker to

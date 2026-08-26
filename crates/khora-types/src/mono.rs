@@ -1,29 +1,26 @@
 //! Monomorphization: turning generic functions into concrete ones.
 //!
-//! Code generation has no representation for a type variable — `llvm_type`
-//! returns nothing for one, and rightly so, since there is no machine type that
-//! is "some `A`". Rather than box every generic value and pay for it forever,
-//! Khora emits one copy of a generic function per set of type arguments it is
-//! actually used at. Abstraction costs nothing at runtime, which is the promise
-//! in `docs/vision.md`.
+//! Code generation has no representation for a type variable — there is no
+//! machine type that is "some `A`". Rather than box every generic value and pay
+//! for it forever, Khora emits one copy of a generic function per set of type
+//! arguments it is used at, so abstraction costs nothing at runtime.
+//! `docs/vision.md`.
 //!
 //! # How the instances are found
 //!
-//! Reachability, not enumeration. Starting from the functions that are already
+//! Reachability, not enumeration. Starting from the functions already
 //! concrete, each body says which generic functions it mentions and at what
-//! arguments — recorded by the checker, which is the only pass that knows,
-//! since it created those variables and solved them.
+//! arguments — recorded by the checker, the only pass that knows, since it
+//! created those variables and solved them.
 //!
 //! Walking a generic body substitutes the instance's own arguments first, so
-//! `pair<A>` calling `id<A>` from inside `pair@Int` asks for `id@Int` and not
-//! for `id@A`.
+//! `pair<A>` calling `id<A>` from inside `pair@Int` asks for `id@Int`.
 //!
 //! # What is deliberately not here
 //!
-//! Recursion through a *changing* type argument — a `f<A>` that calls
-//! `f<List<A>>` — generates instances without end. Polymorphic recursion is
-//! rejected with a diagnostic rather than hanging the compiler, which is what
-//! the depth limit is for.
+//! Polymorphic recursion — an `f<A>` that calls `f<List<A>>` — generates
+//! instances without end, so it is rejected with a diagnostic rather than
+//! hanging the compiler. That is what the depth limit is for.
 
 use std::collections::{HashMap, HashSet};
 
@@ -126,13 +123,11 @@ fn mangle(ty: &Type) -> String {
 /// Turns a call through a trait into a call to the impl that answers it.
 ///
 /// A method mention records the trait's key — `Show::show` — with `Self` as its
-/// first type argument. That argument is what selects the impl, which is the
-/// whole of nominal resolution: a name, never a shape. See
-/// `docs/design/typeclasses.md`.
+/// first type argument, and that argument selects the impl. Nominal resolution
+/// is a name and never a shape. `docs/design/typeclasses.md`.
 ///
-/// Returns `None` when the mention is not a trait method, or when `Self` is
-/// still unsolved, in which case the caller has nothing to emit and the
-/// diagnostic has already been raised elsewhere.
+/// `None` when the mention is not a trait method, or when `Self` is unsolved:
+/// the caller has nothing to emit and the diagnostic was raised elsewhere.
 pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
     let (trait_name, method) = instance.function.split_once("::")?;
     // `#User::birthday` is already the thing to call: an inherent method has no
@@ -294,15 +289,10 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
         .collect();
 
     // **Which impl a call resolves to is a whole-program question.** A generic
-    // function is compiled once per type it is used at, and the type — with its
-    // impls — is very often in a module the generic has never heard of:
-    // `std::ai`'s `extract<A: Extract>` is specialized at an `AnalysisReport`
-    // declared by the application, and `std::ai` cannot see that impl.
-    //
-    // Looking only in the file the *body* lives in is therefore wrong in the
-    // direction that matters most, and it failed the way a missing impl always
-    // fails here: the trait's own declaration has no body, so the code
-    // generator said there was nothing to call.
+    // is compiled once per type it is used at, and that type's impls are often
+    // in a module the generic has never heard of: `std::ai`'s
+    // `extract<A: Extract>` is specialized at an `AnalysisReport` the
+    // application declared, which `std::ai` cannot see.
     //
     // Merged rather than searched unit by unit, because a trait's declaration
     // and its impls are routinely in different files and `select_impl` needs
@@ -440,27 +430,22 @@ fn defining(units: &[Unit<'_>], from: usize, name: &str) -> Option<(usize, Strin
         }
     }
 
-    // A trait or impl method carries a compound key of its own —
-    // `Show#Int::show`, or `#Int::show` for an inherent one — which no import
-    // names. It traveled in with its trait, so look for the key itself in the
-    // other modules.
+    // A trait or impl method carries a compound key — `Show#Int::show`, or
+    // `#Int::show` for an inherent one — which no import names. It traveled in
+    // with its trait, so look for the key itself in the other modules.
     //
-    // **Only for compound keys.** This used to search every unit for any name,
-    // which meant a name the calling file neither defines nor imported was
-    // matched against whatever module happened to declare one first. That is
-    // wrong for exactly the case it looks harmless in: an `extern fn` is a
-    // declaration with no body, so `extern fn close(handle: I32) -> I32` in
-    // `socket_linux.kh` fell past both branches above and bound to the private
-    // `close(file: Ptr)` in `std::fs`. Every POSIX build emitted
-    // `call void @kh$std$fs$close(i32 %handle)` and LLVM rejected the module.
+    // **Only for compound keys.** Searching every unit for any name binds a
+    // name the calling file neither defines nor imported to whatever module
+    // declares one first, and an `extern fn` is exactly that: a declaration
+    // with no body. `extern fn close(handle: I32) -> I32` in `socket_linux.kh`
+    // bound to the private `close(file: Ptr)` in `std::fs`, and every POSIX
+    // build emitted `call void @kh$std$fs$close(i32 %handle)` for LLVM to
+    // reject. Windows hid it, spelling the same call `closesocket`;
+    // `tests/portability.rs` is what makes that class of bug visible from any
+    // host.
     //
-    // Windows hid it for as long as it existed, because `socket_windows.kh`
-    // spells the same call `closesocket`. `khora-codegen-llvm/tests/portability.rs`
-    // is what makes that class of bug visible from any host now.
-    //
-    // A bare name that this file neither defines nor imported is not a Khora
-    // function. It is a C symbol the file declared, and the caller's `None`
-    // branch already does the right thing with it.
+    // A bare name this file neither defines nor imports is a C symbol it
+    // declared, and the caller's `None` branch handles it.
     if !name.contains('#') {
         return None;
     }

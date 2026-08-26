@@ -1,4 +1,4 @@
-//! Phase 11F: adversarial execution, and the evidence it leaves.
+//! Adversarial execution, and the evidence it leaves.
 //!
 //! Every other test in this crate isolates one mechanism and shows it works.
 //! This one runs all of them against each other for as long as it is asked to,
@@ -21,12 +21,11 @@
 //!
 //! # How a failure shows
 //!
-//! Not as a wrong answer — a scheduler has no answer to get wrong. It shows as
-//! a fiber that never finishes, a fiber that finishes twice, a `Task` that
-//! exists in two places, or a count that does not come back to zero. So the
-//! test asserts an *arithmetic* rather than a result:
-//! [`crate::scheduler::Audit`] describes every place a fiber can be, and a
-//! settled pool has nothing anywhere.
+//! Not as a wrong answer — a scheduler has no answer to get wrong — but as a
+//! fiber that never finishes, a fiber that finishes twice, a `Task` in two
+//! places, or a count that does not come back to zero. So the assertion is an
+//! *arithmetic* rather than a result: [`crate::scheduler::Audit`] names every
+//! place a fiber can be, and a settled pool has nothing anywhere.
 //!
 //! Three more checks run continuously rather than at the end, because by the
 //! end the evidence is gone:
@@ -457,22 +456,19 @@ fn adversarial_execution_leaves_nothing_behind() {
         }
 
         // **What can honestly be checked while the pool is busy**, which is
-        // less than it first appears. `Audit` reads five places without a lock
-        // across them, so a task moving between two of them can be seen in
-        // both, and `in_hand` goes negative with nothing wrong. That cost an
-        // hour and forty false failures in sixty seeds before the reasoning
-        // was straight.
+        // less than it looks. `Audit` reads five places without a lock across
+        // them, so a task moving between two is seen in both and `in_hand` goes
+        // negative with nothing wrong.
         //
-        // This one survives, because `audit` reads `completed` before
-        // everything and `spawned` after everything: no fiber can be counted
-        // as finished before it was counted as begun, whatever the skew. A
-        // fiber that finished twice fails it immediately rather than at the
-        // end.
+        // This one survives because `audit` reads `completed` first and
+        // `spawned` last: no fiber can be counted finished before it was
+        // counted begun, whatever the skew. One that finished twice fails here
+        // rather than at the end.
         //
-        // The rest is caught where it can be caught exactly: `ResumedOnce`
-        // aborts the instant two workers enter one coroutine, each fiber
-        // checks its own identity on every resume, and `settled` does the full
-        // arithmetic once the pool is quiet and nothing is moving.
+        // The rest is caught where it can be caught exactly — `ResumedOnce`
+        // aborts the instant two workers enter one coroutine, each fiber checks
+        // its identity on every resume, and `settled` does the full arithmetic
+        // once nothing is moving.
         if round % 32 == 0 {
             let audit = pool.audit();
             assert!(audit.outstanding() >= 0, "more fibers finished than began: {audit:?}");

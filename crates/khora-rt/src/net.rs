@@ -1,6 +1,6 @@
 //! Socket operations that suspend a fiber instead of a worker.
 //!
-//! Phase 11C.3. [`crate::reactor`] can say when a socket is ready; this is what
+//! [`crate::reactor`] can say when a socket is ready; this is what
 //! turns that into a `recv` a Khora program can call and not notice.
 //!
 //! # What `std::net::socket` sees
@@ -101,17 +101,15 @@ fn wait(socket: Socket, interest: Interest, deadline: Option<std::time::Instant>
 /// Receive deadlines, by socket, in milliseconds.
 ///
 /// **This is `SO_RCVTIMEO` moved somewhere it can still work.** The kernel's
-/// receive timeout applies to a call that would have blocked, and a socket the
-/// reactor drives never has one, so the option becomes silently inert the
-/// moment `khora_net_prepare` touches the socket. A server that used it to shed
-/// a slow client — `std::net::http` sets ten seconds in two places — would
-/// instead park a fiber on that client for ever.
+/// receive timeout applies only to a call that would have blocked, and a socket
+/// the reactor drives never has one — so the option goes silently inert the
+/// moment `khora_net_prepare` touches the socket, and a server using it to shed
+/// a slow client parks a fiber on that client for ever instead.
 ///
-/// Keyed by the raw handle, which is only sound because the entry is removed
-/// when the socket is closed: handles are reused, and a stale deadline
-/// belonging to a closed connection would otherwise be inherited by whatever
-/// opened next. `khora_net_forget` is that removal and `std::net` calls it from
-/// `shut`.
+/// Keyed by the raw handle, which is sound only because the entry is removed
+/// when the socket closes: handles are reused, and a stale deadline would
+/// otherwise be inherited by whatever opened next. `khora_net_forget` is that
+/// removal, and `std::net` calls it from `shut`.
 static TIMEOUTS: std::sync::Mutex<Option<std::collections::HashMap<usize, u64>>> =
     std::sync::Mutex::new(None);
 
@@ -136,23 +134,18 @@ fn deadline_for(socket: Socket) -> Option<std::time::Instant> {
 /// Replaces `setsockopt(SO_RCVTIMEO)`. Zero clears it.
 /// Opens an outbound connection, resolving `host` first.
 ///
-/// **The one place a Khora program dials out.** `std::net::socket` grew from a
-/// server: `listen_on`, `accept_on`, and nothing that starts a conversation.
-/// A database driver is the first thing that needs the other direction, and
-/// writing it as Khora over `connect(2)` would mean `getaddrinfo`, `sockaddr`
-/// for two address families, and three copies — one per platform — of struct
-/// arithmetic that has no business being in a standard library.
+/// **The one place a Khora program dials out.** Written in Khora over
+/// `connect(2)` it would mean `getaddrinfo`, `sockaddr` for two address
+/// families, and one copy per platform of struct arithmetic that has no
+/// business being in a standard library. Here it is once, in Rust:
+/// `TcpStream::connect` brings DNS, IPv6 and the platform's resolver, and what
+/// comes back is a handle the reactor takes over like an accepted one.
 ///
-/// So it is here, once, in Rust. `TcpStream::connect` brings DNS, IPv6 and the
-/// platform's own resolver with it, and what comes back is a handle the
-/// reactor can take over exactly like an accepted one.
-///
-/// **It blocks the worker while it connects**, which is honest rather than
-/// ideal: a DNS lookup is not something the reactor can wait on, and the
-/// blocking pool that exists for this (`crate::blocking`) is not reachable
-/// from a plain `extern fn` yet. A connect is once per connection and a query
-/// is many, so this is the right thing to get wrong first — recorded in
-/// `docs/roadmap.md` Phase 13 rather than left to be discovered.
+/// **It blocks the worker while it connects.** A DNS lookup is not something
+/// the reactor can wait on, and `crate::blocking` is not reachable from a plain
+/// `extern fn` yet. A connect happens once per connection where a query happens
+/// many times, so this is the right thing to get wrong first — `docs/roadmap.md`
+/// Phase 13.
 ///
 /// Returns the handle, or -1.
 ///
@@ -239,21 +232,19 @@ pub unsafe extern "C" fn khora_net_recv(socket: Socket, into: *mut u8, length: i
             return read;
         }
         if !wait(socket, Interest::Readable, deadline) {
-            // **A negative return, and nothing else.** The first version of
-            // this also set `EAGAIN`, to imitate a socket with `SO_RCVTIMEO`
-            // down to the error number. That was unnecessary and unsound.
+            // **A negative return, and nothing else** — no `EAGAIN` to
+            // imitate `SO_RCVTIMEO` down to the error number.
             //
-            // Unnecessary because no Khora reads it: `std::net` looks at the
-            // sign and `std::fs` says outright that C's error numbers are a
-            // table it declines to know, so a timeout is a failed read and
-            // that is the whole of the contract.
+            // Unnecessary: no Khora reads it. `std::net` looks at the sign, and
+            // `std::fs` says outright that C's error numbers are a table it
+            // declines to know.
             //
-            // Unsound because `errno` is thread-local and a fiber is not. It
-            // is set here on whichever worker is running, and a fiber that
+            // And unsound, because `errno` is thread-local and a fiber is not.
+            // It would be set on whichever worker is running, and a fiber that
             // suspends before its caller looks — at any safepoint, which is
-            // every loop back-edge — reads the error off a thread that never
-            // made the call. Any future shim tempted to report through `errno`
-            // has the same problem.
+            // every loop back-edge — reads it off a thread that never made the
+            // call. Any shim tempted to report through `errno` has the same
+            // problem.
             return -1;
         }
     }

@@ -4,11 +4,11 @@
 //! needs — the substitution, what each expression and local resolved to, the
 //! demands still owed, and the diagnostics. `unify` does the solving.
 //!
-//! Split across the modules named here because a `Checker` grew fifty methods
-//! and they cluster: inferring an expression form, resolving a call, moving a
-//! row, deciding what may cross a fiber, instantiating a parameter, and taking
-//! a pattern apart. Rust lets an inherent impl live in several modules of one
-//! crate, so each opens `impl<'a> Checker<'a>` again. Roadmap 9.6.3.
+//! Split across the modules named here, one per cluster of methods: inferring
+//! an expression form, resolving a call, moving a row, deciding what may cross
+//! a fiber, instantiating a parameter, taking a pattern apart. Rust lets an
+//! inherent impl live in several modules of one crate, so each opens
+//! `impl<'a> Checker<'a>` again.
 
 use super::*;
 
@@ -84,11 +84,11 @@ pub(crate) struct Checker<'a> {
     /// What this body has demanded of its caller so far, accumulated as calls
     /// are checked and compared against the signature at the end.
     ///
-    /// Requirements flow *upward*: a function that calls something needing
-    /// `ledger` needs `ledger` too, unless a `with` block supplies it. Rows
-    /// are checked against the declaration rather than inferred into it,
-    /// because an exported signature is a promise and inferring one silently
-    /// would let a body widen it. `docs/design/effects.md`.
+    /// Requirements flow *upward*: a function calling something that needs
+    /// `ledger` needs `ledger` too, unless a `with` block supplies it. Rows are
+    /// checked against the declaration rather than inferred into it, because an
+    /// exported signature is a promise and inferring one would let a body widen
+    /// it silently. `docs/design/effects.md`.
     pub(crate) demanded: Vec<Demand>,
     /// Where each deferred projection was written, in the order the unifier
     /// deferred them, so `settle_projections` can report against the source.
@@ -114,31 +114,28 @@ pub(crate) struct Checker<'a> {
     /// The open tail of every lambda's inferred `raises` row, in the order the
     /// lambdas were seen.
     ///
-    /// A lambda's error row is a **lower bound**, not an exact answer: the body
-    /// raises at least these, and the context may reasonably ask it to be
-    /// declared as raising more. That is what makes a stub usable where a
-    /// fallible operation is expected — a mock that never fails satisfies
-    /// `raises IoError`, because raising fewer things is always safe.
+    /// A lambda's error row is a **lower bound**: the body raises at least
+    /// these, and the context may ask it to be declared as raising more. That
+    /// is what makes a mock that never fails satisfy `raises IoError`.
     ///
-    /// The tail is a variable, so it is filled in by whatever the lambda is
-    /// checked against. Anything still unsolved when the body is done was never
-    /// asked for anything, and defaults to closed-empty: nothing said this
-    /// could fail, so it cannot. Without that default an unconstrained tail
-    /// would leave the row *open*, and an open row is a fallible one to the
-    /// code generator — every lambda would return a tagged pair for nothing.
+    /// The tail is a variable, filled in by whatever the lambda is checked
+    /// against. One still unsolved when the body is done was never asked for
+    /// anything and defaults to closed-empty — leaving it open makes the row
+    /// fallible to the code generator, and every lambda returns a tagged pair
+    /// for nothing.
     pub(crate) open_raises: Vec<Type>,
     /// The type the surrounding expression is asking for, when there is one.
     ///
     /// Only integer literals read it, and only to decide which integer they
-    /// are: `let b: U8 = 65` has to work, and 65 on its own is an `Int`. This
-    /// is a *hint*, not a demand — `require` still runs afterwards, so a wrong
-    /// hint changes which error is reported and never whether one is.
+    /// are: `let b: U8 = 65` has to work, and 65 alone is an `Int`. A *hint*,
+    /// not a demand — `require` still runs afterwards, so a wrong one changes
+    /// which error is reported and never whether one is.
     ///
     /// Consumed by the first `infer` that sees it, and re-armed only where a
     /// type flows through unchanged: the branches of an `if`, the tail of a
-    /// block, the arms of a `match`. Anywhere else it would leak into a
-    /// subexpression that means something different — the `0` in `array[0]`
-    /// is an index, not a `U8`, however the result is being used.
+    /// block, the arms of a `match`. Anywhere else it leaks into a
+    /// subexpression that means something different — the `0` in `array[0]` is
+    /// an index, whatever the result is being used as.
     pub(crate) hint: Option<Type>,
     /// Calls written with `!`.
     ///
@@ -246,10 +243,9 @@ impl<'a> Checker<'a> {
     /// checked. A failure is dropped: the caller is speculating, and the real
     /// check happens where the expectation came from.
     ///
-    /// The deferred-projection bookkeeping still has to happen, because
-    /// `settle_projections` pairs the unifier's deferred list with
-    /// `self.projections` by position — leaving one out slides every later
-    /// diagnostic onto the wrong range.
+    /// The deferred-projection bookkeeping still happens: `settle_projections`
+    /// pairs the unifier's deferred list with `self.projections` by position, so
+    /// leaving one out slides every later diagnostic onto the wrong range.
     fn hint_at(&mut self, expected: &Type, found: &Type, range: TextRange) {
         let before = self.unifier.deferred_len();
         let _ = self.unifier.unify(expected, found);
@@ -260,25 +256,20 @@ impl<'a> Checker<'a> {
 
     /// Reports any type the checker finished without working out.
     ///
-    /// **`Unknown` is a silence, not a type.** It is compatible with
-    /// everything, which is exactly what makes it useful downstream of an error
-    /// — one mistake should not become five — and exactly what makes it
-    /// invisible when nothing went wrong. Four errata are the same sentence
-    /// about different holes (24, 26, 27, 30), and the fifth, entry 40, was
-    /// found by the *code generator* three layers away, in a message naming a
-    /// variable the author never wrote.
+    /// **`Unknown` is a silence, not a type.** Being compatible with everything
+    /// is what makes it useful downstream of an error — one mistake should not
+    /// become five — and what makes it invisible when nothing went wrong.
+    /// Errata 24, 26, 27, 30 and 40 are the same sentence about different
+    /// holes, the last found by the *code generator* three layers away.
     ///
-    /// So: a body the checker finished cleanly must have no `Unknown` left in
-    /// it. If one is there, either the program is ambiguous in a way nothing
-    /// reported, or the checker has a gap — and both are worth a sentence
-    /// where they happened rather than a symptom somewhere else.
+    /// So a body the checker finished cleanly must have no `Unknown` left in
+    /// it. One that is there means either an ambiguity nothing reported or a
+    /// gap in the checker, and both are worth a sentence where they happened.
     ///
-    /// Run **only when the body is otherwise clean**, because after an error
-    /// `Unknown` is doing its job and saying so again would bury the real
-    /// message. "Clean" means more than this pass being quiet: a name that did
-    /// not resolve or a fragment that did not parse leaves an `Unknown` behind
-    /// too, and both were already reported — by a different pass, whose errors
-    /// are not in this list.
+    /// Run **only when the body is otherwise clean**: after an error `Unknown`
+    /// is doing its job. "Clean" means more than this pass being quiet — an
+    /// unresolved name or an unparsed fragment leaves one behind too, and those
+    /// were reported by a different pass whose errors are not in this list.
     pub(crate) fn check_unknowns(&mut self) {
         if !self.errors.is_empty() || !self.body.errors.is_empty() {
             return;
@@ -315,17 +306,15 @@ impl<'a> Checker<'a> {
 
     /// Why a field read did not find its field.
     ///
-    /// Usually the plain answer, but not always. A type name is written into a
-    /// signature whether or not the file imported it — `type_of_syntax` reads
-    /// the syntax and does not check that anything answers to the name — while
-    /// its *fields* arrive only with the import. So a file annotating
-    /// `List<Pair<K, V>>` without importing `Pair` type checked the annotation
-    /// and then reported that `Pair` has no field `key`, which is a sentence
-    /// about the wrong thing: the fields are not missing, the type is.
+    /// Usually the plain answer, but not always. `type_of_syntax` reads a name
+    /// out of a signature without checking that anything answers to it, while
+    /// the type's *fields* arrive only with the import. So a file annotating
+    /// `List<Pair<K, V>>` without importing `Pair` checks the annotation and
+    /// then reports that `Pair` has no field `key` — a sentence about the wrong
+    /// thing, since the fields are not missing, the type is.
     ///
-    /// The two halves should agree — an unimported name has no business
-    /// resolving in an annotation either — and until they do, this at least
-    /// says which of the two went wrong.
+    /// The two halves should agree, and until they do this at least says which
+    /// of them went wrong.
     fn why_no_field(&self, owner: &Type, name: &str) -> String {
         if let Type::Adt { name: type_name, .. } = owner {
             if !self.types.adts.contains_key(type_name)

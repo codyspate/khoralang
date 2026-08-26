@@ -6,19 +6,18 @@
 //!
 //! # Why kinds are here at all
 //!
-//! A trait says how it uses `Self`. `Eq` writes `Self`; `Functor` writes
-//! `Self<A>`. That difference is the whole of the kind system a reader ever
-//! sees: `Eq` can be implemented for `Int`, `Functor` cannot, and the compiler
-//! knows which without anyone declaring `* -> *`. Scala makes you write `F[_]`
-//! and Haskell lets you write a kind signature; Khora infers it, because the
+//! A trait says how it uses `Self`: `Eq` writes `Self`, `Functor` writes
+//! `Self<A>`. That difference is the whole kind system a reader sees — `Eq` can
+//! be implemented for `Int` and `Functor` cannot, and the compiler works out
+//! which without anyone writing `* -> *`. Scala makes you write `F[_]`; the
 //! information is already in the trait body.
 //!
 //! # What is deliberately not here
 //!
 //! The orphan rule. It is decided — an impl needs the trait or the type to be
-//! local — but it cannot be *checked* until traits resolve across packages,
-//! and enforcing it now would reject `impl Show for Int` in a file that has no
-//! way to say where `Show` came from. Recorded in `docs/errata.md`.
+//! local — but cannot be *checked* until traits resolve across packages, and
+//! enforcing it now would reject `impl Show for Int` in a file with no way to
+//! say where `Show` came from. `docs/errata.md`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -738,31 +737,26 @@ pub fn check(
             continue;
         }
 
-        // `Share` is not an ordinary trait and its impl is not an ordinary
-        // impl: it *asserts* rather than provides, and everything downstream
-        // trusts it without being able to check it. So it may only be written
-        // where there is nothing to check — a type declared with no body, whose
-        // behaviour lives in the runtime or across the C ABI.
+        // A `Share` impl *asserts* rather than provides, and everything
+        // downstream trusts it without being able to check it. So it may only
+        // be written where there is nothing to check: a type declared with no
+        // body, whose behaviour lives in the runtime or across the C ABI.
         //
-        // **Or one whose only obstacle is a `Ptr`**, which belongs here for the
-        // same reason. A `mut` field is something the compiler can *see*, so an
-        // assertion would be overriding knowledge — that is the lie: writing
+        // **Or one whose only obstacle is a `Ptr`.** A `mut` field is something
+        // the compiler can see, so an assertion there overrides knowledge —
         // `impl Share` for a record with a `mut` field hands two fibers a value
-        // they can both write, with the compiler's blessing and no diagnostic
-        // anywhere. Foreign memory is the opposite. The `false` there is a
-        // conservative default rather than a finding, and the module that put
-        // the pointer across the ABI is the only thing that knows what is
-        // behind it.
+        // they can both write, with the compiler's blessing. Foreign memory is
+        // the opposite: `false` is a conservative default rather than a
+        // finding, and the module that put the pointer across the ABI is the
+        // only thing that knows what is behind it.
         // **Only the file that declares a type may assert its shareability.**
-        // Without this the marker is forgeable by anyone: declare a trait of
-        // your own spelled `Share`, write `impl<A> Share for Array<A>`, and an
-        // array — which `Array::set` writes — becomes something two fibers may
-        // hold. That compiled, and raced.
+        // Otherwise the marker is forgeable: declare a trait of your own
+        // spelled `Share`, write `impl<A> Share for Array<A>`, and an array —
+        // which `Array::set` writes — becomes something two fibers may hold.
         //
-        // The author of a type is the only one who knows what the compiler
-        // cannot, so they are the only one who may say. An imported impl is
-        // skipped entirely rather than re-judged: it was checked where it was
-        // written, and asking again from here would answer differently.
+        // An imported impl is skipped rather than re-judged: it was checked
+        // where it was written, and asking again from here would answer
+        // differently.
         if imp.trait_name == crate::SHARE && imp.local && !declares(&imp.self_type) {
             let what = imp.head().unwrap_or_else(|| "this type".to_string());
             errors.push(HirError {
@@ -894,12 +888,10 @@ fn check_methods(imp: &ImplDef, def: &TraitDef, errors: &mut Vec<HirError>) {
 
 /// Every method an impl declares must have the signature the trait promised.
 ///
-/// `impl_signatures` reads an impl's signature from what the impl *wrote*,
-/// deliberately, so that a disagreement with the trait is a diagnosable
-/// difference rather than something silently papered over. This is the check
-/// that was supposed to read it. Without it a trait could promise `-> Bool`,
-/// an impl return `Int`, and the mismatch surface as invalid LLVM IR blamed on
-/// the compiler.
+/// `impl_signatures` deliberately reads what the impl *wrote* rather than what
+/// the trait promised, so a disagreement is a diagnosable difference. This is
+/// what reads it: without the check, a trait promising `-> Bool` against an
+/// impl returning `Int` surfaces as invalid LLVM IR blamed on the compiler.
 fn check_signatures(
     imp: &ImplDef,
     traits: &Traits,

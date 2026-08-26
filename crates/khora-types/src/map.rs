@@ -15,16 +15,14 @@ pub struct TypeMap {
     ///
     /// **Whether a type is shareable is a fact about the type, not about the
     /// importer.** `std::db`'s `Cell` holds a `Decimal`, so answering "may two
-    /// fibers hold a `Cell`" means looking inside `Decimal` -- and a module
-    /// that imported `Cell` without also importing `Decimal` could not, so it
-    /// got `false`. The same type, the same question, two answers depending on
-    /// an unrelated line at the top of the file.
+    /// fibers hold a `Cell`" means looking inside `Decimal` — and a module that
+    /// imported `Cell` alone cannot, so it would get two different answers to
+    /// one question depending on an unrelated import line.
     ///
-    /// Kept apart from [`TypeMap::variants`] rather than merged into it because
-    /// these names are deliberately **not in scope**: a record literal must not
-    /// infer as a type the file cannot name, and `Decimal::scaled` must still
-    /// be an unknown path. Only the shareability walk reads this, through
-    /// [`TypeMap::bodies_of`].
+    /// Kept apart from [`TypeMap::variants`] because these names are
+    /// deliberately *not in scope*: a record literal must not infer as a type
+    /// the file cannot name, and `Decimal::scaled` must still be an unknown
+    /// path. Only [`TypeMap::bodies_of`] reads this.
     pub(crate) reachable: Vec<VariantInfo>,
     /// The type parameters of those bodies.
     ///
@@ -53,10 +51,9 @@ pub struct TypeMap {
     pub homes: TypeHomes,
     /// The names declared with `effect` rather than `type`.
     ///
-    /// An effect is a record of function types, which would make every one of
-    /// them unshareable — and so make a capability impossible to hand to a
-    /// fiber, which is every concurrent server there is. It is shareable
-    /// instead, and what pays for that is a check where each handler is
+    /// An effect is a record of function types, so the closure rule would make
+    /// every capability unshareable and no fiber could ever be handed one. It
+    /// is shareable instead, paid for by a check where each handler is
     /// *written*. `docs/design/sharing.md`.
     pub effects: HashSet<String>,
 }
@@ -82,11 +79,10 @@ impl TypeMap {
 
     /// A constructor, found by the type it belongs to *and* its own name.
     ///
-    /// Both halves are required. Case names are not unique across a program —
-    /// two types may each have a `Some` — and `Resolution::Variant` carries the
-    /// type for exactly this reason. Looking one up by its bare name resolves
-    /// `Maybe::Some` to `Option::Some` whenever `Option` was declared first,
-    /// which is a wrong tag rather than an error.
+    /// Both halves are required: case names are not unique across a program,
+    /// so looking one up by its bare name resolves `Maybe::Some` to
+    /// `Option::Some` whenever `Option` was declared first — a wrong tag rather
+    /// than an error.
     pub fn variant_of(
         &self,
         home: Option<&khora_hir::ModulePath>,
@@ -114,29 +110,26 @@ impl TypeMap {
     /// can both write is a data race, and refcount atomicity (D10) does not
     /// help — it protects the count, not the fields.
     ///
-    /// **A function type is never shareable**, conservatively, because a
-    /// closure's captures are not in its type and so nothing here can see what
-    /// it holds. A named function referenced by path captures nothing and is
-    /// not affected; only a closure kept in a binding is.
+    /// A function type is never shareable, conservatively: a closure's captures
+    /// are not in its type, so nothing here can see what it holds. Only a
+    /// closure in a binding is affected — a named function referenced by path
+    /// captures nothing.
     ///
     /// **An effect is the exception, and it has to be.** An effect *is* a
     /// record of function types, so the rule above would make every capability
-    /// unshareable — and a fiber could never be spawned from a function holding
-    /// one, which is the shape of every concurrent server. What pays for the
-    /// exception is [`Checker::check_handler_is_shareable`]: a handler's
-    /// closures are written at the `handler for` literal, where the checker can
-    /// see exactly what they captured, so the question is answered once, there,
-    /// instead of at every spawn where it cannot be answered at all.
+    /// unshareable and no concurrent server could be written. What pays for it
+    /// is [`Checker::check_handler_is_shareable`], which asks at the `handler
+    /// for` literal, where the captures are visible, rather than at every spawn
+    /// where they are not.
     ///
     /// `docs/design/memory.md` §5a and `docs/design/sharing.md`.
-    /// **A type the caller chooses answers only if it was asked to.** A
-    /// generic function cannot see what `A` will be, so `A` is shareable
-    /// exactly when the signature wrote `A: Share` — otherwise
-    /// `fn launder<A>(v: A) -> Fiber { Fiber::spawn(fn () => sink(v)) }`
-    /// would hand a caller's mutable record to a fiber with nothing to say
-    /// about it, which is what it did before `bounded` existed.
+    /// **A type the caller chooses answers only if it was asked to.** A generic
+    /// function cannot see what `A` will be, so `A` is shareable exactly when
+    /// the signature wrote `A: Share`. Otherwise
+    /// `fn launder<A>(v: A) -> Fiber { Fiber::spawn(fn () => sink(v)) }` hands
+    /// a caller's mutable record to a fiber with nothing to say about it.
     ///
-    /// `bounded` is the parameters of the enclosing signature that carry the
+    /// `bounded` is the parameters of the enclosing signature carrying the
     /// bound, which the checker reads off `bounds_on`.
     /// Whether this compiler can see what `ty` holds.
     ///
@@ -155,13 +148,11 @@ impl TypeMap {
     pub fn is_opaque(&self, ty: &Type) -> bool {
         match ty {
             Type::Applied { head, .. } => self.is_opaque(head),
-            // A name with no variants recorded and no `effect` declaration.
-            // Not `adts.contains_key`, deliberately: a type imported from
-            // another module reaches this map through its impls but not its
-            // declaration, and treating an absent name as *visible* would
-            // refuse `impl Share for Fibers` in every file but the one that
-            // declared it. A name that exists nowhere is reported as unknown
-            // by resolution, which is the diagnostic that helps.
+            // Not `adts.contains_key`: an imported type reaches this map
+            // through its impls but not its declaration, so treating an absent
+            // name as *visible* would refuse `impl Share for Fibers` in every
+            // file but the declaring one. A name that exists nowhere is
+            // reported as unknown by resolution instead.
             Type::Adt { name, .. } => {
                 self.bodies_of(name).next().is_none() && !self.effects.contains(name)
             }
@@ -177,14 +168,12 @@ impl TypeMap {
     ///
     /// Two different reasons wear the same refusal, and telling them apart is
     /// the difference between a fix and a hunt. A record with a `mut` field is
-    /// a *race*, and the answer is to stop sharing it. A closure is refused
-    /// because **what it captured is not in its type** — it may hold nothing at
-    /// all — and the answer is a language question rather than a change to the
-    /// program.
+    /// a *race*: stop sharing it. A closure is refused because what it captured
+    /// is not in its type — it may hold nothing at all — which is a language
+    /// question rather than a change to the program.
     ///
-    /// The second is the one that matters: an effect *is* a record of function
-    /// types, so no capability can cross into a fiber. The message says so
-    /// rather than sending the reader to look for a `mut` that is not there.
+    /// The message has to say which, or a reader whose capability was refused
+    /// goes looking for a `mut` field that is not there.
     pub fn why_unshareable(&self, ty: &Type) -> String {
         if let Type::Param(name) = ty {
             return format!(
@@ -263,36 +252,29 @@ impl TypeMap {
 
     /// Whether this module may *assert* that two fibers can hold `ty`.
     ///
-    /// **A `Ptr` is refused because the compiler cannot know, and that is
-    /// exactly when a declaring module may say.** The rule used to be "opaque
-    /// types only", on the argument that an impl may only be written where
-    /// there is nothing to check. That argument is about a `mut` field — where
-    /// the compiler *can* see, and an assertion would be overriding knowledge —
-    /// and it does not reach foreign memory, where the compiler's `false` is a
-    /// conservative default rather than a finding.
+    /// Opaque, or blocked only by a `Ptr`. **A pointer is refused because the
+    /// compiler cannot see behind it, and that is exactly the case where the
+    /// declaring module can.** A `mut` field is the opposite: there the
+    /// compiler *can* see, so an assertion would be overriding knowledge rather
+    /// than supplying it, and it still refuses — as does a closure field, or a
+    /// field of somebody else's unshareable type. The vouch covers only what
+    /// this module itself put across the ABI.
     ///
-    /// So: opaque, as before, or a type whose only obstacle is a pointer. A
-    /// `mut` field still refuses, a closure field still refuses, and a field of
-    /// somebody else's unshareable type still refuses — the vouch is only for
-    /// what this module put across the ABI itself.
-    ///
-    /// `std::net::tls` needed it. A `rustls` configuration behind an `Arc` is
-    /// immutable and safe for any number of readers, and a server that cannot
-    /// be handed to the fiber answering a connection is not a server. It was
-    /// smuggled across as an `Int` for a while, which is worse in every way:
-    /// same sharing, no review, no diagnostic if it were wrong.
+    /// `std::net::tls` is why it exists: a `rustls` configuration behind an
+    /// `Arc` is immutable and safe for any number of readers, and a server that
+    /// cannot be handed to the fiber answering a connection is not a server.
+    /// The alternative is smuggling it across as an `Int` — the same sharing,
+    /// with no review and no diagnostic if it were wrong.
     pub fn may_vouch_for(&self, ty: &Type) -> bool {
         if self.is_opaque(ty) {
             return true;
         }
-        // Both questions are asked of the *structure*, ignoring any impl on
-        // `ty` itself — that is the thing being judged, and consulting it would
-        // let anything vouch for itself.
+        // Of the *structure*, ignoring any impl on `ty` itself — consulting
+        // that would let anything vouch for itself.
         //
-        // Blocked only by a pointer, and not already shareable without one. The
-        // second half keeps the original rule's other edge: an assertion on a
-        // type the compiler can already see is fine is not harmless, it is a
-        // reader being told something is dangerous when it is not.
+        // The second half matters too: an assertion on a type the compiler can
+        // already see is fine is not harmless, it tells a reader something is
+        // dangerous when it is not.
         self.structurally_shareable(ty, true) && !self.structurally_shareable(ty, false)
     }
 
@@ -336,19 +318,16 @@ impl TypeMap {
                         .all(|t| self.shareable_with(t, visiting, bounded, pointers_ok))
             }
             Type::Adt { name, args, .. } => {
-                // The trusted answer comes first, arguments included. A type
-                // with no body does not necessarily *hold* its parameters —
-                // `SharedFn<Request, Response, 'e>` describes a call rather
-                // than a contents, and a `Request` is built inside the fiber
-                // that answers it — so asking about them would refuse the one
-                // thing the wrapper exists to allow. An impl asserts for every
-                // instantiation, which is what makes it a thing you have to be
-                // trusted to write.
-                // A trusted assertion answers for any type whose module was
-                // allowed to write one — opaque, or blocked only by a pointer.
-                // `traits::check` refuses the rest, and a refused program is
-                // not compiled, so trusting the impl here cannot outlive the
-                // diagnostic.
+                // Arguments included, because a type with no body does not
+                // necessarily *hold* its parameters: `SharedFn<Request,
+                // Response, 'e>` describes a call, and its `Request` is built
+                // inside the fiber that answers it. Asking about them would
+                // refuse the one thing the wrapper exists to allow. An impl
+                // asserts for every instantiation, which is what makes it
+                // something you have to be trusted to write.
+                // `traits::check` refuses an impl the module was not allowed
+                // to write, and a refused program is not compiled, so trusting
+                // one here cannot outlive the diagnostic.
                 if self.traits.find(SHARE, ty).is_some() {
                     return true;
                 }
@@ -371,23 +350,19 @@ impl TypeMap {
                     return true;
                 }
                 // **A type with no body has to say.** Nothing here can see
-                // inside `pub type Array<A>;`, and answering "shareable"
-                // because no mutable field is *visible* is the wrong default in
-                // the one direction that matters: `Array::set` writes, `Ptr`
-                // points at foreign memory, and a runtime handle may need a
-                // lock of its own. All three looked safe to share until this
-                // line existed, and two fibers writing one array compiled.
+                // inside `pub type Array<A>;`, and "no mutable field is
+                // visible" is the wrong default in the direction that matters:
+                // `Array::set` writes, `Ptr` points at foreign memory, and a
+                // runtime handle may hold a lock. Without this line, two fibers
+                // writing one array compiles.
                 //
-                // So the answer is declared, with `impl Share for T`. That is
-                // the same trade `unsafe impl Sync` makes, minus a keyword this
-                // language does not have: the author of the type knows what the
-                // compiler cannot, and writing it down is what makes it
-                // reviewable. `docs/design/sharing.md`.
-                // The declared field types speak in the *type's* parameters —
-                // `Cons(A, List<A>)` — and those are not the enclosing
-                // function's, so they have to be replaced by what this use
-                // actually supplied before anything is asked about them.
-                // Reading `A` as a rigid parameter of the caller made every
+                // So it is declared, with `impl Share for T` — the trade
+                // `unsafe impl Sync` makes, minus a keyword this language does
+                // not have. `docs/design/sharing.md`.
+                // Declared field types speak in the *type's* parameters —
+                // `Cons(A, List<A>)` — not the enclosing function's, so they
+                // have to be substituted before anything is asked of them.
+                // Reading `A` as a rigid parameter of the caller makes every
                 // generic container unshareable, `List` included.
                 let parameters = self.params_of(name);
                 let mapping: HashMap<&str, Type> = parameters
@@ -408,14 +383,12 @@ impl TypeMap {
                 visiting.pop();
                 ok
             }
-            // Foreign memory. Nothing on this side of the ABI knows what is
-            // behind it or who else is writing there, and a pointer is exactly
-            // the value whose whole purpose is to be written through.
+            // Foreign memory: nothing on this side of the ABI knows what is
+            // behind it or who else writes there.
             //
-            // `pointers_ok` is set only by `may_vouch_for`, which is asking a
-            // different question: not "is this shareable" but "is a pointer the
-            // *only* reason it is not", which is the one case where the
-            // declaring module knows something the compiler cannot.
+            // `pointers_ok` is set only by `may_vouch_for`, which asks a
+            // different question — not "is this shareable" but "is a pointer
+            // the *only* reason it is not".
             Type::Ptr => pointers_ok,
             _ => true,
         }
@@ -440,16 +413,13 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
 
     for (index, decl) in parse.source_file().decls().enumerate() {
         match decl {
-            // A test takes nothing, returns nothing, and can fail — which is
-            // the only interesting thing about its signature. The row is
+            // A test takes nothing, returns nothing, and can fail. The row is
             // *opened* where the body is checked, because a test may fail any
-            // way it likes: that is what a failing test is.
-            // A bench has the same signature for the same reasons, and the
-            // consequence of leaving it out is quiet: no signature means no
-            // registered instance, which means `emit_function` declines to
-            // declare the body, which means the entry point's registration
-            // loop finds no function to point at. The build succeeds and
-            // reports `no benchmarks`.
+            // way it likes.
+            // A bench has the same signature, and leaving it out fails
+            // quietly: no signature, no registered instance, no declared body,
+            // and the entry point finds nothing to point at. The build
+            // succeeds and reports `no benchmarks`.
             ast::Decl::Test(_) | ast::Decl::Bench(_) => {
                 map.signatures.insert(
                     khora_hir::test_key(index),
@@ -599,15 +569,13 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     map.signatures.extend(traits::impl_signatures(&parse.source_file(), homes));
     map.traits = traits::collect(&parse.source_file(), homes);
 
-    // The impls this file's `derive` clauses expanded to, read by the same two
-    // functions that just read the written ones. Nothing downstream of here
-    // can tell the difference, which is the whole design: see the module
-    // comment on `khora_hir::derive`.
+    // What this file's `derive` clauses expanded to, read by the same two
+    // functions that just read the written impls — nothing downstream can tell
+    // the difference, which is the design. See `khora_hir::derive`.
     //
-    // They are appended rather than prepended so that a type which both
-    // derives `Eq` and writes one gets the duplicate reported against the
-    // `derive` — the shorter of the two things to delete, and the one whose
-    // author probably did not realize the other existed.
+    // Appended rather than prepended, so a type that both derives `Eq` and
+    // writes one gets the duplicate reported against the `derive`: the shorter
+    // of the two things to delete.
     let expanded = khora_hir::derive::derived(db, file);
     map.signatures.extend(traits::impl_signatures(&expanded.source_file(), homes));
     let mut generated = traits::collect(&expanded.source_file(), homes);
@@ -632,19 +600,16 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
 
 /// Brings every inherent impl of an imported module into view.
 ///
-/// Every one, not only the ones whose type was named in the import. A type's
-/// own methods are part of the type exactly as its constructors are, and a
-/// value can arrive without its type ever being written down: `req.params` has
-/// type `Params`, and `req.params.get(..)` should work whether or not the file
-/// also imported `Params`. There is nothing to shadow either — an inherent
-/// impl is not a name that can be referred to, only a method reached by
-/// having a value — so gating it on an import buys nothing and costs the
-/// obvious call.
+/// Every one, not only the ones whose type was named in the import. A value can
+/// arrive without its type ever being written down — `req.params` has type
+/// `Params`, and `req.params.get(..)` should work whether or not the file
+/// imported `Params` — and there is nothing to shadow, since an inherent impl
+/// is not a name but a method reached by having a value.
 ///
-/// **What is gated is `export`, not the import.** The copy is marked `foreign`,
-/// which is what makes `InherentImpl::visible` answer for another module, and
-/// only exported methods bring a signature across. A hidden method is
-/// therefore not merely unreachable — its type is not here to be read.
+/// **What gates it is `pub`, not the import.** The copy is marked `foreign`, so
+/// `InherentImpl::visible` answers for another module and only exported methods
+/// bring a signature across: a hidden method is not merely unreachable, its
+/// type is not here to be read.
 pub(crate) fn import_inherent(exported: &TypeMap, map: &mut TypeMap) {
     for imp in &exported.traits.inherent {
         // Marked before the duplicate check, or the same impl arrives once per
@@ -726,26 +691,21 @@ pub(crate) fn import_types(
                 for (name, parameters) in reached.generics {
                     map.reachable_adts.entry(name).or_insert(parameters);
                 }
-                // **And the `Share` impls of everything reached**, which is
-                // the other half of the same argument and was missing.
-                //
-                // A reached type arriving without its impl answers the question
-                // *wrongly* rather than not at all: `impl Share for Channel<A>`
-                // is what makes a channel shareable, and a `Pool` holding one
-                // was refused in a file that had imported `Pool` but not
-                // `Channel` — "add an unused import and your program compiles"
-                // being the shape of the symptom. `Share` is never asked for by
-                // name, so the ordinary route by which an impl arrives, the
+                // **And the `Share` impls of everything reached.** A reached
+                // type arriving without its impl answers the question *wrongly*
+                // rather than not at all: `impl Share for Channel<A>` is what
+                // makes a channel shareable, so without this a `Pool` holding
+                // one is refused unless the file also imported `Channel` — "add
+                // an unused import and your program compiles". `Share` is never
+                // named, so the ordinary route by which an impl arrives, its
                 // trait, never fires for it.
                 //
                 // Every name *mentioned*, not every name with a body: `Channel`
-                // is opaque, so its whole answer is the impl and there is
-                // nothing else of it to carry.
+                // is opaque, so the impl is its whole answer.
                 //
-                // Only `Share`, and only for names actually reached. Every
-                // other trait is about resolving something the program wrote,
-                // and bringing those in would put methods within reach of a
-                // file that cannot name the type they are on.
+                // Only `Share`. Every other trait is about resolving something
+                // the program wrote, and bringing those in would put methods
+                // within reach of a file that cannot name the type.
                 for extra in exported.traits.impls.iter().filter(|i| {
                     i.trait_name == SHARE
                         && i.head().is_some_and(|head| reached.mentioned.contains(&head))
@@ -767,16 +727,13 @@ pub(crate) fn import_types(
                 }
                 // **An impl travels with its type as well as with its
                 // trait.** Importing a trait brings the impls that satisfy it,
-                // which is right: you ask for `Show`, you get the instances.
-                // But it was the *only* way one arrived, so `impl Eq for Point`
-                // written beside `Point` was invisible to any file that
-                // imported `Point` — and `Eq` from `std::core` was already in
-                // scope there. That is the ordinary shape of a program, and it
-                // made a derived impl useless outside the module it came from.
+                // which is right; being the *only* way one arrives is not.
+                // `impl Eq for Point` written beside `Point` would be invisible
+                // to a file importing `Point` with `Eq` already in scope from
+                // `std::core` — the ordinary shape of a program, and it makes a
+                // derived impl useless outside its own module.
                 //
-                // So: visible if either half is. `Share` needed this first and
-                // needed it most, being a property nobody asks for by name,
-                // but nothing about the rule was ever specific to it.
+                // So: visible if either half is.
                 for extra in exported
                     .traits
                     .impls
@@ -826,12 +783,12 @@ pub(crate) fn import_types(
                 if let Some(def) = exported.traits.traits.get(name.as_str()) {
                     map.traits.traits.insert(local.clone(), def.clone());
                 }
-                // A trait's impls travel with it: an imported `Show` is useless
-                // if the impls that satisfy it stayed behind.
+                // A trait's impls travel with it: an imported `Show` is
+                // useless if what satisfies it stayed behind.
                 //
-                // Skipping what is already here, because since an impl also
-                // travels with its *type* the same one can arrive twice — a
-                // file importing both `Iterator` and `Range` was told that
+                // Skipping what is already here, because an impl travels with
+                // its *type* too and the same one can arrive twice — a file
+                // importing both `Iterator` and `Range` would be told that
                 // `Iterator` is already implemented for `Range`, by itself.
                 for imported in
                     exported.traits.impls.iter().filter(|i| &i.trait_name == name)
@@ -864,11 +821,10 @@ pub(crate) fn import_types(
 
 /// Points at the part of two large types that actually disagrees.
 ///
-/// Unification reports the innermost conflicting pair, which on its own reads
-/// as "expected `3`, found `4`" and leaves the reader hunting for where either
-/// number came from. The caller leads with the whole types; this adds the
-/// detail, and adds nothing when the conflict *is* the whole type, since
-/// repeating it would say the same thing twice.
+/// Unification reports the innermost conflicting pair, which alone reads as
+/// "expected `3`, found `4`" and leaves the reader hunting for where either
+/// came from. The caller leads with the whole types and this adds the detail —
+/// nothing, when the conflict *is* the whole type.
 pub(crate) fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> String {
     if outer == inner {
         return String::new();
@@ -925,27 +881,19 @@ pub fn as_written(key: &str) -> String {
 
 /// Every body reachable from `name`'s fields, minus `name`'s own.
 ///
-/// A worklist over type names rather than a recursion, because a type may
-/// contain itself and the visited set is the termination argument.
+/// A worklist rather than a recursion: a type may contain itself, and the
+/// visited set is the termination argument.
 ///
 /// **Only what `exported` already has, including what *it* merely reached.**
-/// A module's own map holds the bodies it imported, so `std::db`'s map has
-/// `Decimal` in it — that is how `Cell` was checkable inside `std::db` and not
-/// outside it. Nothing is fetched from a third module here; this closes the gap
-/// by carrying forward what the exporter already saw.
+/// Nothing is fetched from a third module. Searching `reachable` as well as
+/// `variants` is what makes it transitive rather than one hop deep —
+/// `postgres::pool` imports `Request` from `postgres::db`, whose `Reply` holds
+/// a `Row`, whose cells hold a `Decimal`, which is therefore in `db`'s reached
+/// list rather than its own.
 ///
-/// Searching `reachable` as well as `variants` is what makes it transitive
-/// rather than one hop deep, and it was found the hard way: `postgres::pool`
-/// imports `Request` from `postgres::db`, whose `Reply` holds a `Row`, whose
-/// cells hold a `Decimal` — and `Decimal` is two modules from `pool` and one
-/// from `db`, so it sits in `db`'s reachable list rather than its own.
-///
-/// **Three things come back, and the third is every name mentioned** rather
-/// than every name with a body. An opaque type has no body to find, so it
-/// never appears in the first list — and `Channel` is opaque, which is how a
-/// `Pool` holding one came to depend on whether the importing file had also
-/// written `Channel` in its import line. The caller needs the mentions to
-/// carry their `Share` impls.
+/// The third thing returned is every name *mentioned* rather than every name
+/// with a body, because an opaque type has no body to find and `Channel` is
+/// opaque. The caller needs those mentions to carry their `Share` impls.
 struct Reached {
     /// The bodies, for [`TypeMap::reachable`].
     bodies: Vec<VariantInfo>,

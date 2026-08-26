@@ -1,8 +1,7 @@
 //! Unification: the engine underneath type inference.
 //!
-//! Phase 3 replaces phase 2's "compare against the declared type" checking with
-//! Algorithm W. The part that makes it work is here — everything else is
-//! walking the tree and calling [`Unifier::unify`].
+//! Algorithm W. The part that makes it work is here; everything else is walking
+//! the tree and calling [`Unifier::unify`].
 //!
 //! # Rigid and flexible variables
 //!
@@ -465,17 +464,16 @@ impl Unifier {
         t2: Option<&Type>,
     ) -> Result<(), Mismatch> {
         // An error row labels each entry by its type's own name, so an entry
-        // whose type was still a variable was labelled with the variable —
-        // which prints as `_`. Once the variable is solved the entry has a real
-        // name, and reading it back is not optional: an entry still called `_`
-        // does not match the identical entry called `E` on the other side, both
-        // rows then look short, and a closed row that cannot grow reports a
-        // label nobody is actually missing.
+        // whose type is still a variable is labelled `_`. Relabelling once the
+        // variable is solved is not optional: an entry still called `_` does
+        // not match the identical entry called `E` on the other side, both rows
+        // look short, and a closed row that cannot grow reports a label nobody
+        // is missing.
         //
-        // `zonk` has always done this. Unification has to as well, because it
-        // compares rows *before* anything zonks them — and the variable may
-        // have been solved by something else entirely, which is exactly what
-        // pushing an expected type into a call now does.
+        // Unification has to do it as well as `zonk`, because it compares rows
+        // *before* anything zonks them — and the variable may have been solved
+        // by something else entirely, which is what pushing an expected type
+        // into a call does.
         let f1 = &self.relabel(f1);
         let f2 = &self.relabel(f2);
 

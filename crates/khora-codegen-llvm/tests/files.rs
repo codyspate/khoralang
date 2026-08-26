@@ -2,10 +2,9 @@
 
 //! Reading a real file, from Khora, through ISO C.
 //!
-//! Phase 7.4, and most of phase 7's exit criterion. Nothing here is bound to a
-//! Rust shim: `fopen`, `fread` and `fclose` are the C standard library, spelled
-//! the same on every platform Khora targets, and `FILE *` is exactly what `Ptr`
-//! was added for. `docs/design/ffi.md`.
+//! Nothing here is bound to a Rust shim: `fopen`, `fread` and `fclose` are the
+//! C standard library, spelled the same on every platform Khora targets, and
+//! `FILE *` is exactly what `Ptr` was added for. `docs/design/ffi.md`.
 //!
 //! The socket half of the exit criterion is not here, because a socket is not
 //! ISO C — it is Winsock or it is Berkeley sockets, and choosing between them

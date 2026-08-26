@@ -1,8 +1,7 @@
 //! Waiting on a socket without blocking a worker.
 //!
-//! Phase 11C.2. [`crate::wait`] made a fiber able to wait for *something*, and
-//! timers gave it one thing to wait for. This gives it the other: a descriptor
-//! becoming ready.
+//! [`crate::wait`] is how a fiber waits for *something*, and timers are one
+//! thing to wait for. This is the other: a descriptor becoming ready.
 //!
 //! # The shape, which is the part that matters
 //!
@@ -16,34 +15,30 @@
 //!                                 → wake, resume, retry
 //! ```
 //!
-//! The first line is the whole point and does not change. No `async`, no
-//! `await`, no `Future`, no coloured functions — `std::net::socket` keeps its
-//! blocking shape and every Khora program that already reads a socket benefits
-//! without being edited.
+//! The first line is the whole point and does not change: no `async`, no
+//! `await`, no `Future`, no coloured functions. `std::net::socket` keeps its
+//! blocking shape, and a program that already reads a socket benefits without
+//! being edited.
 //!
 //! # `poll` first, and why that is not a reversal
 //!
 //! `docs/design/scheduler.md` §2 argues for an **operation-oriented** interface
 //! — submit an operation, suspend until it completes — rather than a readiness
-//! one, because IOCP is completion-based and forcing it to fake readiness costs
-//! a buffer and a copy. That argument is about the *interface*, and the
-//! interface here is exactly that: [`wait_until_ready`] is called by an
-//! operation that has already tried and would block, and returns when it is
-//! worth trying again. Nothing above the reactor learns which mechanism
-//! answered.
+//! one, because IOCP is completion-based and making it fake readiness costs a
+//! buffer and a copy. That argument is about the *interface*, and the interface
+//! here is exactly that: [`wait_until_ready`] is called by an operation that
+//! already tried and would block, and returns when it is worth trying again.
+//! Nothing above the reactor learns which mechanism answered.
 //!
-//! The mechanism underneath starts as `poll` — `WSAPoll` on Windows, and the
-//! same call by the same name on Linux and macOS, with the same struct in a
-//! different width. One code path, three platforms, correct on all of them,
-//! and testable on the one this is written on.
+//! Underneath it is `poll` — `WSAPoll` on Windows, the same call by the same
+//! name on Linux and macOS, the same struct in a different width. One code
+//! path, three platforms, testable on the one this is written on.
 //!
-//! **It does not scale, and that is a deliberate staging rather than an
-//! oversight.** `poll` is O(n) in registered descriptors per call, so a
-//! hundred thousand waiting sockets would spend all its time in the kernel
-//! walking a list. epoll, kqueue and IOCP are what that becomes, and they are
-//! reached for the same way `io_uring` is: once the architecture above them is
-//! proven and there is something to measure. The exit criterion's socket row
-//! is *not* claimed by this module.
+//! **It does not scale, and that is deliberate staging.** `poll` is O(n) in
+//! registered descriptors per call, so a hundred thousand waiting sockets would
+//! spend all their time in the kernel walking a list. epoll, kqueue and IOCP
+//! are what that becomes, reached for the same way `io_uring` is: once the
+//! architecture above them is proven and there is something to measure.
 
 #![allow(dead_code)]
 

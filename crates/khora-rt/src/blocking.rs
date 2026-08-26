@@ -1,10 +1,10 @@
 //! A bounded pool of threads for work that genuinely blocks.
 //!
-//! Phase 11E. The reactor answers everything that can be waited on — sockets,
-//! deadlines — by suspending a fiber instead of a worker. Some things cannot be
-//! waited on: a filesystem read, a name lookup, a subprocess, a foreign library
-//! that goes away for a while. Run those on a worker and the worker is gone for
-//! the duration, along with every other fiber queued behind it.
+//! The reactor answers everything that can be waited on — sockets, deadlines —
+//! by suspending a fiber instead of a worker. Some things cannot be waited on:
+//! a filesystem read, a name lookup, a subprocess, a foreign library that goes
+//! away for a while. Run one on a worker and the worker is gone for the
+//! duration, along with every fiber queued behind it.
 //!
 //! So they run here, and the fiber that asked for them suspends the way it
 //! would for a socket. `docs/design/scheduler.md` §9.
@@ -12,10 +12,10 @@
 //! # Bounded, and why that is the whole point
 //!
 //! A pool that starts a thread per blocking call is thread-per-fiber wearing a
-//! different hat, which is the thing this phase exists to remove. Two limits,
-//! then: how many threads there can be, and how much work may be queued for
-//! them. When the queue is full the *fiber* waits — not its worker — so a
-//! program that asks for a million file reads gets slower rather than larger.
+//! different hat. So two limits: how many threads there can be, and how much
+//! work may be queued for them. When the queue is full the *fiber* waits rather
+//! than its worker, so a program asking for a million file reads gets slower
+//! rather than larger.
 //!
 //! Threads are started on demand and retired when they go idle, so a program
 //! that never blocks never pays for any of this.

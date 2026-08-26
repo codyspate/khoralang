@@ -14,12 +14,11 @@ impl<'a> Checker<'a> {
     /// only place one can cross: a fiber touches exactly what its thunk
     /// captured. `docs/design/memory.md` §5a.
     ///
-    /// The thunk therefore has to be one whose captures are visible here — a
-    /// lambda written at the call, or a named function, which captures
-    /// nothing. Anything else is refused rather than waved through, because a
-    /// check that cannot see what it is checking is not a check. That also
-    /// makes the rule worth having on its own terms: **a fiber's body is
-    /// written where it starts**, so what it closes over is on the screen.
+    /// So the thunk has to be one whose captures are visible here: a lambda
+    /// written at the call, or a named function, which captures nothing.
+    /// Anything else is refused, because a check that cannot see what it is
+    /// checking is not a check — and the rule is worth having anyway, since
+    /// **a fiber's body is written where it starts**.
     pub(super) fn check_spawnable(&mut self, args: &[ExprId], range: TextRange) {
         let Some(body) = args.first().copied() else { return };
         let captures: Vec<khora_hir::body::LocalId> = match self.body.expr(body) {
@@ -57,19 +56,15 @@ impl<'a> Checker<'a> {
     /// Every operation of a handler must be safe to hand to another fiber.
     ///
     /// **This is what buys an effect its shareability.** A capability has to be
-    /// able to cross into a fiber — a request arrives, a fiber handles it, the
-    /// handler needs the database — and an effect is a record of closures,
-    /// which nothing at the type level can see inside. So the question is asked
-    /// *here*, at the one place a handler comes into existence, where the
-    /// lambdas are written and what they captured is on the screen.
+    /// able to cross into a fiber, and an effect is a record of closures that
+    /// nothing at the type level can see inside — so the question is asked
+    /// here, at the one place a handler comes into existence and its lambdas
+    /// are written. Answered once where it is answerable, rather than at every
+    /// spawn where it is not. `docs/design/sharing.md`.
     ///
-    /// Answered once, where it is answerable, instead of at every spawn where
-    /// it is not. `docs/design/sharing.md`.
-    ///
-    /// The cost is a real restriction: a handler may not capture something
-    /// writable, so a test double that counts its calls in a `mut` field is
-    /// refused. That is the same trade `Shared<A>` is being kept in reserve
-    /// for, and the error says which binding and why.
+    /// The cost is real: a handler may not capture something writable, so a
+    /// test double counting its calls in a `mut` field is refused. The error
+    /// says which binding and why.
     pub(super) fn check_handler_is_shareable(&mut self, owner: &str, fields: &[(String, ExprId)]) {
         for (label, value) in fields {
             let range = self.body.range(*value);
@@ -82,9 +77,8 @@ impl<'a> Checker<'a> {
             // ```
             //
             // Nothing at this line can see what `leak` took, so accepting it
-            // would let any closure through by the simple move of naming it
-            // first — and the whole exception that makes an effect shareable
-            // rests on this check being the one place it cannot be dodged.
+            // lets any closure through by naming it first — and the exception
+            // that makes an effect shareable rests on this check.
             if !matches!(self.body.expr(*value), Expr::Lambda { .. } | Expr::Path(_)) {
                 self.error(
                     format!(
