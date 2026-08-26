@@ -1,0 +1,5 @@
+error: `export` is spelled `pub`
+ --> src/main.kh:3:1
+  |
+3 | export fn f() -> Int { 1 }
+  | ^^^^^^

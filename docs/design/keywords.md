@@ -122,6 +122,24 @@ pattern — mechanical, and done in one commit precisely so that no branch has t
 be rebased across a half-finished rename. Nothing about visibility changed;
 this is spelling only.
 
+**The old word is a diagnostic, not a silence.** `export` is an ordinary
+identifier now, so a file written before the rename would otherwise get
+"expected a declaration" — true, unhelpful, and pointing at the one place a
+reader with older Khora in front of them will not think to look:
+
+```text
+error: `export` is spelled `pub`
+ --> src/main.kh:3:1
+  |
+3 | export fn f() -> Int { 1 }
+  | ^^^^^^
+```
+
+It recovers, so a file with fifty of them reports fifty renames rather than one
+rename and forty-nine cascading confusions. This is the second time the audit
+has leaned on a diagnostic to carry a decision — `let` at module level is the
+first — and it is the same argument both times.
+
 **And what it should have cost.** `docs/design/compatibility.md` says a change
 that breaks source gets a migration note, and that if the migration is
 mechanical it gets an *edition* instead, with the edition machinery landing

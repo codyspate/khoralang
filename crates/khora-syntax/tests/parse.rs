@@ -705,3 +705,30 @@ fn arbitrary_bytes_never_panic() {
         assert_round_trip(src);
     }
 }
+
+/// `export` is an ordinary identifier now, and a declaration starting with one
+/// is the shape of Khora written before the rename.
+///
+/// **It recovers**, which is the point: the rest of the declaration parses, so
+/// a file with fifty of them reports fifty renames rather than one rename and
+/// forty-nine cascading confusions.
+#[test]
+fn the_old_visibility_keyword_is_named_and_recovered_from() {
+    let parsed = parse("module m;\n\nexport type Counter = { n: Int };\n\nexport fn f() -> Int { 1 }\n");
+    let messages: Vec<&str> = parsed.errors().iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        ["`export` is spelled `pub`", "`export` is spelled `pub`"],
+        "one per declaration, and nothing else"
+    );
+    let dumped = parsed.debug_tree();
+    assert!(dumped.contains("TYPE_DECL"), "the type still parsed: {dumped}");
+    assert!(dumped.contains("FN_DECL"), "and so did the function: {dumped}");
+}
+
+/// And `export` remains usable as a name, because it is no longer reserved.
+#[test]
+fn export_is_an_ordinary_identifier() {
+    let parsed = parse("module m;\n\nfn f(export: Int) -> Int { export + 1 }\n");
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+}

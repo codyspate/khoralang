@@ -110,3 +110,17 @@ fn caret_lands_correctly_after_non_ascii_text() {
 fn several_errors_in_one_file_are_all_reported() {
     assert_snapshot("multiple_errors", &render("module m;\ntype = ;\nfn = ;\n"));
 }
+
+/// The word `export` used to be, pointed at the word it is now.
+///
+/// A first-five-minutes error that states its own remedy, which
+/// `docs/design/keywords.md` argues is the one place the language should lean
+/// on a diagnostic to carry a design decision. Anybody with Khora written
+/// before the rename meets this and nothing else.
+#[test]
+fn the_old_visibility_keyword() {
+    assert_snapshot(
+        "old_export_keyword",
+        &render("module m;\n\nexport fn f() -> Int { 1 }\n"),
+    );
+}

@@ -65,6 +65,16 @@ fn declaration(p: &mut Parser<'_>) {
             ),
         },
         SEMICOLON => p.err_and_bump("stray `;`"),
+        // The word this keyword used to be. It is an ordinary identifier now,
+        // so the default error is "expected a declaration" — true, unhelpful,
+        // and pointing at the one place a reader with older Khora in front of
+        // them will not think to look. `docs/design/keywords.md` records the
+        // rename and why it went both ways.
+        IDENT if p.nth_text(0) == "export" => {
+            p.error("`export` is spelled `pub`");
+            p.bump_any();
+            declaration(p);
+        }
         _ => p.err_recover("expected a declaration", Parser::at_decl_start),
     }
 }
