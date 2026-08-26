@@ -1,5 +1,5 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
   --bg: #080b12;
   --bg-soft: #0d121c;
   --panel: #101722;
@@ -143,6 +143,59 @@ code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, m
 .final-cta h2 { max-width: 760px; }
 .site-footer { min-height: 90px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); color: #768397; font-size: .85rem; }
 .site-footer div { display: flex; gap: 1rem; }
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f7fafc;
+    --bg-soft: #eef4f7;
+    --panel: #ffffff;
+    --panel-2: #f4f8fa;
+    --text: #172033;
+    --muted: #586779;
+    --line: rgba(51, 65, 85, 0.16);
+    --cyan: #0788a6;
+    --teal: #0f8f82;
+    --cyan-soft: rgba(8, 145, 178, 0.08);
+    --shadow: 0 24px 70px rgba(15, 23, 42, 0.11);
+  }
+
+  body {
+    background:
+      radial-gradient(circle at 82% 8%, rgba(8, 145, 178, 0.09), transparent 25rem),
+      radial-gradient(circle at 15% 22%, rgba(15, 143, 130, 0.055), transparent 24rem),
+      var(--bg);
+  }
+
+  .site-header nav { color: #526176; }
+  .site-header nav a:hover { color: #111827; }
+  .hero-lede { color: #526176; }
+  .hero-meta { color: #6b7788; }
+  .button.secondary { background: rgba(255, 255, 255, 0.62); }
+
+  /* Keep the code sample deliberately dark in both themes. It reads as a
+     terminal/editor surface and preserves syntax contrast without maintaining
+     two separate highlight palettes. */
+  .code-card { border-color: rgba(51, 65, 85, 0.2); }
+
+  .feature-card { background: rgba(255, 255, 255, 0.46); }
+  .feature-kicker,
+  .path-list span { color: #718096; }
+  .feature-card code { color: #087f96; }
+  .feature-link { color: #087f96; }
+
+  .pipeline-label { color: #708094; }
+  .pipeline-row code { color: #263548; }
+  .command-grid code {
+    background: rgba(255, 255, 255, 0.62);
+    color: #176777;
+  }
+
+  .toolchain-card {
+    background: linear-gradient(120deg, rgba(8, 145, 178, .06), rgba(15, 143, 130, .03) 55%, rgba(255,255,255,.55));
+  }
+
+  .site-footer { color: #6b7788; }
+}
 
 @media (max-width: 900px) {
   .site-header nav a:not(.github-link):not(:first-child) { display: none; }
