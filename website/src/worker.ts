@@ -8,6 +8,12 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
+    // The product homepage is available only at the canonical root URL.
+    // /home and /home.html are implementation details and redirect away.
+    if (url.pathname === '/home' || url.pathname === '/home/' || url.pathname === '/home.html') {
+      return Response.redirect(new URL('/', url), 301);
+    }
+
     // The product homepage is a standalone static page. Starlight remains
     // mounted under /docs so every existing documentation URL stays stable.
     if (url.pathname === '/') {
