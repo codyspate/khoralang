@@ -98,6 +98,9 @@ A value that has one unambiguous JSON representation.
 fn to_json(self) -> Json
 ```
 
+This value as JSON. Cannot fail: a type either has a representation or
+does not implement this.
+
 ### FromJson
 
 ```khora
@@ -115,6 +118,8 @@ facts to an API client, and a nested field has to retain its path.
 ```khora
 fn from_json(value: Json) -> Self raises DecodeError
 ```
+
+Reads a value back, or says where the shape stopped agreeing.
 
 ## Methods
 
@@ -155,11 +160,19 @@ field was for.
 fn number(self) -> Option<Float>
 ```
 
+The number here, or `None` if this is something else.
+
+**No coercion**, as with `text`: the string `"3"` is not a number, and a
+library that read it as one would hide the day a client started quoting
+its integers.
+
 #### boolean
 
 ```khora
 fn boolean(self) -> Option<Bool>
 ```
+
+The boolean here, or `None`.
 
 #### items
 
@@ -167,11 +180,19 @@ fn boolean(self) -> Option<Bool>
 fn items(self) -> Option<List<Json>>
 ```
 
+The elements, if this is an array. `None` for anything else, including an
+object — a JSON array and a JSON object are different things.
+
 #### is_null
 
 ```khora
 fn is_null(self) -> Bool
 ```
+
+Whether this is `null`, which is a question rather than a value.
+
+A JSON `null` and a missing field are different, and both are worth
+telling apart from a present value: `is_null` answers the first.
 
 #### entries
 

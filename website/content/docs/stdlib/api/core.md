@@ -51,6 +51,13 @@ export type Option<A> =
   | None;
 ```
 
+A value, or nothing.
+
+For absence that is ordinary and expected: a key that is not in a map, the
+head of an empty list. When the absence is a *failure* — something went
+wrong and the caller should know what — the type is `Result`, and
+`ok_or` below is the bridge between them.
+
 ### Result
 
 ```khora
@@ -59,6 +66,13 @@ export type Result<A, E> =
   | Err(error: E);
 ```
 
+A value, or the reason there is not one.
+
+**The same thing a `raises` row says, said as a value.** A tagged return
+already *is* "an error or a value"; which of the two readings a function
+offers is a choice about its caller, and `attempt` is where one becomes the
+other. `docs/design/effect-runtime.md` §8.
+
 ### List
 
 ```khora
@@ -66,6 +80,16 @@ export type List<A> =
   | Nil
   | Cons(head: A, tail: List<A>);
 ```
+
+A singly-linked list: the sequence with no capacity, no reallocation and
+no index.
+
+Cheap at the front and linear everywhere else. `Vector` is the one to reach
+for when the work is indexing or appending; this is the one to reach for
+when the work is "each of these, in order", which is most of it.
+
+`[a, b, c]` builds one — the literal is `Cons(a, Cons(b, Cons(c, Nil)))`
+and needs `List` in scope, exactly as `0.01d` needs `Decimal`.
 
 ### Halves
 
@@ -268,6 +292,17 @@ export type Map<K, V> = {
 };
 ```
 
+A hash table: unordered, mutated in place, and the fast one.
+
+**`Map` mutates and `Dict` does not**, which is the whole choice between
+them. Insert into a `Map` and the map you were holding has changed; insert
+into a `Dict` and you get a new one and the old is untouched. So a `Map`
+cannot go into a `Shared` and cannot cross into a fiber, and a `Dict` can.
+
+Keys need `Hash`, and `Hash` requires `Eq` because the two have to agree —
+see the trait. Entries come back in no particular order, and not even a
+stable one: growing rehashes everything.
+
 ### Vector
 
 ```khora
@@ -384,23 +419,6 @@ export type Changed<A, B> = {
 };
 ```
 
-A value two fibers may both change.
-
-The sharing rules refuse a mutable record to a second fiber on purpose, and
-refuse a handler that captures one, because two fibers writing one value is
-a race. This is what they refuse them *until*: a cell holding a value, with
-the reads and writes serialized.
-
-**Mutation becomes replacement.** There is no borrow of the inside — a
-counter is `Shared::update(count, fn n => n + 1)`, not `count.n = count.n + 1`
-— and that is the whole of why this is safe rather than careful. Handing out
-the inner value would mean stopping it escaping the critical section, and
-without lifetimes there is no way to say that. Nothing unshareable goes in
-or comes out, so there is nothing to leak. `docs/design/shared.md`.
-
-The contents must be `Share` for the same reason, which also means a `Map`
-cannot go in one: it mutates its buckets in place. `Dict` is the ordered
-persistent map, and is what a shared table is made of.
 A new state, and something to hand back that is not the state.
 
 What `Shared::modify` asks its change function for. A record rather than a
@@ -468,11 +486,37 @@ of its own, and nothing has needed one yet.
 export type Shared<A>;
 ```
 
+A value two fibers may both change.
+
+The sharing rules refuse a mutable record to a second fiber on purpose, and
+refuse a handler that captures one, because two fibers writing one value is
+a race. This is what they refuse them *until*: a cell holding a value, with
+the reads and writes serialized.
+
+**Mutation becomes replacement.** There is no borrow of the inside — a
+counter is `Shared::update(count, fn n => n + 1)`, not `count.n = count.n + 1`
+— and that is the whole of why this is safe rather than careful. Handing out
+the inner value would mean stopping it escaping the critical section, and
+without lifetimes there is no way to say that. Nothing unshareable goes in
+or comes out, so there is nothing to leak. `docs/design/shared.md`.
+
+The contents must be `Share` for the same reason, which also means a `Map`
+cannot go in one: it mutates its buckets in place. `Dict` is the ordered
+persistent map, and is what a shared table is made of.
+
 ### Fibers
 
 ```khora
 export type Fibers;
 ```
+
+A nursery: the fibers started under it, and the guarantee that none of
+them outlives it.
+
+Releasing one cancels its children and waits for them, which is where
+structured concurrency comes from — a fiber cannot escape the block that
+started it, because the binding holding the nursery ends on every path out.
+`nursery` is the ordinary way to get one. `docs/design/fibers.md`.
 
 ### Schedule
 
@@ -504,11 +548,23 @@ Attempts in total, including the first. `1` is "do not retry".
 export trait Eq
 ```
 
+Whether two values of a type are the same value.
+
+Structural, and written rather than derived for a type whose identity is
+not its contents. Nothing here defines `!=`: one operator is one thing to
+get right, and the negation is the negation.
+
+**`Float` is not an instance**, because `NaN == NaN` is false and a type
+whose values are not equal to themselves breaks every container built on
+this one. `docs/design/numbers.md` has the argument.
+
 #### eq
 
 ```khora
 fn eq(self, other: Self) -> Bool
 ```
+
+Whether these are the same value.
 
 ### Ord
 
@@ -524,6 +580,11 @@ so `Ord` requires `Eq` rather than repeating it.
 ```khora
 fn cmp(self, other: Self) -> Ordering
 ```
+
+Where `self` falls relative to `other`.
+
+Must agree with `eq`: `cmp` answering `Equal` and `eq` answering false is
+a sort that loses elements and a search that cannot find them.
 
 ### Hash
 
@@ -559,11 +620,21 @@ this one's, so an implementation only has to be *consistent*.
 export trait Show
 ```
 
+A value rendered for a person to read.
+
+**Not a serialization format.** `show` is for a log line, an error message
+and a test's failure output; `std::json` is for something that has to be
+read back. Nothing promises that `show` round-trips, and `Float` is the one
+place it happens to — see `docs/design/compatibility.md`, which makes that
+a promise about `Float` rather than about `Show`.
+
 #### show
 
 ```khora
 fn show(self) -> String
 ```
+
+This value, as text.
 
 ### Share
 
@@ -596,6 +667,12 @@ Fibers are operating-system threads today, so this is `Sync` rather than
 export trait Iterator
 ```
 
+Something a `for` loop can walk.
+
+One method, and it hands back a successor rather than mutating: see `Step`
+above for why that shape rather than Rust's. Implementing it is what makes
+a type usable in `for`.
+
 #### Associated types
 
 ##### Item
@@ -603,6 +680,8 @@ export trait Iterator
 ```khora
 type Item;
 ```
+
+What the iteration yields.
 
 #### Functions
 
@@ -612,17 +691,28 @@ type Item;
 fn next(self) -> Step<Self, Self::Item>
 ```
 
+The next item and the iterator that follows it, or `Done`.
+
 ### Functor
 
 ```khora
 export trait Functor
 ```
 
+A container whose contents can be replaced one for one.
+
+**Higher-kinded**: `Self` is applied to a type here rather than being one,
+which is what lets a single `map` serve `Option`, `List` and everything
+else with a shape. `docs/vision.md` names this as a non-negotiable, and it
+is the thing Rust's trait system cannot say.
+
 #### map
 
 ```khora
 fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>
 ```
+
+Every element replaced by `f` of it, in the same shape.
 
 ### Applicative
 
@@ -640,11 +730,18 @@ signature is easier than reading `Self<(A) -> B>`.
 fn pure<A>(value: A) -> Self<A>
 ```
 
+One value, in the smallest container that can hold it.
+
 #### map2
 
 ```khora
 fn map2<A, B, C>(self: Self<A>, other: Self<B>, f: (A, B) -> C) -> Self<C>
 ```
+
+Two containers combined element-wise by `f`.
+
+What "combined" means is the instance's to decide: `Option` gives up if
+either is `None`, and a validation type would collect both failures.
 
 ### Traversable
 
@@ -663,6 +760,13 @@ container serves every `Applicative`.
 ```khora
 fn traverse<A, B, F: Applicative>(self: Self<A>, f: (A) -> F<B>) -> F<Self<B>>
 ```
+
+`f` over every element, with the containers turned inside out.
+
+A `List<A>` and an `(A) -> Option<B>` give an `Option<List<B>>`: one
+answer for the whole walk rather than a list of answers. That inversion
+is the whole point — it is how "all of these, or the first reason not"
+is written once instead of per container.
 
 ## Effects
 
@@ -722,17 +826,23 @@ impl Ordering
 fn is_less(self) -> Bool
 ```
 
+Whether the comparison came out `Less`.
+
 #### is_equal
 
 ```khora
 fn is_equal(self) -> Bool
 ```
 
+Whether it came out `Equal`.
+
 #### is_greater
 
 ```khora
 fn is_greater(self) -> Bool
 ```
+
+Whether it came out `Greater`.
 
 #### reverse
 
@@ -754,11 +864,18 @@ impl<A> Option<A>
 fn is_some(self) -> Bool
 ```
 
+Whether there is a value.
+
+For a condition. Reaching for the value afterwards means matching twice;
+`match` once instead.
+
 #### is_none
 
 ```khora
 fn is_none(self) -> Bool
 ```
+
+Whether there is not.
 
 #### unwrap_or
 
@@ -776,6 +893,12 @@ when producing it is expensive.
 ```khora
 fn unwrap_or_else(self, fallback: () -> A) -> A
 ```
+
+The value, or the result of calling `fallback`.
+
+The closure is called only when there is nothing, which is the whole
+difference from `unwrap_or` — reach for this when producing the fallback
+costs something.
 
 #### ok_or
 
@@ -798,17 +921,27 @@ impl<A, E> Result<A, E>
 fn is_ok(self) -> Bool
 ```
 
+Whether this succeeded.
+
 #### is_err
 
 ```khora
 fn is_err(self) -> Bool
 ```
 
+Whether it did not.
+
 #### unwrap_or
 
 ```khora
 fn unwrap_or(self, fallback: A) -> A
 ```
+
+The value, or `fallback` if there was an error.
+
+**The error is discarded.** That is the right thing exactly when the
+caller has already decided the reason does not change what they do; when
+it might, `match`.
 
 #### ok
 
@@ -823,6 +956,12 @@ Discards the error, which is the one direction that cannot fail.
 ```khora
 fn map_err<F>(self, f: (E) -> F) -> Result<A, F>
 ```
+
+Rewrites the error and leaves the value alone.
+
+What a function does at the edge of its own vocabulary: a caller should
+see the failure in terms of what *they* asked for, not in terms of
+whatever was reached to answer it.
 
 ### List<A>
 
@@ -871,6 +1010,12 @@ already linearithmic.
 fn take_first(self, count: Int, taken: List<A>) -> Halves<A>
 ```
 
+The first `count` elements and the rest, with `taken` already collected
+in reverse.
+
+`split`'s worker, and public only because `split` is. The accumulator is
+what keeps it a single pass.
+
 #### merge
 
 ```khora
@@ -895,17 +1040,28 @@ impl<A> List<A>
 fn is_empty(self) -> Bool
 ```
 
+Whether there is nothing in it.
+
+Constant time, which `length() == 0` is not.
+
 #### length
 
 ```khora
 fn length(self) -> Int
 ```
 
+How many elements there are.
+
+**Walks the list.** Nothing here caches it, so a loop that asks each time
+round is quadratic — take it once.
+
 #### head
 
 ```khora
 fn head(self) -> Option<A>
 ```
+
+The first element, or `None` for an empty list.
 
 #### push
 
@@ -922,11 +1078,19 @@ is spelled `concat` and its cost is visible at the call site.
 fn concat(self, other: List<A>) -> List<A>
 ```
 
+`self` followed by `other`.
+
+Copies `self` and shares `other`, so the cost is the length of the *left*
+argument. Building a list by repeatedly concatenating onto the end is the
+quadratic way to do it; push and `reverse` once.
+
 #### reverse
 
 ```khora
 fn reverse(self) -> List<A>
 ```
+
+The same elements, back to front.
 
 #### reverse_onto
 
@@ -934,11 +1098,22 @@ fn reverse(self) -> List<A>
 fn reverse_onto(self, acc: List<A>) -> List<A>
 ```
 
+`self` reversed, in front of `acc`.
+
+The accumulating half of `reverse`, and useful on its own: building a
+list front-to-back and reversing it at the end is the linear way to do
+what `concat` in a loop does quadratically. This is the "at the end".
+
 #### fold
 
 ```khora
 fn fold<B>(self, start: B, step: (B, A) -> B) -> B
 ```
+
+Combines every element into one value, left to right.
+
+`step` is called with what has been accumulated so far and the next
+element. Summing is `fold(0, fn (a, b) => a + b)`.
 
 ### Region
 
@@ -952,11 +1127,24 @@ impl Region
 fn open() -> Region
 ```
 
+A new region with nothing deferred into it.
+
+`scoped` is the way to reach one from ordinary code; this is what
+`scoped` calls. Opening one by hand means being responsible for the
+binding that ends it.
+
 #### defer
 
 ```khora
 fn defer(self, finalizer: () ->()) ->()
 ```
+
+Registers `finalizer` to run when this region ends.
+
+**Reverse order**: the last deferred is the first run, so a finalizer may
+depend on one registered before it — a transaction rolled back before the
+connection it ran on is closed. Cleanup runs with cancellation held off,
+so a finalizer caused by a cancellation is not cut short by it.
 
 #### root
 
@@ -1037,6 +1225,8 @@ fn new(length: Int, fill: A) -> Array<A>
 fn length(self) -> Int
 ```
 
+How many elements it has. Fixed at construction; nothing grows an array.
+
 #### get
 
 ```khora
@@ -1055,6 +1245,14 @@ memory is the least useful possible response.
 ```khora
 fn set(self, index: Int, value: A) ->()
 ```
+
+Writes `value` at `index`, in place.
+
+**The one mutation in `core`**, and the reason `Array` is not `Share`:
+two fibers writing one array is a data race, so an array crosses into a
+fiber only inside a type that says it is safe. `docs/design/sharing.md`.
+
+An index outside the array stops the program, as `get` does.
 
 #### is_utf8
 
@@ -1137,6 +1335,11 @@ impl<K: Hash, V> Chain<K, V>
 fn find(self, key: K) -> Option<V>
 ```
 
+The value stored under `key` in this bucket, or `None`.
+
+Linear in the chain, which is fine because a chain is what one bucket
+holds: it is long only when the hash is bad.
+
 #### without
 
 ```khora
@@ -1151,6 +1354,8 @@ The chain with `key` removed, or the same chain if it was not there.
 fn holds(self, key: K) -> Bool
 ```
 
+Whether `key` is in this bucket.
+
 ### Dict<K, V>
 
 ```khora
@@ -1162,6 +1367,8 @@ impl<K, V> Dict<K, V>
 ```khora
 fn new() -> Dict<K, V>
 ```
+
+An empty dictionary.
 
 #### size
 
@@ -1177,6 +1384,8 @@ asks for it at every step.
 ```khora
 fn is_empty(self) -> Bool
 ```
+
+Whether there are no entries.
 
 #### node
 
@@ -1259,6 +1468,8 @@ The value under `key`, if there is one.
 fn contains(self, key: K) -> Bool
 ```
 
+Whether `key` has an entry.
+
 #### insert
 
 ```khora
@@ -1333,17 +1544,26 @@ difference, and it did not exist when this was written.
 fn len(self) -> Int
 ```
 
+How many entries there are. Counted as it goes, not walked.
+
 #### get
 
 ```khora
 fn get(self, key: K) -> Option<V>
 ```
 
+The value under `key`, if there is one.
+
 #### holds
 
 ```khora
 fn holds(self, key: K) -> Bool
 ```
+
+Whether `key` has an entry.
+
+For when the value is not wanted; `get` is one lookup either way, so
+`holds` followed by `get` is two and a `match` on `get` is one.
 
 #### insert
 
@@ -1360,6 +1580,11 @@ number of insertions.
 ```khora
 fn remove(self, key: K) ->()
 ```
+
+Takes `key` out, in place. Removing what is not there does nothing.
+
+The table never shrinks. A map emptied of a million entries keeps its
+million buckets, which nothing here has needed to be otherwise.
 
 #### entries
 
@@ -1450,6 +1675,10 @@ Twice the buckets, and every entry moved into the new ones.
 fn rehash(self, chain: Chain<K, V>) ->()
 ```
 
+Puts one old bucket's entries back into the new buckets.
+
+`grow`'s worker, public only because `grow` is.
+
 ### Vector<A>
 
 ```khora
@@ -1503,6 +1732,8 @@ How many elements are in it.
 ```khora
 fn is_empty(self) -> Bool
 ```
+
+Whether there is nothing in it.
 
 #### capacity
 
@@ -1817,6 +2048,11 @@ impl Fibers
 fn open() -> Fibers
 ```
 
+A nursery with no limit on how many children it holds at once.
+
+`bounded` is usually the one to want: a server adopting a fiber per
+connection meets an unbounded nursery's ceiling by exhausting memory.
+
 #### bounded
 
 ```khora
@@ -1840,6 +2076,12 @@ outside world.
 ```khora
 fn adopt(self, fiber: Fiber) ->()
 ```
+
+Puts a running fiber under this nursery.
+
+The nursery takes the handle, so nothing else can outlive it with one.
+Adopting past a `bounded` limit waits for the oldest child to finish,
+which is what turns a ceiling into a queue.
 
 #### wait
 

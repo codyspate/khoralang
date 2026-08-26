@@ -39,6 +39,13 @@ export type Method =
   | Delete;
 ```
 
+The five verbs this server routes on.
+
+Not every verb HTTP defines: `HEAD`, `OPTIONS` and `TRACE` are answered by
+the server rather than routed to a handler, and a method nobody can mount a
+route for is not worth a case here. `of` returns `None` for the rest, which
+becomes a 400 rather than a panic.
+
 ### Params
 
 ```khora
@@ -62,6 +69,13 @@ export type Request = {
   body: String,
 };
 ```
+
+One request, parsed: the verb, the path, what the route bound, the query,
+the headers and the body.
+
+**Everything is decoded on arrival**, once. A handler reading three query
+parameters and two headers does no parsing at all — the maps below are
+already built, and the header names are already lowercased.
 
 #### path
 
@@ -117,6 +131,12 @@ export type Response = {
 };
 ```
 
+What a handler answers with: a status, a body, its type, and any extra
+headers.
+
+`json` and `text` build the two common ones. `with_header` adds to either,
+and returns a new response rather than changing the one it was given.
+
 #### headers
 
 ```khora
@@ -135,6 +155,13 @@ export type HttpError =
   | MalformedRequest(details: String);
 ```
 
+What can go wrong that is the *server's* problem rather than a client's.
+
+A malformed request from a client is answered with a 400 and never reaches
+here — that is a response, not an error. These two are the cases where
+there is nobody to answer: the port would not bind, or a request could not
+be read at all.
+
 ### RequestLine
 
 ```khora
@@ -143,6 +170,11 @@ export type RequestLine = {
   target: String,
 };
 ```
+
+The first line of a request, before the target has been split.
+
+Public because a caller parsing a request for its own reasons wants the
+target as the client wrote it; `Request` carries the split version.
 
 #### target
 
@@ -355,17 +387,33 @@ impl Method
 fn of(text: String) -> Option<Method>
 ```
 
+The method this text names, or `None`.
+
+Case-sensitive, because HTTP methods are: `get` is not `GET`, and a
+server that accepted it would be lenient about the one part of the
+request line that has never been ambiguous.
+
 #### same
 
 ```khora
 fn same(self, other: Method) -> Bool
 ```
 
+Whether these are the same method.
+
+`Method` predates `derive(Eq)` reaching this file; `rank` is what it
+compares on.
+
 #### rank
 
 ```khora
 fn rank(self) -> Int
 ```
+
+A number per method, so `same` has something to compare.
+
+**Not a wire value and not an order.** Nothing outside this module should
+read it; it exists because comparing two variants needed one integer.
 
 ### Params
 
@@ -378,6 +426,8 @@ impl Params
 ```khora
 fn empty() -> Params
 ```
+
+No parameters bound. What a route with no `:name` in it matches with.
 
 #### get
 
@@ -408,6 +458,8 @@ tests: a real one arrives from a socket.
 ```khora
 fn post(path: String, body: String) -> Request
 ```
+
+A POST to `path` carrying `body`. For tests, like `get`.
 
 #### of
 
@@ -465,6 +517,8 @@ there is one, this is where it goes and nothing above it changes.
 ```khora
 fn text(status: Int, body: String) -> Response
 ```
+
+`body` as `text/plain`, with the given status.
 
 #### with_header
 
@@ -573,6 +627,12 @@ belongs to the caller — see the note on [`Connection`].
 fn understood(text: String) -> Incoming
 ```
 
+Parses one request, or the 400 to answer it with.
+
+Everything a connection needs to decide before a handler runs: whether
+the bytes were a request at all, and — from the headers the parser has
+already folded — whether the client asked to keep the connection.
+
 #### reply
 
 ```khora
@@ -615,17 +675,27 @@ collide with another module's `get`.
 fn new<'e>() -> Router<'e>
 ```
 
+A router with no routes. The start of the pipeline.
+
 #### post
 
 ```khora
 fn post<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
 ```
 
+Mounts `handler` at `route` for POST.
+
+Later mounts are tried first, because each prepends. Mounting the same
+route twice is allowed and the second one wins, which is worth knowing
+rather than an invariant anything enforces.
+
 #### get
 
 ```khora
 fn get<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
 ```
+
+Mounts `handler` at `route` for GET.
 
 #### listen
 
@@ -666,6 +736,12 @@ A listening socket on `port`, announced by the caller.
 fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) ->() with { nursery: Nursery } raises 'e + HttpError
 ```
 
+`serve_forever` over TLS: accepts, handshakes, and serves on a fiber
+each.
+
+A failed handshake ends that fiber quietly rather than the loop — on a
+public port it is the ordinary case, not an incident.
+
 #### secure_and_serve
 
 ```khora
@@ -683,6 +759,12 @@ already closed the socket.
 ```khora
 fn serve_forever<'e>(router: Router<'e>, server: Int) ->() with { nursery: Nursery } raises 'e + HttpError
 ```
+
+Accepts connections on `server` until the process stops.
+
+`listen` is the one to call: it binds the port and then this. Taking an
+already-bound socket is for a caller that wants to bind it themselves —
+a test on port zero, a socket inherited from a supervisor.
 
 #### serve_once
 
@@ -854,4 +936,13 @@ want.
 ```khora
 export fn matches(pattern: String, path: String) -> Option<Params>
 ```
+
+Whether `path` matches `pattern`, and what its `:name` segments bound.
+
+`/analyze/:id` against `/analyze/acc_9921` binds `id`. `None` when the
+shapes disagree, which is how the router moves on to the next route.
+
+Exported so a program can route somewhere other than through `Router` —
+a WebSocket upgrade, a second listener — without reimplementing the one
+piece of matching that has to agree with the server's.
 

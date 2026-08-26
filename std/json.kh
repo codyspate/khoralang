@@ -53,6 +53,8 @@ export type DecodeError =
 
 /// A value that has one unambiguous JSON representation.
 export trait ToJson {
+  /// This value as JSON. Cannot fail: a type either has a representation or
+  /// does not implement this.
   fn to_json(self) -> Json;
 }
 
@@ -62,6 +64,7 @@ export trait ToJson {
 /// A failure rather than an `Option`: absence and the wrong kind are different
 /// facts to an API client, and a nested field has to retain its path.
 export trait FromJson {
+  /// Reads a value back, or says where the shape stopped agreeing.
   fn from_json(value: Json) -> Self raises DecodeError;
 }
 
@@ -345,18 +348,30 @@ impl Json {
     match self { Json::Text(value) => Option::Some(value), _ => Option::None }
   }
 
+  /// The number here, or `None` if this is something else.
+  ///
+  /// **No coercion**, as with `text`: the string `"3"` is not a number, and a
+  /// library that read it as one would hide the day a client started quoting
+  /// its integers.
   fn number(self) -> Option<Float> {
     match self { Json::Number(value) => Option::Some(value), _ => Option::None }
   }
 
+  /// The boolean here, or `None`.
   fn boolean(self) -> Option<Bool> {
     match self { Json::Bool(value) => Option::Some(value), _ => Option::None }
   }
 
+  /// The elements, if this is an array. `None` for anything else, including an
+  /// object — a JSON array and a JSON object are different things.
   fn items(self) -> Option<List<Json>> {
     match self { Json::Array(items) => Option::Some(items), _ => Option::None }
   }
 
+  /// Whether this is `null`, which is a question rather than a value.
+  ///
+  /// A JSON `null` and a missing field are different, and both are worth
+  /// telling apart from a present value: `is_null` answers the first.
   fn is_null(self) -> Bool {
     match self { Json::Null => true, _ => false }
   }

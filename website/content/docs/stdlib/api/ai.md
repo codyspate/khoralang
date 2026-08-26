@@ -41,11 +41,22 @@ export type Device =
   | Npu;
 ```
 
+Where a tensor's memory lives.
+
+Carried in the type, so a program that multiplies a CPU tensor by a GPU one
+is refused rather than copying silently. Provisional along with the rest of
+this module.
+
 ### Scalar
 
 ```khora
 export type Scalar;
 ```
+
+The kind of an element type: what may appear as a tensor's `T`.
+
+A kind rather than a type — nothing is a value of `Scalar`. It exists so
+that `Tensor<D, Shape, T>` can say what `T` is allowed to be.
 
 ### Tuple
 
@@ -53,11 +64,19 @@ export type Scalar;
 export type Tuple;
 ```
 
+The kind of a shape: what may appear as a tensor's `Shape`.
+
+`(M, K)` is a value of this kind, not a value of any type. Matching two
+shapes is ordinary unification, which is what makes a mismatched product a
+type error.
+
 ### F32
 
 ```khora
 export type F32;
 ```
+
+Thirty-two-bit floating point, as an element type.
 
 ### Tensor
 
@@ -65,11 +84,25 @@ export type F32;
 export type Tensor<D: Device, Shape: Tuple, T: Scalar>;
 ```
 
+A tensor, with its device, its shape and its element type in the type.
+
+**The shape is not a runtime field.** `Tensor<Cpu, (1536), F32>` and
+`Tensor<Cpu, (768), F32>` are different types, so a dimension mismatch is
+discovered by the checker rather than asserted at the first multiply. That
+is the whole argument for this being in `std` while the kernels are not:
+the vocabulary two packages must agree on is here, and the arithmetic is
+somebody else's.
+
 ### Embedding
 
 ```khora
 export type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
 ```
+
+A one-dimensional CPU tensor of a known width.
+
+The shape a vector database and an embedding model have to agree on, spelled
+once: `Embedding<1536, F32>`.
 
 ### Message
 
@@ -79,6 +112,13 @@ export type Message = {
   content: String,
 };
 ```
+
+One turn of a conversation: who said it, and what they said.
+
+`role` is text rather than a variant type deliberately. Providers disagree
+about the set — `system`, `user`, `assistant`, `tool`, `developer` — and a
+variant here would have to be widened by `std` every time one of them added
+a word.
 
 ### Prompt
 
@@ -90,6 +130,12 @@ export type Prompt = {
 };
 ```
 
+What is sent to a model: standing instructions, a conversation, and how
+much variation to allow.
+
+Built by piping rather than by filling in a record, so a half-built prompt
+is never a value anybody holds. See the `impl` below.
+
 ### ModelError
 
 ```khora
@@ -99,6 +145,13 @@ export type ModelError =
   | InferenceEngineFailure(msg: String)
   | SchemaExtractionError(details: String);
 ```
+
+Why a model call did not produce an answer.
+
+Coarse on purpose, on the same reasoning `std::db`'s `DbError` gives: every
+provider numbers its failures differently, and a `std` that picked one
+would be wrong for the second. `RateLimited` carries the wait because a
+caller can act on it; the rest carry text.
 
 ## Traits
 
@@ -124,6 +177,9 @@ value, and before now nothing said what.
 type Spec;
 ```
 
+How this type describes itself to a model — a JSON schema, a grammar, a
+set of examples. Its own business; `extract` only hands it over.
+
 #### Functions
 
 ##### spec
@@ -131,6 +187,9 @@ type Spec;
 ```khora
 fn spec() -> Self::Spec
 ```
+
+The description. Called without a value, because there is not one yet:
+describing the answer is what comes before asking for it.
 
 ##### described
 
@@ -217,6 +276,8 @@ cannot be shared and then changed underneath its other holder.
 fn new() -> Prompt
 ```
 
+An empty prompt: no instructions, no messages, temperature one.
+
 #### system
 
 ```khora
@@ -231,11 +292,15 @@ Replaces the system instructions; the last one written wins.
 fn user(self, message: String) -> Prompt
 ```
 
+Adds a turn from the person asking.
+
 #### assistant
 
 ```khora
 fn assistant(self, message: String) -> Prompt
 ```
+
+Adds a turn from the model, which is how a conversation is replayed.
 
 #### saying
 
@@ -243,11 +308,17 @@ fn assistant(self, message: String) -> Prompt
 fn saying(self, role: String, content: String) -> Prompt
 ```
 
+Adds a turn under any role. `user` and `assistant` are this with the two
+roles every provider agrees on.
+
 #### at_temperature
 
 ```khora
 fn at_temperature(self, temperature: Float) -> Prompt
 ```
+
+Sets how much variation to allow. Zero is as close to deterministic as a
+provider offers, which is not a promise any of them makes.
 
 #### describing
 
@@ -268,6 +339,13 @@ how a type already says how it reads.
 ```khora
 export fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(a: Tensor<D, (M, K), T>, b: Tensor<D, (K, N), T>) -> Tensor<D, (M, N), T>
 ```
+
+The matrix product, with the shared dimension checked by the type system.
+
+`K` appears in both arguments, so it has to unify: an `(M, K)` times a
+`(J, N)` does not compile, and no assertion runs to discover it. Declared
+rather than implemented — `docs/design/ecosystem.md` puts the kernel in a
+package.
 
 ### extract
 
@@ -301,4 +379,11 @@ old declaration made it a caller-chosen parameter, which said otherwise.
 ```khora
 export fn cosine_similarity<const Dim: Int>(a: Embedding<Dim, F32>, b: Embedding<Dim, F32>) -> Float
 ```
+
+How alike two embeddings are, from -1 to 1.
+
+**Both must have the same width**, and the type says so rather than a
+length check discovering it: comparing a 1536-wide embedding with a
+768-wide one is refused by the checker. Declared rather than implemented,
+like `matmul` — the arithmetic belongs in a package.
 

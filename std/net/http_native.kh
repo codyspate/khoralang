@@ -25,6 +25,12 @@ import std::net::tls::{TlsConnection, TlsError, TlsServer, receive as tls_receiv
 //! It does answer on a fiber per connection, which took a language feature to
 //! reach rather than a line here: see `Router::serve_once`.
 
+/// The five verbs this server routes on.
+///
+/// Not every verb HTTP defines: `HEAD`, `OPTIONS` and `TRACE` are answered by
+/// the server rather than routed to a handler, and a method nobody can mount a
+/// route for is not worth a case here. `of` returns `None` for the rest, which
+/// becomes a 400 rather than a panic.
 export type Method =
   | Get
   | Post
@@ -33,6 +39,11 @@ export type Method =
   | Delete;
 
 impl Method {
+  /// The method this text names, or `None`.
+  ///
+  /// Case-sensitive, because HTTP methods are: `get` is not `GET`, and a
+  /// server that accepted it would be lenient about the one part of the
+  /// request line that has never been ambiguous.
   fn of(text: String) -> Option<Method> {
     if text == "GET" {
       Option::Some(Method::Get)
@@ -49,10 +60,18 @@ impl Method {
     }
   }
 
+  /// Whether these are the same method.
+  ///
+  /// `Method` predates `derive(Eq)` reaching this file; `rank` is what it
+  /// compares on.
   fn same(self, other: Method) -> Bool {
     Method::rank(self) == Method::rank(other)
   }
 
+  /// A number per method, so `same` has something to compare.
+  ///
+  /// **Not a wire value and not an order.** Nothing outside this module should
+  /// read it; it exists because comparing two variants needed one integer.
   fn rank(self) -> Int {
     match self {
       Method::Get => 0,
@@ -71,6 +90,7 @@ export type Params = {
 };
 
 impl Params {
+  /// No parameters bound. What a route with no `:name` in it matches with.
   fn empty() -> Params { { bound: Map::new() } }
 
   /// `Option::None` when the route did not declare that parameter, which is a
@@ -80,6 +100,12 @@ impl Params {
   }
 }
 
+/// One request, parsed: the verb, the path, what the route bound, the query,
+/// the headers and the body.
+///
+/// **Everything is decoded on arrival**, once. A handler reading three query
+/// parameters and two headers does no parsing at all — the maps below are
+/// already built, and the header names are already lowercased.
 export type Request = {
   method: Method,
   /// The path with the query string taken off: `/analyze/acc_1?deep=true` has
@@ -107,6 +133,7 @@ impl Request {
     Request::of(Method::Get, path, "")
   }
 
+  /// A POST to `path` carrying `body`. For tests, like `get`.
   fn post(path: String, body: String) -> Request {
     Request::of(Method::Post, path, body)
   }
@@ -150,6 +177,11 @@ export type Header = {
   value: String,
 };
 
+/// What a handler answers with: a status, a body, its type, and any extra
+/// headers.
+///
+/// `json` and `text` build the two common ones. `with_header` adds to either,
+/// and returns a new response rather than changing the one it was given.
 export type Response = {
   status: Int,
   body: String,
@@ -170,6 +202,7 @@ impl Response {
     { status: status, body: body.show(), content_type: "application/json", headers: List::Nil }
   }
 
+  /// `body` as `text/plain`, with the given status.
   fn text(status: Int, body: String) -> Response {
     { status: status, body: body, content_type: "text/plain", headers: List::Nil }
   }
@@ -270,6 +303,12 @@ impl Response {
   }
 }
 
+/// What can go wrong that is the *server's* problem rather than a client's.
+///
+/// A malformed request from a client is answered with a 400 and never reaches
+/// here — that is a response, not an error. These two are the cases where
+/// there is nobody to answer: the port would not bind, or a request could not
+/// be read at all.
 export type HttpError =
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
@@ -468,6 +507,10 @@ export fn parse(text: String) -> Option<Request> {
   }
 }
 
+/// The first line of a request, before the target has been split.
+///
+/// Public because a caller parsing a request for its own reasons wants the
+/// target as the client wrote it; `Request` carries the split version.
 export type RequestLine = {
   method: Method,
   /// The request target as written, query string and all. `parse` splits it;
@@ -948,6 +991,11 @@ impl Connection {
     }
   }
 
+  /// Parses one request, or the 400 to answer it with.
+  ///
+  /// Everything a connection needs to decide before a handler runs: whether
+  /// the bytes were a request at all, and — from the headers the parser has
+  /// already folded — whether the client asked to keep the connection.
   fn understood(text: String) -> Incoming {
     match parse(text) {
       Option::None => Incoming::Rejected(Response::text(400, "malformed request")),
@@ -981,6 +1029,14 @@ impl Connection {
   }
 }
 
+/// Whether `path` matches `pattern`, and what its `:name` segments bound.
+///
+/// `/analyze/:id` against `/analyze/acc_9921` binds `id`. `None` when the
+/// shapes disagree, which is how the router moves on to the next route.
+///
+/// Exported so a program can route somewhere other than through `Router` —
+/// a WebSocket upgrade, a second listener — without reimplementing the one
+/// piece of matching that has to agree with the server's.
 export fn matches(pattern: String, path: String) -> Option<Params> {
   match_segments(pattern, path, Map::new())
 }
@@ -1067,8 +1123,14 @@ export type Router<'e> = {
 /// ones so that the pipeline reads as a chain against `Router` and cannot
 /// collide with another module's `get`.
 impl Router {
+  /// A router with no routes. The start of the pipeline.
   fn new<'e>() -> Router<'e> { { routes: List::Nil } }
 
+  /// Mounts `handler` at `route` for POST.
+  ///
+  /// Later mounts are tried first, because each prepends. Mounting the same
+  /// route twice is allowed and the second one wins, which is worth knowing
+  /// rather than an invariant anything enforces.
   fn post<'e>(
     router: Router<'e>,
     route: String,
@@ -1077,6 +1139,7 @@ impl Router {
     { routes: List::Cons({ method: Method::Post, pattern: route, handler: handler }, router.routes) }
   }
 
+  /// Mounts `handler` at `route` for GET.
   fn get<'e>(
     router: Router<'e>,
     route: String,
@@ -1152,6 +1215,11 @@ impl Router {
     if server == invalid_handle() { raise HttpError::BindFailed(port) } else { server }
   }
 
+  /// `serve_forever` over TLS: accepts, handshakes, and serves on a fiber
+  /// each.
+  ///
+  /// A failed handshake ends that fiber quietly rather than the loop — on a
+  /// public port it is the ordinary case, not an incident.
   fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) -> ()
     with { nursery: Nursery }
     raises 'e + HttpError
@@ -1177,6 +1245,11 @@ impl Router {
     }
   }
 
+  /// Accepts connections on `server` until the process stops.
+  ///
+  /// `listen` is the one to call: it binds the port and then this. Taking an
+  /// already-bound socket is for a caller that wants to bind it themselves —
+  /// a test on port zero, a socket inherited from a supervisor.
   fn serve_forever<'e>(router: Router<'e>, server: Int) -> ()
     with { nursery: Nursery }
     raises 'e + HttpError
