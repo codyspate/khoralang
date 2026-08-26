@@ -40,6 +40,18 @@ python bench/load.py 18953 "rust, keep-alive"
 connections, five second runs, median of three. **These numbers travel with
 that sentence or they do not travel.**
 
+> **Every figure below is a measurement of this harness, not of the servers.**
+> They were taken at 48 connections, and `bench/compare.py` later established
+> that 48 Python processes cannot drive any of these servers to its limit:
+> pointed at `floor`, the same rig reports 747k at 48 connections, 1.50M at 96
+> and 2.43M at 160. A rate that climbs with client concurrency is the client's
+> rate. The *ratios between the Khora tiers* still mean something, because all
+> three were throttled by the same client; the absolute numbers do not, and the
+> comparison against the Rust control means less than it looks.
+>
+> `bench/compare.py` is the version that walks a ladder and refuses to report a
+> rate that is still climbing. See "Against other languages" below.
+
 All four back to back in one sitting, after phase 9:
 
 | | req/s |
@@ -135,6 +147,65 @@ The lesson worth carrying into the next round is in errata 45: a benchmark that
 is off by a constant factor *everywhere* is a configuration bug, not a code bug,
 and the way to see it is to measure one primitive against something whose cost
 is already known — one call to `memmem`.
+
+## Against other languages
+
+`bench/peers/` holds the same `/health` route in Go, Node, C# and Java, each
+using that language's ordinary server rather than a hand-rolled socket loop,
+because the comparison worth making is against what a team would actually
+write. `python bench/compare.py` builds nothing and measures everything,
+walking 48, 96 and 160 connections per server.
+
+One sitting, 16-core Windows desktop, load generator on the same machine,
+five-second runs, a discarded warm-up first. Khora built with `--release`.
+
+| | req/s | what it is |
+| --- | --- | --- |
+| Khora, `floor` | **> 2,433,000** | accept, read, write a fixed string. No parsing |
+| Rust, thread per connection | **> 2,129,000** | hand-rolled, no framework |
+| Khora, `render` | **> 2,354,000** | the floor plus response rendering |
+| Khora, `std::net::http` | **> 1,729,000** | a `Router`: accept, read, parse, route, render |
+| C#, ASP.NET Core minimal API | 264,000 | Kestrel |
+| Go, `net/http` | 159,000 | the standard library |
+| Java, JDK `HttpServer` | 133,000 | `com.sun.net.httpserver` |
+| Node, `node:http` | 27,000 | the standard library |
+
+**The four figures with a `>` are not measurements.** Each of those servers
+answered more the more connections it was offered — `std::net::http` reported
+519k, 1.06M and 1.73M across the ladder — which is the client running out of
+capacity, not the server. What they establish is a floor: Khora's HTTP server
+is somewhere above 1.7 million requests a second on this machine, and this rig
+cannot say where. The four without a `>` stopped moving, so those are the
+servers' own numbers.
+
+So the honest reading is **an order of magnitude, not a ratio**. Khora's
+`Router` — a full parse, route match and render, written in Khora — is at
+least 6× Kestrel and at least 10× Go's `net/http` here, and it is in the same
+class as a hand-rolled Rust server. How much more than 6× and 10× is a
+question this harness cannot answer.
+
+**What would answer it** is a second machine, or a load generator that is not
+the thing being measured. A first attempt at one in Go plateaued at 250k,
+which is *below* the Python rig it was meant to replace, so it measured itself
+instead; it is kept in `bench/peers/loadgen.go` with that written on it. Two
+machines is the real fix and is roadmap 13.23.
+
+### One thing the comparison did settle
+
+`--release` made no difference to `std::net::http`: 1.73M optimised against
+1.76M unoptimised, which is the same number twice. For this workload the time
+is in the kernel rather than in the generated code, so the profile has nothing
+to work on. That is worth knowing before anybody attributes a benchmark result
+to an optimiser.
+
+### What these peers are not
+
+Each is the language's *ordinary* server. Node's is single-threaded by design
+and would be several times faster behind `cluster`; Java's JDK server is not
+what a Java service ships on, and Netty or Undertow would be far above it;
+`net/http` is Go's real answer and a specialised library like `fasthttp` is
+faster. Read the table as "what you get when you write the obvious thing",
+which is the comparison a team actually faces, not as a ranking of runtimes.
 
 ## What these do not measure
 

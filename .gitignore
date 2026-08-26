@@ -46,3 +46,14 @@ bench/*.pdb
 # `scripts/gate.sh` reads it; it names a working tree, so it is meaningless on
 # any other machine and belongs to nobody's history.
 /.khora-baseline-ok
+
+# The peer servers `bench/compare.py` measures against, built by hand from
+# `bench/peers/`. Sources are tracked; binaries and build trees are not.
+/bench/peers/*.exe
+/bench/peers/*.class
+/bench/peers/dotnet_health/bin/
+/bench/peers/dotnet_health/obj/
+/bench/*/src/release.exe
+/bench/*/src/release.exe.o
+/bench/*/src/release.pdb
+/bench/compare.json
