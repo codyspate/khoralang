@@ -41,3 +41,8 @@ bench/*.pdb
 # template. It names an LLVM prefix and a Windows SDK version, both of which
 # differ per machine.
 /.cargo/config.toml
+
+# The baseline's receipt. `scripts/baseline.sh` writes it on success and
+# `scripts/gate.sh` reads it; it names a working tree, so it is meaningless on
+# any other machine and belongs to nobody's history.
+/.khora-baseline-ok

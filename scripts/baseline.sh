@@ -12,10 +12,23 @@
 #     sh scripts/baseline.sh
 #
 # Exits non-zero on the first failure, and says which step.
+#
+# **It also leaves a receipt**, `.khora-baseline-ok`, naming the tree it
+# passed for. `scripts/gate.sh` reads it, and the pre-push hook
+# `scripts/install-hooks.sh` writes calls that. An exit status can be dropped
+# by the shell chain around this script — that has put three commits on a red
+# baseline, most recently a `| grep` taking grep's status — and a file on disk
+# cannot be. Roadmap 13.20.
 set -e
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+
+# Removed first, so that a run which dies halfway leaves no receipt at all
+# rather than a stale one. Every early exit below is a failure, and every one
+# of them now says so twice: a non-zero status, and nothing on disk.
+receipt="$root/.khora-baseline-ok"
+rm -f "$receipt"
 khora="./target/debug/khora.exe"
 [ -x "$khora" ] || khora="./target/debug/khora"
 
@@ -103,5 +116,10 @@ if command -v wsl >/dev/null 2>&1; then
 else
     printf '\n=== skipping the Linux check: no wsl\n'
 fi
+
+# The receipt, last, after every step has passed. What it records is which
+# *tree* passed — `sh scripts/tree-id.sh` — so editing a file afterwards
+# invalidates it without anybody having to remember that it should.
+sh "$root/scripts/tree-id.sh" > "$receipt"
 
 printf '\n=== baseline clean\n'

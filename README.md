@@ -174,6 +174,12 @@ source it was generated from.
 `sh scripts/baseline.sh` runs the lot, including twelve HTTP conformance checks
 against a real `curl`.
 
+It leaves a receipt naming the tree it passed for, and `sh scripts/gate.sh`
+asks whether one exists for the tree as it stands. `sh scripts/install-hooks.sh`
+puts that question in a pre-push hook. An exit status can be dropped by the
+shell chain around a script — a `| grep` taking grep's status has put three
+commits on a red baseline — and a file on disk cannot be.
+
 ## Numbers
 
 One measurement, so it can be argued with. A `/health` route on
@@ -260,6 +266,9 @@ scripts/
   setup-llvm.sh        installs LLVM 22.1.8 and writes .cargo/config.toml
   check.sh             the fast loop: front end in ~30s, `native` for the rest
   baseline.sh          everything that must keep working, ~2m
+  gate.sh              whether the baseline passed for the tree as it stands
+  tree-id.sh           one line naming that tree; the receipt's content
+  install-hooks.sh     puts gate.sh in a pre-push hook, opt-in
   http_conformance.sh  what an ordinary client gets, checked with curl
   check-linux.sh       the runtime's tests on Linux, through WSL2
   tsan.sh              the runtime under ThreadSanitizer; see soundness.md
