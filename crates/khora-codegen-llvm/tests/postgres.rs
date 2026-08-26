@@ -755,3 +755,120 @@ fn main() -> Int {
         "the first transaction's row survives and the second's does not: {out}"
     );
 }
+
+/// A pool of two connections serving four fibers, against a real server.
+///
+/// Two claims. **Every fiber gets served** even though there are twice as many
+/// of them as there are connections -- the fifth request does not fail and
+/// does not queue against the database, the *fiber* waits. And **a lease
+/// survives a body that leaves badly**: the third fiber's work raises, and the
+/// pool still has both connections afterwards, because `with_db` registers the
+/// return with `Scope` before the body runs.
+///
+/// A pool that loses a connection to an error is a pool that works until the
+/// first bad day, so the count at the end is the assertion that matters.
+///
+/// Skipped without `KHORA_POSTGRES`, like its neighbours.
+#[test]
+fn a_pool_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and bring up \
+             packages/postgres/docker-compose.yml to run this"
+        );
+        return;
+    }
+
+    let main = "module demo::main;
+import std::core::{Channel, Fiber, Fibers, List, Option, Result, Scope, nursery, print, scoped};
+import std::db::{Cell, Db, DbError, Row};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, close, open, with_db};
+
+export effect Nursery { adopt: (Fiber) -> (), }
+export type Oops = | Failed;
+
+fn number(answer: Result<List<Row>, DbError>) -> Int {
+  match answer {
+    Result::Err(_) => 0 - 1,
+    Result::Ok(rows) => match rows {
+      List::Nil => 0 - 2,
+      List::Cons(row, _) => match row.cells {
+        List::Nil => 0 - 3,
+        List::Cons(cell, _) => match cell {
+          Cell::Number(n) => n,
+          Cell::Null => 0 - 4,
+          Cell::Text(_) => 0 - 5,
+          Cell::Flag(_) => 0 - 6,
+          Cell::Money(_) => 0 - 7,
+        },
+      },
+    },
+  }
+}
+
+/// One unit of work: ask the server to add two numbers.
+fn add(db: Db, a: Int, b: Int) -> Int {
+  number(db.query(\"select ($1::int4 + $2::int4)\",
+    List::Cons(Cell::Number(a), List::Cons(Cell::Number(b), List::Nil))))
+}
+
+fn one_job(pool: Pool, n: Int) -> () {
+  match with_db(pool, fn db => add(db, n, n)) {
+    Result::Ok(total) => print(Int::to_string(total)),
+    Result::Err(_) => print(\"no connection\"),
+  };
+}
+
+/// A body that raises. The lease must come back anyway.
+fn bad_job(pool: Pool) -> () raises Oops {
+  with_db(pool, fn db => raise Oops::Failed)!;
+}
+
+fn run_jobs(pool: Pool) -> () {
+  one_job(pool, 1);
+  one_job(pool, 2);
+  catch_bad(pool);
+  one_job(pool, 3);
+}
+
+fn catch_bad(pool: Pool) -> () {
+  bad_job(pool)! catch { Oops::Failed => print(\"raised\") };
+}
+
+fn main() -> Int {
+  let settings: Settings = {
+    host: \"127.0.0.1\",
+    port: 5433,
+    user: \"khora\",
+    database: \"khora\",
+    secret: \"khora\",
+  };
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 2);
+
+  // No `scoped` here on purpose: a caller needs no capability to lease a
+  // connection, and the lease ends with the `with_db` call rather than with
+  // whatever region happens to enclose it.
+  run_jobs(pool);
+
+  // Both connections are idle again -- including the one the raising body
+  // held, which is the whole point of leasing through `Scope`.
+  print(Int::to_string(Channel::depth(pool.idle)));
+
+  close(pool);
+  Fibers::wait(crew);
+  0
+}
+";
+
+    let exe = build("postgres_pool", main);
+    let ran = std::process::Command::new(&exe).output().expect("the program should run");
+    let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
+    assert_eq!(ran.status.code(), Some(0), "the client should succeed: {out}");
+    assert_eq!(
+        out,
+        "2\n4\nraised\n6\n2\n",
+        "three sums, a caught raise, and both connections back in the pool: {out}"
+    );
+}

@@ -1,0 +1,150 @@
+module postgres::pool;
+
+//! Several connections, and a fair way to take one.
+//!
+//! `db.kh` gives one connection a serving fiber and a `Db` over it. That is
+//! correct and it is not concurrent: a second fiber's statements queue behind
+//! the first's, however many workers are free.
+//!
+//! A pool is the obvious fix and, given a channel, barely a thing at all.
+//! **The pool is a channel holding the idle connections.** Taking one is a
+//! receive, giving it back is a send, and waiting when they are all busy is
+//! what a channel already does. There is no free list, no condition variable
+//! and no count of who has what -- those are the parts a pool usually is, and
+//! they are all the channel's.
+//!
+//! # Backpressure comes for free, and that is the point
+//!
+//! A pool of four with five fibers wanting a connection does not queue the
+//! fifth request against the database and it does not fail it. The fifth
+//! *fiber* waits, having given its worker back, until somebody finishes. Under
+//! more load than the pool can serve, the waiting happens at the edge -- which
+//! is what stops a service from accepting work until it runs out of memory.
+//!
+//! # Leases, and the region they belong to
+//!
+//! `with_db` takes a connection and must give it back, including when the body
+//! raises and including when the fiber running it is cancelled. That is
+//! `Scope`'s job: the return is registered with `acquire` before the body
+//! runs, and a region's finalizers run on the way out however the way out is
+//! reached.
+//!
+//! **The region has to be `with_db`'s own**, and the first version got this
+//! wrong in a way worth recording. It required a `Scope` from its caller,
+//! which reads as flexible and means the lease is held until the *caller's*
+//! region ends rather than until the call returns. Four jobs against a pool of
+//! two, all inside one `scoped`, took both connections and gave neither back:
+//! the third waited for ever. A pool of `n` behaved like a pool of `n` uses.
+//!
+//! So `with_db` opens a region per lease. A caller needs no capability for it,
+//! which is also the better API -- the lifetime of the lease is now the thing
+//! a reader can see, which is the call.
+//!
+//! **The half that is still open** is the same one `std::db` names: a
+//! transaction interrupted mid-flight is rolled back by the *server* when the
+//! connection is reused, not by Khora on the way out. Roadmap 13.3.
+
+import std::core::{Channel, Fiber, Fibers, Option, Result, Scope, acquire, scoped};
+import std::db::{Db, DbError};
+import postgres::db::{Request, Settings, over, serve};
+
+/// A set of connections, each with a fiber serving it.
+export type Pool = {
+  /// The ones nobody is using. A connection is *in* this channel exactly when
+  /// it is free, which is the whole of the bookkeeping.
+  idle: Channel<Channel<Request>>,
+};
+
+/// Opens `count` connections and adopts a serving fiber for each into `crew`.
+///
+/// **Returns before any of them has connected.** A serving fiber opens its own
+/// connection, so `open` is a spawn and not a round trip; a connection that
+/// will not open answers every request with the reason, which is what a caller
+/// sees rather than a failure here. That also means a pool is usable the
+/// instant it exists, and the ones still connecting simply are not idle yet.
+///
+/// Below one connection is one. A pool of none would take a lease that never
+/// arrives, which is a hang rather than an error.
+export fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
+  let wanted = if count < 1 { 1 } else { count };
+  let idle: Channel<Channel<Request>> = Channel::bounded(wanted);
+  let mut made = 0;
+  while made < wanted {
+    // Capacity one: a connection serves one statement at a time, so a deeper
+    // queue would only let a fiber that already holds the lease run ahead of
+    // itself. Depth belongs to `idle`, where it means "how many connections",
+    // and not here, where it would mean nothing.
+    let requests: Channel<Request> = Channel::bounded(1);
+    Fibers::adopt(crew, Fiber::spawn(fn () => serve(settings, requests)));
+    Channel::send(idle, requests);
+    made = made + 1
+  };
+  { idle: idle }
+}
+
+/// Runs `body` with a `Db` over one of the pool's connections.
+///
+/// Waits when they are all busy. The connection goes back **when this call
+/// returns**, however it returns -- normally, raising, or cancelled -- because
+/// the lease is registered with `acquire` in a region this function opens. A
+/// pool that loses a connection to an error is a pool that works until the
+/// first bad day; one that holds a lease past the call is a pool of `n` uses.
+///
+/// The `Result` is about *getting* a connection. What the body did with one
+/// passes straight through on its own row, because folding a caller's error
+/// into `DbError` would lose its type.
+export fn with_db<A, 'e, 'r>(pool: Pool, body: (Db) -> A raises 'r) -> Result<A, DbError>
+  with 'e
+  raises 'r
+{
+  match Channel::receive(pool.idle) {
+    Option::None => Result::Err(DbError::Disconnected("the pool is closed")),
+    // The region opened here is what ends the lease. See the note at the head
+    // of this module for what happened when it was the caller's.
+    Option::Some(requests) => scoped(fn () => held(pool.idle, requests, body))!,
+  }
+}
+
+/// The body, with the lease registered before it starts.
+///
+/// Separate from `with_db` because `acquire` needs a `Scope` and `with_db`'s
+/// whole point is that its caller does not have to have one.
+fn held<A, 'r>(
+  idle: Channel<Channel<Request>>,
+  requests: Channel<Request>,
+  body: (Db) -> A raises 'r,
+) -> Result<A, DbError>
+  with { scope: Scope }
+  raises 'r
+{
+  let leased = acquire(requests, fn back => give_back(idle, back));
+  Result::Ok(body(over(leased))!)
+}
+
+/// Puts a connection back, or lets it go if the pool has closed.
+///
+/// A failed send here is not an error to report: it means somebody closed the
+/// pool while this fiber held a lease, which is what shutting down looks like
+/// from the inside.
+fn give_back(idle: Channel<Channel<Request>>, requests: Channel<Request>) -> () {
+  Channel::send(idle, requests);
+}
+
+/// Stops every serving fiber and closes every connection.
+///
+/// **Only the idle ones**, which is deliberate rather than a limitation: a
+/// connection somebody is using is one whose statement is still running, and
+/// closing its request channel underneath the fiber holding it would answer a
+/// live query with `Disconnected`. Wait for the nursery afterwards; a lease
+/// returned to a closed pool releases its connection, and the serving fiber
+/// ends when its request channel does.
+export fn close(pool: Pool) -> () {
+  Channel::close(pool.idle);
+  let mut going = true;
+  while going {
+    match Channel::receive(pool.idle) {
+      Option::None => going = false,
+      Option::Some(requests) => Channel::close(requests),
+    }
+  };
+}

@@ -172,3 +172,28 @@ fn a_file_that_does_not_parse_is_refused_by_name() {
     assert!(said.contains("a.kh"), "the message should name the file: {said}");
     assert!(said.contains("khora check"), "and the command that explains it: {said}");
 }
+
+/// **A checkout must not make every page stale.** Pages are written with `\n`;
+/// a Windows checkout with `core.autocrlf` set hands them back with `\r\n`. A
+/// byte comparison then reports all of them out of date while `git diff` shows
+/// nothing, which is how a gate stops being believed and then gets switched
+/// off. Found exactly that way, immediately after a rebase.
+#[test]
+fn a_page_with_windows_line_endings_is_not_stale() {
+    let w = world();
+    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\nexport fn f() -> Int { 1 }\n");
+    run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
+
+    let page = page(&w.out, "alpha.md");
+    assert!(!page.contains("\r\n"), "written with `\\n`: {page:?}");
+    std::fs::write(w.out.join("alpha.md"), page.replace('\n', "\r\n"))
+        .expect("rewriting the page as a checkout would");
+
+    let checked =
+        run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap(), "--check"]);
+    assert!(
+        checked.status.success(),
+        "the same content is not stale: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+}

@@ -3264,7 +3264,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
 | 13.10 | Build profiles | **Not started.** `KHORA_DEBUG` is the only knob and it is a boolean. 12.4 says debug info "should become part of an optimization level when there is one"; 12.9 adds that the reproducible build is the one with debug info *off*, so profiles and reproducibility have to be designed together |
 | 13.11 | Public surface audit | **Not started.** `compatibility.md` has the policy; nothing has been checked against it |
-| 13.12 | Production ecosystem | **Postgres speaks `std::db` now.** Wire protocol, both query protocols, bound parameters, `Cell` mapping, and the `Db` capability with `transaction` verified against a real server; no pool, SCRAM or TLS. HTTP client and OTLP not started |
+| 13.12 | Production ecosystem | **Postgres speaks `std::db` now, with a pool.** Wire protocol, both query protocols, bound parameters, `Cell` mapping, the `Db` capability with `transaction`, and a connection pool -- all verified against a real server; no SCRAM or TLS. HTTP client and OTLP not started |
 | 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
 | 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
 | 13.15 | User documentation | **API reference generated; the rest not started.** `khora doc` writes a page per `std` module from `///` and `//!`, gated by `--check` in the baseline. Getting Started, the guide and the cookbook are the docs agent's `website/` work |
@@ -3491,6 +3491,29 @@ answer** — which is how the first draft of the transaction test reported a
 commit that PostgreSQL had actually aborted. The test now matches every
 `Result` explicitly. A discarded `Result` should be a lint; it is not one, and
 that belongs to 13.11 and 13.17.
+
+### The pool, and a lease that outlived its call
+
+A pool is a channel holding the idle connections. Taking one is a receive,
+giving it back is a send, and waiting when they are all busy is what a channel
+already does -- so there is no free list, no condition variable and no count of
+who has what, which are the parts a pool usually is. Backpressure comes with
+it: a fifth fiber against a pool of four waits, having given its worker back,
+rather than queueing work against the database.
+
+**The first version deadlocked, and the reason is worth keeping.** `with_db`
+registered the lease's return with `acquire` and required a `Scope` from its
+caller. That reads as flexible and means the lease is held until the *caller's*
+region ends rather than until the call returns — so four jobs against a pool of
+two, all inside one `scoped`, took both connections and gave neither back. A
+pool of `n` behaved like a pool of `n` uses, and the third job waited for ever.
+
+`with_db` opens a region per lease now. The caller needs no capability, which
+is also the better API: the lifetime of the lease is the call, and a reader can
+see that without knowing where the enclosing `scoped` is. The test holds four
+jobs against two connections and one body that raises, and asserts the pool has
+both connections back at the end — the assertion that a pool losing a
+connection to an error would fail.
 
 ### 13.15 — a standard-library reference that cannot drift
 

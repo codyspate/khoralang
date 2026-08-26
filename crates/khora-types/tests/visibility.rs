@@ -192,3 +192,66 @@ fn a_reachable_type_is_visible_to_the_checker_and_not_to_the_program() {
         "`Amount` was never imported, so naming it should still fail: {found:?}"
     );
 }
+
+/// Four modules, because three only reach one hop. `far` declares the type,
+/// `deep` holds one, `middle` holds one of *those*, and `user` asks.
+fn errors_in_four(far: &str, deep: &str, middle: &str, user: &str) -> Vec<String> {
+    let db = KhoraDatabase::new();
+    let far = SourceFile::new(&db, "far.kh".into(), far.to_string());
+    let deep = SourceFile::new(&db, "deep.kh".into(), deep.to_string());
+    let middle = SourceFile::new(&db, "middle.kh".into(), middle.to_string());
+    let user = SourceFile::new(&db, "user.kh".into(), user.to_string());
+    SourceRoot::new(&db, vec![far, deep, middle, user]);
+    khora_types::diagnostics(&db, user).iter().map(|e| e.message.clone()).collect()
+}
+
+/// **The first fix was one hop deep.** Carrying a type's reachable bodies
+/// across an import is only transitive if the search also looks at what the
+/// *exporter* merely reached, rather than only at what it declared or imported
+/// by name.
+///
+/// Found by `postgres::pool`: it imports `Request` from `postgres::db`, whose
+/// `Reply` holds a `Row`, whose cells hold a `Decimal`. `Decimal` is one module
+/// away from `db` and two from `pool`, so it sits in `db`'s reachable list and
+/// not in its own declarations -- and the walk stopped there.
+#[test]
+fn shareability_reaches_further_than_one_module() {
+    let far = "module far;\n\
+               export type Atom = { n: Int };\n";
+    let deep = "module deep;\n\
+                import far::{Atom};\n\
+                export type Inner = { atom: Atom };\n";
+    let middle = "module middle;\n\
+                  import deep::{Inner};\n\
+                  export type Outer = { inner: Inner };\n";
+    let user = "module user;\n\
+                export trait Share {}\n\
+                import middle::{Outer};\n\
+                fn takes<A: Share>(value: A) -> () { }\n\
+                fn use_it(o: Outer) -> () { takes(o) }\n";
+    let found = errors_in_four(far, deep, middle, user);
+    assert!(found.is_empty(), "three modules deep is still a fact about the type: {found:?}");
+}
+
+/// And still not shareable when it genuinely is not, three modules away.
+#[test]
+fn a_mutable_field_three_modules_away_still_refuses() {
+    let far = "module far;\n\
+               export type Atom = { mut n: Int };\n";
+    let deep = "module deep;\n\
+                import far::{Atom};\n\
+                export type Inner = { atom: Atom };\n";
+    let middle = "module middle;\n\
+                  import deep::{Inner};\n\
+                  export type Outer = { inner: Inner };\n";
+    let user = "module user;\n\
+                export trait Share {}\n\
+                import middle::{Outer};\n\
+                fn takes<A: Share>(value: A) -> () { }\n\
+                fn use_it(o: Outer) -> () { takes(o) }\n";
+    let found = errors_in_four(far, deep, middle, user);
+    assert!(
+        found.iter().any(|e| e.contains("does not implement `Share`")),
+        "a `mut` field three modules away is still a race: {found:?}"
+    );
+}

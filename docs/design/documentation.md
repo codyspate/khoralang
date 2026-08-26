@@ -3,6 +3,12 @@
 Roadmap 13.15's "standard-library API reference". `khora doc` reads the
 comments already in the source and writes one markdown page per module.
 
+**This is what was decided while building it.** `docs/design/auto-documentation.md`
+is the plan for the parts that are not built — a JSON output for consumers
+other than this site, per-symbol records with source locations and
+cross-references, and compiled examples. Where the two disagreed, that page now
+carries the correction.
+
 ## Decided
 
 **`///` documents the declaration below it. `//!` documents the module.**

@@ -1083,7 +1083,13 @@ fn doc(paths: &[PathBuf], out: &Path, check: bool) -> Result<bool> {
     }
     for (path, page) in &pages {
         let before = std::fs::read_to_string(path).ok();
-        if before.as_deref() == Some(page.as_str()) {
+        // **Compared with the line endings normalised.** Pages are written
+        // with `\n`; a checkout on Windows with `core.autocrlf` set hands them
+        // back with `\r\n`, and a byte comparison then says every page is
+        // stale for ever. Found by the gate failing on all fifteen pages
+        // immediately after a rebase, with `git diff` showing nothing --
+        // which is exactly the way a gate stops being believed.
+        if before.as_deref().map(unified) == Some(unified(page)) {
             continue;
         }
         changed.push(format!(
@@ -1171,6 +1177,11 @@ fn every_source(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The same text whatever a checkout did to its line endings.
+fn unified(text: &str) -> String {
+    text.replace("\r\n", "\n")
 }
 
 /// Every `.md` already under `out`, so the ones this run did not write can go.

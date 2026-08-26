@@ -880,12 +880,17 @@ pub fn as_written(key: &str) -> String {
 /// A worklist over type names rather than a recursion, because a type may
 /// contain itself and the visited set is the termination argument.
 ///
-/// **Only what `exported` already has.** A module's own map holds the bodies it
-/// imported, so `std::db`'s map has `Decimal` in it — that is how `Cell` was
-/// checkable inside `std::db` and not outside it. Nothing is fetched from a
-/// third module here; this closes the gap by carrying forward what the exporter
-/// already saw, which is exactly the set the exporter used to answer the same
-/// question.
+/// **Only what `exported` already has, including what *it* merely reached.**
+/// A module's own map holds the bodies it imported, so `std::db`'s map has
+/// `Decimal` in it — that is how `Cell` was checkable inside `std::db` and not
+/// outside it. Nothing is fetched from a third module here; this closes the gap
+/// by carrying forward what the exporter already saw.
+///
+/// Searching `reachable` as well as `variants` is what makes it transitive
+/// rather than one hop deep, and it was found the hard way: `postgres::pool`
+/// imports `Request` from `postgres::db`, whose `Reply` holds a `Row`, whose
+/// cells hold a `Decimal` — and `Decimal` is two modules from `pool` and one
+/// from `db`, so it sits in `db`'s reachable list rather than its own.
 fn reachable_from(
     exported: &TypeMap,
     name: &str,
@@ -895,8 +900,10 @@ fn reachable_from(
     let mut found = Vec::new();
     let mut generics = Vec::new();
 
+    let known = || exported.variants.iter().chain(exported.reachable.iter());
+
     while let Some(here) = queue.pop() {
-        for variant in exported.variants.iter().filter(|v| v.type_name == here) {
+        for variant in known().filter(|v| v.type_name == here) {
             for field in &variant.fields {
                 for mentioned in type_names(field) {
                     if seen.contains(&mentioned) {
@@ -904,10 +911,12 @@ fn reachable_from(
                     }
                     seen.push(mentioned.clone());
                     queue.push(mentioned.clone());
-                    found.extend(
-                        exported.variants.iter().filter(|v| v.type_name == mentioned).cloned(),
-                    );
-                    if let Some(parameters) = exported.adts.get(&mentioned) {
+                    found.extend(known().filter(|v| v.type_name == mentioned).cloned());
+                    let parameters = exported
+                        .adts
+                        .get(&mentioned)
+                        .or_else(|| exported.reachable_adts.get(&mentioned));
+                    if let Some(parameters) = parameters {
                         generics.push((mentioned.clone(), parameters.clone()));
                     }
                 }
