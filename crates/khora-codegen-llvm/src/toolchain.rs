@@ -37,7 +37,7 @@ pub fn tool(name: &str) -> Option<PathBuf> {
 /// already knows how to find the platform's CRT and system libraries, and it
 /// is the same driver that will handle the cross-targets in Phase 6.
 pub fn link_executable(objects: &[&Path], out: &Path) -> Result<(), String> {
-    drive_clang(objects, &[], out, false)
+    drive_clang(objects, &[], out, false, Profile::from_env())
 }
 
 /// File name of the runtime's static archive, as cargo writes it.
@@ -193,21 +193,96 @@ const LIBRARY_CONTROL: &[&str] = &[
     "khora_alloc_count",
 ];
 
-/// Whether a build emits debug information.
+/// How much a build optimizes, and what it therefore keeps.
 ///
-/// On by default, and off with `KHORA_DEBUG=0`. There is no release mode to
-/// hang this off yet, and the default that serves a language being brought up
-/// is the one where a crash can be read. When there is an optimization level to
-/// speak of, this becomes part of it.
+/// **Two, and no more, on purpose.** A profile is a *name for a set of
+/// answers*, and its value is that a person can say which set they want
+/// without knowing what is in it. Three is where that stops being true — the
+/// third is always "release but with something", and the something is better
+/// asked for directly. `docs/design/profiles.md`.
 ///
-/// **Here rather than in `debug`, which is where it belongs and cannot live.**
-/// That module is behind the `llvm` feature because it names inkwell types;
-/// this is an environment variable, and the linker driver below needs it in a
-/// build that has no LLVM at all. Defining it there made `cargo build` fail for
-/// anyone working on the front end, which is the one thing the feature exists
-/// to prevent.
+/// Here rather than beside the code generator for the reason
+/// [`Profile::debug_info`] gives: the linker driver in this module needs the
+/// answer in a build with no LLVM in it at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Profile {
+    /// Unoptimized, with debug information. What a language being brought up
+    /// should do when nobody said otherwise: the crash you are about to have
+    /// is readable.
+    #[default]
+    Debug,
+    /// Optimized, without debug information, and bit-for-bit reproducible.
+    Release,
+}
+
+impl Profile {
+    /// The profile `KHORA_PROFILE` names, or [`Profile::Debug`].
+    ///
+    /// An environment variable as well as `--release` because `khora test` and
+    /// `khora bench` have profiles too, and a flag on every subcommand is
+    /// three ways to say one thing. Anything unrecognised is the default
+    /// rather than an error: this is read deep inside a build, where there is
+    /// no channel to complain on, and a typo that silently optimized would be
+    /// worse than one that silently did not.
+    pub fn from_env() -> Profile {
+        match std::env::var("KHORA_PROFILE").as_deref() {
+            Ok("release") => Profile::Release,
+            _ => Profile::Debug,
+        }
+    }
+
+    /// What the profile is called, for a message.
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Debug => "debug",
+            Profile::Release => "release",
+        }
+    }
+
+    /// Whether this build emits debug information.
+    ///
+    /// The profile decides, and `KHORA_DEBUG` overrides — in both directions,
+    /// which is the point. A release build with debug information is what
+    /// profiling wants, and a debug build without one is how 12.9 measured
+    /// reproducibility before there was a profile to ask for.
+    ///
+    /// **Here rather than in `debug`, which is where it belongs and cannot
+    /// live.** That module is behind the `llvm` feature because it names
+    /// inkwell types; this is an environment variable, and the linker driver
+    /// below needs it in a build that has no LLVM at all. Defining it there
+    /// made `cargo build` fail for anyone working on the front end, which is
+    /// the one thing the feature exists to prevent.
+    pub fn debug_info(self) -> bool {
+        match std::env::var("KHORA_DEBUG").as_deref() {
+            Ok("0") | Ok("off") | Ok("false") => false,
+            Ok("1") | Ok("on") | Ok("true") => true,
+            _ => self == Profile::Debug,
+        }
+    }
+
+    /// The LLVM pass pipeline to run over the module, if any.
+    ///
+    /// `None` in debug, and that is what a debug build has always done —
+    /// nothing but instruction selection. `default<O2>` in release rather than
+    /// `O3`: the difference between them is mostly loop unrolling and
+    /// vectorization, which costs compile time and code size for programs that
+    /// are not numerical kernels, and there is no measurement here that says
+    /// Khora's output is. `O3` is a change to make with a benchmark in hand.
+    pub fn pipeline(self) -> Option<&'static str> {
+        match self {
+            Profile::Debug => None,
+            Profile::Release => Some("default<O2>"),
+        }
+    }
+}
+
+/// Whether a build emits debug information, for the profile the environment
+/// names.
+///
+/// The linker driver's view: it has no profile to hand and reads the same
+/// answer the code generator did.
 pub fn debug_info_wanted() -> bool {
-    !matches!(std::env::var("KHORA_DEBUG").as_deref(), Ok("0") | Ok("off") | Ok("false"))
+    Profile::from_env().debug_info()
 }
 
 pub fn link_with_runtime(
@@ -215,6 +290,7 @@ pub fn link_with_runtime(
     out: &Path,
     library: bool,
     exports: &[String],
+    profile: Profile,
 ) -> Result<(), String> {
     let wasm = khora_db::target_triple().is_some_and(|t| t.contains("wasm"));
     let runtime = runtime_archive().ok_or_else(|| {
@@ -233,7 +309,7 @@ pub fn link_with_runtime(
     if wasm {
         return drive_wasm_ld(objects, runtime.as_path(), out, exports);
     }
-    drive_clang(objects, &[runtime.as_path()], out, library)
+    drive_clang(objects, &[runtime.as_path()], out, library, profile)
 }
 
 /// Links a WebAssembly module with `wasm-ld`.
@@ -301,6 +377,7 @@ fn drive_clang(
     archives: &[&Path],
     out: &Path,
     library: bool,
+    profile: Profile,
 ) -> Result<(), String> {
     let clang = tool("clang").ok_or_else(|| {
         "clang not found in the LLVM toolchain; set LLVM_SYS_221_PREFIX \
@@ -336,7 +413,12 @@ fn drive_clang(
     // artifact that discards it is the failure mode worth guarding against
     // here: everything verifies, nothing is wrong, and no debugger can read
     // the program.
-    if debug_info_wanted() {
+    // The *profile's* answer rather than the environment's, because a build
+    // may have been asked for with `--release` and never touched a variable.
+    // A link that adds `-g` to a module carrying no debug metadata is not
+    // merely pointless: on Windows it costs the reproducibility that not
+    // emitting debug information is what buys.
+    if profile.debug_info() {
         cmd.arg("-g");
     }
 

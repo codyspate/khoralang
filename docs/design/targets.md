@@ -202,7 +202,7 @@ have found it until a Worker build was attempted.
 
 ```
 $ KHORA_TARGET=wasm32-unknown-unknown khora build . --lib
-library src/lib.wasm from 8 module(s)
+library src/lib.wasm from 8 module(s) [debug]
 header  src/lib.h
 ```
 

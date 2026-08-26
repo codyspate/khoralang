@@ -100,6 +100,7 @@ pub(super) fn build(
     out: &Path,
     entry_point: Entry,
     stop: Stop,
+    profile: Profile,
 ) -> Result<(), Vec<HirError>> {
     let files = root.files(db);
     let mut diagnostics: Vec<HirError> = Vec::new();
@@ -110,7 +111,7 @@ pub(super) fn build(
         return Err(diagnostics);
     }
 
-    let machine = target_machine()?;
+    let machine = target_machine(profile)?;
 
     // Whole-program: a generic function is compiled by substituting into its
     // body, so every module's source has to be present at once. There is no
@@ -134,7 +135,7 @@ pub(super) fn build(
     // attached to a function before that function's instructions are built,
     // and the compile unit has to exist before the first subprogram — so this
     // is as early as it can be and still know the entry file's path.
-    if crate::toolchain::debug_info_wanted() {
+    if profile.debug_info() {
         let entry_path = files.first().map(|f| f.path(db).clone()).unwrap_or_default();
         let triple = machine.get_triple();
         let is_msvc = triple.as_str().to_string_lossy().contains("msvc");
@@ -338,7 +339,7 @@ pub(super) fn build(
     if let Some(debug) = backend.debug.as_ref() {
         debug.finalize();
     }
-    backend.finish(&machine, out, stop, entry_point == Entry::Library)
+    backend.finish(&machine, out, stop, entry_point == Entry::Library, profile)
 }
 
 /// Opens the debug scope for one emitted function.
@@ -557,7 +558,7 @@ fn specialized_signature(
 /// with no layout yet reports `i64` as 4-byte aligned, and setting the real one
 /// afterwards does not go back and fix the instructions. The result still runs
 /// on x86, which is exactly what makes it easy to ship.
-fn target_machine() -> Result<TargetMachine, Vec<HirError>> {
+fn target_machine(profile: Profile) -> Result<TargetMachine, Vec<HirError>> {
     // **Every target inkwell was built with, not just this machine's.**
     // `initialize_native` is enough to compile for the host and nothing else,
     // which is what `docs/design/targets.md` recorded as the reason there was
@@ -586,7 +587,16 @@ fn target_machine() -> Result<TargetMachine, Vec<HirError>> {
             &triple,
             CPU,
             FEATURES,
-            OptimizationLevel::Default,
+            // Instruction selection, which is a different dial from the IR
+            // pipeline above it. `Default` is `-O2`'s, and it is what every
+            // build has always used — a debug build that dropped to `None`
+            // would be slower than the one everything here is calibrated
+            // against, for a readability the IR already provides by not having
+            // been optimized.
+            match profile {
+                Profile::Debug => OptimizationLevel::Default,
+                Profile::Release => OptimizationLevel::Aggressive,
+            },
             // **`PIC`, not `Default`.** `Default` means the target's
             // traditional model, which on x86-64 Linux is absolute addressing
             // -- and every mainstream distribution now builds executables as

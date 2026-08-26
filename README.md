@@ -15,6 +15,11 @@ checking, whole-program monomorphization, reference-count planning and LLVM to a
 linked native executable. The standard library is written in Khora, and one of
 the reference applications is an HTTP service.
 
+Two profiles: `khora build` is unoptimized with debug information, and
+`khora build --release` runs LLVM's `default<O2>`, drops debug information, and
+is bit-for-bit reproducible — object and executable both.
+`docs/design/profiles.md`.
+
 It is **pre-1.0 and pre-release.** There is no registry, no editions, and no
 stability promise yet — `docs/design/compatibility.md` decides what the
 promise will be and names what 1.0 is still waiting on.

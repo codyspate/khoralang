@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
+use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
     TargetTriple,
@@ -54,6 +55,7 @@ use text_size::TextRange;
 
 use crate::runtime::{self, Runtime};
 use crate::toolchain;
+use crate::toolchain::Profile;
 
 /// CPU and feature set to generate for.
 ///
@@ -91,7 +93,22 @@ const FEATURES: &str = "";
 /// naming the command that produces it, not a link failure full of undefined
 /// symbols from Rust's `std`.
 pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Main, Stop::AtExecutable)
+    compile_with(db, root, out, Profile::from_env())
+}
+
+/// [`compile`], for a caller that knows which profile it wants.
+///
+/// The plain [`compile`] reads `KHORA_PROFILE`, which is what a build reached
+/// from a test or an editor should do. `khora build --release` has been *told*,
+/// and telling is not the same as arranging for a variable to be read later —
+/// the linker asks the same question, and it has to get the same answer.
+pub fn compile_with(
+    db: &dyn Db,
+    root: SourceRoot,
+    out: &Path,
+    profile: Profile,
+) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Main, Stop::AtExecutable, profile)
 }
 
 /// Compiles the program's `export extern fn`s into a shared library.
@@ -105,7 +122,17 @@ pub fn compile(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirE
 /// validated — generated rather than written, because a header that can drift
 /// from its source is a header that will.
 pub fn compile_library(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Library, Stop::AtExecutable)
+    compile_library_with(db, root, out, Profile::from_env())
+}
+
+/// [`compile_library`], for a caller that knows which profile it wants.
+pub fn compile_library_with(
+    db: &dyn Db,
+    root: SourceRoot,
+    out: &Path,
+    profile: Profile,
+) -> Result<(), Vec<HirError>> {
+    build(db, root, out, Entry::Library, Stop::AtExecutable, profile)
 }
 
 /// Generates and verifies a module, and stops before writing anything.
@@ -121,7 +148,7 @@ pub fn compile_library(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), 
 /// portable step: an unresolved symbol or a wrong calling convention still
 /// needs the real platform, and CI still builds on all three.
 pub fn verify_for_target(db: &dyn Db, root: SourceRoot) -> Result<(), Vec<HirError>> {
-    build(db, root, Path::new("verify-only"), Entry::Main, Stop::AtVerification)
+    build(db, root, Path::new("verify-only"), Entry::Main, Stop::AtVerification, Profile::from_env())
 }
 
 /// Compiles the program's *tests* to an executable that runs them.
@@ -131,7 +158,7 @@ pub fn verify_for_target(db: &dyn Db, root: SourceRoot) -> Result<(), Vec<HirErr
 /// each one a fiber of its own. Everything else — the same monomorphization,
 /// the same lowering — is shared, because a test body is a function body.
 pub fn compile_tests(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Tests, Stop::AtExecutable)
+    build(db, root, out, Entry::Tests, Stop::AtExecutable, Profile::from_env())
 }
 
 /// Compiles the program's `bench` blocks to an executable that times them.
@@ -141,7 +168,7 @@ pub fn compile_tests(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Ve
 /// decide which it is — and the decision already exists, in
 /// `khora_hir::TestKind`, at compile time.
 pub fn compile_benches(db: &dyn Db, root: SourceRoot, out: &Path) -> Result<(), Vec<HirError>> {
-    build(db, root, out, Entry::Benches, Stop::AtExecutable)
+    build(db, root, out, Entry::Benches, Stop::AtExecutable, Profile::from_env())
 }
 
 /// How far to take a build.
@@ -474,6 +501,7 @@ impl<'ctx> Backend<'ctx> {
         out: &Path,
         stop: Stop,
         library: bool,
+        profile: Profile,
     ) -> Result<(), Vec<HirError>> {
         // Dumped before verification, so that a module which fails to verify is
         // still there to be read — that is precisely when it is wanted.
@@ -491,12 +519,45 @@ impl<'ctx> Backend<'ctx> {
             return Ok(());
         }
 
+        // **After verification, before the object.** A debug build runs
+        // nothing here and never has: what a target machine does on its own is
+        // instruction selection, so the IR reaching it is what was written.
+        //
+        // The pipeline is named rather than assembled pass by pass. LLVM's
+        // `default<O2>` is maintained by people who measure it, changes with
+        // every release, and is the thing every other front end runs — a
+        // hand-picked list is a promise to keep picking, and the first
+        // regression is silent.
+        //
+        // Verified again afterwards, in release only, because a pass that
+        // breaks the module is a compiler bug this should catch rather than
+        // hand to the assembler. It costs a walk of the module on a build that
+        // has already spent longer optimizing it.
+        if let Some(pipeline) = profile.pipeline() {
+            let options = PassBuilderOptions::create();
+            self.module.run_passes(pipeline, machine, options).map_err(|e| {
+                vec![backend_error(format!(
+                    "the `{pipeline}` pipeline failed, which is a compiler bug:
+{e}"
+                ))]
+            })?;
+            self.module.verify().map_err(|e| {
+                vec![backend_error(format!(
+                    "optimization produced invalid LLVM IR, which is a compiler bug:
+{e}"
+                ))]
+            })?;
+            if std::env::var_os("KHORA_EMIT_LLVM").is_some() {
+                let _ = self.module.print_to_file(with_suffix(out, ".opt.ll"));
+            }
+        }
+
         let object = with_suffix(out, ".o");
         machine
             .write_to_file(&self.module, FileType::Object, &object)
             .map_err(|e| vec![backend_error(format!("writing {}: {e}", object.display()))])?;
 
-        toolchain::link_with_runtime(&[&object], out, library, &self.c_exports)
+        toolchain::link_with_runtime(&[&object], out, library, &self.c_exports, profile)
             .map_err(|e| vec![backend_error(e)])
     }
 }

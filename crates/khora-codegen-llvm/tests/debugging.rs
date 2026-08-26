@@ -2,6 +2,12 @@
 
 //! What a trap says about where it happened.
 //!
+//! **Compiled at [`Profile::Debug`] explicitly**, which is the profile these
+//! are *about*: a release build emits no line tables, so under
+//! `KHORA_PROFILE=release` every assertion here would fail while nothing was
+//! wrong. Naming the profile is the same reasoning as asserting on a program's
+//! output rather than on its metadata — say what is being tested.
+//!
 //! `khora_bounds_fail`'s own doc comment said "the useful thing to do is say
 //! where", and until the compiler emitted line tables there was no way for it
 //! to. Both traps named what had happened — `Int addition overflowed`, `index 7
@@ -21,6 +27,7 @@ mod harness;
 use std::path::PathBuf;
 use std::process::Command;
 
+use khora_codegen_llvm::Profile;
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
 /// Compiles `source`, runs it with backtraces on, and returns what it printed
@@ -35,7 +42,7 @@ fn trap_of(name: &str, source: &str) -> String {
     let db = KhoraDatabase::new();
     let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
     let root = SourceRoot::new(&db, vec![file]);
-    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+    if let Err(errors) = khora_codegen_llvm::compile_with(&db, root, &exe, Profile::Debug) {
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
         panic!("compiling `{name}` failed:\n  {}\n\n{source}", messages.join("\n  "));
     }
@@ -129,7 +136,7 @@ fn main() -> Int {
     let db = KhoraDatabase::new();
     let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
     let root = SourceRoot::new(&db, vec![file]);
-    khora_codegen_llvm::compile(&db, root, &exe).expect("it compiles");
+    khora_codegen_llvm::compile_with(&db, root, &exe, Profile::Debug).expect("it compiles");
 
     let output = Command::new(&exe)
         .env_remove("RUST_BACKTRACE")
@@ -266,7 +273,7 @@ fn main() -> Int {
 
     // SAFETY-of-a-sort: process-wide, and this is the only test that sets it.
     unsafe { std::env::set_var("KHORA_EMIT_LLVM", "1") };
-    let outcome = khora_codegen_llvm::compile(&db, root, &exe);
+    let outcome = khora_codegen_llvm::compile_with(&db, root, &exe, Profile::Debug);
     unsafe { std::env::remove_var("KHORA_EMIT_LLVM") };
     outcome.expect("it compiles");
 

@@ -94,6 +94,14 @@ enum Command {
         /// beside it. `docs/design/c-export.md`.
         #[arg(long)]
         lib: bool,
+        /// Optimize, drop debug information, and be reproducible.
+        ///
+        /// The default profile is `debug`: unoptimized, with debug information,
+        /// which is what a crash you are about to read wants. `KHORA_PROFILE`
+        /// says the same thing to `khora test` and `khora bench`, which have no
+        /// flag of their own. `docs/design/profiles.md`.
+        #[arg(long)]
+        release: bool,
     },
     /// Write a software bill of materials for a package's dependencies.
     ///
@@ -197,7 +205,9 @@ fn run() -> Result<bool> {
         Command::Fmt { paths, check } => fmt(&paths, check),
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
-        Command::Build { path, out, lib } => build(&path, out.as_deref(), lib),
+        Command::Build { path, out, lib, release } => {
+            build(&path, out.as_deref(), lib, release)
+        }
         Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
         Command::Doc { paths, out, check } => doc(&paths, &out, check),
         Command::Install { url, rev, subdir, path } => {
@@ -617,8 +627,17 @@ fn bench(_path: &Path, _filter: Option<&str>) -> Result<bool> {
 /// Semantic errors are reported through the same renderer `check` uses, so a
 /// diagnostic reads identically whichever command surfaced it.
 #[cfg(feature = "llvm")]
-fn build(path: &Path, out: Option<&Path>, lib: bool) -> Result<bool> {
+fn build(path: &Path, out: Option<&Path>, lib: bool, release: bool) -> Result<bool> {
     let (db, inputs, root) = load(path)?;
+
+    // `--release` wins over the variable, and the variable is how everything
+    // without a flag says it. Passed rather than set, because the linker asks
+    // the same question later and has to be given the same answer.
+    let profile = if release {
+        khora_codegen_llvm::Profile::Release
+    } else {
+        khora_codegen_llvm::Profile::from_env()
+    };
 
     // The binary is named after the module holding `main`, or after the one
     // file when there is only one.
@@ -633,14 +652,19 @@ fn build(path: &Path, out: Option<&Path>, lib: bool) -> Result<bool> {
     });
 
     let outcome = if lib {
-        khora_codegen_llvm::compile_library(&db, root, &target)
+        khora_codegen_llvm::compile_library_with(&db, root, &target, profile)
     } else {
-        khora_codegen_llvm::compile(&db, root, &target)
+        khora_codegen_llvm::compile_with(&db, root, &target, profile)
     };
     match outcome {
         Ok(()) => {
             let what = if lib { "library" } else { "built" };
-            println!("{what} {} from {} module(s)", target.display(), inputs.len());
+            println!(
+                "{what} {} from {} module(s) [{}]",
+                target.display(),
+                inputs.len(),
+                profile.name()
+            );
             if lib {
                 println!("header {}", target.with_extension("h").display());
             }
@@ -722,7 +746,7 @@ fn report_build_errors(
 }
 
 #[cfg(not(feature = "llvm"))]
-fn build(_path: &Path, _out: Option<&Path>, _lib: bool) -> Result<bool> {
+fn build(_path: &Path, _out: Option<&Path>, _lib: bool, _release: bool) -> Result<bool> {
     anyhow::bail!(
         "this `khora` was built without the LLVM backend. \
          Rebuild with `--features llvm`; see docs/llvm-setup.md."

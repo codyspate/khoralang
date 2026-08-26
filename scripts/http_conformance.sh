@@ -26,6 +26,13 @@ base="http://127.0.0.1:$port"
 
 command -v curl > /dev/null || { echo "curl is needed for this check"; exit 1; }
 
+# `KHORA_PROFILE` reaches this the same way it reaches any other build, so
+#
+#     KHORA_PROFILE=release sh scripts/http_conformance.sh
+#
+# asks the same questions of an optimized server. Worth doing after a change to
+# code generation: an optimizer is what turns a latent assumption into a wrong
+# answer, and a server is the program here with the most of them.
 "$khora" build examples/link_shortener > /dev/null
 
 # The shortener persists to `$LINKS_FILE`, defaulting to `./links.txt` in the

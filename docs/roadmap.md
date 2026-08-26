@@ -3264,7 +3264,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.7 | Deployable cross-compilation | **One target of several.** `targets.md` steps 2 and 3 are done for wasm; aarch64 and musl need a sysroot, and step 4 — fetching a runtime — is untouched |
 | 13.8 | WebAssembly product path | **A module exists and runs.** 1.9 MB, hand-built runtime, no deployment example, no host integration |
 | 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
-| 13.10 | Build profiles | **Not started.** `KHORA_DEBUG` is the only knob and it is a boolean. 12.4 says debug info "should become part of an optimization level when there is one"; 12.9 adds that the reproducible build is the one with debug info *off*, so profiles and reproducibility have to be designed together |
+| 13.10 | Build profiles | **Done.** `debug` and `release`, `khora build --release` or `KHORA_PROFILE`. Release runs `default<O2>`, drops debug information, and is bit-for-bit reproducible **including the executable** — which is what 12.9 could only claim with a variable set by hand. Debug is unchanged, deliberately. `docs/design/profiles.md` |
 | 13.11 | Public surface audit | **Not started.** `compatibility.md` has the policy; nothing has been checked against it |
 | 13.12 | Production ecosystem | **Postgres speaks `std::db` now, with a pool.** Wire protocol, both query protocols, bound parameters, `Cell` mapping, the `Db` capability with `transaction`, and a connection pool -- all verified against a real server; no SCRAM or TLS. HTTP client and OTLP not started |
 | 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
@@ -3294,6 +3294,12 @@ likely to change the shape of the release rather than just add to it.
 Debug info is on by default because there is no release mode to hang it off;
 the reproducible build is the one with it *off*. Whatever profiles turn out to
 be, they have to answer both, and 12.4's and 12.9's entries are the constraints.
+
+*Answered.* The profile owns the debug-information decision and `release` turns
+it off, which is what makes the shipped artifact the reproducible one rather
+than a build somebody remembered to configure. `KHORA_DEBUG` survives as an
+override in both directions, so a profiling build needs no third profile.
+`docs/design/profiles.md`.
 
 **13.1's last clause is a decision, not a step.** Threads are the default
 deliberately — `fiber.rs` says so in its first paragraph — because the
