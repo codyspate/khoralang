@@ -105,11 +105,11 @@ So a nursery is a region, and the fibers spawned into it are its finalizers'
 business:
 
 ```
-export effect Nursery {
+pub effect Nursery {
   spawn: (() -> ()) -> Fiber,
 }
 
-export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
+pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
   with 'e
   raises 'r
 ```
@@ -136,7 +136,7 @@ be needed. **The normal path waits explicitly, before the release**, so by the
 time the release runs there is only one case left:
 
 ```
-export fn nursery<A, 'e, 'r>(body: ..) -> A with 'e raises 'r {
+pub fn nursery<A, 'e, 'r>(body: ..) -> A with 'e raises 'r {
   let crew = Fibers::open();
   let value = with { nursery: .. } { body()! };
   Fibers::wait(crew);      // only reached when `body` finished

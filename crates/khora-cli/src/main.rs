@@ -90,7 +90,7 @@ enum Command {
         out: Option<PathBuf>,
         /// Build a shared library instead of an executable.
         ///
-        /// Its interface is the `export extern fn`s, and a C header is written
+        /// Its interface is the `pub extern fn`s, and a C header is written
         /// beside it. `docs/design/c-export.md`.
         #[arg(long)]
         lib: bool,

@@ -34,7 +34,7 @@ extern fn system(command: Ptr) -> I32;
 /// The child's standard *error* is not redirected, so it goes wherever this
 /// process's does. Merging it in would need `2>&1` appended to the command
 /// line, which is a decision for the caller who wrote the rest of that line.
-export fn open_pipe(command: String) -> Ptr {
+pub fn open_pipe(command: String) -> Ptr {
   String::with_c_string(command, fn c => String::with_c_string("r", fn m => popen(c, m)))
 }
 
@@ -42,7 +42,7 @@ export fn open_pipe(command: String) -> Ptr {
 ///
 /// -1 if the wait itself failed, which is the one answer that is not an exit
 /// status.
-export fn close_pipe(pipe: Ptr) -> Int {
+pub fn close_pipe(pipe: Ptr) -> Int {
   exit_status(I32::to_int(pclose(pipe)))
 }
 
@@ -51,7 +51,7 @@ export fn close_pipe(pipe: Ptr) -> Int {
 /// -1 if the shell could not be started at all. A shell that started and could
 /// not find the command is not that: it exits 127, and 127 is an exit status
 /// like any other.
-export fn run(command: String) -> Int {
+pub fn run(command: String) -> Int {
   exit_status(I32::to_int(String::with_c_string(command, fn c => system(c))))
 }
 

@@ -20,7 +20,7 @@ const PROGRAM: &str = "module demo::main;
 
 import std::core::{assert};
 
-export fn main() -> () {}
+pub fn main() -> () {}
 
 test \"one plus one\" {
   assert(1 + 1 == 2);

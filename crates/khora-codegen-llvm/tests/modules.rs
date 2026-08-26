@@ -51,13 +51,13 @@ fn run(test: &str, modules: &[(&str, &str)]) -> Ran {
 const LIB: (&str, &str) = (
     "lib",
     "module demo::lib;
-export type Option<A> = | Some(value: A) | None;
-export type Step<S, A> = | Yield(state: S, item: A) | Done;
-export type Range = | Of(from: Int, to: Int);
+pub type Option<A> = | Some(value: A) | None;
+pub type Step<S, A> = | Yield(state: S, item: A) | Done;
+pub type Range = | Of(from: Int, to: Int);
 
-export fn double(x: Int) -> Int { x * 2 }
+pub fn double(x: Int) -> Int { x * 2 }
 
-export trait Iterator {
+pub trait Iterator {
   type Item;
   fn next(self) -> Step<Self, Self::Item>;
 }
@@ -76,7 +76,7 @@ impl Iterator for Range {
 }
 
 impl<A> Option<A> {
-  export fn unwrap_or(self, fallback: A) -> A {
+  pub fn unwrap_or(self, fallback: A) -> A {
     match self { Option::Some(v) => v, Option::None => fallback }
   }
 }
@@ -169,13 +169,13 @@ fn two_modules_may_declare_the_same_name() {
             (
                 "a",
                 "module demo::a;
-export fn helper() -> Int { 1 }
+pub fn helper() -> Int { 1 }
 ",
             ),
             (
                 "b",
                 "module demo::b;
-export fn helper() -> Int { 2 }
+pub fn helper() -> Int { 2 }
 ",
             ),
             (
@@ -205,14 +205,14 @@ fn one_instantiation_shared_by_two_modules_is_emitted_once() {
                 "one",
                 "module demo::one;
 import demo::lib::{Option};
-export fn take(o: Option<Int>) -> Int { o.unwrap_or(1) }
+pub fn take(o: Option<Int>) -> Int { o.unwrap_or(1) }
 ",
             ),
             (
                 "two",
                 "module demo::two;
 import demo::lib::{Option};
-export fn take(o: Option<Int>) -> Int { o.unwrap_or(2) }
+pub fn take(o: Option<Int>) -> Int { o.unwrap_or(2) }
 ",
             ),
             (
@@ -415,14 +415,14 @@ fn main() -> Int {
 fn two_modules_may_export_a_type_of_the_same_name() {
     let alpha = "module alpha;
 impl String { fn byte_length(self) -> Int; }
-export type Holder = { text: String };
-export fn make_alpha(t: String) -> Holder { { text: t } }
-export fn width(h: Holder) -> Int { String::byte_length(h.text) }
+pub type Holder = { text: String };
+pub fn make_alpha(t: String) -> Holder { { text: t } }
+pub fn width(h: Holder) -> Int { String::byte_length(h.text) }
 ";
     let beta = "module beta;
-export type Holder = { count: Int };
-export fn make_beta(n: Int) -> Holder { { count: n } }
-export fn value(h: Holder) -> Int { h.count }
+pub type Holder = { count: Int };
+pub fn make_beta(n: Int) -> Holder { { count: n } }
+pub fn value(h: Holder) -> Int { h.count }
 ";
     let main = "module main;
 import alpha::{Holder as Boxed, make_alpha, width};

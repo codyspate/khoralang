@@ -135,43 +135,43 @@ mod tests {
 
     #[test]
     fn a_doc_comment_above_an_item_is_found() {
-        let text = "module m;\n\n/// One.\n/// Two.\nexport fn f() -> Int { 1 }\n";
-        let at = text.find("export").expect("the item");
+        let text = "module m;\n\n/// One.\n/// Two.\npub fn f() -> Int { 1 }\n";
+        let at = text.find("pub").expect("the item");
         assert_eq!(doc_above(text, at), "One.\nTwo.");
     }
 
     /// A blank line means the comment belongs to whatever was above it.
     #[test]
     fn a_blank_line_ends_a_doc_comment() {
-        let text = "module m;\n\n/// Not mine.\n\nexport fn f() -> Int { 1 }\n";
-        let at = text.find("export").expect("the item");
+        let text = "module m;\n\n/// Not mine.\n\npub fn f() -> Int { 1 }\n";
+        let at = text.find("pub").expect("the item");
         assert_eq!(doc_above(text, at), "");
     }
 
     #[test]
     fn an_item_with_no_doc_comment_has_none() {
-        let text = "module m;\n\nexport fn f() -> Int { 1 }\n";
-        let at = text.find("export").expect("the item");
+        let text = "module m;\n\npub fn f() -> Int { 1 }\n";
+        let at = text.find("pub").expect("the item");
         assert_eq!(doc_above(text, at), "");
     }
 
     /// The body is not the interface.
     #[test]
     fn a_function_is_cut_at_its_body() {
-        let decl = "export fn add(a: Int, b: Int) -> Int {\n  a + b\n}";
-        assert_eq!(signature_of(decl, ItemKind::Function), "export fn add(a: Int, b: Int) -> Int");
+        let decl = "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}";
+        assert_eq!(signature_of(decl, ItemKind::Function), "pub fn add(a: Int, b: Int) -> Int");
     }
 
     #[test]
     fn a_declaration_with_no_body_survives_whole() {
-        let decl = "export fn opaque(a: Int) -> Int;";
-        assert_eq!(signature_of(decl, ItemKind::Function), "export fn opaque(a: Int) -> Int;");
+        let decl = "pub fn opaque(a: Int) -> Int;";
+        assert_eq!(signature_of(decl, ItemKind::Function), "pub fn opaque(a: Int) -> Int;");
     }
 
     /// A type's cases *are* its interface, so they stay.
     #[test]
     fn a_type_keeps_its_cases() {
-        let decl = "export type Option<A> = | Some(value: A) | None;";
+        let decl = "pub type Option<A> = | Some(value: A) | None;";
         assert_eq!(signature_of(decl, ItemKind::Type), decl);
     }
 

@@ -46,7 +46,7 @@ const ARRAY: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Array<A>;
+pub type Array<A>;
 impl<A> Array<A> {
   fn new(length: Int, fill: A) -> Array<A>;
   fn length(self) -> Int;
@@ -172,7 +172,7 @@ fn a_vector_can_be_written_in_khora() {
         "array_vector",
         &format!(
             "{ARRAY}
-export type Vec = {{ mut items: Array<Int>, mut len: Int }};
+pub type Vec = {{ mut items: Array<Int>, mut len: Int }};
 
 fn empty() -> Vec {{ {{ items: Array::new(2, 0), len: 0 }} }}
 

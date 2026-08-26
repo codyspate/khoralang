@@ -1,6 +1,6 @@
 #![cfg(feature = "llvm")]
 
-//! `export extern fn` — a Khora library that C can call.
+//! `pub extern fn` — a Khora library that C can call.
 //!
 //! `docs/design/c-export.md`. The marker is two words the language already
 //! has, and a body is what tells the directions apart: `extern fn` without one
@@ -46,15 +46,15 @@ fn library(name: &str, source: &str) -> Result<(PathBuf, String), Vec<String>> {
 
 const PRICING: &str = "module t;
 
-export extern fn price(units: Int, scale: Int) -> Int {
+pub extern fn price(units: Int, scale: Int) -> Int {
   units * scale
 }
 
-export extern fn over_budget(total: Int, budget: Int) -> Bool {
+pub extern fn over_budget(total: Int, budget: Int) -> Bool {
   total > budget
 }
 
-export extern fn tick() -> () {
+pub extern fn tick() -> () {
   ()
 }
 ";
@@ -153,7 +153,7 @@ fn refusal(name: &str, source: &str) -> Vec<String> {
 fn an_export_that_could_not_be_called_from_c_is_refused() {
     let found = refusal(
         "export_bad_string",
-        "module t;\nexport extern fn greet(who: String) -> Int { 1 }\n",
+        "module t;\npub extern fn greet(who: String) -> Int { 1 }\n",
     );
     assert!(
         found.iter().any(|e| e.contains("cannot cross") && e.contains("khora_float_text")),
@@ -176,9 +176,9 @@ fn an_extern_body_without_export_is_refused() {
 /// hand somebody an artifact nothing can call.
 #[test]
 fn a_library_with_nothing_exported_is_refused() {
-    let found = refusal("export_none", "module t;\nexport fn plain(n: Int) -> Int { n }\n");
+    let found = refusal("export_none", "module t;\npub fn plain(n: Int) -> Int { n }\n");
     assert!(
-        found.iter().any(|e| e.contains("no `export extern fn`")),
+        found.iter().any(|e| e.contains("no `pub extern fn`")),
         "expected the empty-library error, got {found:?}"
     );
 }
@@ -195,12 +195,12 @@ fn two_exports_of_one_name_are_refused() {
     let one = SourceFile::new(
         &db,
         dir.join("one.kh"),
-        "module one;\nexport extern fn price(n: Int) -> Int { n }\n".to_string(),
+        "module one;\npub extern fn price(n: Int) -> Int { n }\n".to_string(),
     );
     let two = SourceFile::new(
         &db,
         dir.join("two.kh"),
-        "module two;\nexport extern fn price(n: Int) -> Int { n + 1 }\n".to_string(),
+        "module two;\npub extern fn price(n: Int) -> Int { n + 1 }\n".to_string(),
     );
     let root = SourceRoot::new(&db, vec![one, two]);
 
@@ -224,11 +224,11 @@ const TRAPS: &str = "module t;
 
 import std::core::{Eq, Show};
 
-export extern fn price(units: Int, scale: Int) -> Int {
+pub extern fn price(units: Int, scale: Int) -> Int {
   units * scale
 }
 
-export extern fn boom(n: Int) -> Int {
+pub extern fn boom(n: Int) -> Int {
   let a = n.show() + \"-and-some-more-text-to-allocate\";
   let b = a + a;
   let big = 9223372036854775807;

@@ -4,7 +4,7 @@ Roadmap 12.6. `docs/design/ffi.md` settles how Khora calls out; this is the
 other direction, and it is not symmetric.
 
 **Built.** `khora build --lib` writes a shared library, a header beside it, and
-a C symbol per `export extern fn`. The spelling was the one question this
+a C symbol per `pub extern fn`. The spelling was the one question this
 document left open, and §6 records how it was settled and why.
 
 ## Why it is worth doing
@@ -146,10 +146,10 @@ Mechanically small, given the above:
   Generated rather than written, because a header that can drift from the
   source is a header that will.
 
-## 6. How a function says it is exported — **`export extern fn`**
+## 6. How a function says it is exported — **`pub extern fn`**
 
 ```khora
-export extern fn price(units: Int, scale: Int) -> Int {
+pub extern fn price(units: Int, scale: Int) -> Int {
   units * scale
 }
 ```
@@ -168,11 +168,11 @@ manifest never names an individual function.
 constrains that function's signature to scalars and `Ptr`, forbids generics,
 forbids raising. A manifest list would have been the first key naming functions
 rather than packages, imposing a constraint on a source line that gives no hint
-it is special. It would also split visibility across two files, when `export fn`
+it is special. It would also split visibility across two files, when `pub fn`
 is already in the source and the keyword audit renamed `pub` to `export`
 precisely *for* that coherence.
 
-Against the audit's three questions, `export extern fn` passes on its own
+Against the audit's three questions, `pub extern fn` passes on its own
 terms and is more coherent here than Rust's `extern "C"` is there: Rust
 overloads one spelling for both directions, and Khora already has `import` and
 `export` as its direction vocabulary. `"C"` was dropped because Rust needs it
@@ -213,7 +213,7 @@ a duller answer than any of its three options. The heap is lazy and
 forwarding call and nothing else.
 
 **Two functions cannot publish one symbol.** The C namespace is flat, so two
-`export extern fn price` in different modules are a collision a linker resolves
+`pub extern fn price` in different modules are a collision a linker resolves
 by picking one — silently, and not necessarily the same one twice. Refused by
 name.
 

@@ -153,7 +153,7 @@ fn answer(settings: TlsServer, socket: Int) -> () raises TlsError {{
   shut(connection)
 }}
 
-export fn main() -> () raises TlsError {{
+pub fn main() -> () raises TlsError {{
   with {{ scope: Scope::root() }} {{
     start();
     let settings = server(certificate, key)!;
@@ -250,7 +250,7 @@ import std::net::tls::{{TlsError, secure, server, shut}};
 const certificate = {:?};
 const key = {:?};
 
-export fn main() -> () raises TlsError {{
+pub fn main() -> () raises TlsError {{
   with {{ scope: Scope::root() }} {{
     start();
     let settings = server(certificate, key)!;
@@ -301,7 +301,7 @@ fn a_bad_certificate_is_refused_at_startup() {
 import std::core::{Result, Scope, attempt, print};
 import std::net::tls::{TlsError, server};
 
-export fn main() -> () {
+pub fn main() -> () {
   with { scope: Scope::root() } {
     match attempt(fn () => server(\"not a certificate\", \"nor is this\")!) {
       Result::Ok(_) => print(\"opened, which is wrong\"),
@@ -374,7 +374,7 @@ fn answer(settings: TlsServer, socket: Int) -> () raises TlsError {
   shut(connection)
 }
 
-export fn main() -> () raises TlsError {
+pub fn main() -> () raises TlsError {
   with { scope: Scope::root() } {
     start();
     let settings = server(certificate, key)!;
@@ -418,7 +418,7 @@ fn call(caller: TlsClient) -> () {
   }
 }
 
-export fn main() -> () raises TlsError {
+pub fn main() -> () raises TlsError {
   with { scope: Scope::root() } {
     start();
     let settings = server(certificate, key)!;

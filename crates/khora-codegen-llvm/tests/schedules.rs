@@ -51,17 +51,17 @@ fn print(value: Int);
 extern fn khora_live_count() -> Int;
 extern fn khora_tick() -> Int;
 
-export type Result<A, E> = | Ok(value: A) | Err(error: E);
-export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
+pub type Result<A, E> = | Ok(value: A) | Err(error: E);
+pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
 
-export type Oops = | Bad;
+pub type Oops = | Bad;
 
-export type Schedule = { attempts: Int, };
+pub type Schedule = { attempts: Int, };
 impl Schedule {
   fn times(n: Int) -> Schedule { { attempts: if n < 1 { 1 } else { n } } }
 }
 
-export fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
+pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
   with 'e
   raises E
 {
@@ -188,8 +188,8 @@ fn retrying_leaves_nothing_behind() {
         "retry_leaks",
         &format!(
             "{PRELUDE}
-export type Detail = | Of(text: String);
-export type Rich = | Bad(detail: Detail);
+pub type Detail = | Of(text: String);
+pub type Rich = | Bad(detail: Detail);
 
 fn always_fails() -> Int raises Rich {{ raise Rich::Bad(Detail::Of(\"why\")) }}
 

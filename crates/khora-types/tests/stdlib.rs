@@ -109,32 +109,32 @@ fn the_standard_library_declares_what_it_promises() {
     let text = std::fs::read_to_string(std_dir().join("core.kh")).expect("std/core.kh");
     for expected in [
         // Comparison, and the three-way answer that decides all six operators.
-        "export type Ordering",
-        "export trait Eq",
-        "export trait Ord: Eq",
-        "export trait Show",
+        "pub type Ordering",
+        "pub trait Eq",
+        "pub trait Ord: Eq",
+        "pub trait Show",
         // Optional values and failures.
-        "export type Option<A>",
-        "export type Result<A, E>",
+        "pub type Option<A>",
+        "pub type Result<A, E>",
         "impl<A> Option<A>",
         "impl<A, E> Result<A, E>",
         // Containers and iteration.
-        "export type Array<A>",
-        "export type Map<K, V>",
-        "export type Chain<K, V>",
+        "pub type Array<A>",
+        "pub type Map<K, V>",
+        "pub type Chain<K, V>",
         // A map's key is any type with a `Hash`, which is what having bytes
         // was for: before them, a `String` could not be one.
-        "export trait Hash: Eq",
+        "pub trait Hash: Eq",
         "impl Hash for String",
-        "export type List<A>",
-        "export type Step<S, A>",
-        "export trait Iterator",
+        "pub type List<A>",
+        "pub type Step<S, A>",
+        "pub trait Iterator",
         "impl Iterator for Range",
         "impl<A> Iterator for List<A>",
         // The reason higher-kinded types are a non-negotiable.
-        "export trait Functor",
-        "export trait Applicative: Functor",
-        "export trait Traversable: Functor",
+        "pub trait Functor",
+        "pub trait Applicative: Functor",
+        "pub trait Traversable: Functor",
         "impl Traversable for Option",
         "impl Traversable for List",
         // The scalars show, which is what a derived `Show` on a record of them
@@ -143,13 +143,13 @@ fn the_standard_library_declares_what_it_promises() {
         "impl Show for Bool",
         "impl Show for String",
         // Shared state, and the ordered map that can go in it.
-        "export type Shared<A>",
-        "export type Dict<K, V>",
-        "export type Pair<K, V>",
+        "pub type Shared<A>",
+        "pub type Dict<K, V>",
+        "pub type Pair<K, V>",
         // The growable one. `Array::empty` is what made it possible to hold an
         // `Array<A>` rather than an `Array<Option<A>>`, and a hundred integers
         // two objects rather than a hundred and three.
-        "export type Vector<A>",
+        "pub type Vector<A>",
         "fn empty() -> Array<A>",
     ] {
         assert!(text.contains(expected), "std/core.kh no longer declares `{expected}`");

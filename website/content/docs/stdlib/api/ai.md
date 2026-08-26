@@ -34,7 +34,7 @@ reports exist -- the handler answers `complete: Prompt -> String`, and
 ### Device
 
 ```khora
-export type Device =
+pub type Device =
   | Cpu
   | Cuda(device_id: Int)
   | Metal
@@ -50,7 +50,7 @@ this module.
 ### Scalar
 
 ```khora
-export type Scalar;
+pub type Scalar;
 ```
 
 The kind of an element type: what may appear as a tensor's `T`.
@@ -61,7 +61,7 @@ that `Tensor<D, Shape, T>` can say what `T` is allowed to be.
 ### Tuple
 
 ```khora
-export type Tuple;
+pub type Tuple;
 ```
 
 The kind of a shape: what may appear as a tensor's `Shape`.
@@ -73,7 +73,7 @@ type error.
 ### F32
 
 ```khora
-export type F32;
+pub type F32;
 ```
 
 Thirty-two-bit floating point, as an element type.
@@ -81,7 +81,7 @@ Thirty-two-bit floating point, as an element type.
 ### Tensor
 
 ```khora
-export type Tensor<D: Device, Shape: Tuple, T: Scalar>;
+pub type Tensor<D: Device, Shape: Tuple, T: Scalar>;
 ```
 
 A tensor, with its device, its shape and its element type in the type.
@@ -96,7 +96,7 @@ somebody else's.
 ### Embedding
 
 ```khora
-export type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
+pub type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
 ```
 
 A one-dimensional CPU tensor of a known width.
@@ -107,7 +107,7 @@ once: `Embedding<1536, F32>`.
 ### Message
 
 ```khora
-export type Message = {
+pub type Message = {
   role: String,
   content: String,
 };
@@ -123,7 +123,7 @@ a word.
 ### Prompt
 
 ```khora
-export type Prompt = {
+pub type Prompt = {
   system_instructions: Option<String>,
   messages: List<Message>,
   temperature: Float,
@@ -139,7 +139,7 @@ is never a value anybody holds. See the `impl` below.
 ### ModelError
 
 ```khora
-export type ModelError =
+pub type ModelError =
   | ContextLengthExceeded(max_tokens: Int)
   | RateLimited(retry_after_ms: Int)
   | InferenceEngineFailure(msg: String)
@@ -158,7 +158,7 @@ caller can act on it; the rest carry text.
 ### Extract
 
 ```khora
-export trait Extract
+pub trait Extract
 ```
 
 A type a model can be asked to produce: how to describe it, and how to read
@@ -220,7 +220,7 @@ exceptional one — a model is allowed to be wrong.
 ### LLMService
 
 ```khora
-export effect LLMService {
+pub effect LLMService {
   complete: Prompt -> String raises ModelError,
   embed_raw: String -> List<Float> raises ModelError,
 }
@@ -251,7 +251,7 @@ impl<D: Device, Shape: Tuple, T: Scalar> Tensor<D, Shape, T>
 #### zeros
 
 ```khora
-export fn zeros(shape: Shape) -> Tensor<D, Shape, T>
+pub fn zeros(shape: Shape) -> Tensor<D, Shape, T>
 ```
 
 A tensor of the given shape, every element zero.
@@ -273,7 +273,7 @@ cannot be shared and then changed underneath its other holder.
 #### new
 
 ```khora
-export fn new() -> Prompt
+pub fn new() -> Prompt
 ```
 
 An empty prompt: no instructions, no messages, temperature one.
@@ -281,7 +281,7 @@ An empty prompt: no instructions, no messages, temperature one.
 #### system
 
 ```khora
-export fn system(self, instructions: String) -> Prompt
+pub fn system(self, instructions: String) -> Prompt
 ```
 
 Replaces the system instructions; the last one written wins.
@@ -289,7 +289,7 @@ Replaces the system instructions; the last one written wins.
 #### user
 
 ```khora
-export fn user(self, message: String) -> Prompt
+pub fn user(self, message: String) -> Prompt
 ```
 
 Adds a turn from the person asking.
@@ -297,7 +297,7 @@ Adds a turn from the person asking.
 #### assistant
 
 ```khora
-export fn assistant(self, message: String) -> Prompt
+pub fn assistant(self, message: String) -> Prompt
 ```
 
 Adds a turn from the model, which is how a conversation is replayed.
@@ -305,7 +305,7 @@ Adds a turn from the model, which is how a conversation is replayed.
 #### saying
 
 ```khora
-export fn saying(self, role: String, content: String) -> Prompt
+pub fn saying(self, role: String, content: String) -> Prompt
 ```
 
 Adds a turn under any role. `user` and `assistant` are this with the two
@@ -314,7 +314,7 @@ roles every provider agrees on.
 #### at_temperature
 
 ```khora
-export fn at_temperature(self, temperature: Float) -> Prompt
+pub fn at_temperature(self, temperature: Float) -> Prompt
 ```
 
 Sets how much variation to allow. Zero is as close to deterministic as a
@@ -325,7 +325,7 @@ provider offers, which is not a promise any of them makes.
 ### matmul
 
 ```khora
-export fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(a: Tensor<D, (M, K), T>, b: Tensor<D, (K, N), T>) -> Tensor<D, (M, N), T>
+pub fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(a: Tensor<D, (M, K), T>, b: Tensor<D, (K, N), T>) -> Tensor<D, (M, N), T>
 ```
 
 The matrix product, with the shared dimension checked by the type system.
@@ -338,7 +338,7 @@ package.
 ### extract
 
 ```khora
-export fn extract<A: Extract>(prompt: Prompt) -> A with { ai: LLMService } raises ModelError
+pub fn extract<A: Extract>(prompt: Prompt) -> A with { ai: LLMService } raises ModelError
 ```
 
 A typed answer from the model.
@@ -352,7 +352,7 @@ of a handler cannot be.
 ### embed
 
 ```khora
-export fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32> with { ai: LLMService } raises ModelError
+pub fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32> with { ai: LLMService } raises ModelError
 ```
 
 An embedding of a known width.
@@ -365,7 +365,7 @@ old declaration made it a caller-chosen parameter, which said otherwise.
 ### cosine_similarity
 
 ```khora
-export fn cosine_similarity<const Dim: Int>(a: Embedding<Dim, F32>, b: Embedding<Dim, F32>) -> Float
+pub fn cosine_similarity<const Dim: Int>(a: Embedding<Dim, F32>, b: Embedding<Dim, F32>) -> Float
 ```
 
 How alike two embeddings are, from -1 to 1.

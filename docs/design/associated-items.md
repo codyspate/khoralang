@@ -167,7 +167,7 @@ fn`s in the same module may be declared into it. Close to what Elm and Gleam do
 with module-per-type, and needs no new construct beyond a way to say which type
 an item belongs to.
 
-**`impl` blocks.** `impl Prompt { export fn new() -> Prompt { .. } }`. More familiar
+**`impl` blocks.** `impl Prompt { pub fn new() -> Prompt { .. } }`. More familiar
 to Rust users — which now counts for something explicit, per the tie-breaker in
 `docs/vision.md` — and more obviously right once typeclasses land in Phase 3
 (decision A4), since instance declarations will want a similar shape.
@@ -239,12 +239,12 @@ the binding a projection normalizes through is the one that impl declares. The
 signature becomes:
 
 ```
-export trait Extract {
+pub trait Extract {
   type Spec;
   fn spec() -> Self::Spec;
 }
 
-export effect LLMService {
+pub effect LLMService {
   extract: forall <A: Extract> . (Prompt, A::Spec) -> A raises ModelError,
 }
 ```

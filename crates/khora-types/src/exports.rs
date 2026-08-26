@@ -1,4 +1,4 @@
-//! `export extern fn` — a function C can call.
+//! `pub extern fn` — a function C can call.
 //!
 //! `docs/design/c-export.md`. The marker is two words the language already
 //! has: `extern` means the C boundary, `export` means visible outside. A body
@@ -46,7 +46,7 @@ pub(crate) fn export_errors(db: &dyn Db, file: SourceFile) -> Vec<HirError> {
             found.push(HirError {
                 message: format!(
                     "`{name}` has a body and is `extern`, which publishes it as a C symbol — \
-                     so it cannot be private. Write `export extern fn {name}` if that is what \
+                     so it cannot be private. Write `pub extern fn {name}` if that is what \
                      you meant, or drop `extern` if it is an ordinary Khora function"
                 ),
                 range,

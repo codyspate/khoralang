@@ -75,7 +75,7 @@ pub(super) fn counts_non_atomically(
 
 /// Whether this program publishes a C symbol anybody could call.
 ///
-/// An `export extern fn` is one with `is_extern` *and* a body: without a body
+/// An `pub extern fn` is one with `is_extern` *and* a body: without a body
 /// it is a declaration of somebody else's symbol, which is an import rather
 /// than an export. That is the same pair `build` filters exports by, said
 /// earlier — here it has to be answered before any body is emitted, because
@@ -170,7 +170,7 @@ pub(super) fn build(
     //
     // **And a `main` build that publishes a symbol is a library too**, whatever
     // it was built as. `emit_c_exports` runs for every entry point, so a
-    // program with an `export extern fn` hands its address to whatever it is
+    // program with an `pub extern fn` hands its address to whatever it is
     // linked against — and a C library that takes a callback will call it on
     // whichever thread it likes. That program never writes `Fiber::spawn`, so
     // the spawn check alone said "single-threaded" and generated non-atomic
@@ -279,7 +279,7 @@ pub(super) fn build(
         .collect();
     if entry_point == Entry::Library && exports.is_empty() {
         backend.error(
-            "a library has no `export extern fn`, so nothing could call it. Mark the              functions that are its C interface — `docs/design/c-export.md`",
+            "a library has no `pub extern fn`, so nothing could call it. Mark the              functions that are its C interface — `docs/design/c-export.md`",
             text_size::TextRange::empty(0.into()),
         );
     }
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn a_main_that_spawns_may_not() {
         let source = "module main;
-export type Fiber;
+pub type Fiber;
 impl Fiber { fn spawn<'e>(body: () -> () raises 'e) -> Fiber; fn join(self) -> (); }
 fn work() -> () { }
 fn main() -> Int { Fiber::join(Fiber::spawn(fn () => work())); 0 }
@@ -658,7 +658,7 @@ fn main() -> Int { Fiber::join(Fiber::spawn(fn () => work())); 0 }
     }
 
     /// **The audit finding.** `emit_c_exports` runs for every entry point, so a
-    /// `main` build with an `export extern fn` hands its address to whatever it
+    /// `main` build with an `pub extern fn` hands its address to whatever it
     /// is linked against — and a C library that takes a callback calls it on
     /// whichever thread it likes. Such a program never writes `Fiber::spawn`,
     /// so the spawn check alone called it single-threaded and emitted
@@ -666,7 +666,7 @@ fn main() -> Int { Fiber::join(Fiber::spawn(fn () => work())); 0 }
     #[test]
     fn a_main_that_publishes_a_symbol_may_not() {
         let source = "module main;
-export extern fn price(n: Int) -> Int { n * 2 }
+pub extern fn price(n: Int) -> Int { n * 2 }
 fn main() -> Int { 0 }
 ";
         assert!(
@@ -677,7 +677,7 @@ fn main() -> Int { 0 }
 
     /// An `extern fn` *without* a body is an import — somebody else's symbol,
     /// which nothing can call back into. Distinguishing the two is the whole of
-    /// what `export extern fn` means, and treating every `extern` as published
+    /// what `pub extern fn` means, and treating every `extern` as published
     /// would give up the optimisation for every program that reads a file.
     #[test]
     fn declaring_a_foreign_symbol_is_not_publishing_one() {
@@ -692,7 +692,7 @@ fn main() -> Int { getpid(); 0 }
     /// that happens to hold `main`.
     #[test]
     fn a_symbol_published_by_another_module_counts() {
-        let library = "module lib;\nexport extern fn price(n: Int) -> Int { n * 2 }\n";
+        let library = "module lib;\npub extern fn price(n: Int) -> Int { n * 2 }\n";
         let main = "module main;\nfn main() -> Int { 0 }\n";
         assert!(!non_atomic(Entry::Main, &[library, main]));
     }
@@ -700,7 +700,7 @@ fn main() -> Int { getpid(); 0 }
     #[test]
     fn a_library_never_counts_without_atomics() {
         let source = "module main;
-export extern fn price(n: Int) -> Int { n * 2 }
+pub extern fn price(n: Int) -> Int { n * 2 }
 ";
         assert!(!non_atomic(Entry::Library, &[source]));
     }

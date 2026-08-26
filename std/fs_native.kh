@@ -35,7 +35,7 @@ import std::core::{Array, Ptr, Region, Scope, acquire};
 /// promising something. What a caller can act on is "it was not there" against
 /// "it did not work", and both carry the path so the message can say which
 /// file.
-export type IoError =
+pub type IoError =
   | NotFound(path: String)
   | Failed(path: String);
 
@@ -45,7 +45,7 @@ export type IoError =
 /// nothing but this module could construct — and an effect whose operations
 /// only the real implementation can satisfy is not a seam, it is a wrapper.
 /// Streaming will want one and can have its own effect when something needs it.
-export effect Fs {
+pub effect Fs {
   read: (String) -> Array<U8> raises IoError,
   write: (String, Array<U8>) -> () raises IoError,
 }
@@ -54,7 +54,7 @@ impl Fs {
   /// The real file system.
   ///
   /// Everything else in this module exists so that this is three lines.
-  export fn real() -> Fs {
+  pub fn real() -> Fs {
     handler for Fs {
       read: fn path => read_whole(path)!,
       write: fn (path, bytes) => write_whole(path, bytes)!,
@@ -67,7 +67,7 @@ impl Fs {
 /// The other half of [`read_text`], and here for the same reason: `Fs` traffics
 /// in bytes because a file is bytes, and every caller that has a `String`
 /// should not have to remember which way round `String::bytes` goes.
-export fn write_text(path: String, text: String) -> ()
+pub fn write_text(path: String, text: String) -> ()
   with { fs: Fs }
   raises IoError
 {
@@ -79,7 +79,7 @@ export fn write_text(path: String, text: String) -> ()
 /// A convenience over `read`, and the reason `Fs` traffics in bytes rather
 /// than strings: a file is bytes, and whether they are text is a question with
 /// a wrong answer. This one takes the optimistic view and is named for it.
-export fn read_text(path: String) -> String
+pub fn read_text(path: String) -> String
   with { fs: Fs }
   raises IoError
 {

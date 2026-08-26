@@ -31,7 +31,7 @@ imitation of.
 ### IoError
 
 ```khora
-export type IoError =
+pub type IoError =
   | NotFound(path: String)
   | Failed(path: String);
 ```
@@ -50,7 +50,7 @@ file.
 ### Fs
 
 ```khora
-export effect Fs {
+pub effect Fs {
   read: (String) -> Array<U8> raises IoError,
   write: (String, Array<U8>) -> () raises IoError,
 }
@@ -68,7 +68,7 @@ Streaming will want one and can have its own effect when something needs it.
 ### write_text
 
 ```khora
-export fn write_text(path: String, text: String) ->() with { fs: Fs } raises IoError
+pub fn write_text(path: String, text: String) ->() with { fs: Fs } raises IoError
 ```
 
 Writes text to a file, replacing whatever was there.
@@ -80,7 +80,7 @@ should not have to remember which way round `String::bytes` goes.
 ### read_text
 
 ```khora
-export fn read_text(path: String) -> String with { fs: Fs } raises IoError
+pub fn read_text(path: String) -> String with { fs: Fs } raises IoError
 ```
 
 The bytes of a file, as text.

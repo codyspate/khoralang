@@ -111,12 +111,12 @@ fn destructuring_binds_each_component_at_its_own_type() {
 #[test]
 fn a_tuple_in_a_type_argument_is_compared_componentwise() {
     let shapes = "module m;\n\
-                  export type Tensor<S>;\n\
+                  pub type Tensor<S>;\n\
                   fn f(t: Tensor<(2, 3)>) -> Tensor<(2, 3)> { t }\n";
     assert_clean(shapes);
     assert_reports(
         "module m;\n\
-         export type Tensor<S>;\n\
+         pub type Tensor<S>;\n\
          fn f(t: Tensor<(2, 3)>) -> Tensor<(2, 4)> { t }\n",
         "returns `Tensor<(2, 4)>`, but its body has type `Tensor<(2, 3)>`",
     );

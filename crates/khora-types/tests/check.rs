@@ -23,7 +23,7 @@ fn assert_reports(text: &str, needle: &str) {
     );
 }
 
-const ADT: &str = "module m;\nexport type R = | A | B(n: Int) | C;\n";
+const ADT: &str = "module m;\npub type R = | A | B(n: Int) | C;\n";
 
 #[test]
 fn a_well_typed_function_is_accepted() {
@@ -189,8 +189,8 @@ fn a_bool_match_needs_both_cases() {
 #[test]
 fn a_fully_covered_nested_match_needs_no_wildcard() {
     let src = "module m;
-               export type Inner = | X | Y;
-               export type Outer = | Wrap(i: Inner) | Empty;
+               pub type Inner = | X | Y;
+               pub type Outer = | Wrap(i: Inner) | Empty;
                fn f(o: Outer) -> Int {
                  match o {
                    Outer::Wrap(Inner::X) => 1,
@@ -205,8 +205,8 @@ fn a_fully_covered_nested_match_needs_no_wildcard() {
 #[test]
 fn an_incomplete_nested_match_is_still_reported() {
     let src = "module m;
-               export type Inner = | X | Y;
-               export type Outer = | Wrap(i: Inner) | Empty;
+               pub type Inner = | X | Y;
+               pub type Outer = | Wrap(i: Inner) | Empty;
                fn f(o: Outer) -> Int {
                  match o {
                    Outer::Wrap(Inner::X) => 1,
@@ -221,7 +221,7 @@ fn an_incomplete_nested_match_is_still_reported() {
 #[test]
 fn a_recursive_type_terminates() {
     let src = "module m;
-               export type List = | Nil | Cons(head: Int, tail: List);
+               pub type List = | Nil | Cons(head: Int, tail: List);
                fn f(l: List) -> Int {
                  match l {
                    List::Nil => 0,
@@ -279,8 +279,8 @@ fn unsupported_syntax_does_not_produce_type_errors() {
 fn a_constructor_resolves_to_its_own_type() {
     assert_clean(
         "module m;\n\
-         export type Option<A> = | Some(value: A) | None;\n\
-         export type Maybe<A> = | Some(value: A) | None;\n\
+         pub type Option<A> = | Some(value: A) | None;\n\
+         pub type Maybe<A> = | Some(value: A) | None;\n\
          fn f() -> Maybe<Int> { Maybe::Some(1) }\n\
          fn g() -> Option<Int> { Option::Some(1) }\n",
     );
@@ -295,8 +295,8 @@ fn a_constructor_of_another_type_is_not_reachable() {
         &db,
         "a.kh".into(),
         "module m;\n\
-         export type Color = | Red | Green;\n\
-         export type Fruit = | Apple;\n\
+         pub type Color = | Red | Green;\n\
+         pub type Fruit = | Apple;\n\
          fn f() -> Fruit { Fruit::Red }\n"
             .to_string(),
     );
@@ -313,8 +313,8 @@ fn a_constructor_of_another_type_is_not_reachable() {
 fn a_pattern_names_its_own_types_cases() {
     assert_clean(
         "module m;\n\
-         export type First = | A | B;\n\
-         export type Second = | B | A;\n\
+         pub type First = | A | B;\n\
+         pub type Second = | B | A;\n\
          fn f(s: Second) -> Int { match s { Second::B => 1, Second::A => 2 } }\n",
     );
 }
@@ -349,14 +349,14 @@ fn a_let_annotation_decides_the_bindings_type() {
 fn an_annotation_reaches_a_generic_calls_arguments() {
     assert_clean(
         "module m;
-export type Box<A> = | Full(value: A) | Empty;
+pub type Box<A> = | Full(value: A) | Empty;
 fn make<A>(value: A) -> Box<A> { Box::Full(value) }
 fn f() -> Int { let b: Box<U8> = make(200); 0 }
 ",
     );
     assert_reports(
         "module m;
-export type Box<A> = | Full(value: A) | Empty;
+pub type Box<A> = | Full(value: A) | Empty;
 fn make<A>(value: A) -> Box<A> { Box::Full(value) }
 fn f() -> Int { let b: Box<U8> = make(300); 0 }
 ",
@@ -371,7 +371,7 @@ fn f() -> Int { let b: Box<U8> = make(300); 0 }
 fn an_annotation_does_not_leak_past_the_value_it_describes() {
     assert_clean(
         "module m;
-export type Array<A>;
+pub type Array<A>;
 impl<A> Array<A> {
   fn new(length: Int, fill: A) -> Array<A>;
   fn get(self, index: Int) -> A;
@@ -392,10 +392,10 @@ fn f(cells: Array<U8>) -> Int { let byte: U8 = Array::get(cells, 0); 0 }
 fn a_row_entry_solved_from_outside_is_still_the_same_entry() {
     assert_clean(
         "module m;
-export type Result<A, E> = | Ok(value: A) | Err(error: E);
-export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
+pub type Result<A, E> = | Ok(value: A) | Err(error: E);
+pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
 
-export fn twice<A, E, 'e>(body: () -> A with 'e raises E) -> Int with 'e {
+pub fn twice<A, E, 'e>(body: () -> A with 'e raises E) -> Int with 'e {
   let mut outcome = attempt(body);
   outcome = attempt(body);
   0
@@ -461,9 +461,9 @@ fn a_literal_must_fit_the_type_it_is_asked_to_be() {
 fn a_type_nobody_worked_out_is_reported() {
     assert_reports(
         "module m;
-export type Spec = { fields: String };
-export trait Extract { type Spec; fn spec() -> Self::Spec; }
-export effect Model {
+pub type Spec = { fields: String };
+pub trait Extract { type Spec; fn spec() -> Self::Spec; }
+pub effect Model {
   extract: forall <A: Extract> . (A::Spec) -> A,
 }
 fn use_it() -> Int with { model: Model } { model.extract({ fields: \"x\" }); 0 }

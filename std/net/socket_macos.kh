@@ -44,13 +44,13 @@ extern fn khora_net_forget(handle: I32) -> ();
 extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int) -> Int;
 
 /// A failed call returns -1, and a handle is never negative.
-export fn invalid_handle() -> Int { 0 - 1 }
+pub fn invalid_handle() -> Int { 0 - 1 }
 
 /// Nothing to start. Present so that a caller reads the same on both targets.
-export fn start() -> Bool { true }
+pub fn start() -> Bool { true }
 
 /// A socket listening on `port`, or [`invalid_handle`].
-export fn listen_on(port: Int) -> Int {
+pub fn listen_on(port: Int) -> Int {
   // AF_INET, SOCK_STREAM, IPPROTO_TCP — 2, 1 and 6 here as on Linux.
   let handle = socket(I32::of(2), I32::of(1), I32::of(6));
   // Non-blocking from here on, so that a fiber waiting for a connection gives
@@ -96,7 +96,7 @@ fn sockaddr_in(port: Int) -> Array<U8> {
 }
 
 /// Waits for a connection. [`invalid_handle`] if the wait failed.
-export fn accept_on(server: Int) -> Int {
+pub fn accept_on(server: Int) -> Int {
   let taken = khora_net_accept(I32::of(server), Ptr::null(), Ptr::null());
   if I32::to_int(taken) < 0 { invalid_handle() } else {
     // Prepared here rather than inside the runtime's `accept`, so that every
@@ -124,19 +124,19 @@ export fn accept_on(server: Int) -> Int {
 /// a 32-bit `suseconds_t` where Linux makes it 64, so the `timeval` this used
 /// to build was laid out differently on each. A deadline in milliseconds is
 /// the same number everywhere.
-export fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
+pub fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
   khora_net_set_timeout(I32::of(handle), millis) == I32::of(0)
 }
 
 /// Reads what has arrived into `buffer`, and says how many bytes that was.
 ///
 /// Zero means the other end closed; negative means the read failed.
-export fn receive(connection: Int, buffer: Array<U8>) -> Int {
+pub fn receive(connection: Int, buffer: Array<U8>) -> Int {
   Array::with_data(buffer, fn (into, n) => khora_net_recv(I32::of(connection), into, n))
 }
 
 /// Writes `text`, and says how many bytes went. Negative if the write failed.
-export fn transmit(connection: Int, text: String) -> Int {
+pub fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) => khora_net_send(I32::of(connection), from, n))
 }
 
@@ -156,7 +156,7 @@ export fn transmit(connection: Int, text: String) -> Int {
 /// something the reactor can wait on. That is once per connection against many
 /// queries, which is the right thing to get wrong first, and it is written
 /// down in `docs/roadmap.md` Phase 13 rather than left to be found.
-export fn connect_to(host: String, port: Int) -> Int {
+pub fn connect_to(host: String, port: Int) -> Int {
   String::with_data(host, fn (from, n) => khora_net_connect(from, n, port))
 }
 
@@ -166,7 +166,7 @@ export fn connect_to(host: String, port: Int) -> Int {
 /// and wrong for one made of bytes: a wire protocol frames its messages with a
 /// length nobody wrote as characters. Postgres is the first caller, and a
 /// `String` would have meant deciding what its bytes mean on the way through.
-export fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
+pub fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
   Array::with_data(bytes, fn (from, n) => khora_net_send(I32::of(connection), from, n))
 }
 
@@ -175,7 +175,7 @@ export fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
 /// The same reasoning as the other two files, and the same shape: closing while
 /// the peer is still writing sends an RST, which discards the answer the peer
 /// had not read yet. `SHUT_WR` is 1 here too.
-export fn shut(handle: Int) -> () {
+pub fn shut(handle: Int) -> () {
   shutdown(I32::of(handle), I32::of(1));
   drain(handle, 8);
   // The runtime remembers this socket's receive deadline, and handles are

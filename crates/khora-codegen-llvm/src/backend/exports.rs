@@ -1,6 +1,6 @@
 //! The C symbols a library publishes.
 //!
-//! `docs/design/c-export.md`. An `export extern fn` with a body gets a second
+//! `docs/design/c-export.md`. An `pub extern fn` with a body gets a second
 //! symbol under its bare Khora name, forwarding to the mangled one.
 //!
 //! # A wrapper rather than an alias
@@ -39,13 +39,13 @@ use text_size::TextRange;
 use super::Backend;
 
 impl<'ctx> Backend<'ctx> {
-    /// Emits the C entry point for every `export extern fn` with a body.
+    /// Emits the C entry point for every `pub extern fn` with a body.
     ///
     /// `exports` maps the bare Khora name to the mangled symbol. Built by the
     /// driver, which is what knows the instances.
     pub(crate) fn emit_c_exports(&mut self, exports: &[(String, String)]) {
         // **Two functions cannot publish one symbol.** The C namespace is flat
-        // and has no modules in it, so two `export extern fn price` in
+        // and has no modules in it, so two `pub extern fn price` in
         // different modules are a collision the linker would resolve by
         // picking one — silently, and not necessarily the same one twice.
         let mut seen: HashMap<&str, &str> = HashMap::new();

@@ -33,7 +33,7 @@ fn derived(source: &str) -> Vec<String> {
 
 #[test]
 fn a_derive_clause_belongs_to_the_type_it_introduces() {
-    let out = tree("module m;\nderive(Eq, Ord)\nexport type Point = { x: Int, y: Int };\n");
+    let out = tree("module m;\nderive(Eq, Ord)\npub type Point = { x: Int, y: Int };\n");
     assert!(out.contains("DERIVE_CLAUSE"), "{out}");
     assert!(out.contains("DERIVE_KW"), "the word is remapped from IDENT\n{out}");
     // Inside the declaration, not beside it: a reader of the tree asks the
@@ -53,9 +53,9 @@ fn the_traits_are_read_back_in_order() {
 
 #[test]
 fn a_derive_comes_before_export() {
-    let out = tree("module m;\nderive(Eq)\nexport type P = { x: Int };\n");
+    let out = tree("module m;\nderive(Eq)\npub type P = { x: Int };\n");
     assert!(out.contains("DERIVE_CLAUSE"), "{out}");
-    assert!(out.contains("EXPORT_KW"), "{out}");
+    assert!(out.contains("PUB_KW"), "{out}");
 }
 
 #[test]

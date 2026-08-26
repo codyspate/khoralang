@@ -53,7 +53,7 @@ than not having the feature.
 ## What is decided
 
 ```khora
-export type Shared<A>;
+pub type Shared<A>;
 impl<A> Share for Shared<A> {}
 
 impl<A: Share> Shared<A> {

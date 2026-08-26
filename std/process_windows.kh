@@ -31,7 +31,7 @@ extern fn system(command: Ptr) -> I32;
 /// The child's standard *error* is not redirected, so it goes wherever this
 /// process's does. Merging it in would need `2>&1` appended to the command
 /// line, which is a decision for the caller who wrote the rest of that line.
-export fn open_pipe(command: String) -> Ptr {
+pub fn open_pipe(command: String) -> Ptr {
   String::with_c_string(command, fn c => String::with_c_string("r", fn m => _popen(c, m)))
 }
 
@@ -41,13 +41,13 @@ export fn open_pipe(command: String) -> Ptr {
 /// status. Windows hands back the child's code directly — there is no wait
 /// status to unpack, which is the one place this target has less to do than
 /// the other one.
-export fn close_pipe(pipe: Ptr) -> Int {
+pub fn close_pipe(pipe: Ptr) -> Int {
   I32::to_int(_pclose(pipe))
 }
 
 /// Runs `command` through the shell, waits, and gives its exit status.
 ///
 /// -1 if the shell could not be started at all.
-export fn run(command: String) -> Int {
+pub fn run(command: String) -> Int {
   I32::to_int(String::with_c_string(command, fn c => system(c)))
 }

@@ -28,11 +28,11 @@ fn assert_reports(text: &str, needle: &str) {
 }
 
 const SERVICES: &str = "module m;\n\
-                        export type Ledger;\n\
-                        export type Ai;\n\
-                        export type Report;\n\
-                        export type DbError;\n\
-                        export type ModelError;\n\
+                        pub type Ledger;\n\
+                        pub type Ai;\n\
+                        pub type Report;\n\
+                        pub type DbError;\n\
+                        pub type ModelError;\n\
                         fn analyze(id: Int) -> Report with { ledger: Ledger };\n\
                         fn classify(r: Report) -> Int with { ai: Ai };\n\
                         fn risky(id: Int) -> Int raises DbError;\n";
@@ -42,7 +42,7 @@ const SERVICES: &str = "module m;\n\
 #[test]
 fn requiring_exactly_what_is_called_is_accepted() {
     assert_clean(&format!(
-        "{SERVICES}export fn f(id: Int) -> Report with {{ ledger: Ledger }} {{ analyze(id) }}\n"
+        "{SERVICES}pub fn f(id: Int) -> Report with {{ ledger: Ledger }} {{ analyze(id) }}\n"
     ));
 }
 
@@ -51,7 +51,7 @@ fn requiring_exactly_what_is_called_is_accepted() {
 #[test]
 fn requiring_more_than_is_called_is_accepted() {
     assert_clean(&format!(
-        "{SERVICES}export fn f(id: Int) -> Report with {{ ledger: Ledger, ai: Ai }} \
+        "{SERVICES}pub fn f(id: Int) -> Report with {{ ledger: Ledger, ai: Ai }} \
          {{ analyze(id) }}\n"
     ));
 }
@@ -62,7 +62,7 @@ fn requiring_more_than_is_called_is_accepted() {
 fn a_capability_the_caller_lacks_is_rejected_by_name() {
     assert_reports(
         &format!(
-            "{SERVICES}export fn f(id: Int) -> Int with {{ ledger: Ledger }} \
+            "{SERVICES}pub fn f(id: Int) -> Int with {{ ledger: Ledger }} \
              {{ classify(analyze(id)) }}\n"
         ),
         "`classify` needs `ai: Ai`, which this function does not require",
@@ -74,10 +74,10 @@ fn a_capability_the_caller_lacks_is_rejected_by_name() {
 #[test]
 fn a_function_with_no_clause_requires_nothing() {
     assert_reports(
-        &format!("{SERVICES}export fn f(id: Int) -> Report {{ analyze(id) }}\n"),
+        &format!("{SERVICES}pub fn f(id: Int) -> Report {{ analyze(id) }}\n"),
         "`analyze` needs `ledger: Ledger`",
     );
-    assert_clean(&format!("{SERVICES}export fn f(id: Int) -> Int {{ id + 1 }}\n"));
+    assert_clean(&format!("{SERVICES}pub fn f(id: Int) -> Int {{ id + 1 }}\n"));
 }
 
 /// Order is not part of a row's identity.
@@ -86,7 +86,7 @@ fn a_row_is_the_same_written_either_way() {
     assert_clean(&format!(
         "{SERVICES}\
          fn both(id: Int) -> Int with {{ ledger: Ledger, ai: Ai }};\n\
-         export fn f(id: Int) -> Int with {{ ai: Ai, ledger: Ledger }} {{ both(id) }}\n"
+         pub fn f(id: Int) -> Int with {{ ai: Ai, ledger: Ledger }} {{ both(id) }}\n"
     ));
 }
 
@@ -95,7 +95,7 @@ fn a_row_is_the_same_written_either_way() {
 #[test]
 fn a_raise_the_caller_does_not_declare_is_rejected() {
     assert_reports(
-        &format!("{SERVICES}export fn f(id: Int) -> Int {{ risky(id)! }}\n"),
+        &format!("{SERVICES}pub fn f(id: Int) -> Int {{ risky(id)! }}\n"),
         "`risky` needs `DbError`, which this function does not raise",
     );
 }
@@ -103,7 +103,7 @@ fn a_raise_the_caller_does_not_declare_is_rejected() {
 #[test]
 fn declaring_the_raise_accepts_it() {
     assert_clean(&format!(
-        "{SERVICES}export fn f(id: Int) -> Int raises DbError {{ risky(id)! }}\n"
+        "{SERVICES}pub fn f(id: Int) -> Int raises DbError {{ risky(id)! }}\n"
     ));
 }
 
@@ -111,7 +111,7 @@ fn declaring_the_raise_accepts_it() {
 #[test]
 fn a_wider_error_row_accepts_a_narrower_call() {
     assert_clean(&format!(
-        "{SERVICES}export fn f(id: Int) -> Int raises DbError + ModelError {{ risky(id)! }}\n"
+        "{SERVICES}pub fn f(id: Int) -> Int raises DbError + ModelError {{ risky(id)! }}\n"
     ));
 }
 
@@ -120,7 +120,7 @@ fn a_wider_error_row_accepts_a_narrower_call() {
 #[test]
 fn the_two_rows_do_not_satisfy_each_other() {
     assert_reports(
-        &format!("{SERVICES}export fn f(id: Int) -> Int raises DbError {{ classify(analyze(id)) }}\n"),
+        &format!("{SERVICES}pub fn f(id: Int) -> Int raises DbError {{ classify(analyze(id)) }}\n"),
         "needs `ledger: Ledger`",
     );
 }
@@ -133,8 +133,8 @@ fn the_two_rows_do_not_satisfy_each_other() {
 fn a_row_variable_passes_the_rest_through() {
     assert_clean(&format!(
         "{SERVICES}\
-         export fn wrap<'e>(id: Int) -> Report with {{ 'e | ledger: Ledger }} {{ analyze(id) }}\n\
-         export fn caller(id: Int) -> Report with {{ ledger: Ledger, ai: Ai }} {{ wrap(id) }}\n"
+         pub fn wrap<'e>(id: Int) -> Report with {{ 'e | ledger: Ledger }} {{ analyze(id) }}\n\
+         pub fn caller(id: Int) -> Report with {{ ledger: Ledger, ai: Ai }} {{ wrap(id) }}\n"
     ));
 }
 
@@ -143,9 +143,9 @@ fn a_row_variable_does_not_conjure_a_capability() {
     assert_reports(
         &format!(
             "{SERVICES}\
-             export fn wrap<'e>(id: Int) -> Report with {{ 'e | ledger: Ledger }} \
+             pub fn wrap<'e>(id: Int) -> Report with {{ 'e | ledger: Ledger }} \
              {{ analyze(id) }}\n\
-             export fn thin(id: Int) -> Report {{ wrap(id) }}\n"
+             pub fn thin(id: Int) -> Report {{ wrap(id) }}\n"
         ),
         "`wrap` needs `ledger: Ledger`",
     );
@@ -156,7 +156,7 @@ fn a_row_variable_does_not_conjure_a_capability() {
 fn one_label_cannot_carry_two_types() {
     assert_reports(
         &format!(
-            "{SERVICES}export fn f(id: Int) -> Report with {{ ledger: Ai }} {{ analyze(id) }}\n"
+            "{SERVICES}pub fn f(id: Int) -> Report with {{ ledger: Ai }} {{ analyze(id) }}\n"
         ),
         "Ai",
     );
@@ -165,8 +165,8 @@ fn one_label_cannot_carry_two_types() {
 // --- catch -----------------------------------------------------------------
 
 const ERRORS: &str = "module m;
-                      export type DbError = | Timeout | Refused;
-                      export type ModelError = | RateLimited(ms: Int) | TooLong;
+                      pub type DbError = | Timeout | Refused;
+                      pub type ModelError = | RateLimited(ms: Int) | TooLong;
                       fn fetch(id: Int) -> Int raises DbError + ModelError;
                       fn only_db(id: Int) -> Int raises DbError;
 ";
@@ -176,7 +176,7 @@ const ERRORS: &str = "module m;
 #[test]
 fn a_total_catch_empties_the_row() {
     assert_clean(&format!(
-        "{ERRORS}         export fn safe(id: Int) -> Int {{ only_db(id)! catch {{          DbError::Timeout => 0, DbError::Refused => 1, }} }}
+        "{ERRORS}         pub fn safe(id: Int) -> Int {{ only_db(id)! catch {{          DbError::Timeout => 0, DbError::Refused => 1, }} }}
 "
     ));
 }
@@ -185,7 +185,7 @@ fn a_total_catch_empties_the_row() {
 #[test]
 fn an_unnamed_error_type_stays_in_the_row() {
     assert_clean(&format!(
-        "{ERRORS}         export fn half(id: Int) -> Int raises DbError {{ fetch(id)! catch {{          ModelError::RateLimited(ms) => ms, ModelError::TooLong => 0, }} }}
+        "{ERRORS}         pub fn half(id: Int) -> Int raises DbError {{ fetch(id)! catch {{          ModelError::RateLimited(ms) => ms, ModelError::TooLong => 0, }} }}
 "
     ));
 }
@@ -194,7 +194,7 @@ fn an_unnamed_error_type_stays_in_the_row() {
 fn what_a_catch_leaves_behind_still_has_to_be_declared() {
     assert_reports(
         &format!(
-            "{ERRORS}             export fn half(id: Int) -> Int {{ fetch(id)! catch {{              ModelError::RateLimited(ms) => ms, ModelError::TooLong => 0, }} }}
+            "{ERRORS}             pub fn half(id: Int) -> Int {{ fetch(id)! catch {{              ModelError::RateLimited(ms) => ms, ModelError::TooLong => 0, }} }}
 "
         ),
         "`fetch` needs `DbError`",
@@ -207,7 +207,7 @@ fn what_a_catch_leaves_behind_still_has_to_be_declared() {
 fn naming_an_error_type_means_handling_all_of_it() {
     assert_reports(
         &format!(
-            "{ERRORS}             export fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => 0, }} }}
+            "{ERRORS}             pub fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => 0, }} }}
 "
         ),
         "Refused",
@@ -219,7 +219,7 @@ fn naming_an_error_type_means_handling_all_of_it() {
 #[test]
 fn a_wildcard_catch_arm_handles_the_whole_row() {
     assert_clean(&format!(
-        "{ERRORS}export fn safe(id: Int) -> Int {{ fetch(id)! catch {{ _ => 0, }} }}
+        "{ERRORS}pub fn safe(id: Int) -> Int {{ fetch(id)! catch {{ _ => 0, }} }}
 "
     ));
 }
@@ -233,7 +233,7 @@ fn a_wildcard_catch_arm_handles_the_whole_row() {
 fn a_wildcard_catch_arm_handles_a_row_variable() {
     assert_clean(
         "module m;
-         export fn supervise<'e>(work: () -> Int raises 'e) -> Int {
+         pub fn supervise<'e>(work: () -> Int raises 'e) -> Int {
            work()! catch { _ => 0, }
          }
 ",
@@ -245,7 +245,7 @@ fn a_wildcard_catch_arm_handles_a_row_variable() {
 #[test]
 fn named_arms_and_a_wildcard_compose() {
     assert_clean(&format!(
-        "{ERRORS}export fn safe(id: Int) -> Int {{ fetch(id)! catch {{
+        "{ERRORS}pub fn safe(id: Int) -> Int {{ fetch(id)! catch {{
            DbError::Timeout => 0, DbError::Refused => 1, _ => 2, }} }}
 "
     ));
@@ -256,7 +256,7 @@ fn named_arms_and_a_wildcard_compose() {
 #[test]
 fn a_catch_arm_has_to_name_a_constructor() {
     assert_reports(
-        &format!("{ERRORS}export fn safe(id: Int) -> Int {{ only_db(id)! catch {{ 3 => 0, }} }}
+        &format!("{ERRORS}pub fn safe(id: Int) -> Int {{ only_db(id)! catch {{ 3 => 0, }} }}
 "),
         "name an error constructor",
     );
@@ -268,7 +268,7 @@ fn a_catch_arm_has_to_name_a_constructor() {
 fn catching_an_error_nothing_raises_is_an_error() {
     assert_reports(
         &format!(
-            "{ERRORS}             export fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => 0, DbError::Refused => 1,              ModelError::TooLong => 2, ModelError::RateLimited(ms) => ms, }} }}
+            "{ERRORS}             pub fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => 0, DbError::Refused => 1,              ModelError::TooLong => 2, ModelError::RateLimited(ms) => ms, }} }}
 "
         ),
         "nothing in this expression raises `ModelError`",
@@ -281,7 +281,7 @@ fn catching_an_error_nothing_raises_is_an_error() {
 fn a_catch_arm_produces_what_the_operand_would_have() {
     assert_reports(
         &format!(
-            "{ERRORS}             export fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => \"nope\", DbError::Refused => 1, }} }}
+            "{ERRORS}             pub fn safe(id: Int) -> Int {{ only_db(id)! catch {{              DbError::Timeout => \"nope\", DbError::Refused => 1, }} }}
 "
         ),
         "catch arms disagree",
@@ -294,7 +294,7 @@ fn a_catch_arm_produces_what_the_operand_would_have() {
 fn a_catch_still_needs_the_mark() {
     assert_reports(
         &format!(
-            "{ERRORS}             export fn safe(id: Int) -> Int {{ only_db(id) catch {{              DbError::Timeout => 0, DbError::Refused => 1, }} }}
+            "{ERRORS}             pub fn safe(id: Int) -> Int {{ only_db(id) catch {{              DbError::Timeout => 0, DbError::Refused => 1, }} }}
 "
         ),
         "needs `!`",
@@ -304,36 +304,36 @@ fn a_catch_still_needs_the_mark() {
 // --- rows on function types ------------------------------------------------
 
 const HANDLERS: &str = "module m;\n\
-                        export type Db;\n\
-                        export type Ai;\n\
-                        export type Req = | Of;\n\
-                        export type Res = | Of;\n\
-                        export type Oops = | Bad;\n\
-                        export fn mount<'r>(handler: Req -> Res with 'r) -> Int;\n\
-                        export fn mount_db(handler: Req -> Res with { db: Db }) -> Int;\n\
-                        export fn plain(r: Req) -> Res { Res::Of }\n\
-                        export fn served(r: Req) -> Res with { db: Db } { Res::Of }\n\
-                        export fn fallible(r: Req) -> Res raises Oops { Res::Of }\n";
+                        pub type Db;\n\
+                        pub type Ai;\n\
+                        pub type Req = | Of;\n\
+                        pub type Res = | Of;\n\
+                        pub type Oops = | Bad;\n\
+                        pub fn mount<'r>(handler: Req -> Res with 'r) -> Int;\n\
+                        pub fn mount_db(handler: Req -> Res with { db: Db }) -> Int;\n\
+                        pub fn plain(r: Req) -> Res { Res::Of }\n\
+                        pub fn served(r: Req) -> Res with { db: Db } { Res::Of }\n\
+                        pub fn fallible(r: Req) -> Res raises Oops { Res::Of }\n";
 
 /// The point of the whole feature. Naming `served` does not charge its
 /// requirement to whoever wrote the name — the requirement is part of its
 /// type, and travels with the value to whoever eventually calls it.
 #[test]
 fn a_function_that_needs_a_capability_can_be_passed_as_a_value() {
-    assert_clean(&format!("{HANDLERS}export fn go() -> Int {{ mount(served) }}\n"));
+    assert_clean(&format!("{HANDLERS}pub fn go() -> Int {{ mount(served) }}\n"));
 }
 
 /// The same, with the row written out rather than a variable.
 #[test]
 fn an_explicit_row_on_a_parameter_accepts_a_matching_function() {
-    assert_clean(&format!("{HANDLERS}export fn go() -> Int {{ mount_db(served) }}\n"));
+    assert_clean(&format!("{HANDLERS}pub fn go() -> Int {{ mount_db(served) }}\n"));
 }
 
 /// A row variable absorbs the empty row too, so a plain function fits where a
 /// row-polymorphic one is wanted.
 #[test]
 fn a_row_variable_accepts_a_function_that_needs_nothing() {
-    assert_clean(&format!("{HANDLERS}export fn go() -> Int {{ mount(plain) }}\n"));
+    assert_clean(&format!("{HANDLERS}pub fn go() -> Int {{ mount(plain) }}\n"));
 }
 
 /// `with { db: Db }` is a demand on the *argument*, not a wildcard. This is
@@ -344,8 +344,8 @@ fn an_explicit_row_on_a_parameter_rejects_a_function_needing_something_else() {
     assert_reports(
         &format!(
             "{HANDLERS}\
-             export fn other(r: Req) -> Res with {{ ai: Ai }} {{ Res::Of }}\n\
-             export fn go() -> Int {{ mount_db(other) }}\n"
+             pub fn other(r: Req) -> Res with {{ ai: Ai }} {{ Res::Of }}\n\
+             pub fn go() -> Int {{ mount_db(other) }}\n"
         ),
         "ai: Ai",
     );
@@ -355,7 +355,7 @@ fn an_explicit_row_on_a_parameter_rejects_a_function_needing_something_else() {
 #[test]
 fn a_functions_error_row_travels_with_it() {
     assert_reports(
-        &format!("{HANDLERS}export fn go() -> Int {{ mount(fallible) }}\n"),
+        &format!("{HANDLERS}pub fn go() -> Int {{ mount(fallible) }}\n"),
         "Oops",
     );
 }
@@ -366,7 +366,7 @@ fn a_functions_error_row_travels_with_it() {
 fn calling_through_a_binding_still_charges_the_caller() {
     assert_reports(
         &format!(
-            "{HANDLERS}export fn go(r: Req) -> Res {{ let f = served; f(r) }}\n"
+            "{HANDLERS}pub fn go(r: Req) -> Res {{ let f = served; f(r) }}\n"
         ),
         "db: Db",
     );
@@ -375,18 +375,18 @@ fn calling_through_a_binding_still_charges_the_caller() {
 #[test]
 fn calling_through_a_binding_is_accepted_when_declared() {
     assert_clean(&format!(
-        "{HANDLERS}export fn go(r: Req) -> Res with {{ db: Db }} {{ let f = served; f(r) }}\n"
+        "{HANDLERS}pub fn go(r: Req) -> Res with {{ db: Db }} {{ let f = served; f(r) }}\n"
     ));
 }
 
 // --- named contexts --------------------------------------------------------
 
 const TWO_SERVICES: &str = "module m;\n\
-                            export type Ledger;\n\
-                            export type Ai;\n\
-                            export effect Log { note: (Int) -> Int, }\n\
-                            export effect Clock { now: () -> Int, }\n\
-                            export fn stamped(n: Int) -> Int \
+                            pub type Ledger;\n\
+                            pub type Ai;\n\
+                            pub effect Log { note: (Int) -> Int, }\n\
+                            pub effect Clock { now: () -> Int, }\n\
+                            pub fn stamped(n: Int) -> Int \
                               with { log: Log, clock: Clock } { log.note(clock.now() + n) }\n";
 
 /// `with Mock { .. }` is `with { <Mock's bindings> } { .. }`. It used to be a
@@ -396,11 +396,11 @@ const TWO_SERVICES: &str = "module m;\n\
 fn a_named_context_installs_its_bindings() {
     assert_clean(&format!(
         "{TWO_SERVICES}\
-         export context Mock {{\n\
+         pub context Mock {{\n\
            log: handler for Log {{ note: fn n => n }},\n\
            clock: handler for Clock {{ now: fn () => 7 }},\n\
          }}\n\
-         export fn go() -> Int {{ with Mock {{ stamped(1) }} }}\n"
+         pub fn go() -> Int {{ with Mock {{ stamped(1) }} }}\n"
     ));
 }
 
@@ -410,10 +410,10 @@ fn a_named_context_discharges_only_what_it_binds() {
     assert_reports(
         &format!(
             "{TWO_SERVICES}\
-             export context Half {{\n\
+             pub context Half {{\n\
                log: handler for Log {{ note: fn n => n }},\n\
              }}\n\
-             export fn go() -> Int {{ with Half {{ stamped(1) }} }}\n"
+             pub fn go() -> Int {{ with Half {{ stamped(1) }} }}\n"
         ),
         "clock: Clock",
     );
@@ -422,7 +422,7 @@ fn a_named_context_discharges_only_what_it_binds() {
 #[test]
 fn a_context_that_does_not_exist_is_reported() {
     assert_reports(
-        &format!("{TWO_SERVICES}export fn go() -> Int {{ with Nope {{ 1 }} }}\n"),
+        &format!("{TWO_SERVICES}pub fn go() -> Int {{ with Nope {{ 1 }} }}\n"),
         "cannot find a `context` named `Nope`",
     );
 }
@@ -430,9 +430,9 @@ fn a_context_that_does_not_exist_is_reported() {
 // --- what a lambda raises is a lower bound ---------------------------------
 
 const FALLIBLE: &str = "module m;
-export type Oops = | Bad;
-export type Other = | Worse;
-export fn run<A>(body: () -> A raises Oops) -> A raises Oops { body()! }
+pub type Oops = | Bad;
+pub type Other = | Worse;
+pub fn run<A>(body: () -> A raises Oops) -> A raises Oops { body()! }
 ";
 
 /// A stub that cannot fail satisfies an interface that allows failure.
@@ -470,8 +470,8 @@ fn a_body_that_fails_an_unexpected_way_is_refused() {
 fn a_body_that_can_fail_is_refused_where_nothing_may() {
     assert_reports(
         "module m;
-export type Oops = | Bad;
-export fn run<A>(body: () -> A) -> A { body() }
+pub type Oops = | Bad;
+pub fn run<A>(body: () -> A) -> A { body() }
 fn f() -> Int { run(fn () => raise Oops::Bad) }
 ",
         "Oops",
@@ -510,8 +510,8 @@ fn f() -> Int { let go = fn n => if n == 0 { 0 } else { n + go(n - 1) }; go(3) }
 // library install one for the duration of a callback.
 
 const CALLBACK: &str = "module m;
-                        export type Ledger;
-                        export type Ai;
+                        pub type Ledger;
+                        pub type Ai;
                         fn report(id: Int) -> Int with { ledger: Ledger };
                         fn install(body: (Int) -> Int with { ledger: Ledger }) -> Int;
                         fn apply(body: (Int) -> Int) -> Int;
@@ -521,13 +521,13 @@ const CALLBACK: &str = "module m;
 /// callback that needs a capability can be written either way.
 #[test]
 fn a_lambda_requires_what_it_cannot_resolve() {
-    assert_clean(&format!("{CALLBACK}export fn go() -> Int {{ install(fn id => report(id)) }}\n"));
+    assert_clean(&format!("{CALLBACK}pub fn go() -> Int {{ install(fn id => report(id)) }}\n"));
 }
 
 /// And the named function it expands from, which always worked.
 #[test]
 fn a_named_function_can_be_the_same_callback() {
-    assert_clean(&format!("{CALLBACK}export fn go() -> Int {{ install(report) }}\n"));
+    assert_clean(&format!("{CALLBACK}pub fn go() -> Int {{ install(report) }}\n"));
 }
 
 /// The requirement is the *closure's*, not the enclosing function's. `go`
@@ -536,7 +536,7 @@ fn a_named_function_can_be_the_same_callback() {
 #[test]
 fn the_enclosing_function_is_not_charged_for_it() {
     let found = errors(&format!(
-        "{CALLBACK}export fn go() -> Int {{ install(fn id => report(id)) }}\n"
+        "{CALLBACK}pub fn go() -> Int {{ install(fn id => report(id)) }}\n"
     ));
     assert!(
         !found.iter().any(|e| e.contains("does not require")),
@@ -552,7 +552,7 @@ fn the_enclosing_function_is_not_charged_for_it() {
 fn a_capability_in_scope_is_captured_not_required() {
     assert_clean(&format!(
         "{CALLBACK}\
-         export fn go() -> Int with {{ ledger: Ledger }} {{ apply(fn id => report(id)) }}\n"
+         pub fn go() -> Int with {{ ledger: Ledger }} {{ apply(fn id => report(id)) }}\n"
     ));
 }
 
@@ -561,7 +561,7 @@ fn a_capability_in_scope_is_captured_not_required() {
 #[test]
 fn a_callback_cannot_require_what_nobody_supplies() {
     assert_reports(
-        &format!("{CALLBACK}export fn go() -> Int {{ apply(fn id => report(id)) }}\n"),
+        &format!("{CALLBACK}pub fn go() -> Int {{ apply(fn id => report(id)) }}\n"),
         "required here but not provided",
     );
 }
@@ -574,7 +574,7 @@ fn a_closure_requires_only_what_it_could_not_reach() {
         &format!(
             "{CALLBACK}\
              fn both(id: Int) -> Int with {{ ledger: Ledger, ai: Ai }};\n\
-             export fn go() -> Int {{ install(fn id => both(id)) }}\n"
+             pub fn go() -> Int {{ install(fn id => both(id)) }}\n"
         ),
         "ai: Ai",
     );

@@ -55,11 +55,11 @@ const PRELUDE: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Option<A> = | None | Some(A);
-export trait Share {}
+pub type Option<A> = | None | Some(A);
+pub trait Share {}
 impl String { fn byte_length(self) -> Int; }
 
-export type Channel<A>;
+pub type Channel<A>;
 impl<A> Share for Channel<A> {}
 impl<A: Share> Channel<A> {
   fn bounded(capacity: Int) -> Channel<A>;
@@ -72,7 +72,7 @@ impl<A: Share> Channel<A> {
 // safe to hold twice -- and the orphan rule refuses an impl for them here
 // anyway, since neither is declared in this module.
 
-export type Fiber;
+pub type Fiber;
 impl Fiber {
   fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
   fn join(self) -> ();
@@ -80,14 +80,14 @@ impl Fiber {
 }
 impl Share for Fiber {}
 
-export type Fibers;
+pub type Fibers;
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
   fn adopt(self, child: Fiber) -> ();
   fn wait(self) -> ();
 }
-export effect Nursery { adopt: (Fiber) -> (), }
+pub effect Nursery { adopt: (Fiber) -> (), }
 ";
 
 /// One fiber puts values in, another takes them out, and the order survives.
@@ -192,7 +192,7 @@ fn a_reply_channel_carries_an_answer_back() {
             "{PRELUDE}
 // No `impl Share for Ask`: the compiler can see what a record holds and
 // decides for itself. Every field here is shareable, so the record is.
-export type Ask = {{ question: Int, reply: Channel<Int> }};
+pub type Ask = {{ question: Int, reply: Channel<Int> }};
 
 fn serve(requests: Channel<Ask>) -> () {{
   let mut going = true;

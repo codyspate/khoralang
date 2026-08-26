@@ -42,7 +42,7 @@ decimal form — so it takes the scale and the rounding to use, and says so.
 ### Decimal
 
 ```khora
-export type Decimal = {
+pub type Decimal = {
   units: Int,
   scale: Int,
 };
@@ -58,7 +58,7 @@ spelled confusingly and every caller who wants one means a larger `units`.
 ### Rounding
 
 ```khora
-export type Rounding =
+pub type Rounding =
   | HalfEven
   | HalfUp
   | Towards;
@@ -106,7 +106,7 @@ impl Decimal
 #### of_int
 
 ```khora
-export fn of_int(units: Int) -> Decimal
+pub fn of_int(units: Int) -> Decimal
 ```
 
 A whole number.
@@ -114,7 +114,7 @@ A whole number.
 #### scaled
 
 ```khora
-export fn scaled(units: Int, scale: Int) -> Decimal
+pub fn scaled(units: Int, scale: Int) -> Decimal
 ```
 
 `units` counted in steps of `10^-scale`.
@@ -127,7 +127,7 @@ raising, since it can only arise from a caller that computed it.
 #### zero
 
 ```khora
-export fn zero() -> Decimal
+pub fn zero() -> Decimal
 ```
 
 Zero.
@@ -135,7 +135,7 @@ Zero.
 #### at_scale
 
 ```khora
-export fn at_scale(self, scale: Int) -> Decimal
+pub fn at_scale(self, scale: Int) -> Decimal
 ```
 
 The same number at a larger scale.
@@ -147,7 +147,7 @@ million million, and most numbers do not survive it.
 #### add
 
 ```khora
-export fn add(self, other: Decimal) -> Decimal
+pub fn add(self, other: Decimal) -> Decimal
 ```
 
 The sum. Exact, and stops the program if it does not fit.
@@ -155,7 +155,7 @@ The sum. Exact, and stops the program if it does not fit.
 #### sub
 
 ```khora
-export fn sub(self, other: Decimal) -> Decimal
+pub fn sub(self, other: Decimal) -> Decimal
 ```
 
 The difference. Exact, and stops the program if it does not fit.
@@ -163,7 +163,7 @@ The difference. Exact, and stops the program if it does not fit.
 #### mul
 
 ```khora
-export fn mul(self, other: Decimal) -> Decimal
+pub fn mul(self, other: Decimal) -> Decimal
 ```
 
 The product, exactly.
@@ -176,7 +176,7 @@ each give one with eight, and the significand has to hold all of them.
 #### divide
 
 ```khora
-export fn divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal>
+pub fn divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal>
 ```
 
 The quotient, to `scale` decimal places, rounded as asked.
@@ -193,7 +193,7 @@ that turned out to be zero is an ordinary thing for data to do, and
 #### rounded
 
 ```khora
-export fn rounded(self, scale: Int, how: Rounding) -> Decimal
+pub fn rounded(self, scale: Int, how: Rounding) -> Decimal
 ```
 
 The same number at `scale` places, rounded as asked.
@@ -204,7 +204,7 @@ figure somebody can be invoiced for.
 #### negate
 
 ```khora
-export fn negate(self) -> Decimal
+pub fn negate(self) -> Decimal
 ```
 
 The number with the opposite sign.
@@ -212,7 +212,7 @@ The number with the opposite sign.
 #### is_negative
 
 ```khora
-export fn is_negative(self) -> Bool
+pub fn is_negative(self) -> Bool
 ```
 
 Whether it is less than zero.
@@ -220,7 +220,7 @@ Whether it is less than zero.
 #### is_zero
 
 ```khora
-export fn is_zero(self) -> Bool
+pub fn is_zero(self) -> Bool
 ```
 
 Whether it is exactly zero.
@@ -228,7 +228,7 @@ Whether it is exactly zero.
 #### truncated
 
 ```khora
-export fn truncated(self) -> Int
+pub fn truncated(self) -> Int
 ```
 
 The whole part, towards zero.
@@ -236,7 +236,7 @@ The whole part, towards zero.
 #### of_string
 
 ```khora
-export fn of_string(text: String) -> Option<Decimal>
+pub fn of_string(text: String) -> Option<Decimal>
 ```
 
 A decimal written out, or `None` if the text is not one.

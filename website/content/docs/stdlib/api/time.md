@@ -43,7 +43,7 @@ without a special case nobody remembers.
 ### Date
 
 ```khora
-export type Date = {
+pub type Date = {
   year: Int,
   month: Int,
   day: Int,
@@ -59,7 +59,7 @@ its three numbers and hiding them would only mean writing three accessors.
 ### Time
 
 ```khora
-export type Time = {
+pub type Time = {
   hour: Int,
   minute: Int,
   second: Int,
@@ -77,7 +77,7 @@ every subtraction to be correct about something almost nothing observes.
 ### DateTime
 
 ```khora
-export type DateTime = {
+pub type DateTime = {
   date: Date,
   time: Time,
 };
@@ -95,7 +95,7 @@ midnight-boundary report a day out twice a year.
 ### Offset
 
 ```khora
-export type Offset = {
+pub type Offset = {
   minutes: Int,
 };
 ```
@@ -119,7 +119,7 @@ impl Date
 #### of
 
 ```khora
-export fn of(year: Int, month: Int, day: Int) -> Option<Date>
+pub fn of(year: Int, month: Int, day: Int) -> Option<Date>
 ```
 
 A date, or `None` if there is no such day.
@@ -132,7 +132,7 @@ nearly always has bad input rather than an interesting question.
 #### to_days
 
 ```khora
-export fn to_days(self) -> Int
+pub fn to_days(self) -> Int
 ```
 
 Days since the first of January 1970, which may be negative.
@@ -146,7 +146,7 @@ the year.
 #### of_days
 
 ```khora
-export fn of_days(days: Int) -> Date
+pub fn of_days(days: Int) -> Date
 ```
 
 The date `days` after the first of January 1970.
@@ -156,7 +156,7 @@ The inverse of `to_days`, and the other half of Hinnant's pair.
 #### add_days
 
 ```khora
-export fn add_days(self, days: Int) -> Date
+pub fn add_days(self, days: Int) -> Date
 ```
 
 The date `days` later, which may be earlier if `days` is negative.
@@ -164,7 +164,7 @@ The date `days` later, which may be earlier if `days` is negative.
 #### days_until
 
 ```khora
-export fn days_until(self, other: Date) -> Int
+pub fn days_until(self, other: Date) -> Int
 ```
 
 How many days from `self` to `other`, negative if `other` is earlier.
@@ -172,7 +172,7 @@ How many days from `self` to `other`, negative if `other` is earlier.
 #### weekday
 
 ```khora
-export fn weekday(self) -> Int
+pub fn weekday(self) -> Int
 ```
 
 Monday is 1 and Sunday is 7, which is ISO 8601's numbering.
@@ -190,7 +190,7 @@ impl Time
 #### of
 
 ```khora
-export fn of(hour: Int, minute: Int, second: Int, milli: Int) -> Option<Time>
+pub fn of(hour: Int, minute: Int, second: Int, milli: Int) -> Option<Time>
 ```
 
 A time of day, or `None` if there is no such moment.
@@ -198,7 +198,7 @@ A time of day, or `None` if there is no such moment.
 #### midnight
 
 ```khora
-export fn midnight() -> Time
+pub fn midnight() -> Time
 ```
 
 Midnight.
@@ -206,7 +206,7 @@ Midnight.
 #### to_millis
 
 ```khora
-export fn to_millis(self) -> Int
+pub fn to_millis(self) -> Int
 ```
 
 Milliseconds since midnight.
@@ -214,7 +214,7 @@ Milliseconds since midnight.
 #### of_millis
 
 ```khora
-export fn of_millis(millis: Int) -> Time
+pub fn of_millis(millis: Int) -> Time
 ```
 
 The time `millis` after midnight, which must be inside one day.
@@ -228,7 +228,7 @@ impl Offset
 #### utc
 
 ```khora
-export fn utc() -> Offset
+pub fn utc() -> Offset
 ```
 
 No offset at all.
@@ -236,7 +236,7 @@ No offset at all.
 #### of_minutes
 
 ```khora
-export fn of_minutes(minutes: Int) -> Offset
+pub fn of_minutes(minutes: Int) -> Offset
 ```
 
 `minutes` east of UTC. Positive is ahead, negative is behind.
@@ -250,7 +250,7 @@ impl DateTime
 #### of_unix_millis
 
 ```khora
-export fn of_unix_millis(millis: Int) -> DateTime
+pub fn of_unix_millis(millis: Int) -> DateTime
 ```
 
 The moment `millis` after 1970, as UTC says it.
@@ -263,7 +263,7 @@ it a whole day out, and it is the bug this function exists to not have.
 #### to_unix_millis
 
 ```khora
-export fn to_unix_millis(self) -> Int
+pub fn to_unix_millis(self) -> Int
 ```
 
 Milliseconds since 1970, reading `self` as UTC.
@@ -271,7 +271,7 @@ Milliseconds since 1970, reading `self` as UTC.
 #### at_offset
 
 ```khora
-export fn at_offset(millis: Int, offset: Offset) -> DateTime
+pub fn at_offset(millis: Int, offset: Offset) -> DateTime
 ```
 
 The same moment, seen from `offset`.
@@ -282,7 +282,7 @@ worked out.
 #### from_offset
 
 ```khora
-export fn from_offset(self, offset: Offset) -> Int
+pub fn from_offset(self, offset: Offset) -> Int
 ```
 
 Milliseconds since 1970, reading `self` as a wall clock at `offset`.
@@ -402,7 +402,7 @@ fn show(self) -> String
 ### days_in_month
 
 ```khora
-export fn days_in_month(year: Int, month: Int) -> Int
+pub fn days_in_month(year: Int, month: Int) -> Int
 ```
 
 Days in `month` of `year`, which is only interesting for February.
@@ -410,7 +410,7 @@ Days in `month` of `year`, which is only interesting for February.
 ### is_leap
 
 ```khora
-export fn is_leap(year: Int) -> Bool
+pub fn is_leap(year: Int) -> Bool
 ```
 
 Whether `year` has a twenty-ninth of February.

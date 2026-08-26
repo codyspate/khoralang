@@ -40,7 +40,7 @@ import std::core::{Eq, Option, Ord, Ordering, Show};
 /// `month` is 1 to 12 and `day` is 1 to the length of that month. Construct
 /// through `Date::of`, which checks; the fields are public because a date is
 /// its three numbers and hiding them would only mean writing three accessors.
-export type Date = {
+pub type Date = {
   year: Int,
   month: Int,
   day: Int,
@@ -52,7 +52,7 @@ export type Date = {
 /// here as it is in every database and every wire format worth naming. A
 /// calendar that admitted 23:59:60 would push that into every comparison and
 /// every subtraction to be correct about something almost nothing observes.
-export type Time = {
+pub type Time = {
   hour: Int,
   minute: Int,
   second: Int,
@@ -67,7 +67,7 @@ export type Time = {
 /// into the other needs an offset. Keeping them apart is what stops a program
 /// silently treating local wall time as UTC — the mistake that puts a
 /// midnight-boundary report a day out twice a year.
-export type DateTime = {
+pub type DateTime = {
   date: Date,
   time: Time,
 };
@@ -79,12 +79,12 @@ export type DateTime = {
 /// applies on a given date, and that rule is a dataset this module refuses to
 /// carry. A caller gets one of these from a package or from the host and hands
 /// it here.
-export type Offset = {
+pub type Offset = {
   minutes: Int,
 };
 
 /// Days in `month` of `year`, which is only interesting for February.
-export fn days_in_month(year: Int, month: Int) -> Int {
+pub fn days_in_month(year: Int, month: Int) -> Int {
   if month == 2 {
     if is_leap(year) { 29 } else { 28 }
   } else if month == 4 || month == 6 || month == 9 || month == 11 {
@@ -99,7 +99,7 @@ export fn days_in_month(year: Int, month: Int) -> Int {
 /// Divisible by four, except centuries, except every fourth century. The rule
 /// is written out rather than looked up because it is three comparisons and
 /// every reader can check it.
-export fn is_leap(year: Int) -> Bool {
+pub fn is_leap(year: Int) -> Bool {
   if year % 4 != 0 { false }
   else if year % 100 != 0 { true }
   else { year % 400 == 0 }
@@ -112,7 +112,7 @@ impl Date {
   /// March. Rolling is a policy — some systems clamp, some wrap, some raise —
   /// and a library that picked silently would be picking for a caller who
   /// nearly always has bad input rather than an interesting question.
-  export fn of(year: Int, month: Int, day: Int) -> Option<Date> {
+  pub fn of(year: Int, month: Int, day: Int) -> Option<Date> {
     if month < 1 || month > 12 || day < 1 || day > days_in_month(year, month) {
       Option::None
     } else {
@@ -127,7 +127,7 @@ impl Date {
   /// no table, and its shifts of the year and month are what remove the leap
   /// day from the middle of the calculation by moving March to the start of
   /// the year.
-  export fn to_days(self) -> Int {
+  pub fn to_days(self) -> Int {
     let year = if self.month <= 2 { self.year - 1 } else { self.year };
     let era = if year >= 0 { year / 400 } else { (year - 399) / 400 };
     let year_of_era = year - era * 400;
@@ -141,7 +141,7 @@ impl Date {
   /// The date `days` after the first of January 1970.
   ///
   /// The inverse of `to_days`, and the other half of Hinnant's pair.
-  export fn of_days(days: Int) -> Date {
+  pub fn of_days(days: Int) -> Date {
     let shifted = days + 719468;
     let era = if shifted >= 0 { shifted / 146097 } else { (shifted - 146096) / 146097 };
     let day_of_era = shifted - era * 146097;
@@ -157,12 +157,12 @@ impl Date {
   }
 
   /// The date `days` later, which may be earlier if `days` is negative.
-  export fn add_days(self, days: Int) -> Date {
+  pub fn add_days(self, days: Int) -> Date {
     Date::of_days(Date::to_days(self) + days)
   }
 
   /// How many days from `self` to `other`, negative if `other` is earlier.
-  export fn days_until(self, other: Date) -> Int {
+  pub fn days_until(self, other: Date) -> Int {
     Date::to_days(other) - Date::to_days(self)
   }
 
@@ -171,7 +171,7 @@ impl Date {
   /// The first of January 1970 was a Thursday, which is where the 3 comes
   /// from: it is day zero and Thursday is 4, so the offset that lands Monday
   /// on 1 is three.
-  export fn weekday(self) -> Int {
+  pub fn weekday(self) -> Int {
     let shifted = (Date::to_days(self) + 3) % 7;
     if shifted < 0 { shifted + 8 } else { shifted + 1 }
   }
@@ -179,7 +179,7 @@ impl Date {
 
 impl Time {
   /// A time of day, or `None` if there is no such moment.
-  export fn of(hour: Int, minute: Int, second: Int, milli: Int) -> Option<Time> {
+  pub fn of(hour: Int, minute: Int, second: Int, milli: Int) -> Option<Time> {
     if hour < 0 || hour > 23 || minute < 0 || minute > 59
     || second < 0 || second > 59 || milli < 0 || milli > 999 {
       Option::None
@@ -189,15 +189,15 @@ impl Time {
   }
 
   /// Midnight.
-  export fn midnight() -> Time { { hour: 0, minute: 0, second: 0, milli: 0 } }
+  pub fn midnight() -> Time { { hour: 0, minute: 0, second: 0, milli: 0 } }
 
   /// Milliseconds since midnight.
-  export fn to_millis(self) -> Int {
+  pub fn to_millis(self) -> Int {
     ((self.hour * 60 + self.minute) * 60 + self.second) * 1000 + self.milli
   }
 
   /// The time `millis` after midnight, which must be inside one day.
-  export fn of_millis(millis: Int) -> Time {
+  pub fn of_millis(millis: Int) -> Time {
     {
       hour: millis / 3600000,
       minute: (millis / 60000) % 60,
@@ -209,10 +209,10 @@ impl Time {
 
 impl Offset {
   /// No offset at all.
-  export fn utc() -> Offset { { minutes: 0 } }
+  pub fn utc() -> Offset { { minutes: 0 } }
 
   /// `minutes` east of UTC. Positive is ahead, negative is behind.
-  export fn of_minutes(minutes: Int) -> Offset { { minutes: minutes } }
+  pub fn of_minutes(minutes: Int) -> Offset { { minutes: minutes } }
 }
 
 impl DateTime {
@@ -222,7 +222,7 @@ impl DateTime {
   /// before 1970 come out right: `-1` millisecond is the last millisecond of
   /// 1969, not the first of 1970 with a minus sign. Truncating division puts
   /// it a whole day out, and it is the bug this function exists to not have.
-  export fn of_unix_millis(millis: Int) -> DateTime {
+  pub fn of_unix_millis(millis: Int) -> DateTime {
     let day = 86400000;
     let days = if millis >= 0 { millis / day } else { (millis - (day - 1)) / day };
     let rest = millis - days * day;
@@ -230,7 +230,7 @@ impl DateTime {
   }
 
   /// Milliseconds since 1970, reading `self` as UTC.
-  export fn to_unix_millis(self) -> Int {
+  pub fn to_unix_millis(self) -> Int {
     Date::to_days(self.date) * 86400000 + Time::to_millis(self.time)
   }
 
@@ -238,12 +238,12 @@ impl DateTime {
   ///
   /// The one place a zone enters, and it enters as a number somebody else
   /// worked out.
-  export fn at_offset(millis: Int, offset: Offset) -> DateTime {
+  pub fn at_offset(millis: Int, offset: Offset) -> DateTime {
     DateTime::of_unix_millis(millis + offset.minutes * 60000)
   }
 
   /// Milliseconds since 1970, reading `self` as a wall clock at `offset`.
-  export fn from_offset(self, offset: Offset) -> Int {
+  pub fn from_offset(self, offset: Offset) -> Int {
     DateTime::to_unix_millis(self) - offset.minutes * 60000
   }
 }

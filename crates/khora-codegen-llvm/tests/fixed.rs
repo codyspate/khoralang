@@ -56,7 +56,7 @@ fn run(name: &str, source: &str) -> Ran {
 const HEAD: &str = "module t;
 fn print(value: Int);
 
-export type Array<A>;
+pub type Array<A>;
 impl<A> Array<A> {
   fn new(length: Int, fill: A) -> Array<A>;
   fn length(self) -> Int;

@@ -31,7 +31,7 @@ reach rather than a line here: see `Router::serve_once`.
 ### Method
 
 ```khora
-export type Method =
+pub type Method =
   | Get
   | Post
   | Put
@@ -49,7 +49,7 @@ becomes a 400 rather than a panic.
 ### Params
 
 ```khora
-export type Params = {
+pub type Params = {
   bound: Map<String, String>,
 };
 ```
@@ -60,7 +60,7 @@ The path parameters a route matched: `/analyze/:account_id` against
 ### Request
 
 ```khora
-export type Request = {
+pub type Request = {
   method: Method,
   path: String,
   params: Params,
@@ -112,7 +112,7 @@ which is the correct reading: they are the same header.
 ### Header
 
 ```khora
-export type Header = {
+pub type Header = {
   name: String,
   value: String,
 };
@@ -123,7 +123,7 @@ One header on the way out.
 ### Response
 
 ```khora
-export type Response = {
+pub type Response = {
   status: Int,
   body: String,
   content_type: String,
@@ -150,7 +150,7 @@ map would silently keep only the last.
 ### HttpError
 
 ```khora
-export type HttpError =
+pub type HttpError =
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
 ```
@@ -165,7 +165,7 @@ be read at all.
 ### RequestLine
 
 ```khora
-export type RequestLine = {
+pub type RequestLine = {
   method: Method,
   target: String,
 };
@@ -189,7 +189,7 @@ reasons gets what the client actually sent.
 ### Transport
 
 ```khora
-export type Transport = {
+pub type Transport = {
   receive: (Array<U8>) -> Int,
   transmit: (String) -> Int,
   shut: () -> (),
@@ -261,7 +261,7 @@ Ends the conversation and releases whatever is underneath.
 ### Connection
 
 ```khora
-export type Connection = {
+pub type Connection = {
   transport: Transport,
   buffer: Array<U8>,
   mut carried: Int,
@@ -299,7 +299,7 @@ client sends two without waiting, and the second must not be dropped.
 ### Incoming
 
 ```khora
-export type Incoming =
+pub type Incoming =
   | Arrived(request: Request, keep: Bool)
   | Ended
   | Rejected(response: Response);
@@ -343,7 +343,7 @@ next request begins, so the connection cannot be reused whatever the
 ### Route
 
 ```khora
-export type Route<'e> = {
+pub type Route<'e> = {
   method: Method,
   pattern: String,
   handler: SharedFn<Request, Response, 'e>,
@@ -365,7 +365,7 @@ to carry — `Router<'e>` says only how its handlers can fail.
 ### Router
 
 ```khora
-export type Router<'e> = {
+pub type Router<'e> = {
   routes: List<Route<'e>>,
 };
 ```
@@ -384,7 +384,7 @@ impl Method
 #### of
 
 ```khora
-export fn of(text: String) -> Option<Method>
+pub fn of(text: String) -> Option<Method>
 ```
 
 The method this text names, or `None`.
@@ -396,7 +396,7 @@ request line that has never been ambiguous.
 #### same
 
 ```khora
-export fn same(self, other: Method) -> Bool
+pub fn same(self, other: Method) -> Bool
 ```
 
 Whether these are the same method.
@@ -413,7 +413,7 @@ impl Params
 #### empty
 
 ```khora
-export fn empty() -> Params
+pub fn empty() -> Params
 ```
 
 No parameters bound. What a route with no `:name` in it matches with.
@@ -421,7 +421,7 @@ No parameters bound. What a route with no `:name` in it matches with.
 #### get
 
 ```khora
-export fn get(self, name: String) -> Option<String>
+pub fn get(self, name: String) -> Option<String>
 ```
 
 `Option::None` when the route did not declare that parameter, which is a
@@ -436,7 +436,7 @@ impl Request
 #### get
 
 ```khora
-export fn get(path: String) -> Request
+pub fn get(path: String) -> Request
 ```
 
 A GET request for `path`, with no parameters matched yet. Chiefly for
@@ -445,7 +445,7 @@ tests: a real one arrives from a socket.
 #### post
 
 ```khora
-export fn post(path: String, body: String) -> Request
+pub fn post(path: String, body: String) -> Request
 ```
 
 A POST to `path` carrying `body`. For tests, like `get`.
@@ -453,7 +453,7 @@ A POST to `path` carrying `body`. For tests, like `get`.
 #### of
 
 ```khora
-export fn of(method: Method, target: String, body: String) -> Request
+pub fn of(method: Method, target: String, body: String) -> Request
 ```
 
 The query string is honoured here too, so a hand-built request behaves
@@ -463,7 +463,7 @@ finds no `a` would be testing the constructor rather than the code.
 #### query
 
 ```khora
-export fn query(self, name: String) -> Option<String>
+pub fn query(self, name: String) -> Option<String>
 ```
 
 A query parameter, already percent-decoded.
@@ -475,7 +475,7 @@ value, which is how every server reads it and what lets a handler ask
 #### header
 
 ```khora
-export fn header(self, name: String) -> Option<String>
+pub fn header(self, name: String) -> Option<String>
 ```
 
 A header, by a name in any case.
@@ -492,7 +492,7 @@ impl Response
 #### json
 
 ```khora
-export fn json<A: Show>(status: Int, body: A) -> Response
+pub fn json<A: Show>(status: Int, body: A) -> Response
 ```
 
 Serializes `body` and sends it with the given status.
@@ -504,7 +504,7 @@ there is one, this is where it goes and nothing above it changes.
 #### text
 
 ```khora
-export fn text(status: Int, body: String) -> Response
+pub fn text(status: Int, body: String) -> Response
 ```
 
 `body` as `text/plain`, with the given status.
@@ -512,7 +512,7 @@ export fn text(status: Int, body: String) -> Response
 #### with_header
 
 ```khora
-export fn with_header(self, name: String, value: String) -> Response
+pub fn with_header(self, name: String, value: String) -> Response
 ```
 
 The same response with one more header on it.
@@ -524,7 +524,7 @@ changed underneath its other holder.
 #### rendered
 
 ```khora
-export fn rendered(self) -> String
+pub fn rendered(self) -> String
 ```
 
 The response, as bytes on the wire.
@@ -532,7 +532,7 @@ The response, as bytes on the wire.
 #### rendered_keeping
 
 ```khora
-export fn rendered_keeping(self, keep: Bool) -> String
+pub fn rendered_keeping(self, keep: Bool) -> String
 ```
 
 The same, saying whether the connection is staying open.
@@ -551,7 +551,7 @@ begins without the connection closing to tell it.
 #### reason
 
 ```khora
-export fn reason(status: Int) -> String
+pub fn reason(status: Int) -> String
 ```
 
 The reason phrase for a status.
@@ -572,7 +572,7 @@ impl Connection
 #### over
 
 ```khora
-export fn over(transport: Transport) -> Connection
+pub fn over(transport: Transport) -> Connection
 ```
 
 Over a transport, holding at most [`default_limit`] bytes per request.
@@ -580,7 +580,7 @@ Over a transport, holding at most [`default_limit`] bytes per request.
 #### holding
 
 ```khora
-export fn holding(transport: Transport, most: Int) -> Connection
+pub fn holding(transport: Transport, most: Int) -> Connection
 ```
 
 The same, with a cap of your own.
@@ -592,7 +592,7 @@ are connected.
 #### next
 
 ```khora
-export fn next(self) -> Incoming
+pub fn next(self) -> Incoming
 ```
 
 Reads until one request is whole, and says what arrived.
@@ -603,7 +603,7 @@ belongs to the caller — see the note on [`Connection`].
 #### understood
 
 ```khora
-export fn understood(text: String) -> Incoming
+pub fn understood(text: String) -> Incoming
 ```
 
 Parses one request, or the 400 to answer it with.
@@ -615,7 +615,7 @@ already folded — whether the client asked to keep the connection.
 #### reply
 
 ```khora
-export fn reply(self, response: Response, keep: Bool) -> Int
+pub fn reply(self, response: Response, keep: Bool) -> Int
 ```
 
 Renders `response` and sends it.
@@ -626,7 +626,7 @@ reported unless the caller has its own reason to close.
 #### shut
 
 ```khora
-export fn shut(self) ->()
+pub fn shut(self) ->()
 ```
 
 Ends the conversation and releases the transport.
@@ -651,7 +651,7 @@ collide with another module's `get`.
 #### new
 
 ```khora
-export fn new<'e>() -> Router<'e>
+pub fn new<'e>() -> Router<'e>
 ```
 
 A router with no routes. The start of the pipeline.
@@ -659,7 +659,7 @@ A router with no routes. The start of the pipeline.
 #### post
 
 ```khora
-export fn post<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
+pub fn post<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
 ```
 
 Mounts `handler` at `route` for POST.
@@ -671,7 +671,7 @@ rather than an invariant anything enforces.
 #### get
 
 ```khora
-export fn get<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
+pub fn get<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
 ```
 
 Mounts `handler` at `route` for GET.
@@ -679,7 +679,7 @@ Mounts `handler` at `route` for GET.
 #### listen
 
 ```khora
-export fn listen<'e>(router: Router<'e>, port: Int) ->() raises 'e + HttpError
+pub fn listen<'e>(router: Router<'e>, port: Int) ->() raises 'e + HttpError
 ```
 
 Serves until the process stops, on a fiber per connection.
@@ -687,7 +687,7 @@ Serves until the process stops, on a fiber per connection.
 #### listen_tls
 
 ```khora
-export fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'e + HttpError + TlsError
+pub fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'e + HttpError + TlsError
 ```
 
 Accepts for as long as the process lives.
@@ -704,7 +704,7 @@ server is usually the program's.
 #### bound
 
 ```khora
-export fn bound<'e>(port: Int) -> Int raises HttpError
+pub fn bound<'e>(port: Int) -> Int raises HttpError
 ```
 
 A listening socket on `port`, announced by the caller.
@@ -712,7 +712,7 @@ A listening socket on `port`, announced by the caller.
 #### serve_secured
 
 ```khora
-export fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) ->() with { nursery: Nursery } raises 'e + HttpError
+pub fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) ->() with { nursery: Nursery } raises 'e + HttpError
 ```
 
 `serve_forever` over TLS: accepts, handshakes, and serves on a fiber
@@ -724,7 +724,7 @@ public port it is the ordinary case, not an incident.
 #### serve_forever
 
 ```khora
-export fn serve_forever<'e>(router: Router<'e>, server: Int) ->() with { nursery: Nursery } raises 'e + HttpError
+pub fn serve_forever<'e>(router: Router<'e>, server: Int) ->() with { nursery: Nursery } raises 'e + HttpError
 ```
 
 Accepts connections on `server` until the process stops.
@@ -736,7 +736,7 @@ a test on port zero, a socket inherited from a supervisor.
 #### answer_on
 
 ```khora
-export fn answer_on<'e>(router: Router<'e>, transport: Transport) ->() raises 'e
+pub fn answer_on<'e>(router: Router<'e>, transport: Transport) ->() raises 'e
 ```
 
 Answers every request on one connection, until the client stops.
@@ -750,7 +750,7 @@ anything: the reading, the framing and the refusals are all above.
 ### percent_decode
 
 ```khora
-export fn percent_decode(text: String) -> String
+pub fn percent_decode(text: String) -> String
 ```
 
 `%20` becomes a space, and so does `+`.
@@ -765,7 +765,7 @@ input's length is always enough and there is nothing to grow.
 ### parse
 
 ```khora
-export fn parse(text: String) -> Option<Request>
+pub fn parse(text: String) -> Option<Request>
 ```
 
 A request read off the wire.
@@ -773,7 +773,7 @@ A request read off the wire.
 ### default_limit
 
 ```khora
-export fn default_limit() -> Int
+pub fn default_limit() -> Int
 ```
 
 The most a request may be. Anything longer gets a 413.
@@ -806,7 +806,7 @@ takes another.
 ### over_socket
 
 ```khora
-export fn over_socket(connection: Int) -> Transport
+pub fn over_socket(connection: Int) -> Transport
 ```
 
 A transport over a plain socket.
@@ -814,7 +814,7 @@ A transport over a plain socket.
 ### over_tls
 
 ```khora
-export fn over_tls(connection: TlsConnection) -> Transport
+pub fn over_tls(connection: TlsConnection) -> Transport
 ```
 
 A transport over a secured connection.
@@ -825,7 +825,7 @@ it — so there is nothing here that closes it a second time.
 ### request_length
 
 ```khora
-export fn request_length(bytes: Array<U8>, filled: Int) -> Int
+pub fn request_length(bytes: Array<U8>, filled: Int) -> Int
 ```
 
 How long the whole request should be, or negative while the headers are
@@ -846,7 +846,7 @@ want.
 ### matches
 
 ```khora
-export fn matches(pattern: String, path: String) -> Option<Params>
+pub fn matches(pattern: String, path: String) -> Option<Params>
 ```
 
 Whether `path` matches `pattern`, and what its `:name` segments bound.

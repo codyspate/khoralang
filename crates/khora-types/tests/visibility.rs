@@ -19,8 +19,8 @@ fn errors_in_user(library: &str, user: &str) -> Vec<String> {
 }
 
 const LIBRARY: &str = "module library;\n\
-                       export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
-                       export type Point = { x: Int };\n\
+                       pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+                       pub type Point = { x: Int };\n\
                        impl Eq for Point { fn eq(self, other: Point) -> Bool { self.x == other.x } }\n";
 
 /// An impl written beside its type is visible wherever that type is.
@@ -35,7 +35,7 @@ fn an_impl_travels_with_its_type() {
         LIBRARY,
         "module user;\n\
          import library::{Point};\n\
-         export fn same(a: Point, b: Point) -> Bool { Point::eq(a, b) }\n",
+         pub fn same(a: Point, b: Point) -> Bool { Point::eq(a, b) }\n",
     );
     assert!(found.is_empty(), "the type was imported and its impl was not: {found:?}");
 }
@@ -47,7 +47,7 @@ fn an_impl_travels_with_its_trait() {
         LIBRARY,
         "module user;\n\
          import library::{Eq};\n\
-         export fn same<T: Eq>(a: T, b: T) -> Bool { a.eq(b) }\n",
+         pub fn same<T: Eq>(a: T, b: T) -> Bool { a.eq(b) }\n",
     );
     assert!(found.is_empty(), "the trait was imported and its impls were not: {found:?}");
 }
@@ -62,7 +62,7 @@ fn an_impl_imported_from_both_sides_is_not_a_duplicate() {
         LIBRARY,
         "module user;\n\
          import library::{Eq, Point};\n\
-         export fn same(a: Point, b: Point) -> Bool { Point::eq(a, b) }\n",
+         pub fn same(a: Point, b: Point) -> Bool { Point::eq(a, b) }\n",
     );
     assert!(found.is_empty(), "one impl reached here twice and was called two: {found:?}");
 }
@@ -77,7 +77,7 @@ fn a_field_of_an_unimported_type_says_the_type_is_missing() {
     let found = errors_in_user(
         LIBRARY,
         "module user;\n\
-         export fn get(p: Point) -> Int { p.x }\n",
+         pub fn get(p: Point) -> Int { p.x }\n",
     );
     assert!(
         found.iter().any(|e| e.contains("`Point` is not in scope here")),
@@ -92,7 +92,7 @@ fn a_field_of_an_imported_type_reads() {
         LIBRARY,
         "module user;\n\
          import library::{Point};\n\
-         export fn get(p: Point) -> Int { p.x }\n",
+         pub fn get(p: Point) -> Int { p.x }\n",
     );
     assert!(found.is_empty(), "expected no errors, got {found:?}");
 }
@@ -112,13 +112,13 @@ fn errors_in_three(deep: &str, middle: &str, user: &str) -> Vec<String> {
 }
 
 const DEEP: &str = "module deep;\n\
-                    export type Amount = { units: Int };\n";
+                    pub type Amount = { units: Int };\n";
 
 const MIDDLE: &str = "module middle;\n\
                       import deep::{Amount};\n\
-                      export type Cell = | Nothing | Money(Amount);\n\
-                      export type Holder = { cells: List<Cell> };\n\
-                      export type List<A> = | Nil | Cons(head: A, tail: List<A>);\n";
+                      pub type Cell = | Nothing | Money(Amount);\n\
+                      pub type Holder = { cells: List<Cell> };\n\
+                      pub type List<A> = | Nil | Cons(head: A, tail: List<A>);\n";
 
 /// **The bug this exists for.** Whether two fibers may hold a `Cell` is a fact
 /// about `Cell`. It was answered by looking inside, and the looking stopped at
@@ -133,7 +133,7 @@ const MIDDLE: &str = "module middle;\n\
 #[test]
 fn a_types_shareability_does_not_depend_on_what_the_importer_imported() {
     let user = "module user;\n\
-                export trait Share {}\n\
+                pub trait Share {}\n\
                 import middle::{Cell};\n\
                 fn takes<A: Share>(value: A) -> () { }\n\
                 fn use_it(c: Cell) -> () { takes(c) }\n";
@@ -148,7 +148,7 @@ fn a_types_shareability_does_not_depend_on_what_the_importer_imported() {
 #[test]
 fn shareability_reaches_through_a_generic_the_importer_never_named() {
     let user = "module user;\n\
-                export trait Share {}\n\
+                pub trait Share {}\n\
                 import middle::{Holder};\n\
                 fn takes<A: Share>(value: A) -> () { }\n\
                 fn use_it(h: Holder) -> () { takes(h) }\n";
@@ -161,12 +161,12 @@ fn shareability_reaches_through_a_generic_the_importer_never_named() {
 #[test]
 fn a_mutable_field_two_modules_away_still_refuses() {
     let deep = "module deep;\n\
-                export type Counter = { mut n: Int };\n";
+                pub type Counter = { mut n: Int };\n";
     let middle = "module middle;\n\
                   import deep::{Counter};\n\
-                  export type Wrapper = { inner: Counter };\n";
+                  pub type Wrapper = { inner: Counter };\n";
     let user = "module user;\n\
-                export trait Share {}\n\
+                pub trait Share {}\n\
                 import middle::{Wrapper};\n\
                 fn takes<A: Share>(value: A) -> () { }\n\
                 fn use_it(w: Wrapper) -> () { takes(w) }\n";
@@ -183,7 +183,7 @@ fn a_mutable_field_two_modules_away_still_refuses() {
 #[test]
 fn a_reachable_type_is_visible_to_the_checker_and_not_to_the_program() {
     let user = "module user;\n\
-                export trait Share {}\n\
+                pub trait Share {}\n\
                 import middle::{Cell};\n\
                 fn make() -> Amount { { units: 1 } }\n";
     let found = errors_in_three(DEEP, MIDDLE, user);
@@ -217,15 +217,15 @@ fn errors_in_four(far: &str, deep: &str, middle: &str, user: &str) -> Vec<String
 #[test]
 fn shareability_reaches_further_than_one_module() {
     let far = "module far;\n\
-               export type Atom = { n: Int };\n";
+               pub type Atom = { n: Int };\n";
     let deep = "module deep;\n\
                 import far::{Atom};\n\
-                export type Inner = { atom: Atom };\n";
+                pub type Inner = { atom: Atom };\n";
     let middle = "module middle;\n\
                   import deep::{Inner};\n\
-                  export type Outer = { inner: Inner };\n";
+                  pub type Outer = { inner: Inner };\n";
     let user = "module user;\n\
-                export trait Share {}\n\
+                pub trait Share {}\n\
                 import middle::{Outer};\n\
                 fn takes<A: Share>(value: A) -> () { }\n\
                 fn use_it(o: Outer) -> () { takes(o) }\n";
@@ -237,15 +237,15 @@ fn shareability_reaches_further_than_one_module() {
 #[test]
 fn a_mutable_field_three_modules_away_still_refuses() {
     let far = "module far;\n\
-               export type Atom = { mut n: Int };\n";
+               pub type Atom = { mut n: Int };\n";
     let deep = "module deep;\n\
                 import far::{Atom};\n\
-                export type Inner = { atom: Atom };\n";
+                pub type Inner = { atom: Atom };\n";
     let middle = "module middle;\n\
                   import deep::{Inner};\n\
-                  export type Outer = { inner: Inner };\n";
+                  pub type Outer = { inner: Inner };\n";
     let user = "module user;\n\
-                export trait Share {}\n\
+                pub trait Share {}\n\
                 import middle::{Outer};\n\
                 fn takes<A: Share>(value: A) -> () { }\n\
                 fn use_it(o: Outer) -> () { takes(o) }\n";
@@ -258,7 +258,7 @@ fn a_mutable_field_three_modules_away_still_refuses() {
 
 /// **An opaque type's whole answer is its impl, and the impl has to travel.**
 ///
-/// `Channel` is `export type Channel<A>;` with `impl Share for Channel<A>`
+/// `Channel` is `pub type Channel<A>;` with `impl Share for Channel<A>`
 /// beside it: there is no body to look inside, so the assertion *is* the
 /// shareability. Reaching through a field found the bodies of everything
 /// mentioned and stopped there, which left the opaque ones behind — a `Pool`
@@ -273,14 +273,14 @@ fn a_mutable_field_three_modules_away_still_refuses() {
 #[test]
 fn an_opaque_types_share_impl_travels_with_a_type_that_holds_one() {
     let deep = "module deep;\n\
-                export trait Share {}\n\
-                export type Pipe<A>;\n\
+                pub trait Share {}\n\
+                pub type Pipe<A>;\n\
                 impl<A> Share for Pipe<A> {}\n";
     let middle = "module middle;\n\
                   import deep::{Pipe};\n\
-                  export type Plumbing = { pipe: Pipe<Int> };\n";
+                  pub type Plumbing = { pipe: Pipe<Int> };\n";
     let user = "module user;\n\
-                export trait Share {}\n\
+                pub trait Share {}\n\
                 import middle::{Plumbing};\n\
                 fn takes<A: Share>(value: A) -> () { }\n\
                 fn use_it(p: Plumbing) -> () { takes(p) }\n";
@@ -296,13 +296,13 @@ fn an_opaque_types_share_impl_travels_with_a_type_that_holds_one() {
 #[test]
 fn an_opaque_type_without_an_impl_is_still_refused_through_a_field() {
     let deep = "module deep;\n\
-                export trait Share {}\n\
-                export type Pipe<A>;\n";
+                pub trait Share {}\n\
+                pub type Pipe<A>;\n";
     let middle = "module middle;\n\
                   import deep::{Pipe};\n\
-                  export type Plumbing = { pipe: Pipe<Int> };\n";
+                  pub type Plumbing = { pipe: Pipe<Int> };\n";
     let user = "module user;\n\
-                export trait Share {}\n\
+                pub trait Share {}\n\
                 import middle::{Plumbing};\n\
                 fn takes<A: Share>(value: A) -> () { }\n\
                 fn use_it(p: Plumbing) -> () { takes(p) }\n";

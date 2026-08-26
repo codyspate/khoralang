@@ -19,9 +19,9 @@ fn project(at: &Path, lints: &str) {
     std::fs::write(
         at.join("src").join("main.kh"),
         "module demo::main;\n\n\
-         export effect Clock {\n  now: () -> Int,\n}\n\n\
+         pub effect Clock {\n  now: () -> Int,\n}\n\n\
          fn area(r: Int) -> Int with { clock: Clock } {\n  r * r;\n  r * r\n}\n\n\
-         export fn main() -> () {}\n",
+         pub fn main() -> () {}\n",
     )
     .expect("writing the source");
 }

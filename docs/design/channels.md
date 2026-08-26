@@ -34,7 +34,7 @@ says, so the serialisation has to exist somewhere real.
 requests.
 
 ```khora
-export type Channel<A>;
+pub type Channel<A>;
 impl<A> Share for Channel<A> {}
 
 impl<A: Share> Channel<A> {

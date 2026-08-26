@@ -31,7 +31,7 @@ import std::core::{List, Option, Show};
 /// Carried in the type, so a program that multiplies a CPU tensor by a GPU one
 /// is refused rather than copying silently. Provisional along with the rest of
 /// this module.
-export type Device =
+pub type Device =
   | Cpu
   | Cuda(device_id: Int)
   | Metal
@@ -41,17 +41,17 @@ export type Device =
 ///
 /// A kind rather than a type — nothing is a value of `Scalar`. It exists so
 /// that `Tensor<D, Shape, T>` can say what `T` is allowed to be.
-export type Scalar;
+pub type Scalar;
 
 /// The kind of a shape: what may appear as a tensor's `Shape`.
 ///
 /// `(M, K)` is a value of this kind, not a value of any type. Matching two
 /// shapes is ordinary unification, which is what makes a mismatched product a
 /// type error.
-export type Tuple;
+pub type Tuple;
 
 /// Thirty-two-bit floating point, as an element type.
-export type F32;
+pub type F32;
 
 /// A tensor, with its device, its shape and its element type in the type.
 ///
@@ -61,13 +61,13 @@ export type F32;
 /// is the whole argument for this being in `std` while the kernels are not:
 /// the vocabulary two packages must agree on is here, and the arithmetic is
 /// somebody else's.
-export type Tensor<D: Device, Shape: Tuple, T: Scalar>;
+pub type Tensor<D: Device, Shape: Tuple, T: Scalar>;
 
 /// A one-dimensional CPU tensor of a known width.
 ///
 /// The shape a vector database and an embedding model have to agree on, spelled
 /// once: `Embedding<1536, F32>`.
-export type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
+pub type Embedding<const Dim: Int, T: Scalar> = Tensor<Device::Cpu, (Dim), T>;
 
 impl<D: Device, Shape: Tuple, T: Scalar> Tensor<D, Shape, T> {
   /// A tensor of the given shape, every element zero.
@@ -75,7 +75,7 @@ impl<D: Device, Shape: Tuple, T: Scalar> Tensor<D, Shape, T> {
   /// The shape is passed as a value and read back as a type, which is what
   /// makes `Embedding<1536, F32>` and `Tensor::zeros((1536))` the same thing
   /// said twice. Provisional along with the rest of this module.
-  export fn zeros(shape: Shape) -> Tensor<D, Shape, T>;
+  pub fn zeros(shape: Shape) -> Tensor<D, Shape, T>;
 }
 
 /// The matrix product, with the shared dimension checked by the type system.
@@ -84,7 +84,7 @@ impl<D: Device, Shape: Tuple, T: Scalar> Tensor<D, Shape, T> {
 /// `(J, N)` does not compile, and no assertion runs to discover it. Declared
 /// rather than implemented — `docs/design/ecosystem.md` puts the kernel in a
 /// package.
-export fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(
+pub fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>(
   a: Tensor<D, (M, K), T>,
   b: Tensor<D, (K, N), T>
 ) -> Tensor<D, (M, N), T>;
@@ -95,7 +95,7 @@ export fn matmul<D: Device, const M: Int, const K: Int, const N: Int, T: Scalar>
 /// about the set — `system`, `user`, `assistant`, `tool`, `developer` — and a
 /// variant here would have to be widened by `std` every time one of them added
 /// a word.
-export type Message = {
+pub type Message = {
   role: String,
   content: String,
 };
@@ -105,7 +105,7 @@ export type Message = {
 ///
 /// Built by piping rather than by filling in a record, so a half-built prompt
 /// is never a value anybody holds. See the `impl` below.
-export type Prompt = {
+pub type Prompt = {
   system_instructions: Option<String>,
   messages: List<Message>,
   temperature: Float,
@@ -116,12 +116,12 @@ export type Prompt = {
 /// cannot be shared and then changed underneath its other holder.
 impl Prompt {
   /// An empty prompt: no instructions, no messages, temperature one.
-  export fn new() -> Prompt {
+  pub fn new() -> Prompt {
     { system_instructions: Option::None, messages: List::Nil, temperature: 1.0 }
   }
 
   /// Replaces the system instructions; the last one written wins.
-  export fn system(self, instructions: String) -> Prompt {
+  pub fn system(self, instructions: String) -> Prompt {
     {
       system_instructions: Option::Some(instructions),
       messages: self.messages,
@@ -130,18 +130,18 @@ impl Prompt {
   }
 
   /// Adds a turn from the person asking.
-  export fn user(self, message: String) -> Prompt {
+  pub fn user(self, message: String) -> Prompt {
     Prompt::saying(self, "user", message)
   }
 
   /// Adds a turn from the model, which is how a conversation is replayed.
-  export fn assistant(self, message: String) -> Prompt {
+  pub fn assistant(self, message: String) -> Prompt {
     Prompt::saying(self, "assistant", message)
   }
 
   /// Adds a turn under any role. `user` and `assistant` are this with the two
   /// roles every provider agrees on.
-  export fn saying(self, role: String, content: String) -> Prompt {
+  pub fn saying(self, role: String, content: String) -> Prompt {
     {
       system_instructions: self.system_instructions,
       messages: List::Cons({ role: role, content: content }, self.messages),
@@ -151,7 +151,7 @@ impl Prompt {
 
   /// Sets how much variation to allow. Zero is as close to deterministic as a
   /// provider offers, which is not a promise any of them makes.
-  export fn at_temperature(self, temperature: Float) -> Prompt {
+  pub fn at_temperature(self, temperature: Float) -> Prompt {
     {
       system_instructions: self.system_instructions,
       messages: self.messages,
@@ -175,7 +175,7 @@ impl Prompt {
 /// provider numbers its failures differently, and a `std` that picked one
 /// would be wrong for the second. `RateLimited` carries the wait because a
 /// caller can act on it; the rest carry text.
-export type ModelError =
+pub type ModelError =
   | ContextLengthExceeded(max_tokens: Int)
   | RateLimited(retry_after_ms: Int)
   | InferenceEngineFailure(msg: String)
@@ -188,7 +188,7 @@ export type ModelError =
 /// set of examples — because `extract` only has to hand it over. `parse` is the
 /// other half, and was missing: something has to turn the model's text into a
 /// value, and before now nothing said what.
-export trait Extract {
+pub trait Extract {
   /// How this type describes itself to a model — a JSON schema, a grammar, a
   /// set of examples. Its own business; `extract` only hands it over.
   type Spec;
@@ -223,7 +223,7 @@ export trait Extract {
 /// Keeping the effect this small is what makes a mock one line: return a
 /// string. It used to have to fabricate whatever the caller asked for, which
 /// tests the mock rather than the code under it.
-export effect LLMService {
+pub effect LLMService {
   complete: Prompt -> String raises ModelError,
   /// The raw vector, at whatever width the model produces. `embed` below is
   /// the shape-safe reading of it.
@@ -237,7 +237,7 @@ export effect LLMService {
 /// by the caller, which is what makes this a function rather than an
 /// operation: a generic function is specialized at each call site, and a field
 /// of a handler cannot be.
-export fn extract<A: Extract>(prompt: Prompt) -> A
+pub fn extract<A: Extract>(prompt: Prompt) -> A
   with { ai: LLMService }
   raises ModelError
 {
@@ -251,7 +251,7 @@ export fn extract<A: Extract>(prompt: Prompt) -> A
 /// numbers out of a model that returns 1536, so asking for a `Dim` is asking a
 /// question, and a `Dim` that does not match the answer is a `ModelError`. The
 /// old declaration made it a caller-chosen parameter, which said otherwise.
-export fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32>
+pub fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32>
   with { ai: LLMService }
   raises ModelError;
 
@@ -261,7 +261,7 @@ export fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32>
 /// length check discovering it: comparing a 1536-wide embedding with a
 /// 768-wide one is refused by the checker. Declared rather than implemented,
 /// like `matmul` — the arithmetic belongs in a package.
-export fn cosine_similarity<const Dim: Int>(
+pub fn cosine_similarity<const Dim: Int>(
   a: Embedding<Dim, F32>,
   b: Embedding<Dim, F32>
 ) -> Float;

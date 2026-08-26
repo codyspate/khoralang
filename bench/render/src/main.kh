@@ -35,7 +35,7 @@ fn loop_forever(server: Int) -> ()
   loop_forever(server)
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   start();
   let server = listen_on(18951);
   print("listening");

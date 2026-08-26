@@ -53,8 +53,8 @@ fn world() -> World {
 #[test]
 fn a_module_path_becomes_a_file_path() {
     let w = world();
-    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\nexport fn f() -> Int { 1 }\n");
-    write(&w.src.join("b.kh"), "module p::deep::beta;\n//! Beta.\nexport fn g() -> Int { 1 }\n");
+    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\npub fn f() -> Int { 1 }\n");
+    write(&w.src.join("b.kh"), "module p::deep::beta;\n//! Beta.\npub fn g() -> Int { 1 }\n");
 
     let out = run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -69,12 +69,12 @@ fn platform_variants_become_one_page() {
     let w = world();
     write(
         &w.src.join("sock_linux.kh"),
-        "module p::sock;\n//! Sockets.\n/// Opens one.\nexport fn open() -> Int { 1 }\n",
+        "module p::sock;\n//! Sockets.\n/// Opens one.\npub fn open() -> Int { 1 }\n",
     );
     write(
         &w.src.join("sock_windows.kh"),
-        "module p::sock;\n/// Opens one.\nexport fn open() -> Int { 1 }\n\
-         /// Windows only.\nexport fn startup() -> Int { 2 }\n",
+        "module p::sock;\n/// Opens one.\npub fn open() -> Int { 1 }\n\
+         /// Windows only.\npub fn startup() -> Int { 2 }\n",
     );
 
     let out = run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
@@ -91,8 +91,8 @@ fn platform_variants_become_one_page() {
 #[test]
 fn a_page_for_a_deleted_module_is_deleted_too() {
     let w = world();
-    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\nexport fn f() -> Int { 1 }\n");
-    write(&w.src.join("b.kh"), "module p::deep::beta;\n//! Beta.\nexport fn g() -> Int { 1 }\n");
+    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\npub fn f() -> Int { 1 }\n");
+    write(&w.src.join("b.kh"), "module p::deep::beta;\n//! Beta.\npub fn g() -> Int { 1 }\n");
     run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
     assert!(w.out.join("deep").join("beta.md").is_file());
 
@@ -113,7 +113,7 @@ fn regenerating_an_unchanged_tree_changes_nothing() {
     let w = world();
     write(
         &w.src.join("a.kh"),
-        "module p::alpha;\n//! Alpha.\n/// Adds.\nexport fn f(a: Int) -> Int { a }\n",
+        "module p::alpha;\n//! Alpha.\n/// Adds.\npub fn f(a: Int) -> Int { a }\n",
     );
     run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
     let first = page(&w.out, "alpha.md");
@@ -127,11 +127,11 @@ fn regenerating_an_unchanged_tree_changes_nothing() {
 #[test]
 fn check_fails_on_a_stale_tree_and_writes_nothing() {
     let w = world();
-    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\nexport fn f() -> Int { 1 }\n");
+    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\npub fn f() -> Int { 1 }\n");
     run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
 
-    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\nexport fn f() -> Int { 1 }\n\
-         /// New.\nexport fn g() -> Int { 2 }\n");
+    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\npub fn f() -> Int { 1 }\n\
+         /// New.\npub fn g() -> Int { 2 }\n");
     let before = page(&w.out, "alpha.md");
 
     let checked = run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap(), "--check"]);
@@ -147,7 +147,7 @@ fn check_fails_on_a_stale_tree_and_writes_nothing() {
 #[test]
 fn a_module_with_no_introduction_is_a_warning_and_not_an_error() {
     let w = world();
-    write(&w.src.join("a.kh"), "module p::alpha;\nexport fn f() -> Int { 1 }\n");
+    write(&w.src.join("a.kh"), "module p::alpha;\npub fn f() -> Int { 1 }\n");
 
     let out = run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
     assert!(out.status.success());
@@ -164,7 +164,7 @@ fn a_module_with_no_introduction_is_a_warning_and_not_an_error() {
 #[test]
 fn a_file_that_does_not_parse_is_refused_by_name() {
     let w = world();
-    write(&w.src.join("a.kh"), "module p::alpha;\nexport fn (((\n");
+    write(&w.src.join("a.kh"), "module p::alpha;\npub fn (((\n");
 
     let out = run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
     assert!(!out.status.success());
@@ -181,7 +181,7 @@ fn a_file_that_does_not_parse_is_refused_by_name() {
 #[test]
 fn a_page_with_windows_line_endings_is_not_stale() {
     let w = world();
-    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\nexport fn f() -> Int { 1 }\n");
+    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\npub fn f() -> Int { 1 }\n");
     run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
 
     let page = page(&w.out, "alpha.md");

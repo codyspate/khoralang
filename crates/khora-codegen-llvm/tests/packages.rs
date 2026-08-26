@@ -42,16 +42,16 @@ const PACKAGE: &str = r#"module tally;
 import std::core::{Show};
 
 /// A count of something, so that the consumer has a type it did not declare.
-export type Tally = {
+pub type Tally = {
   count: Int,
 };
 
 impl Tally {
-  export fn of(count: Int) -> Tally {
+  pub fn of(count: Int) -> Tally {
     { count: count }
   }
 
-  export fn plus(self, other: Tally) -> Tally {
+  pub fn plus(self, other: Tally) -> Tally {
     { count: self.count + other.count }
   }
 }
@@ -66,7 +66,7 @@ impl Show for Tally {
 
 /// A generic, so that monomorphization has to reach across the boundary: the
 /// body lives here and the specialization is demanded there.
-export fn twice<A>(value: A, join: (A, A) -> A) -> A {
+pub fn twice<A>(value: A, join: (A, A) -> A) -> A {
   join(value, value)
 }
 "#;
@@ -78,7 +78,7 @@ import tally::{Tally, twice};
 
 fn print(value: String);
 
-export fn main() -> () {
+pub fn main() -> () {
   let one = Tally::of(21);
   print(twice(one, fn (a, b) => Tally::plus(a, b)).show());
 }

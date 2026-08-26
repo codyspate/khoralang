@@ -32,7 +32,7 @@ knob that lets somebody pick worse ones is not a feature.
 ### TlsError
 
 ```khora
-export type TlsError =
+pub type TlsError =
   | BadCertificate
   | BadKey
   | Handshake
@@ -88,7 +88,7 @@ a separate piece of work.
 ### TlsServer
 
 ```khora
-export type TlsServer = { settings: Ptr };
+pub type TlsServer = { settings: Ptr };
 ```
 
 A configured server, ready to secure accepted sockets.
@@ -105,7 +105,7 @@ right answer and a good reason to name a field after what it holds.
 ### TlsConnection
 
 ```khora
-export type TlsConnection = { session: Ptr };
+pub type TlsConnection = { session: Ptr };
 ```
 
 One secured connection, and the socket underneath it.
@@ -113,7 +113,7 @@ One secured connection, and the socket underneath it.
 ### TlsClient
 
 ```khora
-export type TlsClient = { trust: Ptr };
+pub type TlsClient = { trust: Ptr };
 ```
 
 What a client trusts.
@@ -130,7 +130,7 @@ because a type hint does not currently reach inside the branches of an
 ### server
 
 ```khora
-export fn server(certificate: String, key: String) -> TlsServer with { scope: Scope } raises TlsError
+pub fn server(certificate: String, key: String) -> TlsServer with { scope: Scope } raises TlsError
 ```
 
 A server from a certificate chain and a private key, both PEM.
@@ -147,7 +147,7 @@ every caller would repeat.
 ### secure
 
 ```khora
-export fn secure(server: TlsServer, socket: Int) -> TlsConnection raises TlsError
+pub fn secure(server: TlsServer, socket: Int) -> TlsConnection raises TlsError
 ```
 
 Completes a handshake over an accepted socket.
@@ -163,7 +163,7 @@ and moves on has leaked nothing.
 ### receive
 
 ```khora
-export fn receive(connection: TlsConnection, into: Array<U8>) -> Int
+pub fn receive(connection: TlsConnection, into: Array<U8>) -> Int
 ```
 
 Plaintext bytes into `into`: how many, 0 when the peer has closed, or -1.
@@ -174,7 +174,7 @@ already handles a socket handles this.
 ### transmit
 
 ```khora
-export fn transmit(connection: TlsConnection, text: String) -> Int
+pub fn transmit(connection: TlsConnection, text: String) -> Int
 ```
 
 Sends `text`, all of it, or -1.
@@ -185,7 +185,7 @@ something a caller can resume, so the runtime finishes it or fails.
 ### shut
 
 ```khora
-export fn shut(connection: TlsConnection) ->()
+pub fn shut(connection: TlsConnection) ->()
 ```
 
 Says goodbye properly, then closes the socket.
@@ -197,7 +197,7 @@ having an end-of-stream that is signed.
 ### client
 
 ```khora
-export fn client() -> TlsClient with { scope: Scope } raises TlsError
+pub fn client() -> TlsClient with { scope: Scope } raises TlsError
 ```
 
 A client trusting the certificates this machine trusts.
@@ -212,7 +212,7 @@ Released when the enclosing scope ends, like a server.
 ### trusting
 
 ```khora
-export fn trusting(extra: String) -> TlsClient with { scope: Scope } raises TlsError
+pub fn trusting(extra: String) -> TlsClient with { scope: Scope } raises TlsError
 ```
 
 The same, trusting one more certificate chain as a root.
@@ -226,7 +226,7 @@ the same amount of typing and leaves a reviewer something to look at.
 ### connect
 
 ```khora
-export fn connect(client: TlsClient, host: String, port: Int) -> TlsConnection raises TlsError
+pub fn connect(client: TlsClient, host: String, port: Int) -> TlsConnection raises TlsError
 ```
 
 Connects to `host` on `port` and completes a handshake.

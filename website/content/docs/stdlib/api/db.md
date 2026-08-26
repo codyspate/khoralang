@@ -47,7 +47,7 @@ itself cancelled — `khora-rt`'s `cancel::Shielded`.
 ### Cell
 
 ```khora
-export type Cell =
+pub type Cell =
   | Null
   | Text(String)
   | Number(Int)
@@ -65,7 +65,7 @@ something that is genuinely a measurement needs one.
 ### Row
 
 ```khora
-export type Row = {
+pub type Row = {
   cells: List<Cell>,
 };
 ```
@@ -75,7 +75,7 @@ One row, in the order the query named its columns.
 ### DbError
 
 ```khora
-export type DbError =
+pub type DbError =
   | Rejected(String)
   | Disconnected(String)
   | RolledBack(String);
@@ -118,7 +118,7 @@ The transaction was rolled back rather than committed.
 ### Db
 
 ```khora
-export effect Db {
+pub effect Db {
   query: (String, List<Cell>) -> Result<List<Row>, DbError>,
   execute: (String, List<Cell>) -> Result<Int, DbError>,
   begin: () -> Result<(), DbError>,
@@ -143,7 +143,7 @@ impl Cell
 #### text
 
 ```khora
-export fn text(self) -> Option<String>
+pub fn text(self) -> Option<String>
 ```
 
 The text in this cell, or `None` if it holds something else.
@@ -155,7 +155,7 @@ column's type.
 #### number
 
 ```khora
-export fn number(self) -> Option<Int>
+pub fn number(self) -> Option<Int>
 ```
 
 The number in this cell, or `None`.
@@ -163,7 +163,7 @@ The number in this cell, or `None`.
 #### money
 
 ```khora
-export fn money(self) -> Option<Decimal>
+pub fn money(self) -> Option<Decimal>
 ```
 
 The decimal in this cell, or `None`.
@@ -171,7 +171,7 @@ The decimal in this cell, or `None`.
 #### flag
 
 ```khora
-export fn flag(self) -> Option<Bool>
+pub fn flag(self) -> Option<Bool>
 ```
 
 The boolean in this cell, or `None`.
@@ -179,7 +179,7 @@ The boolean in this cell, or `None`.
 #### is_null
 
 ```khora
-export fn is_null(self) -> Bool
+pub fn is_null(self) -> Bool
 ```
 
 Whether the cell is null, which is a question rather than a value.
@@ -193,7 +193,7 @@ impl Row
 #### cell
 
 ```khora
-export fn cell(self, index: Int) -> Option<Cell>
+pub fn cell(self, index: Int) -> Option<Cell>
 ```
 
 The cell at `index`, or `None` past the end.
@@ -241,7 +241,7 @@ fn show(self) -> String
 ### transaction
 
 ```khora
-export fn transaction<A, 'c, 'r>(db: Db, body: () -> Result<A, DbError> with 'c raises 'r) -> Result<A, DbError> with 'c raises 'r
+pub fn transaction<A, 'c, 'r>(db: Db, body: () -> Result<A, DbError> with 'c raises 'r) -> Result<A, DbError> with 'c raises 'r
 ```
 
 Runs `body` in a transaction, committing on success and rolling back

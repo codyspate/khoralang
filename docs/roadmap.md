@@ -2853,7 +2853,7 @@ which is what says the over-approximations are the right ones.
 `khora build --lib`. `docs/design/c-export.md`.
 
 ```khora
-export extern fn price(units: Int, scale: Int) -> Int {
+pub extern fn price(units: Int, scale: Int) -> Int {
   units * scale
 }
 ```
@@ -3520,7 +3520,7 @@ suspends from Rust. Three defects, of which one was reachable.
 **A `main` program that publishes a C symbol was counting references without
 atomics.** The proof of single-threadedness was "this is a `main` build and
 nothing mentions `Fiber::spawn`" — and `emit_c_exports` runs for every entry
-point, so a program with an `export extern fn` hands its address to whatever it
+point, so a program with an `pub extern fn` hands its address to whatever it
 is linked against, and a C library calls the callback it was given on whichever
 thread it likes. Non-atomic counting for a function a foreign thread can enter.
 There is no way to see it go wrong except as corruption long afterwards, so the

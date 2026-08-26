@@ -47,14 +47,14 @@ const FIBERS: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Fiber;
+pub type Fiber;
 impl Fiber {
   fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
   fn join(self) -> ();
   fn cancel(self) -> ();
 }
 
-export type Region;
+pub type Region;
 impl Region {
   fn open() -> Region;
   fn defer(self, finalizer: () -> ()) -> ();
@@ -110,7 +110,7 @@ fn a_fiber_is_waited_for_when_a_raise_passes_through() {
         "fiber_raise",
         &format!(
             "{FIBERS}
-export type Oops = | Bad;
+pub type Oops = | Bad;
 
 fn work() -> Int raises Oops {{
   let f = Fiber::spawn(fn () => print(1));
@@ -176,7 +176,7 @@ fn cancelling_a_fiber_does_not_cancel_the_parent() {
         "fiber_cancel_child",
         &format!(
             "{FIBERS}
-export type Oops = | Bad;
+pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops {{ n }}
 
 fn main() -> Int raises Oops {{
@@ -251,20 +251,20 @@ fn print(value: Int);
 extern fn khora_cancel();
 extern fn khora_live_count() -> Int;
 
-export type Fiber;
+pub type Fiber;
 impl Fiber {
   fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
   fn join(self) -> ();
   fn cancel(self) -> ();
 }
 
-export type Region;
+pub type Region;
 impl Region {
   fn open() -> Region;
   fn defer(self, finalizer: () -> ()) -> ();
 }
 
-export type Oops = | Bad;
+pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
 ";
 
@@ -394,15 +394,15 @@ const NURSERY: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Fiber;
+pub type Fiber;
 impl Fiber {
   fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
   fn join(self) -> ();
   fn cancel(self) -> ();
 }
 
-export type Fibers;
-export trait Share {}
+pub type Fibers;
+pub trait Share {}
 /// A nursery is adopted into from more than one fiber; that is what it is for,
 /// and `khora_fibers_adopt` locks. Without this the handler below is refused,
 /// which is the point of the rule — a bodyless type has to say.
@@ -413,9 +413,9 @@ impl Fibers {
   fn wait(self) -> ();
 }
 
-export effect Nursery { adopt: (Fiber) -> (), }
+pub effect Nursery { adopt: (Fiber) -> (), }
 
-export type Oops = | Bad;
+pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
 
 ";
@@ -611,7 +611,7 @@ fn a_program_that_spawns_counts_references_atomically() {
         "spawn_forces_atomics",
         &format!(
             "{FIBERS}
-export type Cell = | Nil | One(next: Cell);
+pub type Cell = | Nil | One(next: Cell);
 
 /// Enough building and releasing to lose a count if two threads shared one
 /// without atomics.
@@ -641,7 +641,7 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
 
 /// `attempt`, and something for it to run.
 const ATTEMPTING: &str = "
-export type Result<A, E> = | Ok(A) | Err(E);
+pub type Result<A, E> = | Ok(A) | Err(E);
 
 /// The intrinsic, declared: catching *whatever* a body raises is not something
 /// `catch` can express, so the compiler supplies the body.

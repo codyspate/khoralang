@@ -18,7 +18,7 @@ fn plan(db: &dyn Db, text: &str, function: &str) -> RcPlan {
         .unwrap_or_else(|| panic!("no function `{function}`"))
 }
 
-const ADT: &str = "module m;\nexport type R = | A | B(n: Int);\n";
+const ADT: &str = "module m;\npub type R = | A | B(n: Int);\n";
 
 #[test]
 fn machine_words_are_not_counted() {
@@ -223,7 +223,7 @@ fn a_read_in_a_guard_keeps_the_binding_alive() {
     let db = KhoraDatabase::new();
     let p = plan(
         &db,
-        "module m;\nexport type R = | A | B;\n\
+        "module m;\npub type R = | A | B;\n\
          fn f(s: String, r: R) -> Int {\n  \
          let t = s + \"\";\n  \
          match r { R::A if String::byte_length(s) > 0 => 1, _ => 0 }\n}\n",
@@ -255,7 +255,7 @@ fn a_capability_is_never_handed_to_its_last_mention() {
     let p = plan(
         &db,
         "module m;\n\
-         export effect Clock { now: () -> Int, }\n\
+         pub effect Clock { now: () -> Int, }\n\
          fn tick() -> Int with { clock: Clock } { clock.now() }\n\
          fn twice() -> Int with { clock: Clock } { clock.now() + tick() }\n",
         "twice",
@@ -285,9 +285,9 @@ fn a_packages_own_shared_is_not_borrowed() {
     let p = plan(
         &db,
         "module m;\n\
-         export type Shared = { label: String };\n\
+         pub type Shared = { label: String };\n\
          impl Shared {\n  \
-         export fn get(self) -> String { self.label }\n\
+         pub fn get(self) -> String { self.label }\n\
          }\n\
          fn use_it(cell: Shared) -> String { Shared::get(cell) }\n",
         "use_it",
@@ -306,9 +306,9 @@ fn a_packages_own_array_method_is_not_borrowed() {
     let p = plan(
         &db,
         "module m;\n\
-         export type Array = { label: String };\n\
+         pub type Array = { label: String };\n\
          impl Array {\n  \
-         export fn length(self) -> Int { 1 }\n\
+         pub fn length(self) -> Int { 1 }\n\
          }\n\
          fn use_it(xs: Array) -> Int { xs.length() }\n",
         "use_it",

@@ -39,7 +39,7 @@ extern fn khora_tls_connect(client: Ptr, host: Ptr, host_len: Int, port: Int) ->
 /// Three cases and no message. A `rustls` diagnostic is written for somebody
 /// debugging a handshake, and the three things a Khora program can *do* about a
 /// failure are: fix the certificate, fix the key, or drop the client.
-export type TlsError =
+pub type TlsError =
   /// The certificate chain was not readable PEM, or was empty.
   | BadCertificate
   /// The key was not readable PEM, or does not match the certificate.
@@ -67,7 +67,7 @@ export type TlsError =
 /// either fits both. The checker says so rather than guessing, which is the
 /// right answer and a good reason to name a field after what it holds.
 ///
-export type TlsServer = { settings: Ptr };
+pub type TlsServer = { settings: Ptr };
 
 /// **Asserted, and here is the argument.** A `Ptr` cannot cross into a fiber on
 /// its own — nothing on this side of the ABI knows what is behind one or who
@@ -83,7 +83,7 @@ export type TlsServer = { settings: Ptr };
 impl Share for TlsServer {}
 
 /// One secured connection, and the socket underneath it.
-export type TlsConnection = { session: Ptr };
+pub type TlsConnection = { session: Ptr };
 
 /// A server from a certificate chain and a private key, both PEM.
 ///
@@ -95,7 +95,7 @@ export type TlsConnection = { session: Ptr };
 /// PEM rather than DER because that is the shape a certificate arrives in —
 /// from a file, a secret store, or an ACME client — and converting is work
 /// every caller would repeat.
-export fn server(certificate: String, key: String) -> TlsServer
+pub fn server(certificate: String, key: String) -> TlsServer
   with { scope: Scope }
   raises TlsError
 {
@@ -120,7 +120,7 @@ export fn server(certificate: String, key: String) -> TlsServer
 ///
 /// A failed handshake has already closed the socket, so a caller that raises
 /// and moves on has leaked nothing.
-export fn secure(server: TlsServer, socket: Int) -> TlsConnection
+pub fn secure(server: TlsServer, socket: Int) -> TlsConnection
   raises TlsError
 {
   let handle = khora_tls_accept(server.settings, socket);
@@ -131,7 +131,7 @@ export fn secure(server: TlsServer, socket: Int) -> TlsConnection
 ///
 /// The same three answers `receive` gives on a plain socket, so a reader that
 /// already handles a socket handles this.
-export fn receive(connection: TlsConnection, into: Array<U8>) -> Int {
+pub fn receive(connection: TlsConnection, into: Array<U8>) -> Int {
   Array::with_data(into, fn (buffer, length) =>
     khora_tls_read(connection.session, buffer, length))
 }
@@ -140,7 +140,7 @@ export fn receive(connection: TlsConnection, into: Array<U8>) -> Int {
 ///
 /// All or nothing, unlike `send`: a partial write of an encrypted record is not
 /// something a caller can resume, so the runtime finishes it or fails.
-export fn transmit(connection: TlsConnection, text: String) -> Int {
+pub fn transmit(connection: TlsConnection, text: String) -> Int {
   String::with_data(text, fn (bytes, length) =>
     khora_tls_write(connection.session, bytes, length))
 }
@@ -150,7 +150,7 @@ export fn transmit(connection: TlsConnection, text: String) -> Int {
 /// The `close_notify` is not politeness. Without it a peer cannot tell a closed
 /// connection from a cut one, which is the truncation attack TLS closes by
 /// having an end-of-stream that is signed.
-export fn shut(connection: TlsConnection) -> () {
+pub fn shut(connection: TlsConnection) -> () {
   khora_tls_close(connection.session)
 }
 
@@ -166,7 +166,7 @@ export fn shut(connection: TlsConnection) -> () {
 /// without an annotation — and an annotation on the `let` would not have,
 /// because a type hint does not currently reach inside the branches of an
 /// `if`.
-export type TlsClient = { trust: Ptr };
+pub type TlsClient = { trust: Ptr };
 
 /// Asserted for the reason `TlsServer`'s is, and the value has the same shape:
 /// a `rustls` configuration behind an `Arc`, built once and never written
@@ -181,7 +181,7 @@ impl Share for TlsClient {}
 /// stale between releases without telling anybody.
 ///
 /// Released when the enclosing scope ends, like a server.
-export fn client() -> TlsClient
+pub fn client() -> TlsClient
   with { scope: Scope }
   raises TlsError
 {
@@ -195,7 +195,7 @@ export fn client() -> TlsClient
 /// verification off**: every library offers one, and it is how verification
 /// comes to be off in production. Naming the certificate you mean to trust is
 /// the same amount of typing and leaves a reviewer something to look at.
-export fn trusting(extra: String) -> TlsClient
+pub fn trusting(extra: String) -> TlsClient
   with { scope: Scope }
   raises TlsError
 {
@@ -217,7 +217,7 @@ export fn trusting(extra: String) -> TlsClient
 /// The socket is made here rather than passed in, because resolving a name
 /// needs `getaddrinfo` and a `struct addrinfo` cannot cross the C ABI — errata
 /// 35. The runtime already has a resolver worth using.
-export fn connect(client: TlsClient, host: String, port: Int) -> TlsConnection
+pub fn connect(client: TlsClient, host: String, port: Int) -> TlsConnection
   raises TlsError
 {
   let handle = String::with_data(host, fn (name, n) =>

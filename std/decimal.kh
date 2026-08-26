@@ -40,7 +40,7 @@ import std::core::{Eq, Option, Ord, Ordering, Show};
 /// would only mean writing accessors for both. `scale` is never negative:
 /// `Decimal::scaled` refuses one, because a negative scale is a large number
 /// spelled confusingly and every caller who wants one means a larger `units`.
-export type Decimal = {
+pub type Decimal = {
   units: Int,
   scale: Int,
 };
@@ -54,7 +54,7 @@ fn ten_to(power: Int) -> Int {
 }
 
 /// How `divide` breaks a tie.
-export type Rounding =
+pub type Rounding =
   /// To the nearer, and to the even one when exactly between.
   ///
   /// The default, and the one every accounting standard names: rounding halves
@@ -69,7 +69,7 @@ export type Rounding =
 
 impl Decimal {
   /// A whole number.
-  export fn of_int(units: Int) -> Decimal {
+  pub fn of_int(units: Int) -> Decimal {
     { units: units, scale: 0 }
   }
 
@@ -79,19 +79,19 @@ impl Decimal {
   /// a wire format wants: it cannot fail, because both halves are already
   /// numbers. A negative scale is refused by clamping to zero rather than by
   /// raising, since it can only arise from a caller that computed it.
-  export fn scaled(units: Int, scale: Int) -> Decimal {
+  pub fn scaled(units: Int, scale: Int) -> Decimal {
     { units: units, scale: if scale < 0 { 0 } else { scale } }
   }
 
   /// Zero.
-  export fn zero() -> Decimal { { units: 0, scale: 0 } }
+  pub fn zero() -> Decimal { { units: 0, scale: 0 } }
 
   /// The same number at a larger scale.
   ///
   /// Exact, and stops the program if the significand cannot hold it — going
   /// from two decimal places to eighteen is a multiplication by ten thousand
   /// million million, and most numbers do not survive it.
-  export fn at_scale(self, scale: Int) -> Decimal {
+  pub fn at_scale(self, scale: Int) -> Decimal {
     if scale <= self.scale {
       self
     } else {
@@ -106,13 +106,13 @@ impl Decimal {
   }
 
   /// The sum. Exact, and stops the program if it does not fit.
-  export fn add(self, other: Decimal) -> Decimal {
+  pub fn add(self, other: Decimal) -> Decimal {
     let pair = Decimal::align(self, other);
     { units: pair.left.units + pair.right.units, scale: pair.left.scale }
   }
 
   /// The difference. Exact, and stops the program if it does not fit.
-  export fn sub(self, other: Decimal) -> Decimal {
+  pub fn sub(self, other: Decimal) -> Decimal {
     let pair = Decimal::align(self, other);
     { units: pair.left.units - pair.right.units, scale: pair.left.scale }
   }
@@ -123,7 +123,7 @@ impl Decimal {
   /// overflow sooner than people expect: two numbers with four decimal places
   /// each give one with eight, and the significand has to hold all of them.
   /// `rounded` afterwards is how a caller comes back to a sensible scale.
-  export fn mul(self, other: Decimal) -> Decimal {
+  pub fn mul(self, other: Decimal) -> Decimal {
     { units: self.units * other.units, scale: self.scale + other.scale }
   }
 
@@ -137,7 +137,7 @@ impl Decimal {
   /// `None` when `other` is zero. Not a trap, because dividing by a quantity
   /// that turned out to be zero is an ordinary thing for data to do, and
   /// `numbers.md` reserves stopping the program for a bug.
-  export fn divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal> {
+  pub fn divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal> {
     if other.units == 0 {
       Option::None
     } else {
@@ -159,7 +159,7 @@ impl Decimal {
   ///
   /// The way back from `mul`'s widening scales, and the way a total becomes a
   /// figure somebody can be invoiced for.
-  export fn rounded(self, scale: Int, how: Rounding) -> Decimal {
+  pub fn rounded(self, scale: Int, how: Rounding) -> Decimal {
     match Decimal::divide(self, Decimal::of_int(1), scale, how) {
       Option::Some(value) => value,
       // Dividing by one, so the only `None` is unreachable.
@@ -168,18 +168,18 @@ impl Decimal {
   }
 
   /// The number with the opposite sign.
-  export fn negate(self) -> Decimal {
+  pub fn negate(self) -> Decimal {
     { units: 0 - self.units, scale: self.scale }
   }
 
   /// Whether it is less than zero.
-  export fn is_negative(self) -> Bool { self.units < 0 }
+  pub fn is_negative(self) -> Bool { self.units < 0 }
 
   /// Whether it is exactly zero.
-  export fn is_zero(self) -> Bool { self.units == 0 }
+  pub fn is_zero(self) -> Bool { self.units == 0 }
 
   /// The whole part, towards zero.
-  export fn truncated(self) -> Int {
+  pub fn truncated(self) -> Int {
     self.units / ten_to(self.scale)
   }
 
@@ -189,7 +189,7 @@ impl Decimal {
   /// everything else on purpose**, including the exponent notation `Float`
   /// takes: a number arriving as `1e-3` is a measurement that has been through
   /// a float somewhere, and taking it here would launder that history.
-  export fn of_string(text: String) -> Option<Decimal> {
+  pub fn of_string(text: String) -> Option<Decimal> {
     let length = String::byte_length(text);
     if length == 0 { Option::None } else {
       let first = U8::to_int(String::byte(text, 0));

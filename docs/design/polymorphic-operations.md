@@ -12,7 +12,7 @@ and a binary.
 be polymorphic:
 
 ```khora
-export effect LLMService {
+pub effect LLMService {
   complete: Prompt -> String raises ModelError,
   extract: forall <A: Extract> . (Prompt, A::Spec) -> A raises ModelError,
   embed: forall <const Dim: Int> . String -> Embedding<Dim, F32> raises ModelError,
@@ -80,11 +80,11 @@ effect. Turning text into an `AnalysisReport` is *library code*, and library
 code can be generic because a generic **function** monomorphizes normally.
 
 ```khora
-export effect LLMService {
+pub effect LLMService {
   complete: Prompt -> String raises ModelError,
 }
 
-export fn extract<A: Extract>(prompt: Prompt) -> A
+pub fn extract<A: Extract>(prompt: Prompt) -> A
   with { ai: LLMService }
   raises ModelError
 {
@@ -115,7 +115,7 @@ Three things get better, and none of them is "it compiles":
 The trait only knew how to *ask*:
 
 ```khora
-export trait Extract {
+pub trait Extract {
   type Spec;
   fn spec() -> Self::Spec;
 }
@@ -140,7 +140,7 @@ So the effect returns what the model actually produces — a vector whose length
 is a run-time fact — and the shape-safe wrapper is a function that checks:
 
 ```khora
-export fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32>
+pub fn embed<const Dim: Int>(text: String) -> Embedding<Dim, F32>
   with { ai: LLMService }
   raises ModelError
 ```

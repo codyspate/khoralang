@@ -34,7 +34,7 @@ mentions `Fiber::spawn`. `khora_fiber_spawn` aborts if that proof turns out to
 be wrong, so a spawn cannot sneak past it.
 
 A second thread can get in without a spawn. `emit_c_exports` runs for **every**
-entry point, so a `main` program containing an `export extern fn` publishes
+entry point, so a `main` program containing an `pub extern fn` publishes
 that symbol — and a C library it is linked against will call the callback it
 was handed on whichever thread it likes. That program never writes
 `Fiber::spawn`, so it was compiled with non-atomic counting for a function a

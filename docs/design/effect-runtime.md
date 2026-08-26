@@ -57,7 +57,7 @@ call. So the handler record does not need to be *found* at runtime — it can be
 handed in.
 
 ```khora
-export fn analyze(id: String) -> Report with { ledger: Ledger }
+pub fn analyze(id: String) -> Report with { ledger: Ledger }
 ```
 
 compiles to a function taking one extra argument: the `Ledger` handler, which
@@ -363,7 +363,7 @@ so an operation that quantifies over a type has no representation.
 It does not need one. The operation is
 
 ```
-export effect Scope {
+pub effect Scope {
   defer: (() -> ()) -> (),
 }
 ```
@@ -371,7 +371,7 @@ export effect Scope {
 and the polymorphism moves to an ordinary generic function:
 
 ```
-export fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
+pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
   with { 'e | scope: Scope }
 {
   scope.defer(fn () => release(value));

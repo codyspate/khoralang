@@ -59,7 +59,7 @@ out of capability-passing because that is what a capability *is*.
 ### Value
 
 ```khora
-export type Value =
+pub type Value =
   | Text(String)
   | Number(Int)
   | Decimal(Float)
@@ -75,7 +75,7 @@ that has types keeps them.
 ### Attribute
 
 ```khora
-export type Attribute = {
+pub type Attribute = {
   name: String,
   value: Value,
 };
@@ -86,7 +86,7 @@ A named value on a span.
 ### Status
 
 ```khora
-export type Status =
+pub type Status =
   | Ok
   | Failed(String);
 ```
@@ -116,7 +116,7 @@ where it was raised; this is its rendering.
 ### Context
 
 ```khora
-export type Context = {
+pub type Context = {
   trace_high: Int,
   trace_low: Int,
   span: Int,
@@ -142,7 +142,7 @@ carried unchanged — a trace that is half sampled is not a trace.
 ### Span
 
 ```khora
-export type Span = {
+pub type Span = {
   context: Context,
   parent: Int,
   name: String,
@@ -164,7 +164,7 @@ The span this one is inside, or zero at the root.
 ### Tracer
 
 ```khora
-export effect Tracer {
+pub effect Tracer {
   start: (String, List<Attribute>) -> Span,
   finish: (Span, Status) -> (),
   event: (Span, String, List<Attribute>) -> (),
@@ -191,7 +191,7 @@ impl Context
 #### none
 
 ```khora
-export fn none() -> Context
+pub fn none() -> Context
 ```
 
 A context that names no trace.
@@ -199,7 +199,7 @@ A context that names no trace.
 #### is_valid
 
 ```khora
-export fn is_valid(self) -> Bool
+pub fn is_valid(self) -> Bool
 ```
 
 Whether this context refers to a trace at all.
@@ -210,7 +210,7 @@ zero usable as "none" without a separate flag.
 #### to_traceparent
 
 ```khora
-export fn to_traceparent(self) -> String
+pub fn to_traceparent(self) -> String
 ```
 
 The `traceparent` header for this context.
@@ -222,7 +222,7 @@ context — a stable, tiny, vendor-neutral spec, which is why it is in
 #### of_traceparent
 
 ```khora
-export fn of_traceparent(header: String) -> Option<Context>
+pub fn of_traceparent(header: String) -> Option<Context>
 ```
 
 The context a `traceparent` header names, or `None` if it does not.
@@ -262,7 +262,7 @@ fn show(self) -> String
 ### around
 
 ```khora
-export fn around<A, 'c, 'r>(tracer: Tracer, name: String, body: () -> A with 'c raises 'r) -> A with 'c raises 'r
+pub fn around<A, 'c, 'r>(tracer: Tracer, name: String, body: () -> A with 'c raises 'r) -> A with 'c raises 'r
 ```
 
 Runs `body` inside a span, and ends the span whichever way it leaves.
@@ -296,7 +296,7 @@ instantiates the row empty and needs no `!` at the call.
 ### around_result
 
 ```khora
-export fn around_result<A, E: Show, 'c, 'r>(tracer: Tracer, name: String, body: () -> Result<A, E> with 'c raises 'r) -> Result<A, E> with 'c raises 'r
+pub fn around_result<A, E: Show, 'c, 'r>(tracer: Tracer, name: String, body: () -> Result<A, E> with 'c raises 'r) -> Result<A, E> with 'c raises 'r
 ```
 
 The same, for a body that reports its failure as a value.
@@ -309,7 +309,7 @@ something to say, which is most of the time.
 ### text
 
 ```khora
-export fn text(name: String, value: String) -> Attribute
+pub fn text(name: String, value: String) -> Attribute
 ```
 
 A `Text` attribute, which is most of them.
@@ -317,7 +317,7 @@ A `Text` attribute, which is most of them.
 ### number
 
 ```khora
-export fn number(name: String, value: Int) -> Attribute
+pub fn number(name: String, value: Int) -> Attribute
 ```
 
 A `Number` attribute.
@@ -325,7 +325,7 @@ A `Number` attribute.
 ### flag
 
 ```khora
-export fn flag(name: String, value: Bool) -> Attribute
+pub fn flag(name: String, value: Bool) -> Attribute
 ```
 
 A `Flag` attribute.

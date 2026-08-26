@@ -50,7 +50,7 @@ handle rather than a small `int`.
 ### invalid_handle
 
 ```khora
-export fn invalid_handle() -> Int
+pub fn invalid_handle() -> Int
 ```
 
 A failed call returns -1, and a handle is never negative.
@@ -58,7 +58,7 @@ A failed call returns -1, and a handle is never negative.
 ### start
 
 ```khora
-export fn start() -> Bool
+pub fn start() -> Bool
 ```
 
 Nothing to start. Present so that a caller reads the same on both targets.
@@ -66,7 +66,7 @@ Nothing to start. Present so that a caller reads the same on both targets.
 ### listen_on
 
 ```khora
-export fn listen_on(port: Int) -> Int
+pub fn listen_on(port: Int) -> Int
 ```
 
 A socket listening on `port`, or [`invalid_handle`].
@@ -74,7 +74,7 @@ A socket listening on `port`, or [`invalid_handle`].
 ### accept_on
 
 ```khora
-export fn accept_on(server: Int) -> Int
+pub fn accept_on(server: Int) -> Int
 ```
 
 Waits for a connection. [`invalid_handle`] if the wait failed.
@@ -82,7 +82,7 @@ Waits for a connection. [`invalid_handle`] if the wait failed.
 ### set_receive_timeout
 
 ```khora
-export fn set_receive_timeout(handle: Int, millis: Int) -> Bool
+pub fn set_receive_timeout(handle: Int, millis: Int) -> Bool
 ```
 
 How long a read will wait before giving up, in milliseconds.
@@ -100,7 +100,7 @@ here already treats as a connection to give up on.
 ### receive
 
 ```khora
-export fn receive(connection: Int, buffer: Array<U8>) -> Int
+pub fn receive(connection: Int, buffer: Array<U8>) -> Int
 ```
 
 Reads what has arrived into `buffer`, and says how many bytes that was.
@@ -110,7 +110,7 @@ Zero means the other end closed; negative means the read failed.
 ### transmit
 
 ```khora
-export fn transmit(connection: Int, text: String) -> Int
+pub fn transmit(connection: Int, text: String) -> Int
 ```
 
 Writes `text`, and says how many bytes went. Negative if the write failed.
@@ -118,7 +118,7 @@ Writes `text`, and says how many bytes went. Negative if the write failed.
 ### connect_to
 
 ```khora
-export fn connect_to(host: String, port: Int) -> Int
+pub fn connect_to(host: String, port: Int) -> Int
 ```
 
 Opens a connection to `host` on `port`, or [`invalid_handle`].
@@ -141,7 +141,7 @@ down in `docs/roadmap.md` Phase 13 rather than left to be found.
 ### transmit_bytes
 
 ```khora
-export fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int
+pub fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int
 ```
 
 Writes bytes, and says how many went. Negative if the write failed.
@@ -154,7 +154,7 @@ length nobody wrote as characters. Postgres is the first caller, and a
 ### shut
 
 ```khora
-export fn shut(handle: Int) ->()
+pub fn shut(handle: Int) ->()
 ```
 
 Closes a connection, letting the other end finish first.

@@ -37,15 +37,15 @@ fn ran(log: &QueryLog, query: &str) -> usize {
 fn library(body: &str) -> String {
     format!(
         "module app::library;\n\
-         export fn first() -> Int = {{ {body} }}\n\
-         export fn second() -> Int = {{ 2 }}\n"
+         pub fn first() -> Int = {{ {body} }}\n\
+         pub fn second() -> Int = {{ 2 }}\n"
     )
 }
 
 /// A consumer that imports the library and calls the function whose span moves.
 const CONSUMER: &str = "module app::consumer;\n\
                         import app::library::{second};\n\
-                        export fn use_it() -> Int = { second() }\n";
+                        pub fn use_it() -> Int = { second() }\n";
 
 struct World {
     db: KhoraDatabase,
@@ -158,7 +158,7 @@ fn a_new_declaration_does_reach_the_importing_file() {
 
     w.library
         .set_text(&mut w.db)
-        .to(format!("{}export fn third() -> Int = {{ 3 }}\n", library("1")));
+        .to(format!("{}pub fn third() -> Int = {{ 3 }}\n", library("1")));
     w.everything();
 
     assert_eq!(

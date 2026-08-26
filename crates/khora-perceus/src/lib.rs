@@ -215,8 +215,8 @@ impl RcPlan {
 /// now write
 ///
 /// ```khora
-/// export type Shared = { .. };
-/// impl Shared { export fn get(self) -> Int { .. } }
+/// pub type Shared = { .. };
+/// impl Shared { pub fn get(self) -> Int { .. } }
 /// ```
 ///
 /// and under a name-only key their `get` — an ordinary Khora function, which

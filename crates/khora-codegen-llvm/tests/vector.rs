@@ -95,7 +95,7 @@ fn sizes() -> Int {
   Array::length(numbers) + Array::length(texts)
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let total = sizes();
   let live = khora_live_count();
   print(Int::to_string(total));
@@ -125,7 +125,7 @@ fn at(v: Vector<String>, index: Int) -> String {
   match Vector::get(v, index) { Option::None => \"-\", Option::Some(s) => s }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let v: Vector<String> = Vector::new();
   print(if Vector::is_empty(v) { \"empty\" } else { \"not empty\" });
   Vector::push(v, \"a\");
@@ -169,7 +169,7 @@ fn a_vector_grows_past_its_first_allocation() {
         "module main;
 import std::core::{Option, Vector, print};
 
-export fn main() -> () {
+pub fn main() -> () {
   let v: Vector<Int> = Vector::new();
   print(Int::to_string(Vector::capacity(v)));
   let mut i = 0;
@@ -287,7 +287,7 @@ fn live_after_popping(n: Int, dropped: Int) -> Int {
   khora_live_count()
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let none = live_with(0);
   let one = live_with(1);
   let hundred = live_with(100);
@@ -335,7 +335,7 @@ fn show(items: List<Int>) -> String {
   }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let v = Vector::from_list(List::Cons(1, List::Cons(2, List::Cons(3, List::Nil))));
   print(Int::to_string(Vector::length(v)));
   print(show(Vector::to_list(v)));
@@ -393,7 +393,7 @@ fn total(values: List<Int>) -> Int {
   match values { List::Nil => 0, List::Cons(head, rest) => head + total(rest) }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let m: Map<Int, Int> = Map::new();
   let mut i = 0;
   // Fifty entries is past two growths, so the entries are spread over buckets
@@ -444,7 +444,7 @@ fn join(items: List<String>) -> String {
   }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let m: Map<String, String> = Map::new();
   Map::insert(m, \"gamma\", \"three\");
   Map::insert(m, \"alpha\", \"one\");
@@ -531,7 +531,7 @@ fn work() -> Int {
     + (if taken > 0 { 0 } else { 1 })
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let total = work();
   let live = khora_live_count();
   print(Int::to_string(total));

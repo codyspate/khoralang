@@ -21,12 +21,12 @@ fn errors(text: &str) -> Vec<String> {
     diagnostics(&db, file).iter().map(|e| e.message.clone()).collect()
 }
 
-const HEAD: &str = "module m;\nexport trait Share {}\n";
+const HEAD: &str = "module m;\npub trait Share {}\n";
 
 /// A type with no body: nothing to look at, so the module says.
 #[test]
 fn an_opaque_type_may_be_vouched_for() {
-    let found = errors(&format!("{HEAD}export type Handle;\nimpl Share for Handle {{}}\n"));
+    let found = errors(&format!("{HEAD}pub type Handle;\nimpl Share for Handle {{}}\n"));
     assert!(found.is_empty(), "an opaque type should be vouchable: {found:?}");
 }
 
@@ -34,7 +34,7 @@ fn an_opaque_type_may_be_vouched_for() {
 #[test]
 fn a_type_blocked_only_by_a_pointer_may_be_vouched_for() {
     let found = errors(&format!(
-        "{HEAD}export type Settings = {{ inner: Ptr }};\nimpl Share for Settings {{}}\n"
+        "{HEAD}pub type Settings = {{ inner: Ptr }};\nimpl Share for Settings {{}}\n"
     ));
     assert!(found.is_empty(), "a pointer is what the module is vouching for: {found:?}");
 }
@@ -44,7 +44,7 @@ fn a_type_blocked_only_by_a_pointer_may_be_vouched_for() {
 #[test]
 fn a_mutable_field_may_not_be_vouched_for() {
     let found = errors(&format!(
-        "{HEAD}export type Counter = {{ mut count: Int, inner: Ptr }};\n\
+        "{HEAD}pub type Counter = {{ mut count: Int, inner: Ptr }};\n\
          impl Share for Counter {{}}\n"
     ));
     assert!(
@@ -57,7 +57,7 @@ fn a_mutable_field_may_not_be_vouched_for() {
 #[test]
 fn a_function_field_may_not_be_vouched_for() {
     let found = errors(&format!(
-        "{HEAD}export type Callback = {{ run: (Int) -> Int }};\nimpl Share for Callback {{}}\n"
+        "{HEAD}pub type Callback = {{ run: (Int) -> Int }};\nimpl Share for Callback {{}}\n"
     ));
     assert!(
         found.iter().any(|m| m.contains("cannot be implemented")),
@@ -70,7 +70,7 @@ fn a_function_field_may_not_be_vouched_for() {
 #[test]
 fn an_ordinary_record_may_not_be_vouched_for() {
     let found = errors(&format!(
-        "{HEAD}export type Point = {{ x: Int, y: Int }};\nimpl Share for Point {{}}\n"
+        "{HEAD}pub type Point = {{ x: Int, y: Int }};\nimpl Share for Point {{}}\n"
     ));
     assert!(
         found.iter().any(|m| m.contains("cannot be implemented")),
@@ -87,11 +87,11 @@ fn an_ordinary_record_may_not_be_vouched_for() {
 fn a_vouched_value_may_cross_into_a_fiber() {
     let found = errors(
         "module m;
-export trait Share {}
-export type Fiber;
+pub trait Share {}
+pub type Fiber;
 impl Fiber { fn spawn(body: () -> ()) -> Fiber; }
 
-export type Settings = { inner: Ptr };
+pub type Settings = { inner: Ptr };
 impl Share for Settings {}
 
 fn use_it(s: Settings) -> () {}
@@ -109,11 +109,11 @@ fn go(settings: Settings) -> Fiber {
 fn an_unvouched_pointer_may_not_cross_into_a_fiber() {
     let found = errors(
         "module m;
-export trait Share {}
-export type Fiber;
+pub trait Share {}
+pub type Fiber;
 impl Fiber { fn spawn(body: () -> ()) -> Fiber; }
 
-export type Settings = { inner: Ptr };
+pub type Settings = { inner: Ptr };
 
 fn use_it(s: Settings) -> () {}
 

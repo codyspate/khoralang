@@ -33,7 +33,7 @@ which is exactly what a capability already was under the monadic design — so t
 dependency-injection model carries over unchanged.
 
 ```
-export effect Ledger {
+pub effect Ledger {
   get_history:  String -> List<Txn> raises DbError,
   flag_account: (String, RiskLevel) -> () raises DbError,
 }
@@ -44,7 +44,7 @@ export effect Ledger {
 Two optional clauses, in this order, between the return type and the body:
 
 ```
-export fn analyze(account_id: String) -> Report
+pub fn analyze(account_id: String) -> Report
   with { ledger: Ledger, ai: Classifier }
   raises DbError + ModelError
 {
@@ -78,7 +78,7 @@ capabilities the caller has.
 appear wherever an expression can.
 
 ```
-export fn validate(txn: Txn) -> () raises ValidationError {
+pub fn validate(txn: Txn) -> () raises ValidationError {
   if txn.amount < 0 {
     raise ValidationError::NegativeAmount(txn.amount);
   }
@@ -123,7 +123,7 @@ where postfix would force parentheses around everything and push the injection
 far from what it feeds.
 
 ```
-export fn main() {
+pub fn main() {
   with { ledger: live_ledger, ai: live_classifier, scope: Scope::root } {
     Router::new()
     |> Router::post("/analyze/:id", handle)
@@ -140,7 +140,7 @@ expression and an `unsafe` block.
 `catch` handles part of the error row and subtracts exactly what it handled:
 
 ```
-export fn analyze_or_defer(id: String) -> Report
+pub fn analyze_or_defer(id: String) -> Report
   with { ledger: Ledger, ai: Classifier }
   raises DbError
 {
@@ -175,7 +175,7 @@ called.
 ### Turning the channel into a value
 
 ```
-export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
+pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
   with 'e;
 ```
 
@@ -211,7 +211,7 @@ Function types carry effect rows, so higher-order functions are polymorphic in
 their argument's effects:
 
 ```
-export fn map<A, B, 'e, 'r>(xs: List<A>, f: A -> B with 'e raises 'r) -> List<B>
+pub fn map<A, B, 'e, 'r>(xs: List<A>, f: A -> B with 'e raises 'r) -> List<B>
   with 'e
   raises 'r;
 ```
@@ -234,13 +234,13 @@ type of the things that implement it is what a Go or TypeScript reader already
 expects. A wrapper would only add an unwrap between the two spellings.
 
 ```
-export effect Db {
+pub effect Db {
   query: (String, List<Value>) -> List<Row> raises DbError,
   exec:  (String, List<Value>) -> ()        raises DbError,
 }
 
 // Needs Config to find the connection string and Scope to own the pool.
-export fn postgres_db() -> Db
+pub fn postgres_db() -> Db
   with { config: Config, scope: Scope }
   raises ConfigError
 {
@@ -257,7 +257,7 @@ export fn postgres_db() -> Db
 }
 
 // Ledger is built on Db, and says so.
-export fn sql_ledger() -> Ledger with { db: Db } {
+pub fn sql_ledger() -> Ledger with { db: Db } {
   handler for Ledger {
     get_history: fn id =>
       db.query("select * from txn where account = $1", [id])!
@@ -274,7 +274,7 @@ Each binding may use the ones above it, exactly like a `let` chain. This is what
 keeps composition flat instead of nesting one `with` per layer:
 
 ```
-export fn main() {
+pub fn main() {
   with {
     config: env_config(),
     scope:  Scope::root,
@@ -300,7 +300,7 @@ build order is the order you read.
 A context is just a row, so it can be named and reused:
 
 ```
-export context Production {
+pub context Production {
   config: env_config(),
   scope:  Scope::root,
   db:     postgres_db()!,
@@ -308,7 +308,7 @@ export context Production {
   ai:     openai_classifier()!,
 }
 
-export fn main() {
+pub fn main() {
   with Production {
     Router::new() |> Router::post("/analyze/:id", handle) |> Router::listen(8080)
   }

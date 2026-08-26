@@ -371,7 +371,7 @@ impl TypeMap {
                     return true;
                 }
                 // **A type with no body has to say.** Nothing here can see
-                // inside `export type Array<A>;`, and answering "shareable"
+                // inside `pub type Array<A>;`, and answering "shareable"
                 // because no mutable field is *visible* is the wrong default in
                 // the one direction that matters: `Array::set` writes, `Ptr`
                 // points at foreign memory, and a runtime handle may need a

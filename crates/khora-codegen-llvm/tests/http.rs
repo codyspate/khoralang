@@ -72,7 +72,7 @@ fn body_size(req: Request) -> Response {
   Response::text(200, Int::to_string(String::byte_length(req.body)))
 }
 
-export fn main() raises HttpError {
+pub fn main() raises HttpError {
   // No `with` block: `listen` opens the nursery it needs itself, and these
   // handlers want no capabilities. `SharedFn::of` is what each mount says
   // instead — the certificate that lets the whole router cross into the fiber

@@ -59,8 +59,8 @@ fn rejects(name: &str, declaration: &str, call: &str, needle: &str) {
     let source = format!(
         "module t;
 extern fn khora_print_int(value: Int);
-export type Pair = {{ a: Int, b: Int }};
-export type Oops = | Bad;
+pub type Pair = {{ a: Int, b: Int }};
+pub type Oops = | Bad;
 
 {declaration}
 
@@ -146,7 +146,7 @@ fn a_foreign_function_may_not_raise() {
         "ffi_raises",
         "module t;
 extern fn khora_print_int(value: Int);
-export type Oops = | Bad;
+pub type Oops = | Bad;
 extern fn can_fail(n: Int) -> Int raises Oops;
 
 fn wrapper() -> Int raises Oops { can_fail(1)! }
@@ -199,7 +199,7 @@ fn a_capability_is_required_but_not_passed() {
         "module t;
 extern fn khora_print_int(value: Int);
 
-export effect Fs { open: (Int) -> Int, }
+pub effect Fs { open: (Int) -> Int, }
 
 extern fn sys_open(flags: I32) -> I32 with { fs: Fs };
 
@@ -232,7 +232,7 @@ fn a_caller_without_the_capability_is_refused() {
         "module t;
 extern fn khora_print_int(value: Int);
 
-export effect Fs { open: (Int) -> Int, }
+pub effect Fs { open: (Int) -> Int, }
 
 extern fn sys_open(flags: I32) -> I32 with { fs: Fs };
 
@@ -348,7 +348,7 @@ const LEND: &str = "module t;
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Array<A>;
+pub type Array<A>;
 impl<A> Array<A> {
   fn new(length: Int, fill: A) -> Array<A>;
   fn length(self) -> Int;
@@ -497,7 +497,7 @@ fn what_was_lent_is_released_when_the_body_raises() {
         "lend_raises",
         &format!(
             "{LEND}
-export type Oops = | Bad;
+pub type Oops = | Bad;
 
 fn borrow() -> Int raises Oops {{
   let bytes: Array<U8> = Array::new(8, 1);
@@ -575,7 +575,7 @@ fn a_c_string_is_released_when_the_body_raises() {
         "lend_c_string_raises",
         &format!(
             "{LEND}
-export type Nope = | Bad;
+pub type Nope = | Bad;
 
 fn borrow() -> Int raises Nope {{
   String::with_c_string(\"khora\", fn p => raise Nope::Bad)!

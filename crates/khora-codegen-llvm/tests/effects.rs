@@ -77,9 +77,9 @@ fn print(value: Int);
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export effect Ledger { balance: (Int) -> Int, }
+pub effect Ledger { balance: (Int) -> Int, }
 
-export fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
+pub fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
 ";
 
 /// The whole shape: a function that requires a capability and never says how it
@@ -110,7 +110,7 @@ fn a_capability_passes_through_an_intermediate() {
         "capability_through",
         &format!(
             "{LEDGER}
-export fn twice(id: Int) -> Int with {{ ledger: Ledger }} {{ report(id) + report(id) }}
+pub fn twice(id: Int) -> Int with {{ ledger: Ledger }} {{ report(id) + report(id) }}
 
 fn main() -> Int {{
   let live = handler for Ledger {{ balance: fn id => id * 10 }};
@@ -204,7 +204,7 @@ fn a_region_releases_its_handler() {
         "capability_leaks",
         &format!(
             "{LEDGER}
-export fn twice(id: Int) -> Int with {{ ledger: Ledger }} {{ report(id) + report(id) }}
+pub fn twice(id: Int) -> Int with {{ ledger: Ledger }} {{ report(id) + report(id) }}
 
 fn run_it() -> Int {{
   let bonus = 100;
@@ -232,8 +232,8 @@ fn print(value: Int);
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type DbError = | Timeout | Refused;
-export type Node = | Of(value: Int);
+pub type DbError = | Timeout | Refused;
+pub type Node = | Of(value: Int);
 
 fn halve(n: Int) -> Int raises DbError {
   if n % 2 == 0 { n / 2 } else { raise DbError::Refused }
@@ -355,8 +355,8 @@ fn print(value: Int);
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type DbError = | Timeout | Refused;
-export type ModelError = | RateLimited(ms: Int) | TooLong;
+pub type DbError = | Timeout | Refused;
+pub type ModelError = | RateLimited(ms: Int) | TooLong;
 
 fn fetch(n: Int) -> Int raises DbError + ModelError {
   if n == 1 { raise DbError::Timeout }
@@ -511,11 +511,11 @@ fn print(value: Int);
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export effect Config { rate: () -> Int, }
-export effect Ledger { balance: (Int) -> Int, }
-export effect Audit { note: (Int) -> Int, }
+pub effect Config { rate: () -> Int, }
+pub effect Ledger { balance: (Int) -> Int, }
+pub effect Audit { note: (Int) -> Int, }
 
-export fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
+pub fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
 ";
 
 /// A service built on another service. `live_ledger` needs `Config` to be
@@ -528,7 +528,7 @@ fn a_handler_can_be_built_from_another_capability() {
         "layer",
         &format!(
             "{LAYERED}
-export fn live_ledger() -> Ledger with {{ config: Config }} {{
+pub fn live_ledger() -> Ledger with {{ config: Config }} {{
   let rate = config.rate();
   handler for Ledger {{ balance: fn id => id * rate }}
 }}
@@ -554,7 +554,7 @@ fn one_region_installs_several_capabilities() {
         "layer_merge",
         &format!(
             "{LAYERED}
-export fn audited(id: Int) -> Int with {{ ledger: Ledger, audit: Audit }} {{
+pub fn audited(id: Int) -> Int with {{ ledger: Ledger, audit: Audit }} {{
   audit.note(report(id))
 }}
 
@@ -582,7 +582,7 @@ fn a_composed_handler_is_released_with_its_region() {
         "layer_leaks",
         &format!(
             "{LAYERED}
-export fn live_ledger() -> Ledger with {{ config: Config }} {{
+pub fn live_ledger() -> Ledger with {{ config: Config }} {{
   let rate = config.rate();
   handler for Ledger {{ balance: fn id => id * rate }}
 }}
@@ -613,9 +613,9 @@ fn building_a_handler_can_raise() {
         "layer_raises",
         &format!(
             "{LAYERED}
-export type ConfigError = | Missing;
+pub type ConfigError = | Missing;
 
-export fn live_ledger() -> Ledger with {{ config: Config }} raises ConfigError {{
+pub fn live_ledger() -> Ledger with {{ config: Config }} raises ConfigError {{
   let rate = config.rate();
   if rate == 0 {{ raise ConfigError::Missing }}
   handler for Ledger {{ balance: fn id => id * rate }}
@@ -646,7 +646,7 @@ fn a_function_value_can_need_a_capability() {
         "fnval_capability",
         &format!(
             "{LEDGER}
-export fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
+pub fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
 
 fn main() -> Int {{
   with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
@@ -670,9 +670,9 @@ fn one_function_value_serves_two_handlers() {
         "fnval_two_handlers",
         &format!(
             "{LEDGER}
-export fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
+pub fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
 
-export fn twice_over<'r>(f: (Int) -> Int with 'r) -> Int with 'r {{
+pub fn twice_over<'r>(f: (Int) -> Int with 'r) -> Int with 'r {{
   apply_to(f, 1) + apply_to(f, 2)
 }}
 
@@ -701,7 +701,7 @@ fn a_function_value_can_raise() {
         "fnval_raises",
         &format!(
             "{FALLIBLE}
-export fn apply_to<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
+pub fn apply_to<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
 
 fn main() -> Int raises DbError {{
   print(apply_to(halve, 8)!);
@@ -726,15 +726,15 @@ fn print(value: Int);
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type DbError = | Timeout | Refused;
-export effect Ledger { balance: (Int) -> Int, }
+pub type DbError = | Timeout | Refused;
+pub effect Ledger { balance: (Int) -> Int, }
 
-export fn report(id: Int) -> Int with { ledger: Ledger } raises DbError {
+pub fn report(id: Int) -> Int with { ledger: Ledger } raises DbError {
   if id < 0 { raise DbError::Refused }
   ledger.balance(id)
 }
 
-export fn apply_to<'r, 'e>(f: (Int) -> Int with 'r raises 'e, n: Int) -> Int
+pub fn apply_to<'r, 'e>(f: (Int) -> Int with 'r raises 'e, n: Int) -> Int
   with 'r
   raises 'e
 { f(n)! }
@@ -759,7 +759,7 @@ fn an_effectful_function_value_leaves_nothing_behind() {
         "fnval_leaks",
         &format!(
             "{LEDGER}
-export fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
+pub fn apply_to<'r>(f: (Int) -> Int with 'r, n: Int) -> Int with 'r {{ f(n) }}
 
 fn run_it() -> Int {{
   let bonus = 100;
@@ -795,7 +795,7 @@ fn a_closure_captures_a_capability_it_uses_without_naming() {
         "closure_capability",
         &format!(
             "{LEDGER}
-export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+pub fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
 
 fn main() -> Int {{
   with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
@@ -820,7 +820,7 @@ fn a_captured_capability_is_the_one_in_scope_where_the_closure_was_written() {
         "closure_capability_lexical",
         &format!(
             "{LEDGER}
-export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+pub fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
 
 fn make() -> (Int) -> Int {{
   with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
@@ -850,7 +850,7 @@ fn a_nested_closure_captures_through_the_one_around_it() {
         "closure_capability_nested",
         &format!(
             "{LEDGER}
-export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+pub fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
 
 fn main() -> Int {{
   with {{ ledger: handler for Ledger {{ balance: fn id => id * 10 }} }} {{
@@ -873,7 +873,7 @@ fn a_closure_holding_a_capability_leaves_nothing_behind() {
         "closure_capability_leaks",
         &format!(
             "{LEDGER}
-export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+pub fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
 
 fn run_it() -> Int {{
   let bonus = 100;
@@ -906,7 +906,7 @@ fn a_closure_can_raise() {
         "closure_raises",
         &format!(
             "{FALLIBLE}
-export fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
+pub fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
 
 fn main() -> Int raises DbError {{
   print(apply(fn n => halve(n)!, 8)!);
@@ -928,7 +928,7 @@ fn a_closure_that_cannot_fail_has_an_empty_row() {
         "closure_infallible",
         &format!(
             "{FALLIBLE}
-export fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
+pub fn apply(f: (Int) -> Int, n: Int) -> Int {{ f(n) }}
 
 fn main() -> Int {{ print(apply(fn n => n * 2, 21)); 0 }}
 "
@@ -946,7 +946,7 @@ fn a_closure_can_raise_directly() {
         "closure_raise_direct",
         &format!(
             "{FALLIBLE}
-export fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
+pub fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
 
 fn main() -> Int raises DbError {{
   print(apply(fn n => if n < 0 {{ raise DbError::Timeout }} else {{ n }}, 5)!);
@@ -968,7 +968,7 @@ fn a_raising_closure_leaves_nothing_behind() {
         "closure_raises_leaks",
         &format!(
             "{FALLIBLE}
-export fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
+pub fn apply<'e>(f: (Int) -> Int raises 'e, n: Int) -> Int raises 'e {{ f(n)! }}
 
 fn attempt(n: Int) -> Int raises DbError {{
   apply(fn m => {{ let text = \"held\"; halve(m)! }}, n)!
@@ -993,9 +993,9 @@ const CONST: &str = "module t;
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export effect Ledger { balance: (Int) -> Int, }
+pub effect Ledger { balance: (Int) -> Int, }
 
-export fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
+pub fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
 ";
 
 /// A `let` at module level is a **constant**: a named expression, lowered
@@ -1034,7 +1034,7 @@ fn a_context_can_name_a_constant() {
             "{CONST}
 const mock = handler for Ledger {{ balance: fn id => id * 10 }};
 
-export context Mock {{ ledger: mock, }}
+pub context Mock {{ ledger: mock, }}
 
 fn main() -> Int {{
   with Mock {{ khora_print_int(report(4)); }}
@@ -1177,9 +1177,9 @@ fn a_raises_row_may_have_three_errors() {
         "module t;
 extern fn khora_print_int(value: Int);
 
-export type A = | AA;
-export type B = | BB;
-export type C = | CC;
+pub type A = | AA;
+pub type B = | BB;
+pub type C = | CC;
 
 fn pick(n: Int) -> Int raises A + B + C {
   if n == 1 { raise A::AA }
@@ -1221,9 +1221,9 @@ const EQ: &str = "module t;
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export trait Eq { fn eq(self, other: Self) -> Bool; }
+pub trait Eq { fn eq(self, other: Self) -> Bool; }
 
-export type Colour = | Red | Green | Blue(shade: Int);
+pub type Colour = | Red | Green | Blue(shade: Int);
 
 impl Eq for Colour {
   fn eq(self, other: Colour) -> Bool {
@@ -1299,7 +1299,7 @@ fn equality_on_a_record_calls_its_eq_impl() {
         "eq_record",
         &format!(
             "{EQ}
-export type Point = {{ x: Int, y: Int }};
+pub type Point = {{ x: Int, y: Int }};
 
 impl Eq for Point {{
   fn eq(self, other: Point) -> Bool {{ self.x == other.x }}
@@ -1332,9 +1332,9 @@ fn equality_without_an_impl_is_refused() {
         "module t;
 extern fn khora_print_int(value: Int);
 
-export trait Eq { fn eq(self, other: Self) -> Bool; }
+pub trait Eq { fn eq(self, other: Self) -> Bool; }
 
-export type Colour = | Red | Green;
+pub type Colour = | Red | Green;
 
 fn main() -> Int {
   khora_print_int(if Colour::Red == Colour::Green { 1 } else { 0 });
@@ -1376,11 +1376,11 @@ const ORD: &str = "module t;
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Ordering = | Less | Equal | Greater;
-export trait Eq { fn eq(self, other: Self) -> Bool; }
-export trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
+pub type Ordering = | Less | Equal | Greater;
+pub trait Eq { fn eq(self, other: Self) -> Bool; }
+pub trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
 
-export type Version = { major: Int, minor: Int };
+pub type Version = { major: Int, minor: Int };
 
 impl Eq for Version {
   fn eq(self, other: Version) -> Bool { self.major == other.major && self.minor == other.minor }
@@ -1497,11 +1497,11 @@ fn ordering_without_an_impl_is_refused() {
         "module t;
 extern fn khora_print_int(value: Int);
 
-export type Ordering = | Less | Equal | Greater;
-export trait Eq { fn eq(self, other: Self) -> Bool; }
-export trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
+pub type Ordering = | Less | Equal | Greater;
+pub trait Eq { fn eq(self, other: Self) -> Bool; }
+pub trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
 
-export type Version = { major: Int };
+pub type Version = { major: Int };
 
 fn main() -> Int {
   let a: Version = { major: 1 };
@@ -1583,9 +1583,9 @@ fn print(value: Int);
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Node = | Of(value: Int);
-export type Heavy = | Detail(node: Node) | Plain;
-export type DbError = | Timeout | Refused;
+pub type Node = | Of(value: Int);
+pub type Heavy = | Detail(node: Node) | Plain;
+pub type DbError = | Timeout | Refused;
 
 fn fetch(n: Int) -> Int raises Heavy + DbError {
   if n == 1 { raise Heavy::Detail(Node::Of(7)) }
@@ -1750,8 +1750,8 @@ fn a_closure_can_capture_one_capability_and_require_another() {
         "capability_mixed",
         &format!(
             "{LEDGER}
-export effect Rate {{ scale: () -> Int, }}
-export fn scaled(id: Int) -> Int with {{ ledger: Ledger, rate: Rate }} {{
+pub effect Rate {{ scale: () -> Int, }}
+pub fn scaled(id: Int) -> Int with {{ ledger: Ledger, rate: Rate }} {{
   report(id) * rate.scale()
 }}
 
@@ -1782,15 +1782,15 @@ fn a_lambda_can_be_given_a_nursery() {
         "module t;
 fn print(value: Int);
 
-export type Fiber;
+pub type Fiber;
 impl Fiber {
   fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
   fn join(self) -> ();
   fn cancel(self) -> ();
 }
 
-export type Fibers;
-export trait Share {}
+pub type Fibers;
+pub trait Share {}
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
@@ -1798,9 +1798,9 @@ impl Fibers {
   fn wait(self) -> ();
 }
 
-export effect Nursery { adopt: (Fiber) -> (), }
+pub effect Nursery { adopt: (Fiber) -> (), }
 
-export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
+pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
   with 'e
   raises 'r
 {
@@ -1914,7 +1914,7 @@ fn a_capability_survives_being_forwarded_after_its_only_mention() {
         "capability_forwarded",
         &format!(
             "{LEDGER}
-export type DbError = | Refused;
+pub type DbError = | Refused;
 
 fn checked(id: Int) -> Int with {{ ledger: Ledger }} raises DbError {{
   if id < 0 {{ raise DbError::Refused }} else {{ report(id) }}

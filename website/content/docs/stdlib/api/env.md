@@ -30,7 +30,7 @@ everywhere. The runtime already knows which target it was built for.
 ### Env
 
 ```khora
-export effect Env {
+pub effect Env {
   variable: (String) -> Option<String>,
   arguments: () -> List<String>,
 }
@@ -46,7 +46,7 @@ hidden input that makes a program hard to test, and this is the seam.
 ### Clock
 
 ```khora
-export effect Clock {
+pub effect Clock {
   unix_seconds: () -> Int,
   unix_millis: () -> Int,
   monotonic_millis: () -> Int,
@@ -77,7 +77,7 @@ caller say which they meant.
 ### variable_or
 
 ```khora
-export fn variable_or(name: String, fallback: String) -> String with { env: Env }
+pub fn variable_or(name: String, fallback: String) -> String with { env: Env }
 ```
 
 A variable, or a default when it is not set.

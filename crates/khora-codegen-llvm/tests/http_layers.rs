@@ -65,7 +65,7 @@ import std::net::http::{Connection, Incoming, Request, Response, matches, over_s
 fn print(value: String);
 
 /// A stage sees the request and may answer, or pass.
-export type Stage = { run: (Request) -> Option<Response> };
+pub type Stage = { run: (Request) -> Option<Response> };
 
 fn through(stages: List<Stage>, request: Request) -> Response {
   match stages {
@@ -115,7 +115,7 @@ fn serve(stages: List<Stage>, socket: Int) -> () {
   Connection::shut(connection)
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   with { scope: Scope::root() } {
     start();
     let stages = [greet(), measure()];

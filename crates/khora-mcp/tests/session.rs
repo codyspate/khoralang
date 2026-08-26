@@ -132,7 +132,7 @@ fn checking_correct_khora_says_so() {
 fn a_missing_capability_comes_back_as_a_diagnostic() {
     let source = "module m;\n\n\
                   import std::random::{Random};\n\n\
-                  export fn roll() -> Int {\n  rng.int()\n}\n";
+                  pub fn roll() -> Int {\n  rng.int()\n}\n";
     let replies = session(&[initialize(), call(2, "khora_check", json!({ "source": source }))]);
     let answer = text(find(&replies, 2));
     assert!(answer.contains("error"), "{answer}");
@@ -146,7 +146,7 @@ fn a_missing_capability_comes_back_as_a_diagnostic() {
 fn the_same_code_with_the_capability_declared_compiles() {
     let source = "module m;\n\n\
                   import std::random::{Random};\n\n\
-                  export fn roll() -> Int with { rng: Random } {\n  rng.int()\n}\n";
+                  pub fn roll() -> Int with { rng: Random } {\n  rng.int()\n}\n";
     let replies = session(&[initialize(), call(2, "khora_check", json!({ "source": source }))]);
     assert!(text(find(&replies, 2)).contains("No errors"), "{}", text(find(&replies, 2)));
 }

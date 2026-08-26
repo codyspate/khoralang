@@ -35,11 +35,11 @@ fn assert_reports(text: &str, needle: &str) {
 /// the scalars a derived field is most likely to be.
 const CORE: &str = "\
 module m;
-export type Ordering = | Less | Equal | Greater;
-export trait Eq { fn eq(self, other: Self) -> Bool; }
-export trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
-export trait Hash: Eq { fn hash(self) -> Int; }
-export trait Show { fn show(self) -> String; }
+pub type Ordering = | Less | Equal | Greater;
+pub trait Eq { fn eq(self, other: Self) -> Bool; }
+pub trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
+pub trait Hash: Eq { fn hash(self) -> Int; }
+pub trait Show { fn show(self) -> String; }
 impl Eq for Int { fn eq(self, other: Int) -> Bool { self == other } }
 impl Ord for Int {
   fn cmp(self, other: Int) -> Ordering {
@@ -72,7 +72,7 @@ fn a_derived_eq_is_callable() {
     assert_clean(&format!(
         "{CORE}\
          derive(Eq)\n\
-         export type Point = {{ x: Int, y: Int }};\n\
+         pub type Point = {{ x: Int, y: Int }};\n\
          fn same(a: Point, b: Point) -> Bool {{ a.eq(b) }}\n"
     ));
 }
@@ -82,7 +82,7 @@ fn a_derived_ord_is_callable() {
     assert_clean(&format!(
         "{CORE}\
          derive(Eq, Ord)\n\
-         export type Point = {{ x: Int, y: Int }};\n\
+         pub type Point = {{ x: Int, y: Int }};\n\
          fn order(a: Point, b: Point) -> Ordering {{ a.cmp(b) }}\n"
     ));
 }
@@ -92,7 +92,7 @@ fn a_derived_hash_is_callable() {
     assert_clean(&format!(
         "{CORE}\
          derive(Eq, Hash)\n\
-         export type Point = {{ x: Int, y: Int }};\n\
+         pub type Point = {{ x: Int, y: Int }};\n\
          fn key(p: Point) -> Int {{ p.hash() }}\n"
     ));
 }
@@ -102,7 +102,7 @@ fn a_derived_show_is_callable() {
     assert_clean(&format!(
         "{CORE}\
          derive(Show)\n\
-         export type Point = {{ x: Int, y: Int }};\n\
+         pub type Point = {{ x: Int, y: Int }};\n\
          fn text(p: Point) -> String {{ p.show() }}\n"
     ));
 }
@@ -112,7 +112,7 @@ fn all_four_can_be_derived_at_once_for_a_variant() {
     assert_clean(&format!(
         "{CORE}\
          derive(Eq, Ord, Show, Hash)\n\
-         export type Shape = | Dot | Circle(r: Int) | Rect(w: Int, h: Int);\n\
+         pub type Shape = | Dot | Circle(r: Int) | Rect(w: Int, h: Int);\n\
          fn use_them(a: Shape, b: Shape) -> String {{\n\
          \x20 if a.eq(b) && a.cmp(b).eq(Ordering::Equal) && a.hash() == b.hash() {{ a.show() }}\n\
          \x20 else {{ b.show() }}\n\
@@ -127,7 +127,7 @@ fn a_derived_impl_satisfies_a_bound() {
     assert_clean(&format!(
         "{CORE}\
          derive(Eq, Ord)\n\
-         export type Point = {{ x: Int, y: Int }};\n\
+         pub type Point = {{ x: Int, y: Int }};\n\
          fn least<T: Ord>(a: T, b: T) -> T {{ if a.cmp(b).eq(Ordering::Greater) {{ b }} else {{ a }} }}\n\
          fn go(a: Point, b: Point) -> Point {{ least(a, b) }}\n"
     ));
@@ -142,9 +142,9 @@ fn a_field_without_the_trait_is_refused_by_name() {
     assert_reports(
         &format!(
             "{CORE}\
-             export type Opaque = | Nothing;\n\
+             pub type Opaque = | Nothing;\n\
              derive(Eq)\n\
-             export type Point = {{ x: Int, y: Opaque }};\n"
+             pub type Point = {{ x: Int, y: Opaque }};\n"
         ),
         "the field `y` has type `Opaque`, which does not",
     );
@@ -156,9 +156,9 @@ fn a_case_payload_without_the_trait_is_refused_by_name() {
     assert_reports(
         &format!(
             "{CORE}\
-             export type Opaque = | Nothing;\n\
+             pub type Opaque = | Nothing;\n\
              derive(Show)\n\
-             export type Wrapper = | Plain(Int) | Odd(inner: Opaque);\n"
+             pub type Wrapper = | Plain(Int) | Odd(inner: Opaque);\n"
         ),
         "the field `inner` of `Odd` has type `Opaque`, which does not",
     );
@@ -170,9 +170,9 @@ fn a_positional_payload_is_named_by_its_position() {
     assert_reports(
         &format!(
             "{CORE}\
-             export type Opaque = | Nothing;\n\
+             pub type Opaque = | Nothing;\n\
              derive(Eq)\n\
-             export type Wrapper = | Both(Int, Opaque);\n"
+             pub type Wrapper = | Both(Int, Opaque);\n"
         ),
         "field 1 of `Both` has type `Opaque`",
     );
@@ -184,9 +184,9 @@ fn a_positional_payload_is_named_by_its_position() {
 fn a_refused_derive_reports_once() {
     let found = errors(&format!(
         "{CORE}\
-         export type Opaque = | Nothing;\n\
+         pub type Opaque = | Nothing;\n\
          derive(Eq)\n\
-         export type Point = {{ x: Opaque }};\n"
+         pub type Point = {{ x: Opaque }};\n"
     ));
     assert_eq!(found.len(), 1, "expected exactly one diagnostic, got {found:?}");
 }
@@ -197,7 +197,7 @@ fn a_trait_that_cannot_be_derived_says_which_can() {
         &format!(
             "{CORE}\
              derive(Frobnicate)\n\
-             export type Point = {{ x: Int }};\n"
+             pub type Point = {{ x: Int }};\n"
         ),
         "`Frobnicate` cannot be derived",
     );
@@ -206,7 +206,7 @@ fn a_trait_that_cannot_be_derived_says_which_can() {
 #[test]
 fn a_type_with_no_body_has_nothing_to_derive_from() {
     assert_reports(
-        &format!("{CORE}derive(Eq)\nexport type Handle;\n"),
+        &format!("{CORE}derive(Eq)\npub type Handle;\n"),
         "it is declared with no body",
     );
 }
@@ -219,7 +219,7 @@ fn deriving_ord_without_eq_says_so() {
         &format!(
             "{CORE}\
              derive(Ord)\n\
-             export type Point = {{ x: Int }};\n"
+             pub type Point = {{ x: Int }};\n"
         ),
         "`Ord` requires `Eq`, and `Point` does not implement it",
     );
@@ -231,7 +231,7 @@ fn deriving_hash_without_eq_says_so() {
         &format!(
             "{CORE}\
              derive(Hash)\n\
-             export type Point = {{ x: Int }};\n"
+             pub type Point = {{ x: Int }};\n"
         ),
         "`Hash` requires `Eq`, and `Point` does not implement it",
     );
@@ -243,7 +243,7 @@ fn a_hand_written_eq_satisfies_ord() {
     assert_clean(&format!(
         "{CORE}\
          derive(Ord)\n\
-         export type Point = {{ x: Int }};\n\
+         pub type Point = {{ x: Int }};\n\
          impl Eq for Point {{ fn eq(self, other: Point) -> Bool {{ self.x.eq(other.x) }} }}\n"
     ));
 }
@@ -256,7 +256,7 @@ fn deriving_what_is_already_written_is_a_duplicate() {
         &format!(
             "{CORE}\
              derive(Eq)\n\
-             export type Point = {{ x: Int }};\n\
+             pub type Point = {{ x: Int }};\n\
              impl Eq for Point {{ fn eq(self, other: Point) -> Bool {{ true }} }}\n"
         ),
         "`Eq` is already implemented for `Point`",
@@ -294,7 +294,7 @@ fn derive_is_still_usable_as_a_name() {
 /// compiles, so the two cannot disagree.
 #[test]
 fn a_records_fields_compare_in_declaration_order() {
-    let source = "module m;\nderive(Ord)\nexport type Point = { x: Int, y: Int };\n";
+    let source = "module m;\nderive(Ord)\npub type Point = { x: Int, y: Int };\n";
     let parse = khora_syntax::parse(source);
     let generated = khora_hir::derive::expand(&parse.source_file());
     let text = generated.source();
@@ -307,7 +307,7 @@ fn a_records_fields_compare_in_declaration_order() {
 /// written at is the number it compares by.
 #[test]
 fn a_variants_cases_order_by_declaration() {
-    let source = "module m;\nderive(Ord)\nexport type Shape = | Dot | Circle(r: Int);\n";
+    let source = "module m;\nderive(Ord)\npub type Shape = | Dot | Circle(r: Int);\n";
     let parse = khora_syntax::parse(source);
     let generated = khora_hir::derive::expand(&parse.source_file());
     let text = generated.source();
@@ -321,7 +321,7 @@ fn a_variants_cases_order_by_declaration() {
 /// the failure mode the `Hash` doc comment in `std/core.kh` is about.
 #[test]
 fn a_derived_hash_reads_the_same_fields_as_the_derived_eq() {
-    let source = "module m;\nderive(Eq, Hash)\nexport type Point = { x: Int, y: Int };\n";
+    let source = "module m;\nderive(Eq, Hash)\npub type Point = { x: Int, y: Int };\n";
     let parse = khora_syntax::parse(source);
     let generated = khora_hir::derive::expand(&parse.source_file());
     let text = generated.source();
@@ -338,7 +338,7 @@ fn a_generic_type_derives_with_a_bound_on_every_parameter() {
     assert_clean(&format!(
         "{CORE}\
          derive(Eq)\n\
-         export type Box<A> = {{ value: A }};\n\
+         pub type Box<A> = {{ value: A }};\n\
          fn same(a: Box<Int>, b: Box<Int>) -> Bool {{ a.eq(b) }}\n"
     ));
 }
@@ -354,7 +354,7 @@ fn a_generic_type_derives_with_a_bound_on_every_parameter() {
 /// when they notice.
 #[test]
 fn a_generic_derive_bounds_every_parameter_by_the_trait() {
-    let source = "module m;\nderive(Eq, Show)\nexport type Pair<A, B> = { left: A, right: B };\n";
+    let source = "module m;\nderive(Eq, Show)\npub type Pair<A, B> = { left: A, right: B };\n";
     let parse = khora_syntax::parse(source);
     let generated = khora_hir::derive::expand(&parse.source_file());
     let text = generated.source();
@@ -367,7 +367,7 @@ fn a_generic_variant_derives() {
     assert_clean(&format!(
         "{CORE}\
          derive(Eq, Ord)\n\
-         export type Maybe<A> = | Nothing | Just(value: A);\n\
+         pub type Maybe<A> = | Nothing | Just(value: A);\n\
          fn order(a: Maybe<Int>, b: Maybe<Int>) -> Ordering {{ a.cmp(b) }}\n"
     ));
 }
@@ -380,7 +380,7 @@ fn a_const_parameter_is_refused_with_a_reason() {
         &format!(
             "{CORE}\
              derive(Eq)\n\
-             export type Vector<const N: Int> = {{ length: Int }};\n"
+             pub type Vector<const N: Int> = {{ length: Int }};\n"
         ),
         "const or row parameter",
     );
@@ -395,7 +395,7 @@ fn a_recursive_type_derives() {
     assert_clean(&format!(
         "{CORE}\
          derive(Eq)\n\
-         export type Chain = | End | Link(head: Int, rest: Chain);\n\
+         pub type Chain = | End | Link(head: Int, rest: Chain);\n\
          fn same(a: Chain, b: Chain) -> Bool {{ a.eq(b) }}\n"
     ));
 }

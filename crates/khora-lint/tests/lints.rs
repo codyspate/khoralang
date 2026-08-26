@@ -22,7 +22,7 @@ fn names(found: &[Finding]) -> Vec<&str> {
 }
 
 const EFFECT: &str = "module m;\n\
-                      export effect Clock {\n  \
+                      pub effect Clock {\n  \
                       now: () -> Int,\n\
                       }\n";
 
@@ -75,7 +75,7 @@ fn each_unused_capability_names_itself() {
         &db,
         &format!(
             "{EFFECT}\n\
-             export effect Log {{\n  write: (String) -> (),\n}}\n\
+             pub effect Log {{\n  write: (String) -> (),\n}}\n\
              fn f(x: Int) -> Int with {{ clock: Clock, log: Log }} {{ x }}\n"
         ),
     );
@@ -210,7 +210,7 @@ fn findings_come_out_in_source_order() {
 
 /// A record that can hold another of its own kind, which is what makes a loop
 /// possible at all. `mut`, because an immutable graph is still a DAG.
-const NODE: &str = "module m;\nexport type Node = { mut next: Node, value: Int }\n";
+const NODE: &str = "module m;\npub type Node = { mut next: Node, value: Int }\n";
 
 fn cycles(db: &dyn Db, body: &str) -> Vec<Finding> {
     let text = format!("{NODE}{body}");
@@ -290,7 +290,7 @@ fn building_from_something_else_is_not_reported() {
 fn assigning_a_number_is_never_a_cycle() {
     let db = KhoraDatabase::new();
     let text = "module m;\n\
-                export type Counter = { mut seen: Int }\n\
+                pub type Counter = { mut seen: Int }\n\
                 fn f(c: Counter) -> () { let n = 3; c.seen = n; }\n";
     let file = SourceFile::new(&db, "a.kh".into(), text.to_string());
     let found: Vec<&Finding> =
@@ -307,7 +307,7 @@ fn the_corpus_is_quiet() {
     let db = KhoraDatabase::new();
     // A representative shape from `std/core.kh`: a field updated from a length.
     let text = "module m;\n\
-                export type Vector = { mut items: String, mut wanted: Int }\n\
+                pub type Vector = { mut items: String, mut wanted: Int }\n\
                 fn clear(self: Vector) -> () {\n\
                 \x20 let held = 4;\n\
                 \x20 if held > 0 { self.wanted = held; }\n\
@@ -342,8 +342,8 @@ fn a_call_that_is_not_a_constructor_is_not_reported() {
 fn a_variant_holding_the_target_is_still_reported() {
     let db = KhoraDatabase::new();
     let text = "module m;\n\
-                export type Slot = | Empty | Held(Slot)\n\
-                export type Box = { mut slot: Slot }\n\
+                pub type Slot = | Empty | Held(Slot)\n\
+                pub type Box = { mut slot: Slot }\n\
                 fn f(b: Box, s: Slot) -> () { b.slot = Held(s); }\n";
     let file = SourceFile::new(&db, "a.kh".into(), text.to_string());
     // Not a cycle — `s` does not reach `b` — so this is the quiet direction,
@@ -357,8 +357,8 @@ fn a_variant_holding_the_target_is_still_reported() {
 
 /// A `Result` and something that produces one.
 const RESULTS: &str = "module m;\n\
-                       export type Result<A, E> = | Ok(value: A) | Err(error: E);\n\
-                       export type Oops = | Bad;\n\
+                       pub type Result<A, E> = | Ok(value: A) | Err(error: E);\n\
+                       pub type Oops = | Bad;\n\
                        fn work() -> Result<Int, Oops> { Result::Ok(1) }\n";
 
 /// **The case that bit twice.** A statement that produces a `Result` and does

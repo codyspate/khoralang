@@ -58,8 +58,8 @@ bindings with a `Layer<...>` annotation. `LayerDecl` is dropped; layers are
 ## 5. Opaque type and signature-only declarations have no production
 
 §1.2 requires `TypeDecl` to have `= TypeDef` and `FunctionDecl` to have
-`= BlockExpr`. §3 relies on neither: `export type Effect<+A, -R, +E>;` declares an
-abstract type, and `export fn succeed<A>(value: A) -> Effect<A, {}, Never>;`
+`= BlockExpr`. §3 relies on neither: `pub type Effect<+A, -R, +E>;` declares an
+abstract type, and `pub fn succeed<A>(value: A) -> Effect<A, {}, Never>;`
 declares a signature with no body. Both right-hand sides are optional in the
 implemented grammar.
 
@@ -443,7 +443,7 @@ Nothing ever read it. A trait could promise `-> Bool`, an impl return `Int`,
 and the checker accept both:
 
 ```khora
-export trait Eq { fn eq(self, other: Self) -> Bool; }
+pub trait Eq { fn eq(self, other: Self) -> Bool; }
 impl Eq for Int { fn eq(self, other: Int) -> Int { 1 } }
 ```
 
@@ -508,8 +508,8 @@ then called `variant_name()`, kept only `"Some"`, and looked it up across the
 whole program with first-match-wins.
 
 ```khora
-export type Option<A> = | Some(value: A) | None;
-export type Maybe<A>  = | Some(value: A) | None;
+pub type Option<A> = | Some(value: A) | None;
+pub type Maybe<A>  = | Some(value: A) | None;
 fn f() -> Maybe<Int> { Maybe::Some(1) }
 ```
 
@@ -1272,7 +1272,7 @@ see its own binding. No cycle, therefore no leak.
 today and leaves four objects alive:
 
 ```khora
-export type Node = { name: String, mut next: Option<Node> };
+pub type Node = { name: String, mut next: Option<Node> };
 
 let a: Node = { name: "a", next: Option::None };
 let b: Node = { name: "b", next: Option::None };

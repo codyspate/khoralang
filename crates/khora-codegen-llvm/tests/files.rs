@@ -58,7 +58,7 @@ const C: &str = "module t;
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Array<A>;
+pub type Array<A>;
 impl<A> Array<A> {
   fn new(length: Int, fill: A) -> Array<A>;
   fn length(self) -> Int;
@@ -202,7 +202,7 @@ extern fn khora_live_count() -> Int;
 extern fn fopen(path: Ptr, mode: Ptr) -> Ptr;
 extern fn fclose(file: Ptr) -> I32;
 
-export type Torn = | Midway;
+pub type Torn = | Midway;
 
 /// Opening is its own function so that the two borrows stay simple: neither
 /// body needs a capability and neither can fail, which is what a C string is

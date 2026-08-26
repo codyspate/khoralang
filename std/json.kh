@@ -22,7 +22,7 @@ import std::core::{Array, Chain, List, Map, Option, Result, Show};
 /// says "number" and means a double, and a separate integer case would be a
 /// distinction the format cannot round-trip. A caller who wants an `Int` asks
 /// for one with `Float::to_int`.
-export type Json =
+pub type Json =
   | Null
   | Bool(value: Bool)
   | Number(value: Float)
@@ -36,7 +36,7 @@ export type Json =
 /// variant per expectation would be a list of the parser's internals. The
 /// offset is in **bytes**, which is what `String::byte` counts and what a
 /// caller can slice with.
-export type JsonError = {
+pub type JsonError = {
   at: Int,
   expected: String,
 };
@@ -48,11 +48,11 @@ export type JsonError = {
 /// outside in: `List::Cons("account", List::Cons("currency", List::Nil))`
 /// identifies `account.currency`. Keeping it structured means an HTTP layer
 /// can render it however its own API promises rather than scraping a message.
-export type DecodeError =
+pub type DecodeError =
   | At(path: List<String>, expected: String, found: String);
 
 /// A value that has one unambiguous JSON representation.
-export trait ToJson {
+pub trait ToJson {
   /// This value as JSON. Cannot fail: a type either has a representation or
   /// does not implement this.
   fn to_json(self) -> Json;
@@ -63,7 +63,7 @@ export trait ToJson {
 ///
 /// A failure rather than an `Option`: absence and the wrong kind are different
 /// facts to an API client, and a nested field has to retain its path.
-export trait FromJson {
+pub trait FromJson {
   /// Reads a value back, or says where the shape stopped agreeing.
   fn from_json(value: Json) -> Self raises DecodeError;
 }
@@ -73,19 +73,19 @@ export trait FromJson {
 /// This is also the bridge used by generic container implementations: `A` is
 /// a type parameter, while the trait function itself is selected from the
 /// expected return type.
-export fn decode<A: FromJson>(value: Json) -> A raises DecodeError {
+pub fn decode<A: FromJson>(value: Json) -> A raises DecodeError {
   FromJson::from_json(value)!
 }
 
 /// One field of an object, in the order `entries` happened to find it.
-export type Field = {
+pub type Field = {
   name: String,
   value: Json,
 };
 
 /// One object member. Chiefly useful to generated encoders, and preferable to
 /// making an otherwise context-free record literal guess that it is a `Field`.
-export fn member(name: String, value: Json) -> Field { { name: name, value: value } }
+pub fn member(name: String, value: Json) -> Field { { name: name, value: value } }
 
 // ---------------------------------------------------------------------------
 // Values and traits used by `derive(ToJson, FromJson)`
@@ -216,7 +216,7 @@ fn from_json_items<A: FromJson>(items: List<Json>, at: Int) -> List<A>
 /// The map intentionally forgets that order, as every other object built by
 /// this module does. This is exported because a derived impl lives in the
 /// module that declared its type; it is useful to handwritten encoders too.
-export fn object(fields: List<Field>) -> Json {
+pub fn object(fields: List<Field>) -> Json {
   let out: Map<String, Json> = Map::new();
   put_fields(out, fields);
   Json::Object(out)
@@ -233,7 +233,7 @@ fn put_fields(out: Map<String, Json>, fields: List<Field>) -> () {
 }
 
 /// Reads and decodes one required object field, retaining its path on failure.
-export fn field_as<A: FromJson>(value: Json, name: String) -> A raises DecodeError {
+pub fn field_as<A: FromJson>(value: Json, name: String) -> A raises DecodeError {
   match value {
     Json::Object(fields) => match Map::get(fields, name) {
       Option::None =>
@@ -253,19 +253,19 @@ export fn field_as<A: FromJson>(value: Json, name: String) -> A raises DecodeErr
 /// shape: `{ "case": "Circle", "fields": [3] }`. Uniformity is more useful
 /// than saving two punctuation marks on a unit case, and positional fields
 /// work for both named and unnamed case payloads.
-export fn variant(case_name: String, fields: List<Json>) -> Json {
+pub fn variant(case_name: String, fields: List<Json>) -> Json {
   object(List::Cons(
       { name: "case", value: Json::Text(case_name) },
       List::Cons({ name: "fields", value: Json::Array(fields) }, List::Nil)))
 }
 
 /// The case tag of a derived variant.
-export fn variant_case(value: Json) -> String raises DecodeError {
+pub fn variant_case(value: Json) -> String raises DecodeError {
   field_as(value, "case")!
 }
 
 /// Checks the payload count before a generated constructor reads it.
-export fn variant_arity(value: Json, expected: Int) -> () raises DecodeError {
+pub fn variant_arity(value: Json, expected: Int) -> () raises DecodeError {
   let fields: List<Json> = field_as(value, "fields")!;
   let found = List::length(fields);
   if found == expected {
@@ -279,7 +279,7 @@ export fn variant_arity(value: Json, expected: Int) -> () raises DecodeError {
 }
 
 /// Decodes one positional payload of a derived variant.
-export fn variant_field<A: FromJson>(value: Json, wanted: Int) -> A raises DecodeError {
+pub fn variant_field<A: FromJson>(value: Json, wanted: Int) -> A raises DecodeError {
   let fields: List<Json> = field_as(value, "fields")!;
   match item_at(fields, wanted) {
     Option::None => raise DecodeError::At(
@@ -294,7 +294,7 @@ export fn variant_field<A: FromJson>(value: Json, wanted: Int) -> A raises Decod
 }
 
 /// Reports a case tag no generated decoder recognizes.
-export fn unknown_variant<A>(found: String, expected: String) -> A raises DecodeError {
+pub fn unknown_variant<A>(found: String, expected: String) -> A raises DecodeError {
   raise DecodeError::At(List::Cons("case", List::Nil), expected, found)
 }
 
@@ -332,7 +332,7 @@ impl Json {
   /// is what almost every consumer of a parsed document does, and writing the
   /// `match` by hand at each step turns three levels of nesting into fifteen
   /// lines.
-  export fn field(self, name: String) -> Option<Json> {
+  pub fn field(self, name: String) -> Option<Json> {
     match self {
       Json::Object(fields) => Map::get(fields, name),
       _ => Option::None,
@@ -344,7 +344,7 @@ impl Json {
   /// `Option` rather than a failure, because a document being the wrong shape
   /// is the caller's business to name — this module does not know what the
   /// field was for.
-  export fn text(self) -> Option<String> {
+  pub fn text(self) -> Option<String> {
     match self { Json::Text(value) => Option::Some(value), _ => Option::None }
   }
 
@@ -353,18 +353,18 @@ impl Json {
   /// **No coercion**, as with `text`: the string `"3"` is not a number, and a
   /// library that read it as one would hide the day a client started quoting
   /// its integers.
-  export fn number(self) -> Option<Float> {
+  pub fn number(self) -> Option<Float> {
     match self { Json::Number(value) => Option::Some(value), _ => Option::None }
   }
 
   /// The boolean here, or `None`.
-  export fn boolean(self) -> Option<Bool> {
+  pub fn boolean(self) -> Option<Bool> {
     match self { Json::Bool(value) => Option::Some(value), _ => Option::None }
   }
 
   /// The elements, if this is an array. `None` for anything else, including an
   /// object — a JSON array and a JSON object are different things.
-  export fn items(self) -> Option<List<Json>> {
+  pub fn items(self) -> Option<List<Json>> {
     match self { Json::Array(items) => Option::Some(items), _ => Option::None }
   }
 
@@ -372,7 +372,7 @@ impl Json {
   ///
   /// A JSON `null` and a missing field are different, and both are worth
   /// telling apart from a present value: `is_null` answers the first.
-  export fn is_null(self) -> Bool {
+  pub fn is_null(self) -> Bool {
     match self { Json::Null => true, _ => false }
   }
 
@@ -385,7 +385,7 @@ impl Json {
   /// and it buys `field` in constant time, which is what consumers actually
   /// do with a document. A `List<Field>` would keep the order and make every
   /// lookup a scan.
-  export fn entries(self) -> List<Field> {
+  pub fn entries(self) -> List<Field> {
     match self {
       Json::Object(fields) => gather(fields, 0, List::Nil),
       _ => List::Nil,
@@ -423,7 +423,7 @@ fn from_chain(chain: Chain<String, Json>, into: List<Field>) -> List<Field> {
 /// Compact: no spaces and no newlines. Pretty-printing is a second function
 /// when something wants one, rather than a flag that doubles every branch
 /// below.
-export fn encode(value: Json) -> String {
+pub fn encode(value: Json) -> String {
   match value {
     Json::Null => "null",
     Json::Bool(flag) => if flag { "true" } else { "false" },
@@ -543,7 +543,7 @@ type Fields = { fields: Map<String, Json>, at: Int };
 /// Trailing text is an error rather than ignored: `{"a":1} oops` is a mistake
 /// somebody wants told about, and a parser that stops at the first complete
 /// value hides it.
-export fn parse(text: String) -> Result<Json, JsonError> {
+pub fn parse(text: String) -> Result<Json, JsonError> {
   match value_at(text, skip_space(text, 0)) {
     Result::Err(why) => Result::Err(why),
     Result::Ok(found) => {

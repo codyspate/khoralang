@@ -307,7 +307,7 @@ fn a_file_outside_the_workspace_scan_still_gets_diagnostics() {
 #[test]
 fn a_name_from_another_file_resolves() {
     let w = workspace(&[
-        ("src/library.kh", "module app::library;\nexport fn two() -> Int { 2 }\n"),
+        ("src/library.kh", "module app::library;\npub fn two() -> Int { 2 }\n"),
         ("src/main.kh", "module app::main;\nimport app::library::{two};\nfn f() -> Int { two() }\n"),
     ]);
     let path = w.root.join("src/main.kh");

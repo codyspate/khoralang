@@ -190,7 +190,7 @@ fn cells_do_not_coerce() {
 /// that is a moment only the child can name.
 const CANCELLABLE: &str = r#"extern fn khora_cancel();
 
-export type Oops = | Bad;
+pub type Oops = | Bad;
 
 /// A fallible call, so that `!` marks a cancellation point. It never fails;
 /// the `!` is the whole of its job.

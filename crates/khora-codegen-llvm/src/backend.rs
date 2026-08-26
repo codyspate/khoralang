@@ -111,7 +111,7 @@ pub fn compile_with(
     build(db, root, out, Entry::Main, Stop::AtExecutable, profile)
 }
 
-/// Compiles the program's `export extern fn`s into a shared library.
+/// Compiles the program's `pub extern fn`s into a shared library.
 ///
 /// No `main`, and **never single-threaded**: the host decides which of its
 /// threads calls in, so reference counting has to be atomic whether or not
@@ -194,7 +194,7 @@ enum Entry {
     Tests,
     /// Time every `bench` block and report the distribution.
     Benches,
-    /// No entry point at all: a shared library whose `export extern fn`s are
+    /// No entry point at all: a shared library whose `pub extern fn`s are
     /// the only way in. `docs/design/c-export.md`.
     Library,
 }

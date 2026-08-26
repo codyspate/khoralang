@@ -162,7 +162,7 @@ fn a_fallible_stage_raises_out_of_the_flow() {
         "flow_raises",
         &format!(
             "{PRELUDE}
-export type Oops = | Bad;
+pub type Oops = | Bad;
 fn checked(n: Int) -> Int raises Oops {{ if n > 5 {{ raise Oops::Bad }} else {{ n }} }}
 fn attempt<'e>(f: (Int) -> Int raises 'e, v: Int) -> Int raises 'e {{ f(v)! }}
 
@@ -186,7 +186,7 @@ fn the_failure_row_matches_the_explicit_lambda() {
         "flow_row_same",
         &format!(
             "{PRELUDE}
-export type Oops = | Bad;
+pub type Oops = | Bad;
 fn checked(n: Int) -> Int raises Oops {{ if n > 5 {{ raise Oops::Bad }} else {{ n }} }}
 fn attempt<'e>(f: (Int) -> Int raises 'e, v: Int) -> Int raises 'e {{ f(v)! }}
 

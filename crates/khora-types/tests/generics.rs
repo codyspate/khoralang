@@ -23,7 +23,7 @@ fn assert_reports(text: &str, needle: &str) {
     );
 }
 
-const OPTION: &str = "module m;\nexport type Option<A> = | Some(value: A) | None;\n";
+const OPTION: &str = "module m;\npub type Option<A> = | Some(value: A) | None;\n";
 
 #[test]
 fn the_identity_function_checks() {

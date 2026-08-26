@@ -70,9 +70,9 @@ fn formatting_never_loses_a_token() {
 fn preserves_the_token_sequence() {
     let cases = [
         "module m;\nfn f() { let x = 1; x }\n",
-        "module m;\nexport fn g(a: Int, b: Int) -> Int { a + b }\n",
+        "module m;\npub fn g(a: Int, b: Int) -> Int { a + b }\n",
         "module m;\nfn h() { xs |> map(f) |> filter(g) }\n",
-        "module m;\nexport effect E { op: String -> Int raises Err }\n",
+        "module m;\npub effect E { op: String -> Int raises Err }\n",
         "module m;\nfn k() { if a { b } else { c } }\n",
     ];
     for src in cases {
@@ -197,7 +197,7 @@ fn is_formatted_agrees_with_format() {
 /// same way an impl's parameters belong to `impl`.
 #[test]
 fn a_derive_clause_hugs_its_traits() {
-    let src = "module m;\n\nderive(Eq, Ord)\nexport type Point = { x: Int, y: Int };\n";
+    let src = "module m;\n\nderive(Eq, Ord)\npub type Point = { x: Int, y: Int };\n";
     assert_eq!(format(src).unwrap(), src);
 }
 
@@ -215,7 +215,7 @@ fn a_file_with_only_a_module_declaration_formats() {
 #[test]
 fn a_variant_doc_comment_is_indented_with_its_variant() {
     let src = "module m;\n\n\
-               export type Level =\n  \
+               pub type Level =\n  \
                /// Fine.\n  \
                | Ok\n  \
                /// Not fine.\n  \
@@ -229,7 +229,7 @@ fn a_variant_doc_comment_is_indented_with_its_variant() {
 #[test]
 fn a_field_doc_comment_keeps_its_own_indent() {
     let src = "module m;\n\n\
-               export type Point = {\n  \
+               pub type Point = {\n  \
                /// Across.\n  \
                x: Int,\n\
                };\n";
@@ -241,7 +241,7 @@ fn a_field_doc_comment_keeps_its_own_indent() {
 #[test]
 fn a_multi_line_doc_comment_moves_together() {
     let src = "module m;\n\n\
-               export type Level =\n  \
+               pub type Level =\n  \
                /// One.\n  \
                /// Two.\n  \
                | Ok;\n";
@@ -253,7 +253,7 @@ fn a_multi_line_doc_comment_moves_together() {
 /// lookahead is exactly the kind of change that breaks it.
 #[test]
 fn formatting_a_documented_variant_twice_is_formatting_it_once() {
-    let messy = "module m;\nexport type Level =\n/// Fine.\n| Ok\n/// Not fine.\n| Bad;\n";
+    let messy = "module m;\npub type Level =\n/// Fine.\n| Ok\n/// Not fine.\n| Bad;\n";
     let once = format(messy).unwrap();
     assert_eq!(format(&once).unwrap(), once, "not idempotent:\n{once}");
 }

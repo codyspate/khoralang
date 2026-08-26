@@ -640,7 +640,7 @@ import std::core::{Channel, Fiber, Fibers, List, Option, Result, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Request, Settings, over, serve};
 
-export effect Nursery { adopt: (Fiber) -> (), }
+pub effect Nursery { adopt: (Fiber) -> (), }
 
 fn one(c: Cell) -> List<Cell> { List::Cons(c, List::Nil) }
 
@@ -785,8 +785,8 @@ import std::db::{Cell, Db, DbError, Row};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close, open, with_db};
 
-export effect Nursery { adopt: (Fiber) -> (), }
-export type Oops = | Failed;
+pub effect Nursery { adopt: (Fiber) -> (), }
+pub type Oops = | Failed;
 
 fn number(answer: Result<List<Row>, DbError>) -> Int {
   match answer {
@@ -905,7 +905,7 @@ import postgres::pool::{Pool, close as close_pool, open as open_pool, with_db};
 /// outside would be racing that window.
 extern fn khora_cancel();
 
-export type Oops = | Bad;
+pub type Oops = | Bad;
 
 /// A fallible call, so that `!` marks a cancellation point.
 fn mark() -> Int raises Oops { 1 }

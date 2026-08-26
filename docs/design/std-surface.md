@@ -45,7 +45,7 @@ could name the type. The keyword was accepted on a method and read by nothing:
 
 ```khora
 module lib;
-export type Counter = { n: Int };
+pub type Counter = { n: Int };
 impl Counter {
   fn secret(self) -> Int { self.n * 2 }   // no `export`
 }
@@ -113,7 +113,7 @@ The refusal names the fix, because it is one word in a file the reader may not
 have thought to open, and it names the other fix too:
 
     `Map::rehash` is not exported, so only the module that declares it may
-    call it. Write `export fn rehash` there if it is part of the type's
+    call it. Write `pub fn rehash` there if it is part of the type's
     interface — otherwise this call belongs inside that module.
 
 **A trait impl is not filtered.** `impl Show for Decimal { fn show }` is

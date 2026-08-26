@@ -40,7 +40,7 @@ extern fn khora_monotonic_millis() -> Int;
 /// a function that reads `DATABASE_URL` says so in its signature, and a test
 /// can hand it something else. Reading the environment is exactly the kind of
 /// hidden input that makes a program hard to test, and this is the seam.
-export effect Env {
+pub effect Env {
   /// The value of a variable, or `None` when it is not set.
   variable: (String) -> Option<String>,
   /// Everything the process was invoked with, the program's own name first —
@@ -66,7 +66,7 @@ export effect Env {
 /// and the half it was wrong for would be the half that only fails in
 /// production, at 2am, when the clock is stepped an hour. Naming both makes the
 /// caller say which they meant.
-export effect Clock {
+pub effect Clock {
   /// Seconds since 1970, on the wall clock.
   ///
   /// Kept, because it is what a caller who wants a date wants, and it is
@@ -86,7 +86,7 @@ export effect Clock {
 
 impl Env {
   /// The real environment.
-  export fn real() -> Env {
+  pub fn real() -> Env {
     handler for Env {
       variable: fn name => read_variable(name),
       arguments: fn () => collect_arguments(khora_arg_count() - 1, List::Nil),
@@ -99,7 +99,7 @@ impl Clock {
   ///
   /// Seconds are milliseconds divided down rather than a second call to ISO C's
   /// `time`, so that a program reading both never sees them straddle a tick.
-  export fn real() -> Clock {
+  pub fn real() -> Clock {
     handler for Clock {
       unix_seconds: fn () => khora_unix_millis() / 1000,
       unix_millis: fn () => khora_unix_millis(),
@@ -112,7 +112,7 @@ impl Clock {
 ///
 /// The shape almost every caller wants, written once here rather than as a
 /// `match` at each of them.
-export fn variable_or(name: String, fallback: String) -> String
+pub fn variable_or(name: String, fallback: String) -> String
   with { env: Env }
 {
   match env.variable(name) {

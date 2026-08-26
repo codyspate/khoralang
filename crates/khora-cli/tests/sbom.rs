@@ -25,7 +25,7 @@ fn package(root: &std::path::Path, name: &str, version: &str, dependencies: &str
     .expect("writing a manifest");
     std::fs::write(
         root.join("src").join("lib.kh"),
-        format!("module {name}::lib;\nexport fn go() -> Int {{ 1 }}\n"),
+        format!("module {name}::lib;\npub fn go() -> Int {{ 1 }}\n"),
     )
     .expect("writing a source file");
 }

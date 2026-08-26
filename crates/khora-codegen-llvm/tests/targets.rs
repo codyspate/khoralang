@@ -175,7 +175,7 @@ fn a_wasm_library_links_and_exports_what_it_should() {
 
     let db = KhoraDatabase::new();
     let source = "module w;\n\
-                  export extern fn price(units: Int, scale: Int) -> Int { units * scale }\n";
+                  pub extern fn price(units: Int, scale: Int) -> Int { units * scale }\n";
     let files = vec![SourceFile::new(&db, dir.join("lib.kh"), source.to_string())];
     let root = SourceRoot::new(&db, files);
 

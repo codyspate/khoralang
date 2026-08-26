@@ -24,7 +24,7 @@ module std::decimal;
 // bounded at 18.        <- a note to a maintainer; stays private
 
 /// A number counted in steps of `10^-scale`.
-export type Decimal = { units: Int, scale: Int };
+pub type Decimal = { units: Int, scale: Int };
 ```
 
 `khora doc std --out website/content/docs/stdlib/api` writes the pages;

@@ -53,11 +53,11 @@ fn run(name: &str, source: &str) -> String {
 const CORE: &str = r#"module t;
 fn print(value: String);
 
-export type Ordering = | Less | Equal | Greater;
-export trait Eq { fn eq(self, other: Self) -> Bool; }
-export trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
-export trait Hash: Eq { fn hash(self) -> Int; }
-export trait Show { fn show(self) -> String; }
+pub type Ordering = | Less | Equal | Greater;
+pub trait Eq { fn eq(self, other: Self) -> Bool; }
+pub trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }
+pub trait Hash: Eq { fn hash(self) -> Int; }
+pub trait Show { fn show(self) -> String; }
 
 impl Eq for Int { fn eq(self, other: Int) -> Bool { self == other } }
 impl Ord for Int {
@@ -91,10 +91,10 @@ impl Ordering {
 fn yes(answer: Bool) -> String { if answer { "yes" } else { "no" } }
 
 derive(Eq, Ord, Show, Hash)
-export type Point = { x: Int, y: Int };
+pub type Point = { x: Int, y: Int };
 
 derive(Eq, Ord, Show, Hash)
-export type Shape = | Dot | Circle(r: Int) | Rect(w: Int, h: Int);
+pub type Shape = | Dot | Circle(r: Int) | Rect(w: Int, h: Int);
 "#;
 
 /// The format a test can assert on, and the reason to pin it: change it and

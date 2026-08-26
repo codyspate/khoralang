@@ -37,8 +37,8 @@ fn assert_reports(sources: &[(&str, &str)], needle: &str) {
 const LIB: (&str, &str) = (
     "lib.kh",
     "module demo::lib;\n\
-     export type Option<A> = | Some(value: A) | None;\n\
-     export fn double(x: Int) -> Int { x * 2 }\n\
+     pub type Option<A> = | Some(value: A) | None;\n\
+     pub fn double(x: Int) -> Int { x * 2 }\n\
      fn secret(x: Int) -> Int { x }\n",
 );
 
@@ -50,7 +50,7 @@ fn a_named_import_is_callable_from_a_body() {
             "main.kh",
             "module demo::main;\n\
              import demo::lib::{double};\n\
-             export fn run() -> Int { double(21) }\n",
+             pub fn run() -> Int { double(21) }\n",
         ),
     ]);
 }
@@ -67,7 +67,7 @@ fn an_imported_call_is_type_checked() {
                 "main.kh",
                 "module demo::main;\n\
                  import demo::lib::{double};\n\
-                 export fn run() -> Int { double(true) }\n",
+                 pub fn run() -> Int { double(true) }\n",
             ),
         ],
         "expected `Int`, found `Bool`",
@@ -84,7 +84,7 @@ fn an_imported_type_brings_its_constructors() {
             "main.kh",
             "module demo::main;\n\
              import demo::lib::{Option};\n\
-             export fn unwrap(o: Option<Int>) -> Int {\n\
+             pub fn unwrap(o: Option<Int>) -> Int {\n\
                match o { Option::Some(v) => v, Option::None => 0 }\n\
              }\n",
         ),
@@ -101,7 +101,7 @@ fn an_imported_types_matches_are_still_checked() {
                 "main.kh",
                 "module demo::main;\n\
                  import demo::lib::{Option};\n\
-                 export fn unwrap(o: Option<Int>) -> Int {\n\
+                 pub fn unwrap(o: Option<Int>) -> Int {\n\
                    match o { Option::Some(v) => v }\n\
                  }\n",
             ),
@@ -119,7 +119,7 @@ fn a_private_item_cannot_be_imported() {
                 "main.kh",
                 "module demo::main;\n\
                  import demo::lib::{secret};\n\
-                 export fn run() -> Int { secret(1) }\n",
+                 pub fn run() -> Int { secret(1) }\n",
             ),
         ],
         "`secret` is not exported from `demo.lib`",
@@ -135,7 +135,7 @@ fn importing_something_that_does_not_exist_is_reported() {
                 "main.kh",
                 "module demo::main;\n\
                  import demo::lib::{nope};\n\
-                 export fn run() -> Int { 1 }\n",
+                 pub fn run() -> Int { 1 }\n",
             ),
         ],
         "does not declare `nope`",
@@ -151,7 +151,7 @@ fn importing_from_a_module_that_does_not_exist_is_reported() {
                 "main.kh",
                 "module demo::main;\n\
                  import demo::missing::{thing};\n\
-                 export fn run() -> Int { 1 }\n",
+                 pub fn run() -> Int { 1 }\n",
             ),
         ],
         "cannot find module `demo.missing`",
@@ -166,7 +166,7 @@ fn an_alias_renames_what_it_imports() {
             "main.kh",
             "module demo::main;\n\
              import demo::lib::{double as twice};\n\
-             export fn run() -> Int { twice(21) }\n",
+             pub fn run() -> Int { twice(21) }\n",
         ),
     ]);
 }
@@ -179,7 +179,7 @@ fn a_glob_import_brings_every_exported_item() {
             "main.kh",
             "module demo::main;\n\
              import demo::lib::*;\n\
-             export fn run() -> Int { double(21) }\n",
+             pub fn run() -> Int { double(21) }\n",
         ),
     ]);
 }
@@ -195,7 +195,7 @@ fn a_local_declaration_shadows_an_import() {
             "module demo::main;\n\
              import demo::lib::{double};\n\
              fn double(x: Bool) -> Bool { x }\n\
-             export fn run() -> Bool { double(true) }\n",
+             pub fn run() -> Bool { double(true) }\n",
         ),
     ]);
 }
@@ -206,7 +206,7 @@ fn a_module_sees_nothing_it_did_not_import() {
     assert_reports(
         &[
             LIB,
-            ("main.kh", "module demo::main;\nexport fn run() -> Int { double(21) }\n"),
+            ("main.kh", "module demo::main;\npub fn run() -> Int { double(21) }\n"),
         ],
         "cannot find `double` in this scope",
     );
@@ -221,15 +221,15 @@ fn a_method_arrives_on_a_type_that_was_never_imported() {
         (
             "net.kh",
             "module net;\n\
-             export type Params = | Of(one: String);\n\
-             impl Params { export fn one(self) -> String { match self { Params::Of(s) => s } } }\n\
-             export type Request = { params: Params };\n",
+             pub type Params = | Of(one: String);\n\
+             impl Params { pub fn one(self) -> String { match self { Params::Of(s) => s } } }\n\
+             pub type Request = { params: Params };\n",
         ),
         (
             "app.kh",
             "module app;\n\
              import net::{Request};\n\
-             export fn handle(req: Request) -> String { req.params.one() }\n",
+             pub fn handle(req: Request) -> String { req.params.one() }\n",
         ),
     ]);
 }
@@ -242,15 +242,15 @@ fn a_function_arrives_on_a_type_that_was_never_imported() {
         (
             "net.kh",
             "module net;\n\
-             export type Params = | Of(one: String);\n\
-             impl Params { export fn empty() -> Params { Params::Of(\"\") } }\n\
-             export type Request = { params: Params };\n",
+             pub type Params = | Of(one: String);\n\
+             impl Params { pub fn empty() -> Params { Params::Of(\"\") } }\n\
+             pub type Request = { params: Params };\n",
         ),
         (
             "app.kh",
             "module app;\n\
              import net::{Params, Request};\n\
-             export fn blank() -> Params { Params::empty() }\n",
+             pub fn blank() -> Params { Params::empty() }\n",
         ),
     ]);
 }
@@ -264,14 +264,14 @@ fn an_imported_effect_brings_its_operations() {
         (
             "svc.kh",
             "module svc;\n\
-             export type Row = | Of(n: Int);\n\
-             export effect Db { query: (String) -> Row, }\n",
+             pub type Row = | Of(n: Int);\n\
+             pub effect Db { query: (String) -> Row, }\n",
         ),
         (
             "app.kh",
             "module app;\n\
              import svc::{Db, Row};\n\
-             export fn load(id: String) -> Row with { db: Db } { db.query(id) }\n",
+             pub fn load(id: String) -> Row with { db: Db } { db.query(id) }\n",
         ),
     ]);
 }
@@ -284,15 +284,15 @@ fn an_imported_effect_can_be_installed() {
         (
             "svc.kh",
             "module svc;\n\
-             export type Row = | Of(n: Int);\n\
-             export effect Db { query: (String) -> Row, }\n\
-             export fn load(id: String) -> Row with { db: Db } { db.query(id) }\n",
+             pub type Row = | Of(n: Int);\n\
+             pub effect Db { query: (String) -> Row, }\n\
+             pub fn load(id: String) -> Row with { db: Db } { db.query(id) }\n",
         ),
         (
             "app.kh",
             "module app;\n\
              import svc::{Db, Row, load};\n\
-             export fn go() -> Row {\n\
+             pub fn go() -> Row {\n\
                with { db: handler for Db { query: fn _ => Row::Of(1) } } { load(\"x\") }\n\
              }\n",
         ),
@@ -313,14 +313,14 @@ fn a_method_without_export_is_not_callable_from_another_module() {
             (
                 "lib.kh",
                 "module lib;\n\
-                 export type Counter = { n: Int };\n\
+                 pub type Counter = { n: Int };\n\
                  impl Counter { fn secret(self) -> Int { self.n * 2 } }\n",
             ),
             (
                 "app.kh",
                 "module app;\n\
                  import lib::{Counter};\n\
-                 export fn use_it(c: Counter) -> Int { Counter::secret(c) }\n",
+                 pub fn use_it(c: Counter) -> Int { Counter::secret(c) }\n",
             ),
         ],
         "is not exported",
@@ -335,14 +335,14 @@ fn the_method_form_is_refused_too() {
             (
                 "lib.kh",
                 "module lib;\n\
-                 export type Counter = { n: Int };\n\
+                 pub type Counter = { n: Int };\n\
                  impl Counter { fn secret(self) -> Int { self.n * 2 } }\n",
             ),
             (
                 "app.kh",
                 "module app;\n\
                  import lib::{Counter};\n\
-                 export fn use_it(c: Counter) -> Int { c.secret() }\n",
+                 pub fn use_it(c: Counter) -> Int { c.secret() }\n",
             ),
         ],
         "is not exported",
@@ -358,17 +358,17 @@ fn the_refusal_says_what_to_write_and_where() {
             (
                 "lib.kh",
                 "module lib;\n\
-                 export type Counter = { n: Int };\n\
+                 pub type Counter = { n: Int };\n\
                  impl Counter { fn secret(self) -> Int { self.n * 2 } }\n",
             ),
             (
                 "app.kh",
                 "module app;\n\
                  import lib::{Counter};\n\
-                 export fn use_it(c: Counter) -> Int { Counter::secret(c) }\n",
+                 pub fn use_it(c: Counter) -> Int { Counter::secret(c) }\n",
             ),
         ],
-        "export fn secret",
+        "pub fn secret",
     );
 }
 
@@ -379,9 +379,9 @@ fn a_module_may_call_its_own_unexported_methods() {
     assert_clean(&[(
         "lib.kh",
         "module lib;\n\
-         export type Counter = { n: Int };\n\
+         pub type Counter = { n: Int };\n\
          impl Counter {\n\
-           export fn doubled(self) -> Int { Counter::secret(self) }\n\
+           pub fn doubled(self) -> Int { Counter::secret(self) }\n\
            fn secret(self) -> Int { self.n * 2 }\n\
          }\n",
     )]);
@@ -394,14 +394,14 @@ fn an_exported_method_crosses_the_boundary() {
         (
             "lib.kh",
             "module lib;\n\
-             export type Counter = { n: Int };\n\
-             impl Counter { export fn doubled(self) -> Int { self.n * 2 } }\n",
+             pub type Counter = { n: Int };\n\
+             impl Counter { pub fn doubled(self) -> Int { self.n * 2 } }\n",
         ),
         (
             "app.kh",
             "module app;\n\
              import lib::{Counter};\n\
-             export fn use_it(c: Counter) -> Int { c.doubled() + Counter::doubled(c) }\n",
+             pub fn use_it(c: Counter) -> Int { c.doubled() + Counter::doubled(c) }\n",
         ),
     ]);
 }
@@ -415,15 +415,15 @@ fn a_trait_method_needs_no_export_on_the_impl() {
         (
             "lib.kh",
             "module lib;\n\
-             export trait Show { fn show(self) -> String; }\n\
-             export type Counter = { n: Int };\n\
+             pub trait Show { fn show(self) -> String; }\n\
+             pub type Counter = { n: Int };\n\
              impl Show for Counter { fn show(self) -> String { \"c\" } }\n",
         ),
         (
             "app.kh",
             "module app;\n\
              import lib::{Counter, Show};\n\
-             export fn render(c: Counter) -> String { c.show() }\n",
+             pub fn render(c: Counter) -> String { c.show() }\n",
         ),
     ]);
 }

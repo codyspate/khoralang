@@ -637,7 +637,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     }
     // **A derived `Ord` returns an `Ordering`, and nobody wrote that down.**
     //
-    // `export type Point = { .. } impl Ord;` expands to a `cmp` whose arms are
+    // `pub type Point = { .. } impl Ord;` expands to a `cmp` whose arms are
     // `Ordering::Less` and friends, so without this the author is told that
     // `Ordering::Less` is not a constructor — about a line they did not write,
     // naming a type they never mentioned. The clause is the mention.

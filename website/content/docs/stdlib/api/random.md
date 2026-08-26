@@ -31,7 +31,7 @@ generator with a different name so that a program says which one it needed.
 ### Random
 
 ```khora
-export effect Random {
+pub effect Random {
   int: () -> Int,
   in_range: (Int, Int) -> Int,
   bytes: (Array<U8>) -> (),

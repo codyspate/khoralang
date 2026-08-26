@@ -40,7 +40,7 @@ import std::random::{Random};
 /// which is the rule every language has and the reason the fields are in this
 /// order rather than alphabetical.
 derive(Eq, Ord, Show)
-export type Link = {
+pub type Link = {
   created: Int,
   code: String,
   url: String,
@@ -68,7 +68,7 @@ impl Link {
 /// fiber answering a connection. The `Dict` is persistent, so a reader holds a
 /// whole map rather than a view of one being edited underneath it, and a
 /// writer replaces the cell's contents in one step.
-export type Store = {
+pub type Store = {
   links: Shared<Dict<String, Link>>,
   /// On the monotonic clock, which is the one whose differences are durations.
   started: Int,
@@ -411,7 +411,7 @@ fn port() -> Int
   }
 }
 
-export fn main() raises HttpError {
+pub fn main() raises HttpError {
   with { env: Env::real(), clock: Clock::real(), fs: Fs::real(), random: Random::real() } {
     let store: Store = { links: Shared::of(load()), started: clock.monotonic_millis() };
     print("restored ${Int::to_string(Dict::size(Shared::get(store.links)))} link(s)");

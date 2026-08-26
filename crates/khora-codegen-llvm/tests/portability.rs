@@ -34,7 +34,7 @@ const MAIN: &str = "module demo::main;
 
 fn print(value: String);
 
-export fn main() -> () {
+pub fn main() -> () {
   print(\"ok\");
 }
 ";

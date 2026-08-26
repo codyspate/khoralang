@@ -30,7 +30,7 @@ module std::core;
 /// A three-way answer rather than two booleans: one comparison decides all six
 /// operators, and a type cannot accidentally disagree with itself about `<` and
 /// `>=`.
-export type Ordering =
+pub type Ordering =
   | Less
   | Equal
   | Greater;
@@ -44,14 +44,14 @@ export type Ordering =
 /// **`Float` is not an instance**, because `NaN == NaN` is false and a type
 /// whose values are not equal to themselves breaks every container built on
 /// this one. `docs/design/numbers.md` has the argument.
-export trait Eq {
+pub trait Eq {
   /// Whether these are the same value.
   fn eq(self, other: Self) -> Bool;
 }
 
 /// Ordering refines equality: anything orderable can be compared for equality,
 /// so `Ord` requires `Eq` rather than repeating it.
-export trait Ord: Eq {
+pub trait Ord: Eq {
   /// Where `self` falls relative to `other`.
   ///
   /// Must agree with `eq`: `cmp` answering `Equal` and `eq` answering false is
@@ -71,7 +71,7 @@ export trait Ord: Eq {
 /// `Float` is deliberately not an instance, because it is not an instance of
 /// `Eq`: `NaN == NaN` is false, and a key that is not equal to itself is a
 /// lost entry in every language that allows one. `docs/design/numbers.md`.
-export trait Hash: Eq {
+pub trait Hash: Eq {
   /// A number to bucket by. Any number: spreading it out is the map's job, not
   /// this one's, so an implementation only has to be *consistent*.
   fn hash(self) -> Int;
@@ -84,7 +84,7 @@ export trait Hash: Eq {
 /// read back. Nothing promises that `show` round-trips, and `Float` is the one
 /// place it happens to — see `docs/design/compatibility.md`, which makes that
 /// a promise about `Float` rather than about `Show`.
-export trait Show {
+pub trait Show {
   /// This value, as text.
   fn show(self) -> String;
 }
@@ -135,7 +135,7 @@ impl Show for String {
 /// `Send`: both fibers keep their reference, and neither hands it over.
 ///
 /// `docs/design/sharing.md`.
-export trait Share {}
+pub trait Share {}
 
 impl Eq for Int {
   fn eq(self, other: Int) -> Bool { self == other }
@@ -241,13 +241,13 @@ impl Eq for Ordering {
 
 impl Ordering {
   /// Whether the comparison came out `Less`.
-  export fn is_less(self) -> Bool { self.eq(Ordering::Less) }
+  pub fn is_less(self) -> Bool { self.eq(Ordering::Less) }
   /// Whether it came out `Equal`.
-  export fn is_equal(self) -> Bool { self.eq(Ordering::Equal) }
+  pub fn is_equal(self) -> Bool { self.eq(Ordering::Equal) }
   /// Whether it came out `Greater`.
-  export fn is_greater(self) -> Bool { self.eq(Ordering::Greater) }
+  pub fn is_greater(self) -> Bool { self.eq(Ordering::Greater) }
   /// `a.cmp(b).reverse()` sorts descending without a second comparison.
-  export fn reverse(self) -> Ordering {
+  pub fn reverse(self) -> Ordering {
     match self {
       Ordering::Less => Ordering::Greater,
       Ordering::Equal => Ordering::Equal,
@@ -266,7 +266,7 @@ impl Ordering {
 /// head of an empty list. When the absence is a *failure* — something went
 /// wrong and the caller should know what — the type is `Result`, and
 /// `ok_or` below is the bridge between them.
-export type Option<A> =
+pub type Option<A> =
   | Some(value: A)
   | None;
 
@@ -276,7 +276,7 @@ export type Option<A> =
 /// already *is* "an error or a value"; which of the two readings a function
 /// offers is a choice about its caller, and `attempt` is where one becomes the
 /// other. `docs/design/effect-runtime.md` §8.
-export type Result<A, E> =
+pub type Result<A, E> =
   | Ok(value: A)
   | Err(error: E);
 
@@ -285,16 +285,16 @@ impl<A> Option<A> {
   ///
   /// For a condition. Reaching for the value afterwards means matching twice;
   /// `match` once instead.
-  export fn is_some(self) -> Bool { match self { Option::Some(v) => true, Option::None => false } }
+  pub fn is_some(self) -> Bool { match self { Option::Some(v) => true, Option::None => false } }
 
   /// Whether there is not.
-  export fn is_none(self) -> Bool { match self { Option::Some(v) => false, Option::None => true } }
+  pub fn is_none(self) -> Bool { match self { Option::Some(v) => false, Option::None => true } }
 
   /// The value, or `fallback` if there is none.
   ///
   /// `fallback` is evaluated either way. `unwrap_or_else` takes a closure for
   /// when producing it is expensive.
-  export fn unwrap_or(self, fallback: A) -> A {
+  pub fn unwrap_or(self, fallback: A) -> A {
     match self { Option::Some(v) => v, Option::None => fallback }
   }
 
@@ -303,35 +303,35 @@ impl<A> Option<A> {
   /// The closure is called only when there is nothing, which is the whole
   /// difference from `unwrap_or` — reach for this when producing the fallback
   /// costs something.
-  export fn unwrap_or_else(self, fallback: () -> A) -> A {
+  pub fn unwrap_or_else(self, fallback: () -> A) -> A {
     match self { Option::Some(v) => v, Option::None => fallback() }
   }
 
   /// Turns absence into a failure, which is how an `Option` joins a `raises`
   /// chain.
-  export fn ok_or<E>(self, error: E) -> Result<A, E> {
+  pub fn ok_or<E>(self, error: E) -> Result<A, E> {
     match self { Option::Some(v) => Result::Ok(v), Option::None => Result::Err(error) }
   }
 }
 
 impl<A, E> Result<A, E> {
   /// Whether this succeeded.
-  export fn is_ok(self) -> Bool { match self { Result::Ok(v) => true, Result::Err(e) => false } }
+  pub fn is_ok(self) -> Bool { match self { Result::Ok(v) => true, Result::Err(e) => false } }
 
   /// Whether it did not.
-  export fn is_err(self) -> Bool { match self { Result::Ok(v) => false, Result::Err(e) => true } }
+  pub fn is_err(self) -> Bool { match self { Result::Ok(v) => false, Result::Err(e) => true } }
 
   /// The value, or `fallback` if there was an error.
   ///
   /// **The error is discarded.** That is the right thing exactly when the
   /// caller has already decided the reason does not change what they do; when
   /// it might, `match`.
-  export fn unwrap_or(self, fallback: A) -> A {
+  pub fn unwrap_or(self, fallback: A) -> A {
     match self { Result::Ok(v) => v, Result::Err(e) => fallback }
   }
 
   /// Discards the error, which is the one direction that cannot fail.
-  export fn ok(self) -> Option<A> {
+  pub fn ok(self) -> Option<A> {
     match self { Result::Ok(v) => Option::Some(v), Result::Err(e) => Option::None }
   }
 
@@ -340,7 +340,7 @@ impl<A, E> Result<A, E> {
   /// What a function does at the edge of its own vocabulary: a caller should
   /// see the failure in terms of what *they* asked for, not in terms of
   /// whatever was reached to answer it.
-  export fn map_err<F>(self, f: (E) -> F) -> Result<A, F> {
+  pub fn map_err<F>(self, f: (E) -> F) -> Result<A, F> {
     match self { Result::Ok(v) => Result::Ok(v), Result::Err(e) => Result::Err(f(e)) }
   }
 }
@@ -358,12 +358,12 @@ impl<A, E> Result<A, E> {
 ///
 /// `[a, b, c]` builds one — the literal is `Cons(a, Cons(b, Cons(c, Nil)))`
 /// and needs `List` in scope, exactly as `0.01d` needs `Decimal`.
-export type List<A> =
+pub type List<A> =
   | Nil
   | Cons(head: A, tail: List<A>);
 
 /// A list split down the middle, for `sort`.
-export type Halves<A> = {
+pub type Halves<A> = {
   left: List<A>,
   right: List<A>,
 };
@@ -380,7 +380,7 @@ impl<A: Ord> List<A> {
   /// `A: Ord` rather than a comparison function, so that `<` on the elements
   /// and `sort` on the list cannot disagree. Sorting by something else is
   /// `sort_by`, which does not exist yet and wants a closure.
-  export fn sort(self) -> List<A> {
+  pub fn sort(self) -> List<A> {
     match self {
       List::Nil => List::Nil,
       List::Cons(only, rest) => match rest {
@@ -405,7 +405,7 @@ impl<A: Ord> List<A> {
   ///
   /// The cost is a length and a reversal, both linear, against a sort that is
   /// already linearithmic.
-  export fn split(self) -> Halves<A> {
+  pub fn split(self) -> Halves<A> {
     List::take_first(self, self.length() / 2, List::Nil)
   }
 
@@ -450,31 +450,31 @@ impl<A> List<A> {
   /// Whether there is nothing in it.
   ///
   /// Constant time, which `length() == 0` is not.
-  export fn is_empty(self) -> Bool { match self { List::Nil => true, List::Cons(h, t) => false } }
+  pub fn is_empty(self) -> Bool { match self { List::Nil => true, List::Cons(h, t) => false } }
 
   /// How many elements there are.
   ///
   /// **Walks the list.** Nothing here caches it, so a loop that asks each time
   /// round is quadratic — take it once.
-  export fn length(self) -> Int {
+  pub fn length(self) -> Int {
     match self { List::Nil => 0, List::Cons(h, t) => 1 + t.length() }
   }
 
   /// The first element, or `None` for an empty list.
-  export fn head(self) -> Option<A> {
+  pub fn head(self) -> Option<A> {
     match self { List::Nil => Option::None, List::Cons(h, t) => Option::Some(h) }
   }
 
   /// Prepends, which is the cheap end. Appending walks the whole list, so it
   /// is spelled `concat` and its cost is visible at the call site.
-  export fn push(self, item: A) -> List<A> { List::Cons(item, self) }
+  pub fn push(self, item: A) -> List<A> { List::Cons(item, self) }
 
   /// `self` followed by `other`.
   ///
   /// Copies `self` and shares `other`, so the cost is the length of the *left*
   /// argument. Building a list by repeatedly concatenating onto the end is the
   /// quadratic way to do it; push and `reverse` once.
-  export fn concat(self, other: List<A>) -> List<A> {
+  pub fn concat(self, other: List<A>) -> List<A> {
     match self {
       List::Nil => other,
       List::Cons(h, t) => List::Cons(h, t.concat(other)),
@@ -482,14 +482,14 @@ impl<A> List<A> {
   }
 
   /// The same elements, back to front.
-  export fn reverse(self) -> List<A> { self.reverse_onto(List::Nil) }
+  pub fn reverse(self) -> List<A> { self.reverse_onto(List::Nil) }
 
   /// `self` reversed, in front of `acc`.
   ///
   /// The accumulating half of `reverse`, and useful on its own: building a
   /// list front-to-back and reversing it at the end is the linear way to do
   /// what `concat` in a loop does quadratically. This is the "at the end".
-  export fn reverse_onto(self, acc: List<A>) -> List<A> {
+  pub fn reverse_onto(self, acc: List<A>) -> List<A> {
     match self {
       List::Nil => acc,
       List::Cons(h, t) => t.reverse_onto(List::Cons(h, acc)),
@@ -500,7 +500,7 @@ impl<A> List<A> {
   ///
   /// `step` is called with what has been accumulated so far and the next
   /// element. Summing is `fold(0, fn (a, b) => a + b)`.
-  export fn fold<B>(self, start: B, step: (B, A) -> B) -> B {
+  pub fn fold<B>(self, start: B, step: (B, A) -> B) -> B {
     match self {
       List::Nil => start,
       List::Cons(h, t) => t.fold(step(start, h), step),
@@ -517,7 +517,7 @@ impl<A> List<A> {
 /// Khora has no mutable references and no mutable fields, so Rust's
 /// `fn next(&mut self) -> Option<Item>` is not expressible. An iterator hands
 /// back its successor instead. `for` desugars to this and reads the same.
-export type Step<S, A> =
+pub type Step<S, A> =
   | Yield(state: S, item: A)
   | Done;
 
@@ -526,7 +526,7 @@ export type Step<S, A> =
 /// One method, and it hands back a successor rather than mutating: see `Step`
 /// above for why that shape rather than Rust's. Implementing it is what makes
 /// a type usable in `for`.
-export trait Iterator {
+pub trait Iterator {
   /// What the iteration yields.
   type Item;
   /// The next item and the iterator that follows it, or `Done`.
@@ -534,7 +534,7 @@ export trait Iterator {
 }
 
 /// `Range::Of(from, to)` yields `from` up to but not including `to`.
-export type Range = | Of(from: Int, to: Int);
+pub type Range = | Of(from: Int, to: Int);
 
 impl Iterator for Range {
   type Item = Int;
@@ -569,7 +569,7 @@ impl<A> Iterator for List<A> {
 /// which is what lets a single `map` serve `Option`, `List` and everything
 /// else with a shape. `docs/vision.md` names this as a non-negotiable, and it
 /// is the thing Rust's trait system cannot say.
-export trait Functor {
+pub trait Functor {
   /// Every element replaced by `f` of it, in the same shape.
   fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;
 }
@@ -577,7 +577,7 @@ export trait Functor {
 /// `pure` lifts a value; `map2` combines two containers. `map2` rather than
 /// `ap` because `ap` would need a container of *functions*, and reading a
 /// signature is easier than reading `Self<(A) -> B>`.
-export trait Applicative: Functor {
+pub trait Applicative: Functor {
   /// One value, in the smallest container that can hold it.
   fn pure<A>(value: A) -> Self<A>;
   /// Two containers combined element-wise by `f`.
@@ -592,7 +592,7 @@ export trait Applicative: Functor {
 /// This is the abstraction Rust cannot express and the reason higher-kinded
 /// types are a non-negotiable in `docs/vision.md`: one `traverse` per
 /// container serves every `Applicative`.
-export trait Traversable: Functor {
+pub trait Traversable: Functor {
   /// `f` over every element, with the containers turned inside out.
   ///
   /// A `List<A>` and an `(A) -> Option<B>` give an `Option<List<B>>`: one
@@ -665,7 +665,7 @@ impl Traversable for List {
 /// halves of that are deliberate: an assertion is the one place a reader of a
 /// test already expects control to leave, it is written at every one of them,
 /// and a test is not ordinary code. `docs/design/testing.md`.
-export fn assert(condition: Bool);
+pub fn assert(condition: Bool);
 
 /// Writes a line to standard output.
 ///
@@ -673,11 +673,11 @@ export fn assert(condition: Bool);
 /// the argument's type, because there is no prelude yet to declare three
 /// differently-typed printers. It is not an effect, which it eventually should
 /// be — writing to a console is exactly the sort of thing a capability is for.
-export fn print(value: String);
+pub fn print(value: String);
 
 /// The empty type. A function whose return type is `Never` does not return
 /// normally — it raises, diverges, or transfers control to a handler.
-export type Never;
+pub type Never;
 
 /// Resource lifetimes.
 ///
@@ -689,7 +689,7 @@ export type Never;
 /// and a closure is monomorphic, so an operation cannot be generic — and it
 /// need not be: `acquire` below is an ordinary generic function that closes
 /// over the value and the release, which is where the polymorphism belongs.
-export effect Scope {
+pub effect Scope {
   defer: (() -> ()) -> (),
 }
 
@@ -699,7 +699,7 @@ export effect Scope {
 /// and has to name it. Reference counted like everything else — which is the
 /// whole mechanism: releasing the last reference runs the finalizers, and the
 /// paths that release a binding are already the paths a region has to end on.
-export type Region;
+pub type Region;
 
 /// A fiber that acquires something wants it released by the scope that outlives
 /// it, so a `Scope` has to be able to cross — which means the region behind it
@@ -712,17 +712,17 @@ impl Region {
   /// `scoped` is the way to reach one from ordinary code; this is what
   /// `scoped` calls. Opening one by hand means being responsible for the
   /// binding that ends it.
-  export fn open() -> Region;
+  pub fn open() -> Region;
   /// Registers `finalizer` to run when this region ends.
   ///
   /// **Reverse order**: the last deferred is the first run, so a finalizer may
   /// depend on one registered before it — a transaction rolled back before the
   /// connection it ran on is closed. Cleanup runs with cancellation held off,
   /// so a finalizer caused by a cancellation is not cut short by it.
-  export fn defer(self, finalizer: () -> ()) -> ();
+  pub fn defer(self, finalizer: () -> ()) -> ();
   /// The region that ends when the program does, released by the entry point
   /// after `main` returns — on the failing path as well as the ordinary one.
-  export fn root() -> Region;
+  pub fn root() -> Region;
 }
 
 impl Scope {
@@ -732,7 +732,7 @@ impl Scope {
   /// above it to ask. Everything else should take one rather than reach for
   /// this — a library that roots its own scope has decided its caller's
   /// lifetimes for it.
-  export fn root() -> Scope {
+  pub fn root() -> Scope {
     let region = Region::root();
     handler for Scope { defer: fn f => Region::defer(region, f) }
   }
@@ -745,7 +745,7 @@ impl Scope {
 /// a region and the region waits; put it in a block and the block does. That
 /// is where structured concurrency comes from, and it needed nothing of its
 /// own. `docs/design/fibers.md`.
-export type Fiber;
+pub type Fiber;
 
 /// A handle to a running fiber, and every operation on one is a message to the
 /// runtime rather than a write to shared memory. Joining twice is joining once,
@@ -759,11 +759,11 @@ impl Fiber {
   /// *stopped*: a cancellation travels out on the same tagged return an error
   /// does, so a fiber with no error row has no channel to be interrupted on
   /// and runs to its end.
-  export fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
+  pub fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
   /// Waits for the fiber to finish. Joining twice is joining once.
-  export fn join(self) -> ();
+  pub fn join(self) -> ();
   /// Asks the fiber to stop at its next cancellation point. Returns at once.
-  export fn cancel(self) -> ();
+  pub fn cancel(self) -> ();
 }
 
 /// A fixed number of elements, side by side.
@@ -776,7 +776,7 @@ impl Fiber {
 /// layout is a contract with the code generator rather than something the
 /// runtime hides. What the runtime does own is allocation and release, both of
 /// which need the length at run time.
-export type Array<A>;
+pub type Array<A>;
 
 impl<A> Array<A> {
   /// No elements at all.
@@ -787,19 +787,19 @@ impl<A> Array<A> {
   /// `fill` it will never write. That gap is what `Vector<A>` is built on: its
   /// storage starts here and is allocated for real by the first `push`, which
   /// is also the first moment there is a value of `A` to fill with.
-  export fn empty() -> Array<A>;
+  pub fn empty() -> Array<A>;
 
   /// `length` elements, every one of them `fill`.
-  export fn new(length: Int, fill: A) -> Array<A>;
+  pub fn new(length: Int, fill: A) -> Array<A>;
   /// How many elements it has. Fixed at construction; nothing grows an array.
-  export fn length(self) -> Int;
+  pub fn length(self) -> Int;
   /// The element at `index`.
   ///
   /// An index outside the array stops the program and says which index and
   /// what length. Same reasoning as trapping on integer overflow: a program
   /// that runs off its own array is wrong, and reading whatever is next in
   /// memory is the least useful possible response.
-  export fn get(self, index: Int) -> A;
+  pub fn get(self, index: Int) -> A;
   /// Writes `value` at `index`, in place.
   ///
   /// **The one mutation in `core`**, and the reason `Array` is not `Share`:
@@ -807,18 +807,18 @@ impl<A> Array<A> {
   /// fiber only inside a type that says it is safe. `docs/design/sharing.md`.
   ///
   /// An index outside the array stops the program, as `get` does.
-  export fn set(self, index: Int, value: A) -> ();
+  pub fn set(self, index: Int, value: A) -> ();
 
   /// Whether these bytes are well-formed UTF-8, and so whether
   /// `String::from_bytes` will accept them. Only an `Array<U8>` has an answer.
-  export fn is_utf8(self) -> Bool;
+  pub fn is_utf8(self) -> Bool;
 
   /// The first `count` elements, copied.
   ///
   /// What a caller does with a buffer it only partly filled: a socket read
   /// says how many bytes arrived, and the rest of the buffer is not part of
   /// the message.
-  export fn prefix(self, count: Int) -> Array<A> {
+  pub fn prefix(self, count: Int) -> Array<A> {
     let length = Array::length(self);
     // Nothing to copy and — the part that used to trap — nothing to seed the
     // new array with. `Array::new` needs a value of `A`, and the only one to
@@ -858,7 +858,7 @@ impl<A> Array<A> {
   /// Only an array of numbers can be lent. An `Array<A>` of Khora objects
   /// holds reference-counted pointers, and handing those across is the mistake
   /// the whole boundary exists to prevent. `docs/design/ffi.md`.
-  export fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
+  pub fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
     with 'c
     raises 'e;
 }
@@ -877,23 +877,23 @@ impl<A> Array<A> {
 /// arguments; none of that is hard and none of it is what a hash was waiting
 /// for.
 impl Int {
-  export fn wrapping_add(self, other: Int) -> Int;
-  export fn wrapping_sub(self, other: Int) -> Int;
-  export fn wrapping_mul(self, other: Int) -> Int;
-  export fn xor(self, other: Int) -> Int;
-  export fn and(self, other: Int) -> Int;
-  export fn or(self, other: Int) -> Int;
-  export fn shl(self, other: Int) -> Int;
+  pub fn wrapping_add(self, other: Int) -> Int;
+  pub fn wrapping_sub(self, other: Int) -> Int;
+  pub fn wrapping_mul(self, other: Int) -> Int;
+  pub fn xor(self, other: Int) -> Int;
+  pub fn and(self, other: Int) -> Int;
+  pub fn or(self, other: Int) -> Int;
+  pub fn shl(self, other: Int) -> Int;
   /// Arithmetic, so a negative number stays negative. A logical shift is what
   /// `Int` cannot express and what an unsigned fixed-width type will.
-  export fn shr(self, other: Int) -> Int;
+  pub fn shr(self, other: Int) -> Int;
 }
 
 // --- text ------------------------------------------------------------------
 //
 /// What `split_once` found: the text before the separator, and everything
 /// after it.
-export type Split = {
+pub type Split = {
   head: String,
   rest: String,
 };
@@ -925,7 +925,7 @@ impl String {
   /// rather than a walk: the input is already UTF-8, so the only way out of it
   /// is a cut through a multi-byte character, and that shows up as a
   /// continuation byte at one end or the other.
-  export fn slice(self, from: Int, to: Int) -> String;
+  pub fn slice(self, from: Int, to: Int) -> String;
 
   /// Where `needle` first occurs at or after `from`, counting in bytes, or
   /// **-1** if it is nowhere.
@@ -945,7 +945,7 @@ impl String {
   /// An empty needle is found at `from`, which is what every other language
   /// says and what stops `split_once` on an empty separator from running
   /// forever.
-  export fn find(self, needle: String, from: Int) -> Int;
+  pub fn find(self, needle: String, from: Int) -> Int;
 
   /// Where `needle` first occurs, or nothing.
   ///
@@ -960,12 +960,12 @@ impl String {
   /// That matters because this is the hottest thing in the request parser:
   /// `split_once` is built on it, and parsing one request is about eight
   /// searches.
-  export fn index_of(self, needle: String) -> Option<Int> {
+  pub fn index_of(self, needle: String) -> Option<Int> {
     let found = String::find(self, needle, 0);
     if found < 0 { Option::None } else { Option::Some(found) }
   }
 
-  export fn matches_at(self, needle: String, at: Int) -> Bool {
+  pub fn matches_at(self, needle: String, at: Int) -> Bool {
     let count = String::byte_length(needle);
     let mut done = 0;
     let mut same = true;
@@ -979,7 +979,7 @@ impl String {
     same
   }
 
-  export fn starts_with(self, prefix: String) -> Bool {
+  pub fn starts_with(self, prefix: String) -> Bool {
     if String::byte_length(prefix) > String::byte_length(self) {
       false
     } else {
@@ -993,7 +993,7 @@ impl String {
   /// per piece and every caller here wants the head and the rest. A record
   /// rather than a pair, because `.head` says which one it is and `.0` does
   /// not.
-  export fn split_once(self, separator: String) -> Option<Split> {
+  pub fn split_once(self, separator: String) -> Option<Split> {
     match String::index_of(self, separator) {
       Option::None => Option::None,
       Option::Some(at) => Option::Some({
@@ -1018,7 +1018,7 @@ impl Float {
   /// reader means by "the number" and what `print` on a `Float` already gives.
   /// Thirty-two bytes is always enough for a double; the call says how many it
   /// needed, so a longer answer would be caught rather than truncated.
-  export fn to_string(self) -> String {
+  pub fn to_string(self) -> String {
     let out: Array<U8> = Array::new(32, 0);
     let written = Array::with_data(out, fn (into, n) => khora_float_text(self, into, n));
     if written > 32 { "?" } else { String::from_bytes(Array::prefix(out, written)) }
@@ -1033,7 +1033,7 @@ impl Float {
   ///
   /// A number too large for an `Int` clamps to the nearest end, and a `NaN` is
   /// zero. Undefined behaviour is the alternative and is not one.
-  export fn to_int(self) -> Int;
+  pub fn to_int(self) -> Int;
 }
 
 impl Int {
@@ -1052,7 +1052,7 @@ impl Int {
   /// a long enough run of digits would have stopped the program — which for
   /// text off a socket is a denial of service with extra steps. The running
   /// total is checked before it is grown instead.
-  export fn of_string(text: String) -> Option<Int> {
+  pub fn of_string(text: String) -> Option<Int> {
     let length = String::byte_length(text);
     let negative = length > 0 && U8::to_int(String::byte(text, 0)) == 45;
     let start = if negative { 1 } else { 0 };
@@ -1082,7 +1082,7 @@ impl Int {
   ///
   /// Exact up to 2^53 and rounded beyond it, which is IEEE's business rather
   /// than Khora's.
-  export fn to_float(self) -> Float;
+  pub fn to_float(self) -> Float;
 
   /// The number, written out.
   ///
@@ -1090,7 +1090,7 @@ impl Int {
   /// a status line, a log — and written here rather than in the runtime
   /// because it is four lines of Khora and a good test of whether they are
   /// pleasant to write.
-  export fn to_string(self) -> String {
+  pub fn to_string(self) -> String {
     if self == 0 {
       "0"
     } else if self < 0 {
@@ -1125,15 +1125,15 @@ impl Int {
 ///
 /// Lending a *buffer* across is the harder question and this type deliberately
 /// does not answer it. `docs/design/ffi.md`.
-export type Ptr;
+pub type Ptr;
 
 impl Ptr {
   /// The null pointer, for the libraries that take one.
-  export fn null() -> Ptr;
+  pub fn null() -> Ptr;
 
   /// Whether this is null — which is how a great many C functions say they
   /// failed.
-  export fn is_null(self) -> Bool;
+  pub fn is_null(self) -> Bool;
 }
 
 /// A string's bytes.
@@ -1146,11 +1146,11 @@ impl Ptr {
 /// same word.
 impl String {
   /// How many bytes the string occupies. Not how many characters it has.
-  export fn byte_length(self) -> Int;
+  pub fn byte_length(self) -> Int;
 
   /// The byte at `index`, counting from zero. Out of range stops the program,
   /// the same as an array.
-  export fn byte(self, index: Int) -> U8;
+  pub fn byte(self, index: Int) -> U8;
 
   /// The same bytes, as a `String`.
   ///
@@ -1159,13 +1159,13 @@ impl String {
   /// without it is the mistake. An `Option` was the alternative and would put
   /// the decision in the wrong place, because what to *do* about bytes that
   /// are not text depends entirely on where they came from.
-  export fn from_bytes(bytes: Array<U8>) -> String;
+  pub fn from_bytes(bytes: Array<U8>) -> String;
 
   /// A copy of the bytes.
   ///
   /// A copy rather than a view, because a string is immutable and an array is
   /// not — a view would let one be edited through the other.
-  export fn bytes(self) -> Array<U8>;
+  pub fn bytes(self) -> Array<U8>;
 
   /// Lends the bytes to `body` as a pointer and a length, for the duration of
   /// the call and no longer.
@@ -1180,13 +1180,13 @@ impl String {
   ///
   /// A string with a zero inside it is not refused: C will see a shorter
   /// string than Khora has, which is what C strings are.
-  export fn with_c_string<B, 'c, 'e>(self, body: (Ptr) -> B with 'c raises 'e) -> B
+  pub fn with_c_string<B, 'c, 'e>(self, body: (Ptr) -> B with 'c raises 'e) -> B
     with 'c
     raises 'e;
 
   /// See `Array::with_data`, which is the same thing and carries the argument
   /// for why the lifetime is a call rather than anything wider.
-  export fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
+  pub fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
     with 'c
     raises 'e;
 }
@@ -1215,26 +1215,26 @@ impl U8 {
   /// Explicit, like every conversion in Khora: there is no implicit narrowing
   /// anywhere, because a number that silently becomes a different number is
   /// found in production rather than in a test.
-  export fn of(value: Int) -> U8;
+  pub fn of(value: Int) -> U8;
 
   /// The low bits of `value`, whatever they are. The way to ask for
   /// truncation by name, for the wire formats that mean it.
-  export fn wrapping(value: Int) -> U8;
+  pub fn wrapping(value: Int) -> U8;
 
   /// Every `U8` is an `Int`, so this cannot fail and costs one
   /// instruction.
-  export fn to_int(self) -> Int;
+  pub fn to_int(self) -> Int;
 
-  export fn wrapping_add(self, other: U8) -> U8;
-  export fn wrapping_sub(self, other: U8) -> U8;
-  export fn wrapping_mul(self, other: U8) -> U8;
-  export fn xor(self, other: U8) -> U8;
-  export fn and(self, other: U8) -> U8;
-  export fn or(self, other: U8) -> U8;
-  export fn shl(self, other: U8) -> U8;
+  pub fn wrapping_add(self, other: U8) -> U8;
+  pub fn wrapping_sub(self, other: U8) -> U8;
+  pub fn wrapping_mul(self, other: U8) -> U8;
+  pub fn xor(self, other: U8) -> U8;
+  pub fn and(self, other: U8) -> U8;
+  pub fn or(self, other: U8) -> U8;
+  pub fn shl(self, other: U8) -> U8;
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
-  export fn shr(self, other: U8) -> U8;
+  pub fn shr(self, other: U8) -> U8;
 }
 
 /// An unsigned 16-bit integer: 0 to 65,535.
@@ -1244,26 +1244,26 @@ impl U16 {
   /// Explicit, like every conversion in Khora: there is no implicit narrowing
   /// anywhere, because a number that silently becomes a different number is
   /// found in production rather than in a test.
-  export fn of(value: Int) -> U16;
+  pub fn of(value: Int) -> U16;
 
   /// The low bits of `value`, whatever they are. The way to ask for
   /// truncation by name, for the wire formats that mean it.
-  export fn wrapping(value: Int) -> U16;
+  pub fn wrapping(value: Int) -> U16;
 
   /// Every `U16` is an `Int`, so this cannot fail and costs one
   /// instruction.
-  export fn to_int(self) -> Int;
+  pub fn to_int(self) -> Int;
 
-  export fn wrapping_add(self, other: U16) -> U16;
-  export fn wrapping_sub(self, other: U16) -> U16;
-  export fn wrapping_mul(self, other: U16) -> U16;
-  export fn xor(self, other: U16) -> U16;
-  export fn and(self, other: U16) -> U16;
-  export fn or(self, other: U16) -> U16;
-  export fn shl(self, other: U16) -> U16;
+  pub fn wrapping_add(self, other: U16) -> U16;
+  pub fn wrapping_sub(self, other: U16) -> U16;
+  pub fn wrapping_mul(self, other: U16) -> U16;
+  pub fn xor(self, other: U16) -> U16;
+  pub fn and(self, other: U16) -> U16;
+  pub fn or(self, other: U16) -> U16;
+  pub fn shl(self, other: U16) -> U16;
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
-  export fn shr(self, other: U16) -> U16;
+  pub fn shr(self, other: U16) -> U16;
 }
 
 /// An unsigned 32-bit integer: 0 to 4,294,967,295.
@@ -1273,26 +1273,26 @@ impl U32 {
   /// Explicit, like every conversion in Khora: there is no implicit narrowing
   /// anywhere, because a number that silently becomes a different number is
   /// found in production rather than in a test.
-  export fn of(value: Int) -> U32;
+  pub fn of(value: Int) -> U32;
 
   /// The low bits of `value`, whatever they are. The way to ask for
   /// truncation by name, for the wire formats that mean it.
-  export fn wrapping(value: Int) -> U32;
+  pub fn wrapping(value: Int) -> U32;
 
   /// Every `U32` is an `Int`, so this cannot fail and costs one
   /// instruction.
-  export fn to_int(self) -> Int;
+  pub fn to_int(self) -> Int;
 
-  export fn wrapping_add(self, other: U32) -> U32;
-  export fn wrapping_sub(self, other: U32) -> U32;
-  export fn wrapping_mul(self, other: U32) -> U32;
-  export fn xor(self, other: U32) -> U32;
-  export fn and(self, other: U32) -> U32;
-  export fn or(self, other: U32) -> U32;
-  export fn shl(self, other: U32) -> U32;
+  pub fn wrapping_add(self, other: U32) -> U32;
+  pub fn wrapping_sub(self, other: U32) -> U32;
+  pub fn wrapping_mul(self, other: U32) -> U32;
+  pub fn xor(self, other: U32) -> U32;
+  pub fn and(self, other: U32) -> U32;
+  pub fn or(self, other: U32) -> U32;
+  pub fn shl(self, other: U32) -> U32;
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
-  export fn shr(self, other: U32) -> U32;
+  pub fn shr(self, other: U32) -> U32;
 }
 
 /// An unsigned 64-bit integer: 0 to 18,446,744,073,709,551,615.
@@ -1305,31 +1305,31 @@ impl U64 {
   /// Explicit, like every conversion in Khora: there is no implicit narrowing
   /// anywhere, because a number that silently becomes a different number is
   /// found in production rather than in a test.
-  export fn of(value: Int) -> U64;
+  pub fn of(value: Int) -> U64;
 
   /// The low bits of `value`, whatever they are. The way to ask for
   /// truncation by name, for the wire formats that mean it.
-  export fn wrapping(value: Int) -> U64;
+  pub fn wrapping(value: Int) -> U64;
 
   /// `Int` cannot hold every `U64`, so this stops the program above
   /// `Int`'s maximum. `U64::wrapping_to_int` is how to reinterpret the bits
   /// instead.
-  export fn to_int(self) -> Int;
+  pub fn to_int(self) -> Int;
 
   /// The same bits read as a signed `Int`, so a `U64` above `Int`'s maximum
   /// comes back negative rather than stopping.
-  export fn wrapping_to_int(self) -> Int;
+  pub fn wrapping_to_int(self) -> Int;
 
-  export fn wrapping_add(self, other: U64) -> U64;
-  export fn wrapping_sub(self, other: U64) -> U64;
-  export fn wrapping_mul(self, other: U64) -> U64;
-  export fn xor(self, other: U64) -> U64;
-  export fn and(self, other: U64) -> U64;
-  export fn or(self, other: U64) -> U64;
-  export fn shl(self, other: U64) -> U64;
+  pub fn wrapping_add(self, other: U64) -> U64;
+  pub fn wrapping_sub(self, other: U64) -> U64;
+  pub fn wrapping_mul(self, other: U64) -> U64;
+  pub fn xor(self, other: U64) -> U64;
+  pub fn and(self, other: U64) -> U64;
+  pub fn or(self, other: U64) -> U64;
+  pub fn shl(self, other: U64) -> U64;
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
-  export fn shr(self, other: U64) -> U64;
+  pub fn shr(self, other: U64) -> U64;
 }
 
 /// A signed 8-bit integer: -128 to 127.
@@ -1339,26 +1339,26 @@ impl I8 {
   /// Explicit, like every conversion in Khora: there is no implicit narrowing
   /// anywhere, because a number that silently becomes a different number is
   /// found in production rather than in a test.
-  export fn of(value: Int) -> I8;
+  pub fn of(value: Int) -> I8;
 
   /// The low bits of `value`, whatever they are. The way to ask for
   /// truncation by name, for the wire formats that mean it.
-  export fn wrapping(value: Int) -> I8;
+  pub fn wrapping(value: Int) -> I8;
 
   /// Every `I8` is an `Int`, so this cannot fail and costs one
   /// instruction.
-  export fn to_int(self) -> Int;
+  pub fn to_int(self) -> Int;
 
-  export fn wrapping_add(self, other: I8) -> I8;
-  export fn wrapping_sub(self, other: I8) -> I8;
-  export fn wrapping_mul(self, other: I8) -> I8;
-  export fn xor(self, other: I8) -> I8;
-  export fn and(self, other: I8) -> I8;
-  export fn or(self, other: I8) -> I8;
-  export fn shl(self, other: I8) -> I8;
+  pub fn wrapping_add(self, other: I8) -> I8;
+  pub fn wrapping_sub(self, other: I8) -> I8;
+  pub fn wrapping_mul(self, other: I8) -> I8;
+  pub fn xor(self, other: I8) -> I8;
+  pub fn and(self, other: I8) -> I8;
+  pub fn or(self, other: I8) -> I8;
+  pub fn shl(self, other: I8) -> I8;
   /// Arithmetic, because the type is signed: a negative number stays
   /// negative.
-  export fn shr(self, other: I8) -> I8;
+  pub fn shr(self, other: I8) -> I8;
 }
 
 /// A signed 16-bit integer: -32,768 to 32,767.
@@ -1368,26 +1368,26 @@ impl I16 {
   /// Explicit, like every conversion in Khora: there is no implicit narrowing
   /// anywhere, because a number that silently becomes a different number is
   /// found in production rather than in a test.
-  export fn of(value: Int) -> I16;
+  pub fn of(value: Int) -> I16;
 
   /// The low bits of `value`, whatever they are. The way to ask for
   /// truncation by name, for the wire formats that mean it.
-  export fn wrapping(value: Int) -> I16;
+  pub fn wrapping(value: Int) -> I16;
 
   /// Every `I16` is an `Int`, so this cannot fail and costs one
   /// instruction.
-  export fn to_int(self) -> Int;
+  pub fn to_int(self) -> Int;
 
-  export fn wrapping_add(self, other: I16) -> I16;
-  export fn wrapping_sub(self, other: I16) -> I16;
-  export fn wrapping_mul(self, other: I16) -> I16;
-  export fn xor(self, other: I16) -> I16;
-  export fn and(self, other: I16) -> I16;
-  export fn or(self, other: I16) -> I16;
-  export fn shl(self, other: I16) -> I16;
+  pub fn wrapping_add(self, other: I16) -> I16;
+  pub fn wrapping_sub(self, other: I16) -> I16;
+  pub fn wrapping_mul(self, other: I16) -> I16;
+  pub fn xor(self, other: I16) -> I16;
+  pub fn and(self, other: I16) -> I16;
+  pub fn or(self, other: I16) -> I16;
+  pub fn shl(self, other: I16) -> I16;
   /// Arithmetic, because the type is signed: a negative number stays
   /// negative.
-  export fn shr(self, other: I16) -> I16;
+  pub fn shr(self, other: I16) -> I16;
 }
 
 /// A signed 32-bit integer: -2,147,483,648 to 2,147,483,647.
@@ -1399,26 +1399,26 @@ impl I32 {
   /// Explicit, like every conversion in Khora: there is no implicit narrowing
   /// anywhere, because a number that silently becomes a different number is
   /// found in production rather than in a test.
-  export fn of(value: Int) -> I32;
+  pub fn of(value: Int) -> I32;
 
   /// The low bits of `value`, whatever they are. The way to ask for
   /// truncation by name, for the wire formats that mean it.
-  export fn wrapping(value: Int) -> I32;
+  pub fn wrapping(value: Int) -> I32;
 
   /// Every `I32` is an `Int`, so this cannot fail and costs one
   /// instruction.
-  export fn to_int(self) -> Int;
+  pub fn to_int(self) -> Int;
 
-  export fn wrapping_add(self, other: I32) -> I32;
-  export fn wrapping_sub(self, other: I32) -> I32;
-  export fn wrapping_mul(self, other: I32) -> I32;
-  export fn xor(self, other: I32) -> I32;
-  export fn and(self, other: I32) -> I32;
-  export fn or(self, other: I32) -> I32;
-  export fn shl(self, other: I32) -> I32;
+  pub fn wrapping_add(self, other: I32) -> I32;
+  pub fn wrapping_sub(self, other: I32) -> I32;
+  pub fn wrapping_mul(self, other: I32) -> I32;
+  pub fn xor(self, other: I32) -> I32;
+  pub fn and(self, other: I32) -> I32;
+  pub fn or(self, other: I32) -> I32;
+  pub fn shl(self, other: I32) -> I32;
   /// Arithmetic, because the type is signed: a negative number stays
   /// negative.
-  export fn shr(self, other: I32) -> I32;
+  pub fn shr(self, other: I32) -> I32;
 }
 
 /// One bucket's worth of entries: the keys that hashed to the same slot.
@@ -1427,7 +1427,7 @@ impl I32 {
 /// ordinary recursive ADT and needs no tombstones, no sentinel value and no
 /// second array saying which slots are live. It allocates per entry, which is
 /// the price, and it is the shape the language is actually good at.
-export type Chain<K, V> =
+pub type Chain<K, V> =
   | Empty
   | Node(key: K, value: V, rest: Chain<K, V>);
 
@@ -1476,13 +1476,13 @@ impl<K: Hash, V> Chain<K, V> {
 /// instead of dividing. `new` starts at eight and `grow` doubles, so nothing
 /// else has to maintain it.
 /// One key and the value under it.
-export type Pair<K, V> = {
+pub type Pair<K, V> = {
   key: K,
   value: V,
 };
 
 /// The smallest entry of a tree, and what is left without it.
-export type Least<K, V> = {
+pub type Least<K, V> = {
   key: K,
   value: V,
   rest: Dict<K, V>,
@@ -1504,17 +1504,17 @@ export type Least<K, V> = {
 /// Weight-balanced (Adams), so every operation is logarithmic in the size and
 /// the recursion here is bounded by the depth rather than by the length — the
 /// distinction that `String::slice` got wrong and paid for.
-export type Dict<K, V> =
+pub type Dict<K, V> =
   | Empty
   | Node(size: Int, key: K, value: V, left: Dict<K, V>, right: Dict<K, V>);
 
 impl<K, V> Dict<K, V> {
   /// An empty dictionary.
-  export fn new() -> Dict<K, V> { Dict::Empty }
+  pub fn new() -> Dict<K, V> { Dict::Empty }
 
   /// How many entries. Kept in the node rather than counted, because balancing
   /// asks for it at every step.
-  export fn size(self) -> Int {
+  pub fn size(self) -> Int {
     match self {
       Dict::Empty => 0,
       Dict::Node(count, k, v, l, r) => count,
@@ -1522,7 +1522,7 @@ impl<K, V> Dict<K, V> {
   }
 
   /// Whether there are no entries.
-  export fn is_empty(self) -> Bool { Dict::size(self) == 0 }
+  pub fn is_empty(self) -> Bool { Dict::size(self) == 0 }
 
   /// A node whose size is computed from its children, and no balancing.
   ///
@@ -1555,7 +1555,7 @@ impl<K, V> Dict<K, V> {
   /// The right side is heavy. Which rotation depends on its own shape: a
   /// single one moves its left subtree across, which only helps if that
   /// subtree is the lighter half.
-  export fn rotate_left(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
+  pub fn rotate_left(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
     match right {
       // Unreachable: an empty side is never the heavy one.
       Dict::Empty => Dict::node(key, value, left, Dict::Empty),
@@ -1578,7 +1578,7 @@ impl<K, V> Dict<K, V> {
   }
 
   /// The mirror of it.
-  export fn rotate_right(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
+  pub fn rotate_right(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
     match left {
       Dict::Empty => Dict::node(key, value, Dict::Empty, right),
       Dict::Node(n, lk, lv, ll, lr) =>
@@ -1600,7 +1600,7 @@ impl<K, V> Dict<K, V> {
   }
 
   /// Every entry, smallest key first.
-  export fn entries(self) -> List<Pair<K, V>> { Dict::gather(self, List::Nil) }
+  pub fn entries(self) -> List<Pair<K, V>> { Dict::gather(self, List::Nil) }
 
   /// The right side first, so what comes out is in key order.
   ///
@@ -1617,7 +1617,7 @@ impl<K, V> Dict<K, V> {
 
 impl<K: Ord, V> Dict<K, V> {
   /// The value under `key`, if there is one.
-  export fn get(self, key: K) -> Option<V> {
+  pub fn get(self, key: K) -> Option<V> {
     match self {
       Dict::Empty => Option::None,
       Dict::Node(n, nk, nv, l, r) =>
@@ -1632,7 +1632,7 @@ impl<K: Ord, V> Dict<K, V> {
   }
 
   /// Whether `key` has an entry.
-  export fn contains(self, key: K) -> Bool {
+  pub fn contains(self, key: K) -> Bool {
     match Dict::get(self, key) {
       Option::None => false,
       Option::Some(found) => true,
@@ -1640,7 +1640,7 @@ impl<K: Ord, V> Dict<K, V> {
   }
 
   /// The map with `key` set to `value`, leaving this one as it was.
-  export fn insert(self, key: K, value: V) -> Dict<K, V> {
+  pub fn insert(self, key: K, value: V) -> Dict<K, V> {
     match self {
       Dict::Empty => Dict::Node(1, key, value, Dict::Empty, Dict::Empty),
       Dict::Node(n, nk, nv, l, r) =>
@@ -1656,7 +1656,7 @@ impl<K: Ord, V> Dict<K, V> {
   }
 
   /// The map without `key`. Removing what is not there is the map unchanged.
-  export fn remove(self, key: K) -> Dict<K, V> {
+  pub fn remove(self, key: K) -> Dict<K, V> {
     match self {
       Dict::Empty => Dict::Empty,
       Dict::Node(n, nk, nv, l, r) =>
@@ -1675,7 +1675,7 @@ impl<K: Ord, V> Dict<K, V> {
   /// The successor moves up: every key on the left is smaller than every key
   /// on the right, so the smallest of the right is the one that can sit
   /// between them.
-  export fn glue(left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
+  pub fn glue(left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
     match Dict::least(right) {
       Option::None => left,
       Option::Some(taken) => Dict::balance(taken.key, taken.value, left, taken.rest),
@@ -1704,7 +1704,7 @@ impl<K: Ord, V> Dict<K, V> {
   ///
   /// A loop rather than a fold, because the recursion would be as deep as the
   /// list is long — the cliff `String::slice` fell off.
-  export fn from_list(entries: List<Pair<K, V>>) -> Dict<K, V> {
+  pub fn from_list(entries: List<Pair<K, V>>) -> Dict<K, V> {
     let mut out = Dict::Empty;
     let mut rest = entries;
     let mut going = true;
@@ -1731,7 +1731,7 @@ impl<K: Ord, V> Dict<K, V> {
 /// Keys need `Hash`, and `Hash` requires `Eq` because the two have to agree —
 /// see the trait. Entries come back in no particular order, and not even a
 /// stable one: growing rehashes everything.
-export type Map<K, V> = {
+pub type Map<K, V> = {
   mut buckets: Array<Chain<K, V>>,
   mut count: Int,
 };
@@ -1745,13 +1745,13 @@ impl<K: Hash, V> Map<K, V> {
   /// `:name` still builds one for its parameters, and both were paid for on
   /// every request a server answered. `Array::empty` is what makes the
   /// difference, and it did not exist when this was written.
-  export fn new() -> Map<K, V> { { buckets: Array::empty(), count: 0 } }
+  pub fn new() -> Map<K, V> { { buckets: Array::empty(), count: 0 } }
 
   /// How many entries there are. Counted as it goes, not walked.
-  export fn len(self) -> Int { self.count }
+  pub fn len(self) -> Int { self.count }
 
   /// The value under `key`, if there is one.
-  export fn get(self, key: K) -> Option<V> {
+  pub fn get(self, key: K) -> Option<V> {
     let at = Map::slot(self, key);
     if at < 0 { Option::None } else { Chain::find(Array::get(self.buckets, at), key) }
   }
@@ -1760,7 +1760,7 @@ impl<K: Hash, V> Map<K, V> {
   ///
   /// For when the value is not wanted; `get` is one lookup either way, so
   /// `holds` followed by `get` is two and a `match` on `get` is one.
-  export fn holds(self, key: K) -> Bool {
+  pub fn holds(self, key: K) -> Bool {
     let at = Map::slot(self, key);
     if at < 0 { false } else { Chain::holds(Array::get(self.buckets, at), key) }
   }
@@ -1768,7 +1768,7 @@ impl<K: Hash, V> Map<K, V> {
   /// Adds `key`, replacing whatever was there. The count only moves when the
   /// key is new, which is what makes it the number of entries rather than the
   /// number of insertions.
-  export fn insert(self, key: K, value: V) -> () {
+  pub fn insert(self, key: K, value: V) -> () {
     if self.count * 4 >= Array::length(self.buckets) * 3 { Map::grow(self); }
     let at = Map::slot(self, key);
     let bucket = Array::get(self.buckets, at);
@@ -1784,7 +1784,7 @@ impl<K: Hash, V> Map<K, V> {
   ///
   /// The table never shrinks. A map emptied of a million entries keeps its
   /// million buckets, which nothing here has needed to be otherwise.
-  export fn remove(self, key: K) -> () {
+  pub fn remove(self, key: K) -> () {
     let at = Map::slot(self, key);
     let bucket = Array::get(self.buckets, at);
     if Chain::holds(bucket, key) {
@@ -1813,7 +1813,7 @@ impl<K: Hash, V> Map<K, V> {
   /// obvious reason: a chain is only short while the `Hash` is good, and a bad
   /// one puts every entry in a single bucket. The price of that should be a
   /// slow walk, not a smashed stack.
-  export fn entries(self) -> List<Pair<K, V>> {
+  pub fn entries(self) -> List<Pair<K, V>> {
     let mut out: List<Pair<K, V>> = List::Nil;
     // Backwards, and prepending, so the list comes out in bucket order with no
     // reversing pass at the end — `List::reverse` would be a second walk and a
@@ -1851,7 +1851,7 @@ impl<K: Hash, V> Map<K, V> {
   /// `keys` and `values` walk the same list the same way, so the two line up
   /// position for position. That is the only thing worth promising about the
   /// order of either.
-  export fn keys(self) -> List<K> {
+  pub fn keys(self) -> List<K> {
     let mut out: List<K> = List::Nil;
     let mut rest = Map::entries(self);
     let mut walking = true;
@@ -1870,7 +1870,7 @@ impl<K: Hash, V> Map<K, V> {
   /// The values, one per entry — duplicates included, because two keys may
   /// well hold the same value and dropping one would make `values` disagree
   /// with `len`.
-  export fn values(self) -> List<V> {
+  pub fn values(self) -> List<V> {
     let mut out: List<V> = List::Nil;
     let mut rest = Map::entries(self);
     let mut walking = true;
@@ -1991,7 +1991,7 @@ impl<K: Hash, V> Map<K, V> {
 /// Popping the last element and `clear` both drop the array outright, which
 /// releases everything at once and is why neither keeps the storage; `wanted`
 /// remembers the size, so refilling reallocates exactly once.
-export type Vector<A> = {
+pub type Vector<A> = {
   mut items: Array<A>,
   mut len: Int,
   /// How big the first allocation should be. Meaningless once there is one.
@@ -2006,7 +2006,7 @@ impl<A> Vector<A> {
   /// a vector which is made and never pushed to, as a field on a record or an
   /// accumulator on the branch that turned out to have nothing to accumulate,
   /// has cost two objects and no cells: itself, and the empty array's header.
-  export fn new() -> Vector<A> {
+  pub fn new() -> Vector<A> {
     let items: Array<A> = Array::empty();
     { items: items, len: 0, wanted: 8 }
   }
@@ -2024,16 +2024,16 @@ impl<A> Vector<A> {
   /// rightly, but a capacity is a hint about a size that is often computed —
   /// `expected - already_have` — and being wrong about a hint is not the same
   /// kind of mistake as indexing off the end of an array.
-  export fn with_capacity(capacity: Int) -> Vector<A> {
+  pub fn with_capacity(capacity: Int) -> Vector<A> {
     let items: Array<A> = Array::empty();
     { items: items, len: 0, wanted: if capacity < 1 { 8 } else { capacity } }
   }
 
   /// How many elements are in it.
-  export fn length(self) -> Int { self.len }
+  pub fn length(self) -> Int { self.len }
 
   /// Whether there is nothing in it.
-  export fn is_empty(self) -> Bool { self.len == 0 }
+  pub fn is_empty(self) -> Bool { self.len == 0 }
 
   /// How many elements fit before the next reallocation — allocated cells, not
   /// promised ones, so this is nought until the first `push`.
@@ -2041,13 +2041,13 @@ impl<A> Vector<A> {
   /// Worth exposing because growth is the only thing about a vector that is
   /// not visible from the outside, and a test that means to exercise it has to
   /// be able to see it.
-  export fn capacity(self) -> Int { Array::length(self.items) }
+  pub fn capacity(self) -> Int { Array::length(self.items) }
 
   /// Adds an element at the end.
   ///
   /// The element goes to `grow` as well when the array is full, because it is
   /// the fill: the only value of `A` anyone here has.
-  export fn push(self, item: A) -> () {
+  pub fn push(self, item: A) -> () {
     if self.len == Array::length(self.items) { Vector::grow(self, item); }
     Array::set(self.items, self.len, item);
     self.len = self.len + 1;
@@ -2074,7 +2074,7 @@ impl<A> Vector<A> {
   /// all of those cells hold the same one — and it goes at the next growth or
   /// with the array. Blanking them would need a value of `A` to blank them
   /// *with*, which is the same wall this whole type is built around.
-  export fn grow(self, seed: A) -> () {
+  pub fn grow(self, seed: A) -> () {
     let old = self.items;
     let was = Array::length(old);
     let room = if was == 0 { self.wanted } else { was * 2 };
@@ -2101,7 +2101,7 @@ impl<A> Vector<A> {
   /// and then kept would be indistinguishable from a leak. Popping the last
   /// element has no first element to use and needs none — the array goes, all
   /// at once, and `wanted` keeps its size for the next fill.
-  export fn pop(self) -> Option<A> {
+  pub fn pop(self) -> Option<A> {
     if self.len == 0 {
       Option::None
     } else {
@@ -2129,7 +2129,7 @@ impl<A> Vector<A> {
   /// not empty — they hold the fill, or an element a `pop` left behind — and
   /// handing one of those back would be a phantom element rather than an
   /// error.
-  export fn get(self, index: Int) -> Option<A> {
+  pub fn get(self, index: Int) -> Option<A> {
     if index < 0 || index >= self.len {
       Option::None
     } else {
@@ -2144,7 +2144,7 @@ impl<A> Vector<A> {
   /// element there — so this reports rather than inventing one or growing to
   /// fit. Growing would have to fill the gap between, and the gap is exactly
   /// what there is no value of `A` for; `push` is how a vector gets longer.
-  export fn set(self, index: Int, value: A) -> Bool {
+  pub fn set(self, index: Int, value: A) -> Bool {
     if index < 0 || index >= self.len {
       false
     } else {
@@ -2161,7 +2161,7 @@ impl<A> Vector<A> {
   /// holding its contents is the bug this method is usually called to avoid.
   /// `wanted` remembers how big it was, so the next fill reallocates once and
   /// arrives back where it started.
-  export fn clear(self) -> () {
+  pub fn clear(self) -> () {
     let held = Array::length(self.items);
     if held > 0 { self.wanted = held; }
     let empty: Array<A> = Array::empty();
@@ -2175,7 +2175,7 @@ impl<A> Vector<A> {
   /// without a reversing pass — the same trick `Map::entries` uses, and a loop
   /// for the same reason: one frame per element is what `String::slice`
   /// overflowed the stack with.
-  export fn to_list(self) -> List<A> {
+  pub fn to_list(self) -> List<A> {
     let mut out: List<A> = List::Nil;
     let mut i = self.len;
     while i > 0 {
@@ -2192,7 +2192,7 @@ impl<A> Vector<A> {
   /// enough to be worth pre-sizing for is a list long enough to overflow the
   /// stack being measured. Doubling costs a handful of reallocations and no
   /// stack at all.
-  export fn from_list(items: List<A>) -> Vector<A> {
+  pub fn from_list(items: List<A>) -> Vector<A> {
     let out: Vector<A> = Vector::new();
     let mut rest = items;
     let mut walking = true;
@@ -2234,7 +2234,7 @@ impl<A> Vector<A> {
 /// The cost is the wrapper at the mount site, and that is the honest price: the
 /// alternative is a bit in every function type, which colours every container
 /// of a function all the way up. `docs/design/sharing.md`.
-export type SharedFn<A, B, 'e>;
+pub type SharedFn<A, B, 'e>;
 
 impl<A, B, 'e> Share for SharedFn<A, B, 'e> {}
 
@@ -2244,9 +2244,9 @@ impl<A, B, 'e> SharedFn<A, B, 'e> {
   /// The argument has to be a closure literal or a named function — anything
   /// else was written elsewhere and took its captures with it, which is the
   /// one thing this cannot check and so the one thing it refuses.
-  export fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>;
+  pub fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>;
   /// Calls it. A plain closure call; the wrapper costs nothing at runtime.
-  export fn call(self, argument: A) -> B raises 'e;
+  pub fn call(self, argument: A) -> B raises 'e;
 }
 
 /// A new state, and something to hand back that is not the state.
@@ -2254,7 +2254,7 @@ impl<A, B, 'e> SharedFn<A, B, 'e> {
 /// What `Shared::modify` asks its change function for. A record rather than a
 /// tuple because a tuple literal has no expression form yet, and named halves
 /// read better than positional ones at the call anyway.
-export type Changed<A, B> = {
+pub type Changed<A, B> = {
   state: A,
   result: B,
 };
@@ -2307,7 +2307,7 @@ export type Changed<A, B> = {
 ///
 /// **No select.** Waiting on the first of several channels wants a primitive
 /// of its own, and nothing has needed one yet.
-export type Channel<A>;
+pub type Channel<A>;
 
 /// The lock is what makes this true, and every operation takes it.
 impl<A> Share for Channel<A> {}
@@ -2316,28 +2316,28 @@ impl<A: Share> Channel<A> {
   /// A channel that will hold at most `capacity` values.
   ///
   /// Below one is one — see the type's note on rendezvous.
-  export fn bounded(capacity: Int) -> Channel<A>;
+  pub fn bounded(capacity: Int) -> Channel<A>;
 
   /// Puts a value in, waiting while the channel is full.
   ///
   /// False when the channel is closed, in which case the value is released
   /// rather than kept: a send with nowhere to put its value must not be the
   /// quietest possible leak.
-  export fn send(self, value: A) -> Bool;
+  pub fn send(self, value: A) -> Bool;
 
   /// Takes a value out, waiting while the channel is empty.
   ///
   /// `None` only when the channel is closed *and* drained.
-  export fn receive(self) -> Option<A>;
+  pub fn receive(self) -> Option<A>;
 
   /// Says nothing more will be sent, and releases everybody waiting.
-  export fn close(self) -> ();
+  pub fn close(self) -> ();
 
   /// How many values are waiting to be taken.
   ///
   /// **Stale the moment it is given**, which is true of every such count. For
   /// a pool reporting its depth and for tests; nothing should branch on it.
-  export fn depth(self) -> Int;
+  pub fn depth(self) -> Int;
 }
 
 /// A value two fibers may both change.
@@ -2357,18 +2357,18 @@ impl<A: Share> Channel<A> {
 /// The contents must be `Share` for the same reason, which also means a `Map`
 /// cannot go in one: it mutates its buckets in place. `Dict` is the ordered
 /// persistent map, and is what a shared table is made of.
-export type Shared<A>;
+pub type Shared<A>;
 
 /// The lock is what makes this true, and `khora_shared_update` takes it.
 impl<A> Share for Shared<A> {}
 
 impl<A: Share> Shared<A> {
   /// A cell holding `value`.
-  export fn of(value: A) -> Shared<A>;
+  pub fn of(value: A) -> Shared<A>;
   /// What is in it now, as a value of the caller's own.
-  export fn get(self) -> A;
+  pub fn get(self) -> A;
   /// Replaces what is in it.
-  export fn set(self, value: A) -> ();
+  pub fn set(self, value: A) -> ();
   /// Reads, transforms and writes as one step, and gives back the new value.
   ///
   /// `change` runs once, under the lock. It cannot fail, and that is
@@ -2379,7 +2379,7 @@ impl<A: Share> Shared<A> {
   ///
   /// Updating the same cell from inside `change` is a deadlock, and stops the
   /// program with a message rather than waiting for itself.
-  export fn update(self, change: (A) -> A) -> A;
+  pub fn update(self, change: (A) -> A) -> A;
 
   /// The same, for a change that has something to say beyond the new state.
   ///
@@ -2398,7 +2398,7 @@ impl<A: Share> Shared<A> {
   ///
   /// Both halves are installed and handed back under the one lock, so the
   /// answer belongs to the state it was produced with.
-  export fn modify<B>(self, change: (A) -> Changed<A, B>) -> B;
+  pub fn modify<B>(self, change: (A) -> Changed<A, B>) -> B;
 }
 
 /// A nursery: the fibers started under it, and the guarantee that none of
@@ -2408,7 +2408,7 @@ impl<A: Share> Shared<A> {
 /// structured concurrency comes from — a fiber cannot escape the block that
 /// started it, because the binding holding the nursery ends on every path out.
 /// `nursery` is the ordinary way to get one. `docs/design/fibers.md`.
-export type Fibers;
+pub type Fibers;
 
 /// Adopting from more than one fiber at once is what a nursery is for, and the
 /// runtime takes a lock to do it. `khora-rt`.
@@ -2419,7 +2419,7 @@ impl Fibers {
   ///
   /// `bounded` is usually the one to want: a server adopting a fiber per
   /// connection meets an unbounded nursery's ceiling by exhausting memory.
-  export fn open() -> Fibers;
+  pub fn open() -> Fibers;
   /// A nursery that will hold at most `limit` running children.
   ///
   /// Adopting past the limit waits for the oldest to finish. That is the whole
@@ -2431,15 +2431,15 @@ impl Fibers {
   /// Unbounded is right for a nursery over a known handful of tasks — the
   /// shape `nursery(..)` is usually used for — and wrong for one fed by the
   /// outside world.
-  export fn bounded(limit: Int) -> Fibers;
+  pub fn bounded(limit: Int) -> Fibers;
   /// Puts a running fiber under this nursery.
   ///
   /// The nursery takes the handle, so nothing else can outlive it with one.
   /// Adopting past a `bounded` limit waits for the oldest child to finish,
   /// which is what turns a ceiling into a queue.
-  export fn adopt(self, fiber: Fiber) -> ();
+  pub fn adopt(self, fiber: Fiber) -> ();
   /// Waits for every child, oldest first, and empties the nursery.
-  export fn wait(self) -> ();
+  pub fn wait(self) -> ();
 }
 
 /// Where a spawned fiber goes.
@@ -2456,7 +2456,7 @@ impl Fibers {
 /// ```
 /// nursery.adopt(Fiber::spawn(fn () => analyze(id)!));
 /// ```
-export effect Nursery {
+pub effect Nursery {
   adopt: (Fiber) -> (),
 }
 
@@ -2483,7 +2483,7 @@ export effect Nursery {
 ///
 /// Which makes eta-expansion change meaning, and it should not.
 /// `docs/design/capability-passing.md` decides what to do about that.
-export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
+pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
   with 'e
   raises 'r
 {
@@ -2504,7 +2504,7 @@ export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises
 /// slowly, which for a server means accepting more slowly, which the listening
 /// socket's backlog is already built to absorb: overload becomes latency
 /// instead of collapse.
-export fn bounded_nursery<A, 'e, 'r>(
+pub fn bounded_nursery<A, 'e, 'r>(
   limit: Int,
   body: () -> A with { 'e | nursery: Nursery } raises 'r
 ) -> A
@@ -2529,7 +2529,7 @@ export fn bounded_nursery<A, 'e, 'r>(
 /// and the error passes straight through.
 ///
 /// **Pass a named function, not a lambda**, for the reason on `nursery`.
-export fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A
+pub fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A
   with 'e
   raises 'r
 {
@@ -2543,7 +2543,7 @@ export fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) 
 ///
 /// The generic half of `Scope`, kept out of the effect so the operation can
 /// stay a plain closure. `release` is called with `value` when the region ends.
-export fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
+pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
   with { 'e | scope: Scope }
 {
   scope.defer(fn () => release(value));
@@ -2560,7 +2560,7 @@ export fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
 /// This is also what makes retrying possible: a policy that runs a computation
 /// a second time has to be able to see that the first time did not work,
 /// without knowing what it was doing.
-export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
+pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
   with 'e;
 
 // --- schedules -------------------------------------------------------------
@@ -2570,16 +2570,16 @@ export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
 /// Deliberately a plain description rather than a stream of instants: a
 /// schedule with no clock in it can be read, compared and tested, and the
 /// clock arrives later without changing what a policy *means*.
-export type Schedule = {
+pub type Schedule = {
   /// Attempts in total, including the first. `1` is "do not retry".
   attempts: Int,
 };
 
 impl Schedule {
   /// Run once. The identity, and the one you get by not asking.
-  export fn once() -> Schedule { { attempts: 1 } }
+  pub fn once() -> Schedule { { attempts: 1 } }
   /// Run up to `n` times, stopping at the first success.
-  export fn times(n: Int) -> Schedule { { attempts: if n < 1 { 1 } else { n } } }
+  pub fn times(n: Int) -> Schedule { { attempts: if n < 1 { 1 } else { n } } }
 }
 
 /// Runs `body` until it succeeds or the schedule runs out.
@@ -2588,7 +2588,7 @@ impl Schedule {
 /// stopped the retrying — an earlier error is a thing that was already
 /// recovered from, and reporting it would say the wrong thing about what
 /// happened.
-export fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
+pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
   with 'e
   raises E
 {
@@ -2613,7 +2613,7 @@ export fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) ->
 
 /// Runs `body` until it fails, or the schedule runs out. The count of runs
 /// that succeeded comes back.
-export fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int
+pub fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int
   with 'e
 {
   let mut left = schedule.attempts;

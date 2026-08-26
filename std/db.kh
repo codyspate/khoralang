@@ -46,7 +46,7 @@ import std::decimal::{Decimal};
 /// read through a float is a number that has already lost, and
 /// `docs/design/numbers.md` is the long version. Floats can be added when
 /// something that is genuinely a measurement needs one.
-export type Cell =
+pub type Cell =
   | Null
   | Text(String)
   | Number(Int)
@@ -54,7 +54,7 @@ export type Cell =
   | Flag(Bool);
 
 /// One row, in the order the query named its columns.
-export type Row = {
+pub type Row = {
   cells: List<Cell>,
 };
 
@@ -65,7 +65,7 @@ export type Row = {
 /// different integer in every engine, and a `std` that pretended otherwise
 /// would be wrong for the second engine anybody wrote. A package that knows
 /// its engine can offer a richer type; this is what everything can agree on.
-export type DbError =
+pub type DbError =
   /// The statement was not accepted.
   | Rejected(String)
   /// The connection is gone.
@@ -77,7 +77,7 @@ export type DbError =
 ///
 /// A record of closures, so a Postgres package, a SQLite package, D1 behind a
 /// Worker and an in-memory double are the same type to everything above.
-export effect Db {
+pub effect Db {
   /// Runs a query and gives back every row.
   query: (String, List<Cell>) -> Result<List<Row>, DbError>,
   /// Runs a statement and gives back how many rows it changed.
@@ -148,7 +148,7 @@ export effect Db {
 /// The row is the *caller's*, deliberately. A transaction over a body that can
 /// fail its own way keeps that failure's type — folding it into `DbError`
 /// would be the loss `Result<A, DbError>` already declines to take.
-export fn transaction<A, 'c, 'r>(
+pub fn transaction<A, 'c, 'r>(
   db: Db, body: () -> Result<A, DbError> with 'c raises 'r
 ) -> Result<A, DbError> with 'c raises 'r {
   match db.begin() {
@@ -215,34 +215,34 @@ impl Cell {
   /// **No coercion.** A `Number` read as text is a schema misunderstanding,
   /// and a library that rendered it would hide the day somebody changed a
   /// column's type.
-  export fn text(self) -> Option<String> {
+  pub fn text(self) -> Option<String> {
     match self { Cell::Text(value) => Option::Some(value), _ => Option::None }
   }
 
   /// The number in this cell, or `None`.
-  export fn number(self) -> Option<Int> {
+  pub fn number(self) -> Option<Int> {
     match self { Cell::Number(value) => Option::Some(value), _ => Option::None }
   }
 
   /// The decimal in this cell, or `None`.
-  export fn money(self) -> Option<Decimal> {
+  pub fn money(self) -> Option<Decimal> {
     match self { Cell::Money(value) => Option::Some(value), _ => Option::None }
   }
 
   /// The boolean in this cell, or `None`.
-  export fn flag(self) -> Option<Bool> {
+  pub fn flag(self) -> Option<Bool> {
     match self { Cell::Flag(value) => Option::Some(value), _ => Option::None }
   }
 
   /// Whether the cell is null, which is a question rather than a value.
-  export fn is_null(self) -> Bool {
+  pub fn is_null(self) -> Bool {
     match self { Cell::Null => true, _ => false }
   }
 }
 
 impl Row {
   /// The cell at `index`, or `None` past the end.
-  export fn cell(self, index: Int) -> Option<Cell> {
+  pub fn cell(self, index: Int) -> Option<Cell> {
     nth(self.cells, index)
   }
 }

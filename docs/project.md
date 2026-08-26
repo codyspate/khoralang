@@ -20,6 +20,15 @@
 
 ### 1.2 Formal EBNF Grammar
 
+> **This is the original sketch, not the implemented grammar.** It is kept as
+> written because it is the document the project started from and other
+> sections of it are still cited — §6.1's reproducible builds, among others.
+> The syntax below has been overtaken in at least three ways: paths are `::`
+> rather than `.`, a function body is a block rather than `= expr;`, and
+> visibility is `pub` rather than `export`. `docs/grammar.ebnf` is what the
+> parser implements, and `docs/design/keywords.md` records why each of those
+> changed.
+
 ```ebnf
 Program        ::= ModuleDecl ( ImportDecl )* ( TopLevelDecl )* ;
 ModuleDecl     ::= "module" IdentPath ";" ;
@@ -88,47 +97,47 @@ The entrypoint `Effect.run_native()` is legal to call only when $R = \emptyset$ 
 ```typescript
 module std.effect;
 
-export type Option<+A> =
+pub type Option<+A> =
   | Some(value: A)
   | None;
 
-export type Result<+A, +E> =
+pub type Result<+A, +E> =
   | Ok(value: A)
   | Err(error: E);
 
-export type Effect<+A, -R, +E>;
-export type Layer<+OutR, -InR, +E>;
-export type Scope;
+pub type Effect<+A, -R, +E>;
+pub type Layer<+OutR, -InR, +E>;
+pub type Scope;
 
-export fn succeed<A>(value: A) -> Effect<A, Never {},>;
-export fn fail<E>(error: E) -> Effect<Never, E {},>;
-export fn sync<A>(thunk: () -> A) -> Effect<A, Never {},>;
-export fn try_catch<A, E>(thunk: () -> A, on_error: Error -> E) -> Effect<A, E {},>;
+pub fn succeed<A>(value: A) -> Effect<A, Never {},>;
+pub fn fail<E>(error: E) -> Effect<Never, E {},>;
+pub fn sync<A>(thunk: () -> A) -> Effect<A, Never {},>;
+pub fn try_catch<A, E>(thunk: () -> A, on_error: Error -> E) -> Effect<A, E {},>;
 
-export fn ask<T>(label: Label) -> Effect<T, 'r Never T label: { | },>;
+pub fn ask<T>(label: Label) -> Effect<T, 'r Never T label: { | },>;
 
-export fn map<A, B, E R,>(effect: Effect<A, E R,>, f: A -> B) -> Effect<B, E R,>;
-export fn flat_map<A, B, E1, E2 R1, R2,>(
+pub fn map<A, B, E R,>(effect: Effect<A, E R,>, f: A -> B) -> Effect<B, E R,>;
+pub fn flat_map<A, B, E1, E2 R1, R2,>(
   effect: Effect<A, E1 R1,>, 
   f: A -> Effect<B, E2 R2,>
 ) -> Effect<B, + E1 E2 R1 R2 { | } },>;
 
-export fn tap<A, E R,>(effect: Effect<A, E R,>, f: A -> Effect<(), R, E>) -> Effect<A, E R,>;
-export fn catch<A, E1, E2 R,>(effect: Effect<A, E1 R,>, handler: E1 -> Effect<A, E2 R,>) -> Effect<A, E2 R,>;
+pub fn tap<A, E R,>(effect: Effect<A, E R,>, f: A -> Effect<(), R, E>) -> Effect<A, E R,>;
+pub fn catch<A, E1, E2 R,>(effect: Effect<A, E1 R,>, handler: E1 -> Effect<A, E2 R,>) -> Effect<A, E2 R,>;
 
-export fn acquire_release<A, E1 R1, R2,>(
+pub fn acquire_release<A, E1 R1, R2,>(
   acquire: Effect<A, E1 R1,>, 
   release: A -> Effect<(), R2, Never>
 ) -> Effect<A, + E1 R1 R2 Scope scope: { | },>;
 
-export fn scoped<A, E R,>(effect: Effect<A, E R Scope scope: { | },>) -> Effect<A, E R,>;
+pub fn scoped<A, E R,>(effect: Effect<A, E R Scope scope: { | },>) -> Effect<A, E R,>;
 
-export fn provide_layer<A, E1, E2 R1, R2,>(
+pub fn provide_layer<A, E1, E2 R1, R2,>(
   effect: Effect<A, E1 R1,>, 
   layer: Layer<R1, E2 R2,>
 ) -> Effect<A, E1 E2 R2, { | }>;
 
-export fn run_native<A, E>(effect: Effect<A, E {},>) -> Result<A, E>;
+pub fn run_native<A, E>(effect: Effect<A, E {},>) -> Result<A, E>;
 
 ```
 
@@ -139,42 +148,42 @@ module std.ai;
 
 import std.effect.{Effect};
 
-export type Device = | Cpu | Cuda(device_id: Int) | Metal | Npu;
+pub type Device = | Cpu | Cuda(device_id: Int) | Metal | Npu;
 
 // Shape-safe tensor parameterized by Device, Shape Tuple, and Element Type
-export type Tensor<D: Device, Scalar Shape: Tuple, Type:>;
-export type Embedding<const Dim: Int, Type: Scalar> = Tensor<Device.Cpu, (Dim), Type>;
+pub type Tensor<D: Device, Scalar Shape: Tuple, Type:>;
+pub type Embedding<const Dim: Int, Type: Scalar> = Tensor<Device.Cpu, (Dim), Type>;
 
 // Compile-time shape-verified matrix multiplication
-export fn matmul<D: Device, Int, K: M: N: Scalar T: const>(
+pub fn matmul<D: Device, Int, K: M: N: Scalar T: const>(
   a: Tensor<D, (M, K), T>,
   b: Tensor<D, (K, N), T>
 ) -> Tensor<D, (M, N), T>;
 
-export type Message = {
+pub type Message = {
   role: String,
   content: String,
 };
 
-export type Prompt = {
+pub type Prompt = {
   system_instructions: Option<String>,
   messages: List<Message>,
   temperature: Float,
 };
 
-export type ModelError =
+pub type ModelError =
   | ContextLengthExceeded(max_tokens: Int)
   | RateLimited(retry_after_ms: Int)
   | InferenceEngineFailure(msg: String)
   | SchemaExtractionError(details: String);
 
-export type LLMService = {
+pub type LLMService = {
   complete: Prompt -> Effect<String, ModelError {},>,
   extract: forall <Schema> . (Prompt, Schema.Spec) -> Effect<Schema, ModelError {},>,
   embed: forall <const Dim: Int> . String -> Effect<Embedding<Dim, F32>, {}, ModelError>,
 };
 
-export fn cosine_similarity<const Dim: Int>(
+pub fn cosine_similarity<const Dim: Int>(
   a: Embedding<Dim, F32>, 
   b: Embedding<Dim, F32>
 ) -> Float;
@@ -244,23 +253,23 @@ import std.effect.{Effect, Layer, Scope, ask, Option};
 import std.net.http.{Request, Response, Router};
 import std.ai.{LLMService, Prompt, Embedding, ModelError, Tensor, cosine_similarity};
 
-export type RiskLevel =
+pub type RiskLevel =
   | Low
   | Moderate(reason: String)
   | Critical(action_required: String);
 
-export type AnalysisReport = {
+pub type AnalysisReport = {
   account_id: String,
   risk: RiskLevel,
   confidence: Float,
 };
 
-export type Ledger = {
+pub type Ledger = {
   get_history: String -> Effect<String, String {},>,
   flag_account: (String, RiskLevel) -> Effect<(), {}, String>,
 };
 
-export fn analyze_transaction_risk(account_id: String) 
+pub fn analyze_transaction_risk(account_id: String) 
   -> Effect<AnalysisReport, LLMService Ledger, String ai: ledger: { },> = {
     
     account_id
@@ -316,7 +325,7 @@ let mock_ai_layer: Layer<{ ai: LLMService }, {}, Never> =
     }),
   });
 
-export fn main() = {
+pub fn main() = {
   let app_layer =
     mock_ledger_layer
     |> Layer.merge(mock_ai_layer);

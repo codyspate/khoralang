@@ -57,7 +57,7 @@ import std::process::shell::{close_pipe, open_pipe, run};
 /// Note what is *not* here: a command that ran and exited non-zero. It ran.
 /// Its status is the answer, and a caller who wanted that to be a failure says
 /// so by calling [`checked_output`].
-export type ProcessError =
+pub type ProcessError =
   | NotStarted(command: String)
   | NotText(command: String)
   | Failed(command: String, status: Int);
@@ -67,7 +67,7 @@ export type ProcessError =
 /// Both halves together because `popen` gives both for the price of one, and
 /// the alternative — a `capture` that returns text and a caller who then wants
 /// the status — is a caller running the command twice.
-export type Completed = {
+pub type Completed = {
   /// What the command exited with. Zero is the universal "it worked".
   status: Int,
   /// Everything it wrote to its standard output. Its standard *error* is not
@@ -103,7 +103,7 @@ export type Completed = {
 /// command into a `Shared<List<String>>` and the test can say that the driver
 /// built the command line it was supposed to, which is the assertion that
 /// matters and the one a real subprocess makes impossible to write.
-export effect Process {
+pub effect Process {
   /// Runs `command` and waits for it, giving what it exited with. Whatever it
   /// prints goes to this process's own output, unredirected.
   status: (String) -> Int raises ProcessError,
@@ -113,7 +113,7 @@ export effect Process {
 
 impl Process {
   /// A real shell.
-  export fn real() -> Process {
+  pub fn real() -> Process {
     handler for Process {
       status: fn command => started(command, run(command))!,
       capture: fn command => capture_output(command)!,
@@ -128,7 +128,7 @@ impl Process {
 /// worked and there is text, or it did not and there is nothing useful to do
 /// with whatever came out. Written once here rather than as the same three
 /// lines at every call site, the way `std::env`'s `variable_or` is.
-export fn checked_output(command: String) -> String
+pub fn checked_output(command: String) -> String
   with { process: Process }
   raises ProcessError
 {

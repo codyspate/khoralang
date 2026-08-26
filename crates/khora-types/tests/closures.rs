@@ -140,7 +140,7 @@ fn a_lambda_parameter_follows_the_ordinary_mutability_rule() {
 fn a_closure_can_be_stored_in_an_adt() {
     assert_clean(
         "module m;\n\
-         export type Handler = | Of(run: (Int) -> Int);\n\
+         pub type Handler = | Of(run: (Int) -> Int);\n\
          fn make() -> Handler { Handler::Of(fn x => x + 1) }\n",
     );
 }
@@ -228,8 +228,8 @@ fn an_unnamed_lambda_has_no_self_reference() {
 // Found by writing the link shortener, which is what it took.
 
 const RECORD: &str = "module m;\n\
-                      export type Link = { code: String, hits: Int };\n\
-                      export type Held = | Nothing | Just(link: Link);\n";
+                      pub type Link = { code: String, hits: Int };\n\
+                      pub type Held = | Nothing | Just(link: Link);\n";
 
 /// The one that failed. A field read on a pattern binding, inside a `match`,
 /// inside a lambda whose parameter type comes from the callee's signature.
@@ -238,7 +238,7 @@ fn a_lambda_knows_its_parameter_before_its_body() {
     assert_clean(&format!(
         "{RECORD}\
          fn apply(v: Held, f: (Held) -> Held) -> Held {{ f(v) }}\n\
-         export fn bump(h: Held) -> Held {{\n\
+         pub fn bump(h: Held) -> Held {{\n\
            apply(h, fn held => match held {{\n\
              Held::Nothing => Held::Nothing,\n\
              Held::Just(found) => Held::Just({{ code: found.code, hits: found.hits + 1 }}),\n\
@@ -254,7 +254,7 @@ fn a_generic_callee_pins_the_parameter_too() {
     assert_clean(&format!(
         "{RECORD}\
          fn apply<A>(v: A, f: (A) -> A) -> A {{ f(v) }}\n\
-         export fn bump(h: Held) -> Held {{\n\
+         pub fn bump(h: Held) -> Held {{\n\
            apply(h, fn held => match held {{\n\
              Held::Nothing => Held::Nothing,\n\
              Held::Just(found) => Held::Just({{ code: found.code, hits: found.hits + 1 }}),\n\
@@ -270,7 +270,7 @@ fn a_pattern_binding_in_a_lambda_has_a_type() {
     assert_clean(&format!(
         "{RECORD}\
          fn count(v: Held, f: (Held) -> Int) -> Int {{ f(v) }}\n\
-         export fn hits(h: Held) -> Int {{\n\
+         pub fn hits(h: Held) -> Int {{\n\
            count(h, fn held => match held {{ Held::Nothing => 0, Held::Just(g) => g.hits }})\n\
          }}\n"
     ));
@@ -285,7 +285,7 @@ fn a_lambda_that_disagrees_with_the_expected_type_is_still_reported() {
         &format!(
             "{RECORD}\
              fn count(v: Held, f: (Held) -> Int) -> Int {{ f(v) }}\n\
-             export fn hits(h: Held) -> Int {{ count(h, fn held => \"not a number\") }}\n"
+             pub fn hits(h: Held) -> Int {{ count(h, fn held => \"not a number\") }}\n"
         ),
         "String",
     );
@@ -297,7 +297,7 @@ fn a_lambda_that_disagrees_with_the_expected_type_is_still_reported() {
 fn a_lambda_with_no_expected_type_is_still_inferred_from_use() {
     assert_clean(
         "module m;\n\
-         export fn twice(n: Int) -> Int { let f = fn x => x + 1; f(f(n)) }\n",
+         pub fn twice(n: Int) -> Int { let f = fn x => x + 1; f(f(n)) }\n",
     );
 }
 
@@ -315,18 +315,18 @@ fn a_lambda_with_no_expected_type_is_still_inferred_from_use() {
 fn an_annotated_closure_parameter_keeps_its_annotation() {
     assert_clean(
         "module m;\n\
-         export fn f() -> String { let g = fn (s: String) => s + \"b\"; g(\"a\") }\n",
+         pub fn f() -> String { let g = fn (s: String) => s + \"b\"; g(\"a\") }\n",
     );
     // And it is still *checked*, rather than merely believed.
     assert_reports(
         "module m;\n\
-         export fn f() -> Int { let g = fn (s: Int) => s + \"b\"; g(1) }\n",
+         pub fn f() -> Int { let g = fn (s: Int) => s + \"b\"; g(1) }\n",
         "arithmetic: expected `Int`, found `String`",
     );
     assert_reports(
         "module m;\n\
          fn ap(f: (String) -> String) -> String { f(\"x\") }\n\
-         export fn g() -> String { ap(fn (s: Int) => s + 1) }\n",
+         pub fn g() -> String { ap(fn (s: Int) => s + 1) }\n",
         "`String` does not match `Int`",
     );
 }
@@ -342,18 +342,18 @@ fn concatenation_does_not_depend_on_how_the_string_arrived() {
     assert_clean(
         "module m;\n\
          fn ap(f: (String) -> String) -> String { f(\"x\") }\n\
-         export fn g() -> String { ap(fn s => s + \"b\") }\n",
+         pub fn g() -> String { ap(fn s => s + \"b\") }\n",
     );
     assert_clean(
         "module m;\n\
          fn ap<A>(f: (A) -> A, x: A) -> A { f(x) }\n\
-         export fn g() -> String { ap(fn (s: String) => s + \"b\", \"a\") }\n",
+         pub fn g() -> String { ap(fn (s: String) => s + \"b\", \"a\") }\n",
     );
     // Nested, because the inner closure's operand comes from the outer one's
     // parameter rather than from its own.
     assert_clean(
         "module m;\n\
-         export fn f() -> String {\n\
+         pub fn f() -> String {\n\
            let g = fn (s: String) => { let h = fn (t: String) => t + s; h(\"x\") };\n\
            g(\"y\")\n\
          }\n",
@@ -370,17 +370,17 @@ fn concatenation_does_not_depend_on_how_the_string_arrived() {
 fn an_unsolved_operand_learns_from_the_other_side() {
     assert_clean(
         "module m;\n\
-         export fn f() -> String { let g = fn s => s + \"b\"; g(\"a\") }\n",
+         pub fn f() -> String { let g = fn s => s + \"b\"; g(\"a\") }\n",
     );
     // Arithmetic still defaults the same way it always did.
     assert_clean(
         "module m;\n\
-         export fn f() -> Int { let g = fn s => s + 1; g(2) }\n",
+         pub fn f() -> Int { let g = fn s => s + 1; g(2) }\n",
     );
     // And a caller that disagrees with what the body settled is still caught.
     assert_reports(
         "module m;\n\
-         export fn f() -> Int { let g = fn s => s + \"b\"; g(1) }\n",
+         pub fn f() -> Int { let g = fn s => s + \"b\"; g(1) }\n",
         "expected `String`, found `Int`",
     );
 }

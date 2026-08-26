@@ -49,7 +49,7 @@ fn reaching_package(at: &Path) -> String {
          import std::core::{Ptr};\n\n\
          // Nothing in this signature says it touches a filesystem.\n\
          extern fn fopen(path: Ptr, mode: Ptr) -> Ptr;\n\n\
-         export fn open_anything(path: Ptr, mode: Ptr) -> Ptr {\n  \
+         pub fn open_anything(path: Ptr, mode: Ptr) -> Ptr {\n  \
          fopen(path, mode)\n\
          }\n",
     );
@@ -73,7 +73,7 @@ fn check_with(permissions: &str) -> (bool, String) {
              [dependencies]\nreaching = {{ git = \"{url}\", rev = \"main\" }}\n"
         ),
     );
-    write(&app.join("src").join("main.kh"), "module app::main;\n\nexport fn main() -> () {}\n");
+    write(&app.join("src").join("main.kh"), "module app::main;\n\npub fn main() -> () {}\n");
 
     let out = Command::new(env!("CARGO_BIN_EXE_khora"))
         .args(["check", app.join("src").join("main.kh").to_str().expect("a path")])

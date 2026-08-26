@@ -56,20 +56,20 @@ import std::core::{Eq, List, Option, Result, Scope, Show, acquire, scoped};
 /// The smallest thing that matches OpenTelemetry's `AnyValue` without
 /// inheriting its variance. A vendor that only has strings renders these; one
 /// that has types keeps them.
-export type Value =
+pub type Value =
   | Text(String)
   | Number(Int)
   | Decimal(Float)
   | Flag(Bool);
 
 /// A named value on a span.
-export type Attribute = {
+pub type Attribute = {
   name: String,
   value: Value,
 };
 
 /// How a span ended.
-export type Status =
+pub type Status =
   /// Nothing went wrong, which is the common case and carries nothing.
   | Ok
   /// Something did, and this is what it was.
@@ -84,7 +84,7 @@ export type Status =
 /// **Two `Int`s for the trace id** because W3C's is 128 bits and Khora's
 /// integer is 64. Naming the halves is better than a string that has to be
 /// parsed at every hop.
-export type Context = {
+pub type Context = {
   trace_high: Int,
   trace_low: Int,
   span: Int,
@@ -94,7 +94,7 @@ export type Context = {
 };
 
 /// A span in progress.
-export type Span = {
+pub type Span = {
   context: Context,
   /// The span this one is inside, or zero at the root.
   parent: Int,
@@ -109,7 +109,7 @@ export type Span = {
 /// `observability.md` flagged as an open question. It is not needed: `around`
 /// below is an ordinary generic *function* that takes the tracer as an
 /// argument, which gets the scoping without the type system change.
-export effect Tracer {
+pub effect Tracer {
   /// Begins a span inside whatever is current.
   start: (String, List<Attribute>) -> Span,
   /// Ends it. Idempotent is not promised; end a span once.
@@ -126,7 +126,7 @@ impl Tracer {
   /// span value with a zero context and does nothing else — no attributes are
   /// read, no strings are built, and with Perceus the list the caller passed
   /// is released at the call.
-  export fn none() -> Tracer {
+  pub fn none() -> Tracer {
     handler for Tracer {
       start: fn (name, _attributes) => {
         context: { trace_high: 0, trace_low: 0, span: 0, sampled: false },
@@ -166,7 +166,7 @@ impl Tracer {
 /// row has none, nothing inside the span can be interrupted, and no frame here
 /// could carry the interruption if it were. A body that does no fallible work
 /// instantiates the row empty and needs no `!` at the call.
-export fn around<A, 'c, 'r>(
+pub fn around<A, 'c, 'r>(
   tracer: Tracer, name: String, body: () -> A with 'c raises 'r
 ) -> A with 'c raises 'r {
   scoped(fn () => spanned(tracer, name, body))!
@@ -214,7 +214,7 @@ fn unfinished(tracer: Tracer, span: Span, ended: Ended) -> () {
 /// the `Result` and puts the error's own text on it, where `around` can only
 /// say that the body did not return. Reach for this when the failure has
 /// something to say, which is most of the time.
-export fn around_result<A, E: Show, 'c, 'r>(
+pub fn around_result<A, E: Show, 'c, 'r>(
   tracer: Tracer, name: String, body: () -> Result<A, E> with 'c raises 'r
 ) -> Result<A, E> with 'c raises 'r {
   scoped(fn () => reported(tracer, name, body))!
@@ -240,23 +240,23 @@ fn reported<A, E: Show, 'c, 'r>(
 }
 
 /// A `Text` attribute, which is most of them.
-export fn text(name: String, value: String) -> Attribute {
+pub fn text(name: String, value: String) -> Attribute {
   { name: name, value: Value::Text(value) }
 }
 
 /// A `Number` attribute.
-export fn number(name: String, value: Int) -> Attribute {
+pub fn number(name: String, value: Int) -> Attribute {
   { name: name, value: Value::Number(value) }
 }
 
 /// A `Flag` attribute.
-export fn flag(name: String, value: Bool) -> Attribute {
+pub fn flag(name: String, value: Bool) -> Attribute {
   { name: name, value: Value::Flag(value) }
 }
 
 impl Context {
   /// A context that names no trace.
-  export fn none() -> Context {
+  pub fn none() -> Context {
     { trace_high: 0, trace_low: 0, span: 0, sampled: false }
   }
 
@@ -264,7 +264,7 @@ impl Context {
   ///
   /// W3C says an all-zero trace id or span id is invalid, which is what makes
   /// zero usable as "none" without a separate flag.
-  export fn is_valid(self) -> Bool {
+  pub fn is_valid(self) -> Bool {
     (self.trace_high != 0 || self.trace_low != 0) && self.span != 0
   }
 
@@ -273,7 +273,7 @@ impl Context {
   /// `00-{32 hex}-{16 hex}-{2 hex}`, which is version zero of the W3C trace
   /// context — a stable, tiny, vendor-neutral spec, which is why it is in
   /// `std` when the exporters are not.
-  export fn to_traceparent(self) -> String {
+  pub fn to_traceparent(self) -> String {
     "00-" + hex16(self.trace_high) + hex16(self.trace_low) + "-" + hex16(self.span)
     + "-" + (if self.sampled { "01" } else { "00" })
   }
@@ -283,7 +283,7 @@ impl Context {
   /// **Refuses anything it does not fully understand**, including a version it
   /// has not heard of. A header half-read is a trace joined to the wrong
   /// parent, which is worse than a trace that starts fresh.
-  export fn of_traceparent(header: String) -> Option<Context> {
+  pub fn of_traceparent(header: String) -> Option<Context> {
     if String::byte_length(header) != 55 { Option::None }
     else if !String::starts_with(header, "00-") { Option::None }
     else if U8::to_int(String::byte(header, 35)) != 45 { Option::None }

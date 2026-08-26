@@ -51,7 +51,7 @@ import std::db::{Cell, Db, DbError, Row};
 import postgres::conn::{Answer, Connection, PgError, ask, close, open, run};
 
 /// What a caller wants done.
-export type Work =
+pub type Work =
   /// Rows back.
   | Query(sql: String, values: List<Cell>)
   /// A count back.
@@ -67,13 +67,13 @@ export type Work =
 /// variant it asked for and treats the others as a broken server -- which they
 /// would be, since `serve` answers each `Work` with its matching `Reply` and
 /// nothing else can put anything on that reply channel.
-export type Reply =
+pub type Reply =
   | Rows(Result<List<Row>, DbError>)
   | Counted(Result<Int, DbError>)
   | Finished(Result<(), DbError>);
 
 /// One question and where to put the answer.
-export type Request = {
+pub type Request = {
   work: Work,
   /// **Made by the caller, one per request, capacity one.** A shared reply
   /// channel would hand a fiber somebody else's answer the moment two requests
@@ -85,7 +85,7 @@ export type Request = {
 ///
 /// A record rather than five arguments because it crosses into the serving
 /// fiber, and one shareable value is easier to reason about than five.
-export type Settings = {
+pub type Settings = {
   host: String,
   port: Int,
   user: String,
@@ -103,7 +103,7 @@ export type Settings = {
 /// A connection that will not open is not a failure a caller has to remember
 /// to check: every request is answered with the reason, in the terms
 /// `std::db` speaks, until somebody closes the channel.
-export fn serve(settings: Settings, requests: Channel<Request>) -> () {
+pub fn serve(settings: Settings, requests: Channel<Request>) -> () {
   match open(settings.host, settings.port, settings.user, settings.database, settings.secret) {
     Result::Err(why) => refuse(requests, PgError::to_db(why)),
     Result::Ok(c) => {
@@ -173,7 +173,7 @@ fn answer(c: Connection, work: Work) -> Reply {
 }
 
 /// A `Db` that sends its work to whoever is serving `requests`.
-export fn over(requests: Channel<Request>) -> Db {
+pub fn over(requests: Channel<Request>) -> Db {
   handler for Db {
     query: fn (sql, values) => ask_rows(requests, Work::Query(sql, values)),
     execute: fn (sql, values) => ask_count(requests, Work::Execute(sql, values)),
@@ -267,7 +267,7 @@ fn statement(c: Connection, sql: String) -> Result<(), DbError> {
 ///
 /// A tag with no number is zero: `BEGIN`, `COMMIT` and `SET` have none, and
 /// they did not affect any rows, so zero is the answer and not a failure.
-export fn changed(tag: String) -> Int {
+pub fn changed(tag: String) -> Int {
   let width = String::byte_length(tag);
   let mut at = width;
   while at > 0 && is_digit(String::byte(tag, at - 1)) {

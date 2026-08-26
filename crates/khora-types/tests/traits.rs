@@ -25,7 +25,7 @@ fn assert_reports(text: &str, needle: &str) {
 }
 
 const SHOW: &str = "module m;\n\
-                    export trait Show { fn show(self) -> String; }\n\
+                    pub trait Show { fn show(self) -> String; }\n\
                     impl Show for Int { fn show(self) -> String { \"i\" } }\n";
 
 // --- resolution -----------------------------------------------------------
@@ -62,8 +62,8 @@ fn an_unbounded_parameter_is_told_to_add_a_bound() {
 fn a_bound_that_does_not_cover_the_method_names_the_bounds_it_has() {
     assert_reports(
         "module m;\n\
-         export trait Show { fn show(self) -> String; }\n\
-         export trait Size { fn size(self) -> Int; }\n\
+         pub trait Show { fn show(self) -> String; }\n\
+         pub trait Size { fn size(self) -> Int; }\n\
          fn f<T: Size>(x: T) -> String { x.show() }\n",
         "no method `show` on `T`, whose bounds are `Size`",
     );
@@ -73,8 +73,8 @@ fn a_bound_that_does_not_cover_the_method_names_the_bounds_it_has() {
 fn a_supertrait_bound_provides_its_parents_methods() {
     assert_clean(
         "module m;\n\
-         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
-         export trait Ord: Eq { fn cmp(self, other: Self) -> Int; }\n\
+         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         pub trait Ord: Eq { fn cmp(self, other: Self) -> Int; }\n\
          fn f<T: Ord>(a: T, b: T) -> Bool { a.eq(b) }\n",
     );
 }
@@ -83,7 +83,7 @@ fn a_supertrait_bound_provides_its_parents_methods() {
 fn a_method_call_checks_its_arguments() {
     assert_reports(
         "module m;\n\
-         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
          impl Eq for Int { fn eq(self, other: Int) -> Bool { true } }\n\
          fn f() -> Bool { 1.eq(true) }\n",
         "this argument",
@@ -138,8 +138,8 @@ fn a_bound_the_caller_does_not_have_is_rejected() {
 fn a_supertrait_discharges_a_bound_on_its_parent() {
     assert_clean(
         "module m;\n\
-         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
-         export trait Ord: Eq { fn cmp(self, other: Self) -> Int; }\n\
+         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         pub trait Ord: Eq { fn cmp(self, other: Self) -> Int; }\n\
          fn needs_eq<T: Eq>(a: T, b: T) -> Bool { a.eq(b) }\n\
          fn has_ord<T: Ord>(a: T, b: T) -> Bool { needs_eq(a, b) }\n",
     );
@@ -159,8 +159,8 @@ fn two_impls_of_one_trait_for_one_type_are_rejected() {
 fn one_type_may_implement_several_traits() {
     assert_clean(
         "module m;\n\
-         export trait Show { fn show(self) -> String; }\n\
-         export trait Size { fn size(self) -> Int; }\n\
+         pub trait Show { fn show(self) -> String; }\n\
+         pub trait Size { fn size(self) -> Int; }\n\
          impl Show for Int { fn show(self) -> String { \"i\" } }\n\
          impl Size for Int { fn size(self) -> Int { 8 } }\n",
     );
@@ -175,7 +175,7 @@ fn an_impl_of_an_unknown_trait_is_rejected() {
 fn an_impl_missing_a_function_is_rejected() {
     assert_reports(
         "module m;\n\
-         export trait Show { fn show(self) -> String; }\n\
+         pub trait Show { fn show(self) -> String; }\n\
          impl Show for Int { }\n",
         "missing `show` from `Show`",
     );
@@ -185,7 +185,7 @@ fn an_impl_missing_a_function_is_rejected() {
 fn an_impl_with_a_function_the_trait_never_declared_is_rejected() {
     assert_reports(
         "module m;\n\
-         export trait Show { fn show(self) -> String; }\n\
+         pub trait Show { fn show(self) -> String; }\n\
          impl Show for Int { fn show(self) -> String { \"i\" } fn extra(self) -> Int { 1 } }\n",
         "`Show` has no function named `extra`",
     );
@@ -196,7 +196,7 @@ fn an_impl_with_a_function_the_trait_never_declared_is_rejected() {
 fn a_default_body_makes_a_function_optional() {
     assert_clean(
         "module m;\n\
-         export trait Show {\n\
+         pub trait Show {\n\
            fn show(self) -> String;\n\
            fn label(self) -> String { \"thing\" }\n\
          }\n\
@@ -210,7 +210,7 @@ fn a_default_body_makes_a_function_optional() {
 fn an_impl_must_supply_every_associated_type() {
     assert_reports(
         "module m;\n\
-         export trait Iterator { type Item; fn next(self) -> Int; }\n\
+         pub trait Iterator { type Item; fn next(self) -> Int; }\n\
          impl Iterator for Int { fn next(self) -> Int { 1 } }\n",
         "missing the associated type `Item`",
     );
@@ -220,7 +220,7 @@ fn an_impl_must_supply_every_associated_type() {
 fn an_associated_type_the_trait_never_declared_is_rejected() {
     assert_reports(
         "module m;\n\
-         export trait Show { fn show(self) -> String; }\n\
+         pub trait Show { fn show(self) -> String; }\n\
          impl Show for Int { type Item = Int; fn show(self) -> String { \"i\" } }\n",
         "`Show` has no associated type named `Item`",
     );
@@ -234,7 +234,7 @@ fn an_associated_type_the_trait_never_declared_is_rejected() {
 fn a_higher_kinded_trait_rejects_a_plain_type() {
     assert_reports(
         "module m;\n\
-         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl Functor for Int { }\n",
         "kind `* -> *`",
     );
@@ -244,8 +244,8 @@ fn a_higher_kinded_trait_rejects_a_plain_type() {
 fn a_plain_trait_rejects_a_constructor() {
     assert_reports(
         "module m;\n\
-         export type Option<A> = | Some(value: A) | None;\n\
-         export trait Show { fn show(self) -> String; }\n\
+         pub type Option<A> = | Some(value: A) | None;\n\
+         pub trait Show { fn show(self) -> String; }\n\
          impl Show for Option { }\n",
         "kind `*`",
     );
@@ -257,8 +257,8 @@ fn a_plain_trait_rejects_a_constructor() {
 fn applying_a_constructor_too_far_suggests_the_bare_name() {
     assert_reports(
         "module m;\n\
-         export type Option<A> = | Some(value: A) | None;\n\
-         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         pub type Option<A> = | Some(value: A) | None;\n\
+         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl<A> Functor for Option<A> { }\n",
         "write `impl Functor for Option`",
     );
@@ -268,8 +268,8 @@ fn applying_a_constructor_too_far_suggests_the_bare_name() {
 fn a_higher_kinded_trait_accepts_a_constructor() {
     let found = errors(
         "module m;\n\
-         export type Option<A> = | Some(value: A) | None;\n\
-         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         pub type Option<A> = | Some(value: A) | None;\n\
+         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl Functor for Option {\n\
            fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> { Option::None }\n\
          }\n",
@@ -283,8 +283,8 @@ fn a_higher_kinded_trait_accepts_a_constructor() {
 fn a_const_parameter_gives_a_different_kind() {
     assert_reports(
         "module m;\n\
-         export type Vector<const N: Int>;\n\
-         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         pub type Vector<const N: Int>;\n\
+         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl Functor for Vector { }\n",
         "kind",
     );
@@ -293,7 +293,7 @@ fn a_const_parameter_gives_a_different_kind() {
 // --- a type's own methods -------------------------------------------------
 
 const USER: &str = "module m;\n\
-                    export type User = | Of(age: Int);\n\
+                    pub type User = | Of(age: Int);\n\
                     impl User {\n\
                       fn age(self) -> Int { match self { User::Of(a) => a } }\n\
                     }\n";
@@ -330,7 +330,7 @@ fn a_method_the_type_does_not_have_is_still_reported() {
 fn one_type_cannot_declare_a_method_name_twice() {
     assert_reports(
         "module m;\n\
-         export type User = | Of(age: Int);\n\
+         pub type User = | Of(age: Int);\n\
          impl User { fn age(self) -> Int { 1 } }\n\
          impl User { fn age(self) -> Int { 2 } }\n",
         "`User` already has a method named `age`",
@@ -342,7 +342,7 @@ fn one_type_cannot_declare_a_method_name_twice() {
 fn a_type_may_have_several_impl_blocks() {
     assert_clean(
         "module m;\n\
-         export type User = | Of(age: Int);\n\
+         pub type User = | Of(age: Int);\n\
          impl User { fn age(self) -> Int { 1 } }\n\
          impl User { fn next(self) -> Int { 2 } }\n",
     );
@@ -355,7 +355,7 @@ fn a_type_may_have_several_impl_blocks() {
 fn a_type_s_own_function_is_reached_by_path() {
     assert_clean(
         "module m;\n\
-         export type User = | Of(age: Int);\n\
+         pub type User = | Of(age: Int);\n\
          impl User { fn new(age: Int) -> User { User::Of(age) } }\n\
          fn f() -> User { User::new(3) }\n",
     );
@@ -366,7 +366,7 @@ fn a_type_s_own_function_is_reached_by_path() {
 fn a_function_reached_by_path_checks_its_arguments() {
     assert_reports(
         "module m;\n\
-         export type User = | Of(age: Int);\n\
+         pub type User = | Of(age: Int);\n\
          impl User { fn new(age: Int) -> User { User::Of(age) } }\n\
          fn f() -> User { User::new(true) }\n",
         "Bool",
@@ -379,7 +379,7 @@ fn a_function_reached_by_path_checks_its_arguments() {
 fn a_function_the_type_does_not_have_is_reported_by_name() {
     assert_reports(
         "module m;\n\
-         export type User = | Of(age: Int);\n\
+         pub type User = | Of(age: Int);\n\
          impl User { fn new(age: Int) -> User { User::Of(age) } }\n\
          fn f() -> User { User::make(3) }\n",
         "`make`",
@@ -392,8 +392,8 @@ fn a_function_the_type_does_not_have_is_reported_by_name() {
 fn an_inherent_method_shadows_a_trait_method_of_the_same_name() {
     assert_clean(
         "module m;\n\
-         export type User = | Of(age: Int);\n\
-         export trait Show { fn show(self) -> Int; }\n\
+         pub type User = | Of(age: Int);\n\
+         pub trait Show { fn show(self) -> Int; }\n\
          impl Show for User { fn show(self) -> Int { 1 } }\n\
          impl User { fn show(self) -> Int { 2 } }\n\
          fn f(u: User) -> Int { u.show() }\n",
@@ -405,8 +405,8 @@ fn an_inherent_method_shadows_a_trait_method_of_the_same_name() {
 fn inherent_methods_and_trait_impls_coexist() {
     assert_clean(
         "module m;\n\
-         export type User = | Of(age: Int);\n\
-         export trait Show { fn show(self) -> Int; }\n\
+         pub type User = | Of(age: Int);\n\
+         pub trait Show { fn show(self) -> Int; }\n\
          impl Show for User { fn show(self) -> Int { 1 } }\n\
          impl User { fn age(self) -> Int { 2 } }\n\
          fn f(u: User) -> Int { u.show() + u.age() }\n",
@@ -419,7 +419,7 @@ fn inherent_methods_and_trait_impls_coexist() {
 fn a_parameterised_inherent_impl_is_allowed() {
     assert_clean(
         "module m;\n\
-         export type Wrapper<A> = | Of(value: A);\n\
+         pub type Wrapper<A> = | Of(value: A);\n\
          impl<A> Wrapper<A> { fn size(self) -> Int { 1 } }\n\
          fn f(b: Wrapper<Int>) -> Int { b.size() }\n",
     );
@@ -428,9 +428,9 @@ fn a_parameterised_inherent_impl_is_allowed() {
 // --- higher-kinded unification --------------------------------------------
 
 const FUNCTOR: &str = "module m;\n\
-                       export type Option<A> = | Some(value: A) | None;\n\
-                       export type Wrapper<A> = | Of(value: A);\n\
-                       export trait Functor {\n\
+                       pub type Option<A> = | Some(value: A) | None;\n\
+                       pub type Wrapper<A> = | Of(value: A);\n\
+                       pub trait Functor {\n\
                          fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;\n\
                        }\n\
                        impl Functor for Option {\n\
@@ -493,9 +493,9 @@ fn a_higher_kinded_method_is_not_available_on_a_plain_type() {
 fn two_constructors_may_implement_one_higher_kinded_trait() {
     assert_clean(
         "module m;\n\
-         export type Option<A> = | Some(value: A) | None;\n\
-         export type Wrapper<A> = | Of(value: A);\n\
-         export trait Functor {\n\
+         pub type Option<A> = | Some(value: A) | None;\n\
+         pub type Wrapper<A> = | Of(value: A);\n\
+         pub trait Functor {\n\
            fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;\n\
          }\n\
          impl Functor for Option {\n\
@@ -517,8 +517,8 @@ fn two_constructors_may_implement_one_higher_kinded_trait() {
 fn a_constructor_applied_to_a_function_type_unifies() {
     assert_clean(
         "module m;\n\
-         export type Option<A> = | Some(value: A) | None;\n\
-         export trait Applicative {\n\
+         pub type Option<A> = | Some(value: A) | None;\n\
+         pub trait Applicative {\n\
            fn ap<A, B>(self: Self<(A) -> B>, value: Self<A>) -> Self<B>;\n\
          }\n\
          impl Applicative for Option {\n\
@@ -533,9 +533,9 @@ fn a_constructor_applied_to_a_function_type_unifies() {
 // --- trait functions with no receiver -------------------------------------
 
 const PURE: &str = "module m;\n\
-                    export type Option<A> = | Some(value: A) | None;\n\
-                    export type Wrapper<A> = | Of(value: A);\n\
-                    export trait Applicative {\n\
+                    pub type Option<A> = | Some(value: A) | None;\n\
+                    pub type Wrapper<A> = | Of(value: A);\n\
+                    pub trait Applicative {\n\
                       fn pure<A>(value: A) -> Self<A>;\n\
                     }\n\
                     impl Applicative for Option {\n\
@@ -592,8 +592,8 @@ fn a_function_the_trait_does_not_have_is_reported() {
 fn a_method_on_a_bounded_application_resolves_through_the_bound() {
     assert_clean(
         "module m;\n\
-         export type Option<A> = | Some(value: A) | None;\n\
-         export trait Applicative {\n\
+         pub type Option<A> = | Some(value: A) | None;\n\
+         pub trait Applicative {\n\
            fn pure<A>(value: A) -> Self<A>;\n\
            fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;\n\
          }\n\
@@ -609,7 +609,7 @@ fn a_method_on_a_bounded_application_resolves_through_the_bound() {
 fn an_unbounded_application_has_no_methods() {
     assert_reports(
         "module m;\n\
-         export trait Applicative { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         pub trait Applicative { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          fn twice<F, A>(x: F<A>, f: (A) -> A) -> F<A> { x.map(f) }\n",
         "add one, as `F: Trait`",
     );
@@ -618,9 +618,9 @@ fn an_unbounded_application_has_no_methods() {
 // --- associated types -----------------------------------------------------
 
 const ITER: &str = "module m;\n\
-                    export type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
-                    export type Range = | Of(from: Int, to: Int);\n\
-                    export trait Iterator {\n\
+                    pub type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
+                    pub type Range = | Of(from: Int, to: Int);\n\
+                    pub trait Iterator {\n\
                       type Item;\n\
                       fn next(self) -> Step<Self, Self::Item>;\n\
                     }\n\
@@ -658,9 +658,9 @@ fn a_projection_is_the_bound_type_not_a_fresh_one() {
 fn a_projection_through_a_parameterised_impl_substitutes_first() {
     assert_clean(
         "module m;\n\
-         export type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
-         export type List<A> = | Nil | Cons(head: A, tail: List<A>);\n\
-         export trait Iterator {\n\
+         pub type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
+         pub type List<A> = | Nil | Cons(head: A, tail: List<A>);\n\
+         pub trait Iterator {\n\
            type Item;\n\
            fn next(self) -> Step<Self, Self::Item>;\n\
          }\n\
@@ -696,7 +696,7 @@ fn an_unresolved_projection_is_rigid() {
 fn an_impl_returning_the_wrong_type_is_rejected() {
     assert_reports(
         "module m;\n\
-         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
          impl Eq for Int { fn eq(self, other: Int) -> Int { 1 } }\n",
         "`eq` returns `Int` here, but `Eq` declares `Bool`",
     );
@@ -706,7 +706,7 @@ fn an_impl_returning_the_wrong_type_is_rejected() {
 fn an_impl_taking_the_wrong_parameter_is_rejected() {
     assert_reports(
         "module m;\n\
-         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
          impl Eq for Int { fn eq(self, other: Bool) -> Bool { true } }\n",
         "parameter 2 of `eq` is `Bool` here, but `Eq` declares `Int`",
     );
@@ -716,7 +716,7 @@ fn an_impl_taking_the_wrong_parameter_is_rejected() {
 fn an_impl_with_the_wrong_arity_is_rejected() {
     assert_reports(
         "module m;\n\
-         export trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
          impl Eq for Int { fn eq(self) -> Bool { true } }\n",
         "`eq` takes 2 parameter(s) in `Eq`, but this impl declares 1",
     );
@@ -728,9 +728,9 @@ fn an_impl_with_the_wrong_arity_is_rejected() {
 fn an_impl_disagreeing_with_its_own_associated_type_is_rejected() {
     assert_reports(
         "module m;\n\
-         export type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
-         export type Range = | Of(from: Int, to: Int);\n\
-         export trait Iterator {\n\
+         pub type Step<S, A> = | Yield(state: S, item: A) | Done;\n\
+         pub type Range = | Of(from: Int, to: Int);\n\
+         pub trait Iterator {\n\
            type Item;\n\
            fn next(self) -> Step<Self, Self::Item>;\n\
          }\n\
@@ -748,8 +748,8 @@ fn an_impl_disagreeing_with_its_own_associated_type_is_rejected() {
 fn an_impl_may_rename_the_methods_own_parameters() {
     assert_clean(
         "module m;\n\
-         export type Option<A> = | Some(value: A) | None;\n\
-         export trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
+         pub type Option<A> = | Some(value: A) | None;\n\
+         pub trait Functor { fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>; }\n\
          impl Functor for Option {\n\
            fn map<X, Y>(self: Option<X>, f: (X) -> Y) -> Option<Y> { Option::None }\n\
          }\n",
@@ -759,37 +759,37 @@ fn an_impl_may_rename_the_methods_own_parameters() {
 // --- projecting off a type variable (D3) -----------------------------------
 
 const EXTRACT: &str = "module m;\n\
-                       export type Text = | Of(s: String);\n\
-                       export type Num = | Of(n: Int);\n\
-                       export type TextSpec = | Of;\n\
-                       export type NumSpec = | Of;\n\
-                       export trait Extract { type Spec; fn spec() -> Self::Spec; }\n\
+                       pub type Text = | Of(s: String);\n\
+                       pub type Num = | Of(n: Int);\n\
+                       pub type TextSpec = | Of;\n\
+                       pub type NumSpec = | Of;\n\
+                       pub trait Extract { type Spec; fn spec() -> Self::Spec; }\n\
                        impl Extract for Text \
                          { type Spec = TextSpec; fn spec() -> TextSpec { TextSpec::Of } }\n\
                        impl Extract for Num \
                          { type Spec = NumSpec; fn spec() -> NumSpec { NumSpec::Of } }\n\
-                       export fn extract<A: Extract>(spec: A::Spec) -> A;\n";
+                       pub fn extract<A: Extract>(spec: A::Spec) -> A;\n";
 
 /// The shape D3 was named after. `?A::Spec ~ NumSpec` cannot be solved when it
 /// is met — projection is not injective — so it waits for the return type to
 /// say what `A` is.
 #[test]
 fn a_projection_waits_for_its_owner() {
-    assert_clean(&format!("{EXTRACT}export fn f() -> Num {{ extract(Num::spec()) }}\n"));
+    assert_clean(&format!("{EXTRACT}pub fn f() -> Num {{ extract(Num::spec()) }}\n"));
 }
 
 /// A trait function reached through the type that implements it, which is how
 /// the spec gets named at all.
 #[test]
 fn a_trait_function_is_reached_through_the_implementing_type() {
-    assert_clean(&format!("{EXTRACT}export fn f() -> NumSpec {{ Num::spec() }}\n"));
+    assert_clean(&format!("{EXTRACT}pub fn f() -> NumSpec {{ Num::spec() }}\n"));
 }
 
 /// Nothing settles `A`, and nothing later will.
 #[test]
 fn a_projection_nothing_settles_is_reported() {
     assert_reports(
-        &format!("{EXTRACT}export fn f() -> Int {{ extract(Num::spec()); 0 }}\n"),
+        &format!("{EXTRACT}pub fn f() -> Int {{ extract(Num::spec()); 0 }}\n"),
         "nothing here says which type this is projected from",
     );
 }
@@ -799,7 +799,7 @@ fn a_projection_nothing_settles_is_reported() {
 #[test]
 fn a_projection_that_does_not_fit_is_still_reported() {
     assert_reports(
-        &format!("{EXTRACT}export fn f() -> Text {{ extract(Num::spec()) }}\n"),
+        &format!("{EXTRACT}pub fn f() -> Text {{ extract(Num::spec()) }}\n"),
         "expected `TextSpec`, found `NumSpec`",
     );
 }
@@ -811,7 +811,7 @@ fn a_projection_that_does_not_fit_is_still_reported() {
 fn a_projection_off_a_rigid_parameter_is_still_rigid() {
     assert_reports(
         &format!(
-            "{EXTRACT}export fn f<A: Extract>(spec: A::Spec) -> A \
+            "{EXTRACT}pub fn f<A: Extract>(spec: A::Spec) -> A \
              {{ extract(NumSpec::Of) }}\n"
         ),
         "NumSpec",
@@ -828,15 +828,15 @@ fn a_projection_off_a_rigid_parameter_is_still_rigid() {
 // `T: Ord`" about a signature that already said exactly that.
 
 const TWO: &str = "module m;\n\
-                   export trait Show { fn show(self) -> String; }\n\
-                   export trait Tag { fn tag(self) -> Int; }\n\
+                   pub trait Show { fn show(self) -> String; }\n\
+                   pub trait Tag { fn tag(self) -> Int; }\n\
                    impl Show for Int { fn show(self) -> String { \"i\" } }\n\
                    impl Tag for Int { fn tag(self) -> Int { 1 } }\n";
 
 #[test]
 fn two_bounds_are_both_kept() {
     assert_clean(&format!(
-        "{TWO}export fn both<T: Show + Tag>(v: T) -> String {{ v.show() }}\n"
+        "{TWO}pub fn both<T: Show + Tag>(v: T) -> String {{ v.show() }}\n"
     ));
 }
 
@@ -844,7 +844,7 @@ fn two_bounds_are_both_kept() {
 #[test]
 fn the_later_bound_is_kept_too() {
     assert_clean(&format!(
-        "{TWO}export fn both<T: Show + Tag>(v: T) -> Int {{ v.tag() }}\n"
+        "{TWO}pub fn both<T: Show + Tag>(v: T) -> Int {{ v.tag() }}\n"
     ));
 }
 
@@ -853,7 +853,7 @@ fn the_later_bound_is_kept_too() {
 #[test]
 fn a_trait_left_out_of_the_bounds_is_still_missing() {
     assert_reports(
-        &format!("{TWO}export fn one<T: Show>(v: T) -> Int {{ v.tag() }}\n"),
+        &format!("{TWO}pub fn one<T: Show>(v: T) -> Int {{ v.tag() }}\n"),
         // The message names the bounds the parameter does have, which is only
         // worth reading now that the list is accurate.
         "no method `tag` on `T`, whose bounds are `Show`",
@@ -865,10 +865,10 @@ fn a_trait_left_out_of_the_bounds_is_still_missing() {
 fn three_bounds_are_all_kept() {
     assert_clean(
         "module m;\n\
-         export trait A { fn a(self) -> Int; }\n\
-         export trait B { fn b(self) -> Int; }\n\
-         export trait C { fn c(self) -> Int; }\n\
-         export fn all<T: A + B + C>(v: T) -> Int { v.a() + v.b() + v.c() }\n",
+         pub trait A { fn a(self) -> Int; }\n\
+         pub trait B { fn b(self) -> Int; }\n\
+         pub trait C { fn c(self) -> Int; }\n\
+         pub fn all<T: A + B + C>(v: T) -> Int { v.a() + v.b() + v.c() }\n",
     );
 }
 
@@ -877,7 +877,7 @@ fn three_bounds_are_all_kept() {
 fn two_supertraits_are_both_kept() {
     assert_clean(&format!(
         "{TWO}\
-         export trait Both: Show + Tag {{ fn both(self) -> Int; }}\n\
-         export fn use_it<T: Both>(v: T) -> Int {{ v.tag() }}\n"
+         pub trait Both: Show + Tag {{ fn both(self) -> Int; }}\n\
+         pub fn use_it<T: Both>(v: T) -> Int {{ v.tag() }}\n"
     ));
 }

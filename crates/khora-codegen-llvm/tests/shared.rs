@@ -72,7 +72,7 @@ fn a_cell_holds_a_value_and_swaps_it() {
         "module main;
 import std::core::{Shared, print};
 
-export fn main() -> () {
+pub fn main() -> () {
   let count = Shared::of(0);
   print(Int::to_string(Shared::get(count)));
   Shared::set(count, 7);
@@ -103,7 +103,7 @@ effect Ledger { balance: (Int) -> Int, }
 
 fn report(id: Int) -> Int with { ledger: Ledger } { ledger.balance(id) }
 
-export fn main() -> () {
+pub fn main() -> () {
   let calls = Shared::of(0);
   with { ledger: handler for Ledger {
     balance: fn id => { Shared::update(calls, fn n => n + 1); id * 10 },
@@ -129,7 +129,7 @@ import std::core::{Fiber, Fibers, Shared, print};
 
 fn bump(cell: Shared<Int>) -> () { Shared::update(cell, fn n => n + 1); }
 
-export fn main() -> () {
+pub fn main() -> () {
   let count = Shared::of(0);
   let crew = Fibers::open();
   let mut i = 0;
@@ -163,7 +163,7 @@ fn work() -> () {
   print(Int::to_string(List::length(Shared::get(names))))
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   work();
   let live = khora_live_count();
   print(Int::to_string(live))
@@ -191,7 +191,7 @@ fn show(entries: List<Pair<Int, String>>) -> String {
   }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let d = Dict::new()
     |> Dict::insert(3, \"c\")
     |> Dict::insert(1, \"a\")
@@ -224,7 +224,7 @@ fn keys(entries: List<Pair<Int, String>>) -> String {
   }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let d = Dict::new() |> Dict::insert(1, \"a\") |> Dict::insert(2, \"b\");
   let more = Dict::insert(d, 3, \"c\");
   let fewer = Dict::remove(d, 1);
@@ -262,7 +262,7 @@ fn depth(d: Dict<Int, Int>) -> Int {
   }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let big = ladder(Dict::new(), 500);
   print(Int::to_string(Dict::size(big)));
   // Perfectly balanced would be 9. Weight-balanced with a slack of three
@@ -295,7 +295,7 @@ fn work() -> Int {
   kept + Dict::size(d)
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let total = work();
   let live = khora_live_count();
   print(Int::to_string(total));
@@ -325,7 +325,7 @@ fn record(cache: Shared<Dict<Int, Int>>, key: Int) -> () {
   Shared::update(cache, fn table => Dict::insert(table, key, key * key));
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let cache = Shared::of(Dict::new());
   let crew = Fibers::open();
   let mut i = 0;
@@ -365,7 +365,7 @@ fn note(log: Shared<String>, what: String) -> () {
   Shared::update(log, fn (soFar: String) => soFar + what + \";\");
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let log = Shared::of(\"\");
   note(log, \"begin\");
   note(log, \"execute\");

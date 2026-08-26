@@ -271,12 +271,12 @@ fn an_adt_is_built_and_matched() {
         "module t;
 fn print(value: Int);
 
-export type Shape =
+pub type Shape =
   | Circle(radius: Int)
   | Square(side: Int)
   | Point;
 
-export fn area(s: Shape) -> Int {
+pub fn area(s: Shape) -> Int {
   match s {
     Shape::Circle(r) => 3 * r * r,
     Shape::Square(side) => side * side,
@@ -313,7 +313,7 @@ fn a_list_literal_builds_a_cons_chain() {
         "module t;
 fn print(value: Int);
 
-export type List<A> = | Nil | Cons(head: A, tail: List<A>);
+pub type List<A> = | Nil | Cons(head: A, tail: List<A>);
 
 fn total(xs: List<Int>) -> Int {
   match xs {
@@ -478,7 +478,7 @@ fn match_guards_fall_through() {
         "module t;
 fn print(value: Int);
 
-export type Reading = | Sample(value: Int) | Missing;
+pub type Reading = | Sample(value: Int) | Missing;
 
 fn describe(r: Reading) -> Int {
   match r {
@@ -550,7 +550,7 @@ extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 fn print(value: String);
 
-export type List = | Nil | Cons(head: Int, tail: List);
+pub type List = | Nil | Cons(head: Int, tail: List);
 
 fn build(n: Int) -> List {
   if n == 0 {
@@ -629,7 +629,7 @@ fn the_live_count_is_actually_observable() {
         "module t;
 extern fn khora_live_count() -> Int;
 
-export type Wrapper = | Wrap(value: Int);
+pub type Wrapper = | Wrap(value: Int);
 
 /// The block releases what it declared *after* its tail is evaluated, so the
 /// count is read while `held` is still alive.
@@ -664,7 +664,7 @@ fn nested_constructor_patterns_match() {
         "module t;
 fn print(value: Int);
 
-export type List = | Nil | Cons(head: Int, tail: List);
+pub type List = | Nil | Cons(head: Int, tail: List);
 
 fn second(l: List) -> Int {
   match l {
@@ -720,7 +720,7 @@ fn a_generic_function_over_a_generic_type_runs() {
         "module t;
 fn print(value: Int);
 
-export type Option<A> = | Some(value: A) | None;
+pub type Option<A> = | Some(value: A) | None;
 
 fn unwrap_or<A>(o: Option<A>, fallback: A) -> A {
   match o {
@@ -815,7 +815,7 @@ fn a_declaration_with_no_body_cannot_be_called() {
     let found = errors(
         "unsupported",
         "module t;
-export type Bag<A> = | Full(value: A) | Empty;
+pub type Bag<A> = | Full(value: A) | Empty;
 fn peek<A>(bag: Bag<A>) -> A;
 fn main() -> Int { peek(Bag::Full(1)) }
 ",
@@ -935,7 +935,7 @@ fn a_parameterised_impl_is_selected_by_the_receiver() {
         "module t;
 fn print(value: Int);
 
-export type Wrapper<A> = | Of(value: A);
+pub type Wrapper<A> = | Of(value: A);
 
 trait Unwrap { fn get(self) -> Int; }
 
@@ -1083,7 +1083,7 @@ fn closures_and_their_captures_are_freed() {
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type List = | Nil | Cons(head: Int, tail: List);
+pub type List = | Nil | Cons(head: Int, tail: List);
 
 fn build(n: Int) -> List {
   if n == 0 { List::Nil } else { List::Cons(n, build(n - 1)) }
@@ -1231,7 +1231,7 @@ fn a_type_can_have_methods_without_a_trait() {
         "module t;
 fn print(value: Int);
 
-export type User = | Of(age: Int);
+pub type User = | Of(age: Int);
 
 impl User {
   fn age(self) -> Int { match self { User::Of(a) => a } }
@@ -1259,7 +1259,7 @@ fn a_type_s_own_function_is_called_by_path() {
         "module t;
 fn print(value: Int);
 
-export type Counter = | Of(count: Int);
+pub type Counter = | Of(count: Int);
 
 impl Counter {
   fn new() -> Counter { Counter::Of(0) }
@@ -1288,7 +1288,7 @@ fn an_inherent_method_wins_over_a_trait_method() {
         "module t;
 fn print(value: Int);
 
-export type User = | Of(age: Int);
+pub type User = | Of(age: Int);
 
 trait Describe { fn describe(self) -> Int; }
 
@@ -1313,7 +1313,7 @@ fn a_parameterised_inherent_impl_runs() {
         "module t;
 fn print(value: Int);
 
-export type Wrapper<A> = | Of(value: A);
+pub type Wrapper<A> = | Of(value: A);
 
 impl<A> Wrapper<A> {
   fn tag(self) -> Int { 7 }
@@ -1339,7 +1339,7 @@ fn an_inherent_method_does_not_leak_its_receiver() {
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type List = | Nil | Cons(head: Int, tail: List);
+pub type List = | Nil | Cons(head: Int, tail: List);
 
 impl List {
   fn sum(self) -> Int {
@@ -1374,7 +1374,7 @@ fn a_higher_kinded_trait_runs() {
         "module t;
 fn print(value: Int);
 
-export type Option<A> = | Some(value: A) | None;
+pub type Option<A> = | Some(value: A) | None;
 
 trait Functor {
   fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;
@@ -1421,11 +1421,11 @@ fn traverse_works_over_three_containers() {
         "module t;
 fn print(value: Int);
 
-export type Option<A> = | Some(value: A) | None;
-export type List<A> = | Nil | Cons(head: A, tail: List<A>);
-export type Pair<A> = | Of(first: A, second: A);
+pub type Option<A> = | Some(value: A) | None;
+pub type List<A> = | Nil | Cons(head: A, tail: List<A>);
+pub type Pair<A> = | Of(first: A, second: A);
 
-export trait Applicative {
+pub trait Applicative {
   fn pure<A>(value: A) -> Self<A>;
   fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;
   fn map2<A, B, C>(self: Self<A>, other: Self<B>, f: (A, B) -> C) -> Self<C>;
@@ -1448,7 +1448,7 @@ impl Applicative for Option {
 }
 
 // ONE traverse per container, written against any Applicative.
-export trait Traversable {
+pub trait Traversable {
   fn traverse<A, B, F: Applicative>(self: Self<A>, f: (A) -> F<B>) -> F<Self<B>>;
 }
 
@@ -1504,7 +1504,7 @@ fn pair_or(o: Option<Pair<Int>>, fallback: Int) -> Int {
   match o { Option::Some(p) => match p { Pair::Of(a, b) => a + b }, Option::None => fallback }
 }
 
-export fn main() -> Int {
+pub fn main() -> Int {
   // The same `halve` traversed through three different containers.
   print(or_else(Option::Some(8).traverse(halve), 0 - 1));
   print(or_else(Option::Some(7).traverse(halve), 0 - 1));
@@ -1531,9 +1531,9 @@ const ITERATOR: &str = "module t;
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Step<S, A> = | Yield(state: S, item: A) | Done;
-export type Range = | Of(from: Int, to: Int);
-export type List<A> = | Nil | Cons(head: A, tail: List<A>);
+pub type Step<S, A> = | Yield(state: S, item: A) | Done;
+pub type Range = | Of(from: Int, to: Int);
+pub type List<A> = | Nil | Cons(head: A, tail: List<A>);
 
 trait Iterator {
   type Item;
@@ -1644,7 +1644,7 @@ fn a_generic_container_releases_what_it_holds() {
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Wrapper<A> = | Of(value: A);
+pub type Wrapper<A> = | Of(value: A);
 
 fn holds_a_string() { let b = Wrapper::Of(\"held\"); }
 fn holds_an_int() { let b = Wrapper::Of(1); }
@@ -1674,7 +1674,7 @@ extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 fn print(value: String);
 
-export type Pair<A> = | Of(first: A, second: A);
+pub type Pair<A> = | Of(first: A, second: A);
 
 fn duplicate<A>(x: A) -> Pair<A> { Pair::Of(x, x) }
 
@@ -1711,8 +1711,8 @@ fn a_constructors_tag_comes_from_its_own_type() {
         "module t;
 fn print(value: Int);
 
-export type First = | A | B;
-export type Second = | B | A;
+pub type First = | A | B;
+pub type Second = | B | A;
 
 fn which(s: Second) -> Int { match s { Second::B => 1, Second::A => 2 } }
 
@@ -1791,7 +1791,7 @@ fn a_closure_can_call_itself() {
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type List = | Nil | Cons(head: Int, tail: List);
+pub type List = | Nil | Cons(head: Int, tail: List);
 
 fn sums() -> Int {
   let countdown = fn n => if n == 0 { 0 } else { n + countdown(n - 1) };

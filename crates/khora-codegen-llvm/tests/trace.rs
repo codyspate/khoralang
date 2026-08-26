@@ -178,7 +178,7 @@ fn the_default_tracer_records_nothing_and_stays_out_of_the_way() {
 /// visible in the transcript rather than decoded from a count.
 const RECORDING: &str = r#"extern fn khora_cancel();
 
-export type Oops = | Bad;
+pub type Oops = | Bad;
 
 /// A fallible call, so that `!` marks a cancellation point.
 fn mark() -> Int raises Oops { 1 }

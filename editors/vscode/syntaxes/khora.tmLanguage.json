@@ -201,7 +201,7 @@
         },
         {
           "comment": "`extern fn` only: the word is a keyword when it is what a `fn` declaration begins with.",
-          "match": "^\\s*(?:export\\s+)?(extern)\\b(?=\\s+fn\\b)",
+          "match": "^\\s*(?:pub\\s+)?(extern)\\b(?=\\s+fn\\b)",
           "captures": {
             "1": {
               "name": "keyword.declaration.khora"
@@ -219,7 +219,7 @@
         },
         {
           "name": "keyword.declaration.khora",
-          "match": "\\b(module|import|type|trait|impl|effect|fn|let|export)\\b"
+          "match": "\\b(module|import|type|trait|impl|effect|fn|let|pub)\\b"
         },
         {
           "name": "storage.modifier.khora",

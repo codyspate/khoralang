@@ -43,7 +43,7 @@ import postgres::wire::{Message, Reader, extended, message_at, message_width, pa
 /// Kept separate from `DbError` so the driver can say things `std::db`'s three
 /// cases cannot — an authentication method it has not got is neither a
 /// rejected statement nor a lost connection.
-export type PgError =
+pub type PgError =
   /// The socket never opened.
   | Unreachable(String)
   /// The server said no. Carries its message, which is usually the useful one.
@@ -59,7 +59,7 @@ impl PgError {
   /// `Unsupported` becomes `Rejected` rather than `Disconnected`: the
   /// connection is fine, the request is the thing that cannot be served, and
   /// a caller retrying a `Disconnected` would retry forever.
-  export fn to_db(self) -> DbError {
+  pub fn to_db(self) -> DbError {
     match self {
       PgError::Unreachable(why) => DbError::Disconnected(why),
       PgError::Closed(why) => DbError::Disconnected(why),
@@ -70,7 +70,7 @@ impl PgError {
 }
 
 /// An open connection.
-export type Connection = {
+pub type Connection = {
   handle: Int,
   /// Bytes that have arrived and not yet been consumed as messages.
   ///
@@ -81,14 +81,14 @@ export type Connection = {
 };
 
 /// What a column is called and what type the server says it is.
-export type Column = {
+pub type Column = {
   name: String,
   /// The type's OID. Text is 25, `int4` is 23, and so on — see `oid_to_cell`.
   oid: Int,
 };
 
 /// A query's answer.
-export type Answer = {
+pub type Answer = {
   columns: List<Column>,
   rows: List<Row>,
   /// What `CommandComplete` said: `SELECT 3`, `INSERT 0 1`.
@@ -128,7 +128,7 @@ fn advance(bytes: Array<U8>, count: Int) -> Array<U8> {
 }
 
 /// One message, reading from the socket until a whole one has arrived.
-export fn next_message(c: Connection) -> Result<Message, PgError> {
+pub fn next_message(c: Connection) -> Result<Message, PgError> {
   let mut answer: Result<Message, PgError> = Result::Err(PgError::Closed("no message"));
   let mut going = true;
   while going {
@@ -180,7 +180,7 @@ fn error_text(m: Message) -> String {
 // --- connecting ------------------------------------------------------------
 
 /// Opens a connection and completes the handshake.
-export fn open(
+pub fn open(
   host: String,
   port: Int,
   user: String,
@@ -291,7 +291,7 @@ fn authenticate(c: Connection, m: Message, secret: String) -> Result<Bool, PgErr
 }
 
 /// Closes politely, so the server logs a disconnection and not a broken pipe.
-export fn close(c: Connection) -> () {
+pub fn close(c: Connection) -> () {
   transmit_bytes(c.handle, terminate());
   shut(c.handle);
 }
@@ -299,7 +299,7 @@ export fn close(c: Connection) -> () {
 // --- querying --------------------------------------------------------------
 
 /// Runs one statement and reads everything it produces.
-export fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
+pub fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
   if transmit_bytes(c.handle, query(sql)) < 0 {
     Result::Err(PgError::Closed("the query could not be sent"))
   } else {
@@ -320,7 +320,7 @@ export fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
 /// has already prepared, and invalidating it when the schema changes, which is
 /// a cache and not a slice of protocol. Round trips are unchanged either way:
 /// this is one write and one read, the same as `run`.
-export fn ask(c: Connection, sql: String, values: List<Cell>) -> Result<Answer, PgError> {
+pub fn ask(c: Connection, sql: String, values: List<Cell>) -> Result<Answer, PgError> {
   if transmit_bytes(c.handle, extended(sql, to_wire(values))) < 0 {
     Result::Err(PgError::Closed("the query could not be sent"))
   } else {
@@ -485,7 +485,7 @@ fn oid_at(columns: List<Column>, index: Int) -> Int {
 /// to parse would have to become either a wrong number or a lost value, and
 /// neither is a decision to take quietly. `Text` keeps the server's own digits
 /// until 13.12 says what should happen to them.
-export fn oid_to_cell(oid: Int, text: String) -> Cell {
+pub fn oid_to_cell(oid: Int, text: String) -> Cell {
   // 16 bool, 20 int8, 21 int2, 23 int4.
   if oid == 16 {
     Cell::Flag(text == "t")

@@ -46,7 +46,7 @@ fn declaration(p: &mut Parser<'_>) {
         IDENT if p.at_contextual(TEST_KW) || p.at_contextual(BENCH_KW) => test_decl(p),
         IDENT if p.at_contextual(EXTERN_KW) => fn_decl(p),
         IDENT if p.at_contextual(DERIVE_KW) => type_decl(p),
-        EXPORT_KW => match p.nth(1) {
+        PUB_KW => match p.nth(1) {
             TYPE_KW => type_decl(p),
             TRAIT_KW => trait_decl(p),
             EFFECT_KW => effect_decl(p),
@@ -133,7 +133,7 @@ fn type_decl(p: &mut Parser<'_>) {
     if p.at_contextual(DERIVE_KW) {
         derive_clause(p);
     }
-    p.eat(EXPORT_KW);
+    p.eat(PUB_KW);
     // Reached only through the `derive` arm above: every other caller checked
     // for `type` first. A `derive` in front of anything else is the mistake
     // worth naming, and naming it here — rather than letting the clause be
@@ -206,7 +206,7 @@ fn derive_clause(p: &mut Parser<'_>) {
 /// from.
 fn trait_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(EXPORT_KW);
+    p.eat(PUB_KW);
     p.bump(TRAIT_KW);
     name(p);
     if p.at(LT) {
@@ -265,7 +265,7 @@ fn trait_body(p: &mut Parser<'_>) {
         }
         match p.current() {
             TYPE_KW => assoc_type_decl(p),
-            FN_KW | EXPORT_KW => fn_decl(p),
+            FN_KW | PUB_KW => fn_decl(p),
             _ => {
                 p.err_recover("expected `fn` or `type`", |p| {
                     p.at_any(&[R_BRACE, FN_KW, TYPE_KW]) || p.at_decl_start()
@@ -301,7 +301,7 @@ fn assoc_type_decl(p: &mut Parser<'_>) {
 /// the dependency-injection model survived decision A8 unchanged.
 fn effect_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(EXPORT_KW);
+    p.eat(PUB_KW);
     p.bump(EFFECT_KW);
     name(p);
     if p.at(LT) {
@@ -330,7 +330,7 @@ fn effect_decl(p: &mut Parser<'_>) {
 /// one `with` per layer.
 fn context_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(EXPORT_KW);
+    p.eat(PUB_KW);
     p.bump_contextual(CONTEXT_KW);
     name(p);
     let brace = p.open(L_BRACE);
@@ -362,7 +362,7 @@ fn context_decl(p: &mut Parser<'_>) {
 /// `std` describes intrinsics and FFI entry points.
 fn fn_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(EXPORT_KW);
+    p.eat(PUB_KW);
     // `extern fn` says the body is a C symbol found at link time. Without it a
     // function with no body is a declaration nobody has kept yet, which the
     // checker allows — a signature ahead of its implementation is a useful
@@ -457,7 +457,7 @@ fn param(p: &mut Parser<'_>) {
 /// `let mut? Pattern (":" Type)? "=" Expr ";"`
 pub(super) fn let_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(EXPORT_KW);
+    p.eat(PUB_KW);
     p.bump(LET_KW);
     p.eat(MUT_KW);
     pattern(p);
@@ -484,7 +484,7 @@ pub(super) fn let_decl(p: &mut Parser<'_>) {
 /// positions cannot be confused.
 pub(super) fn const_decl(p: &mut Parser<'_>) {
     let m = p.start();
-    p.eat(EXPORT_KW);
+    p.eat(PUB_KW);
     // Whichever word got us here. A `let` only reaches this from the recovery
     // path in `declaration`, which has already said what the right one is.
     p.bump_any();

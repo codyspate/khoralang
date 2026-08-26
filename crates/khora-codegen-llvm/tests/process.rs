@@ -101,7 +101,7 @@ fn work() -> String with {{ process: Process }} {{
   }}
 }}
 
-export fn main() -> () {{
+pub fn main() -> () {{
   with {{ process: Process::real() }} {{ print(work()) }}
 }}
 "
@@ -128,7 +128,7 @@ fn work() -> String with {{ process: Process }} {{
   }}
 }}
 
-export fn main() -> () {{
+pub fn main() -> () {{
   with {{ process: Process::real() }} {{ print(work()) }}
 }}
 "
@@ -152,7 +152,7 @@ fn work() -> String with {{ process: Process }} {{
   }}
 }}
 
-export fn main() -> () {{
+pub fn main() -> () {{
   with {{ process: Process::real() }} {{ print(work()) }}
 }}
 "
@@ -186,7 +186,7 @@ fn work() -> String with {{ process: Process }} {{
   }}
 }}
 
-export fn main() -> () {{
+pub fn main() -> () {{
   with {{ process: Process::real() }} {{ print(work()) }}
 }}
 "
@@ -220,7 +220,7 @@ fn work() -> Int with {{ process: Process }} {{
   String::byte_length(captured) + String::byte_length(refused)
 }}
 
-export fn main() -> () {{
+pub fn main() -> () {{
   let total = with {{ process: Process::real() }} {{ work() }};
   let live = khora_live_count();
   print(Int::to_string(total));
@@ -253,7 +253,7 @@ fn version() -> String with {{ process: Process }} {{
   }}
 }}
 
-export fn main() -> () {{
+pub fn main() -> () {{
   with {{ process: handler for Process {{
     status: fn command => 0,
     capture: fn command => {{ status: 0, text: \"asked: \" + command }},

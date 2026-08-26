@@ -18,12 +18,12 @@ fn collects_every_kind_of_declaration() {
         &db,
         "a.kh",
         "module app::core;\n\
-         export type Risk = | Low | High(reason: String);\n\
-         export effect Ledger { record: Int -> () }\n\
-         export fn analyze() -> Int { 1 }\n\
+         pub type Risk = | Low | High(reason: String);\n\
+         pub effect Ledger { record: Int -> () }\n\
+         pub fn analyze() -> Int { 1 }\n\
          fn private_helper() -> Int { 2 }\n\
          const cache = 1;\n\
-         export const shared_cache = 2;\n",
+         pub const shared_cache = 2;\n",
     );
 
     let map = item_map(&db, f);
@@ -39,7 +39,7 @@ fn collects_every_kind_of_declaration() {
     assert!(map.item("analyze").unwrap().is_public);
     assert!(!map.item("private_helper").unwrap().is_public, "visibility not tracked");
     // A constant is exported like anything else. This used to be hard-coded to
-    // private, so `export const` parsed and then did not export.
+    // private, so `pub const` parsed and then did not export.
     assert!(map.item("shared_cache").unwrap().is_public);
     assert!(!map.item("cache").unwrap().is_public);
 }
@@ -49,7 +49,7 @@ fn collects_every_kind_of_declaration() {
 #[test]
 fn variant_constructors_belong_to_their_type() {
     let db = KhoraDatabase::new();
-    let f = file(&db, "a.kh", "module m;\nexport type Risk = | Low | High(reason: String);\n");
+    let f = file(&db, "a.kh", "module m;\npub type Risk = | Low | High(reason: String);\n");
     let map = item_map(&db, f);
 
     let names: Vec<_> = map.variants_of("Risk").map(|v| v.name.clone()).collect();
@@ -60,7 +60,7 @@ fn variant_constructors_belong_to_their_type() {
 #[test]
 fn a_missing_module_declaration_is_an_error() {
     let db = KhoraDatabase::new();
-    let f = file(&db, "a.kh", "export fn f() -> Int { 1 }\n");
+    let f = file(&db, "a.kh", "pub fn f() -> Int { 1 }\n");
     let map = item_map(&db, f);
     assert!(
         map.errors.iter().any(|e| e.message.contains("must begin with a `module`")),
@@ -88,7 +88,7 @@ fn a_duplicate_definition_names_both_places() {
 #[test]
 fn the_module_graph_maps_paths_to_files() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std::core;\nexport type Option = | Some | None;\n");
+    let core = file(&db, "core.kh", "module std::core;\npub type Option = | Some | None;\n");
     let app = file(&db, "app.kh", "module app::main;\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
@@ -116,7 +116,7 @@ fn declaring_one_module_in_two_files_is_an_error() {
 #[test]
 fn resolves_a_qualified_path_into_another_module() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std::core;\nexport fn identity() -> Int { 1 }\n");
+    let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
     let app = file(&db, "app.kh", "module app::main;\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
@@ -145,7 +145,7 @@ fn a_private_item_is_not_reachable_from_another_module() {
 #[test]
 fn resolves_a_constructor_through_its_type() {
     let db = KhoraDatabase::new();
-    let f = file(&db, "a.kh", "module m;\nexport type Risk = | Low | High(reason: String);\n");
+    let f = file(&db, "a.kh", "module m;\npub type Risk = | Low | High(reason: String);\n");
     let root = SourceRoot::new(&db, vec![f]);
 
     let res = resolve_path(&db, root, f, &path(&["Risk", "High"])).unwrap();
@@ -163,7 +163,7 @@ fn resolves_a_constructor_through_its_type() {
 #[test]
 fn a_type_s_own_function_resolves_against_the_type() {
     let db = KhoraDatabase::new();
-    let f = file(&db, "a.kh", "module m;\nexport type Risk = | Low;\n");
+    let f = file(&db, "a.kh", "module m;\npub type Risk = | Low;\n");
     let root = SourceRoot::new(&db, vec![f]);
 
     let res = resolve_path(&db, root, f, &path(&["Risk", "from_str"])).unwrap();
@@ -177,7 +177,7 @@ fn a_type_s_own_function_resolves_against_the_type() {
 #[test]
 fn a_named_import_brings_a_public_item_into_scope() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std::core;\nexport fn identity() -> Int { 1 }\n");
+    let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
     let app = file(&db, "app.kh", "module app::main;\nimport std::core::{identity};\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
@@ -188,7 +188,7 @@ fn a_named_import_brings_a_public_item_into_scope() {
 #[test]
 fn an_aliased_import_resolves_under_its_local_name() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std::core;\nexport fn identity() -> Int { 1 }\n");
+    let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
     let app = file(&db, "app.kh", "module app::main;\nimport std::core::{identity as id};\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
@@ -202,7 +202,7 @@ fn an_aliased_import_resolves_under_its_local_name() {
 #[test]
 fn a_glob_import_brings_public_items_into_scope() {
     let db = KhoraDatabase::new();
-    let core = file(&db, "core.kh", "module std::core;\nexport fn identity() -> Int { 1 }\n");
+    let core = file(&db, "core.kh", "module std::core;\npub fn identity() -> Int { 1 }\n");
     let app = file(&db, "app.kh", "module app::main;\nimport std::core::*;\n");
     let root = SourceRoot::new(&db, vec![core, app]);
 
@@ -239,14 +239,14 @@ fn an_unknown_name_is_reported() {
 #[test]
 fn editing_one_file_does_not_recollect_another() {
     let (mut db, log) = KhoraDatabase::logged();
-    let a = file(&db, "a.kh", "module a;\nexport fn f() -> Int { 1 }\n");
-    let b = file(&db, "b.kh", "module b;\nexport fn g() -> Int { 2 }\n");
+    let a = file(&db, "a.kh", "module a;\npub fn f() -> Int { 1 }\n");
+    let b = file(&db, "b.kh", "module b;\npub fn g() -> Int { 2 }\n");
 
     item_map(&db, a);
     item_map(&db, b);
     log.take();
 
-    b.set_text(&mut db).to("module b;\nexport fn g() -> Int { 99 }\n".to_string());
+    b.set_text(&mut db).to("module b;\npub fn g() -> Int { 99 }\n".to_string());
 
     item_map(&db, a);
     item_map(&db, b);

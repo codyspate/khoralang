@@ -7,7 +7,7 @@ import std::net::http::{HttpError, Response, Router};
 // this is what `std::net::http` costs from end to end, and against
 // `bench/render` it is what the parser and the router cost between them.
 
-export fn main() raises HttpError {
+pub fn main() raises HttpError {
   Router::new()
     |> Router::get("/health", SharedFn::of(fn request => Response::json(200, "{\"status\":\"ok\"}")))
     |> Router::listen(18952)!

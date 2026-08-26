@@ -1,4 +1,4 @@
-//! `export extern fn`, as the checker sees it.
+//! `pub extern fn`, as the checker sees it.
 //!
 //! `docs/design/c-export.md`. Two words the language already has: `extern` is
 //! the C boundary, `export` is visible outside. A body tells the directions
@@ -38,12 +38,12 @@ fn assert_reports(text: &str, needle: &str) {
 #[test]
 fn a_signature_c_can_call_is_accepted() {
     assert_clean(
-        "module m;\nexport extern fn price(units: Int, scale: Int) -> Int { units * scale }\n",
+        "module m;\npub extern fn price(units: Int, scale: Int) -> Int { units * scale }\n",
     );
     // `()` as a return is C's `void`, which is fine. As a *parameter* it is
     // not, and `foreign_obstacle` already said so.
-    assert_clean("module m;\nexport extern fn tick(n: Int) -> () { }\n");
-    assert_clean("module m;\nexport extern fn wide(a: U8, b: I32) -> Bool { true }\n");
+    assert_clean("module m;\npub extern fn tick(n: Int) -> () { }\n");
+    assert_clean("module m;\npub extern fn wide(a: U8, b: I32) -> Bool { true }\n");
 }
 
 /// A C symbol is reachable by anything that links the library, so a private one
@@ -60,15 +60,15 @@ fn an_extern_body_must_be_exported() {
 #[test]
 fn a_type_that_cannot_cross_is_refused_at_the_declaration() {
     assert_reports(
-        "module m;\nexport extern fn greet(who: String) -> Int { 1 }\n",
+        "module m;\npub extern fn greet(who: String) -> Int { 1 }\n",
         "its parameter of type `String` cannot cross",
     );
     assert_reports(
-        "module m;\nexport extern fn name(n: Int) -> String { \"x\" }\n",
+        "module m;\npub extern fn name(n: Int) -> String { \"x\" }\n",
         "its return type `String` cannot cross",
     );
     assert_reports(
-        "module m;\nexport extern fn id<A>(a: A) -> A { a }\n",
+        "module m;\npub extern fn id<A>(a: A) -> A { a }\n",
         "it is generic",
     );
 }
@@ -79,7 +79,7 @@ fn a_type_that_cannot_cross_is_refused_at_the_declaration() {
 #[test]
 fn the_message_says_what_to_do_about_text() {
     assert_reports(
-        "module m;\nexport extern fn greet(who: String) -> Int { 1 }\n",
+        "module m;\npub extern fn greet(who: String) -> Int { 1 }\n",
         "take a buffer and a capacity and return the length",
     );
 }
@@ -95,7 +95,7 @@ fn a_foreign_import_is_left_alone() {
 
 #[test]
 fn an_ordinary_function_is_untouched() {
-    assert_clean("module m;\nexport fn plain(s: String) -> String { s }\n");
+    assert_clean("module m;\npub fn plain(s: String) -> String { s }\n");
 }
 
 /// A `with` clause means the opposite thing on each side of this boundary, and
@@ -115,14 +115,14 @@ fn an_ordinary_function_is_untouched() {
 fn an_export_cannot_require_a_capability() {
     assert_reports(
         "module m;\n\
-         export effect Log { note: (Int) -> (), }\n\
-         export extern fn go(n: Int) -> Int with { log: Log } { n }\n",
+         pub effect Log { note: (Int) -> (), }\n\
+         pub extern fn go(n: Int) -> Int with { log: Log } { n }\n",
         "has a `with` clause, so it needs evidence that C has none of",
     );
     // And the import direction is untouched, because there it is a permission.
     assert_clean(
         "module m;\n\
-         export effect Fs { open: (Ptr) -> Int, }\n\
+         pub effect Fs { open: (Ptr) -> Int, }\n\
          extern fn sys_open(path: Ptr) -> I32 with { fs: Fs };\n",
     );
 }

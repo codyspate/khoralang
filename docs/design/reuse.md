@@ -217,8 +217,8 @@ Packages made it unkeepable: the key is a bare type *name*, and anyone may now
 write
 
 ```khora
-export type Shared = { .. };
-impl Shared { export fn get(self) -> Int { .. } }
+pub type Shared = { .. };
+impl Shared { pub fn get(self) -> Int { .. } }
 ```
 
 whose `get` would have been told its caller was lending. The caller makes no

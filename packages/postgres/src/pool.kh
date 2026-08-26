@@ -51,7 +51,7 @@ import std::db::{Db, DbError};
 import postgres::db::{Request, Settings, over, serve};
 
 /// A set of connections, each with a fiber serving it.
-export type Pool = {
+pub type Pool = {
   /// The ones nobody is using. A connection is *in* this channel exactly when
   /// it is free, which is the whole of the bookkeeping.
   idle: Channel<Channel<Request>>,
@@ -79,7 +79,7 @@ export type Pool = {
 ///
 /// Below one connection is one. A pool of none would take a lease that never
 /// arrives, which is a hang rather than an error.
-export fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
+pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
   let wanted = if count < 1 { 1 } else { count };
   let idle: Channel<Channel<Request>> = Channel::bounded(wanted);
   let mut made = 0;
@@ -107,7 +107,7 @@ export fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
 /// The `Result` is about *getting* a connection. What the body did with one
 /// passes straight through on its own row, because folding a caller's error
 /// into `DbError` would lose its type.
-export fn with_db<A, 'e, 'r>(pool: Pool, body: (Db) -> A raises 'r) -> Result<A, DbError>
+pub fn with_db<A, 'e, 'r>(pool: Pool, body: (Db) -> A raises 'r) -> Result<A, DbError>
   with 'e
   raises 'r
 {
@@ -153,7 +153,7 @@ fn give_back(idle: Channel<Channel<Request>>, requests: Channel<Request>) -> () 
 /// returned to a closed pool is released rather than queued, and its serving
 /// fiber ends when its request channel does — so waiting on the crew is what
 /// makes this a shutdown rather than a request to shut down.
-export fn close(pool: Pool) -> () {
+pub fn close(pool: Pool) -> () {
   Channel::close(pool.idle);
   let mut going = true;
   while going {

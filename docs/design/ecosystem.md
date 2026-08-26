@@ -89,7 +89,7 @@ A foreign function is opaque, so the compiler cannot see what it does. Its
 way `unsafe` is a promise rather than a proof:
 
 ```
-export fn open(path: String) -> File
+pub fn open(path: String) -> File
   with { fs: FileSystem }
   raises IoError;
 ```

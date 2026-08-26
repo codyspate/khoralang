@@ -50,8 +50,8 @@ const REGIONS: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Region;
-export trait Share {}
+pub type Region;
+pub trait Share {}
 /// `khora_region_defer` locks, so a scope may be handed across fibers.
 impl Share for Region {}
 
@@ -140,7 +140,7 @@ fn a_finalizer_runs_when_a_raise_passes_through() {
         "region_raise",
         &format!(
             "{REGIONS}
-export type Oops = | Bad;
+pub type Oops = | Bad;
 
 fn work(n: Int) -> Int raises Oops {{
   let region = Region::open();
@@ -234,7 +234,7 @@ fn the_root_region_ends_after_an_uncaught_raise() {
         "region_root_raise",
         &format!(
             "{REGIONS}
-export type Oops = | Bad;
+pub type Oops = | Bad;
 
 fn main() -> Int raises Oops {{
   let region = Region::root();
@@ -259,8 +259,8 @@ const SCOPE: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Region;
-export trait Share {}
+pub type Region;
+pub trait Share {}
 /// `khora_region_defer` locks, so a scope may be handed across fibers.
 impl Share for Region {}
 impl Region {
@@ -268,9 +268,9 @@ impl Region {
   fn defer(self, finalizer: () -> ()) -> ();
 }
 
-export effect Scope { defer: (() -> ()) -> (), }
+pub effect Scope { defer: (() -> ()) -> (), }
 
-export fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
+pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
   with { 'e | scope: Scope }
 {
   scope.defer(fn () => release(value));
@@ -286,7 +286,7 @@ fn an_acquired_value_is_released_when_the_region_ends() {
         "scope_acquire",
         &format!(
             "{SCOPE}
-export fn use_it() -> Int with {{ scope: Scope }} {{
+pub fn use_it() -> Int with {{ scope: Scope }} {{
   let handle = acquire(7, fn h => print(h));
   handle + 1
 }}
@@ -313,11 +313,11 @@ fn a_region_discharges_the_scope_requirement() {
         "scope_subtract",
         &format!(
             "{SCOPE}
-export fn use_it() -> Int with {{ scope: Scope }} {{
+pub fn use_it() -> Int with {{ scope: Scope }} {{
   acquire(7, fn h => print(h))
 }}
 
-export fn scoped_use() -> Int {{
+pub fn scoped_use() -> Int {{
   let region = Region::open();
   with {{ scope: handler for Scope {{ defer: fn f => Region::defer(region, f) }} }} {{
     use_it()
@@ -342,7 +342,7 @@ fn acquired_values_are_released_in_reverse() {
         "scope_reverse",
         &format!(
             "{SCOPE}
-export fn use_them() -> Int with {{ scope: Scope }} {{
+pub fn use_them() -> Int with {{ scope: Scope }} {{
   let first = acquire(1, fn h => print(h));
   let second = acquire(2, fn h => print(h));
   first + second
@@ -373,8 +373,8 @@ extern fn khora_cancel();
 extern fn khora_cancel_reset();
 extern fn khora_live_count() -> Int;
 
-export type Region;
-export trait Share {}
+pub type Region;
+pub trait Share {}
 /// `khora_region_defer` locks, so a scope may be handed across fibers.
 impl Share for Region {}
 impl Region {
@@ -383,7 +383,7 @@ impl Region {
   fn defer(self, finalizer: () -> ()) -> ();
 }
 
-export type Oops = | Bad;
+pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
 ";
 

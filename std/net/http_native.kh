@@ -31,7 +31,7 @@ import std::net::tls::{TlsConnection, TlsError, TlsServer, receive as tls_receiv
 /// the server rather than routed to a handler, and a method nobody can mount a
 /// route for is not worth a case here. `of` returns `None` for the rest, which
 /// becomes a 400 rather than a panic.
-export type Method =
+pub type Method =
   | Get
   | Post
   | Put
@@ -44,7 +44,7 @@ impl Method {
   /// Case-sensitive, because HTTP methods are: `get` is not `GET`, and a
   /// server that accepted it would be lenient about the one part of the
   /// request line that has never been ambiguous.
-  export fn of(text: String) -> Option<Method> {
+  pub fn of(text: String) -> Option<Method> {
     if text == "GET" {
       Option::Some(Method::Get)
     } else if text == "POST" {
@@ -64,7 +64,7 @@ impl Method {
   ///
   /// `Method` predates `derive(Eq)` reaching this file; `rank` is what it
   /// compares on.
-  export fn same(self, other: Method) -> Bool {
+  pub fn same(self, other: Method) -> Bool {
     Method::rank(self) == Method::rank(other)
   }
 
@@ -85,17 +85,17 @@ impl Method {
 
 /// The path parameters a route matched: `/analyze/:account_id` against
 /// `/analyze/acc_9921` binds `account_id`.
-export type Params = {
+pub type Params = {
   bound: Map<String, String>,
 };
 
 impl Params {
   /// No parameters bound. What a route with no `:name` in it matches with.
-  export fn empty() -> Params { { bound: Map::new() } }
+  pub fn empty() -> Params { { bound: Map::new() } }
 
   /// `Option::None` when the route did not declare that parameter, which is a
   /// programming error the type makes you notice rather than an empty string.
-  export fn get(self, name: String) -> Option<String> {
+  pub fn get(self, name: String) -> Option<String> {
     Map::get(self.bound, name)
   }
 }
@@ -106,7 +106,7 @@ impl Params {
 /// **Everything is decoded on arrival**, once. A handler reading three query
 /// parameters and two headers does no parsing at all — the maps below are
 /// already built, and the header names are already lowercased.
-export type Request = {
+pub type Request = {
   method: Method,
   /// The path with the query string taken off: `/analyze/acc_1?deep=true` has
   /// a path of `/analyze/acc_1`. Routes match against this, so mounting
@@ -129,19 +129,19 @@ export type Request = {
 impl Request {
   /// A GET request for `path`, with no parameters matched yet. Chiefly for
   /// tests: a real one arrives from a socket.
-  export fn get(path: String) -> Request {
+  pub fn get(path: String) -> Request {
     Request::of(Method::Get, path, "")
   }
 
   /// A POST to `path` carrying `body`. For tests, like `get`.
-  export fn post(path: String, body: String) -> Request {
+  pub fn post(path: String, body: String) -> Request {
     Request::of(Method::Post, path, body)
   }
 
   /// The query string is honoured here too, so a hand-built request behaves
   /// like one off the wire. A test that writes `Request::get("/x?a=1")` and
   /// finds no `a` would be testing the constructor rather than the code.
-  export fn of(method: Method, target: String, body: String) -> Request {
+  pub fn of(method: Method, target: String, body: String) -> Request {
     let split = split_target(target);
     {
       method: method,
@@ -158,7 +158,7 @@ impl Request {
   /// A parameter written with no `=` — `/x?verbose` — is present with an empty
   /// value, which is how every server reads it and what lets a handler ask
   /// "was this requested" rather than "what does it say".
-  export fn query(self, name: String) -> Option<String> {
+  pub fn query(self, name: String) -> Option<String> {
     Map::get(self.queries, name)
   }
 
@@ -166,13 +166,13 @@ impl Request {
   ///
   /// `Host`, `host` and `HOST` are one header. The RFC says so, and this is
   /// the half of it that everybody gets wrong.
-  export fn header(self, name: String) -> Option<String> {
+  pub fn header(self, name: String) -> Option<String> {
     Map::get(self.headers, lowered(name))
   }
 }
 
 /// One header on the way out.
-export type Header = {
+pub type Header = {
   name: String,
   value: String,
 };
@@ -182,7 +182,7 @@ export type Header = {
 ///
 /// `json` and `text` build the two common ones. `with_header` adds to either,
 /// and returns a new response rather than changing the one it was given.
-export type Response = {
+pub type Response = {
   status: Int,
   body: String,
   content_type: String,
@@ -198,12 +198,12 @@ impl Response {
   /// `A: Show` rather than a JSON encoder, because there is no JSON module yet
   /// and `Show` is the trait a type already uses to say how it reads. When
   /// there is one, this is where it goes and nothing above it changes.
-  export fn json<A: Show>(status: Int, body: A) -> Response {
+  pub fn json<A: Show>(status: Int, body: A) -> Response {
     { status: status, body: body.show(), content_type: "application/json", headers: List::Nil }
   }
 
   /// `body` as `text/plain`, with the given status.
-  export fn text(status: Int, body: String) -> Response {
+  pub fn text(status: Int, body: String) -> Response {
     { status: status, body: body, content_type: "text/plain", headers: List::Nil }
   }
 
@@ -212,7 +212,7 @@ impl Response {
   /// A new response rather than a mutated one, like `Prompt`'s builders and
   /// for the same reason: a half-built response cannot be shared and then
   /// changed underneath its other holder.
-  export fn with_header(self, name: String, value: String) -> Response {
+  pub fn with_header(self, name: String, value: String) -> Response {
     {
       status: self.status,
       body: self.body,
@@ -222,7 +222,7 @@ impl Response {
   }
 
   /// The response, as bytes on the wire.
-  export fn rendered(self) -> String { Response::rendered_keeping(self, false) }
+  pub fn rendered(self) -> String { Response::rendered_keeping(self, false) }
 
   /// The same, saying whether the connection is staying open.
   ///
@@ -236,7 +236,7 @@ impl Response {
   /// `Content-Length` is on every response already, which is what makes this
   /// safe: a client knows where the body ends and where the next answer
   /// begins without the connection closing to tell it.
-  export fn rendered_keeping(self, keep: Bool) -> String {
+  pub fn rendered_keeping(self, keep: Bool) -> String {
     "HTTP/1.1 " + Int::to_string(self.status) + " " + Response::reason(self.status) + "\r\n"
     + "Content-Type: " + self.content_type + "\r\n"
     + "Content-Length: " + Int::to_string(String::byte_length(self.body)) + "\r\n"
@@ -264,7 +264,7 @@ impl Response {
   /// reads the number — but one that says `Unknown` about a status the server
   /// deliberately chose reads as a bug to whoever is holding the packet
   /// capture, and it was.
-  export fn reason(status: Int) -> String {
+  pub fn reason(status: Int) -> String {
     if status == 200 {
       "OK"
     } else if status == 201 {
@@ -309,7 +309,7 @@ impl Response {
 /// here — that is a response, not an error. These two are the cases where
 /// there is nobody to answer: the port would not bind, or a request could not
 /// be read at all.
-export type HttpError =
+pub type HttpError =
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
 
@@ -441,7 +441,7 @@ fn hex_pair(text: String, at: Int) -> Option<Int> {
 ///
 /// The decoded form is never longer than the encoded one, so a buffer of the
 /// input's length is always enough and there is nothing to grow.
-export fn percent_decode(text: String) -> String {
+pub fn percent_decode(text: String) -> String {
   let length = String::byte_length(text);
   if length == 0 {
     ""
@@ -487,7 +487,7 @@ export fn percent_decode(text: String) -> String {
 // ---------------------------------------------------------------------------
 
 /// A request read off the wire.
-export fn parse(text: String) -> Option<Request> {
+pub fn parse(text: String) -> Option<Request> {
   match String::split_once(text, "\r\n") {
     Option::None => Option::None,
     Option::Some(lines) => match parse_request_line(lines.head) {
@@ -511,7 +511,7 @@ export fn parse(text: String) -> Option<Request> {
 ///
 /// Public because a caller parsing a request for its own reasons wants the
 /// target as the client wrote it; `Request` carries the split version.
-export type RequestLine = {
+pub type RequestLine = {
   method: Method,
   /// The request target as written, query string and all. `parse` splits it;
   /// keeping it whole here means a caller reading a request line for its own
@@ -672,7 +672,7 @@ fn body_of(rest: String) -> String {
 /// what a fiber costs — so this is the number that decides how many callers a
 /// server can hold, not a guess about how big a request is. `Connection::holding`
 /// takes another.
-export fn default_limit() -> Int { 8192 }
+pub fn default_limit() -> Int { 8192 }
 
 fn limit() -> Int { default_limit() }
 
@@ -716,7 +716,7 @@ fn chunk() -> Int { 4096 }
 /// transport belongs to a connection rather than to a computation: two fibers
 /// serve two clients at once, and a capability installed by `with` would be
 /// one of them.
-export type Transport = {
+pub type Transport = {
   /// Bytes into the buffer: how many, 0 when the peer closed, or -1.
   receive: (Array<U8>) -> Int,
   /// The text, all of it, or -1.
@@ -726,7 +726,7 @@ export type Transport = {
 };
 
 /// A transport over a plain socket.
-export fn over_socket(connection: Int) -> Transport {
+pub fn over_socket(connection: Int) -> Transport {
   {
     receive: fn buffer => receive(connection, buffer),
     transmit: fn text => transmit(connection, text),
@@ -738,7 +738,7 @@ export fn over_socket(connection: Int) -> Transport {
 ///
 /// The socket is the TLS connection's now — `secure` took it and `shut` closes
 /// it — so there is nothing here that closes it a second time.
-export fn over_tls(connection: TlsConnection) -> Transport {
+pub fn over_tls(connection: TlsConnection) -> Transport {
   {
     receive: fn buffer => tls_receive(connection, buffer),
     transmit: fn text => tls_transmit(connection, text),
@@ -826,7 +826,7 @@ fn copy_at(from: Array<U8>, into: Array<U8>, count: Int, offset: Int) -> () {
 ///
 /// [`Connection`] is this with a buffer around it, and is what most callers
 /// want.
-export fn request_length(bytes: Array<U8>, filled: Int) -> Int {
+pub fn request_length(bytes: Array<U8>, filled: Int) -> Int {
   let after = end_of_headers(bytes, filled);
   if after < 0 {
     0 - 1
@@ -905,7 +905,7 @@ fn content_length(head: String) -> Int {
 /// loop and that is a decision of the accept loop, not of this type: a server
 /// that answers one caller at a time, or hands connections to a pool, is
 /// written against exactly this.
-export type Connection = {
+pub type Connection = {
   transport: Transport,
   buffer: Array<U8>,
   /// Bytes of the *next* request that arrived with the last one. A pipelining
@@ -914,7 +914,7 @@ export type Connection = {
 };
 
 /// What reading a connection produced.
-export type Incoming =
+pub type Incoming =
   /// A whole request, and whether the client asked to keep the connection open.
   ///
   /// The flag is read from the `Connection` header here rather than by the
@@ -933,7 +933,7 @@ export type Incoming =
 
 impl Connection {
   /// Over a transport, holding at most [`default_limit`] bytes per request.
-  export fn over(transport: Transport) -> Connection {
+  pub fn over(transport: Transport) -> Connection {
     Connection::holding(transport, default_limit())
   }
 
@@ -942,7 +942,7 @@ impl Connection {
   /// The buffer is allocated once for the connection rather than once per
   /// request, so this is what one caller costs in memory for as long as they
   /// are connected.
-  export fn holding(transport: Transport, most: Int) -> Connection {
+  pub fn holding(transport: Transport, most: Int) -> Connection {
     let buffer: Array<U8> = Array::new(most, 0);
     { transport: transport, buffer: buffer, carried: 0 }
   }
@@ -951,7 +951,7 @@ impl Connection {
   ///
   /// Blocks. Whether that blocks a thread, a fiber or the only thread there is
   /// belongs to the caller — see the note on [`Connection`].
-  export fn next(self) -> Incoming {
+  pub fn next(self) -> Incoming {
     let filled = read_request(self.transport, self.buffer, self.carried);
     let want = request_length(self.buffer, filled);
     // Whether what is in the buffer is already a whole request.
@@ -996,7 +996,7 @@ impl Connection {
   /// Everything a connection needs to decide before a handler runs: whether
   /// the bytes were a request at all, and — from the headers the parser has
   /// already folded — whether the client asked to keep the connection.
-  export fn understood(text: String) -> Incoming {
+  pub fn understood(text: String) -> Incoming {
     match parse(text) {
       Option::None => Incoming::Rejected(Response::text(400, "malformed request")),
       Option::Some(request) => {
@@ -1019,12 +1019,12 @@ impl Connection {
   ///
   /// `keep` decides the `Connection` header, and is what [`Incoming::Arrived`]
   /// reported unless the caller has its own reason to close.
-  export fn reply(self, response: Response, keep: Bool) -> Int {
+  pub fn reply(self, response: Response, keep: Bool) -> Int {
     self.transport.transmit(Response::rendered_keeping(response, keep))
   }
 
   /// Ends the conversation and releases the transport.
-  export fn shut(self) -> () {
+  pub fn shut(self) -> () {
     self.transport.shut()
   }
 }
@@ -1037,7 +1037,7 @@ impl Connection {
 /// Exported so a program can route somewhere other than through `Router` —
 /// a WebSocket upgrade, a second listener — without reimplementing the one
 /// piece of matching that has to agree with the server's.
-export fn matches(pattern: String, path: String) -> Option<Params> {
+pub fn matches(pattern: String, path: String) -> Option<Params> {
   match_segments(pattern, path, Map::new())
 }
 
@@ -1100,7 +1100,7 @@ fn segment(text: String) -> Split {
 /// It also takes the capabilities out of the router's type. A handler closes
 /// over what it needs at the mount site, so there is no `'r` left for a `Route`
 /// to carry — `Router<'e>` says only how its handlers can fail.
-export type Route<'e> = {
+pub type Route<'e> = {
   method: Method,
   pattern: String,
   handler: SharedFn<Request, Response, 'e>,
@@ -1108,7 +1108,7 @@ export type Route<'e> = {
 
 /// A router carries its handlers' failures, so mounting a route that can fail
 /// against the database widens the router's own error row.
-export type Router<'e> = {
+pub type Router<'e> = {
   routes: List<Route<'e>>,
 };
 
@@ -1124,14 +1124,14 @@ export type Router<'e> = {
 /// collide with another module's `get`.
 impl Router {
   /// A router with no routes. The start of the pipeline.
-  export fn new<'e>() -> Router<'e> { { routes: List::Nil } }
+  pub fn new<'e>() -> Router<'e> { { routes: List::Nil } }
 
   /// Mounts `handler` at `route` for POST.
   ///
   /// Later mounts are tried first, because each prepends. Mounting the same
   /// route twice is allowed and the second one wins, which is worth knowing
   /// rather than an invariant anything enforces.
-  export fn post<'e>(
+  pub fn post<'e>(
     router: Router<'e>,
     route: String,
     handler: SharedFn<Request, Response, 'e>
@@ -1140,7 +1140,7 @@ impl Router {
   }
 
   /// Mounts `handler` at `route` for GET.
-  export fn get<'e>(
+  pub fn get<'e>(
     router: Router<'e>,
     route: String,
     handler: SharedFn<Request, Response, 'e>
@@ -1149,7 +1149,7 @@ impl Router {
   }
 
   /// Serves until the process stops, on a fiber per connection.
-  export fn listen<'e>(router: Router<'e>, port: Int) -> ()
+  pub fn listen<'e>(router: Router<'e>, port: Int) -> ()
     raises 'e + HttpError
   {
     if start() {
@@ -1195,7 +1195,7 @@ impl Router {
   ///
   /// The configuration is released when the caller's scope ends, which for a
   /// server is usually the program's.
-  export fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) -> ()
+  pub fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) -> ()
     with { scope: Scope }
     raises 'e + HttpError + TlsError
   {
@@ -1206,7 +1206,7 @@ impl Router {
   }
 
   /// A listening socket on `port`, announced by the caller.
-  export fn bound<'e>(port: Int) -> Int raises HttpError {
+  pub fn bound<'e>(port: Int) -> Int raises HttpError {
     if start() {
     } else {
       raise HttpError::BindFailed(port)
@@ -1220,7 +1220,7 @@ impl Router {
   ///
   /// A failed handshake ends that fiber quietly rather than the loop — on a
   /// public port it is the ordinary case, not an incident.
-  export fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) -> ()
+  pub fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) -> ()
     with { nursery: Nursery }
     raises 'e + HttpError
   {
@@ -1250,7 +1250,7 @@ impl Router {
   /// `listen` is the one to call: it binds the port and then this. Taking an
   /// already-bound socket is for a caller that wants to bind it themselves —
   /// a test on port zero, a socket inherited from a supervisor.
-  export fn serve_forever<'e>(router: Router<'e>, server: Int) -> ()
+  pub fn serve_forever<'e>(router: Router<'e>, server: Int) -> ()
     with { nursery: Nursery }
     raises 'e + HttpError
   {
@@ -1325,7 +1325,7 @@ impl Router {
   /// **Written against the public [`Connection`], with nothing reserved.** A
   /// framework of a different shape writes this loop itself and is not missing
   /// anything: the reading, the framing and the refusals are all above.
-  export fn answer_on<'e>(router: Router<'e>, transport: Transport) -> ()
+  pub fn answer_on<'e>(router: Router<'e>, transport: Transport) -> ()
     raises 'e
   {
     let connection = Connection::over(transport);

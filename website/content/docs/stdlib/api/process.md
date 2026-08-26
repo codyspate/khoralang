@@ -45,7 +45,7 @@ command line out of untrusted text should wait for `spawn`.
 ### ProcessError
 
 ```khora
-export type ProcessError =
+pub type ProcessError =
   | NotStarted(command: String)
   | NotText(command: String)
   | Failed(command: String, status: Int);
@@ -70,7 +70,7 @@ so by calling [`checked_output`].
 ### Completed
 
 ```khora
-export type Completed = {
+pub type Completed = {
   status: Int,
   text: String,
 };
@@ -105,7 +105,7 @@ folded in writes `2>&1` on the end of the command themselves.
 ### Process
 
 ```khora
-export effect Process {
+pub effect Process {
   status: (String) -> Int raises ProcessError,
   capture: (String) -> Completed raises ProcessError,
 }
@@ -144,7 +144,7 @@ matters and the one a real subprocess makes impossible to write.
 ### checked_output
 
 ```khora
-export fn checked_output(command: String) -> String with { process: Process } raises ProcessError
+pub fn checked_output(command: String) -> String with { process: Process } raises ProcessError
 ```
 
 What `command` printed, provided it succeeded.

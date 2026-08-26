@@ -390,7 +390,7 @@ impl<'a> Checker<'a> {
     /// be somewhere else.
     pub(super) fn not_exported(&self, owner: &str, method: &str) -> String {
         format!(
-            "`{owner}::{method}` is not exported, so only the module that declares it may call it. Write `export fn {method}` there if it is part of the type's interface — otherwise this call belongs inside that module"
+            "`{owner}::{method}` is not exported, so only the module that declares it may call it. Write `pub fn {method}` there if it is part of the type's interface — otherwise this call belongs inside that module"
         )
     }
 

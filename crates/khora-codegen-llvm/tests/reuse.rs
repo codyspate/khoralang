@@ -93,7 +93,7 @@ fn total(xs: List<Int>) -> Int {
   }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let built = build(10);
   khora_reset_counters();
   let walked = increment(built);

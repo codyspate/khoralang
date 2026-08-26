@@ -74,7 +74,7 @@ fn a_file_written_by_khora_can_be_read_by_khora() {
         "fs_round_trip",
         &format!(
             "{HEAD}
-export fn work() -> Int with {{ fs: Fs }} raises IoError {{
+pub fn work() -> Int with {{ fs: Fs }} raises IoError {{
   let bytes: Array<U8> = Array::new(3, 65);
   fs.write(\"@DIR@/greeting.txt\", bytes)!;
   print(read_text(\"@DIR@/greeting.txt\")!);
@@ -105,7 +105,7 @@ fn a_missing_file_raises_not_found() {
         "fs_missing",
         &format!(
             "{HEAD}
-export fn work() -> Int with {{ fs: Fs }} {{
+pub fn work() -> Int with {{ fs: Fs }} {{
   String::byte_length(read_text(\"@DIR@/nothing-here.txt\")! catch {{
     IoError::NotFound(p) => \"1\",
     IoError::Failed(p) => \"22\",
@@ -133,7 +133,7 @@ fn a_file_that_is_not_text_fails_rather_than_trapping() {
         "fs_not_text",
         &format!(
             "{HEAD}
-export fn work() -> Int with {{ fs: Fs }} raises IoError {{
+pub fn work() -> Int with {{ fs: Fs }} raises IoError {{
   // 0xFF is not a byte any UTF-8 sequence starts with.
   let bytes: Array<U8> = Array::new(2, 255);
   fs.write(\"@DIR@/binary.dat\", bytes)!;
@@ -181,7 +181,7 @@ fn the_file_system_can_be_replaced_wholesale() {
         &format!(
             "{HEAD}
 /// Ordinary code. It has no idea whether a disk exists.
-export fn work() -> Int with {{ fs: Fs }} raises IoError {{
+pub fn work() -> Int with {{ fs: Fs }} raises IoError {{
   String::byte_length(read_text(\"/etc/passwd\")!)
 }}
 

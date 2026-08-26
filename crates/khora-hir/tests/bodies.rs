@@ -147,13 +147,13 @@ fn match_arm_bindings_are_scoped_to_their_arm() {
     let db = KhoraDatabase::new();
     let body = only_body(
         &db,
-        "module m;\nexport type R = | A(x: Int) | B;\nfn f(r: R) -> Int {\n  match r {\n    R::A(v) => v,\n    R::B => 0,\n  }\n}\n",
+        "module m;\npub type R = | A(x: Int) | B;\nfn f(r: R) -> Int {\n  match r {\n    R::A(v) => v,\n    R::B => 0,\n  }\n}\n",
     );
     assert!(errors(&body).is_empty(), "{:?}", errors(&body));
 
     let leaked = only_body(
         &db,
-        "module m;\nexport type R = | A(x: Int) | B;\nfn f(r: R) -> Int {\n  match r {\n    R::A(v) => 0,\n    R::B => v,\n  }\n}\n",
+        "module m;\npub type R = | A(x: Int) | B;\nfn f(r: R) -> Int {\n  match r {\n    R::A(v) => 0,\n    R::B => v,\n  }\n}\n",
     );
     assert!(
         errors(&leaked).iter().any(|e| e.contains("cannot find `v`")),
@@ -167,7 +167,7 @@ fn constructors_resolve_in_patterns_and_expressions() {
     let db = KhoraDatabase::new();
     let body = only_body(
         &db,
-        "module m;\nexport type R = | A | B;\nfn f(r: R) -> R {\n  match r {\n    R::A => R::B,\n    R::B => R::A,\n  }\n}\n",
+        "module m;\npub type R = | A | B;\nfn f(r: R) -> R {\n  match r {\n    R::A => R::B,\n    R::B => R::A,\n  }\n}\n",
     );
     assert!(errors(&body).is_empty(), "{:?}", errors(&body));
 
@@ -181,7 +181,7 @@ fn an_unknown_constructor_is_reported() {
     let db = KhoraDatabase::new();
     let body = only_body(
         &db,
-        "module m;\nexport type R = | A;\nfn f(r: R) -> Int {\n  match r {\n    R::Nope => 1,\n  }\n}\n",
+        "module m;\npub type R = | A;\nfn f(r: R) -> Int {\n  match r {\n    R::Nope => 1,\n  }\n}\n",
     );
     assert!(
         errors(&body).iter().any(|e| e.contains("cannot find constructor")),

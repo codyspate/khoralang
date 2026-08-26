@@ -47,7 +47,7 @@ const PRELUDE: &str = "module t;
 fn assert(condition: Bool);
 fn print(value: Int);
 
-export type Oops = | Bad;
+pub type Oops = | Bad;
 fn halve(n: Int) -> Int raises Oops {
   if n % 2 == 0 { n / 2 } else { raise Oops::Bad }
 }

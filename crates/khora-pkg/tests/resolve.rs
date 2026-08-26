@@ -112,7 +112,7 @@ fn changing_a_source_file_changes_the_hash() {
     write(&source, "module a;\n");
     let before = khora_pkg::hash_tree(&w.root).expect("a hash");
 
-    write(&source, "module a;\nexport fn f() -> Int = { 1 }\n");
+    write(&source, "module a;\npub fn f() -> Int = { 1 }\n");
     assert_ne!(before, khora_pkg::hash_tree(&w.root).expect("a hash"));
 }
 

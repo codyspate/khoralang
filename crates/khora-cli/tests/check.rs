@@ -29,7 +29,7 @@ fn check(name: &str, source: &str) -> (bool, String) {
 fn a_correct_program_passes() {
     let (ok, output) = check(
         "good",
-        "module m;\nfn double(x: Int) -> Int { x + x }\nexport fn main() -> Int { double(21) }\n",
+        "module m;\nfn double(x: Int) -> Int { x + x }\npub fn main() -> Int { double(21) }\n",
     );
     assert!(ok, "expected success, got:\n{output}");
     assert!(output.contains("no errors"), "{output}");
@@ -93,13 +93,13 @@ fn only_this_targets_files_are_read() {
             .to_string();
         std::fs::write(
             dir.join(name),
-            format!("module t::which;\nexport fn which() -> Int {{ 1 }} // {target}\n"),
+            format!("module t::which;\npub fn which() -> Int {{ 1 }} // {target}\n"),
         )
         .expect("writing a fixture");
     }
     std::fs::write(
         dir.join("main.kh"),
-        "module t::main;\nimport t::which::{which};\nexport fn main() -> Int { which() }\n",
+        "module t::main;\nimport t::which::{which};\npub fn main() -> Int { which() }\n",
     )
     .expect("writing a fixture");
 
@@ -128,7 +128,7 @@ fn a_file_named_outright_is_read_anyway() {
     // A name that cannot be this host's, whichever host that is.
     let other = if cfg!(windows) { "linux" } else { "windows" };
     let path = dir.join(format!("only_{other}.kh"));
-    std::fs::write(&path, "module t;\nexport fn f() -> Int { 1 }\n").expect("a fixture");
+    std::fs::write(&path, "module t;\npub fn f() -> Int { 1 }\n").expect("a fixture");
 
     let out = Command::new(env!("CARGO_BIN_EXE_khora"))
         .arg("check")
@@ -192,7 +192,7 @@ fn a_path_dependency_comes_from_the_manifest() {
 
     std::fs::write(
         root.join("greet/greet.kh"),
-        "module acme::greet;\nexport fn greeting() -> Int { 7 }\n",
+        "module acme::greet;\npub fn greeting() -> Int { 7 }\n",
     )
     .expect("a fixture");
     std::fs::write(
@@ -211,7 +211,7 @@ edition = \"2026\"
         root.join("app/main.kh"),
         "module app::main;
 import acme::greet::{greeting};
-export fn main() -> Int { greeting() }
+pub fn main() -> Int { greeting() }
 ",
     )
     .expect("a fixture");
@@ -238,7 +238,7 @@ fn the_standard_library_needs_no_declaring() {
         dir.join("main.kh"),
         "module app::main;
 import std::core::{Option};
-export fn main() -> Int { Option::Some(41).unwrap_or(0) + 1 }
+pub fn main() -> Int { Option::Some(41).unwrap_or(0) + 1 }
 ",
     )
     .expect("a fixture");
@@ -272,7 +272,7 @@ edition = \"2026\"
 ",
     )
     .expect("a manifest");
-    std::fs::write(dir.join("main.kh"), "module app::main;\nexport fn main() -> Int { 0 }\n")
+    std::fs::write(dir.join("main.kh"), "module app::main;\npub fn main() -> Int { 0 }\n")
         .expect("a fixture");
 
     let out = Command::new(env!("CARGO_BIN_EXE_khora"))

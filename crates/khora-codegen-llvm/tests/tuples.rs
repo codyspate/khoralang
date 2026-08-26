@@ -77,9 +77,9 @@ fn print(value: String);
 extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Option<A> = | Some(value: A) | None;
-export type List<A> = | Nil | Cons(head: A, tail: List<A>);
-export type Wrapper<A> = | Of(inner: A);
+pub type Option<A> = | Some(value: A) | None;
+pub type List<A> = | Nil | Cons(head: A, tail: List<A>);
+pub type Wrapper<A> = | Of(inner: A);
 ";
 
 /// A tuple is built, returned, taken apart, and holds its elements.

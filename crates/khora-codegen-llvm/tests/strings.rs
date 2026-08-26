@@ -45,7 +45,7 @@ const HEAD: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Array<A>;
+pub type Array<A>;
 impl<A> Array<A> {
   fn new(length: Int, fill: A) -> Array<A>;
   fn length(self) -> Int;

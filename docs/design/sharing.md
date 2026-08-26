@@ -77,7 +77,7 @@ test double that counts its calls in a `mut` field is refused. It captures a
 
 ### A type with no body has to say so
 
-`export type Array<A>;` has no visible fields, and answering "shareable" because
+`pub type Array<A>;` has no visible fields, and answering "shareable" because
 none can be seen was wrong in the direction that matters. `Array::set` writes.
 `Ptr` points at memory this language did not allocate. A runtime handle may need
 a lock of its own. All three looked safe until this rule existed, and two fibers
@@ -145,7 +145,7 @@ closure was written somewhere else. The handler cannot borrow the `handler for`
 trick, and the whole router was stuck on one fiber.
 
 ```khora
-export type SharedFn<A, B, 'e>;
+pub type SharedFn<A, B, 'e>;
 impl<A, B, 'e> Share for SharedFn<A, B, 'e> {}
 ```
 

@@ -243,7 +243,7 @@ fn sorting_is_stable() {
         "text_sort_stable",
         &format!(
             "{HEAD}
-export type Entry = {{ key: Int, tag: String }};
+pub type Entry = {{ key: Int, tag: String }};
 
 impl Eq for Entry {{
   fn eq(self, other: Entry) -> Bool {{ self.key == other.key }}

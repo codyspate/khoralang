@@ -31,7 +31,7 @@ See docs/design/effects.md.
 ### Ordering
 
 ```khora
-export type Ordering =
+pub type Ordering =
   | Less
   | Equal
   | Greater;
@@ -46,7 +46,7 @@ operators, and a type cannot accidentally disagree with itself about `<` and
 ### Option
 
 ```khora
-export type Option<A> =
+pub type Option<A> =
   | Some(value: A)
   | None;
 ```
@@ -61,7 +61,7 @@ wrong and the caller should know what — the type is `Result`, and
 ### Result
 
 ```khora
-export type Result<A, E> =
+pub type Result<A, E> =
   | Ok(value: A)
   | Err(error: E);
 ```
@@ -76,7 +76,7 @@ other. `docs/design/effect-runtime.md` §8.
 ### List
 
 ```khora
-export type List<A> =
+pub type List<A> =
   | Nil
   | Cons(head: A, tail: List<A>);
 ```
@@ -94,7 +94,7 @@ and needs `List` in scope, exactly as `0.01d` needs `Decimal`.
 ### Halves
 
 ```khora
-export type Halves<A> = {
+pub type Halves<A> = {
   left: List<A>,
   right: List<A>,
 };
@@ -105,7 +105,7 @@ A list split down the middle, for `sort`.
 ### Step
 
 ```khora
-export type Step<S, A> =
+pub type Step<S, A> =
   | Yield(state: S, item: A)
   | Done;
 ```
@@ -119,7 +119,7 @@ back its successor instead. `for` desugars to this and reads the same.
 ### Range
 
 ```khora
-export type Range = | Of(from: Int, to: Int);
+pub type Range = | Of(from: Int, to: Int);
 ```
 
 `Range::Of(from, to)` yields `from` up to but not including `to`.
@@ -127,7 +127,7 @@ export type Range = | Of(from: Int, to: Int);
 ### Never
 
 ```khora
-export type Never;
+pub type Never;
 ```
 
 The empty type. A function whose return type is `Never` does not return
@@ -136,7 +136,7 @@ normally — it raises, diverges, or transfers control to a handler.
 ### Region
 
 ```khora
-export type Region;
+pub type Region;
 ```
 
 A region, and the finalizers deferred to it.
@@ -149,7 +149,7 @@ paths that release a binding are already the paths a region has to end on.
 ### Fiber
 
 ```khora
-export type Fiber;
+pub type Fiber;
 ```
 
 A running fiber, and the only way to wait for one or stop it.
@@ -163,7 +163,7 @@ own. `docs/design/fibers.md`.
 ### Array
 
 ```khora
-export type Array<A>;
+pub type Array<A>;
 ```
 
 A fixed number of elements, side by side.
@@ -180,7 +180,7 @@ which need the length at run time.
 ### Split
 
 ```khora
-export type Split = {
+pub type Split = {
   head: String,
   rest: String,
 };
@@ -192,7 +192,7 @@ after it.
 ### Ptr
 
 ```khora
-export type Ptr;
+pub type Ptr;
 ```
 
 An opaque machine address: a C `void *`.
@@ -210,7 +210,7 @@ does not answer it. `docs/design/ffi.md`.
 ### Chain
 
 ```khora
-export type Chain<K, V> =
+pub type Chain<K, V> =
   | Empty
   | Node(key: K, value: V, rest: Chain<K, V>);
 ```
@@ -225,7 +225,7 @@ the price, and it is the shape the language is actually good at.
 ### Pair
 
 ```khora
-export type Pair<K, V> = {
+pub type Pair<K, V> = {
   key: K,
   value: V,
 };
@@ -249,7 +249,7 @@ One key and the value under it.
 ### Least
 
 ```khora
-export type Least<K, V> = {
+pub type Least<K, V> = {
   key: K,
   value: V,
   rest: Dict<K, V>,
@@ -261,7 +261,7 @@ The smallest entry of a tree, and what is left without it.
 ### Dict
 
 ```khora
-export type Dict<K, V> =
+pub type Dict<K, V> =
   | Empty
   | Node(size: Int, key: K, value: V, left: Dict<K, V>, right: Dict<K, V>);
 ```
@@ -286,7 +286,7 @@ distinction that `String::slice` got wrong and paid for.
 ### Map
 
 ```khora
-export type Map<K, V> = {
+pub type Map<K, V> = {
   mut buckets: Array<Chain<K, V>>,
   mut count: Int,
 };
@@ -306,7 +306,7 @@ stable one: growing rehashes everything.
 ### Vector
 
 ```khora
-export type Vector<A> = {
+pub type Vector<A> = {
   mut items: Array<A>,
   mut len: Int,
   mut wanted: Int,
@@ -381,7 +381,7 @@ How big the first allocation should be. Meaningless once there is one.
 ### SharedFn
 
 ```khora
-export type SharedFn<A, B, 'e>;
+pub type SharedFn<A, B, 'e>;
 ```
 
 The fibers a block is responsible for.
@@ -413,7 +413,7 @@ of a function all the way up. `docs/design/sharing.md`.
 ### Changed
 
 ```khora
-export type Changed<A, B> = {
+pub type Changed<A, B> = {
   state: A,
   result: B,
 };
@@ -428,7 +428,7 @@ read better than positional ones at the call anyway.
 ### Channel
 
 ```khora
-export type Channel<A>;
+pub type Channel<A>;
 ```
 
 A bounded queue one fiber puts values into and another takes them out of.
@@ -483,7 +483,7 @@ of its own, and nothing has needed one yet.
 ### Shared
 
 ```khora
-export type Shared<A>;
+pub type Shared<A>;
 ```
 
 A value two fibers may both change.
@@ -507,7 +507,7 @@ persistent map, and is what a shared table is made of.
 ### Fibers
 
 ```khora
-export type Fibers;
+pub type Fibers;
 ```
 
 A nursery: the fibers started under it, and the guarantee that none of
@@ -521,7 +521,7 @@ started it, because the binding holding the nursery ends on every path out.
 ### Schedule
 
 ```khora
-export type Schedule = {
+pub type Schedule = {
   attempts: Int,
 };
 ```
@@ -545,7 +545,7 @@ Attempts in total, including the first. `1` is "do not retry".
 ### Eq
 
 ```khora
-export trait Eq
+pub trait Eq
 ```
 
 Whether two values of a type are the same value.
@@ -569,7 +569,7 @@ Whether these are the same value.
 ### Ord
 
 ```khora
-export trait Ord: Eq
+pub trait Ord: Eq
 ```
 
 Ordering refines equality: anything orderable can be compared for equality,
@@ -589,7 +589,7 @@ a sort that loses elements and a search that cannot find them.
 ### Hash
 
 ```khora
-export trait Hash: Eq
+pub trait Hash: Eq
 ```
 
 A value that can be a key.
@@ -617,7 +617,7 @@ this one's, so an implementation only has to be *consistent*.
 ### Show
 
 ```khora
-export trait Show
+pub trait Show
 ```
 
 A value rendered for a person to read.
@@ -639,7 +639,7 @@ This value, as text.
 ### Share
 
 ```khora
-export trait Share
+pub trait Share
 ```
 
 Two fibers may hold this at once.
@@ -664,7 +664,7 @@ Fibers are operating-system threads today, so this is `Sync` rather than
 ### Iterator
 
 ```khora
-export trait Iterator
+pub trait Iterator
 ```
 
 Something a `for` loop can walk.
@@ -696,7 +696,7 @@ The next item and the iterator that follows it, or `Done`.
 ### Functor
 
 ```khora
-export trait Functor
+pub trait Functor
 ```
 
 A container whose contents can be replaced one for one.
@@ -717,7 +717,7 @@ Every element replaced by `f` of it, in the same shape.
 ### Applicative
 
 ```khora
-export trait Applicative: Functor
+pub trait Applicative: Functor
 ```
 
 `pure` lifts a value; `map2` combines two containers. `map2` rather than
@@ -746,7 +746,7 @@ either is `None`, and a validation type would collect both failures.
 ### Traversable
 
 ```khora
-export trait Traversable: Functor
+pub trait Traversable: Functor
 ```
 
 Walks a structure left to right, collecting the effects of each step.
@@ -773,7 +773,7 @@ is written once instead of per container.
 ### Scope
 
 ```khora
-export effect Scope {
+pub effect Scope {
   defer: (() -> ()) -> (),
 }
 ```
@@ -792,7 +792,7 @@ over the value and the release, which is where the polymorphism belongs.
 ### Nursery
 
 ```khora
-export effect Nursery {
+pub effect Nursery {
   adopt: (Fiber) -> (),
 }
 ```
@@ -823,7 +823,7 @@ impl Ordering
 #### is_less
 
 ```khora
-export fn is_less(self) -> Bool
+pub fn is_less(self) -> Bool
 ```
 
 Whether the comparison came out `Less`.
@@ -831,7 +831,7 @@ Whether the comparison came out `Less`.
 #### is_equal
 
 ```khora
-export fn is_equal(self) -> Bool
+pub fn is_equal(self) -> Bool
 ```
 
 Whether it came out `Equal`.
@@ -839,7 +839,7 @@ Whether it came out `Equal`.
 #### is_greater
 
 ```khora
-export fn is_greater(self) -> Bool
+pub fn is_greater(self) -> Bool
 ```
 
 Whether it came out `Greater`.
@@ -847,7 +847,7 @@ Whether it came out `Greater`.
 #### reverse
 
 ```khora
-export fn reverse(self) -> Ordering
+pub fn reverse(self) -> Ordering
 ```
 
 `a.cmp(b).reverse()` sorts descending without a second comparison.
@@ -861,7 +861,7 @@ impl<A> Option<A>
 #### is_some
 
 ```khora
-export fn is_some(self) -> Bool
+pub fn is_some(self) -> Bool
 ```
 
 Whether there is a value.
@@ -872,7 +872,7 @@ For a condition. Reaching for the value afterwards means matching twice;
 #### is_none
 
 ```khora
-export fn is_none(self) -> Bool
+pub fn is_none(self) -> Bool
 ```
 
 Whether there is not.
@@ -880,7 +880,7 @@ Whether there is not.
 #### unwrap_or
 
 ```khora
-export fn unwrap_or(self, fallback: A) -> A
+pub fn unwrap_or(self, fallback: A) -> A
 ```
 
 The value, or `fallback` if there is none.
@@ -891,7 +891,7 @@ when producing it is expensive.
 #### unwrap_or_else
 
 ```khora
-export fn unwrap_or_else(self, fallback: () -> A) -> A
+pub fn unwrap_or_else(self, fallback: () -> A) -> A
 ```
 
 The value, or the result of calling `fallback`.
@@ -903,7 +903,7 @@ costs something.
 #### ok_or
 
 ```khora
-export fn ok_or<E>(self, error: E) -> Result<A, E>
+pub fn ok_or<E>(self, error: E) -> Result<A, E>
 ```
 
 Turns absence into a failure, which is how an `Option` joins a `raises`
@@ -918,7 +918,7 @@ impl<A, E> Result<A, E>
 #### is_ok
 
 ```khora
-export fn is_ok(self) -> Bool
+pub fn is_ok(self) -> Bool
 ```
 
 Whether this succeeded.
@@ -926,7 +926,7 @@ Whether this succeeded.
 #### is_err
 
 ```khora
-export fn is_err(self) -> Bool
+pub fn is_err(self) -> Bool
 ```
 
 Whether it did not.
@@ -934,7 +934,7 @@ Whether it did not.
 #### unwrap_or
 
 ```khora
-export fn unwrap_or(self, fallback: A) -> A
+pub fn unwrap_or(self, fallback: A) -> A
 ```
 
 The value, or `fallback` if there was an error.
@@ -946,7 +946,7 @@ it might, `match`.
 #### ok
 
 ```khora
-export fn ok(self) -> Option<A>
+pub fn ok(self) -> Option<A>
 ```
 
 Discards the error, which is the one direction that cannot fail.
@@ -954,7 +954,7 @@ Discards the error, which is the one direction that cannot fail.
 #### map_err
 
 ```khora
-export fn map_err<F>(self, f: (E) -> F) -> Result<A, F>
+pub fn map_err<F>(self, f: (E) -> F) -> Result<A, F>
 ```
 
 Rewrites the error and leaves the value alone.
@@ -972,7 +972,7 @@ impl<A: Ord> List<A>
 #### sort
 
 ```khora
-export fn sort(self) -> List<A>
+pub fn sort(self) -> List<A>
 ```
 
 The same elements, in order.
@@ -990,7 +990,7 @@ and `sort` on the list cannot disagree. Sorting by something else is
 #### split
 
 ```khora
-export fn split(self) -> Halves<A>
+pub fn split(self) -> Halves<A>
 ```
 
 The first half and the second, each in the order it was given.
@@ -1013,7 +1013,7 @@ impl<A> List<A>
 #### is_empty
 
 ```khora
-export fn is_empty(self) -> Bool
+pub fn is_empty(self) -> Bool
 ```
 
 Whether there is nothing in it.
@@ -1023,7 +1023,7 @@ Constant time, which `length() == 0` is not.
 #### length
 
 ```khora
-export fn length(self) -> Int
+pub fn length(self) -> Int
 ```
 
 How many elements there are.
@@ -1034,7 +1034,7 @@ round is quadratic — take it once.
 #### head
 
 ```khora
-export fn head(self) -> Option<A>
+pub fn head(self) -> Option<A>
 ```
 
 The first element, or `None` for an empty list.
@@ -1042,7 +1042,7 @@ The first element, or `None` for an empty list.
 #### push
 
 ```khora
-export fn push(self, item: A) -> List<A>
+pub fn push(self, item: A) -> List<A>
 ```
 
 Prepends, which is the cheap end. Appending walks the whole list, so it
@@ -1051,7 +1051,7 @@ is spelled `concat` and its cost is visible at the call site.
 #### concat
 
 ```khora
-export fn concat(self, other: List<A>) -> List<A>
+pub fn concat(self, other: List<A>) -> List<A>
 ```
 
 `self` followed by `other`.
@@ -1063,7 +1063,7 @@ quadratic way to do it; push and `reverse` once.
 #### reverse
 
 ```khora
-export fn reverse(self) -> List<A>
+pub fn reverse(self) -> List<A>
 ```
 
 The same elements, back to front.
@@ -1071,7 +1071,7 @@ The same elements, back to front.
 #### reverse_onto
 
 ```khora
-export fn reverse_onto(self, acc: List<A>) -> List<A>
+pub fn reverse_onto(self, acc: List<A>) -> List<A>
 ```
 
 `self` reversed, in front of `acc`.
@@ -1083,7 +1083,7 @@ what `concat` in a loop does quadratically. This is the "at the end".
 #### fold
 
 ```khora
-export fn fold<B>(self, start: B, step: (B, A) -> B) -> B
+pub fn fold<B>(self, start: B, step: (B, A) -> B) -> B
 ```
 
 Combines every element into one value, left to right.
@@ -1100,7 +1100,7 @@ impl Region
 #### open
 
 ```khora
-export fn open() -> Region
+pub fn open() -> Region
 ```
 
 A new region with nothing deferred into it.
@@ -1112,7 +1112,7 @@ binding that ends it.
 #### defer
 
 ```khora
-export fn defer(self, finalizer: () ->()) ->()
+pub fn defer(self, finalizer: () ->()) ->()
 ```
 
 Registers `finalizer` to run when this region ends.
@@ -1125,7 +1125,7 @@ so a finalizer caused by a cancellation is not cut short by it.
 #### root
 
 ```khora
-export fn root() -> Region
+pub fn root() -> Region
 ```
 
 The region that ends when the program does, released by the entry point
@@ -1140,7 +1140,7 @@ impl Fiber
 #### spawn
 
 ```khora
-export fn spawn<'e>(body: () ->() raises 'e) -> Fiber
+pub fn spawn<'e>(body: () ->() raises 'e) -> Fiber
 ```
 
 Runs `body` on a fiber of its own.
@@ -1153,7 +1153,7 @@ and runs to its end.
 #### join
 
 ```khora
-export fn join(self) ->()
+pub fn join(self) ->()
 ```
 
 Waits for the fiber to finish. Joining twice is joining once.
@@ -1161,7 +1161,7 @@ Waits for the fiber to finish. Joining twice is joining once.
 #### cancel
 
 ```khora
-export fn cancel(self) ->()
+pub fn cancel(self) ->()
 ```
 
 Asks the fiber to stop at its next cancellation point. Returns at once.
@@ -1175,7 +1175,7 @@ impl<A> Array<A>
 #### empty
 
 ```khora
-export fn empty() -> Array<A>
+pub fn empty() -> Array<A>
 ```
 
 No elements at all.
@@ -1190,7 +1190,7 @@ is also the first moment there is a value of `A` to fill with.
 #### new
 
 ```khora
-export fn new(length: Int, fill: A) -> Array<A>
+pub fn new(length: Int, fill: A) -> Array<A>
 ```
 
 `length` elements, every one of them `fill`.
@@ -1198,7 +1198,7 @@ export fn new(length: Int, fill: A) -> Array<A>
 #### length
 
 ```khora
-export fn length(self) -> Int
+pub fn length(self) -> Int
 ```
 
 How many elements it has. Fixed at construction; nothing grows an array.
@@ -1206,7 +1206,7 @@ How many elements it has. Fixed at construction; nothing grows an array.
 #### get
 
 ```khora
-export fn get(self, index: Int) -> A
+pub fn get(self, index: Int) -> A
 ```
 
 The element at `index`.
@@ -1219,7 +1219,7 @@ memory is the least useful possible response.
 #### set
 
 ```khora
-export fn set(self, index: Int, value: A) ->()
+pub fn set(self, index: Int, value: A) ->()
 ```
 
 Writes `value` at `index`, in place.
@@ -1233,7 +1233,7 @@ An index outside the array stops the program, as `get` does.
 #### is_utf8
 
 ```khora
-export fn is_utf8(self) -> Bool
+pub fn is_utf8(self) -> Bool
 ```
 
 Whether these bytes are well-formed UTF-8, and so whether
@@ -1242,7 +1242,7 @@ Whether these bytes are well-formed UTF-8, and so whether
 #### prefix
 
 ```khora
-export fn prefix(self, count: Int) -> Array<A>
+pub fn prefix(self, count: Int) -> Array<A>
 ```
 
 The first `count` elements, copied.
@@ -1254,7 +1254,7 @@ the message.
 #### with_data
 
 ```khora
-export fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B with 'c raises 'e
+pub fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B with 'c raises 'e
 ```
 
 Lends the elements to `body` as a pointer and a count, for the duration
@@ -1285,7 +1285,7 @@ impl Ptr
 #### null
 
 ```khora
-export fn null() -> Ptr
+pub fn null() -> Ptr
 ```
 
 The null pointer, for the libraries that take one.
@@ -1293,7 +1293,7 @@ The null pointer, for the libraries that take one.
 #### is_null
 
 ```khora
-export fn is_null(self) -> Bool
+pub fn is_null(self) -> Bool
 ```
 
 Whether this is null — which is how a great many C functions say they
@@ -1308,7 +1308,7 @@ impl<K, V> Dict<K, V>
 #### new
 
 ```khora
-export fn new() -> Dict<K, V>
+pub fn new() -> Dict<K, V>
 ```
 
 An empty dictionary.
@@ -1316,7 +1316,7 @@ An empty dictionary.
 #### size
 
 ```khora
-export fn size(self) -> Int
+pub fn size(self) -> Int
 ```
 
 How many entries. Kept in the node rather than counted, because balancing
@@ -1325,7 +1325,7 @@ asks for it at every step.
 #### is_empty
 
 ```khora
-export fn is_empty(self) -> Bool
+pub fn is_empty(self) -> Bool
 ```
 
 Whether there are no entries.
@@ -1333,7 +1333,7 @@ Whether there are no entries.
 #### rotate_left
 
 ```khora
-export fn rotate_left(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
+pub fn rotate_left(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
 ```
 
 The right side is heavy. Which rotation depends on its own shape: a
@@ -1343,7 +1343,7 @@ subtree is the lighter half.
 #### rotate_right
 
 ```khora
-export fn rotate_right(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
+pub fn rotate_right(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
 ```
 
 The mirror of it.
@@ -1351,7 +1351,7 @@ The mirror of it.
 #### entries
 
 ```khora
-export fn entries(self) -> List<Pair<K, V>>
+pub fn entries(self) -> List<Pair<K, V>>
 ```
 
 Every entry, smallest key first.
@@ -1365,7 +1365,7 @@ impl<K: Ord, V> Dict<K, V>
 #### get
 
 ```khora
-export fn get(self, key: K) -> Option<V>
+pub fn get(self, key: K) -> Option<V>
 ```
 
 The value under `key`, if there is one.
@@ -1373,7 +1373,7 @@ The value under `key`, if there is one.
 #### contains
 
 ```khora
-export fn contains(self, key: K) -> Bool
+pub fn contains(self, key: K) -> Bool
 ```
 
 Whether `key` has an entry.
@@ -1381,7 +1381,7 @@ Whether `key` has an entry.
 #### insert
 
 ```khora
-export fn insert(self, key: K, value: V) -> Dict<K, V>
+pub fn insert(self, key: K, value: V) -> Dict<K, V>
 ```
 
 The map with `key` set to `value`, leaving this one as it was.
@@ -1389,7 +1389,7 @@ The map with `key` set to `value`, leaving this one as it was.
 #### remove
 
 ```khora
-export fn remove(self, key: K) -> Dict<K, V>
+pub fn remove(self, key: K) -> Dict<K, V>
 ```
 
 The map without `key`. Removing what is not there is the map unchanged.
@@ -1397,7 +1397,7 @@ The map without `key`. Removing what is not there is the map unchanged.
 #### glue
 
 ```khora
-export fn glue(left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
+pub fn glue(left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
 ```
 
 Joins two sides whose node has gone.
@@ -1409,7 +1409,7 @@ between them.
 #### from_list
 
 ```khora
-export fn from_list(entries: List<Pair<K, V>>) -> Dict<K, V>
+pub fn from_list(entries: List<Pair<K, V>>) -> Dict<K, V>
 ```
 
 Builds a map from entries, later ones winning.
@@ -1426,7 +1426,7 @@ impl<K: Hash, V> Map<K, V>
 #### new
 
 ```khora
-export fn new() -> Map<K, V>
+pub fn new() -> Map<K, V>
 ```
 
 An empty map, which allocates nothing but itself.
@@ -1441,7 +1441,7 @@ difference, and it did not exist when this was written.
 #### len
 
 ```khora
-export fn len(self) -> Int
+pub fn len(self) -> Int
 ```
 
 How many entries there are. Counted as it goes, not walked.
@@ -1449,7 +1449,7 @@ How many entries there are. Counted as it goes, not walked.
 #### get
 
 ```khora
-export fn get(self, key: K) -> Option<V>
+pub fn get(self, key: K) -> Option<V>
 ```
 
 The value under `key`, if there is one.
@@ -1457,7 +1457,7 @@ The value under `key`, if there is one.
 #### holds
 
 ```khora
-export fn holds(self, key: K) -> Bool
+pub fn holds(self, key: K) -> Bool
 ```
 
 Whether `key` has an entry.
@@ -1468,7 +1468,7 @@ For when the value is not wanted; `get` is one lookup either way, so
 #### insert
 
 ```khora
-export fn insert(self, key: K, value: V) ->()
+pub fn insert(self, key: K, value: V) ->()
 ```
 
 Adds `key`, replacing whatever was there. The count only moves when the
@@ -1478,7 +1478,7 @@ number of insertions.
 #### remove
 
 ```khora
-export fn remove(self, key: K) ->()
+pub fn remove(self, key: K) ->()
 ```
 
 Takes `key` out, in place. Removing what is not there does nothing.
@@ -1489,7 +1489,7 @@ million buckets, which nothing here has needed to be otherwise.
 #### entries
 
 ```khora
-export fn entries(self) -> List<Pair<K, V>>
+pub fn entries(self) -> List<Pair<K, V>>
 ```
 
 Every entry, as a list.
@@ -1516,7 +1516,7 @@ slow walk, not a smashed stack.
 #### keys
 
 ```khora
-export fn keys(self) -> List<K>
+pub fn keys(self) -> List<K>
 ```
 
 The keys, in the reverse of the order `entries` reports them — which is
@@ -1537,7 +1537,7 @@ order of either.
 #### values
 
 ```khora
-export fn values(self) -> List<V>
+pub fn values(self) -> List<V>
 ```
 
 The values, one per entry — duplicates included, because two keys may
@@ -1553,7 +1553,7 @@ impl<A> Vector<A>
 #### new
 
 ```khora
-export fn new() -> Vector<A>
+pub fn new() -> Vector<A>
 ```
 
 Empty, holding no storage at all.
@@ -1567,7 +1567,7 @@ has cost two objects and no cells: itself, and the empty array's header.
 #### with_capacity
 
 ```khora
-export fn with_capacity(capacity: Int) -> Vector<A>
+pub fn with_capacity(capacity: Int) -> Vector<A>
 ```
 
 Room for `capacity` elements, from the first `push` onwards.
@@ -1587,7 +1587,7 @@ kind of mistake as indexing off the end of an array.
 #### length
 
 ```khora
-export fn length(self) -> Int
+pub fn length(self) -> Int
 ```
 
 How many elements are in it.
@@ -1595,7 +1595,7 @@ How many elements are in it.
 #### is_empty
 
 ```khora
-export fn is_empty(self) -> Bool
+pub fn is_empty(self) -> Bool
 ```
 
 Whether there is nothing in it.
@@ -1603,7 +1603,7 @@ Whether there is nothing in it.
 #### capacity
 
 ```khora
-export fn capacity(self) -> Int
+pub fn capacity(self) -> Int
 ```
 
 How many elements fit before the next reallocation — allocated cells, not
@@ -1616,7 +1616,7 @@ be able to see it.
 #### push
 
 ```khora
-export fn push(self, item: A) ->()
+pub fn push(self, item: A) ->()
 ```
 
 Adds an element at the end.
@@ -1627,7 +1627,7 @@ the fill: the only value of `A` anyone here has.
 #### grow
 
 ```khora
-export fn grow(self, seed: A) ->()
+pub fn grow(self, seed: A) ->()
 ```
 
 Twice the room, or `wanted` if there was none, with `seed` in every cell.
@@ -1655,7 +1655,7 @@ with the array. Blanking them would need a value of `A` to blank them
 #### pop
 
 ```khora
-export fn pop(self) -> Option<A>
+pub fn pop(self) -> Option<A>
 ```
 
 Removes the last element and hands it back.
@@ -1676,7 +1676,7 @@ at once, and `wanted` keeps its size for the next fill.
 #### get
 
 ```khora
-export fn get(self, index: Int) -> Option<A>
+pub fn get(self, index: Int) -> Option<A>
 ```
 
 The element at `index`, or `Option::None` if there is none there.
@@ -1694,7 +1694,7 @@ error.
 #### set
 
 ```khora
-export fn set(self, index: Int, value: A) -> Bool
+pub fn set(self, index: Int, value: A) -> Bool
 ```
 
 Replaces the element at `index`. Answers whether there was one to
@@ -1708,7 +1708,7 @@ what there is no value of `A` for; `push` is how a vector gets longer.
 #### clear
 
 ```khora
-export fn clear(self) ->()
+pub fn clear(self) ->()
 ```
 
 Empties it.
@@ -1723,7 +1723,7 @@ arrives back where it started.
 #### to_list
 
 ```khora
-export fn to_list(self) -> List<A>
+pub fn to_list(self) -> List<A>
 ```
 
 The elements, first to last.
@@ -1736,7 +1736,7 @@ overflowed the stack with.
 #### from_list
 
 ```khora
-export fn from_list(items: List<A>) -> Vector<A>
+pub fn from_list(items: List<A>) -> Vector<A>
 ```
 
 A vector of the list's elements, in the same order.
@@ -1756,7 +1756,7 @@ impl<A, B, 'e> SharedFn<A, B, 'e>
 #### of
 
 ```khora
-export fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>
+pub fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>
 ```
 
 Certifies a closure written here.
@@ -1768,7 +1768,7 @@ one thing this cannot check and so the one thing it refuses.
 #### call
 
 ```khora
-export fn call(self, argument: A) -> B raises 'e
+pub fn call(self, argument: A) -> B raises 'e
 ```
 
 Calls it. A plain closure call; the wrapper costs nothing at runtime.
@@ -1782,7 +1782,7 @@ impl<A: Share> Channel<A>
 #### bounded
 
 ```khora
-export fn bounded(capacity: Int) -> Channel<A>
+pub fn bounded(capacity: Int) -> Channel<A>
 ```
 
 A channel that will hold at most `capacity` values.
@@ -1792,7 +1792,7 @@ Below one is one — see the type's note on rendezvous.
 #### send
 
 ```khora
-export fn send(self, value: A) -> Bool
+pub fn send(self, value: A) -> Bool
 ```
 
 Puts a value in, waiting while the channel is full.
@@ -1804,7 +1804,7 @@ quietest possible leak.
 #### receive
 
 ```khora
-export fn receive(self) -> Option<A>
+pub fn receive(self) -> Option<A>
 ```
 
 Takes a value out, waiting while the channel is empty.
@@ -1814,7 +1814,7 @@ Takes a value out, waiting while the channel is empty.
 #### close
 
 ```khora
-export fn close(self) ->()
+pub fn close(self) ->()
 ```
 
 Says nothing more will be sent, and releases everybody waiting.
@@ -1822,7 +1822,7 @@ Says nothing more will be sent, and releases everybody waiting.
 #### depth
 
 ```khora
-export fn depth(self) -> Int
+pub fn depth(self) -> Int
 ```
 
 How many values are waiting to be taken.
@@ -1839,7 +1839,7 @@ impl<A: Share> Shared<A>
 #### of
 
 ```khora
-export fn of(value: A) -> Shared<A>
+pub fn of(value: A) -> Shared<A>
 ```
 
 A cell holding `value`.
@@ -1847,7 +1847,7 @@ A cell holding `value`.
 #### get
 
 ```khora
-export fn get(self) -> A
+pub fn get(self) -> A
 ```
 
 What is in it now, as a value of the caller's own.
@@ -1855,7 +1855,7 @@ What is in it now, as a value of the caller's own.
 #### set
 
 ```khora
-export fn set(self, value: A) ->()
+pub fn set(self, value: A) ->()
 ```
 
 Replaces what is in it.
@@ -1863,7 +1863,7 @@ Replaces what is in it.
 #### update
 
 ```khora
-export fn update(self, change: (A) -> A) -> A
+pub fn update(self, change: (A) -> A) -> A
 ```
 
 Reads, transforms and writes as one step, and gives back the new value.
@@ -1880,7 +1880,7 @@ program with a message rather than waiting for itself.
 #### modify
 
 ```khora
-export fn modify<B>(self, change: (A) -> Changed<A, B>) -> B
+pub fn modify<B>(self, change: (A) -> Changed<A, B>) -> B
 ```
 
 The same, for a change that has something to say beyond the new state.
@@ -1910,7 +1910,7 @@ impl Fibers
 #### open
 
 ```khora
-export fn open() -> Fibers
+pub fn open() -> Fibers
 ```
 
 A nursery with no limit on how many children it holds at once.
@@ -1921,7 +1921,7 @@ connection meets an unbounded nursery's ceiling by exhausting memory.
 #### bounded
 
 ```khora
-export fn bounded(limit: Int) -> Fibers
+pub fn bounded(limit: Int) -> Fibers
 ```
 
 A nursery that will hold at most `limit` running children.
@@ -1939,7 +1939,7 @@ outside world.
 #### adopt
 
 ```khora
-export fn adopt(self, fiber: Fiber) ->()
+pub fn adopt(self, fiber: Fiber) ->()
 ```
 
 Puts a running fiber under this nursery.
@@ -1951,7 +1951,7 @@ which is what turns a ceiling into a queue.
 #### wait
 
 ```khora
-export fn wait(self) ->()
+pub fn wait(self) ->()
 ```
 
 Waits for every child, oldest first, and empties the nursery.
@@ -1965,7 +1965,7 @@ impl Schedule
 #### once
 
 ```khora
-export fn once() -> Schedule
+pub fn once() -> Schedule
 ```
 
 Run once. The identity, and the one you get by not asking.
@@ -1973,7 +1973,7 @@ Run once. The identity, and the one you get by not asking.
 #### times
 
 ```khora
-export fn times(n: Int) -> Schedule
+pub fn times(n: Int) -> Schedule
 ```
 
 Run up to `n` times, stopping at the first success.
@@ -2107,7 +2107,7 @@ fn traverse<A, B, F: Applicative>(self: List<A>, f: (A) -> F<B>) -> F<List<B>>
 ### assert
 
 ```khora
-export fn assert(condition: Bool)
+pub fn assert(condition: Bool)
 ```
 
 Fails the test this is written in, if `condition` is false.
@@ -2120,7 +2120,7 @@ and a test is not ordinary code. `docs/design/testing.md`.
 ### print
 
 ```khora
-export fn print(value: String)
+pub fn print(value: String)
 ```
 
 Writes a line to standard output.
@@ -2133,7 +2133,7 @@ be — writing to a console is exactly the sort of thing a capability is for.
 ### nursery
 
 ```khora
-export fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A with 'e raises 'r
+pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A with 'e raises 'r
 ```
 
 Runs `body` with a nursery, and does not return until its children are done.
@@ -2163,7 +2163,7 @@ Which makes eta-expansion change meaning, and it should not.
 ### bounded_nursery
 
 ```khora
-export fn bounded_nursery<A, 'e, 'r>(limit: Int, body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A with 'e raises 'r
+pub fn bounded_nursery<A, 'e, 'r>(limit: Int, body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A with 'e raises 'r
 ```
 
 The same, holding at most `limit` children at once.
@@ -2184,7 +2184,7 @@ instead of collapse.
 ### scoped
 
 ```khora
-export fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A with 'e raises 'r
+pub fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A with 'e raises 'r
 ```
 
 Runs `body` in a fresh region, discharging its `scope` requirement.
@@ -2199,7 +2199,7 @@ and the error passes straight through.
 ### acquire
 
 ```khora
-export fn acquire<A, 'e>(value: A, release: (A) ->()) -> A with { 'e | scope: Scope }
+pub fn acquire<A, 'e>(value: A, release: (A) ->()) -> A with { 'e | scope: Scope }
 ```
 
 Acquires a value and registers its release in one step.
@@ -2210,7 +2210,7 @@ stay a plain closure. `release` is called with `value` when the region ends.
 ### attempt
 
 ```khora
-export fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e
+pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e
 ```
 
 Runs `body` and makes its failure a value.
@@ -2227,7 +2227,7 @@ without knowing what it was doing.
 ### retry
 
 ```khora
-export fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A with 'e raises E
+pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A with 'e raises E
 ```
 
 Runs `body` until it succeeds or the schedule runs out.
@@ -2240,7 +2240,7 @@ happened.
 ### repeat
 
 ```khora
-export fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int with 'e
+pub fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int with 'e
 ```
 
 Runs `body` until it fails, or the schedule runs out. The count of runs

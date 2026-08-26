@@ -93,7 +93,7 @@ fn three() -> () with { rng: Random } {
   print(Int::to_string(rng.int()))
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   with { rng: Random::seeded(1234) } { three(); };
   with { rng: Random::seeded(1234) } { three(); };
   with { rng: Random::seeded(1235) } { three(); }
@@ -136,7 +136,7 @@ fn record() -> () with { rng: Random } {
   with { rng: Random::seeded(seed) } { two(); }
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   with { rng: Random::real() } { record(); }
 }
 ",
@@ -180,7 +180,7 @@ fn survey(low: Int, high: Int, rounds: Int) -> () with { rng: Random } {
   print(Int::to_string(most))
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   with { rng: Random::seeded(7) } { survey(10, 20, 1000); };
   // Negative bounds, because `low + scale(..)` is where an unsigned reduction
   // would quietly go wrong.
@@ -211,7 +211,7 @@ fn an_empty_range_stops_the_program() {
 import std::core::{print};
 import std::random::{Random};
 
-export fn main() -> () {
+pub fn main() -> () {
   with { rng: Random::seeded(1) } { print(Int::to_string(rng.in_range(4, 4))); }
 }
 ",
@@ -267,7 +267,7 @@ fn take(size: Int) -> () with { rng: Random } {
   print(Int::to_string(zeros(buffer)))
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   with { rng: Random::seeded(99) } { take(32); };
   with { rng: Random::seeded(99) } { take(32); };
   with { rng: Random::seeded(100) } { take(32); };
@@ -329,7 +329,7 @@ fn measure() -> () with { clock: Clock } {
   print(Int::to_string(seconds))
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   with { clock: Clock::real() } { measure(); }
 }
 ",
@@ -367,7 +367,7 @@ fn how_long() -> Int with { clock: Clock } {
   after - before
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   // Every reading is five milliseconds after the last, forever.
   let ticks = Shared::of(0);
   with { clock: handler for Clock {
@@ -424,7 +424,7 @@ fn work() -> Int {
   sum
 }
 
-export fn main() -> () {
+pub fn main() -> () {
   let total = work();
   let live = khora_live_count();
   print(if total >= 0 { if total < 900 { \"in range\" } else { \"too big\" } } else { \"negative\" });

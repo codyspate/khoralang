@@ -24,7 +24,7 @@ fn decls(source: &str) -> Vec<Decl> {
 
 #[test]
 fn a_trait_declares_functions() {
-    let out = tree("module m;\nexport trait Eq {\n  fn eq(self, other: Self) -> Bool;\n}\n");
+    let out = tree("module m;\npub trait Eq {\n  fn eq(self, other: Self) -> Bool;\n}\n");
     assert!(out.contains("TRAIT_DECL"), "{out}");
     assert!(out.contains("TRAIT_KW"), "{out}");
     assert!(out.contains("FN_DECL"), "{out}");

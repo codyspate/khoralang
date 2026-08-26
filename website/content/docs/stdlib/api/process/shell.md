@@ -44,7 +44,7 @@ apart.
 ### open_pipe
 
 ```khora
-export fn open_pipe(command: String) -> Ptr
+pub fn open_pipe(command: String) -> Ptr
 ```
 
 A stream reading what `command` writes to its standard output, or null.
@@ -56,7 +56,7 @@ line, which is a decision for the caller who wrote the rest of that line.
 ### close_pipe
 
 ```khora
-export fn close_pipe(pipe: Ptr) -> Int
+pub fn close_pipe(pipe: Ptr) -> Int
 ```
 
 Waits for the pipe's command to finish, and gives its exit status.
@@ -67,7 +67,7 @@ status.
 ### run
 
 ```khora
-export fn run(command: String) -> Int
+pub fn run(command: String) -> Int
 ```
 
 Runs `command` through the shell, waits, and gives its exit status.

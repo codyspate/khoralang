@@ -31,7 +31,7 @@ const SHAPED: &str = "module t;
 
 fn print(value: String);
 
-export type Holding =
+pub type Holding =
   | Cash(amount: Int)
   | Position(ticker: String, lots: Int);
 

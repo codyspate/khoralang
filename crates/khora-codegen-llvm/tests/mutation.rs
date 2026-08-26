@@ -47,8 +47,8 @@ const MUT: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Counter = { mut count: Int };
-export type Slot = { mut held: String };
+pub type Counter = { mut count: Int };
+pub type Slot = { mut held: String };
 ";
 
 /// The point of the whole feature: a field written after the record was built.
@@ -154,7 +154,7 @@ fn a_nested_record_is_written_through() {
         "mut_nested",
         &format!(
             "{MUT}
-export type Pair = {{ left: Counter, right: Counter }};
+pub type Pair = {{ left: Counter, right: Counter }};
 
 fn work() -> Int {{
   let shared = {{ count: 10 }};

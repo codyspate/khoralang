@@ -38,19 +38,19 @@ extern fn khora_net_forget(handle: Int) -> ();
 extern fn khora_net_connect(host: Ptr, host_len: Int, port: Int) -> Int;
 
 /// `INVALID_SOCKET` is `(SOCKET)~0`, which read as a signed handle is -1.
-export fn invalid_handle() -> Int { 0 - 1 }
+pub fn invalid_handle() -> Int { 0 - 1 }
 
 /// Winsock has to be told which version of itself to be, once per process.
 ///
 /// `MAKEWORD(2, 2)` is 0x0202. The 512 bytes are a `WSADATA`, which the call
 /// fills in and nothing here reads — it is an out-parameter that has to exist.
-export fn start() -> Bool {
+pub fn start() -> Bool {
   let data: Array<U8> = Array::new(512, 0);
   Array::with_data(data, fn (buffer, n) => WSAStartup(U16::of(514), buffer) == I32::of(0))
 }
 
 /// A socket listening on `port`, or [`invalid_handle`].
-export fn listen_on(port: Int) -> Int {
+pub fn listen_on(port: Int) -> Int {
   // AF_INET, SOCK_STREAM, IPPROTO_TCP.
   let handle = socket(I32::of(2), I32::of(1), I32::of(6));
   // Non-blocking from here on, so that a fiber waiting for a connection gives
@@ -94,7 +94,7 @@ fn sockaddr_in(port: Int) -> Array<U8> {
 }
 
 /// Waits for a connection. [`invalid_handle`] if the wait failed.
-export fn accept_on(server: Int) -> Int {
+pub fn accept_on(server: Int) -> Int {
   let taken = khora_net_accept(server, Ptr::null(), Ptr::null());
   if taken < 0 { taken } else {
     // Prepared here rather than inside the runtime's `accept`, so that every
@@ -125,20 +125,20 @@ export fn accept_on(server: Int) -> Int {
 /// The runtime keeps the deadline and a scheduler timer enforces it. A read
 /// that runs out still comes back negative, which is what every caller here
 /// already treats as a connection to give up on.
-export fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
+pub fn set_receive_timeout(handle: Int, millis: Int) -> Bool {
   khora_net_set_timeout(handle, millis) == I32::of(0)
 }
 
 /// Reads what has arrived into `buffer`, and says how many bytes that was.
 ///
 /// Zero means the other end closed; negative means the read failed.
-export fn receive(connection: Int, buffer: Array<U8>) -> Int {
+pub fn receive(connection: Int, buffer: Array<U8>) -> Int {
   Array::with_data(buffer, fn (into, n) =>
     khora_net_recv(connection, into, n))
 }
 
 /// Writes `text`, and says how many bytes went. Negative if the write failed.
-export fn transmit(connection: Int, text: String) -> Int {
+pub fn transmit(connection: Int, text: String) -> Int {
   String::with_data(text, fn (from, n) =>
     khora_net_send(connection, from, n))
 }
@@ -156,7 +156,7 @@ export fn transmit(connection: Int, text: String) -> Int {
 /// **It blocks the fiber's worker while it connects.** A DNS lookup is not
 /// something the reactor can wait on. Once per connection against many
 /// queries, and written down in `docs/roadmap.md` Phase 13.
-export fn connect_to(host: String, port: Int) -> Int {
+pub fn connect_to(host: String, port: Int) -> Int {
   String::with_data(host, fn (from, n) => khora_net_connect(from, n, port))
 }
 
@@ -165,7 +165,7 @@ export fn connect_to(host: String, port: Int) -> Int {
 /// [`transmit`] takes a `String`, which is right for a protocol made of text
 /// and wrong for one made of bytes: a wire protocol frames its messages with a
 /// length nobody wrote as characters.
-export fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
+pub fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
   Array::with_data(bytes, fn (from, n) => khora_net_send(connection, from, n))
 }
 
@@ -185,7 +185,7 @@ export fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
 /// stops talking must not hold the fiber, and the receive deadline the server
 /// already set is doing the real work — this only has to outlast the bytes that
 /// were in flight.
-export fn shut(handle: Int) -> () {
+pub fn shut(handle: Int) -> () {
   shutdown(handle, I32::of(1));
   drain(handle, 8);
   // The runtime remembers this socket's receive deadline, and handles are

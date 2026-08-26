@@ -71,7 +71,7 @@ fn a_user_array_no_longer_reaches_the_backend() {
     assert!(found[0].contains("Rename it"), "the message should say what to do: {}", found[0]);
 }
 
-/// **Naming the builtin is not defining it.** `export type Array<A>;` with no
+/// **Naming the builtin is not defining it.** `pub type Array<A>;` with no
 /// right-hand side is what `std::core` writes, and what every backend test
 /// writes to reach an array without importing the standard library. It claims
 /// nothing the compiler does not already provide, so it is not a collision —
@@ -79,11 +79,11 @@ fn a_user_array_no_longer_reaches_the_backend() {
 #[test]
 fn declaring_the_builtin_without_a_definition_is_fine() {
     for declaration in [
-        "export type Array<A>;",
-        "export type Fiber;",
-        "export type Fibers;",
-        "export type Shared<A>;",
-        "export trait Share {}",
+        "pub type Array<A>;",
+        "pub type Fiber;",
+        "pub type Fibers;",
+        "pub type Shared<A>;",
+        "pub trait Share {}",
     ] {
         let found = refuses(declaration);
         assert!(
@@ -116,8 +116,8 @@ fn an_ordinary_name_is_left_alone() {
 fn two_modules_may_declare_one_name() {
     let found = errors_in_user(
         "module library;
-         export type Point = { label: String };
-         export fn make() -> Point { { label: \"theirs\" } }
+         pub type Point = { label: String };
+         pub fn make() -> Point { { label: \"theirs\" } }
 ",
         "module app;
          import library::{Point as Theirs, make};
@@ -148,13 +148,13 @@ fn two_modules_may_declare_one_name() {
 fn two_declarations_of_one_shape_do_not_unify() {
     let found = errors_in_user(
         "module library;
-         export type Point = { label: String };
-         export fn make() -> Point { { label: \"theirs\" } }
-         export fn take(p: Point) -> String { p.label }
+         pub type Point = { label: String };
+         pub fn make() -> Point { { label: \"theirs\" } }
+         pub fn take(p: Point) -> String { p.label }
 ",
         "module app;
          import library::{make, take};
-         export type Point = { label: String };
+         pub type Point = { label: String };
          fn mine() -> Point { { label: \"mine\" } }
          // Theirs where mine is wanted.
          fn wrong_way() -> Point { make() }
@@ -182,9 +182,9 @@ fn two_declarations_of_one_shape_do_not_unify() {
 fn an_alias_is_the_type_it_renames() {
     let found = errors_in_user(
         "module library;
-         export type Point = { label: String };
-         export fn make() -> Point { { label: \"theirs\" } }
-         export fn take(p: Point) -> String { p.label }
+         pub type Point = { label: String };
+         pub fn make() -> Point { { label: \"theirs\" } }
+         pub fn take(p: Point) -> String { p.label }
 ",
         "module app;
          import library::{Point as Theirs, make, take};
@@ -204,8 +204,8 @@ fn an_alias_is_the_type_it_renames() {
 fn using_a_type_without_importing_it_says_to_import_it() {
     let found = errors_in_user(
         "module library;
-         export type Point = { label: String };
-         export fn make() -> Point { { label: \"theirs\" } }
+         pub type Point = { label: String };
+         pub fn make() -> Point { { label: \"theirs\" } }
 ",
         "module app;
          import library::{make};

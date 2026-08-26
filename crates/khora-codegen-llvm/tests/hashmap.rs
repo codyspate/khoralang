@@ -22,9 +22,9 @@ const MAP: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-export type Option<A> = | Some(value: A) | None;
+pub type Option<A> = | Some(value: A) | None;
 
-export type Array<A>;
+pub type Array<A>;
 impl<A> Array<A> {
   fn new(length: Int, fill: A) -> Array<A>;
   fn length(self) -> Int;
@@ -39,7 +39,7 @@ impl Int {
   fn shr(self, other: Int) -> Int;
 }
 
-export type Chain<V> = | Empty | Node(key: Int, value: V, rest: Chain<V>);
+pub type Chain<V> = | Empty | Node(key: Int, value: V, rest: Chain<V>);
 
 impl<V> Chain<V> {
   fn find(self, key: Int) -> Option<V> {
@@ -60,7 +60,7 @@ impl<V> Chain<V> {
   }
 }
 
-export type Map<V> = { mut buckets: Array<Chain<V>>, mut count: Int };
+pub type Map<V> = { mut buckets: Array<Chain<V>>, mut count: Int };
 
 impl<V> Map<V> {
   fn new() -> Map<V> { { buckets: Array::new(8, Chain::Empty), count: 0 } }

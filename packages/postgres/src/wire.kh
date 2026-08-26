@@ -37,30 +37,30 @@ import std::core::{Array, List, Option, Vector};
 /// A `Vector<U8>` rather than an `Array<U8>`, because the length is not known
 /// until the payload is finished — which is the whole reason a protocol puts
 /// the length first and a writer has to buffer.
-export type Writer = {
+pub type Writer = {
   bytes: Vector<U8>,
 };
 
 impl Writer {
-  export fn new() -> Writer {
+  pub fn new() -> Writer {
     { bytes: Vector::new() }
   }
 
   /// One byte.
-  export fn u8(self, value: Int) -> () {
+  pub fn u8(self, value: Int) -> () {
     Vector::push(self.bytes, U8::of(Int::and(value, 255)));
   }
 
   /// Sixteen bits, most significant first. The protocol is big-endian
   /// throughout, which is not this machine's order and so is written out
   /// rather than reinterpreted.
-  export fn i16(self, value: Int) -> () {
+  pub fn i16(self, value: Int) -> () {
     Writer::u8(self, Int::shr(value, 8));
     Writer::u8(self, value);
   }
 
   /// Thirty-two bits, most significant first.
-  export fn i32(self, value: Int) -> () {
+  pub fn i32(self, value: Int) -> () {
     Writer::u8(self, Int::shr(value, 24));
     Writer::u8(self, Int::shr(value, 16));
     Writer::u8(self, Int::shr(value, 8));
@@ -68,7 +68,7 @@ impl Writer {
   }
 
   /// A string's bytes, without a terminator.
-  export fn text(self, value: String) -> () {
+  pub fn text(self, value: String) -> () {
     let count = String::byte_length(value);
     let mut at = 0;
     while at < count {
@@ -79,7 +79,7 @@ impl Writer {
 
   /// A string, terminated by a zero byte, which is how the protocol carries
   /// every name it has: users, databases, parameters, SQL.
-  export fn cstring(self, value: String) -> () {
+  pub fn cstring(self, value: String) -> () {
     Writer::text(self, value);
     Writer::u8(self, 0);
   }
@@ -88,7 +88,7 @@ impl Writer {
   ///
   /// Used to put one finished message inside another buffer, which is how the
   /// extended protocol's five frames become a single write.
-  export fn raw(self, values: Array<U8>) -> () {
+  pub fn raw(self, values: Array<U8>) -> () {
     let count = Array::length(values);
     let mut at = 0;
     while at < count {
@@ -97,10 +97,10 @@ impl Writer {
     };
   }
 
-  export fn length(self) -> Int { Vector::length(self.bytes) }
+  pub fn length(self) -> Int { Vector::length(self.bytes) }
 
   /// What has been written, as an array ready to send.
-  export fn finish(self) -> Array<U8> {
+  pub fn finish(self) -> Array<U8> {
     let count = Vector::length(self.bytes);
     let out: Array<U8> = Array::new(count, 0);
     let mut at = 0;
@@ -122,7 +122,7 @@ impl Writer {
 /// the symptom is an unrelated message type and no clue which frame was
 /// mis-sized — so it is one function, used by everything, rather than
 /// arithmetic repeated at every call site.
-export fn framed(kind: Int, payload: Array<U8>) -> Array<U8> {
+pub fn framed(kind: Int, payload: Array<U8>) -> Array<U8> {
   let out = Writer::new();
   Writer::u8(out, kind);
   Writer::i32(out, Array::length(payload) + 4);
@@ -135,7 +135,7 @@ export fn framed(kind: Int, payload: Array<U8>) -> Array<U8> {
 /// The server has not agreed a protocol yet, so there is nothing for a type
 /// byte to mean. Version three is `0x00030000`, and the parameters are
 /// `name\0value\0` pairs ended by one more zero.
-export fn startup(user: String, database: String) -> Array<U8> {
+pub fn startup(user: String, database: String) -> Array<U8> {
   let body = Writer::new();
   Writer::i32(body, 196608);
   Writer::cstring(body, "user");
@@ -152,7 +152,7 @@ export fn startup(user: String, database: String) -> Array<U8> {
 }
 
 /// A simple query: everything in one string, results in one round trip.
-export fn query(sql: String) -> Array<U8> {
+pub fn query(sql: String) -> Array<U8> {
   let body = Writer::new();
   Writer::cstring(body, sql);
   framed(81, Writer::finish(body))
@@ -182,7 +182,7 @@ export fn query(sql: String) -> Array<U8> {
 /// An empty name is the *unnamed* statement, which every backend keeps exactly
 /// one of and replaces without being asked. That is what a query run once
 /// wants; a name is what reuse would want, and reuse is not here yet.
-export fn parse(name: String, sql: String) -> Array<U8> {
+pub fn parse(name: String, sql: String) -> Array<U8> {
   let body = Writer::new();
   Writer::cstring(body, name);
   Writer::cstring(body, sql);
@@ -191,7 +191,7 @@ export fn parse(name: String, sql: String) -> Array<U8> {
 }
 
 /// `Bind`: the values, in order, for a parsed statement.
-export fn bind(portal: String, statement: String, values: List<Option<String>>) -> Array<U8> {
+pub fn bind(portal: String, statement: String, values: List<Option<String>>) -> Array<U8> {
   let body = Writer::new();
   Writer::cstring(body, portal);
   Writer::cstring(body, statement);
@@ -231,7 +231,7 @@ export fn bind(portal: String, statement: String, values: List<Option<String>>) 
 ///
 /// Describing the *statement* would answer a different question — what
 /// parameters it takes — and the column types are what `oid_to_cell` needs.
-export fn describe_portal(name: String) -> Array<U8> {
+pub fn describe_portal(name: String) -> Array<U8> {
   let body = Writer::new();
   Writer::u8(body, 80);
   Writer::cstring(body, name);
@@ -243,7 +243,7 @@ export fn describe_portal(name: String) -> Array<U8> {
 /// **Zero means all of them**, which is not a count of zero. This driver reads
 /// whole answers, so zero is what it always passes; a cursor is what the other
 /// values are for.
-export fn execute(portal: String, rows: Int) -> Array<U8> {
+pub fn execute(portal: String, rows: Int) -> Array<U8> {
   let body = Writer::new();
   Writer::cstring(body, portal);
   Writer::i32(body, rows);
@@ -256,7 +256,7 @@ export fn execute(portal: String, rows: Int) -> Array<U8> {
 /// `ReadyForQuery` waits for the backend. Nothing times out and nothing says
 /// why — which is why this is never optional and never left to a caller to
 /// remember.
-export fn sync() -> Array<U8> {
+pub fn sync() -> Array<U8> {
   let empty: Array<U8> = Array::new(0, 0);
   framed(83, empty)
 }
@@ -267,7 +267,7 @@ export fn sync() -> Array<U8> {
 /// unnamed portal — the whole exchange in one buffer, because five writes is
 /// five chances to leave the backend halfway through a message if one of them
 /// fails.
-export fn extended(sql: String, values: List<Option<String>>) -> Array<U8> {
+pub fn extended(sql: String, values: List<Option<String>>) -> Array<U8> {
   let out = Writer::new();
   Writer::raw(out, parse("", sql));
   Writer::raw(out, bind("", "", values));
@@ -278,7 +278,7 @@ export fn extended(sql: String, values: List<Option<String>>) -> Array<U8> {
 }
 
 /// A password, in whatever form the server asked for.
-export fn password(secret: String) -> Array<U8> {
+pub fn password(secret: String) -> Array<U8> {
   let body = Writer::new();
   Writer::cstring(body, secret);
   framed(112, Writer::finish(body))
@@ -286,7 +286,7 @@ export fn password(secret: String) -> Array<U8> {
 
 /// `Terminate`. Politer than closing the socket: the server logs a
 /// disconnection rather than a broken connection.
-export fn terminate() -> Array<U8> {
+pub fn terminate() -> Array<U8> {
   let empty: Array<U8> = Array::new(0, 0);
   framed(88, empty)
 }
@@ -294,15 +294,15 @@ export fn terminate() -> Array<U8> {
 // --- reading ---------------------------------------------------------------
 
 /// A position in a received buffer.
-export type Reader = {
+pub type Reader = {
   bytes: Array<U8>,
   mut at: Int,
 };
 
 impl Reader {
-  export fn of(bytes: Array<U8>) -> Reader { { bytes: bytes, at: 0 } }
+  pub fn of(bytes: Array<U8>) -> Reader { { bytes: bytes, at: 0 } }
 
-  export fn remaining(self) -> Int { Array::length(self.bytes) - self.at }
+  pub fn remaining(self) -> Int { Array::length(self.bytes) - self.at }
 
   /// One byte, or zero past the end.
   ///
@@ -310,7 +310,7 @@ impl Reader {
   /// end is looking at a message it has already decided the length of, so the
   /// mistake was upstream and reporting it here would blame the wrong line.
   /// `remaining` is how a caller checks before it reads.
-  export fn u8(self) -> Int {
+  pub fn u8(self) -> Int {
     if self.at >= Array::length(self.bytes) {
       0
     } else {
@@ -320,7 +320,7 @@ impl Reader {
     }
   }
 
-  export fn i16(self) -> Int {
+  pub fn i16(self) -> Int {
     let hi = Reader::u8(self);
     let lo = Reader::u8(self);
     Int::or(Int::shl(hi, 8), lo)
@@ -337,7 +337,7 @@ impl Reader {
   /// string. Without the sign, every NULL in every result became an empty
   /// text, which is the kind of wrong that reaches a report rather than a
   /// crash. Found by the first query the driver ever ran.
-  export fn i32(self) -> Int {
+  pub fn i32(self) -> Int {
     let a = Reader::u8(self);
     let b = Reader::u8(self);
     let c = Reader::u8(self);
@@ -347,7 +347,7 @@ impl Reader {
   }
 
   /// Bytes up to a zero, as text. The zero is consumed and not returned.
-  export fn cstring(self) -> String {
+  pub fn cstring(self) -> String {
     let out = Vector::new();
     let mut going = true;
     while going {
@@ -376,7 +376,7 @@ impl Reader {
   }
 
   /// `count` bytes, as their own array.
-  export fn take(self, count: Int) -> Array<U8> {
+  pub fn take(self, count: Int) -> Array<U8> {
     let have = Reader::remaining(self);
     let n = if count < have { count } else { have };
     let out: Array<U8> = Array::new(n, 0);
@@ -391,7 +391,7 @@ impl Reader {
 }
 
 /// One message read off the wire, before anything is made of it.
-export type Message = {
+pub type Message = {
   /// The type byte: `R` for authentication, `T` for a row description, and so
   /// on. Kept as a number because that is what the wire carries and a name
   /// here would be a second vocabulary to keep in step.
@@ -404,7 +404,7 @@ export type Message = {
 /// `Option::None` means *not yet*, not *broken*: a socket read returns whatever
 /// has arrived, and a message split across two reads is the ordinary case
 /// rather than an error. The caller reads more and asks again.
-export fn message_at(bytes: Array<U8>, from: Int) -> Option<Message> {
+pub fn message_at(bytes: Array<U8>, from: Int) -> Option<Message> {
   let available = Array::length(bytes) - from;
   if available < 5 {
     Option::None
@@ -426,6 +426,6 @@ export fn message_at(bytes: Array<U8>, from: Int) -> Option<Message> {
 }
 
 /// How many bytes a message occupies, given its payload.
-export fn message_width(message: Message) -> Int {
+pub fn message_width(message: Message) -> Int {
   Array::length(message.payload) + 5
 }

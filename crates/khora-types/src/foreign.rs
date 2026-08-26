@@ -8,7 +8,7 @@
 //! Here rather than in the backend, where this began. The rule is a fact about
 //! *types*, and it is now needed in two places that answer to different
 //! audiences: the backend refuses to generate a call that would cross badly,
-//! and the checker refuses an `export extern fn` whose signature could not be
+//! and the checker refuses an `pub extern fn` whose signature could not be
 //! called from C at all. The second is why it moved — an export is part of a
 //! library's published ABI whether or not any Khora code calls it, so it has
 //! to be reported at the declaration and therefore by `khora check`.

@@ -325,7 +325,7 @@ impl NameRef {
 
 impl TypeDecl {
     pub fn is_exported(&self) -> bool {
-        token(&self.0, EXPORT_KW).is_some()
+        token(&self.0, PUB_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
@@ -355,7 +355,7 @@ impl DeriveClause {
 
 impl EffectDecl {
     pub fn is_exported(&self) -> bool {
-        token(&self.0, EXPORT_KW).is_some()
+        token(&self.0, PUB_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
@@ -371,7 +371,7 @@ impl EffectDecl {
 
 impl ContextDecl {
     pub fn is_exported(&self) -> bool {
-        token(&self.0, EXPORT_KW).is_some()
+        token(&self.0, PUB_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)
@@ -404,7 +404,7 @@ impl BenchDecl {
 
 impl FnDecl {
     pub fn is_exported(&self) -> bool {
-        token(&self.0, EXPORT_KW).is_some()
+        token(&self.0, PUB_KW).is_some()
     }
     /// Whether the body is a C symbol, found at link time.
     ///
@@ -498,7 +498,7 @@ impl ConstDecl {
         child(&self.0)
     }
     pub fn is_exported(&self) -> bool {
-        token(&self.0, EXPORT_KW).is_some()
+        token(&self.0, PUB_KW).is_some()
     }
 }
 
@@ -554,7 +554,7 @@ impl TypeBounds {
 
 impl TraitDecl {
     pub fn is_exported(&self) -> bool {
-        token(&self.0, EXPORT_KW).is_some()
+        token(&self.0, PUB_KW).is_some()
     }
     pub fn name(&self) -> Option<Name> {
         child(&self.0)

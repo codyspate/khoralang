@@ -18,7 +18,7 @@ fn only(source: &str) -> Item {
 
 #[test]
 fn a_doc_comment_attaches_to_the_declaration_below_it() {
-    let item = only("module m;\n\n/// The first line.\n/// The second.\nexport fn f() -> Int { 1 }\n");
+    let item = only("module m;\n\n/// The first line.\n/// The second.\npub fn f() -> Int { 1 }\n");
     assert_eq!(item.doc, ["The first line.", "The second."]);
 }
 
@@ -26,7 +26,7 @@ fn a_doc_comment_attaches_to_the_declaration_below_it() {
 /// is a note to whoever maintains the file.
 #[test]
 fn a_plain_comment_is_not_documentation() {
-    let item = only("module m;\n\n// A note to a maintainer.\nexport fn f() -> Int { 1 }\n");
+    let item = only("module m;\n\n// A note to a maintainer.\npub fn f() -> Int { 1 }\n");
     assert!(item.doc.is_empty(), "a `//` comment should not be published: {:?}", item.doc);
 }
 
@@ -35,7 +35,7 @@ fn a_plain_comment_is_not_documentation() {
 #[test]
 fn a_plain_comment_underneath_ends_the_block() {
     let item = only(
-        "module m;\n\n/// Published.\n// TODO: this is slow.\nexport fn f() -> Int { 1 }\n",
+        "module m;\n\n/// Published.\n// TODO: this is slow.\npub fn f() -> Int { 1 }\n",
     );
     assert!(item.doc.is_empty(), "the note broke the run: {:?}", item.doc);
 }
@@ -45,7 +45,7 @@ fn a_plain_comment_underneath_ends_the_block() {
 #[test]
 fn a_blank_line_ends_the_block() {
     let item = only(
-        "module m;\n\n/// About something else.\n\n/// About this.\nexport fn f() -> Int { 1 }\n",
+        "module m;\n\n/// About something else.\n\n/// About this.\npub fn f() -> Int { 1 }\n",
     );
     assert_eq!(item.doc, ["About this."]);
 }
@@ -54,14 +54,14 @@ fn a_blank_line_ends_the_block() {
 #[test]
 fn a_divider_is_not_documentation() {
     let item =
-        only("module m;\n\n////////////////\nexport fn f() -> Int { 1 }\n");
+        only("module m;\n\n////////////////\npub fn f() -> Int { 1 }\n");
     assert!(item.doc.is_empty(), "{:?}", item.doc);
 }
 
 #[test]
 fn one_space_after_the_marker_is_removed_and_no_more() {
     let item = only(
-        "module m;\n///     indented, as in a code block\n///not indented\nexport fn f() -> Int { 1 }\n",
+        "module m;\n///     indented, as in a code block\n///not indented\npub fn f() -> Int { 1 }\n",
     );
     assert_eq!(item.doc, ["    indented, as in a code block", "not indented"]);
 }
@@ -70,7 +70,7 @@ fn one_space_after_the_marker_is_removed_and_no_more() {
 
 #[test]
 fn module_docs_come_from_bang_comments() {
-    let m = module("module m;\n\n//! What this module is.\n//!\n//! More.\n\nexport fn f() -> Int { 1 }\n");
+    let m = module("module m;\n\n//! What this module is.\n//!\n//! More.\n\npub fn f() -> Int { 1 }\n");
     assert_eq!(m.doc, ["What this module is.", "", "More."]);
     assert_eq!(m.path.as_deref(), Some("m"));
 }
@@ -79,8 +79,8 @@ fn module_docs_come_from_bang_comments() {
 /// write it before them. Neither position is wrong.
 #[test]
 fn module_docs_may_sit_either_side_of_the_imports() {
-    let before = module("module m;\n//! Above.\nimport std::core::{Int};\n\nexport fn f() -> Int { 1 }\n");
-    let after = module("module m;\nimport std::core::{Int};\n//! Below.\n\nexport fn f() -> Int { 1 }\n");
+    let before = module("module m;\n//! Above.\nimport std::core::{Int};\n\npub fn f() -> Int { 1 }\n");
+    let after = module("module m;\nimport std::core::{Int};\n//! Below.\n\npub fn f() -> Int { 1 }\n");
     assert_eq!(before.doc, ["Above."]);
     assert_eq!(after.doc, ["Below."]);
 }
@@ -89,7 +89,7 @@ fn module_docs_may_sit_either_side_of_the_imports() {
 /// module, so it is not the module's text.
 #[test]
 fn a_bang_comment_after_a_declaration_is_not_the_modules() {
-    let m = module("module m;\n//! Mine.\nexport fn f() -> Int { 1 }\n//! Not mine.\n");
+    let m = module("module m;\n//! Mine.\npub fn f() -> Int { 1 }\n//! Not mine.\n");
     assert_eq!(m.doc, ["Mine."]);
 }
 
@@ -102,7 +102,7 @@ fn a_module_path_with_several_segments_survives() {
 
 #[test]
 fn an_unexported_item_is_not_documented() {
-    let m = module("module m;\n\n/// Private.\nfn f() -> Int { 1 }\n\n/// Public.\nexport fn g() -> Int { 2 }\n");
+    let m = module("module m;\n\n/// Private.\nfn f() -> Int { 1 }\n\n/// Public.\npub fn g() -> Int { 2 }\n");
     assert_eq!(m.items.len(), 1);
     assert_eq!(m.items[0].name, "g");
 }
@@ -116,8 +116,8 @@ fn an_unexported_item_is_not_documented() {
 fn an_exported_method_of_an_exported_type_is_documented() {
     let m = module(
         "module m;\n\n\
-         export type Counter = { n: Int };\n\n\
-         impl Counter {\n  /// How many.\n  export fn count(self) -> Int { self.n }\n}\n",
+         pub type Counter = { n: Int };\n\n\
+         impl Counter {\n  /// How many.\n  pub fn count(self) -> Int { self.n }\n}\n",
     );
     let methods = m.items.iter().find(|i| i.kind == Kind::Methods).expect("an impl block");
     assert_eq!(methods.name, "Counter");
@@ -131,9 +131,9 @@ fn an_exported_method_of_an_exported_type_is_documented() {
 fn an_unexported_method_of_an_exported_type_is_not_documented() {
     let m = module(
         "module m;\n\n\
-         export type Counter = { n: Int };\n\n\
+         pub type Counter = { n: Int };\n\n\
          impl Counter {\n  \
-         export fn count(self) -> Int { Counter::twice(self) }\n  \
+         pub fn count(self) -> Int { Counter::twice(self) }\n  \
          fn twice(self) -> Int { self.n * 2 }\n}\n",
     );
     let methods = m.items.iter().find(|i| i.kind == Kind::Methods).expect("an impl block");
@@ -147,8 +147,8 @@ fn an_unexported_method_of_an_exported_type_is_not_documented() {
 fn a_trait_impls_methods_are_documented_without_the_keyword() {
     let m = module(
         "module m;\n\n\
-         export trait Show { fn show(self) -> String; }\n\
-         export type Counter = { n: Int };\n\n\
+         pub trait Show { fn show(self) -> String; }\n\
+         pub type Counter = { n: Int };\n\n\
          impl Show for Counter {\n  fn show(self) -> String { \"c\" }\n}\n",
     );
     let imp = m.items.iter().find(|i| i.kind == Kind::TraitImpl).expect("a trait impl");
@@ -165,13 +165,13 @@ fn methods_of_an_unexported_type_are_not_documented() {
 }
 
 /// A generic type's impl is written `impl<A> List<A>` and the declaration is
-/// `export type List<A>`; matching on the base name is what connects them.
+/// `pub type List<A>`; matching on the base name is what connects them.
 #[test]
 fn a_generic_impl_is_matched_to_its_declaration() {
     let m = module(
         "module m;\n\n\
-         export type List<A> = | Nil | Cons(head: A, tail: List<A>);\n\n\
-         impl<A> List<A> {\n  /// How many.\n  export fn length(self) -> Int { 0 }\n}\n",
+         pub type List<A> = | Nil | Cons(head: A, tail: List<A>);\n\n\
+         impl<A> List<A> {\n  /// How many.\n  pub fn length(self) -> Int { 0 }\n}\n",
     );
     let methods = m.items.iter().find(|i| i.kind == Kind::Methods).expect("an impl block");
     assert_eq!(methods.name, "List<A>");
@@ -182,8 +182,8 @@ fn a_generic_impl_is_matched_to_its_declaration() {
 fn a_trait_implementation_is_named_by_both_halves() {
     let m = module(
         "module m;\n\n\
-         export type Money = { units: Int };\n\
-         export trait Show { fn show(self) -> String; }\n\n\
+         pub type Money = { units: Int };\n\
+         pub trait Show { fn show(self) -> String; }\n\n\
          impl Show for Money {\n  /// Digits.\n  fn show(self) -> String { \"\" }\n}\n",
     );
     let found = m.items.iter().find(|i| i.kind == Kind::TraitImpl).expect("a trait impl");
@@ -204,8 +204,8 @@ fn an_impl_for_a_type_from_elsewhere_is_not_documented() {
 
 #[test]
 fn a_function_is_its_signature_and_never_its_body() {
-    let item = only("module m;\nexport fn add(a: Int, b: Int) -> Int { a + b }\n");
-    assert_eq!(item.signature, "export fn add(a: Int, b: Int) -> Int");
+    let item = only("module m;\npub fn add(a: Int, b: Int) -> Int { a + b }\n");
+    assert_eq!(item.signature, "pub fn add(a: Int, b: Int) -> Int");
 }
 
 /// A signature wrapped over several lines is a formatting decision about a
@@ -213,25 +213,25 @@ fn a_function_is_its_signature_and_never_its_body() {
 #[test]
 fn a_wrapped_signature_is_collapsed() {
     let item = only(
-        "module m;\nexport fn open(\n  host: String,\n  port: Int,\n) -> Result<Connection, PgError> { todo }\n",
+        "module m;\npub fn open(\n  host: String,\n  port: Int,\n) -> Result<Connection, PgError> { todo }\n",
     );
-    assert_eq!(item.signature, "export fn open(host: String, port: Int) -> Result<Connection, PgError>");
+    assert_eq!(item.signature, "pub fn open(host: String, port: Int) -> Result<Connection, PgError>");
 }
 
 #[test]
 fn effect_rows_and_generics_survive() {
     let item = only(
-        "module m;\nexport fn run<A>(f: A) -> A with { io: Io } raises IoError { f }\n",
+        "module m;\npub fn run<A>(f: A) -> A with { io: Io } raises IoError { f }\n",
     );
-    assert_eq!(item.signature, "export fn run<A>(f: A) -> A with { io: Io } raises IoError");
+    assert_eq!(item.signature, "pub fn run<A>(f: A) -> A with { io: Io } raises IoError");
 }
 
 /// A type's shape is the documentation, so it is printed as written rather than
 /// squeezed onto one line.
 #[test]
 fn a_type_keeps_the_shape_it_was_written_in() {
-    let item = only("module m;\nexport type Cell =\n  | Null\n  | Text(String)\n  | Number(Int);\n");
-    assert_eq!(item.signature, "export type Cell =\n  | Null\n  | Text(String)\n  | Number(Int);");
+    let item = only("module m;\npub type Cell =\n  | Null\n  | Text(String)\n  | Number(Int);\n");
+    assert_eq!(item.signature, "pub type Cell =\n  | Null\n  | Text(String)\n  | Number(Int);");
 }
 
 /// A `///` inside a record belongs to its field and is emitted there. Leaving
@@ -239,7 +239,7 @@ fn a_type_keeps_the_shape_it_was_written_in() {
 #[test]
 fn comments_inside_a_type_are_not_repeated_in_its_signature() {
     let item = only(
-        "module m;\nexport type Row = {\n  /// The cells.\n  cells: List<Cell>,\n};\n",
+        "module m;\npub type Row = {\n  /// The cells.\n  cells: List<Cell>,\n};\n",
     );
     assert!(!item.signature.contains("The cells"), "{}", item.signature);
     assert_eq!(item.members.len(), 1);
@@ -250,7 +250,7 @@ fn comments_inside_a_type_are_not_repeated_in_its_signature() {
 #[test]
 fn a_variant_case_carries_its_own_documentation() {
     let item = only(
-        "module m;\nexport type E =\n  /// Nothing answered.\n  | Unreachable(String)\n  /// It said no.\n  | Refused(String);\n",
+        "module m;\npub type E =\n  /// Nothing answered.\n  | Unreachable(String)\n  /// It said no.\n  | Refused(String);\n",
     );
     let names: Vec<&str> = item.members.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, ["Unreachable", "Refused"]);
@@ -262,9 +262,9 @@ fn a_variant_case_carries_its_own_documentation() {
 #[test]
 fn a_trait_shows_its_header_and_its_functions_separately() {
     let item = only(
-        "module m;\nexport trait Ord: Eq {\n  /// Compare.\n  fn cmp(self, other: Self) -> Ordering;\n}\n",
+        "module m;\npub trait Ord: Eq {\n  /// Compare.\n  fn cmp(self, other: Self) -> Ordering;\n}\n",
     );
-    assert_eq!(item.signature, "export trait Ord: Eq");
+    assert_eq!(item.signature, "pub trait Ord: Eq");
     assert_eq!(item.members.len(), 1);
     assert_eq!(item.members[0].signature, "fn cmp(self, other: Self) -> Ordering");
 }
@@ -272,7 +272,7 @@ fn a_trait_shows_its_header_and_its_functions_separately() {
 #[test]
 fn an_associated_type_is_a_member() {
     let item = only(
-        "module m;\nexport trait Iter {\n  /// What it yields.\n  type Item;\n  fn next(self) -> Option<Self::Item>;\n}\n",
+        "module m;\npub trait Iter {\n  /// What it yields.\n  type Item;\n  fn next(self) -> Option<Self::Item>;\n}\n",
     );
     let assoc = item.members.iter().find(|m| m.kind == Kind::AssocType).expect("an assoc type");
     assert_eq!(assoc.name, "Item");
@@ -281,18 +281,18 @@ fn an_associated_type_is_a_member() {
 
 #[test]
 fn a_constant_is_printed_whole() {
-    let item = only("module m;\n/// The digits.\nexport const digits = \"0123456789\";\n");
+    let item = only("module m;\n/// The digits.\npub const digits = \"0123456789\";\n");
     assert_eq!(item.name, "digits");
     assert_eq!(item.kind, Kind::Const);
-    assert_eq!(item.signature, "export const digits = \"0123456789\";");
+    assert_eq!(item.signature, "pub const digits = \"0123456789\";");
 }
 
 /// The comment stripper counts quotes rather than assuming a `//` is a comment,
 /// because getting it wrong would silently corrupt a value.
 #[test]
 fn a_double_slash_inside_a_string_is_not_a_comment() {
-    let item = only("module m;\nexport const url = \"https://example.com\";\n");
-    assert_eq!(item.signature, "export const url = \"https://example.com\";");
+    let item = only("module m;\npub const url = \"https://example.com\";\n");
+    assert_eq!(item.signature, "pub const url = \"https://example.com\";");
 }
 
 // --- the page ---------------------------------------------------------------
@@ -301,8 +301,8 @@ fn a_double_slash_inside_a_string_is_not_a_comment() {
 fn a_page_has_frontmatter_and_a_section_per_kind() {
     let page = markdown(&module(
         "module std::thing;\n\n//! What it is.\n\n\
-         /// A number holder.\nexport type N = { n: Int };\n\n\
-         /// Adds.\nexport fn add(a: Int) -> Int { a }\n",
+         /// A number holder.\npub type N = { n: Int };\n\n\
+         /// Adds.\npub fn add(a: Int) -> Int { a }\n",
     ));
     assert!(page.starts_with("---\ntitle: std::thing\n"), "{page}");
     assert!(page.contains("description: \"What it is\""), "{page}");
@@ -310,7 +310,7 @@ fn a_page_has_frontmatter_and_a_section_per_kind() {
     assert!(page.contains("\n## Functions\n"), "{page}");
     // Types before functions: an argument type has to mean something first.
     assert!(page.find("## Types") < page.find("## Functions"), "{page}");
-    assert!(page.contains("```khora\nexport fn add(a: Int) -> Int\n```"), "{page}");
+    assert!(page.contains("```khora\npub fn add(a: Int) -> Int\n```"), "{page}");
 }
 
 /// A colon in the first sentence is a YAML document boundary if it is not
@@ -326,7 +326,7 @@ fn a_description_with_a_colon_is_quoted() {
 #[test]
 fn headings_inside_a_doc_comment_are_pushed_below_their_item() {
     let page = markdown(&module(
-        "module m;\n\n/// Text.\n///\n/// # Why\n/// Because.\nexport fn f() -> Int { 1 }\n",
+        "module m;\n\n/// Text.\n///\n/// # Why\n/// Because.\npub fn f() -> Int { 1 }\n",
     ));
     assert!(page.contains("\n#### Why\n"), "a `#` under an `###` item should be `####`: {page}");
     assert!(!page.contains("\n# Why\n"), "{page}");
@@ -335,7 +335,7 @@ fn headings_inside_a_doc_comment_are_pushed_below_their_item() {
 #[test]
 fn a_hash_inside_a_fenced_block_is_left_alone() {
     let page = markdown(&module(
-        "module m;\n\n/// Text.\n///\n/// ```\n/// # not a heading\n/// ```\nexport fn f() -> Int { 1 }\n",
+        "module m;\n\n/// Text.\n///\n/// ```\n/// # not a heading\n/// ```\npub fn f() -> Int { 1 }\n",
     ));
     assert!(page.contains("\n# not a heading\n"), "{page}");
 }
@@ -350,7 +350,7 @@ fn a_module_with_nothing_exported_says_so() {
 /// can review.
 #[test]
 fn the_same_input_produces_the_same_page() {
-    let source = "module m;\n//! Text.\n/// Doc.\nexport fn f() -> Int { 1 }\n";
+    let source = "module m;\n//! Text.\n/// Doc.\npub fn f() -> Int { 1 }\n";
     assert_eq!(markdown(&module(source)), markdown(&module(source)));
 }
 
@@ -377,7 +377,7 @@ fn the_description_is_a_sentence_and_not_a_source_line() {
 #[test]
 fn module_headings_sit_beside_the_api_sections() {
     let page = markdown(&module(
-        "module m;\n//! Text.\n//!\n//! # Background\n//! Why.\n\nexport fn f() -> Int { 1 }\n",
+        "module m;\n//! Text.\n//!\n//! # Background\n//! Why.\n\npub fn f() -> Int { 1 }\n",
     ));
     assert!(page.contains("\n## Background\n"), "{page}");
     assert!(page.contains("\n## Functions\n"), "{page}");
@@ -390,8 +390,8 @@ fn module_headings_sit_beside_the_api_sections() {
 /// change when somebody renamed a file.
 #[test]
 fn files_sharing_a_module_path_become_one_page() {
-    let linux = module("module p::sock;\n//! Sockets.\n/// Opens.\nexport fn open() -> Int { 1 }\n");
-    let windows = module("module p::sock;\n/// Opens.\nexport fn open() -> Int { 1 }\n/// Only here.\nexport fn wsa() -> Int { 2 }\n");
+    let linux = module("module p::sock;\n//! Sockets.\n/// Opens.\npub fn open() -> Int { 1 }\n");
+    let windows = module("module p::sock;\n/// Opens.\npub fn open() -> Int { 1 }\n/// Only here.\npub fn wsa() -> Int { 2 }\n");
     let merged = merge(vec![linux, windows]);
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].doc, ["Sockets."]);
@@ -403,8 +403,8 @@ fn files_sharing_a_module_path_become_one_page() {
 #[test]
 fn merging_sorts_by_module_path_and_leaves_others_alone() {
     let merged = merge(vec![
-        module("module p::z;\nexport fn a() -> Int { 1 }\n"),
-        module("module p::a;\nexport fn a() -> Int { 1 }\n"),
+        module("module p::z;\npub fn a() -> Int { 1 }\n"),
+        module("module p::a;\npub fn a() -> Int { 1 }\n"),
     ]);
     let paths: Vec<&str> = merged.iter().filter_map(|m| m.path.as_deref()).collect();
     assert_eq!(paths, ["p::a", "p::z"]);

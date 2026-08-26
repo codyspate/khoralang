@@ -75,19 +75,65 @@ diagnostic to carry a design decision, which is worth knowing.
 
 ## What this pass changed
 
-### `pub` became `export` — done
+### `pub` became `export`, and then became `pub` again
 
-Khora chose `import` over Rust's `use`, then paired it with Rust's `pub`. The
-module system's verb came from TypeScript and its visibility marker from Rust,
-which was incoherent in a way that showed at every declaration.
+**Both directions were right when they were taken**, and what changed in
+between is the construct rather than anybody's taste. Question 1 before
+question 3, exactly as the test above says.
 
-`import` and `export` are a matched pair this entire audience reads without
-thinking. `pub` paired with nothing in the language and was Rust-specific
-jargon. The behavior is identical either way, so this was question 3: the same
-accuracy, better coherence.
+The audit's reasoning was coherence, and it was good. Khora chose `import` over
+Rust's `use` and then paired it with Rust's `pub`: the module system's verb from
+TypeScript and its visibility marker from Rust, which showed at every
+declaration. `import` and `export` are a matched pair this audience reads
+without thinking; `pub` paired with nothing. Same accuracy, better coherence —
+question 3, and the only rename the tables produced.
 
-This is the only rename the audit produced from the tables above; the one below
-came later, from somebody reading the code rather than the list.
+**Then 13.11 gave the keyword a second place to appear.** `export` inside an
+`impl` had been parsed and read by nothing; making it mean something put the
+word on methods, where the pairing argument does not reach:
+
+```khora
+impl Map<K, V> {
+  pub fn get(self, key: K) -> Option<V> { .. }
+  fn slot(self, key: K) -> Int { .. }
+}
+```
+
+Nobody *imports* `Map::get`. It is reached by having a `Map`, which is why
+`import_inherent` brings a type's methods across whether or not the type was
+named in an import. The symmetry `export` was chosen for is a fact about
+module-level declarations, and a method is not one of those in the way the
+argument needed — `import`/`export` still reads well over a `type`, and reads
+like a category error over a method on it.
+
+Two smaller things, both question 3's "equally accurate and more coherent":
+
+- **Frequency.** The word went from 46 occurrences in `std` to 287 in one
+  commit, because 241 methods needed it. A three-letter word at that density is
+  a different proposition from a six-letter one at the old density.
+- **The other half is unchanged.** `import` did not need a partner to make
+  sense; it names an action a file takes. `pub` names a property a declaration
+  has. They were never doing the same kind of work, which is the part the
+  original argument slightly overstated.
+
+**What this cost.** 556 keywords in `.kh` files, 903 in Khora written inside
+Rust test fixtures, 422 in prose, one snapshot and one syntax-highlighting
+pattern — mechanical, and done in one commit precisely so that no branch has to
+be rebased across a half-finished rename. Nothing about visibility changed;
+this is spelling only.
+
+**And what it should have cost.** `docs/design/compatibility.md` says a change
+that breaks source gets a migration note, and that if the migration is
+mechanical it gets an *edition* instead, with the edition machinery landing
+"with the first change that needs it". This is a mechanical source break and it
+did not get an edition, because there is no Khora outside this repository to
+migrate: no registry, no release, and 13.19's external alpha not started. The
+policy is about protecting code somebody else wrote, and there is none. The
+first change that needs the machinery will be the first one that lands after
+somebody outside has written a program.
+
+The rename below came later, from somebody reading the code rather than the
+list.
 
 ### `const` for a module-level constant — done
 
@@ -126,7 +172,7 @@ error: a binding at module level is a `const`, not a `let`
 
 **A constant's type is inferred**, like everything else — `const alphabet =
 "bcdfghjkmnpqrstvwxyz23456789";` needs no annotation, and one can be written
-when it helps. Nothing else about the construct changed: `export const` exports
+when it helps. Nothing else about the construct changed: `pub const` exports
 it, which it had not actually done before, because visibility was hard-coded to
 private on the one declaration kind nobody had revisited.
 

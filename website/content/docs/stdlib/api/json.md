@@ -24,7 +24,7 @@ which is exactly the input nobody tests with.
 ### Json
 
 ```khora
-export type Json =
+pub type Json =
   | Null
   | Bool(value: Bool)
   | Number(value: Float)
@@ -43,7 +43,7 @@ for one with `Float::to_int`.
 ### JsonError
 
 ```khora
-export type JsonError = {
+pub type JsonError = {
   at: Int,
   expected: String,
 };
@@ -59,7 +59,7 @@ caller can slice with.
 ### DecodeError
 
 ```khora
-export type DecodeError =
+pub type DecodeError =
   | At(path: List<String>, expected: String, found: String);
 ```
 
@@ -74,7 +74,7 @@ can render it however its own API promises rather than scraping a message.
 ### Field
 
 ```khora
-export type Field = {
+pub type Field = {
   name: String,
   value: Json,
 };
@@ -87,7 +87,7 @@ One field of an object, in the order `entries` happened to find it.
 ### ToJson
 
 ```khora
-export trait ToJson
+pub trait ToJson
 ```
 
 A value that has one unambiguous JSON representation.
@@ -104,7 +104,7 @@ does not implement this.
 ### FromJson
 
 ```khora
-export trait FromJson
+pub trait FromJson
 ```
 
 A value that can be recovered from JSON, or explains where the shape
@@ -132,7 +132,7 @@ impl Json
 #### field
 
 ```khora
-export fn field(self, name: String) -> Option<Json>
+pub fn field(self, name: String) -> Option<Json>
 ```
 
 The field, if this is an object and it has one.
@@ -145,7 +145,7 @@ lines.
 #### text
 
 ```khora
-export fn text(self) -> Option<String>
+pub fn text(self) -> Option<String>
 ```
 
 The rest are one per shape, so that a caller can ask "is it what I
@@ -157,7 +157,7 @@ field was for.
 #### number
 
 ```khora
-export fn number(self) -> Option<Float>
+pub fn number(self) -> Option<Float>
 ```
 
 The number here, or `None` if this is something else.
@@ -169,7 +169,7 @@ its integers.
 #### boolean
 
 ```khora
-export fn boolean(self) -> Option<Bool>
+pub fn boolean(self) -> Option<Bool>
 ```
 
 The boolean here, or `None`.
@@ -177,7 +177,7 @@ The boolean here, or `None`.
 #### items
 
 ```khora
-export fn items(self) -> Option<List<Json>>
+pub fn items(self) -> Option<List<Json>>
 ```
 
 The elements, if this is an array. `None` for anything else, including an
@@ -186,7 +186,7 @@ object — a JSON array and a JSON object are different things.
 #### is_null
 
 ```khora
-export fn is_null(self) -> Bool
+pub fn is_null(self) -> Bool
 ```
 
 Whether this is `null`, which is a question rather than a value.
@@ -197,7 +197,7 @@ telling apart from a present value: `is_null` answers the first.
 #### entries
 
 ```khora
-export fn entries(self) -> List<Field>
+pub fn entries(self) -> List<Field>
 ```
 
 Every field of an object, or the empty list.
@@ -253,7 +253,7 @@ fn show(self) -> String
 ### decode
 
 ```khora
-export fn decode<A: FromJson>(value: Json) -> A raises DecodeError
+pub fn decode<A: FromJson>(value: Json) -> A raises DecodeError
 ```
 
 Decodes as the type the surrounding expression asks for.
@@ -265,7 +265,7 @@ expected return type.
 ### member
 
 ```khora
-export fn member(name: String, value: Json) -> Field
+pub fn member(name: String, value: Json) -> Field
 ```
 
 One object member. Chiefly useful to generated encoders, and preferable to
@@ -274,7 +274,7 @@ making an otherwise context-free record literal guess that it is a `Field`.
 ### object
 
 ```khora
-export fn object(fields: List<Field>) -> Json
+pub fn object(fields: List<Field>) -> Json
 ```
 
 Builds an object from fields in declaration order.
@@ -286,7 +286,7 @@ module that declared its type; it is useful to handwritten encoders too.
 ### field_as
 
 ```khora
-export fn field_as<A: FromJson>(value: Json, name: String) -> A raises DecodeError
+pub fn field_as<A: FromJson>(value: Json, name: String) -> A raises DecodeError
 ```
 
 Reads and decodes one required object field, retaining its path on failure.
@@ -294,7 +294,7 @@ Reads and decodes one required object field, retaining its path on failure.
 ### variant
 
 ```khora
-export fn variant(case_name: String, fields: List<Json>) -> Json
+pub fn variant(case_name: String, fields: List<Json>) -> Json
 ```
 
 The stable representation of a derived variant.
@@ -307,7 +307,7 @@ work for both named and unnamed case payloads.
 ### variant_case
 
 ```khora
-export fn variant_case(value: Json) -> String raises DecodeError
+pub fn variant_case(value: Json) -> String raises DecodeError
 ```
 
 The case tag of a derived variant.
@@ -315,7 +315,7 @@ The case tag of a derived variant.
 ### variant_arity
 
 ```khora
-export fn variant_arity(value: Json, expected: Int) ->() raises DecodeError
+pub fn variant_arity(value: Json, expected: Int) ->() raises DecodeError
 ```
 
 Checks the payload count before a generated constructor reads it.
@@ -323,7 +323,7 @@ Checks the payload count before a generated constructor reads it.
 ### variant_field
 
 ```khora
-export fn variant_field<A: FromJson>(value: Json, wanted: Int) -> A raises DecodeError
+pub fn variant_field<A: FromJson>(value: Json, wanted: Int) -> A raises DecodeError
 ```
 
 Decodes one positional payload of a derived variant.
@@ -331,7 +331,7 @@ Decodes one positional payload of a derived variant.
 ### unknown_variant
 
 ```khora
-export fn unknown_variant<A>(found: String, expected: String) -> A raises DecodeError
+pub fn unknown_variant<A>(found: String, expected: String) -> A raises DecodeError
 ```
 
 Reports a case tag no generated decoder recognizes.
@@ -339,7 +339,7 @@ Reports a case tag no generated decoder recognizes.
 ### encode
 
 ```khora
-export fn encode(value: Json) -> String
+pub fn encode(value: Json) -> String
 ```
 
 The value, as JSON text.
@@ -351,7 +351,7 @@ below.
 ### parse
 
 ```khora
-export fn parse(text: String) -> Result<Json, JsonError>
+pub fn parse(text: String) -> Result<Json, JsonError>
 ```
 
 A whole document.

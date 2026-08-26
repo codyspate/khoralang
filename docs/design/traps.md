@@ -110,7 +110,7 @@ mattering. This is the genuinely interesting long-term answer, it fits
 deliberately outlive the scope that made them.
 
 **It does work at an export boundary, which this document originally missed.**
-12.6 constrains an `export extern fn` to scalars and `Ptr` in and out, no
+12.6 constrains an `pub extern fn` to scalars and `Ptr` in and out, no
 `raises`, and — since `khora-types/src/exports.rs` — no `with` clause. A
 function that can be handed no capability can reach no effect, so nothing it
 allocates is reachable from anywhere but its own stack: there is no module-level

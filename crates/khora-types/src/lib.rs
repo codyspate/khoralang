@@ -580,7 +580,7 @@ pub const COMPILER_KNOWN: [&str; 13] = [
 
 /// Whether declaring `name` with a definition would collide with the compiler.
 ///
-/// **Only a definition collides.** `export type Array<A>;` with no right-hand
+/// **Only a definition collides.** `pub type Array<A>;` with no right-hand
 /// side is how the builtin is *named* — it is what `std::core` writes, and what
 /// every backend test writes to reach an array without importing the standard
 /// library. Nothing is claimed by it that the compiler does not already

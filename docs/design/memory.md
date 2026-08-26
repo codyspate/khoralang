@@ -47,7 +47,7 @@ It was also **temporary**, and it ended exactly where this predicted — see
 section 4. Today this compiles, and leaves four objects alive:
 
 ```khora
-export type Node = { name: String, mut next: Option<Node> };
+pub type Node = { name: String, mut next: Option<Node> };
 
 let a: Node = { name: "a", next: Option::None };
 let b: Node = { name: "b", next: Option::None };

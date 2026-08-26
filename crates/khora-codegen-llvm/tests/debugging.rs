@@ -156,7 +156,7 @@ fn a_bounds_failure_says_which_line_indexed() {
         "module t;
 fn print(value: Int);
 
-export type Array<A>;
+pub type Array<A>;
 impl<A> Array<A> {
   fn new(length: Int, fill: A) -> Array<A>;
   fn get(self, index: Int) -> A;
@@ -188,7 +188,7 @@ fn a_trap_on_a_fiber_says_which_fiber() {
         "module t;
 fn print(value: Int);
 
-export type Fiber;
+pub type Fiber;
 impl Fiber {
   fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
   fn join(self) -> ();
