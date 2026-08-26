@@ -3281,7 +3281,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
 | 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
 | 13.15 | User documentation | **API reference generated; the rest not started.** `khora doc` writes a page per `std` module from `///` and `//!`, gated by `--check` in the baseline. Getting Started, the guide and the cookbook are the docs agent's `website/` work |
-| 13.16 | Editor and tooling | **Half.** 10.4's language server does diagnostics, formatting, completion, hover and navigation; nothing is packaged |
+| 13.16 | Editor and tooling | **Less than half, and this row overstated it.** The language server answers diagnostics and hover. Not formatting, not completion, not navigation — none of those exist. And the VS Code extension is grammar-only: no `main`, no client, so **nothing has ever connected to the server**. Packaging an extension that speaks to it is the release blocker; Phase 14 is where the rest is planned |
 | 13.17 | Diagnostics pass | **Ongoing, and it works.** Six misleading messages were found and fixed by *using* the language during phase 12, and the `discarded-result` lint by two real bugs that a message could not have caught — `expr!` is the identity on values, so a discarded `Result` looks handled. A corpus makes that systematic instead of incidental |
 | 13.18 | Reference applications | **The service exists.** `ledger_service` is HTTP + PostgreSQL + a pool + transactions + tracing, verified against a real server; `risk_analyzer` and `link_shortener` alongside it. The wasm one is still missing |
 | 13.19 | External alpha | **Not started**, and nothing substitutes for it |
@@ -3459,6 +3459,69 @@ memory-safety bugs and the people in it did not sign up for that.
 
 That order is a plan and not a promise; evidence from any step can reorder what
 follows it.
+
+### What comes next, and the case for each
+
+Steps 1 to 4 of that order are done, and 5 — "everything else" — is not an
+order. What is left divides three ways, and the divisions matter more than the
+numbering does.
+
+**Nothing substitutes for these, and they are a chain.** 13.14 is "there is
+nothing to *download*"; 13.24 is the acceptance test; 13.19 is the alpha. No
+alpha without an install story, and no install story without release artifacts.
+This is most of what "releasable" means and none of it is interesting work.
+
+**These are capability gaps somebody meets in their first week.** 13.12's
+missing HTTP client, 13.2's untested behaviour under overload, 13.16's editor
+extension that nobody can install.
+
+**And these are depth**: 13.9's heap layout in DWARF, 13.23's numbers at scale,
+13.21's signing, 13.22's governance documents, 13.7 and 13.8's remaining
+targets.
+
+#### The next one should be the HTTP client
+
+**Khora can serve HTTP and cannot call it.** `std::net::http` is a server —
+`Router`, `Request`, `Response`, TLS, a fiber per connection — and there is no
+outbound side at all. Every service calls another service: an auth check, a
+payment API, a webhook, its own sibling. `docs/positioning.md` claims Khora
+should be a candidate wherever a team compares Go, backend TypeScript or
+application Rust, and a service language that cannot make a request is not one.
+
+It is also the last real *capability* hole. Everything else left in this phase
+is infrastructure around a language that already works.
+
+The shape is settled by what exists. Sockets, TLS and header parsing are
+already here; the client should be an **effect** — `with { http: HttpClient }`
+— so that it is mockable in a test, interceptable by the tracing wrapper the
+way `Fs` is in `observability.md`, and covered by `[permissions] network`. That
+is the same shape `Db` has, which 13.12 proved works. It can be tested against
+the link shortener already in the tree, and then against something real.
+
+#### The case for doing 13.2 before the alpha instead
+
+13.2 is not on the critical path, and the argument for it is that an alpha user
+finds it *for* you, badly. Overload, backpressure, bounded queues, graceful
+shutdown and recovery are all uncovered — 11F's soak is adversarial
+*scheduling*, not adversarial *load*. One report of a service falling over is
+worth more damage than an early alpha is worth in signal.
+
+`bench/service` and a real scheduler both exist, so this is measurement and
+hardening rather than invention, which makes it cheap now and expensive after
+somebody has been burned.
+
+#### And the case for 13.14 first
+
+Only that it is the chain everything ends in, and that it is the item most
+likely to reveal that something else was missing. Against it: it needs
+decisions rather than work — where artifacts live, whether the toolchain ships
+LLVM or expects it, what the installer is called — and three-platform CI runs
+bill around two hours each.
+
+The ordering taken here is **client, then load, then install**, on the same
+principle the original order used: use the language before polishing it. An
+alpha of something that cannot make an HTTP request produces feedback about the
+missing HTTP request.
 
 ### The channel, and the gap that made it necessary
 
@@ -3749,6 +3812,433 @@ there cannot be until something holds a list; a curated list in the
 documentation is honest and a fake index would not be. Versions are recorded
 but not solved, which stays right until two packages in real use want different
 revisions of a third.
+
+## Phase 14 — From usable to delightful
+
+Phase 13 answers "can a stranger use it". This one answers "would they want
+to", which is a different question and the one that decides whether anybody
+stays after the first afternoon.
+
+**Two halves that look unrelated and are not.** The editor experience and
+workspace support are both downstream of the same thing: an index the compiler
+already builds and does not publish. Salsa resolves every name, knows every
+type, and knows which modules a package reaches — and none of it leaves the
+process. Go-to-definition, completion, rename, "which members did this change
+affect" and a sound build cache are all the same query asked five ways.
+
+**Nothing here blocks a release.** 13.16 is the part that does — an extension
+somebody can install — and it stays in Phase 13. This is what turns a language
+that works into one people reach for, and it is deliberately listed *after* the
+alpha, because an alpha is the cheapest way to learn which of these actually
+matter.
+
+**Decision A7 already committed to this and the commitment has not been kept.**
+"Developer experience is a product requirement. Diagnostic quality, compile
+speed and LSP latency are tested from Phase 2, not polished in Phase 6. The
+thesis is *beats Rust's DX*." Two of those three have been held to honestly —
+`khora-diagnostics` snapshots every message, and 12.7 measured the compile-time
+budget. The third has not been tested at all, because there has never been a
+client to measure a response to. A7's stated comparison is rust-analyzer, and
+the gap between rust-analyzer and hover-only is this phase.
+
+### Where the editor actually stands, which is behind where the list said
+
+The 13.16 row claimed the language server "does diagnostics, formatting,
+completion, hover and navigation". Two of those are true. The server handles
+`textDocument/didOpen`, `didChange`, `didClose`, `hover` and
+`publishDiagnostics`, and nothing else — no formatting, no completion, no
+definitions, no references, no symbols, no semantic tokens.
+
+**And the extension has never connected to it.** `editors/vscode/package.json`
+contributes `languages` and `grammars` and has no `main`, no
+`activationEvents` and no client. So `khora lsp` starts a server that no editor
+has ever spoken to: the diagnostics and hover that do exist are unreachable
+from the only editor the repository ships support for. That is the first thing
+to fix and it is an afternoon.
+
+| # | Item | Why it is here |
+| --- | --- | --- |
+| 14.1 | **The extension speaks to the server** | Give the extension a `main`, an activation event on `.kh`, and a `vscode-languageclient` that spawns `khora lsp`. Everything below is invisible until this exists |
+| 14.2 | **Format on save** | `khora-fmt` is already the canonical formatter and the baseline already gates on it. `textDocument/formatting` and `documentRangeFormatting` wire the existing crate to the editor; the extension sets `editor.formatOnSave` for `.kh` by default. The smallest item here with the largest daily effect |
+| 14.3 | **Go to definition** | Ctrl-click. HIR already resolves every name to a `Resolution`; what is missing is a position → resolution map and a declaration site per resolution. That map is the index the rest of this list needs |
+| 14.4 | **Completion** | Context-aware rather than word-based: after `.` the methods of the receiver's type, after `Type::` that type's own, inside an import list the module's exports, and inside a `with { .. }` row **the handlers that satisfy it** — see below |
+| 14.5 | **Semantic tokens** | A TextMate grammar cannot tell a local from an import or a field from a method, and `editors/vscode/README.md` has said so since it was written. This is the editor-agnostic answer and it reuses the compiler instead of duplicating it |
+| 14.6 | **Inlay hints for rows** | The one thing no other language's editor can show, because no other language has the rows. See below |
+| 14.7 | **Quick fixes** | Khora's diagnostics already state their remedy in words. Turning a sentence into an edit is mechanical from there, and the messages were written that way on purpose |
+| 14.8 | **References, rename, symbols** | Find-all-references, workspace-wide rename, document outline and `Ctrl+T`. All the same index as 14.3, read backwards |
+| 14.9 | **Signature help and run lenses** | Parameter hints while typing a call; a "Run test" lens above each `test` block, which `khora test --filter` already supports from the command line |
+| 14.10 | **Cancellation and debounce** | The server is one thread, one message at a time, with no cancellation — fine for hover on a small file and not for completion on a keystroke. Decision A3 chose Salsa for `docs/project.md` §6.5's sub-15 ms responses and said the incrementality "is not a bolt-on"; the measurement it was chosen for has still never been taken, because nothing has ever sent the server a request in anger |
+| 14.11 | **Beyond VS Code** | An LSP client for Zed and Neovim is small once 14.1 exists. A tree-sitter grammar is a *second parser* and `editors/vscode/README.md` argues against it; semantic tokens reach the same editors without the duplication |
+| 14.12 | **Published, not built by hand** | The marketplace and OpenVSX, and an extension that finds or fetches a matching server. Today installation is a PowerShell script that packages a `.vsix` because the machine has no Node |
+
+#### Inlay hints for rows, which is the one worth building for its own sake
+
+Every other language's inlay hints show inferred *types*, because that is the
+only thing their checker infers that the source does not say. Khora infers two
+more things and they are the ones a reader actually wants:
+
+```khora
+let answer = charge(account, amount);      // with { db: Db, clock: Clock }  raises DbError
+```
+
+The `with` and `raises` rows of a call are computed at every call site — the
+checker has to, to do the row subtraction — and then dropped. `khora-lint`'s
+`unused_capabilities` note already says the same fact is wanted for a second
+consumer and describes where to publish it: `BodyTypes` needs a per-call-site
+record of the labels the callee required, and `lambda_captures` is the shape to
+copy.
+
+That single change pays three times: a sharper `unused-capability` lint, inlay
+hints, and capability-aware completion. **It is the highest-leverage item in
+this phase** and it is a day's work in one crate.
+
+#### Completion that knows what a row wants
+
+```khora
+with { db: <cursor> } { .. }
+```
+
+There is exactly one correct answer set here — the handlers in scope whose type
+satisfies `Db` — and the checker can compute it. No other language's completion
+has this shape because no other language's dependencies are in the type. The
+same applies to `handler for <cursor>` and to the `raises` clause.
+
+Worth saying plainly: this is the feature that would make somebody who tried
+Khora for an afternoon tell somebody else about it.
+
+#### Quick fixes, because the messages were already written for them
+
+The diagnostics in this repository name the fix rather than the fault, and that
+was a deliberate choice long before anybody thought about code actions:
+
+- ``a binding at module level is a `const`, not a `let` ``
+- ``` `export` is spelled `pub` ```
+- ``` `Map::rehash` is not exported … Write `export fn rehash` there ```
+- ``this call can leave the function, but the function has no `raises` clause``
+- ``this produces a `Result` and nothing looks at it … write `let _ =` ``
+
+Each of those is one edit away from being a lightbulb. The rename one is the
+clearest: it already recovers and reports one error per declaration, so
+"fix all in file" is well defined.
+
+### Where workspaces stand, which is nowhere
+
+There is no workspace concept at all. A `khora.toml` describes one package,
+`path` dependencies point at siblings, and every command takes one package.
+The evidence is in `scripts/baseline.sh`, which loops:
+
+```sh
+# One at a time, because each example is its own package: `ledger_service`
+# depends on `packages/postgres`, and a check over the whole directory would
+# resolve one manifest for four programs and find neither the dependency nor
+# the reason it was missing.
+for app in examples/*/; do
+    "$khora" check "$app"
+done
+```
+
+That comment is a workaround for a missing feature, written by somebody who
+had already noticed. This repository *is* a monorepo — `std`, four examples, a
+package, a benchmark suite, all interdependent — and the tooling does not know
+it.
+
+| # | Item | Why it is here |
+| --- | --- | --- |
+| 14.13 | **`[workspace]`** | `members = ["packages/*", "examples/*"]` in a root manifest. One command covers every member, and `khora check` at the root stops being a loop in a shell script |
+| 14.14 | **Inherited fields** | `version.workspace = true`, and the same for `edition`, `authors`, `[lints]`, `[fmt]` and `[permissions]` defaults. This repository's own `Cargo.toml` already works this way, which is the argument |
+| 14.15 | **One lock, one version** | A single `khora.lock` at the root and one resolved graph, so two members cannot silently use two versions of a shared dependency. The single-version policy is most of what makes a monorepo coherent rather than a directory of projects |
+| 14.16 | **Affected-only** | Given a diff, run only the members it can reach. See below — Khora can do this *exactly* rather than heuristically |
+| 14.17 | **A build cache with a sound key** | See below. Reproducible builds make this provable rather than hopeful |
+| 14.18 | **`[tasks]` gets a runner** | The table is parsed today and nothing runs it: `khora-manifest` has `Task { description, depends_on }` and there is no consumer. A task graph across members, with the dependency edges the workspace already knows |
+| 14.19 | **Workspace permissions as policy** | A root that caps what any member may request, not just what each declares. See below |
+| 14.20 | **Release tooling** | Which members changed, bump them and their dependents, write the notes. `publish = true` already exists per package; this is the part that decides what to do with it |
+| 14.21 | **`khora new`, `khora why`, `khora graph`** | Scaffold a member; explain why a dependency is present; draw the member graph. Small, and each is the answer to a question people ask constantly in a monorepo |
+
+#### Affected-only is exact here, and that is unusual
+
+Nx and Turborepo infer the dependency graph from imports and are approximately
+right; Bazel is exactly right and makes you declare everything by hand. Khora
+gets the exact answer for free, because **compilation is whole-program**: the
+compiler already resolves which modules a package reaches in order to
+monomorphize it. `TypeMap::reachable` exists for the sharing check and holds
+part of the answer already.
+
+So "which members does this diff affect" is a query against something the
+compiler computes anyway, not a heuristic bolted on beside it. That is worth
+saying out loud because it is the rare case where a language decision taken for
+an unrelated reason — no separate compilation, decided in
+`docs/design/compatibility.md` — hands a tooling feature over for nothing.
+
+#### A cache key that is actually sound
+
+Every monorepo cache is a bet that the key captures everything that could
+change the output. Turborepo hashes inputs and hopes; the usual failure is a
+toolchain difference nobody hashed.
+
+Khora can do better, because 12.9 made builds **bit-for-bit reproducible** —
+measured, not assumed, and `KHORA_PROFILE=release` is reproducible including
+the executable as of 13.10. When the same inputs provably produce the same
+bytes, a content-addressed cache is a *proof* rather than an optimisation: key
+on the tree content, the toolchain version and the profile, and a hit is the
+artifact the build would have produced.
+
+`scripts/tree-id.sh` already computes the content half of that key for the
+baseline's receipt, which is the same idea one scale down.
+
+The remote half — a shared cache between a team and CI — is the same key over a
+network, and is worth building only once somebody has a team.
+
+#### Permissions are the monorepo feature nobody else has
+
+`docs/design/permissions.md` already makes a package declare what it may reach:
+network hosts, filesystem paths, environment variables, `extern` symbols. In a
+single package that is a good idea. In a monorepo it is a **policy surface**:
+
+```toml
+[workspace.permissions]
+# No member may reach the network except through the two that are meant to.
+network = { allow = ["services/gateway", "packages/postgres"] }
+```
+
+A workspace root that caps what any member may request turns "we have a rule
+about which services talk to the internet" from a code-review convention into a
+build failure. No other monorepo tool can do this because no other language has
+the grants in the manifest and enforced by the compiler.
+
+This is the item most likely to be the reason somebody chooses Khora for a
+platform team, and it is nearly free given what 10.2 already built — the
+grants, the enforcement and `khora-cli/tests/permissions.rs` are all there; what
+is missing is a root that can speak for the members.
+
+### The lints that are not there
+
+Four exist: `dangling-expression`, `discarded-result`, `reference-cycle` and
+`unused-capability`. This compiles clean:
+
+```khora
+module main;
+import std::core::{List, Option, Show, print};
+
+fn main() -> Int {
+  let unused = 41;
+  let answer = 42;
+  answer
+}
+```
+
+Three imports nothing uses and a binding nothing reads, and not a word. Those
+are the two most common lints in any language and the two that keep a codebase
+tidy without anybody deciding to tidy it.
+
+| # | Lint | Why it is here |
+| --- | --- | --- |
+| 14.22 | **`unused-import`** | The most-fired lint in every language that has one. Resolution already knows which imported names were used; nothing asks it |
+| 14.23 | **`unused-binding`** | And unused parameters. `_` as the escape, which the language already uses for `let _ =` |
+| 14.24 | **`unreachable-code`** | Statements after a `raise` or a `return`. Cheap, and always a mistake |
+| 14.25 | **`inconsistent-constructor`** | `new`, `of`, `empty` and `root` follow a real rule that is written down nowhere — see `docs/design/std-surface.md` Finding 3. A rule nobody can read is a rule the next module guesses at |
+| 14.26 | **`undocumented-export`** | `khora-doc/tests/std_surface.rs` holds this floor for `std` and only for `std`, as a Rust test. As a lint it serves every package, at the level each chooses |
+| 14.27 | **Sharpen `unused-capability`** | It stays silent whenever a body contains any call, because a call may forward a capability without naming it. The fix is the per-call-site record of required labels — the *same* change 14.6 and completion want. One change, three consumers |
+
+#### The escape hatch has to come before the lints do
+
+`[lints]` sets a level per lint per package and that is the only dial. There is
+no way to say "I meant this one" at the line — `discarded-result` has `let _ =`
+by luck rather than by design, and `reference-cycle` has nothing at all.
+
+Add six more lints to that and the predictable outcome is a `khora.toml` that
+turns half of them off, which is worse than not having them: a lint people
+switch off wholesale stops being evidence about anything.
+
+So an expression- or item-level allow comes first. It is a **language-surface
+decision** — attributes do not exist, and inventing them for this is a large
+answer to a small question, where a comment-directed pragma is a small answer
+with a long tail. Not decided here; decided before 14.22.
+
+### The inner loop is four and a half minutes
+
+Measured rather than felt:
+
+| | |
+| --- | --- |
+| `cargo test --workspace --features llvm` | **271 s**, 1507 tests, 133 test binaries |
+| of which `khora-codegen-llvm` | **~247 s — 94%** |
+| `sh scripts/baseline.sh` | **319 s** on a warm tree |
+
+The baseline is the suite plus clippy, the corpus check, the formatter check,
+the generated reference check, the package tests, four example builds, twelve
+HTTP conformance checks against a real `curl`, and the runtime's Linux run
+through WSL. 271 of its 319 seconds are the suite, so **everything below is
+about the suite**; the rest of the baseline costs 48 seconds and earns them.
+
+**Two causes, both structural rather than a slow function somewhere.**
+
+*Every codegen test builds the whole world.* Each one constructs a fresh
+`KhoraDatabase`, parses and checks all of `std`, monomorphizes, emits LLVM,
+writes an object and shells out to `clang` to link an executable. There are
+several hundred of them, so `std` is checked several hundred times per run.
+Decision A3 chose Salsa *specifically* so that work would be done once — and
+the test harness throws the database away between tests, which is the one place
+in the repository that opts out of the incrementality the whole design rests on.
+
+*Cargo runs test binaries one at a time.* 271 s of wall clock against 262 s of
+reported in-binary time is the tell: the parallelism is inside each binary and
+there is none between them. 51 binaries in `khora-codegen-llvm` alone, each a
+process start and a link of the test harness.
+
+| # | Item | Why it is here |
+| --- | --- | --- |
+| 14.28 | **One database per test binary** | `std` parsed and checked once instead of once per test. No product change, and it is what A3 bought |
+| 14.29 | **Stop before the linker when nothing is run** | `Stop::AtVerification` already exists. A test asserting that something compiles pays for a `clang` invocation it never uses |
+| 14.30 | **Fewer, larger test binaries** | Modules inside one binary rather than 51 binaries cargo starts sequentially. Removes process starts and lets the existing in-binary parallelism cover more tests |
+| 14.31 | **`cargo nextest`** | Runs binaries in parallel. Configuration, not code, and the sequential-binaries finding says it is the cheapest item here |
+| 14.32 | **Split the baseline** | A fast gate and a full gate, the way `scripts/check.sh` and `scripts/baseline.sh` already almost are. The receipt from 13.20 makes "which one passed" a fact rather than a memory |
+
+**Measure each before doing it.** Which of the four dominates is not known —
+the 94% figure says *where*, not *why*, and 14.28 and 14.31 could plausibly
+each be most of it. The instrumentation is one timing harness and it should
+come first, because the alternative is optimising the part that was easiest to
+see.
+
+### What this phase deliberately does not include
+
+**A build system.** Bazel and Buck exist because C++ and Java need per-file
+incremental compilation across a huge graph. Khora is whole-program: the unit
+is the package, the compiler is fast enough that 12.7 called the compile-time
+budget "not a crisis", and adding a second build system on top of a compiler
+that already knows the whole graph would be building the problem in order to
+solve it.
+
+**A registry.** 13.13 decided git URLs are enough until somebody needs
+discovery, and nothing about workspaces changes that.
+
+**Editor-specific plugins beyond a thin client.** Every feature above is LSP,
+which is one implementation and every editor. The one exception argued for
+elsewhere is a tree-sitter grammar, and `editors/vscode/README.md` explains why
+it is a second parser and therefore a cost, not a feature.
+
+## Phase 15 — The Torvalds test
+
+**A named standard the codebase has to pass**, after which it should be
+something to point at rather than something to explain. Torvalds is shorthand
+here for a specific set of instincts: strict about quality, consistency,
+performance, organization and safety; hostile to cleverness with no reason
+recorded; and hostile to noise.
+
+This is not a rewrite. Every phase up to here made the language work, and the
+work is sound — 13.6 audited it, ThreadSanitizer is clean, the baseline is
+green on three platforms. What has not happened is anybody reading it as a
+stranger would and asking whether it is *good*, as opposed to correct.
+
+### The finding that starts it, because it is not a matter of taste
+
+**26% of the non-blank lines in `crates/` are comments.** 19,647 lines of
+comment against 55,742 of code. Eight files over 200 lines have more comment
+than code, and the worst is not close:
+
+```
+ 70%   299 comment /  129 code   khora-perceus/src/lib.rs
+ 65%   208 comment /  111 code   khora-rt/src/lib.rs
+ 60%   229 comment /  150 code   khora-rt/src/heap.rs
+ 53%   291 comment /  257 code   khora-codegen-llvm/src/backend.rs
+```
+
+That is not a house style. A reader opening `khora-perceus` meets two and a
+half lines of prose for every line of code, and the effect is the opposite of
+the one intended: when everything is explained at length, nothing stands out,
+and the comment that is actually load-bearing reads like all the others.
+
+#### The rule that removes most of it, and it costs nothing
+
+**History belongs in `docs/errata.md` and in the commit message. A code comment
+says what a reader needs now.**
+
+This repository already keeps `errata.md` for exactly the record of "what was
+believed and turned out to be false", and it is one of the most useful files
+here. A great many code comments re-tell that story at the site of the fix —
+how the bug was found, what the first attempt was, what the symptom looked
+like. All of it is worth keeping and almost none of it is worth keeping *there*.
+Move it, leave a line naming the invariant and pointing at the entry, delete
+the retelling.
+
+Two more, in descending order of how much they cut:
+
+- **A comment that restates the code is worse than none**, because it is a
+  second thing that has to be kept true and the first thing to rot.
+- **Length should be proportionate to surprise.** A paragraph above a
+  three-line function that does what its name says is noise. The same paragraph
+  above a line whose deletion silently reintroduces a heisenbug is the most
+  valuable thing on the screen.
+
+#### What must survive the edit
+
+The naive version of this pass deletes everything and loses what is genuinely
+good here, which is real. Explicitly kept:
+
+- **`# Safety` contracts on every `unsafe`.** 13.6 is the reason and it is not
+  finished — `khora-rt` alone has 180 `unsafe` blocks.
+- **The argument for a decision a reader would otherwise "tidy away".**
+  `#[inline(never)]` on `current::running` is the example: deleting the
+  attribute compiles, passes, and reintroduces a fiber reading another fiber's
+  cancellation flag. That comment is load-bearing and should be longer than the
+  function.
+- **Invariants that are not local** — the drop-glue key including its module,
+  the reserved `which` values, the cancellation shield, why `Live` is a
+  `BTreeSet`. A reader cannot derive these from the file they are in.
+
+The test for each comment is one question: **would deleting this cause somebody
+to make a change that compiles and is wrong?** If yes it stays and may grow. If
+no it goes to the commit message.
+
+### The rest of the review
+
+| # | Dimension | What it means here |
+| --- | --- | --- |
+| 15.1 | **Comments** | Above. The largest single item and the one with a measurable before and after |
+| 15.2 | **Consistency** | One way to do each thing. Error construction, naming, module layout, how a crate exposes its queries. `std-surface.md` Finding 3 is the same problem one level up |
+| 15.3 | **Organization** | Seventeen crates. Does each have one job, and could a newcomer predict which one a change belongs in? The answer for `khora-db`, `khora-syntax` and `khora-rt` is obviously yes; for others it has never been asked |
+| 15.4 | **Function and file size** | `khora-types/src/check/calls.rs` and `khora-codegen-llvm/src/backend/driver.rs` are where the work is; both have grown by accretion. Long functions are where the reviewer's attention runs out |
+| 15.5 | **Performance of the compiler itself** | Not the generated code — 12.7 measured that. Cloning in hot paths, `TypeMap` copied per file, quadratic scans in name resolution. Nothing here has ever been profiled |
+| 15.6 | **Safety** | 13.6 closed the audit and left 28 `unsafe` blocks without notes and the scheduler unsanitised. This is the same list, finished |
+| 15.7 | **Dead code and speculative generality** | Things built for a future that has not arrived. `[tasks]` is parsed and never run; `Halves` and `Chain` are public types that exist for one caller each |
+| 15.8 | **Tests** | Whether they assert behaviour or implementation. A test that pins the current output of a function nobody promised anything about is a brake, not a check |
+
+### How it is run, and what "passes" means
+
+**Crate by crate, in the order a stranger reads them.** `khora-syntax`, then
+`khora-types`, then `khora-rt` — the first because it is where anybody starts,
+the second because it is where the language actually lives, the third because
+it is the one with the `unsafe`.
+
+**Findings recorded, not fixed in place.** The review produces a list and the
+list is worked; a review that edits as it reads produces neither a clean
+codebase nor an honest account of what was wrong with it.
+
+**Three mechanical aids, each an afternoon**, because a standard nobody can
+measure drifts back within a month:
+
+- the comment-ratio report above, run over the tree and printed per file;
+- a check that every `unsafe` block carries a `# Safety` note;
+- a function-length and nesting-depth report.
+
+None of them is a gate. They are for finding the places worth a person's
+attention, which is the only thing a metric is good for here.
+
+**Done means**: an experienced reviewer who has never seen Khora can open any
+crate, and every comment they meet earns its space, every file is where they
+would have guessed, and nothing makes them ask "why is it done that way" and
+find no answer. That is a judgement and it should stay one — a rubric that
+could be automated would be a rubric that could be gamed.
+
+### Why this is a phase and not a chore
+
+Non-negotiable 6 says a language with no libraries loses, and A6's answer is
+that libraries get written in Khora by people who are not us. The first thing
+any of those people will do is read this repository — to see whether the
+compiler is something they can trust, and whether a bug they hit is something
+they could fix themselves.
+
+A codebase that is 26% comment, where the comments are a diary, answers that
+question badly no matter how good the language is.
 
 ## When can libraries be written?
 
