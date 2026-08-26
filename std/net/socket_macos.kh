@@ -63,7 +63,18 @@ pub fn listen_on(port: Int) -> Int {
   } else {
     let address = sockaddr_in(port);
     let bound = Array::with_data(address, fn (bytes, n) => bind(handle, bytes, I32::of(16)));
-    if bound == I32::of(0) && listen(handle, I32::of(16)) == I32::of(0) {
+    // **511, not 16.** The backlog is the queue of connections the kernel has
+    // accepted and this program has not yet taken, which is to say it *is* the
+    // buffer `bounded_nursery` means when it says overload "becomes latency
+    // instead of collapse": a server bounded to 256 concurrent connections
+    // absorbs a burst here or refuses it at the TCP layer, where a client sees
+    // a failed connect rather than a slow answer.
+    //
+    // It was 16, which is smaller than any of the bounds above it, and a load
+    // test of twenty-four clients found it by hanging. 511 is nginx's default
+    // and the number every kernel clamps to its own maximum, so it is a
+    // request rather than an assertion about the machine.
+    if bound == I32::of(0) && listen(handle, I32::of(511)) == I32::of(0) {
       I32::to_int(handle)
     } else {
       close(handle);

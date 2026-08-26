@@ -3267,7 +3267,7 @@ tree so far has any opinion about those, which is itself the finding.
 | | | Today |
 | --- | --- | --- |
 | 13.1 | Scheduler and I/O architecture | **Half.** 11I and 11J landed; the next three steps and the acceptance criterion are written in "What is left, in the order worth trying" above and `scheduler.md` §10a. Threads are still the default — making the scheduler one is a decision, not a flag flip |
-| 13.2 | Concurrency under real load | **Started.** 11F's soak covers adversarial execution; overload, backpressure, bounded queues, shutdown and recovery are not covered |
+| 13.2 | Concurrency under real load | **Covered, and it found one.** Eight tests in `tests/load.rs` hold the claims `std/core.kh` had only asserted in prose: a bounded nursery bounds, a full channel stops its sender, overload is latency rather than loss, a closed channel drains, a service recovers, and a server serving four answers twenty-four at once. The listening backlog was **16** against a concurrency bound of 256 — the backlog *is* the overload buffer, and it is 511 now |
 | 13.3 | DB cancellation safety | **Done.** `transaction` registers the rollback with a region of its own before the body runs, so it fires on every way out — and the body carries a `raises` row, without which no cancellation could reach it. Finalizers are shielded from the cancellation running them. Proved against a real server: the cancelled insert is gone, the committed one is there |
 | 13.4 | Trace propagation | **Designed, not built — but a span now closes.** `observability.md` §Propagation says a span's parent must survive spawn, steal, suspension, wake and cancellation, and that the fiber carries it; the fiber does not carry it yet. What 13.3's region work made possible was the smaller half: `around` and `around_result` register the finish before the body runs, so a span closes on a raise and on a cancellation instead of being left open and read as still running |
 | 13.5 | `Decimal` | **Done.** `0.01d` is built — the language's only literal suffix, desugared to `Decimal::scaled` during lowering — with the scale-alignment and overflow tests 13.5 asked for. `docs/design/numbers.md` |
@@ -3516,7 +3516,47 @@ load per `https` call. The fix is known and is not invented: `postgres::pool`
 is a channel of connections with a fiber owning each, and nothing about it was
 specific to Postgres.
 
-#### The case for doing 13.2 before the alpha instead
+#### 13.2, done before the alpha — and the case was right
+
+13.2 is not on the critical path, and the argument for it was that an alpha
+user finds it *for* you, badly. That turned out to be literally true: the first
+thing the load tests found was in the tree rather than in the tests.
+
+**The listening backlog was 16.** `bounded_nursery`'s own documentation says
+overload "becomes latency instead of collapse", absorbed by "the listening
+socket's backlog" — and `Router::listen` bounds itself to 256 concurrent
+connections while `listen_on` asked the kernel to queue sixteen. Every number
+above it was larger than it. A burst of two dozen clients does not become
+latency at sixteen; it becomes a failed connect, which a client sees as the
+server being down rather than slow.
+
+It was found by a test hanging, which is the honest version of the story: the
+test opened twenty-four connections before sending anything, the seventeenth
+stalled, and the reason took longer to find than the fix. 511 now, on all three
+platforms — nginx's default, and a number every kernel clamps to its own
+maximum, so it is a request rather than a claim about the machine.
+
+**What the eight tests pin**, all of it previously prose:
+
+- a bounded nursery never runs more than its limit, and still runs everything;
+- a full channel stops its sender — the depth never exceeds the capacity, and
+  all two hundred values arrive, in order;
+- a closed channel drains what was queued before it answers `None`;
+- overload is latency rather than loss: three hundred units through a queue of
+  eight and four workers, every one done exactly once, both bounds held;
+- a service recovers — a burst, then quiet, then ordinary work, with the heap
+  back to zero;
+- shutdown completes what was already accepted;
+- and a server bounded to four answers twenty-four simultaneous clients, with
+  each answer carrying the highest number of handlers that ever ran at once.
+
+That last one is the shape worth copying. The assertion is not "it did not
+fall over" but **the number the design claims**: greater than one, so the load
+really did overlap, and no greater than four, so the bound was not decoration.
+A test that only checked for a crash would have passed against a server with no
+bound at all.
+
+#### The other case for doing 13.2 before the alpha
 
 13.2 is not on the critical path, and the argument for it is that an alpha user
 finds it *for* you, badly. Overload, backpressure, bounded queues, graceful
