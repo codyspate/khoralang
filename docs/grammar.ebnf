@@ -25,6 +25,10 @@ TraitDecl      ::= ( "export" )? "trait" Ident ( TypeParams )?
 ImplDecl       ::= "impl" ( TypeParams )? Type ( "for" Type )?
                    "{" ( TraitItem )* "}" ;   (* without "for": the type's
                                                   own methods *)
+(* "export" on a method of an inherent impl means what it means on a top-level
+   declaration: without it, only the declaring module may call it. On a *trait*
+   impl it is not read — those methods are the trait's, and are reachable
+   wherever the trait is. docs/design/std-surface.md, roadmap 13.11. *)
 TraitItem      ::= AssocTypeDecl | FunctionDecl ;
 AssocTypeDecl  ::= "type" Ident ( ":" TypeBounds )? ( "=" Type )? ";" ;
 TypeBounds     ::= Type ( "+" Type )* ;

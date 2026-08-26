@@ -156,8 +156,31 @@ pub struct InherentImpl {
     pub head: String,
     pub self_type: Type,
     pub generics: Vec<String>,
+    /// Every method the block declares.
     pub methods: Vec<String>,
+    /// The subset carrying `export`, which is what another module may call.
+    ///
+    /// **`export` on a method used to be decoration** — parsed, and read by
+    /// nothing. `std` omitted it on 317 methods and `packages/postgres` wrote
+    /// it on all of theirs, and both were correct, which is the state a
+    /// keyword ends up in when it means nothing. Roadmap 13.11,
+    /// `docs/design/std-surface.md`.
+    pub exported: Vec<String>,
+    /// Whether this arrived by import rather than being written here.
+    ///
+    /// A module can always call its own methods, so `export` is a statement
+    /// about *other* modules and this is what tells them apart. Set by
+    /// [`crate::map::import_inherent`], which is the only way a foreign impl
+    /// gets here.
+    pub foreign: bool,
     pub range: TextRange,
+}
+
+impl InherentImpl {
+    /// Whether a file holding this may call `method`.
+    pub fn visible(&self, method: &str) -> bool {
+        !self.foreign || self.exported.iter().any(|m| m == method)
+    }
 }
 
 /// Every trait and impl a file declares.
@@ -214,7 +237,19 @@ impl Traits {
         let head = head_of(ty)?;
         self.inherent
             .iter()
-            .find(|i| i.head == head && i.methods.iter().any(|m| m == method))
+            .find(|i| i.head == head && i.methods.iter().any(|m| m == method) && i.visible(method))
+    }
+
+    /// A method that is there and that this file may not call.
+    ///
+    /// Only for the diagnostic: "there is no such method" and "there is, and
+    /// it is not exported" send a reader to two different places, and the
+    /// second is a one-word fix in a file they may not have thought to open.
+    pub fn inherent_hidden(&self, ty: &Type, method: &str) -> Option<&InherentImpl> {
+        let head = head_of(ty)?;
+        self.inherent
+            .iter()
+            .find(|i| i.head == head && i.methods.iter().any(|m| m == method) && !i.visible(method))
     }
 }
 
@@ -290,6 +325,12 @@ pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
                         .functions()
                         .filter_map(|f| f.name().and_then(|n| n.ident()))
                         .collect(),
+                    exported: i
+                        .functions()
+                        .filter(|f| f.is_exported())
+                        .filter_map(|f| f.name().and_then(|n| n.ident()))
+                        .collect(),
+                    foreign: false,
                     range: i.syntax().text_range(),
                 });
             }

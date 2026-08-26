@@ -75,7 +75,7 @@ impl<D: Device, Shape: Tuple, T: Scalar> Tensor<D, Shape, T> {
   /// The shape is passed as a value and read back as a type, which is what
   /// makes `Embedding<1536, F32>` and `Tensor::zeros((1536))` the same thing
   /// said twice. Provisional along with the rest of this module.
-  fn zeros(shape: Shape) -> Tensor<D, Shape, T>;
+  export fn zeros(shape: Shape) -> Tensor<D, Shape, T>;
 }
 
 /// The matrix product, with the shared dimension checked by the type system.
@@ -116,12 +116,12 @@ export type Prompt = {
 /// cannot be shared and then changed underneath its other holder.
 impl Prompt {
   /// An empty prompt: no instructions, no messages, temperature one.
-  fn new() -> Prompt {
+  export fn new() -> Prompt {
     { system_instructions: Option::None, messages: List::Nil, temperature: 1.0 }
   }
 
   /// Replaces the system instructions; the last one written wins.
-  fn system(self, instructions: String) -> Prompt {
+  export fn system(self, instructions: String) -> Prompt {
     {
       system_instructions: Option::Some(instructions),
       messages: self.messages,
@@ -130,18 +130,18 @@ impl Prompt {
   }
 
   /// Adds a turn from the person asking.
-  fn user(self, message: String) -> Prompt {
+  export fn user(self, message: String) -> Prompt {
     Prompt::saying(self, "user", message)
   }
 
   /// Adds a turn from the model, which is how a conversation is replayed.
-  fn assistant(self, message: String) -> Prompt {
+  export fn assistant(self, message: String) -> Prompt {
     Prompt::saying(self, "assistant", message)
   }
 
   /// Adds a turn under any role. `user` and `assistant` are this with the two
   /// roles every provider agrees on.
-  fn saying(self, role: String, content: String) -> Prompt {
+  export fn saying(self, role: String, content: String) -> Prompt {
     {
       system_instructions: self.system_instructions,
       messages: List::Cons({ role: role, content: content }, self.messages),
@@ -151,7 +151,7 @@ impl Prompt {
 
   /// Sets how much variation to allow. Zero is as close to deterministic as a
   /// provider offers, which is not a promise any of them makes.
-  fn at_temperature(self, temperature: Float) -> Prompt {
+  export fn at_temperature(self, temperature: Float) -> Prompt {
     {
       system_instructions: self.system_instructions,
       messages: self.messages,

@@ -44,7 +44,7 @@ impl Method {
   /// Case-sensitive, because HTTP methods are: `get` is not `GET`, and a
   /// server that accepted it would be lenient about the one part of the
   /// request line that has never been ambiguous.
-  fn of(text: String) -> Option<Method> {
+  export fn of(text: String) -> Option<Method> {
     if text == "GET" {
       Option::Some(Method::Get)
     } else if text == "POST" {
@@ -64,7 +64,7 @@ impl Method {
   ///
   /// `Method` predates `derive(Eq)` reaching this file; `rank` is what it
   /// compares on.
-  fn same(self, other: Method) -> Bool {
+  export fn same(self, other: Method) -> Bool {
     Method::rank(self) == Method::rank(other)
   }
 
@@ -91,11 +91,11 @@ export type Params = {
 
 impl Params {
   /// No parameters bound. What a route with no `:name` in it matches with.
-  fn empty() -> Params { { bound: Map::new() } }
+  export fn empty() -> Params { { bound: Map::new() } }
 
   /// `Option::None` when the route did not declare that parameter, which is a
   /// programming error the type makes you notice rather than an empty string.
-  fn get(self, name: String) -> Option<String> {
+  export fn get(self, name: String) -> Option<String> {
     Map::get(self.bound, name)
   }
 }
@@ -129,19 +129,19 @@ export type Request = {
 impl Request {
   /// A GET request for `path`, with no parameters matched yet. Chiefly for
   /// tests: a real one arrives from a socket.
-  fn get(path: String) -> Request {
+  export fn get(path: String) -> Request {
     Request::of(Method::Get, path, "")
   }
 
   /// A POST to `path` carrying `body`. For tests, like `get`.
-  fn post(path: String, body: String) -> Request {
+  export fn post(path: String, body: String) -> Request {
     Request::of(Method::Post, path, body)
   }
 
   /// The query string is honoured here too, so a hand-built request behaves
   /// like one off the wire. A test that writes `Request::get("/x?a=1")` and
   /// finds no `a` would be testing the constructor rather than the code.
-  fn of(method: Method, target: String, body: String) -> Request {
+  export fn of(method: Method, target: String, body: String) -> Request {
     let split = split_target(target);
     {
       method: method,
@@ -158,7 +158,7 @@ impl Request {
   /// A parameter written with no `=` — `/x?verbose` — is present with an empty
   /// value, which is how every server reads it and what lets a handler ask
   /// "was this requested" rather than "what does it say".
-  fn query(self, name: String) -> Option<String> {
+  export fn query(self, name: String) -> Option<String> {
     Map::get(self.queries, name)
   }
 
@@ -166,7 +166,7 @@ impl Request {
   ///
   /// `Host`, `host` and `HOST` are one header. The RFC says so, and this is
   /// the half of it that everybody gets wrong.
-  fn header(self, name: String) -> Option<String> {
+  export fn header(self, name: String) -> Option<String> {
     Map::get(self.headers, lowered(name))
   }
 }
@@ -198,12 +198,12 @@ impl Response {
   /// `A: Show` rather than a JSON encoder, because there is no JSON module yet
   /// and `Show` is the trait a type already uses to say how it reads. When
   /// there is one, this is where it goes and nothing above it changes.
-  fn json<A: Show>(status: Int, body: A) -> Response {
+  export fn json<A: Show>(status: Int, body: A) -> Response {
     { status: status, body: body.show(), content_type: "application/json", headers: List::Nil }
   }
 
   /// `body` as `text/plain`, with the given status.
-  fn text(status: Int, body: String) -> Response {
+  export fn text(status: Int, body: String) -> Response {
     { status: status, body: body, content_type: "text/plain", headers: List::Nil }
   }
 
@@ -212,7 +212,7 @@ impl Response {
   /// A new response rather than a mutated one, like `Prompt`'s builders and
   /// for the same reason: a half-built response cannot be shared and then
   /// changed underneath its other holder.
-  fn with_header(self, name: String, value: String) -> Response {
+  export fn with_header(self, name: String, value: String) -> Response {
     {
       status: self.status,
       body: self.body,
@@ -222,7 +222,7 @@ impl Response {
   }
 
   /// The response, as bytes on the wire.
-  fn rendered(self) -> String { Response::rendered_keeping(self, false) }
+  export fn rendered(self) -> String { Response::rendered_keeping(self, false) }
 
   /// The same, saying whether the connection is staying open.
   ///
@@ -236,7 +236,7 @@ impl Response {
   /// `Content-Length` is on every response already, which is what makes this
   /// safe: a client knows where the body ends and where the next answer
   /// begins without the connection closing to tell it.
-  fn rendered_keeping(self, keep: Bool) -> String {
+  export fn rendered_keeping(self, keep: Bool) -> String {
     "HTTP/1.1 " + Int::to_string(self.status) + " " + Response::reason(self.status) + "\r\n"
     + "Content-Type: " + self.content_type + "\r\n"
     + "Content-Length: " + Int::to_string(String::byte_length(self.body)) + "\r\n"
@@ -264,7 +264,7 @@ impl Response {
   /// reads the number — but one that says `Unknown` about a status the server
   /// deliberately chose reads as a bug to whoever is holding the packet
   /// capture, and it was.
-  fn reason(status: Int) -> String {
+  export fn reason(status: Int) -> String {
     if status == 200 {
       "OK"
     } else if status == 201 {
@@ -996,7 +996,7 @@ impl Connection {
   /// Everything a connection needs to decide before a handler runs: whether
   /// the bytes were a request at all, and — from the headers the parser has
   /// already folded — whether the client asked to keep the connection.
-  fn understood(text: String) -> Incoming {
+  export fn understood(text: String) -> Incoming {
     match parse(text) {
       Option::None => Incoming::Rejected(Response::text(400, "malformed request")),
       Option::Some(request) => {
@@ -1124,14 +1124,14 @@ export type Router<'e> = {
 /// collide with another module's `get`.
 impl Router {
   /// A router with no routes. The start of the pipeline.
-  fn new<'e>() -> Router<'e> { { routes: List::Nil } }
+  export fn new<'e>() -> Router<'e> { { routes: List::Nil } }
 
   /// Mounts `handler` at `route` for POST.
   ///
   /// Later mounts are tried first, because each prepends. Mounting the same
   /// route twice is allowed and the second one wins, which is worth knowing
   /// rather than an invariant anything enforces.
-  fn post<'e>(
+  export fn post<'e>(
     router: Router<'e>,
     route: String,
     handler: SharedFn<Request, Response, 'e>
@@ -1140,7 +1140,7 @@ impl Router {
   }
 
   /// Mounts `handler` at `route` for GET.
-  fn get<'e>(
+  export fn get<'e>(
     router: Router<'e>,
     route: String,
     handler: SharedFn<Request, Response, 'e>
@@ -1149,7 +1149,7 @@ impl Router {
   }
 
   /// Serves until the process stops, on a fiber per connection.
-  fn listen<'e>(router: Router<'e>, port: Int) -> ()
+  export fn listen<'e>(router: Router<'e>, port: Int) -> ()
     raises 'e + HttpError
   {
     if start() {
@@ -1195,7 +1195,7 @@ impl Router {
   ///
   /// The configuration is released when the caller's scope ends, which for a
   /// server is usually the program's.
-  fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) -> ()
+  export fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) -> ()
     with { scope: Scope }
     raises 'e + HttpError + TlsError
   {
@@ -1206,7 +1206,7 @@ impl Router {
   }
 
   /// A listening socket on `port`, announced by the caller.
-  fn bound<'e>(port: Int) -> Int raises HttpError {
+  export fn bound<'e>(port: Int) -> Int raises HttpError {
     if start() {
     } else {
       raise HttpError::BindFailed(port)
@@ -1220,7 +1220,7 @@ impl Router {
   ///
   /// A failed handshake ends that fiber quietly rather than the loop — on a
   /// public port it is the ordinary case, not an incident.
-  fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) -> ()
+  export fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) -> ()
     with { nursery: Nursery }
     raises 'e + HttpError
   {
@@ -1250,7 +1250,7 @@ impl Router {
   /// `listen` is the one to call: it binds the port and then this. Taking an
   /// already-bound socket is for a caller that wants to bind it themselves —
   /// a test on port zero, a socket inherited from a supervisor.
-  fn serve_forever<'e>(router: Router<'e>, server: Int) -> ()
+  export fn serve_forever<'e>(router: Router<'e>, server: Int) -> ()
     with { nursery: Nursery }
     raises 'e + HttpError
   {
@@ -1325,7 +1325,7 @@ impl Router {
   /// **Written against the public [`Connection`], with nothing reserved.** A
   /// framework of a different shape writes this loop itself and is not missing
   /// anything: the reading, the framing and the refusals are all above.
-  fn answer_on<'e>(router: Router<'e>, transport: Transport) -> ()
+  export fn answer_on<'e>(router: Router<'e>, transport: Transport) -> ()
     raises 'e
   {
     let connection = Connection::over(transport);

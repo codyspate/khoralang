@@ -76,7 +76,7 @@ impl Iterator for Range {
 }
 
 impl<A> Option<A> {
-  fn unwrap_or(self, fallback: A) -> A {
+  export fn unwrap_or(self, fallback: A) -> A {
     match self { Option::Some(v) => v, Option::None => fallback }
   }
 }

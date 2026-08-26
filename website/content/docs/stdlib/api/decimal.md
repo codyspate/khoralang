@@ -144,14 +144,6 @@ Exact, and stops the program if the significand cannot hold it — going
 from two decimal places to eighteen is a multiplication by ten thousand
 million million, and most numbers do not survive it.
 
-#### align
-
-```khora
-fn align(self, other: Decimal) -> Split2
-```
-
-Both numbers at the larger of their two scales.
-
 #### add
 
 ```khora

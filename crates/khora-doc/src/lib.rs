@@ -20,15 +20,19 @@
 //!
 //! # What is documented
 //!
-//! Exported items, and the members of exported types and traits. **`export`
-//! means nothing inside an `impl`** -- nothing in the compiler reads it there,
-//! and `std` never writes it while `packages/postgres` always does. Rather than
-//! pick a side of an inconsistency that is really roadmap 13.11's to settle,
-//! this documents an impl's methods when the impl's *self type* is exported,
-//! and ignores the keyword on the method. That answers correctly for both
-//! files today and will keep answering correctly if 13.11 makes the keyword
-//! mean something, because an unexported type's methods are unreachable
-//! either way.
+//! Exported items, and the members of exported types and traits.
+//!
+//! **`export` on a method means something now**, as of 13.11: a method without
+//! it may only be called by the module that declares it, so it is not part of
+//! anybody's API and does not belong in a reference. This used to ignore the
+//! keyword — it had to, because nothing read it and the two halves of the tree
+//! disagreed about writing it — and the note left here said this would keep
+//! answering correctly once it meant something. It does not, so it now filters
+//! on it.
+//!
+//! **A trait impl's methods are not filtered.** `impl Show for Decimal` is
+//! reachable through `Show` wherever `Decimal` is, and the keyword is not read
+//! there either; what makes those public is the trait.
 
 mod markdown;
 mod signature;
@@ -290,8 +294,13 @@ fn impl_item(i: &ast::ImplDecl) -> Option<Item> {
         None => (self_name, Kind::Methods),
     };
 
-    let members: Vec<Item> =
-        assoc_types(i.assoc_types()).chain(functions(i.functions())).collect();
+    // An inherent method is API only if it says so. A trait impl's methods are
+    // the trait's, and are reachable wherever the trait is — see the note at
+    // the head of this module.
+    let inherent = kind == Kind::Methods;
+    let members: Vec<Item> = assoc_types(i.assoc_types())
+        .chain(functions(i.functions().filter(|f| !inherent || f.is_exported())))
+        .collect();
     if members.is_empty() {
         return None;
     }

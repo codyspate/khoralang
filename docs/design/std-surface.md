@@ -1,7 +1,6 @@
 # The `std` surface
 
-**Status: audited once. One decision is open and it is a language question.**
-Roadmap 13.11.
+**Status: audited, and the open question is answered.** Roadmap 13.11.
 
 `docs/design/compatibility.md` lists this among the things 1.0 requires and
 does not have: *every public item in `std` is a promise at 1.0, and the set has
@@ -35,12 +34,14 @@ above `Changed` and ran into its doc comment, so `Changed` carried both and
 `Shared` carried none. Two contiguous `///` blocks are one block, and nothing
 had noticed.
 
-## Finding 2 — `export` means nothing inside an `impl`, and that is the open one
+## Finding 2 — `export` meant nothing inside an `impl`. It does now
 
-**This is a language-surface question and this document does not settle it.**
+**Resolved: option 1 below, taken 2026-08-26.** A method without `export` may
+only be called by the module that declares it. What follows is the state that
+was found and the argument for the change; what was done is at the end.
 
-Today, every method of an exported type is reachable from every module that can
-name the type. The keyword is accepted on a method and read by nothing:
+Before, every method of an exported type was reachable from every module that
+could name the type. The keyword was accepted on a method and read by nothing:
 
 ```khora
 module lib;
@@ -56,13 +57,13 @@ import lib::{Counter};
 fn main() -> Int { Counter::secret({ n: 21 }) }   // compiles
 ```
 
-The two halves of this repository disagree about it in the way you would
-expect of a keyword that does nothing. In `std`, **317 methods carry no
-`export` and 46 do**. In `packages/postgres`, written later, every public
-method carries it. Both are correct today and one of them will be wrong the
-moment the keyword means something.
+The two halves of this repository disagreed about it in the way you would
+expect of a keyword that does nothing. In `std`, **317 methods carried no
+`export` and 46 did**. In `packages/postgres`, written later, every public
+method carried it. Both were correct, which is how you can tell the keyword
+meant nothing.
 
-The consequence for 1.0 is not stylistic. These are all promises right now:
+The consequence for 1.0 was not stylistic. These were all promises:
 
 | | why it exists |
 | --- | --- |
@@ -72,9 +73,10 @@ The consequence for 1.0 is not stylistic. These are all promises right now:
 | `Dict::node`, `Dict::gather` | balancing and traversal helpers |
 | `Method::rank` | an integer per variant, so `same` has something to compare |
 
-None of those is a thing to promise for a decade. Each is documented now, and
-several of the new lines say "public only because the caller is", which is an
-honest description of an accident rather than a design.
+None of those is a thing to promise for a decade. Each is documented, and
+several of those lines said "public only because the caller is", which was an
+honest description of an accident rather than a design. All of them are private
+now.
 
 **The options, as they look from here.**
 
@@ -98,8 +100,57 @@ honest description of an accident rather than a design.
 
 Option 1 is the one that fits the vision: `docs/design/compatibility.md`'s
 argument is that a promise should be deliberate, and a keyword that is
-sometimes written and never read is the opposite. It is also the expensive one,
-and the expense is the audit itself rather than the language change.
+sometimes written and never read is the opposite.
+
+## What was done
+
+**Option 1.** `InherentImpl` records which of its methods carry the keyword;
+`import_inherent` marks the copy `foreign`, and a foreign impl answers for only
+its exported methods. A hidden method's *signature* does not cross either, so
+it is not merely unreachable — its type is not there to be read.
+
+The refusal names the fix, because it is one word in a file the reader may not
+have thought to open, and it names the other fix too:
+
+    `Map::rehash` is not exported, so only the module that declares it may
+    call it. Write `export fn rehash` there if it is part of the type's
+    interface — otherwise this call belongs inside that module.
+
+**A trait impl is not filtered.** `impl Show for Decimal { fn show }` is
+reachable wherever `Show` is; what makes it public is the trait, and writing
+the keyword on one method of an impl would suggest the others were hidden.
+
+**The triage cost far less than the 317 suggested**, because "317 methods to
+decide about" was the wrong frame. Measured three ways:
+
+| | |
+| --- | --- |
+| 92 | called from another file already — public, no judgement needed |
+| 35 | called only inside the file that declares them — the candidates |
+| 184 | called nowhere in this tree — API waiting for a user, and *not* evidence of anything |
+
+That third bucket is the trap. `Option::is_some` and `Int::wrapping_add` are
+uncalled here because `std`'s callers are programs that do not exist yet, and
+hiding them on that evidence would have been the worst possible reading of it.
+
+So: **241 methods gained the keyword and 24 did not**, chosen from the middle
+bucket. The direction of the default is deliberate — a method wrongly hidden is
+caught by the compiler the first time anything calls it, and a method wrongly
+exported is a promise nobody noticed making.
+
+The 24, each a helper of a public function on the same type: `List::take_first`
+and `merge` (`sort` and `split`); `Chain::find`, `without`, `holds`;
+`Dict::node`, `balance`, `gather`, `least`; `Map::slot`, `grow`, `rehash`;
+`String::fold` and `compare_bytes` (`Hash` and `Ord`); `Int::digits` and
+`digit`; `Decimal::align`; `Method::rank`; `Response::extra`;
+`Router::serve_once`, `serve_connection`, `secure_and_serve`, `dispatch`;
+`Prompt::describing`.
+
+**One thing this exposed.** `Chain` is now an exported type with no public
+methods at all, which is the reference saying out loud that it is `Map`'s
+implementation. It stays exported because `Map`'s `buckets` field has type
+`Array<Chain<K, V>>` and a public field's type has to be nameable — which is a
+question about whether `Map`'s fields should be public, not about `Chain`.
 
 ## Finding 3 — three names for the same idea
 
@@ -120,11 +171,10 @@ guess. It belongs in a style note rather than in the compiler.
 
 ## What was not done
 
-**No item was removed.** Removing from the surface is the other half of the
-audit and it depends on Finding 2: if a method without `export` becomes
-private, most of the rows in that table stop being public without anybody
-deleting anything, and the ones that remain are a much shorter list to argue
-about.
+**No type, trait or free function was removed.** Twenty-four methods stopped
+being public, which is Finding 2's doing rather than a separate pass. Whether
+`std` should export fewer *types* — `Chain` and `Halves` are the obvious
+candidates — is a question this did not open.
 
 **Packages were not audited.** `packages/postgres` is not `std` and does not
 carry `std`'s promise. The same test could be pointed at it.

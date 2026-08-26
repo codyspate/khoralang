@@ -132,7 +132,7 @@ impl Json
 #### field
 
 ```khora
-fn field(self, name: String) -> Option<Json>
+export fn field(self, name: String) -> Option<Json>
 ```
 
 The field, if this is an object and it has one.
@@ -145,7 +145,7 @@ lines.
 #### text
 
 ```khora
-fn text(self) -> Option<String>
+export fn text(self) -> Option<String>
 ```
 
 The rest are one per shape, so that a caller can ask "is it what I
@@ -157,7 +157,7 @@ field was for.
 #### number
 
 ```khora
-fn number(self) -> Option<Float>
+export fn number(self) -> Option<Float>
 ```
 
 The number here, or `None` if this is something else.
@@ -169,7 +169,7 @@ its integers.
 #### boolean
 
 ```khora
-fn boolean(self) -> Option<Bool>
+export fn boolean(self) -> Option<Bool>
 ```
 
 The boolean here, or `None`.
@@ -177,7 +177,7 @@ The boolean here, or `None`.
 #### items
 
 ```khora
-fn items(self) -> Option<List<Json>>
+export fn items(self) -> Option<List<Json>>
 ```
 
 The elements, if this is an array. `None` for anything else, including an
@@ -186,7 +186,7 @@ object — a JSON array and a JSON object are different things.
 #### is_null
 
 ```khora
-fn is_null(self) -> Bool
+export fn is_null(self) -> Bool
 ```
 
 Whether this is `null`, which is a question rather than a value.
@@ -197,7 +197,7 @@ telling apart from a present value: `is_null` answers the first.
 #### entries
 
 ```khora
-fn entries(self) -> List<Field>
+export fn entries(self) -> List<Field>
 ```
 
 Every field of an object, or the empty list.

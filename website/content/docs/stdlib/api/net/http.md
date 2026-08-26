@@ -384,7 +384,7 @@ impl Method
 #### of
 
 ```khora
-fn of(text: String) -> Option<Method>
+export fn of(text: String) -> Option<Method>
 ```
 
 The method this text names, or `None`.
@@ -396,24 +396,13 @@ request line that has never been ambiguous.
 #### same
 
 ```khora
-fn same(self, other: Method) -> Bool
+export fn same(self, other: Method) -> Bool
 ```
 
 Whether these are the same method.
 
 `Method` predates `derive(Eq)` reaching this file; `rank` is what it
 compares on.
-
-#### rank
-
-```khora
-fn rank(self) -> Int
-```
-
-A number per method, so `same` has something to compare.
-
-**Not a wire value and not an order.** Nothing outside this module should
-read it; it exists because comparing two variants needed one integer.
 
 ### Params
 
@@ -424,7 +413,7 @@ impl Params
 #### empty
 
 ```khora
-fn empty() -> Params
+export fn empty() -> Params
 ```
 
 No parameters bound. What a route with no `:name` in it matches with.
@@ -432,7 +421,7 @@ No parameters bound. What a route with no `:name` in it matches with.
 #### get
 
 ```khora
-fn get(self, name: String) -> Option<String>
+export fn get(self, name: String) -> Option<String>
 ```
 
 `Option::None` when the route did not declare that parameter, which is a
@@ -447,7 +436,7 @@ impl Request
 #### get
 
 ```khora
-fn get(path: String) -> Request
+export fn get(path: String) -> Request
 ```
 
 A GET request for `path`, with no parameters matched yet. Chiefly for
@@ -456,7 +445,7 @@ tests: a real one arrives from a socket.
 #### post
 
 ```khora
-fn post(path: String, body: String) -> Request
+export fn post(path: String, body: String) -> Request
 ```
 
 A POST to `path` carrying `body`. For tests, like `get`.
@@ -464,7 +453,7 @@ A POST to `path` carrying `body`. For tests, like `get`.
 #### of
 
 ```khora
-fn of(method: Method, target: String, body: String) -> Request
+export fn of(method: Method, target: String, body: String) -> Request
 ```
 
 The query string is honoured here too, so a hand-built request behaves
@@ -474,7 +463,7 @@ finds no `a` would be testing the constructor rather than the code.
 #### query
 
 ```khora
-fn query(self, name: String) -> Option<String>
+export fn query(self, name: String) -> Option<String>
 ```
 
 A query parameter, already percent-decoded.
@@ -486,7 +475,7 @@ value, which is how every server reads it and what lets a handler ask
 #### header
 
 ```khora
-fn header(self, name: String) -> Option<String>
+export fn header(self, name: String) -> Option<String>
 ```
 
 A header, by a name in any case.
@@ -503,7 +492,7 @@ impl Response
 #### json
 
 ```khora
-fn json<A: Show>(status: Int, body: A) -> Response
+export fn json<A: Show>(status: Int, body: A) -> Response
 ```
 
 Serializes `body` and sends it with the given status.
@@ -515,7 +504,7 @@ there is one, this is where it goes and nothing above it changes.
 #### text
 
 ```khora
-fn text(status: Int, body: String) -> Response
+export fn text(status: Int, body: String) -> Response
 ```
 
 `body` as `text/plain`, with the given status.
@@ -523,7 +512,7 @@ fn text(status: Int, body: String) -> Response
 #### with_header
 
 ```khora
-fn with_header(self, name: String, value: String) -> Response
+export fn with_header(self, name: String, value: String) -> Response
 ```
 
 The same response with one more header on it.
@@ -535,7 +524,7 @@ changed underneath its other holder.
 #### rendered
 
 ```khora
-fn rendered(self) -> String
+export fn rendered(self) -> String
 ```
 
 The response, as bytes on the wire.
@@ -543,7 +532,7 @@ The response, as bytes on the wire.
 #### rendered_keeping
 
 ```khora
-fn rendered_keeping(self, keep: Bool) -> String
+export fn rendered_keeping(self, keep: Bool) -> String
 ```
 
 The same, saying whether the connection is staying open.
@@ -559,20 +548,10 @@ server benchmarked with keep-alive was comparing two different questions.
 safe: a client knows where the body ends and where the next answer
 begins without the connection closing to tell it.
 
-#### extra
-
-```khora
-fn extra(headers: List<Header>) -> String
-```
-
-The caller's own headers. `with_header` prepends, so the most recently
-added is written first — which no client cares about, and saying so here
-is cheaper than reversing a list to make it look tidy.
-
 #### reason
 
 ```khora
-fn reason(status: Int) -> String
+export fn reason(status: Int) -> String
 ```
 
 The reason phrase for a status.
@@ -624,7 +603,7 @@ belongs to the caller — see the note on [`Connection`].
 #### understood
 
 ```khora
-fn understood(text: String) -> Incoming
+export fn understood(text: String) -> Incoming
 ```
 
 Parses one request, or the 400 to answer it with.
@@ -672,7 +651,7 @@ collide with another module's `get`.
 #### new
 
 ```khora
-fn new<'e>() -> Router<'e>
+export fn new<'e>() -> Router<'e>
 ```
 
 A router with no routes. The start of the pipeline.
@@ -680,7 +659,7 @@ A router with no routes. The start of the pipeline.
 #### post
 
 ```khora
-fn post<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
+export fn post<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
 ```
 
 Mounts `handler` at `route` for POST.
@@ -692,7 +671,7 @@ rather than an invariant anything enforces.
 #### get
 
 ```khora
-fn get<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
+export fn get<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
 ```
 
 Mounts `handler` at `route` for GET.
@@ -700,7 +679,7 @@ Mounts `handler` at `route` for GET.
 #### listen
 
 ```khora
-fn listen<'e>(router: Router<'e>, port: Int) ->() raises 'e + HttpError
+export fn listen<'e>(router: Router<'e>, port: Int) ->() raises 'e + HttpError
 ```
 
 Serves until the process stops, on a fiber per connection.
@@ -708,7 +687,7 @@ Serves until the process stops, on a fiber per connection.
 #### listen_tls
 
 ```khora
-fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'e + HttpError + TlsError
+export fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'e + HttpError + TlsError
 ```
 
 Accepts for as long as the process lives.
@@ -725,7 +704,7 @@ server is usually the program's.
 #### bound
 
 ```khora
-fn bound<'e>(port: Int) -> Int raises HttpError
+export fn bound<'e>(port: Int) -> Int raises HttpError
 ```
 
 A listening socket on `port`, announced by the caller.
@@ -733,7 +712,7 @@ A listening socket on `port`, announced by the caller.
 #### serve_secured
 
 ```khora
-fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) ->() with { nursery: Nursery } raises 'e + HttpError
+export fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) ->() with { nursery: Nursery } raises 'e + HttpError
 ```
 
 `serve_forever` over TLS: accepts, handshakes, and serves on a fiber
@@ -742,22 +721,10 @@ each.
 A failed handshake ends that fiber quietly rather than the loop — on a
 public port it is the ordinary case, not an incident.
 
-#### secure_and_serve
-
-```khora
-fn secure_and_serve<'e>(router: Router<'e>, connection: Int, settings: TlsServer) ->()
-```
-
-One connection, handshaken and then served.
-
-A failed handshake is the ordinary case on a public port — a scanner, a
-browser sent to `http://` — so it ends this fiber quietly. `secure` has
-already closed the socket.
-
 #### serve_forever
 
 ```khora
-fn serve_forever<'e>(router: Router<'e>, server: Int) ->() with { nursery: Nursery } raises 'e + HttpError
+export fn serve_forever<'e>(router: Router<'e>, server: Int) ->() with { nursery: Nursery } raises 'e + HttpError
 ```
 
 Accepts connections on `server` until the process stops.
@@ -766,57 +733,10 @@ Accepts connections on `server` until the process stops.
 already-bound socket is for a caller that wants to bind it themselves —
 a test on port zero, a socket inherited from a supervisor.
 
-#### serve_once
-
-```khora
-fn serve_once<'e>(router: Router<'e>, server: Int) ->() with { nursery: Nursery } raises 'e + HttpError
-```
-
-Accepts one connection and hands it to a fiber of its own.
-
-**This is what `SharedFn` bought.** A closure's captures are not in its
-type, so a `Router` holding plain closures could never cross into a fiber
-and the server answered one caller at a time. Certifying each handler
-where it is mounted makes the route an ordinary shareable record, and the
-thunk below closes over the whole router without anything special being
-said about routers. `docs/design/sharing.md`.
-
-The nursery is what makes it structured rather than merely concurrent: an
-adopted fiber cannot outlive it, so leaving `listen` — by a raise, or by
-cancellation — deals with the connections still being answered instead of
-abandoning them.
-
-**A fiber is an operating-system thread today**, so this is
-thread-per-connection and should be read as such: fine for a service with
-tens or hundreds of concurrent callers, and the wrong shape for tens of
-thousands. Nothing here changes when fibers become stackful coroutines on
-a scheduler — `docs/design/fibers.md` promises a program cannot tell which
-it has — so the ceiling is the runtime's to raise and not this module's.
-Until it does, the honest position is a bounded number of connections
-rather than an event loop that happens not to be written yet.
-
-#### serve_connection
-
-```khora
-fn serve_connection<'e>(router: Router<'e>, transport: Transport) ->()
-```
-
-One connection, from the first byte to the close.
-
-What a fiber runs, and it does not fail: a fiber has nobody to hand a
-failure to, and a connection nothing closes is a descriptor leaked for the
-life of the process. So whatever the handler raised becomes a 500 and the
-socket is shut either way.
-
-The arm is `_`, because `'e` is whatever the mounted handlers raise and
-this function cannot name a constructor of it. Catching *whatever* is the
-one thing naming constructors cannot express, and the reason a total
-wildcard arm exists at all.
-
 #### answer_on
 
 ```khora
-fn answer_on<'e>(router: Router<'e>, transport: Transport) ->() raises 'e
+export fn answer_on<'e>(router: Router<'e>, transport: Transport) ->() raises 'e
 ```
 
 Answers every request on one connection, until the client stops.
@@ -824,14 +744,6 @@ Answers every request on one connection, until the client stops.
 **Written against the public [`Connection`], with nothing reserved.** A
 framework of a different shape writes this loop itself and is not missing
 anything: the reading, the framing and the refusals are all above.
-
-#### dispatch
-
-```khora
-fn dispatch<'e>(routes: List<Route<'e>>, request: Request) -> Response raises 'e
-```
-
-What to send back for this request text.
 
 ## Functions
 

@@ -113,7 +113,7 @@ export effect Process {
 
 impl Process {
   /// A real shell.
-  fn real() -> Process {
+  export fn real() -> Process {
     handler for Process {
       status: fn command => started(command, run(command))!,
       capture: fn command => capture_output(command)!,

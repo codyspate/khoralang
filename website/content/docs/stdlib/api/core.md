@@ -823,7 +823,7 @@ impl Ordering
 #### is_less
 
 ```khora
-fn is_less(self) -> Bool
+export fn is_less(self) -> Bool
 ```
 
 Whether the comparison came out `Less`.
@@ -831,7 +831,7 @@ Whether the comparison came out `Less`.
 #### is_equal
 
 ```khora
-fn is_equal(self) -> Bool
+export fn is_equal(self) -> Bool
 ```
 
 Whether it came out `Equal`.
@@ -839,7 +839,7 @@ Whether it came out `Equal`.
 #### is_greater
 
 ```khora
-fn is_greater(self) -> Bool
+export fn is_greater(self) -> Bool
 ```
 
 Whether it came out `Greater`.
@@ -847,7 +847,7 @@ Whether it came out `Greater`.
 #### reverse
 
 ```khora
-fn reverse(self) -> Ordering
+export fn reverse(self) -> Ordering
 ```
 
 `a.cmp(b).reverse()` sorts descending without a second comparison.
@@ -861,7 +861,7 @@ impl<A> Option<A>
 #### is_some
 
 ```khora
-fn is_some(self) -> Bool
+export fn is_some(self) -> Bool
 ```
 
 Whether there is a value.
@@ -872,7 +872,7 @@ For a condition. Reaching for the value afterwards means matching twice;
 #### is_none
 
 ```khora
-fn is_none(self) -> Bool
+export fn is_none(self) -> Bool
 ```
 
 Whether there is not.
@@ -880,7 +880,7 @@ Whether there is not.
 #### unwrap_or
 
 ```khora
-fn unwrap_or(self, fallback: A) -> A
+export fn unwrap_or(self, fallback: A) -> A
 ```
 
 The value, or `fallback` if there is none.
@@ -891,7 +891,7 @@ when producing it is expensive.
 #### unwrap_or_else
 
 ```khora
-fn unwrap_or_else(self, fallback: () -> A) -> A
+export fn unwrap_or_else(self, fallback: () -> A) -> A
 ```
 
 The value, or the result of calling `fallback`.
@@ -903,7 +903,7 @@ costs something.
 #### ok_or
 
 ```khora
-fn ok_or<E>(self, error: E) -> Result<A, E>
+export fn ok_or<E>(self, error: E) -> Result<A, E>
 ```
 
 Turns absence into a failure, which is how an `Option` joins a `raises`
@@ -918,7 +918,7 @@ impl<A, E> Result<A, E>
 #### is_ok
 
 ```khora
-fn is_ok(self) -> Bool
+export fn is_ok(self) -> Bool
 ```
 
 Whether this succeeded.
@@ -926,7 +926,7 @@ Whether this succeeded.
 #### is_err
 
 ```khora
-fn is_err(self) -> Bool
+export fn is_err(self) -> Bool
 ```
 
 Whether it did not.
@@ -934,7 +934,7 @@ Whether it did not.
 #### unwrap_or
 
 ```khora
-fn unwrap_or(self, fallback: A) -> A
+export fn unwrap_or(self, fallback: A) -> A
 ```
 
 The value, or `fallback` if there was an error.
@@ -946,7 +946,7 @@ it might, `match`.
 #### ok
 
 ```khora
-fn ok(self) -> Option<A>
+export fn ok(self) -> Option<A>
 ```
 
 Discards the error, which is the one direction that cannot fail.
@@ -954,7 +954,7 @@ Discards the error, which is the one direction that cannot fail.
 #### map_err
 
 ```khora
-fn map_err<F>(self, f: (E) -> F) -> Result<A, F>
+export fn map_err<F>(self, f: (E) -> F) -> Result<A, F>
 ```
 
 Rewrites the error and leaves the value alone.
@@ -972,7 +972,7 @@ impl<A: Ord> List<A>
 #### sort
 
 ```khora
-fn sort(self) -> List<A>
+export fn sort(self) -> List<A>
 ```
 
 The same elements, in order.
@@ -990,7 +990,7 @@ and `sort` on the list cannot disagree. Sorting by something else is
 #### split
 
 ```khora
-fn split(self) -> Halves<A>
+export fn split(self) -> Halves<A>
 ```
 
 The first half and the second, each in the order it was given.
@@ -1004,30 +1004,6 @@ breaks its tie towards the left then puts them back the wrong way round.
 The cost is a length and a reversal, both linear, against a sort that is
 already linearithmic.
 
-#### take_first
-
-```khora
-fn take_first(self, count: Int, taken: List<A>) -> Halves<A>
-```
-
-The first `count` elements and the rest, with `taken` already collected
-in reverse.
-
-`split`'s worker, and public only because `split` is. The accumulator is
-what keeps it a single pass.
-
-#### merge
-
-```khora
-fn merge(self, other: List<A>) -> List<A>
-```
-
-Two sorted lists, as one.
-
-`<=` rather than `<` on the tie, which is exactly what makes the sort
-stable: an element from the left half goes first when they are equal, and
-the left half is the earlier one.
-
 ### List<A>
 
 ```khora
@@ -1037,7 +1013,7 @@ impl<A> List<A>
 #### is_empty
 
 ```khora
-fn is_empty(self) -> Bool
+export fn is_empty(self) -> Bool
 ```
 
 Whether there is nothing in it.
@@ -1047,7 +1023,7 @@ Constant time, which `length() == 0` is not.
 #### length
 
 ```khora
-fn length(self) -> Int
+export fn length(self) -> Int
 ```
 
 How many elements there are.
@@ -1058,7 +1034,7 @@ round is quadratic — take it once.
 #### head
 
 ```khora
-fn head(self) -> Option<A>
+export fn head(self) -> Option<A>
 ```
 
 The first element, or `None` for an empty list.
@@ -1066,7 +1042,7 @@ The first element, or `None` for an empty list.
 #### push
 
 ```khora
-fn push(self, item: A) -> List<A>
+export fn push(self, item: A) -> List<A>
 ```
 
 Prepends, which is the cheap end. Appending walks the whole list, so it
@@ -1075,7 +1051,7 @@ is spelled `concat` and its cost is visible at the call site.
 #### concat
 
 ```khora
-fn concat(self, other: List<A>) -> List<A>
+export fn concat(self, other: List<A>) -> List<A>
 ```
 
 `self` followed by `other`.
@@ -1087,7 +1063,7 @@ quadratic way to do it; push and `reverse` once.
 #### reverse
 
 ```khora
-fn reverse(self) -> List<A>
+export fn reverse(self) -> List<A>
 ```
 
 The same elements, back to front.
@@ -1095,7 +1071,7 @@ The same elements, back to front.
 #### reverse_onto
 
 ```khora
-fn reverse_onto(self, acc: List<A>) -> List<A>
+export fn reverse_onto(self, acc: List<A>) -> List<A>
 ```
 
 `self` reversed, in front of `acc`.
@@ -1107,7 +1083,7 @@ what `concat` in a loop does quadratically. This is the "at the end".
 #### fold
 
 ```khora
-fn fold<B>(self, start: B, step: (B, A) -> B) -> B
+export fn fold<B>(self, start: B, step: (B, A) -> B) -> B
 ```
 
 Combines every element into one value, left to right.
@@ -1124,7 +1100,7 @@ impl Region
 #### open
 
 ```khora
-fn open() -> Region
+export fn open() -> Region
 ```
 
 A new region with nothing deferred into it.
@@ -1136,7 +1112,7 @@ binding that ends it.
 #### defer
 
 ```khora
-fn defer(self, finalizer: () ->()) ->()
+export fn defer(self, finalizer: () ->()) ->()
 ```
 
 Registers `finalizer` to run when this region ends.
@@ -1149,7 +1125,7 @@ so a finalizer caused by a cancellation is not cut short by it.
 #### root
 
 ```khora
-fn root() -> Region
+export fn root() -> Region
 ```
 
 The region that ends when the program does, released by the entry point
@@ -1164,7 +1140,7 @@ impl Fiber
 #### spawn
 
 ```khora
-fn spawn<'e>(body: () ->() raises 'e) -> Fiber
+export fn spawn<'e>(body: () ->() raises 'e) -> Fiber
 ```
 
 Runs `body` on a fiber of its own.
@@ -1177,7 +1153,7 @@ and runs to its end.
 #### join
 
 ```khora
-fn join(self) ->()
+export fn join(self) ->()
 ```
 
 Waits for the fiber to finish. Joining twice is joining once.
@@ -1185,7 +1161,7 @@ Waits for the fiber to finish. Joining twice is joining once.
 #### cancel
 
 ```khora
-fn cancel(self) ->()
+export fn cancel(self) ->()
 ```
 
 Asks the fiber to stop at its next cancellation point. Returns at once.
@@ -1199,7 +1175,7 @@ impl<A> Array<A>
 #### empty
 
 ```khora
-fn empty() -> Array<A>
+export fn empty() -> Array<A>
 ```
 
 No elements at all.
@@ -1214,7 +1190,7 @@ is also the first moment there is a value of `A` to fill with.
 #### new
 
 ```khora
-fn new(length: Int, fill: A) -> Array<A>
+export fn new(length: Int, fill: A) -> Array<A>
 ```
 
 `length` elements, every one of them `fill`.
@@ -1222,7 +1198,7 @@ fn new(length: Int, fill: A) -> Array<A>
 #### length
 
 ```khora
-fn length(self) -> Int
+export fn length(self) -> Int
 ```
 
 How many elements it has. Fixed at construction; nothing grows an array.
@@ -1230,7 +1206,7 @@ How many elements it has. Fixed at construction; nothing grows an array.
 #### get
 
 ```khora
-fn get(self, index: Int) -> A
+export fn get(self, index: Int) -> A
 ```
 
 The element at `index`.
@@ -1243,7 +1219,7 @@ memory is the least useful possible response.
 #### set
 
 ```khora
-fn set(self, index: Int, value: A) ->()
+export fn set(self, index: Int, value: A) ->()
 ```
 
 Writes `value` at `index`, in place.
@@ -1257,7 +1233,7 @@ An index outside the array stops the program, as `get` does.
 #### is_utf8
 
 ```khora
-fn is_utf8(self) -> Bool
+export fn is_utf8(self) -> Bool
 ```
 
 Whether these bytes are well-formed UTF-8, and so whether
@@ -1266,7 +1242,7 @@ Whether these bytes are well-formed UTF-8, and so whether
 #### prefix
 
 ```khora
-fn prefix(self, count: Int) -> Array<A>
+export fn prefix(self, count: Int) -> Array<A>
 ```
 
 The first `count` elements, copied.
@@ -1278,7 +1254,7 @@ the message.
 #### with_data
 
 ```khora
-fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B with 'c raises 'e
+export fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B with 'c raises 'e
 ```
 
 Lends the elements to `body` as a pointer and a count, for the duration
@@ -1309,7 +1285,7 @@ impl Ptr
 #### null
 
 ```khora
-fn null() -> Ptr
+export fn null() -> Ptr
 ```
 
 The null pointer, for the libraries that take one.
@@ -1317,44 +1293,11 @@ The null pointer, for the libraries that take one.
 #### is_null
 
 ```khora
-fn is_null(self) -> Bool
+export fn is_null(self) -> Bool
 ```
 
 Whether this is null — which is how a great many C functions say they
 failed.
-
-### Chain<K, V>
-
-```khora
-impl<K: Hash, V> Chain<K, V>
-```
-
-#### find
-
-```khora
-fn find(self, key: K) -> Option<V>
-```
-
-The value stored under `key` in this bucket, or `None`.
-
-Linear in the chain, which is fine because a chain is what one bucket
-holds: it is long only when the hash is bad.
-
-#### without
-
-```khora
-fn without(self, key: K) -> Chain<K, V>
-```
-
-The chain with `key` removed, or the same chain if it was not there.
-
-#### holds
-
-```khora
-fn holds(self, key: K) -> Bool
-```
-
-Whether `key` is in this bucket.
 
 ### Dict<K, V>
 
@@ -1365,7 +1308,7 @@ impl<K, V> Dict<K, V>
 #### new
 
 ```khora
-fn new() -> Dict<K, V>
+export fn new() -> Dict<K, V>
 ```
 
 An empty dictionary.
@@ -1373,7 +1316,7 @@ An empty dictionary.
 #### size
 
 ```khora
-fn size(self) -> Int
+export fn size(self) -> Int
 ```
 
 How many entries. Kept in the node rather than counted, because balancing
@@ -1382,39 +1325,15 @@ asks for it at every step.
 #### is_empty
 
 ```khora
-fn is_empty(self) -> Bool
+export fn is_empty(self) -> Bool
 ```
 
 Whether there are no entries.
 
-#### node
-
-```khora
-fn node(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
-```
-
-A node whose size is computed from its children, and no balancing.
-
-What the rotations build with: they already know the shape is sound, and
-asking `balance` again would recurse.
-
-#### balance
-
-```khora
-fn balance(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
-```
-
-Rebuilds a node, rotating if one side has outgrown the other.
-
-A side may be at most three times the weight of the other. Three rather
-than two because two is not enough slack to keep a single insert from
-rotating on every level, and much more than three stops bounding the
-depth usefully.
-
 #### rotate_left
 
 ```khora
-fn rotate_left(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
+export fn rotate_left(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
 ```
 
 The right side is heavy. Which rotation depends on its own shape: a
@@ -1424,7 +1343,7 @@ subtree is the lighter half.
 #### rotate_right
 
 ```khora
-fn rotate_right(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
+export fn rotate_right(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
 ```
 
 The mirror of it.
@@ -1432,21 +1351,10 @@ The mirror of it.
 #### entries
 
 ```khora
-fn entries(self) -> List<Pair<K, V>>
+export fn entries(self) -> List<Pair<K, V>>
 ```
 
 Every entry, smallest key first.
-
-#### gather
-
-```khora
-fn gather(self, after: List<Pair<K, V>>) -> List<Pair<K, V>>
-```
-
-The right side first, so what comes out is in key order.
-
-An accumulator rather than two lists joined, so nothing is walked twice
-and the recursion is the tree's depth.
 
 ### Dict<K, V>
 
@@ -1457,7 +1365,7 @@ impl<K: Ord, V> Dict<K, V>
 #### get
 
 ```khora
-fn get(self, key: K) -> Option<V>
+export fn get(self, key: K) -> Option<V>
 ```
 
 The value under `key`, if there is one.
@@ -1465,7 +1373,7 @@ The value under `key`, if there is one.
 #### contains
 
 ```khora
-fn contains(self, key: K) -> Bool
+export fn contains(self, key: K) -> Bool
 ```
 
 Whether `key` has an entry.
@@ -1473,7 +1381,7 @@ Whether `key` has an entry.
 #### insert
 
 ```khora
-fn insert(self, key: K, value: V) -> Dict<K, V>
+export fn insert(self, key: K, value: V) -> Dict<K, V>
 ```
 
 The map with `key` set to `value`, leaving this one as it was.
@@ -1481,7 +1389,7 @@ The map with `key` set to `value`, leaving this one as it was.
 #### remove
 
 ```khora
-fn remove(self, key: K) -> Dict<K, V>
+export fn remove(self, key: K) -> Dict<K, V>
 ```
 
 The map without `key`. Removing what is not there is the map unchanged.
@@ -1489,7 +1397,7 @@ The map without `key`. Removing what is not there is the map unchanged.
 #### glue
 
 ```khora
-fn glue(left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
+export fn glue(left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V>
 ```
 
 Joins two sides whose node has gone.
@@ -1498,18 +1406,10 @@ The successor moves up: every key on the left is smaller than every key
 on the right, so the smallest of the right is the one that can sit
 between them.
 
-#### least
-
-```khora
-fn least(self) -> Option<Least<K, V>>
-```
-
-The smallest entry, and the tree without it.
-
 #### from_list
 
 ```khora
-fn from_list(entries: List<Pair<K, V>>) -> Dict<K, V>
+export fn from_list(entries: List<Pair<K, V>>) -> Dict<K, V>
 ```
 
 Builds a map from entries, later ones winning.
@@ -1526,7 +1426,7 @@ impl<K: Hash, V> Map<K, V>
 #### new
 
 ```khora
-fn new() -> Map<K, V>
+export fn new() -> Map<K, V>
 ```
 
 An empty map, which allocates nothing but itself.
@@ -1541,7 +1441,7 @@ difference, and it did not exist when this was written.
 #### len
 
 ```khora
-fn len(self) -> Int
+export fn len(self) -> Int
 ```
 
 How many entries there are. Counted as it goes, not walked.
@@ -1549,7 +1449,7 @@ How many entries there are. Counted as it goes, not walked.
 #### get
 
 ```khora
-fn get(self, key: K) -> Option<V>
+export fn get(self, key: K) -> Option<V>
 ```
 
 The value under `key`, if there is one.
@@ -1557,7 +1457,7 @@ The value under `key`, if there is one.
 #### holds
 
 ```khora
-fn holds(self, key: K) -> Bool
+export fn holds(self, key: K) -> Bool
 ```
 
 Whether `key` has an entry.
@@ -1568,7 +1468,7 @@ For when the value is not wanted; `get` is one lookup either way, so
 #### insert
 
 ```khora
-fn insert(self, key: K, value: V) ->()
+export fn insert(self, key: K, value: V) ->()
 ```
 
 Adds `key`, replacing whatever was there. The count only moves when the
@@ -1578,7 +1478,7 @@ number of insertions.
 #### remove
 
 ```khora
-fn remove(self, key: K) ->()
+export fn remove(self, key: K) ->()
 ```
 
 Takes `key` out, in place. Removing what is not there does nothing.
@@ -1589,7 +1489,7 @@ million buckets, which nothing here has needed to be otherwise.
 #### entries
 
 ```khora
-fn entries(self) -> List<Pair<K, V>>
+export fn entries(self) -> List<Pair<K, V>>
 ```
 
 Every entry, as a list.
@@ -1616,7 +1516,7 @@ slow walk, not a smashed stack.
 #### keys
 
 ```khora
-fn keys(self) -> List<K>
+export fn keys(self) -> List<K>
 ```
 
 The keys, in the reverse of the order `entries` reports them — which is
@@ -1637,47 +1537,12 @@ order of either.
 #### values
 
 ```khora
-fn values(self) -> List<V>
+export fn values(self) -> List<V>
 ```
 
 The values, one per entry — duplicates included, because two keys may
 well hold the same value and dropping one would make `values` disagree
 with `len`.
-
-#### slot
-
-```khora
-fn slot(self, key: K) -> Int
-```
-
-Which bucket a key belongs in.
-
-Knuth's multiplicative constant, then a shift-xor so that the high bits —
-where multiplication puts the information — reach the low ones the mask
-keeps. Wrapping on purpose: overflow is where the mixing comes from.
-Which bucket a key belongs in.
-
-Negative when there are no buckets, which is the empty map: every reader
-checks for it, because masking against a length of zero would ask for
-element -1.
-
-#### grow
-
-```khora
-fn grow(self) ->()
-```
-
-Twice the buckets, and every entry moved into the new ones.
-
-#### rehash
-
-```khora
-fn rehash(self, chain: Chain<K, V>) ->()
-```
-
-Puts one old bucket's entries back into the new buckets.
-
-`grow`'s worker, public only because `grow` is.
 
 ### Vector<A>
 
@@ -1688,7 +1553,7 @@ impl<A> Vector<A>
 #### new
 
 ```khora
-fn new() -> Vector<A>
+export fn new() -> Vector<A>
 ```
 
 Empty, holding no storage at all.
@@ -1702,7 +1567,7 @@ has cost two objects and no cells: itself, and the empty array's header.
 #### with_capacity
 
 ```khora
-fn with_capacity(capacity: Int) -> Vector<A>
+export fn with_capacity(capacity: Int) -> Vector<A>
 ```
 
 Room for `capacity` elements, from the first `push` onwards.
@@ -1722,7 +1587,7 @@ kind of mistake as indexing off the end of an array.
 #### length
 
 ```khora
-fn length(self) -> Int
+export fn length(self) -> Int
 ```
 
 How many elements are in it.
@@ -1730,7 +1595,7 @@ How many elements are in it.
 #### is_empty
 
 ```khora
-fn is_empty(self) -> Bool
+export fn is_empty(self) -> Bool
 ```
 
 Whether there is nothing in it.
@@ -1738,7 +1603,7 @@ Whether there is nothing in it.
 #### capacity
 
 ```khora
-fn capacity(self) -> Int
+export fn capacity(self) -> Int
 ```
 
 How many elements fit before the next reallocation — allocated cells, not
@@ -1751,7 +1616,7 @@ be able to see it.
 #### push
 
 ```khora
-fn push(self, item: A) ->()
+export fn push(self, item: A) ->()
 ```
 
 Adds an element at the end.
@@ -1762,7 +1627,7 @@ the fill: the only value of `A` anyone here has.
 #### grow
 
 ```khora
-fn grow(self, seed: A) ->()
+export fn grow(self, seed: A) ->()
 ```
 
 Twice the room, or `wanted` if there was none, with `seed` in every cell.
@@ -1790,7 +1655,7 @@ with the array. Blanking them would need a value of `A` to blank them
 #### pop
 
 ```khora
-fn pop(self) -> Option<A>
+export fn pop(self) -> Option<A>
 ```
 
 Removes the last element and hands it back.
@@ -1811,7 +1676,7 @@ at once, and `wanted` keeps its size for the next fill.
 #### get
 
 ```khora
-fn get(self, index: Int) -> Option<A>
+export fn get(self, index: Int) -> Option<A>
 ```
 
 The element at `index`, or `Option::None` if there is none there.
@@ -1829,7 +1694,7 @@ error.
 #### set
 
 ```khora
-fn set(self, index: Int, value: A) -> Bool
+export fn set(self, index: Int, value: A) -> Bool
 ```
 
 Replaces the element at `index`. Answers whether there was one to
@@ -1843,7 +1708,7 @@ what there is no value of `A` for; `push` is how a vector gets longer.
 #### clear
 
 ```khora
-fn clear(self) ->()
+export fn clear(self) ->()
 ```
 
 Empties it.
@@ -1858,7 +1723,7 @@ arrives back where it started.
 #### to_list
 
 ```khora
-fn to_list(self) -> List<A>
+export fn to_list(self) -> List<A>
 ```
 
 The elements, first to last.
@@ -1871,7 +1736,7 @@ overflowed the stack with.
 #### from_list
 
 ```khora
-fn from_list(items: List<A>) -> Vector<A>
+export fn from_list(items: List<A>) -> Vector<A>
 ```
 
 A vector of the list's elements, in the same order.
@@ -1891,7 +1756,7 @@ impl<A, B, 'e> SharedFn<A, B, 'e>
 #### of
 
 ```khora
-fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>
+export fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>
 ```
 
 Certifies a closure written here.
@@ -1903,7 +1768,7 @@ one thing this cannot check and so the one thing it refuses.
 #### call
 
 ```khora
-fn call(self, argument: A) -> B raises 'e
+export fn call(self, argument: A) -> B raises 'e
 ```
 
 Calls it. A plain closure call; the wrapper costs nothing at runtime.
@@ -1917,7 +1782,7 @@ impl<A: Share> Channel<A>
 #### bounded
 
 ```khora
-fn bounded(capacity: Int) -> Channel<A>
+export fn bounded(capacity: Int) -> Channel<A>
 ```
 
 A channel that will hold at most `capacity` values.
@@ -1927,7 +1792,7 @@ Below one is one — see the type's note on rendezvous.
 #### send
 
 ```khora
-fn send(self, value: A) -> Bool
+export fn send(self, value: A) -> Bool
 ```
 
 Puts a value in, waiting while the channel is full.
@@ -1939,7 +1804,7 @@ quietest possible leak.
 #### receive
 
 ```khora
-fn receive(self) -> Option<A>
+export fn receive(self) -> Option<A>
 ```
 
 Takes a value out, waiting while the channel is empty.
@@ -1949,7 +1814,7 @@ Takes a value out, waiting while the channel is empty.
 #### close
 
 ```khora
-fn close(self) ->()
+export fn close(self) ->()
 ```
 
 Says nothing more will be sent, and releases everybody waiting.
@@ -1957,7 +1822,7 @@ Says nothing more will be sent, and releases everybody waiting.
 #### depth
 
 ```khora
-fn depth(self) -> Int
+export fn depth(self) -> Int
 ```
 
 How many values are waiting to be taken.
@@ -1974,7 +1839,7 @@ impl<A: Share> Shared<A>
 #### of
 
 ```khora
-fn of(value: A) -> Shared<A>
+export fn of(value: A) -> Shared<A>
 ```
 
 A cell holding `value`.
@@ -1982,7 +1847,7 @@ A cell holding `value`.
 #### get
 
 ```khora
-fn get(self) -> A
+export fn get(self) -> A
 ```
 
 What is in it now, as a value of the caller's own.
@@ -1990,7 +1855,7 @@ What is in it now, as a value of the caller's own.
 #### set
 
 ```khora
-fn set(self, value: A) ->()
+export fn set(self, value: A) ->()
 ```
 
 Replaces what is in it.
@@ -1998,7 +1863,7 @@ Replaces what is in it.
 #### update
 
 ```khora
-fn update(self, change: (A) -> A) -> A
+export fn update(self, change: (A) -> A) -> A
 ```
 
 Reads, transforms and writes as one step, and gives back the new value.
@@ -2015,7 +1880,7 @@ program with a message rather than waiting for itself.
 #### modify
 
 ```khora
-fn modify<B>(self, change: (A) -> Changed<A, B>) -> B
+export fn modify<B>(self, change: (A) -> Changed<A, B>) -> B
 ```
 
 The same, for a change that has something to say beyond the new state.
@@ -2045,7 +1910,7 @@ impl Fibers
 #### open
 
 ```khora
-fn open() -> Fibers
+export fn open() -> Fibers
 ```
 
 A nursery with no limit on how many children it holds at once.
@@ -2056,7 +1921,7 @@ connection meets an unbounded nursery's ceiling by exhausting memory.
 #### bounded
 
 ```khora
-fn bounded(limit: Int) -> Fibers
+export fn bounded(limit: Int) -> Fibers
 ```
 
 A nursery that will hold at most `limit` running children.
@@ -2074,7 +1939,7 @@ outside world.
 #### adopt
 
 ```khora
-fn adopt(self, fiber: Fiber) ->()
+export fn adopt(self, fiber: Fiber) ->()
 ```
 
 Puts a running fiber under this nursery.
@@ -2086,7 +1951,7 @@ which is what turns a ceiling into a queue.
 #### wait
 
 ```khora
-fn wait(self) ->()
+export fn wait(self) ->()
 ```
 
 Waits for every child, oldest first, and empties the nursery.
@@ -2100,7 +1965,7 @@ impl Schedule
 #### once
 
 ```khora
-fn once() -> Schedule
+export fn once() -> Schedule
 ```
 
 Run once. The identity, and the one you get by not asking.
@@ -2108,7 +1973,7 @@ Run once. The identity, and the one you get by not asking.
 #### times
 
 ```khora
-fn times(n: Int) -> Schedule
+export fn times(n: Int) -> Schedule
 ```
 
 Run up to `n` times, stopping at the first success.

@@ -54,7 +54,7 @@ impl Fs {
   /// The real file system.
   ///
   /// Everything else in this module exists so that this is three lines.
-  fn real() -> Fs {
+  export fn real() -> Fs {
     handler for Fs {
       read: fn path => read_whole(path)!,
       write: fn (path, bytes) => write_whole(path, bytes)!,

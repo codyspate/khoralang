@@ -251,7 +251,7 @@ impl<D: Device, Shape: Tuple, T: Scalar> Tensor<D, Shape, T>
 #### zeros
 
 ```khora
-fn zeros(shape: Shape) -> Tensor<D, Shape, T>
+export fn zeros(shape: Shape) -> Tensor<D, Shape, T>
 ```
 
 A tensor of the given shape, every element zero.
@@ -273,7 +273,7 @@ cannot be shared and then changed underneath its other holder.
 #### new
 
 ```khora
-fn new() -> Prompt
+export fn new() -> Prompt
 ```
 
 An empty prompt: no instructions, no messages, temperature one.
@@ -281,7 +281,7 @@ An empty prompt: no instructions, no messages, temperature one.
 #### system
 
 ```khora
-fn system(self, instructions: String) -> Prompt
+export fn system(self, instructions: String) -> Prompt
 ```
 
 Replaces the system instructions; the last one written wins.
@@ -289,7 +289,7 @@ Replaces the system instructions; the last one written wins.
 #### user
 
 ```khora
-fn user(self, message: String) -> Prompt
+export fn user(self, message: String) -> Prompt
 ```
 
 Adds a turn from the person asking.
@@ -297,7 +297,7 @@ Adds a turn from the person asking.
 #### assistant
 
 ```khora
-fn assistant(self, message: String) -> Prompt
+export fn assistant(self, message: String) -> Prompt
 ```
 
 Adds a turn from the model, which is how a conversation is replayed.
@@ -305,7 +305,7 @@ Adds a turn from the model, which is how a conversation is replayed.
 #### saying
 
 ```khora
-fn saying(self, role: String, content: String) -> Prompt
+export fn saying(self, role: String, content: String) -> Prompt
 ```
 
 Adds a turn under any role. `user` and `assistant` are this with the two
@@ -314,23 +314,11 @@ roles every provider agrees on.
 #### at_temperature
 
 ```khora
-fn at_temperature(self, temperature: Float) -> Prompt
+export fn at_temperature(self, temperature: Float) -> Prompt
 ```
 
 Sets how much variation to allow. Zero is as close to deterministic as a
 provider offers, which is not a promise any of them makes.
-
-#### describing
-
-```khora
-fn describing(self, spec: String) -> Prompt
-```
-
-The prompt, with a description of what the answer should look like
-appended. What `extract` puts between a caller's request and the model.
-
-`S: Show` because a spec has to reach the model as words, and `Show` is
-how a type already says how it reads.
 
 ## Functions
 

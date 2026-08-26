@@ -200,9 +200,11 @@ Stating the policy is not meeting it. 1.0 is blocked on at least:
 - ~~**Declaration identity.**~~ Done: a type carries the module that declares
   it, so "a public type" is now a thing that can be said. Roadmap 8.5.2,
   errata 46.
-- **The `std` audit.** Every public item in `std` is a promise at 1.0, and the
-  set has never been reviewed with that in mind — several exist because a
-  reference application needed them at the time.
+- ~~**The `std` audit.**~~ Done: 390 items reviewed, 94 undocumented ones
+  written and held by a test, and `export` made to mean something inside an
+  `impl` — a method without it is its module's, so the 24 helpers that were
+  promises by accident are no longer. Roadmap 13.11,
+  `docs/design/std-surface.md`.
 - **Editions**, if anything before 1.0 needs one.
 
 ## Not decided here
@@ -211,9 +213,10 @@ Stating the policy is not meeting it. 1.0 is blocked on at least:
   a public sum type to gain cases, or a record to gain fields, without a major
   release. Needed before `std` can evolve comfortably, and it is a language
   surface change rather than a policy one.
-- **What "public" means across packages.** `export` is module-level visibility.
-  Whether a package has a narrower public surface than the union of its
-  exported modules is 10.2's question.
+- **What "public" means across packages.** `export` is module-level visibility
+  — on an item, and since 13.11 on a method too. Whether a *package* has a
+  narrower public surface than the union of its exported modules is still
+  10.2's question, and nothing about it changed.
 - **How long a major version is supported**, and whether more than one is. That
   is a project-management commitment and needs a project, not a design.
 - **Minimum supported compiler version for a package**, and how the resolver

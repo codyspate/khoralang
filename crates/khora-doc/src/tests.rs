@@ -107,20 +107,53 @@ fn an_unexported_item_is_not_documented() {
     assert_eq!(m.items[0].name, "g");
 }
 
-/// The rule that makes `std` documentable at all: `export` means nothing inside
-/// an impl, so an impl's methods follow the visibility of the type.
+/// An inherent method is documented when it says it is API.
+///
+/// This used to assert the opposite — that the keyword was ignored — because
+/// nothing read it and `std` never wrote it. 13.11 made it mean something, so
+/// what a reference lists and what another module may call are one set again.
 #[test]
-fn methods_of_an_exported_type_are_documented_without_the_keyword() {
+fn an_exported_method_of_an_exported_type_is_documented() {
     let m = module(
         "module m;\n\n\
          export type Counter = { n: Int };\n\n\
-         impl Counter {\n  /// How many.\n  fn count(self) -> Int { self.n }\n}\n",
+         impl Counter {\n  /// How many.\n  export fn count(self) -> Int { self.n }\n}\n",
     );
     let methods = m.items.iter().find(|i| i.kind == Kind::Methods).expect("an impl block");
     assert_eq!(methods.name, "Counter");
     assert_eq!(methods.members.len(), 1);
     assert_eq!(methods.members[0].name, "count");
     assert_eq!(methods.members[0].doc, ["How many."]);
+}
+
+/// And a helper on a public type is not, because nobody outside can call it.
+#[test]
+fn an_unexported_method_of_an_exported_type_is_not_documented() {
+    let m = module(
+        "module m;\n\n\
+         export type Counter = { n: Int };\n\n\
+         impl Counter {\n  \
+         export fn count(self) -> Int { Counter::twice(self) }\n  \
+         fn twice(self) -> Int { self.n * 2 }\n}\n",
+    );
+    let methods = m.items.iter().find(|i| i.kind == Kind::Methods).expect("an impl block");
+    let names: Vec<&str> = methods.members.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["count"], "a private helper is not part of the API");
+}
+
+/// A trait impl's methods are the trait's and are not filtered: `Show` is
+/// reachable wherever the type is, and the keyword is not read there.
+#[test]
+fn a_trait_impls_methods_are_documented_without_the_keyword() {
+    let m = module(
+        "module m;\n\n\
+         export trait Show { fn show(self) -> String; }\n\
+         export type Counter = { n: Int };\n\n\
+         impl Show for Counter {\n  fn show(self) -> String { \"c\" }\n}\n",
+    );
+    let imp = m.items.iter().find(|i| i.kind == Kind::TraitImpl).expect("a trait impl");
+    assert_eq!(imp.members.len(), 1);
+    assert_eq!(imp.members[0].name, "show");
 }
 
 #[test]
@@ -138,7 +171,7 @@ fn a_generic_impl_is_matched_to_its_declaration() {
     let m = module(
         "module m;\n\n\
          export type List<A> = | Nil | Cons(head: A, tail: List<A>);\n\n\
-         impl<A> List<A> {\n  /// How many.\n  fn length(self) -> Int { 0 }\n}\n",
+         impl<A> List<A> {\n  /// How many.\n  export fn length(self) -> Int { 0 }\n}\n",
     );
     let methods = m.items.iter().find(|i| i.kind == Kind::Methods).expect("an impl block");
     assert_eq!(methods.name, "List<A>");

@@ -640,18 +640,27 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
 /// impl is not a name that can be referred to, only a method reached by
 /// having a value — so gating it on an import buys nothing and costs the
 /// obvious call.
+///
+/// **What is gated is `export`, not the import.** The copy is marked `foreign`,
+/// which is what makes `InherentImpl::visible` answer for another module, and
+/// only exported methods bring a signature across. A hidden method is
+/// therefore not merely unreachable — its type is not here to be read.
 pub(crate) fn import_inherent(exported: &TypeMap, map: &mut TypeMap) {
     for imp in &exported.traits.inherent {
-        if map.traits.inherent.contains(imp) {
+        // Marked before the duplicate check, or the same impl arrives once per
+        // origin: the guard has to compare what would actually be pushed.
+        let mut imp = imp.clone();
+        imp.foreign = true;
+        if map.traits.inherent.contains(&imp) {
             continue;
         }
-        map.traits.inherent.push(imp.clone());
-        let own = format!("#{}::", imp.head);
-        for (key, signature) in &exported.signatures {
-            if key.starts_with(&own) {
-                map.signatures.insert(key.clone(), signature.clone());
+        for method in &imp.exported {
+            let key = crate::traits::method_key("", &imp.head, method);
+            if let Some(signature) = exported.signatures.get(key.as_str()) {
+                map.signatures.insert(key, signature.clone());
             }
         }
+        map.traits.inherent.push(imp);
     }
 }
 

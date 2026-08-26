@@ -332,7 +332,7 @@ impl Json {
   /// is what almost every consumer of a parsed document does, and writing the
   /// `match` by hand at each step turns three levels of nesting into fifteen
   /// lines.
-  fn field(self, name: String) -> Option<Json> {
+  export fn field(self, name: String) -> Option<Json> {
     match self {
       Json::Object(fields) => Map::get(fields, name),
       _ => Option::None,
@@ -344,7 +344,7 @@ impl Json {
   /// `Option` rather than a failure, because a document being the wrong shape
   /// is the caller's business to name — this module does not know what the
   /// field was for.
-  fn text(self) -> Option<String> {
+  export fn text(self) -> Option<String> {
     match self { Json::Text(value) => Option::Some(value), _ => Option::None }
   }
 
@@ -353,18 +353,18 @@ impl Json {
   /// **No coercion**, as with `text`: the string `"3"` is not a number, and a
   /// library that read it as one would hide the day a client started quoting
   /// its integers.
-  fn number(self) -> Option<Float> {
+  export fn number(self) -> Option<Float> {
     match self { Json::Number(value) => Option::Some(value), _ => Option::None }
   }
 
   /// The boolean here, or `None`.
-  fn boolean(self) -> Option<Bool> {
+  export fn boolean(self) -> Option<Bool> {
     match self { Json::Bool(value) => Option::Some(value), _ => Option::None }
   }
 
   /// The elements, if this is an array. `None` for anything else, including an
   /// object — a JSON array and a JSON object are different things.
-  fn items(self) -> Option<List<Json>> {
+  export fn items(self) -> Option<List<Json>> {
     match self { Json::Array(items) => Option::Some(items), _ => Option::None }
   }
 
@@ -372,7 +372,7 @@ impl Json {
   ///
   /// A JSON `null` and a missing field are different, and both are worth
   /// telling apart from a present value: `is_null` answers the first.
-  fn is_null(self) -> Bool {
+  export fn is_null(self) -> Bool {
     match self { Json::Null => true, _ => false }
   }
 
@@ -385,7 +385,7 @@ impl Json {
   /// and it buys `field` in constant time, which is what consumers actually
   /// do with a document. A `List<Field>` would keep the order and make every
   /// lookup a scan.
-  fn entries(self) -> List<Field> {
+  export fn entries(self) -> List<Field> {
     match self {
       Json::Object(fields) => gather(fields, 0, List::Nil),
       _ => List::Nil,

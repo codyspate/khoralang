@@ -222,7 +222,7 @@ fn a_method_arrives_on_a_type_that_was_never_imported() {
             "net.kh",
             "module net;\n\
              export type Params = | Of(one: String);\n\
-             impl Params { fn one(self) -> String { match self { Params::Of(s) => s } } }\n\
+             impl Params { export fn one(self) -> String { match self { Params::Of(s) => s } } }\n\
              export type Request = { params: Params };\n",
         ),
         (
@@ -243,7 +243,7 @@ fn a_function_arrives_on_a_type_that_was_never_imported() {
             "net.kh",
             "module net;\n\
              export type Params = | Of(one: String);\n\
-             impl Params { fn empty() -> Params { Params::Of(\"\") } }\n\
+             impl Params { export fn empty() -> Params { Params::Of(\"\") } }\n\
              export type Request = { params: Params };\n",
         ),
         (
@@ -295,6 +295,135 @@ fn an_imported_effect_can_be_installed() {
              export fn go() -> Row {\n\
                with { db: handler for Db { query: fn _ => Row::Of(1) } } { load(\"x\") }\n\
              }\n",
+        ),
+    ]);
+}
+
+// --- `export` on a method -----------------------------------------------
+
+/// **13.11.** A method without `export` belongs to its module.
+///
+/// The keyword was parsed and read by nothing, so every method of an exported
+/// type was reachable from everywhere: `Map::rehash` and `List::take_first`
+/// were promises. `docs/design/std-surface.md` has the argument and the count.
+#[test]
+fn a_method_without_export_is_not_callable_from_another_module() {
+    assert_reports(
+        &[
+            (
+                "lib.kh",
+                "module lib;\n\
+                 export type Counter = { n: Int };\n\
+                 impl Counter { fn secret(self) -> Int { self.n * 2 } }\n",
+            ),
+            (
+                "app.kh",
+                "module app;\n\
+                 import lib::{Counter};\n\
+                 export fn use_it(c: Counter) -> Int { Counter::secret(c) }\n",
+            ),
+        ],
+        "is not exported",
+    );
+}
+
+/// The same through method syntax, which resolves by a different path.
+#[test]
+fn the_method_form_is_refused_too() {
+    assert_reports(
+        &[
+            (
+                "lib.kh",
+                "module lib;\n\
+                 export type Counter = { n: Int };\n\
+                 impl Counter { fn secret(self) -> Int { self.n * 2 } }\n",
+            ),
+            (
+                "app.kh",
+                "module app;\n\
+                 import lib::{Counter};\n\
+                 export fn use_it(c: Counter) -> Int { c.secret() }\n",
+            ),
+        ],
+        "is not exported",
+    );
+}
+
+/// **The message names the fix**, because it is one word in a file the reader
+/// may not have thought to open.
+#[test]
+fn the_refusal_says_what_to_write_and_where() {
+    assert_reports(
+        &[
+            (
+                "lib.kh",
+                "module lib;\n\
+                 export type Counter = { n: Int };\n\
+                 impl Counter { fn secret(self) -> Int { self.n * 2 } }\n",
+            ),
+            (
+                "app.kh",
+                "module app;\n\
+                 import lib::{Counter};\n\
+                 export fn use_it(c: Counter) -> Int { Counter::secret(c) }\n",
+            ),
+        ],
+        "export fn secret",
+    );
+}
+
+/// A module may always call its own, keyword or not. `export` is a statement
+/// about other modules.
+#[test]
+fn a_module_may_call_its_own_unexported_methods() {
+    assert_clean(&[(
+        "lib.kh",
+        "module lib;\n\
+         export type Counter = { n: Int };\n\
+         impl Counter {\n\
+           export fn doubled(self) -> Int { Counter::secret(self) }\n\
+           fn secret(self) -> Int { self.n * 2 }\n\
+         }\n",
+    )]);
+}
+
+/// And an exported one crosses, which is the whole point of the keyword.
+#[test]
+fn an_exported_method_crosses_the_boundary() {
+    assert_clean(&[
+        (
+            "lib.kh",
+            "module lib;\n\
+             export type Counter = { n: Int };\n\
+             impl Counter { export fn doubled(self) -> Int { self.n * 2 } }\n",
+        ),
+        (
+            "app.kh",
+            "module app;\n\
+             import lib::{Counter};\n\
+             export fn use_it(c: Counter) -> Int { c.doubled() + Counter::doubled(c) }\n",
+        ),
+    ]);
+}
+
+/// **A trait impl is not filtered.** Its methods are the trait's, reachable
+/// wherever the trait is, and the keyword is not read there — writing it on
+/// one would suggest the others were hidden.
+#[test]
+fn a_trait_method_needs_no_export_on_the_impl() {
+    assert_clean(&[
+        (
+            "lib.kh",
+            "module lib;\n\
+             export trait Show { fn show(self) -> String; }\n\
+             export type Counter = { n: Int };\n\
+             impl Show for Counter { fn show(self) -> String { \"c\" } }\n",
+        ),
+        (
+            "app.kh",
+            "module app;\n\
+             import lib::{Counter, Show};\n\
+             export fn render(c: Counter) -> String { c.show() }\n",
         ),
     ]);
 }

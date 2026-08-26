@@ -62,7 +62,7 @@ impl Random {
   /// the whole process shares. Each call seeds a new one, so two of them handed
   /// to two subsystems do not interleave — and a program that wants one shared
   /// source passes one `Random` around, which is what the capability is for.
-  fn real() -> Random {
+  export fn real() -> Random {
     Random::seeded(khora_random_seed())
   }
 
@@ -79,7 +79,7 @@ impl Random {
   /// the same lock every other shared value uses, not a second mechanism — and
   /// the handler may cross into a fiber because a `Shared` is the one writable
   /// thing the sharing rules allow it to capture. `docs/design/sharing.md`.
-  fn seeded(seed: Int) -> Random {
+  export fn seeded(seed: Int) -> Random {
     let state = Shared::of(seed);
     handler for Random {
       int: fn () => draw(state),

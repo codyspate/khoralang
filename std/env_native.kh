@@ -86,7 +86,7 @@ export effect Clock {
 
 impl Env {
   /// The real environment.
-  fn real() -> Env {
+  export fn real() -> Env {
     handler for Env {
       variable: fn name => read_variable(name),
       arguments: fn () => collect_arguments(khora_arg_count() - 1, List::Nil),
@@ -99,7 +99,7 @@ impl Clock {
   ///
   /// Seconds are milliseconds divided down rather than a second call to ISO C's
   /// `time`, so that a program reading both never sees them straddle a tick.
-  fn real() -> Clock {
+  export fn real() -> Clock {
     handler for Clock {
       unix_seconds: fn () => khora_unix_millis() / 1000,
       unix_millis: fn () => khora_unix_millis(),

@@ -207,6 +207,20 @@ impl<'a> Checker<'a> {
             let key = traits::method_key("", &own.head, method);
             return Some(self.call_signature(callee, &key, &self_ty, args, range));
         }
+        // There, and not for this file. Reported here rather than falling
+        // through to "has no method", which would send the reader looking for
+        // a spelling mistake instead of at a missing keyword.
+        if let Some(hidden) = self.types.traits.inherent_hidden(&self_ty, method) {
+            // The head rather than `self_ty`: the advice is to write a keyword
+            // in `impl<A> Option<A>`, and `Option<Int>::unwrap_or` points at a
+            // block that does not exist.
+            let owner = hidden.head.clone();
+            for arg in args {
+                self.infer(*arg);
+            }
+            self.error(self.not_exported(&owner, method), range);
+            return Some(Type::Unknown);
+        }
 
         // Inside a generic function the receiver is rigid, and the only methods
         // it has are the ones its bounds promise. `F<B>` counts: the methods
@@ -368,6 +382,18 @@ impl<'a> Checker<'a> {
         self.types.signatures.get(key).cloned()
     }
 
+    /// What to say about a method that exists and is not this file's to call.
+    ///
+    /// Names the fix, because it is one word in a file the reader may not have
+    /// thought to open — and because the *other* fix is real too: a helper
+    /// that only its own module should reach is a method whose caller should
+    /// be somewhere else.
+    pub(super) fn not_exported(&self, owner: &str, method: &str) -> String {
+        format!(
+            "`{owner}::{method}` is not exported, so only the module that declares it may call it. Write `export fn {method}` there if it is part of the type's interface — otherwise this call belongs inside that module"
+        )
+    }
+
     /// The type of `Owner::name`, where `Owner` is a trait or a bounded type
     /// parameter and `name` is one of the trait's functions.
     ///
@@ -394,6 +420,11 @@ impl<'a> Checker<'a> {
                 None => Type::adt(other),
             },
         };
+        if self.types.traits.inherent_hidden(&self_ty, name).is_some() {
+            let range = self.body.range(at);
+            self.error(self.not_exported(owner, name), range);
+            return Type::Unknown;
+        }
         if let Some(own) = self.types.traits.inherent_method(&self_ty, name) {
             let key = traits::method_key("", &own.head, name);
             let Some(signature) = self.types.signatures.get(key.as_str()).cloned() else {
