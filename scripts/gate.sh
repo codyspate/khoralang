@@ -48,6 +48,11 @@ if [ "$was" != "$now" ]; then
     printf '\n' >&2
     printf 'Something tracked has changed since the baseline passed. Run it\n' >&2
     printf 'again:  sh scripts/baseline.sh\n' >&2
+    printf '\n' >&2
+    printf 'If nothing was edited, a `git add` of a *new* file will do this too:\n' >&2
+    printf 'the tracked list is part of what the receipt names. Stage first, then\n' >&2
+    printf 'run the baseline, then commit -- which is the right order anyway, since\n' >&2
+    printf 'a file that is not staged is not in the commit being pushed.\n' >&2
     exit 1
 fi
 

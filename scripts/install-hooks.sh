@@ -15,6 +15,11 @@
 #
 # `git push --no-verify` still works, and that is on purpose. This exists to
 # stop the accident, not to stop the decision.
+#
+# The working order it implies: **stage, then baseline, then commit, then
+# push.** Staging a new file changes the tracked list, which is part of what
+# the receipt names, so a baseline run before the `git add` does not count for
+# the tree that includes it.
 set -e
 
 root=$(cd "$(dirname "$0")/.." && pwd)
