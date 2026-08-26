@@ -1,0 +1,176 @@
+name: release
+
+# Builds a toolchain per platform and attaches it to a release that already
+# exists.
+#
+# The flow, and the order matters:
+#
+#   1. Create a release on GitHub with a new tag, and **save it as a draft**.
+#   2. This runs, builds a toolchain on each platform, and uploads them to that
+#      draft.
+#   3. You look at what is in it, and press Publish.
+#
+# Only step 3 makes it visible to `install.sh`. So a half-built or wrong
+# release is never something a `curl | sh` can reach: until somebody presses
+# the button, the newest thing the installer can see is the previous one.
+#
+# **Candidates go out the same way with the pre-release box ticked.** A
+# pre-release is published — installable by name, and with `install.sh --pre` —
+# and is excluded from `/releases/latest`, so it is testable without being what
+# a plain `curl | sh` gets. Candidates are versions of their own,
+# `v0.2.0-rc.1` then `-rc.2`; the stable release is `v0.2.0` cut from the same
+# commit as the last candidate. Nothing is ever promoted in place, because a
+# version number that changes meaning is worse than an extra tag.
+#
+# **`workflow_dispatch` is here because saving a draft may not fire anything.**
+# GitHub's `release` webhook documents `created` as covering a saved draft, and
+# Actions has historically been inconsistent about delivering release events
+# for drafts. Rather than depend on it, the same job can be started by hand
+# from the Actions tab with the tag as input — and that path is the one to use
+# if step 1 produces no run.
+#
+# Artifacts are attached with `gh release upload`, which does not touch the
+# release's draft state. `softprops/action-gh-release` would have been shorter
+# and takes a `draft:` argument, which means a workflow that runs against an
+# already-published release can quietly unpublish it. Not a risk worth the
+# three lines it saves.
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag of the draft release to attach to, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      # A draft release has no tag yet — GitHub creates it on publish — so
+      # there is nothing to check out by tag name. `target_commitish` is the
+      # branch or commit the release was made against, which is the thing the
+      # tag *will* point at.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.target_commitish || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      - name: Cache the Windows LLVM tarball
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~/.llvm
+          key: llvm-22.1.8-${{ runner.os }}
+
+      # The same script a contributor runs, for the reason `ci.yml` gives: a
+      # failure here should be a failure of the documented install rather than
+      # of a path that only exists in CI.
+      - name: Install LLVM and write the cargo config
+        shell: bash
+        run: |
+          prefix=$(sh scripts/setup-llvm.sh --quiet)
+          if [ -z "$prefix" ]; then echo "setup-llvm printed nothing"; exit 1; fi
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+
+      # **Named for the tag, not the manifest.** A candidate is tagged
+      # `v0.2.0-rc.1` while `Cargo.toml` still says `0.2.0`; the artifact has
+      # to carry the tag's version or `install.sh`, which builds the filename
+      # out of the tag it asked the API for, looks for a file nobody
+      # published. The same string reaches `khora --version`.
+      - name: Package
+        shell: bash
+        run: sh scripts/package.sh --version "${TAG#v}"
+
+      # **The artifact is used before it is published**, and this is the only
+      # place that can happen. Every test inside the repository finds `std/`
+      # and the runtime archive in the tree; none of them can tell whether a
+      # toolchain that has been unpacked somewhere else finds them beside its
+      # own binary. A release that unpacks and cannot compile is the one
+      # failure a release must not have.
+      - name: Compile something with what was packaged
+        shell: bash
+        run: |
+          set -eu
+          name=$(cd dist && ls -d khora-*/ | head -1)
+          name=${name%/}
+
+          mkdir -p "$RUNNER_TEMP/first/src"
+          cat > "$RUNNER_TEMP/first/khora.toml" <<'EOF'
+          [package]
+          name = "first"
+          version = "0.1.0"
+          edition = "2026"
+          EOF
+          cat > "$RUNNER_TEMP/first/src/main.kh" <<'EOF'
+          module main;
+          import std::core::{print};
+          fn main() -> Int { print("a packaged toolchain works"); 0 }
+          EOF
+
+          cd "$RUNNER_TEMP/first"
+          # No KHORA_STD, no KHORA_RT_LIB. If the layout is wrong, here is
+          # where it shows.
+          "$GITHUB_WORKSPACE/dist/$name/bin/khora" build .
+          if [ -f src/main.exe ]; then ./src/main.exe; else ./src/main; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: khora-${{ matrix.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  attach:
+    name: attach to ${{ github.event.release.tag_name || inputs.tag }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: What is about to be attached
+        run: ls -l artifacts
+
+      # `gh` is on every runner. `--clobber` so that re-running after a fixed
+      # build replaces the file rather than failing on a name that is already
+      # there — which is the difference between a release you can iterate on
+      # and one you have to delete and remake.
+      #
+      # The release is *not* created here if it is missing: this workflow
+      # attaches to a decision somebody already made, and a run against a typo
+      # in a tag should say so rather than quietly produce a second release.
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            echo "No release tagged $TAG."
+            echo "Create it on GitHub first — as a draft — then run this."
+            exit 1
+          fi
+          gh release upload "$TAG" artifacts/* --clobber
+          echo
+          echo "Attached to $TAG. It is still a draft until somebody publishes it,"
+          echo "and only publishing makes it the release install.sh will find."

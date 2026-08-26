@@ -38,7 +38,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 /// The version of the toolchain doing the asking.
-pub const RUNNING: &str = env!("CARGO_PKG_VERSION");
+///
+/// `CARGO_PKG_VERSION` unless a packaged build said otherwise. A release
+/// candidate is tagged `v0.2.0-rc.1` while the manifest still says `0.2.0` —
+/// bumping every crate for each candidate is churn, and the two disagreeing is
+/// worse than either: a pin on `0.2.0-rc.1` would find a toolchain that
+/// reports `0.2.0` and decide it was the wrong one.
+///
+/// `scripts/package.sh` sets `KHORA_RELEASE` from the tag, so what a released
+/// binary reports is what it was published as.
+pub const RUNNING: &str = match option_env!("KHORA_RELEASE") {
+    Some(named) => named,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 /// Set to the version being run, so a shim cannot re-exec forever.
 ///

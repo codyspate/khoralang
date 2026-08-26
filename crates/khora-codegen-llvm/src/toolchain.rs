@@ -31,6 +31,69 @@ pub fn tool(name: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The C driver used to link, wherever it is.
+///
+/// **An installed toolchain has no `LLVM_SYS_221_PREFIX`**, and the linker is
+/// the one thing a downloaded `khora` cannot bring with it. Everything else it
+/// needs is in the tarball: LLVM is linked into the binary, the runtime
+/// archive sits beside it, and `std` is found the same way. Linking is not,
+/// because it needs the platform's own C runtime and system libraries, and the
+/// driver that knows where those live belongs to the platform.
+///
+/// Every native toolchain makes this trade. `rustup` installs a compiler and
+/// then tells you to install MSVC Build Tools or a `cc`, for this reason and
+/// with this awkwardness.
+///
+/// The pinned prefix comes first, because a build from this tree should use
+/// the LLVM it was built against and nothing else; then `PATH`. On Windows the
+/// fallbacks are clang only — a MinGW `gcc` produces a different ABI from the
+/// MSVC-targeting objects the backend emits, and linking those is a failure a
+/// long way from its cause.
+pub fn linker() -> Option<PathBuf> {
+    if let Some(pinned) = tool("clang") {
+        return Some(pinned);
+    }
+    let names: &[&str] =
+        if cfg!(windows) { &["clang", "clang-cl"] } else { &["clang", "cc", "gcc"] };
+    names.iter().find_map(|name| which(name))
+}
+
+/// The first `name` on `PATH`, or `None`.
+///
+/// Written here rather than taken as a dependency: it is a dozen lines, and a
+/// compiler reaching for a crate to look at `PATH` is a crate to audit for the
+/// sake of a dozen lines.
+fn which(name: &str) -> Option<PathBuf> {
+    let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    std::env::var_os("PATH")?
+        .to_str()?
+        .split(if cfg!(windows) { ';' } else { ':' })
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| Path::new(entry).join(&exe))
+        .find(|path| path.is_file())
+}
+
+/// What to say when there is no linker.
+///
+/// Names the command for the platform the reader is actually on. "Install a C
+/// toolchain" is advice they have to translate, and this is the first thing
+/// anybody meets after downloading a compiler.
+fn no_linker() -> String {
+    let install = if cfg!(windows) {
+        "install the Visual Studio Build Tools with the \"Desktop development with C++\" \
+         workload, or LLVM from https://releases.llvm.org"
+    } else if cfg!(target_os = "macos") {
+        "run `xcode-select --install`"
+    } else {
+        "install `clang` or `gcc` from your package manager"
+    };
+    format!(
+        "no linker found. Khora compiles to a native object and needs a C driver to link it \
+         against the platform's runtime: {install}. Or set LLVM_SYS_221_PREFIX to an LLVM \
+         installation, or put `clang` on PATH."
+    )
+}
+
 /// Links object files into an executable.
 ///
 /// `clang` is used as the driver rather than invoking a linker directly: it
@@ -379,11 +442,7 @@ fn drive_clang(
     library: bool,
     profile: Profile,
 ) -> Result<(), String> {
-    let clang = tool("clang").ok_or_else(|| {
-        "clang not found in the LLVM toolchain; set LLVM_SYS_221_PREFIX \
-         (see docs/llvm-setup.md)"
-            .to_string()
-    })?;
+    let clang = linker().ok_or_else(no_linker)?;
 
     let mut cmd = std::process::Command::new(&clang);
     // A shared library rather than an executable: no entry point, and the

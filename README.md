@@ -15,6 +15,70 @@ checking, whole-program monomorphization, reference-count planning and LLVM to a
 linked native executable. The standard library is written in Khora, and one of
 the reference applications is an HTTP service.
 
+## Installing it
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/codyspate/khoralang/main/install.ps1 | iex
+```
+
+Downloads a toolchain into `~/.khora`, checks it against the published
+checksum, and puts `bin` on your PATH. `rm -rf ~/.khora` undoes it. Read either
+script before running it; both are short, need no root, and install no
+packages.
+
+**One thing is not in the download and cannot be: a linker.** A Khora *program*
+is a standalone native executable — 3.6 MB for the benchmark server, importing
+nothing but the operating system's own libraries. The *compiler* carries LLVM
+inside itself and finds `std/` and the runtime archive beside its own binary,
+so nothing needs configuring. But turning an object file into an executable
+needs the platform's C runtime and system libraries, and the driver that knows
+where those live belongs to the platform. `rustc` has the same requirement for
+the same reason.
+
+| | |
+| --- | --- |
+| Windows | Visual Studio Build Tools, "Desktop development with C++" |
+| macOS | `xcode-select --install` |
+| Linux | `clang` or `gcc` from your package manager |
+
+The installer checks before downloading anything and says so.
+
+### Release candidates
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --pre     # the newest build, candidates included
+curl -fsSL .../install.sh | sh -s -- --version 0.2.0-rc.1
+```
+
+A candidate is published as a GitHub **pre-release**, which is installable by
+name and is excluded from `/releases/latest` — so a plain `curl | sh` never
+reaches one, and `--pre` is how somebody volunteers to test. `khora --version`
+reports what it was published as.
+
+Candidates are versions of their own: `0.2.0-rc.1`, then `-rc.2`, then `0.2.0`
+cut from the same commit as the last candidate. Nothing is promoted in place. A
+version number that changes meaning is worse than an extra tag, and "is your
+0.2.0 the one from before or after the fix" is a question nobody should have to
+ask.
+
+### Cutting one
+
+1. Create a release on GitHub with a new tag and **save it as a draft** — tick
+   "pre-release" for a candidate.
+2. `.github/workflows/release.yml` builds a toolchain on each platform,
+   **compiles a program with the packaged toolchain** to prove it works
+   unpacked, and attaches the archives and their checksums to that draft.
+3. Look at what is in it, and press Publish.
+
+Only step 3 makes it visible to the installer, so a half-built release is never
+something a `curl | sh` can reach. If saving the draft starts no run, start it
+from the Actions tab with the tag as input; the workflow says why that path
+exists.
+
 Two profiles: `khora build` is unoptimized with debug information, and
 `khora build --release` runs LLVM's `default<O2>`, drops debug information, and
 is bit-for-bit reproducible — object and executable both.
@@ -266,6 +330,7 @@ scripts/
   setup-llvm.sh        installs LLVM 22.1.8 and writes .cargo/config.toml
   check.sh             the fast loop: front end in ~30s, `native` for the rest
   baseline.sh          everything that must keep working, ~5m
+  package.sh           assembles a toolchain into dist/
   gate.sh              whether the baseline passed for the tree as it stands
   tree-id.sh           one line naming that tree; the receipt's content
   install-hooks.sh     puts gate.sh in a pre-push hook, opt-in

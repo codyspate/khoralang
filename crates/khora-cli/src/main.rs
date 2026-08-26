@@ -16,7 +16,11 @@ use khora_diagnostics::{
 use khora_manifest::LintLevel;
 
 #[derive(Parser)]
-#[command(name = "khora", version, about = "The Khora language toolchain")]
+#[command(
+    name = "khora",
+    version = khora_toolchain::RUNNING,
+    about = "The Khora language toolchain"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

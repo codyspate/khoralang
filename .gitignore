@@ -57,3 +57,7 @@ bench/*.pdb
 /bench/*/src/release.exe.o
 /bench/*/src/release.pdb
 /bench/compare.json
+
+# What `scripts/package.sh` assembles. Built on demand and published by the
+# release workflow; never committed.
+/dist/
