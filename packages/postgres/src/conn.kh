@@ -2,19 +2,30 @@ module postgres::conn;
 
 import std::core::{Array, List, Option, Result, Vector, print};
 import std::db::{Cell, DbError, Row};
+import std::decimal::{Decimal};
 import std::net::socket::{connect_to, invalid_handle, receive, shut, start, transmit_bytes};
-import postgres::wire::{Message, Reader, message_at, message_width, password, query, startup, terminate};
+import postgres::wire::{Message, Reader, extended, message_at, message_width, password, query, startup, terminate};
 
 /// A connection to a PostgreSQL server, and the conversation it has.
 ///
 /// # What this speaks
 ///
-/// The **simple query** protocol: one string in, rows out, one round trip. Not
-/// the extended one — no `Parse`, no `Bind`, no prepared statements, and so no
-/// parameter binding. That is the next slice and it matters: a driver without
-/// bound parameters is a driver that invites string concatenation into SQL,
-/// which is the oldest hole there is. Until then this is for reading a schema
-/// and running fixed statements, and `docs/roadmap.md` 13.12 says so.
+/// Both query protocols, and which one to use is not a preference:
+///
+/// - `ask` takes values and sends them as values. Use it for anything with a
+///   parameter in it. `Parse` carries the SQL and `Bind` carries the data, so
+///   there is no string for a quote mark to escape out of.
+/// - `run` takes one string and nothing else. Use it for statements that have
+///   no parameters — schema, `BEGIN`, a fixed query. It is the only one that
+///   can carry several statements separated by semicolons, which is also the
+///   reason it must never be handed anything a user typed.
+///
+/// **Interpolating a value into `run` is the oldest hole there is**, and the
+/// only defence a library can offer is to make the safe call the shorter one.
+/// It is: `ask(c, "select * from t where id = $1", cons(Cell::Number(id)))`.
+///
+/// Parameters are `$1`, `$2` and so on, numbered from one, and the same
+/// parameter may appear more than once.
 ///
 /// # What it does not speak
 ///
@@ -296,6 +307,64 @@ export fn run(c: Connection, sql: String) -> Result<Answer, PgError> {
   }
 }
 
+/// Runs one statement with values bound to `$1`, `$2`, and so on.
+///
+/// **The values never become part of the SQL.** They travel in their own
+/// message with their own lengths, so a value containing a quote, a semicolon
+/// or `--` is a value containing those characters and not a second statement.
+/// That is the whole reason this exists next to `run`.
+///
+/// The statement is parsed and thrown away each time -- the *unnamed*
+/// statement, which every backend keeps one of. Reusing a named one across
+/// calls would save a parse; it would also mean tracking what this connection
+/// has already prepared, and invalidating it when the schema changes, which is
+/// a cache and not a slice of protocol. Round trips are unchanged either way:
+/// this is one write and one read, the same as `run`.
+export fn ask(c: Connection, sql: String, values: List<Cell>) -> Result<Answer, PgError> {
+  if transmit_bytes(c.handle, extended(sql, to_wire(values))) < 0 {
+    Result::Err(PgError::Closed("the query could not be sent"))
+  } else {
+    collect(c)
+  }
+}
+
+/// Every `Cell` as the text the server will parse, or `None` for NULL.
+///
+/// **Text format for everything**, which is what `Bind` was told to expect.
+/// Binary would be fewer bytes and a second encoding to get wrong per type,
+/// and the server parses these exactly as it parses a literal -- so `Number`
+/// reaching an `int4` column and `Text` reaching a `date` both work, and the
+/// server says so when they do not.
+fn to_wire(values: List<Cell>) -> List<Option<String>> {
+  let mut out: Vector<Option<String>> = Vector::new();
+  let mut rest = values;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(head, tail) => {
+        Vector::push(out, cell_text(head));
+        rest = tail
+      },
+    }
+  };
+  to_list(out)
+}
+
+/// One `Cell` as text.
+fn cell_text(value: Cell) -> Option<String> {
+  match value {
+    Cell::Null => Option::None,
+    Cell::Text(text) => Option::Some(text),
+    Cell::Number(number) => Option::Some(Int::to_string(number)),
+    Cell::Money(amount) => Option::Some(Decimal::show(amount)),
+    // `t` and `f`, which PostgreSQL accepts for `bool` alongside `true` and
+    // `false`. Either would do; this is what the server sends back, so a value
+    // read out and written in again is the same bytes.
+    Cell::Flag(flag) => Option::Some(if flag { "t" } else { "f" }),
+  }
+}
+
 /// Reads until `ReadyForQuery`, gathering whatever came before it.
 fn collect(c: Connection) -> Result<Answer, PgError> {
   let mut columns: List<Column> = List::Nil;
@@ -357,7 +426,7 @@ fn describe(m: Message) -> List<Column> {
     Vector::push(out, { name: name, oid: oid });
     i = i + 1
   };
-  to_column_list(out)
+  to_list(out)
 }
 
 /// `DataRow`: a count, then a length and that many bytes for each value.
@@ -382,7 +451,7 @@ fn data_row(m: Message, columns: List<Column>) -> Row {
     };
     i = i + 1
   };
-  { cells: to_cell_list(cells) }
+  { cells: to_list(cells) }
 }
 
 /// The type of column `index`, or text if the description is missing.
@@ -432,36 +501,19 @@ export fn oid_to_cell(oid: Int, text: String) -> Cell {
   }
 }
 
-// --- the three list copies `Vector` cannot do for itself --------------------
+// --- Vector to List ---------------------------------------------------------
 
-fn to_list(v: Vector<Row>) -> List<Row> {
-  let mut out: List<Row> = List::Nil;
-  let mut i = Vector::length(v) - 1;
-  while i >= 0 {
-    match Vector::get(v, i) {
-      Option::Some(item) => out = List::Cons(item, out),
-      Option::None => (),
-    };
-    i = i - 1
-  };
-  out
-}
-
-fn to_column_list(v: Vector<Column>) -> List<Column> {
-  let mut out: List<Column> = List::Nil;
-  let mut i = Vector::length(v) - 1;
-  while i >= 0 {
-    match Vector::get(v, i) {
-      Option::Some(item) => out = List::Cons(item, out),
-      Option::None => (),
-    };
-    i = i - 1
-  };
-  out
-}
-
-fn to_cell_list(v: Vector<Cell>) -> List<Cell> {
-  let mut out: List<Cell> = List::Nil;
+/// A `Vector` as a `List`, in the same order.
+///
+/// Built back to front, which is why it walks down rather than up: `Cons` is
+/// the cheap end of a list, and the alternative is appending once per element.
+///
+/// One generic function and not four copies. The four were here because an
+/// earlier version of this file believed they had to be; they did not, and the
+/// comment that said so was the wrong kind of wrong -- a note explaining a
+/// limitation that was never tested.
+fn to_list<A>(v: Vector<A>) -> List<A> {
+  let mut out: List<A> = List::Nil;
   let mut i = Vector::length(v) - 1;
   while i >= 0 {
     match Vector::get(v, i) {

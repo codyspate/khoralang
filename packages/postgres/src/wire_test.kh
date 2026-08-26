@@ -11,7 +11,8 @@ module postgres::wire_test;
 // expected. `docs/roadmap.md` Phase 13.
 
 import std::core::{Array, Option, Show, assert, print};
-import postgres::wire::{Message, Reader, Writer, framed, message_at, message_width, password, query, startup, terminate};
+import std::core::{List};
+import postgres::wire::{Message, Reader, Writer, bind, describe_portal, execute, extended, framed, message_at, message_width, parse, password, query, startup, sync, terminate};
 
 /// The bytes as hex, so a failure says which byte rather than that two arrays
 /// differ.
@@ -162,4 +163,87 @@ test "a reader stops a C string at its zero and consumes it" {
   assert(Reader::cstring(read) == "one");
   assert(Reader::cstring(read) == "two");
   assert(Reader::remaining(read) == 0);
+}
+
+// --- the extended protocol -------------------------------------------------
+//
+// Every expected string below is written out rather than computed. A test that
+// computes what it expects the same way the code does agrees with the code and
+// not with PostgreSQL, which is the only thing worth agreeing with.
+
+test "Parse is the unnamed statement, the SQL, and no parameter types" {
+  let bytes = parse("", "s");
+  // 50            'P'
+  //   00 00 00 09 length: 4 self + 1 name + 2 sql + 2 type count
+  //   00          the unnamed statement
+  //   73 00       "s\0"
+  //   00 00       zero parameter types: let the server infer them
+  assert(hex(bytes) == "5000000009007300" + "0000");
+}
+
+test "Bind sends the value in its own length-prefixed field" {
+  let one: List<Option<String>> = List::Cons(Option::Some("hi"), List::Nil);
+  let bytes = bind("", "", one);
+  // 42            'B'
+  //   00 00 00 12 length: 4 self + 1 portal + 1 stmt + 2 formats + 2 count
+  //                       + 4 length + 2 value + 2 result formats = 18
+  //   00 00       both names unnamed
+  //   00 00       zero parameter format codes: text
+  //   00 01       one value
+  //   00 00 00 02 two bytes long
+  //   68 69       "hi"
+  //   00 00       zero result format codes: text back
+  assert(hex(bytes) == "4200000012" + "0000" + "0000" + "0001" + "00000002" + "6869" + "0000");
+}
+
+/// **NULL is a length of -1, and an empty string is a length of zero.** They
+/// are different questions -- `WHERE x = ''` and `WHERE x IS NULL` do not match
+/// the same rows -- and four bytes of `ff` is the whole difference on the wire.
+test "NULL is a length of minus one, not an empty value" {
+  let null: List<Option<String>> = List::Cons(Option::None, List::Nil);
+  let empty: List<Option<String>> = List::Cons(Option::Some(""), List::Nil);
+  assert(hex(bind("", "", null)) == "4200000010" + "0000" + "0000" + "0001" + "ffffffff" + "0000");
+  assert(hex(bind("", "", empty)) == "4200000010" + "0000" + "0000" + "0001" + "00000000" + "0000");
+}
+
+test "a value keeps a quote mark as a quote mark" {
+  // The point of the whole exercise: the value below would close a string
+  // literal and start a second statement if it were concatenated into SQL.
+  // Here it is five bytes with a length in front, and nothing reads it as SQL.
+  let hostile: List<Option<String>> = List::Cons(Option::Some("'; --"), List::Nil);
+  let bytes = bind("", "", hostile);
+  assert(hex(bytes) == "4200000015" + "0000" + "0000" + "0001" + "00000005" + "273b202d2d" + "0000");
+}
+
+test "Bind with no values still says how many there are" {
+  let none: List<Option<String>> = List::Nil;
+  assert(hex(bind("", "", none)) == "420000000c" + "0000" + "0000" + "0000" + "0000");
+}
+
+test "Describe asks about the portal, not the statement" {
+  // 44 'D', length 6, 50 'P', 00 the unnamed portal.
+  assert(hex(describe_portal("")) == "4400000006" + "50" + "00");
+}
+
+test "Execute with a row limit of zero means every row" {
+  // 45 'E', length 9, 00 unnamed portal, 00000000 no limit.
+  assert(hex(execute("", 0)) == "4500000009" + "00" + "00000000");
+}
+
+test "Sync is a type byte and a length and nothing else" {
+  assert(hex(sync()) == "5300000004");
+}
+
+/// The five messages in one buffer, which is one write and one chance to fail.
+test "an extended query is Parse, Bind, Describe, Execute, Sync" {
+  let none: List<Option<String>> = List::Nil;
+  let whole = extended("s", none);
+  let head = hex(parse("", "s")) + hex(bind("", "", none));
+  let expected = head + hex(describe_portal("")) + hex(execute("", 0)) + hex(sync());
+  assert(hex(whole) == expected);
+  // And it ends with Sync, without which the backend waits for more and the
+  // caller waits for the backend, and neither says why.
+  let text = hex(whole);
+  let width = String::byte_length(text);
+  assert(String::slice(text, width - 10, width) == "5300000004");
 }

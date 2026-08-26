@@ -3262,7 +3262,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.9 | Debugging ergonomics | **Half.** 12.4 gives line tables and named locals; following a pointer into an object needs `KhoraHeader` and every ADT described in DWARF |
 | 13.10 | Build profiles | **Not started.** `KHORA_DEBUG` is the only knob and it is a boolean. 12.4 says debug info "should become part of an optimization level when there is one"; 12.9 adds that the reproducible build is the one with debug info *off*, so profiles and reproducibility have to be designed together |
 | 13.11 | Public surface audit | **Not started.** `compatibility.md` has the policy; nothing has been checked against it |
-| 13.12 | Production ecosystem | **Not started.** `ecosystem.md` already decided Postgres is a package and not `std`, which this item agrees with |
+| 13.12 | Production ecosystem | **Postgres under way.** Wire protocol, both query protocols, bound parameters, `Cell` mapping; no SCRAM, TLS or pool. HTTP client and OTLP not started |
 | 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
 | 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
 | 13.15 | User documentation | **Not started.** Every document in `docs/` is written for somebody building the compiler |
@@ -3438,6 +3438,58 @@ memory-safety bugs and the people in it did not sign up for that.
 
 That order is a plan and not a promise; evidence from any step can reorder what
 follows it.
+
+### 13.12 — bound parameters, which was the driver's one unacceptable gap
+
+The driver spoke the **simple query** protocol: one string in, rows out. Every
+value a caller wanted to send had to be concatenated into that string, and a
+driver that requires concatenation into SQL is a driver that ships the oldest
+hole there is. That was written down as the next slice, and it was.
+
+`ask(c, sql, values)` speaks the **extended** protocol — Parse, Bind, Describe,
+Execute, Sync — with parameters as `$1`, `$2`, numbered from one. The SQL and
+the data travel in different messages, so there is no string for a quote mark
+to escape out of. It is one write and one read, the same round trips as `run`.
+
+Four decisions inside it worth keeping:
+
+- **The values are `List<Cell>`,** which is the same type rows come back as.
+  What comes out can go back in, and there was no reason to invent a second
+  vocabulary for the same five shapes.
+- **Text format both ways.** Binary would be fewer bytes and a second encoding
+  to get wrong per type. The server parses these exactly as it parses a
+  literal, so `Number` reaching an `int4` and `Text` reaching a `date` both
+  work, and the server says so when they do not.
+- **Zero parameter type OIDs**, which asks the server to infer every type from
+  where the parameter appears. Naming types the caller guessed at would turn a
+  server-side coercion into a client-side error.
+- **The unnamed statement**, thrown away each time. A named one would save a
+  parse and would also mean tracking what this connection has prepared and
+  invalidating it when the schema changes — a cache, not a slice of protocol.
+
+`run` stays, for statements with no parameters, and the documentation is blunt
+about which to reach for. The only defence a library can offer against
+interpolation is to make the safe call the shorter one, and it now is.
+
+Tested twice: nine assertions on the bytes, every expected value written out by
+hand rather than computed (a test that computes what it expects the same way
+the code does agrees with the code and not with PostgreSQL), and ten against a
+real PostgreSQL 18.6 — including `'; --` as a value, `''` and NULL giving
+different answers to `is null`, `$1` used twice, and a rejected statement
+leaving the connection usable.
+
+`packages/postgres/README.md` now exists, because the package is installable
+and a package somebody can install is a package somebody lands on.
+
+**Two things found by writing it.** The four hand-written `Vector`-to-`List`
+copies in `conn.kh`, under a comment explaining that they could not be one
+generic function — they could; nobody had tried. That is the wrong kind of
+wrong: a note that documents a limitation which was never tested reads as
+authority and stops the next person looking. And `khora fmt` **dedents a
+wrapped `let` initializer to the same column as the `let`**, so a continuation
+line reads as a new statement. Not fixed here; it belongs to 13.16 and it is
+the kind of thing that has to be right before anybody else's code goes through
+the formatter.
 
 ### 13.13 — publishing, done while the Postgres package needed it
 

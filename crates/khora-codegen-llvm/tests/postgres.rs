@@ -485,3 +485,133 @@ fn main() -> Int {
          the connection, and a query after it"
     );
 }
+
+/// Bound parameters, against a real server, including a value that would end
+/// the statement if it were concatenated into it.
+///
+/// The fake server cannot check this. It could be taught to echo a `Bind`, but
+/// what is being tested is that *PostgreSQL* treats the value as a value --
+/// that `'; drop table` arrives as eleven characters of text and not as SQL --
+/// and only PostgreSQL can answer that.
+///
+/// Skipped without `KHORA_POSTGRES`, like its neighbour.
+#[test]
+fn bound_parameters_against_a_real_server() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and bring up \
+             packages/postgres/docker-compose.yml to run this"
+        );
+        return;
+    }
+
+    let main = "module demo::main;
+import std::core::{List, Option, Result, print};
+import std::db::{Cell, Row};
+import postgres::conn::{Answer, Connection, PgError, ask, close, open};
+
+fn show_cell(c: Cell) -> String {
+  match c {
+    Cell::Null => \"null\",
+    Cell::Text(t) => \"text:\" + t,
+    Cell::Number(n) => \"number:\" + Int::to_string(n),
+    Cell::Flag(b) => if b { \"flag:t\" } else { \"flag:f\" },
+    Cell::Money(m) => \"money\",
+  }
+}
+
+fn show_row(cells: List<Cell>) -> String {
+  match cells {
+    List::Nil => \"\",
+    List::Cons(head, tail) => match tail {
+      List::Nil => show_cell(head),
+      List::Cons(_, _) => show_cell(head) + \",\" + show_row(tail),
+    },
+  }
+}
+
+fn first(answer: Answer) -> String {
+  match answer.rows {
+    List::Nil => \"no rows\",
+    List::Cons(row, _) => show_row(row.cells),
+  }
+}
+
+fn one(c: Cell) -> List<Cell> { List::Cons(c, List::Nil) }
+
+fn say(c: Connection, sql: String, values: List<Cell>) -> () {
+  match ask(c, sql, values) {
+    Result::Ok(answer) => print(first(answer)),
+    Result::Err(why) => match why {
+      PgError::Refused(m) => print(\"refused: \" + m),
+      PgError::Unreachable(m) => print(\"unreachable: \" + m),
+      PgError::Closed(m) => print(\"closed: \" + m),
+      PgError::Unsupported(m) => print(\"unsupported: \" + m),
+    },
+  }
+}
+
+fn main() -> Int {
+  match open(\"127.0.0.1\", 5433, \"khora\", \"khora\", \"khora\") {
+    Result::Err(_) => 1,
+    Result::Ok(c) => {
+      // Each of the four cell kinds the driver can send, back out again.
+      say(c, \"select $1::int4\", one(Cell::Number(42)));
+      say(c, \"select $1::text\", one(Cell::Text(\"ada\")));
+      say(c, \"select $1::bool\", one(Cell::Flag(true)));
+      say(c, \"select $1::text\", one(Cell::Null));
+
+      // Two of them, and one used twice, which is the numbering working.
+      say(c, \"select $1::int4 + $2::int4, $1::int4\",
+        List::Cons(Cell::Number(3), List::Cons(Cell::Number(4), List::Nil)));
+
+      // The point of the exercise. Concatenated, this ends the string and
+      // starts a comment; bound, it is a five-character value and the server
+      // says so.
+      say(c, \"select $1::text\", one(Cell::Text(\"'; --\")));
+
+      // An empty string and a NULL are different rows, which is the -1 length
+      // meaning what it should.
+      say(c, \"select $1::text is null\", one(Cell::Text(\"\")));
+      say(c, \"select $1::text is null\", one(Cell::Null));
+
+      // A rejected statement still has to leave the connection usable: the
+      // extended protocol's error arrives before `ReadyForQuery` too.
+      say(c, \"select $1::int4\", one(Cell::Text(\"not a number\")));
+      say(c, \"select $1::int4\", one(Cell::Number(7)));
+
+      close(c);
+      0
+    },
+  }
+}
+";
+
+    let exe = build("postgres_bound", main);
+    let ran = std::process::Command::new(&exe).output().expect("the program should run");
+    let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
+    assert_eq!(ran.status.code(), Some(0), "the client should succeed: {out}");
+
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.first().copied(), Some("number:42"), "{out}");
+    assert_eq!(lines.get(1).copied(), Some("text:ada"), "{out}");
+    assert_eq!(lines.get(2).copied(), Some("flag:t"), "{out}");
+    assert_eq!(lines.get(3).copied(), Some("null"), "{out}");
+    assert_eq!(lines.get(4).copied(), Some("number:7,number:3"), "$1 used twice: {out}");
+    assert_eq!(
+        lines.get(5).copied(),
+        Some("text:'; --"),
+        "the value came back as a value, character for character: {out}"
+    );
+    assert_eq!(lines.get(6).copied(), Some("flag:f"), "'' is not null: {out}");
+    assert_eq!(lines.get(7).copied(), Some("flag:t"), "NULL is: {out}");
+    assert!(
+        lines.get(8).is_some_and(|l| l.starts_with("refused:")),
+        "a bad value is the server's error, not a hang: {out}"
+    );
+    assert_eq!(
+        lines.get(9).copied(),
+        Some("number:7"),
+        "and the connection survived it: {out}"
+    );
+}

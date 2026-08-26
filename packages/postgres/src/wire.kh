@@ -1,6 +1,6 @@
 module postgres::wire;
 
-import std::core::{Array, Option, Vector};
+import std::core::{Array, List, Option, Vector};
 
 /// The bytes of a PostgreSQL frontend/backend message, and how to read them
 /// back.
@@ -84,6 +84,19 @@ impl Writer {
     Writer::u8(self, 0);
   }
 
+  /// Every byte of an array, as they are.
+  ///
+  /// Used to put one finished message inside another buffer, which is how the
+  /// extended protocol's five frames become a single write.
+  export fn raw(self, values: Array<U8>) -> () {
+    let count = Array::length(values);
+    let mut at = 0;
+    while at < count {
+      Vector::push(self.bytes, Array::get(values, at));
+      at = at + 1
+    };
+  }
+
   export fn length(self) -> Int { Vector::length(self.bytes) }
 
   /// What has been written, as an array ready to send.
@@ -110,15 +123,10 @@ impl Writer {
 /// mis-sized — so it is one function, used by everything, rather than
 /// arithmetic repeated at every call site.
 export fn framed(kind: Int, payload: Array<U8>) -> Array<U8> {
-  let count = Array::length(payload);
   let out = Writer::new();
   Writer::u8(out, kind);
-  Writer::i32(out, count + 4);
-  let mut at = 0;
-  while at < count {
-    Vector::push(out.bytes, Array::get(payload, at));
-    at = at + 1
-  };
+  Writer::i32(out, Array::length(payload) + 4);
+  Writer::raw(out, payload);
   Writer::finish(out)
 }
 
@@ -137,14 +145,9 @@ export fn startup(user: String, database: String) -> Array<U8> {
   Writer::u8(body, 0);
 
   let payload = Writer::finish(body);
-  let count = Array::length(payload);
   let out = Writer::new();
-  Writer::i32(out, count + 4);
-  let mut at = 0;
-  while at < count {
-    Vector::push(out.bytes, Array::get(payload, at));
-    at = at + 1
-  };
+  Writer::i32(out, Array::length(payload) + 4);
+  Writer::raw(out, payload);
   Writer::finish(out)
 }
 
@@ -153,6 +156,125 @@ export fn query(sql: String) -> Array<U8> {
   let body = Writer::new();
   Writer::cstring(body, sql);
   framed(81, Writer::finish(body))
+}
+
+// --- the extended query protocol -------------------------------------------
+//
+// Five messages instead of one, and the reason is the only reason that
+// matters: **the values never touch the SQL**. `Parse` carries the statement
+// with `$1` in it and `Bind` carries the values separately, so there is no
+// string for a quote mark to escape out of. A driver without this is a driver
+// that invites concatenation, which is the oldest hole there is.
+//
+// Values are `Option<String>` here rather than anything richer, and that is
+// the layering rather than a shortcut: this module knows bytes, and what a
+// `Cell` renders to is `conn`'s business. `None` is NULL, which the protocol
+// spells as a length of -1 and is not the same as a value of length zero.
+
+/// `Parse`: a name for the statement, the SQL, and the types of its parameters.
+///
+/// **Zero parameter types, not one per parameter.** An empty list asks the
+/// server to infer every type from where the parameter appears, which is the
+/// honest answer from a driver that has not read the schema. Naming types the
+/// caller guessed at would turn a server-side coercion into a client-side
+/// error.
+///
+/// An empty name is the *unnamed* statement, which every backend keeps exactly
+/// one of and replaces without being asked. That is what a query run once
+/// wants; a name is what reuse would want, and reuse is not here yet.
+export fn parse(name: String, sql: String) -> Array<U8> {
+  let body = Writer::new();
+  Writer::cstring(body, name);
+  Writer::cstring(body, sql);
+  Writer::i16(body, 0);
+  framed(80, Writer::finish(body))
+}
+
+/// `Bind`: the values, in order, for a parsed statement.
+export fn bind(portal: String, statement: String, values: List<Option<String>>) -> Array<U8> {
+  let body = Writer::new();
+  Writer::cstring(body, portal);
+  Writer::cstring(body, statement);
+
+  // Zero parameter format codes. One code would apply to every parameter and
+  // zero means the default, which is text — and saying nothing is clearer than
+  // saying the default out loud.
+  Writer::i16(body, 0);
+
+  Writer::i16(body, List::length(values));
+  let mut rest = values;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(head, tail) => {
+        match head {
+          // NULL. A length of -1, which is four bytes of `ff` and not an empty
+          // value: `WHERE x = ''` and `WHERE x IS NULL` are different questions.
+          Option::None => Writer::i32(body, 0 - 1),
+          Option::Some(text) => {
+            Writer::i32(body, String::byte_length(text));
+            Writer::text(body, text)
+          },
+        };
+        rest = tail
+      },
+    }
+  };
+
+  // Zero result format codes: text back, which `data_row` already assumes.
+  Writer::i16(body, 0);
+  framed(66, Writer::finish(body))
+}
+
+/// `Describe` a portal, which is what produces the `RowDescription`.
+///
+/// Describing the *statement* would answer a different question — what
+/// parameters it takes — and the column types are what `oid_to_cell` needs.
+export fn describe_portal(name: String) -> Array<U8> {
+  let body = Writer::new();
+  Writer::u8(body, 80);
+  Writer::cstring(body, name);
+  framed(68, Writer::finish(body))
+}
+
+/// `Execute`: run a bound portal, returning at most `rows` of them.
+///
+/// **Zero means all of them**, which is not a count of zero. This driver reads
+/// whole answers, so zero is what it always passes; a cursor is what the other
+/// values are for.
+export fn execute(portal: String, rows: Int) -> Array<U8> {
+  let body = Writer::new();
+  Writer::cstring(body, portal);
+  Writer::i32(body, rows);
+  framed(69, Writer::finish(body))
+}
+
+/// `Sync`: the end of the exchange, and the thing that gets a `ReadyForQuery`.
+///
+/// Without it the backend waits for more, and a caller reading until
+/// `ReadyForQuery` waits for the backend. Nothing times out and nothing says
+/// why — which is why this is never optional and never left to a caller to
+/// remember.
+export fn sync() -> Array<U8> {
+  let empty: Array<U8> = Array::new(0, 0);
+  framed(83, empty)
+}
+
+/// One statement with its values, as a single write.
+///
+/// Parse, Bind, Describe, Execute, Sync against the unnamed statement and the
+/// unnamed portal — the whole exchange in one buffer, because five writes is
+/// five chances to leave the backend halfway through a message if one of them
+/// fails.
+export fn extended(sql: String, values: List<Option<String>>) -> Array<U8> {
+  let out = Writer::new();
+  Writer::raw(out, parse("", sql));
+  Writer::raw(out, bind("", "", values));
+  Writer::raw(out, describe_portal(""));
+  Writer::raw(out, execute("", 0));
+  Writer::raw(out, sync());
+  Writer::finish(out)
 }
 
 /// A password, in whatever form the server asked for.
