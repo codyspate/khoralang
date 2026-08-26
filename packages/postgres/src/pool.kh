@@ -40,9 +40,11 @@ module postgres::pool;
 //! which is also the better API -- the lifetime of the lease is now the thing
 //! a reader can see, which is the call.
 //!
-//! **The half that is still open** is the same one `std::db` names: a
-//! transaction interrupted mid-flight is rolled back by the *server* when the
-//! connection is reused, not by Khora on the way out. Roadmap 13.3.
+//! **The transaction is covered too**, as of 13.3: `std::db::transaction`
+//! registers its rollback with a region of its own, so a fiber stopped
+//! mid-flight sends the `ROLLBACK` on its way out rather than leaving it to
+//! the server to notice when the connection is reused. The lease then comes
+//! back to a connection that is ready, which is why the two belong together.
 
 import std::core::{Channel, Fiber, Fibers, Option, Result, Scope, acquire, scoped};
 import std::db::{Db, DbError};

@@ -107,6 +107,25 @@ Declared today, each with its reason: `Fibers` and `Region` (both take a lock �
 see below), `Fiber` (every operation is a message to the runtime), and
 `SharedFn`.
 
+**The assertion has to travel as far as the type does**, and getting that wrong
+is invisible in the module that wrote it. An impl arrives in another file two
+ways: with its trait, or with its type. Neither fires for a type nobody named —
+and reaching through a field to answer "is this shareable" deliberately looks at
+types the file cannot name, which is what `TypeMap::reachable` exists for.
+
+So a body arrived and its impl did not, and for an opaque type the impl *is* the
+answer. `postgres::pool`'s `Pool` holds a `Channel`, `Channel` is opaque with an
+`impl Share` beside it, and a `Pool` could not be handed to a fiber from any file
+that had not also imported `Channel` — while a file that had imported it for
+unrelated reasons was fine. "Add an unused import and your program compiles" is
+the shape that makes this worth a rule rather than a fix: the same type, the same
+question, two answers.
+
+`Share` impls now travel with every name an imported type *mentions*, opaque ones
+included. Only `Share`: every other trait is about resolving something the
+program wrote, and importing those would put methods within reach of a file that
+cannot name the type they are on.
+
 ### A type the caller chooses has to be required
 
 ```khora

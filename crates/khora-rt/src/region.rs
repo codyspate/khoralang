@@ -190,6 +190,14 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
     // has not been freed — the null check above is what guarantees that.
     let list = unsafe { Box::from_raw(list) };
     let list = list.into_inner().unwrap_or_else(|e| e.into_inner());
+
+    // **Finalizers are not cancellable.** This release may itself be part of a
+    // cancellation unwinding, in which case the flag is still set and the
+    // first `!` inside a finalizer would stop it half-done — a rollback that
+    // never reaches the server, a connection returned to the pool inside an
+    // open transaction. [`crate::cancel::Shielded`] has the argument.
+    let _shield = crate::cancel::Shielded::new();
+
     for finalizer in list.into_iter().rev() {
         // SAFETY: a closure's first field is its code pointer, and a `() -> ()`
         // closure is called with its own object as the only argument. This is
@@ -200,5 +208,114 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
             call(finalizer.closure);
             khora_drop(finalizer.closure, finalizer.glue);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cancel::{khora_cancel, khora_cancel_reset, khora_cancelled};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A closure object of type `() -> ()`: one field, holding the code
+    /// pointer that `khora_region_release` calls it through. Fabricated here
+    /// because generated code is what usually builds one, and this crate has
+    /// no compiler.
+    fn closure(code: extern "C" fn(*mut u8)) -> *mut u8 {
+        let object = khora_alloc(std::mem::size_of::<*const u8>() as u64, 0);
+        // SAFETY: one field's worth of space, freshly allocated, and nothing
+        // else holds the pointer yet.
+        unsafe {
+            object.add(KHORA_FIELD_OFFSET).cast::<extern "C" fn(*mut u8)>().write(code);
+        }
+        object
+    }
+
+    static RAN: AtomicUsize = AtomicUsize::new(0);
+    static SAW: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn watching(_closure: *mut u8) {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        SAW.store(usize::from(khora_cancelled()), Ordering::SeqCst);
+    }
+
+    /// **The 13.3 property.** A finalizer running as part of a cancellation
+    /// must not itself be cancelled, or a rollback stops at its first `!` and
+    /// the connection goes back to the pool holding locks.
+    #[test]
+    fn a_finalizer_does_not_see_the_cancellation_that_is_running_it() {
+        let region = khora_region_open();
+        // SAFETY: a live region and a live closure whose drop is the default.
+        unsafe { khora_region_defer(region, closure(watching), None) };
+
+        khora_cancel();
+        assert_eq!(khora_cancelled(), 1, "the flag is set before the region ends");
+
+        // SAFETY: the only reference, as `khora_drop` would have found it.
+        unsafe { khora_region_release(region) };
+
+        assert_eq!(RAN.load(Ordering::SeqCst), 1, "the finalizer ran");
+        assert_eq!(SAW.load(Ordering::SeqCst), 0, "and ran with the cancellation held off");
+        assert_eq!(khora_cancelled(), 1, "which masks the flag rather than clearing it");
+
+        khora_cancel_reset();
+        // SAFETY: released above, so the fields are already gone.
+        unsafe { khora_drop(region, None) };
+    }
+
+    static INNER: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn opens_another(_closure: *mut u8) {
+        extern "C" fn innermost(_closure: *mut u8) {
+            INNER.store(usize::from(khora_cancelled()), Ordering::SeqCst);
+        }
+        let region = khora_region_open();
+        // SAFETY: as above.
+        unsafe {
+            khora_region_defer(region, closure(innermost), None);
+            khora_region_release(region);
+            khora_drop(region, None);
+        }
+    }
+
+    /// The shield nests, because a finalizer that releases a region of its own
+    /// is ordinary — a lease returning a connection that rolls back first.
+    #[test]
+    fn the_shield_survives_a_finalizer_that_ends_a_region() {
+        let region = khora_region_open();
+        // SAFETY: as above.
+        unsafe { khora_region_defer(region, closure(opens_another), None) };
+
+        khora_cancel();
+        // SAFETY: as above.
+        unsafe { khora_region_release(region) };
+
+        assert_eq!(INNER.load(Ordering::SeqCst), 0, "the inner finalizer is shielded too");
+        assert_eq!(khora_cancelled(), 1, "and the outer one leaves the flag alone");
+
+        khora_cancel_reset();
+        // SAFETY: released above.
+        unsafe { khora_drop(region, None) };
+    }
+
+    /// Nothing is masked once the region has ended, so an ordinary program
+    /// pays no attention to any of this.
+    #[test]
+    fn an_uncancelled_region_is_unaffected() {
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        extern "C" fn counting(_closure: *mut u8) {
+            COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let region = khora_region_open();
+        // SAFETY: as above.
+        unsafe {
+            khora_region_defer(region, closure(counting), None);
+            khora_region_defer(region, closure(counting), None);
+            khora_region_release(region);
+            khora_drop(region, None);
+        }
+        assert_eq!(COUNT.load(Ordering::SeqCst), 2);
+        assert_eq!(khora_cancelled(), 0);
     }
 }

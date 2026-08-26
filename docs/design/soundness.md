@@ -170,6 +170,34 @@ Three things about the setup are worth keeping, because each cost time:
   invocation still came back `1`. The script now says `KHORA_TSAN_ALL_CLEAR` in
   words and the caller greps for it.
 
+## Finding 4 — `attempt` turned a cancellation into a typed null
+
+Found after this audit closed, on the way to 13.3, and recorded here because it
+is the same kind of thing and this is where the kind is kept.
+
+`effect-runtime.md` §6 promises that **nothing a program writes can swallow a
+cancellation**: it travels the tagged return under a `which` no error type can
+be assigned, and a `catch` dispatches on error type ids, so it matches no case.
+`lower_catch` keeps the promise deliberately — under a `_` arm it routes
+`CANCELLED_WHICH` and `FAILED_WHICH` back to the propagate path by name.
+
+`attempt` is the *other* total handler, and it did not. It branched on "the tag
+is not zero" and packed whatever it found into `Err`. A cancelled computation
+came back as an ordinary failure, so a retry policy would retry a fiber that
+had been asked to stop — and, worse, a cancellation carries no payload, so the
+`Err` held **a null typed as the body's error**. One `problem.show()` from a
+read through it.
+
+Fixed in `lower/failure.rs` by giving `attempt` the routing `catch` already
+had. Two tests in `tests/fibers.rs`: a cancellation passes through, and a real
+failure is still a value.
+
+**How it survived the audit.** The audit read the runtime, and this is in the
+code generator; the promise it breaks is in a design document rather than in a
+`# Safety` comment. What found it was writing a program that took the promise
+literally — a rollback doing fallible work inside a finalizer — which is the
+argument for the reference applications rather than for more reading.
+
 ## What is still open
 
 **A fiber must not suspend inside an `extern` call**, or a C library's
@@ -213,3 +241,10 @@ document, and it is a tooling problem rather than an unread piece of code.
 
 **Nothing here checked the scheduler's work-stealing** beyond the invariants
 its own soak asserts. 13.2 is where that belongs.
+
+**A finalizer that hangs cannot be interrupted.** 13.3 made finalizers
+uncancellable — see `cancel::Shielded` — because cleanup caused by a
+cancellation must not be cut short by that same cancellation. Everything with
+cancellation pays this price, and the usual answer is a deadline on the cleanup
+itself, which Khora does not have. Nothing is unsound; a program can hang where
+it would previously have corrupted a transaction.

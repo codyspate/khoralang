@@ -20,13 +20,56 @@ pub extern "C" fn khora_cancel() {
     current(|fiber| fiber.cancel());
 }
 
-/// Whether a cancellation is pending.
+/// Whether a cancellation is pending *and may be acted on here*.
 ///
 /// Read at every cancellation point, so it is on the hot path of any loop that
-/// does fallible work. A relaxed load of a word, which is what it costs.
+/// does fallible work. Two relaxed loads of a word, which is what it costs.
+///
+/// The second word is [`Shielded`]: a cancellation that arrives while a
+/// finalizer is running is remembered rather than observed, so the finalizer
+/// finishes and the unwind carries on afterwards.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_cancelled() -> u8 {
-    u8::from(current(|fiber| fiber.is_cancelled()))
+    u8::from(current(|fiber| fiber.is_cancelled() && !fiber.is_shielded()))
+}
+
+/// Holds a pending cancellation off for as long as it is alive.
+///
+/// **Cleanup cannot itself be cancelled.** A transaction rolled back on the
+/// way out of a cancelled fiber has to send a `ROLLBACK` and read the reply,
+/// and every `!` on that path is a cancellation point that would find the flag
+/// still set — so without this, the rollback that cancellation is supposed to
+/// cause would be interrupted by the same cancellation, one statement in. The
+/// connection would go back to the pool inside an open transaction holding its
+/// locks, which is the exact failure `std::db` exists to prevent.
+///
+/// So [`crate::region::khora_region_release`] wraps its finalizers in one.
+/// This is the same answer Trio reached with `CancelScope(shield=True)` and Go
+/// with `context.WithoutCancel`, arrived at from the same direction: the
+/// alternative is cleanup that only runs when nothing went wrong, which is not
+/// cleanup.
+///
+/// **The flag is not cleared**, only masked. When the last shield goes the
+/// cancellation is observed at the next cancellation point and the unwind
+/// continues from where it was — the finalizer got its turn, and nothing else
+/// changed.
+///
+/// The price is honest and worth stating: a finalizer that hangs cannot be
+/// interrupted. Everything with cancellation pays it, and the usual answer is
+/// a deadline on the cleanup itself, which Khora does not have yet.
+pub(crate) struct Shielded;
+
+impl Shielded {
+    pub(crate) fn new() -> Shielded {
+        current(|fiber| fiber.shield());
+        Shielded
+    }
+}
+
+impl Drop for Shielded {
+    fn drop(&mut self) {
+        current(|fiber| fiber.unshield());
+    }
 }
 
 /// Stops a cancelled computation that has nowhere left to unwind to.

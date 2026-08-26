@@ -636,3 +636,93 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
 ", "every counted object must be released");
     assert_eq!(ran.code, Some(0));
 }
+
+// --- what `attempt` may not turn into a value -------------------------------
+
+/// `attempt`, and something for it to run.
+const ATTEMPTING: &str = "
+export type Result<A, E> = | Ok(A) | Err(E);
+
+/// The intrinsic, declared: catching *whatever* a body raises is not something
+/// `catch` can express, so the compiler supplies the body.
+fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e;
+";
+
+/// **A cancellation is not a failure, and `attempt` may not say it is.**
+///
+/// `effect-runtime.md` §6 promises that nothing a program writes can swallow a
+/// cancellation: a `catch` names error constructors and a cancellation is not
+/// one. `lower_catch` keeps that promise by routing the reserved tags back to
+/// the propagate path even under a `_` arm. `attempt` is the other total
+/// handler and it did not — it branched on "the tag is not zero" and packed
+/// whatever it found into `Err`.
+///
+/// Two things were wrong with that, and the second is the serious one. A
+/// cancelled computation came back as an ordinary failure, so a retry policy
+/// would retry a fiber that had been asked to stop. And a cancellation carries
+/// no payload, so the `Err` held a null typed as the body's error — a
+/// `problem.show()` away from reading through it.
+///
+/// Found on the way to 13.3, by a rollback that ran fallible work in a
+/// finalizer and was told its own cancellation was a database error.
+#[test]
+fn attempt_does_not_turn_a_cancellation_into_an_error() {
+    let ran = run(
+        "fiber_attempt_cancelled",
+        &format!(
+            "{CANCELLABLE}{ATTEMPTING}
+fn worker() -> () raises Oops {{
+  let region = Region::open();
+  Region::defer(region, fn () => print(99));
+  print(1);
+  khora_cancel();
+  match attempt(fn () => ok(7)!) {{
+    Result::Ok(n) => print(n),
+    Result::Err(_) => print(-1),
+  }};
+  print(2);
+}}
+
+fn run_it() -> () {{
+  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::join(f);
+}}
+
+fn main() -> Int {{
+  run_it();
+  print(3);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n99\n3\n",
+        "the cancellation must pass through `attempt` rather than becoming its `Err`"
+    );
+    assert_eq!(ran.code, Some(0), "and stop the fiber, not the program");
+}
+
+/// The ordinary reading is untouched: a body that actually fails is still a
+/// value, which is the whole point of `attempt`.
+#[test]
+fn attempt_still_makes_a_real_failure_a_value() {
+    let ran = run(
+        "fiber_attempt_error",
+        &format!(
+            "{CANCELLABLE}{ATTEMPTING}
+fn bad() -> Int raises Oops {{ raise Oops::Bad }}
+
+fn main() -> Int {{
+  match attempt(fn () => bad()!) {{
+    Result::Ok(n) => print(n),
+    Result::Err(_) => print(-1),
+  }};
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "-1\n");
+    assert_eq!(ran.code, Some(0));
+}

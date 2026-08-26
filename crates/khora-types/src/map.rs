@@ -712,10 +712,49 @@ pub(crate) fn import_types(
                 );
                 // And the bodies those fields reach, which are not in scope
                 // here but have to be *visible* -- see `TypeMap::reachable`.
-                let (bodies, generics) = reachable_from(exported, name);
-                map.reachable.extend(bodies);
-                for (reached, parameters) in generics {
-                    map.reachable_adts.entry(reached).or_insert(parameters);
+                let reached = reachable_from(exported, name);
+                map.reachable.extend(reached.bodies);
+                for (name, parameters) in reached.generics {
+                    map.reachable_adts.entry(name).or_insert(parameters);
+                }
+                // **And the `Share` impls of everything reached**, which is
+                // the other half of the same argument and was missing.
+                //
+                // A reached type arriving without its impl answers the question
+                // *wrongly* rather than not at all: `impl Share for Channel<A>`
+                // is what makes a channel shareable, and a `Pool` holding one
+                // was refused in a file that had imported `Pool` but not
+                // `Channel` — "add an unused import and your program compiles"
+                // being the shape of the symptom. `Share` is never asked for by
+                // name, so the ordinary route by which an impl arrives, the
+                // trait, never fires for it.
+                //
+                // Every name *mentioned*, not every name with a body: `Channel`
+                // is opaque, so its whole answer is the impl and there is
+                // nothing else of it to carry.
+                //
+                // Only `Share`, and only for names actually reached. Every
+                // other trait is about resolving something the program wrote,
+                // and bringing those in would put methods within reach of a
+                // file that cannot name the type they are on.
+                for extra in exported.traits.impls.iter().filter(|i| {
+                    i.trait_name == SHARE
+                        && i.head().is_some_and(|head| reached.mentioned.contains(&head))
+                }) {
+                    let known = map
+                        .traits
+                        .impls
+                        .iter()
+                        .any(|i| i.trait_name == extra.trait_name && i.head() == extra.head());
+                    if known {
+                        continue;
+                    }
+                    let mut extra = extra.clone();
+                    extra.local = false;
+                    map.traits.impls.push(extra);
+                    if let Some(def) = exported.traits.traits.get(SHARE) {
+                        map.traits.traits.entry(SHARE.to_string()).or_insert_with(|| def.clone());
+                    }
                 }
                 // **An impl travels with its type as well as with its
                 // trait.** Importing a trait brings the impls that satisfy it,
@@ -891,10 +930,24 @@ pub fn as_written(key: &str) -> String {
 /// imports `Request` from `postgres::db`, whose `Reply` holds a `Row`, whose
 /// cells hold a `Decimal` — and `Decimal` is two modules from `pool` and one
 /// from `db`, so it sits in `db`'s reachable list rather than its own.
-fn reachable_from(
-    exported: &TypeMap,
-    name: &str,
-) -> (Vec<VariantInfo>, Vec<(String, Vec<String>)>) {
+///
+/// **Three things come back, and the third is every name mentioned** rather
+/// than every name with a body. An opaque type has no body to find, so it
+/// never appears in the first list — and `Channel` is opaque, which is how a
+/// `Pool` holding one came to depend on whether the importing file had also
+/// written `Channel` in its import line. The caller needs the mentions to
+/// carry their `Share` impls.
+struct Reached {
+    /// The bodies, for [`TypeMap::reachable`].
+    bodies: Vec<VariantInfo>,
+    /// Their type parameters, for [`TypeMap::reachable_adts`].
+    generics: Vec<(String, Vec<String>)>,
+    /// Every name mentioned, whether or not it has a body — the opaque ones
+    /// are exactly the ones whose whole answer is an impl.
+    mentioned: Vec<String>,
+}
+
+fn reachable_from(exported: &TypeMap, name: &str) -> Reached {
     let mut seen: Vec<String> = vec![name.to_string()];
     let mut queue: Vec<String> = vec![name.to_string()];
     let mut found = Vec::new();
@@ -923,7 +976,7 @@ fn reachable_from(
             }
         }
     }
-    (found, generics)
+    Reached { bodies: found, generics, mentioned: seen }
 }
 
 /// Every ADT name a type mentions, at any depth.

@@ -54,6 +54,17 @@ pub(crate) struct Fiber {
     /// Shared rather than owned, because a parent holding the handle sets it
     /// from outside.
     cancelled: AtomicUsize,
+    /// How deep this fiber is inside a region's finalizers.
+    ///
+    /// A count rather than a flag, because a finalizer that releases a region
+    /// of its own is an ordinary thing to do. Zero means a cancellation point
+    /// answers honestly; anything else means one is *running cleanup* and must
+    /// be allowed to finish. [`crate::cancel::Shielded`] is where the reason
+    /// lives.
+    ///
+    /// On the fiber rather than on the thread, because a finalizer may park —
+    /// and the worker that comes back to it may not be the one that left.
+    shielded: AtomicUsize,
     /// Set while a worker is inside this fiber's `resume`. See
     /// `crate::coro::ResumedOnce`; debug builds only.
     #[cfg(debug_assertions)]
@@ -77,6 +88,7 @@ impl Fiber {
         Fiber {
             id: next_id(),
             cancelled: AtomicUsize::new(0),
+            shielded: AtomicUsize::new(0),
             #[cfg(debug_assertions)]
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: false,
@@ -89,6 +101,7 @@ impl Fiber {
         Arc::new(Fiber {
             id: next_id(),
             cancelled: AtomicUsize::new(0),
+            shielded: AtomicUsize::new(0),
             #[cfg(debug_assertions)]
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: true,
@@ -120,6 +133,23 @@ impl Fiber {
 
     pub(crate) fn uncancel(&self) {
         self.cancelled.store(0, COUNTER_ORDER);
+    }
+
+    /// Whether this fiber is running cleanup that must not be interrupted.
+    pub(crate) fn is_shielded(&self) -> bool {
+        self.shielded.load(COUNTER_ORDER) != 0
+    }
+
+    /// Enters a shielded stretch. Nests.
+    pub(crate) fn shield(&self) {
+        self.shielded.fetch_add(1, COUNTER_ORDER);
+    }
+
+    /// Leaves one. Saturating rather than wrapping, because a count that has
+    /// gone wrong should stop shielding rather than shield for ever.
+    pub(crate) fn unshield(&self) {
+        let depth = self.shielded.load(COUNTER_ORDER);
+        self.shielded.store(depth.saturating_sub(1), COUNTER_ORDER);
     }
 }
 

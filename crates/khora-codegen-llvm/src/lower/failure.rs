@@ -67,7 +67,50 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.store_result(slot, object.into());
         self.br(merge);
 
+        // Two things travel this channel without being errors, and `catch`
+        // already routes both of them back to propagating — see
+        // `lower_catch`, where a `_` arm sends `CANCELLED_WHICH` and
+        // `FAILED_WHICH` to `onward` by name. `attempt` is the *other* total
+        // handler and it did not, which is a hole in the same rule:
+        // `effect-runtime.md` §6 says a cancellation cannot be swallowed
+        // because nothing a program writes names it, and `attempt` names
+        // nothing at all.
+        //
+        // It was worse than a swallow. A cancellation carries no payload, so
+        // the word is zero, and the `Err` built from it held a null typed as
+        // the body's error — `Result::Err(problem)` whose `problem.show()`
+        // reads through it. Found by 13.3, whose rolled-back transaction ran
+        // fallible work in a finalizer and got back `Err` from a body that had
+        // been cancelled rather than having failed.
         self.at(failed);
+        let escape = self.block("attempt.onward");
+        let erred = self.block("attempt.raised");
+        let cancelled = self.be.ctx.i32_type().const_int(runtime::CANCELLED_WHICH, false);
+        let aborted = self.be.ctx.i32_type().const_int(runtime::FAILED_WHICH, false);
+        let is_cancel = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, which, cancelled, "attempt.cancelled")
+            .expect("testing for a cancellation");
+        let is_abort = self
+            .be
+            .builder
+            .build_int_compare(IntPredicate::EQ, which, aborted, "attempt.aborted")
+            .expect("testing for a failed assertion");
+        let not_an_error = self
+            .be
+            .builder
+            .build_or(is_cancel, is_abort, "attempt.escapes")
+            .expect("either of the two");
+        self.be
+            .builder
+            .build_conditional_branch(not_an_error, escape, erred)
+            .expect("branching on the tag");
+
+        self.at(escape);
+        self.leave_with(which, word);
+
+        self.at(erred);
         let err_field = err_info.fields.first().cloned().unwrap_or(Type::Unit);
         let error = self.be.word_to_value(word, &err_field);
         let object = self.allocate(err_info.fields.len(), err_tag, &result_name);

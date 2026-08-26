@@ -35,6 +35,13 @@ cancelled. **A handler that cannot promise that is a broken handler**, and
 the test beside this module is written against the promise rather than
 against any engine.
 
+All three ways out are covered, and the third took two pieces rather than
+one: the rollback is registered with a region before the body runs, and the
+body carries a `raises` row so that a cancellation has a channel to reach
+it on. `transaction`'s own comment has the argument. What the runtime owes
+in return is that a finalizer running *because* of a cancellation is not
+itself cancelled — `khora-rt`'s `cancel::Shielded`.
+
 ## Types
 
 ### Cell
@@ -234,7 +241,7 @@ fn show(self) -> String
 ### transaction
 
 ```khora
-export fn transaction<A, 'c>(db: Db, body: () -> Result<A, DbError> with 'c) -> Result<A, DbError> with 'c
+export fn transaction<A, 'c, 'r>(db: Db, body: () -> Result<A, DbError> with 'c raises 'r) -> Result<A, DbError> with 'c raises 'r
 ```
 
 Runs `body` in a transaction, committing on success and rolling back
@@ -246,13 +253,53 @@ path where nothing goes wrong, and the paths where something does are the
 ones that leave a connection holding locks until somebody restarts the
 service.
 
-Rolling back on a raised error is handled here. Rolling back when the fiber
-is *cancelled* is the case that needs `Region`'s `defer` to be threaded
-through, and is the open half — `docs/design/ecosystem.md` names it as the
-middle layer and this is where it will live.
 **The body's failure is a `DbError`**, not a type variable. A body doing
 database work produces one already, and a caller with an error of its own
 renders it into `Rejected` before getting here — which keeps this function
 concrete, and keeps the rendering where the type is still known rather than
 behind a `Show` the transaction would have to carry.
+
+#### How the third way out is covered
+
+A body can return, it can fail, and its fiber can be **cancelled** — and
+the third one does not pass through any `match` written here. A
+cancellation travels the same tagged return an error does, straight out of
+this function, so a version that only inspected `body()`'s answer was
+correct for two paths out of three. The one it missed is the one that
+happens in production: a request times out, the nursery stops its children,
+and a connection goes back to the pool inside an open transaction holding
+its locks.
+
+So the rollback is **registered before the body runs** rather than decided
+after it, with `scoped` and `acquire`: a region's finalizers run on every
+path out, because every path out already releases the binding holding the
+region. Committing marks the transaction settled, and a settled transaction
+has nothing left to undo — so the finalizer costs a boolean on the ordinary
+path and is the whole contract on the extraordinary one.
+
+The region is **this function's own**, for the reason `postgres::pool` gives
+at greater length: a transaction that borrowed its caller's scope would end
+when the caller did, which is not what a transaction is.
+
+#### Why the body carries a row it does not seem to need
+
+`raises 'r` is the other half, and without it the paragraph above is
+theatre. `docs/design/effect-runtime.md` §6: **a cancellation point is a
+`!` in a function that can raise**, and it travels out on the tagged return
+an error uses. A body typed `() -> Result<A, DbError>` with no row has no
+`!` anywhere inside it, so nothing in the transaction can observe a
+cancellation, and the frames above have no channel to receive one on
+either. The first version of this function was in that state: a region, a
+finalizer, and no path that could ever reach it.
+
+With the row, a body that does fallible work has cancellation points, and
+one that fires unwinds through here — releasing the region, running the
+rollback. A body that does no fallible work instantiates `'r` empty, needs
+no `!` at the call, and has nothing to interrupt: §6's promise is that an
+interruption is delayed to the next mark that can carry it, never lost, and
+a transaction with no marks in it runs to its commit.
+
+The row is the *caller's*, deliberately. A transaction over a body that can
+fail its own way keeps that failure's type — folding it into `DbError`
+would be the loss `Result<A, DbError>` already declines to take.
 

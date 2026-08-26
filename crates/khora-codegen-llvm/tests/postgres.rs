@@ -872,3 +872,138 @@ fn main() -> Int {
         "three sums, a caught raise, and both connections back in the pool: {out}"
     );
 }
+
+/// **13.3, against the server that has to believe it.** A fiber cancelled
+/// inside a transaction leaves nothing behind.
+///
+/// The recording handler in `tests/db.rs` proves the *shape* — rollback
+/// happened, commit did not — and can prove nothing else, because it is not a
+/// database. This asks PostgreSQL whether the row is there, which is the only
+/// question a person actually has. It also exercises the parts the double
+/// cannot: a real `ROLLBACK` on the wire, sent from a finalizer, on a fiber
+/// that has already been asked to stop.
+///
+/// Skipped without `KHORA_POSTGRES`, like its neighbours.
+#[test]
+fn a_cancelled_transaction_leaves_nothing_behind() {
+    if std::env::var_os("KHORA_POSTGRES").is_none() {
+        eprintln!(
+            "skipping: set KHORA_POSTGRES=1 and bring up \
+             packages/postgres/docker-compose.yml to run this"
+        );
+        return;
+    }
+
+    let main = r#"module demo::main;
+import std::core::{Fiber, Fibers, List, Option, Result, Show, print};
+import std::db::{Cell, Db, DbError, Row, transaction};
+import postgres::db::{Settings};
+import postgres::pool::{Pool, close as close_pool, open as open_pool, with_db};
+
+/// The runtime's own, so the fiber can stop *itself* at the one moment that
+/// matters: after the insert, before the commit. A parent cancelling from
+/// outside would be racing that window.
+extern fn khora_cancel();
+
+export type Oops = | Bad;
+
+/// A fallible call, so that `!` marks a cancellation point.
+fn mark() -> Int raises Oops { 1 }
+
+fn settings() -> Settings {
+  {
+    host: "127.0.0.1",
+    port: 5433,
+    user: "khora",
+    database: "khora",
+    secret: "khora",
+  }
+}
+
+fn one(c: Cell) -> List<Cell> { List::Cons(c, List::Nil) }
+
+/// Writes a row and is stopped before it can commit.
+fn interrupted(pool: Pool) -> () raises Oops {
+  with_db(pool, fn db => transaction(db, fn () => {
+    db.execute("insert into khora_cancel_probe (note) values ($1)",
+      one(Cell::Text("should not survive")));
+    khora_cancel();
+    mark()!;
+    Result::Ok(1)
+  })!)!;
+  print("the fiber carried on, which is wrong");
+}
+
+/// Writes a row the ordinary way, so the test can tell "rolled back" from
+/// "never worked".
+///
+/// **Both results, and the inner one is the transaction's.** `with_db` answers
+/// whether a connection was available; what was done with it comes back inside
+/// that, and matching only the outer one is how a draft of the ledger service
+/// reported a schema as ready against a database that was not running.
+fn committed(pool: Pool) -> () {
+  match with_db(pool, fn db => transaction(db, fn () => {
+    db.execute("insert into khora_cancel_probe (note) values ($1)",
+      one(Cell::Text("should survive")));
+    Result::Ok(1)
+  })) {
+    Result::Err(problem) => print("no connection: " + problem.show()),
+    Result::Ok(inner) => match inner {
+      Result::Ok(_) => print("wrote one"),
+      Result::Err(problem) => print("did not write: " + problem.show()),
+    },
+  }
+}
+
+fn count(pool: Pool) -> () {
+  match with_db(pool, fn db => db.query("select count(*)::int4 from khora_cancel_probe", List::Nil)) {
+    Result::Err(problem) => print("no connection: " + problem.show()),
+    Result::Ok(inner) => match inner {
+      Result::Err(problem) => print("query failed: " + problem.show()),
+      Result::Ok(rows) => match rows {
+        List::Nil => print("no rows"),
+        List::Cons(row, _) => match Row::cell(row, 0) {
+          Option::Some(cell) => print("rows: " + cell.show()),
+          Option::None => print("no cell"),
+        },
+      },
+    },
+  }
+}
+
+fn schema(pool: Pool) -> () {
+  with_db(pool, fn db => db.execute("drop table if exists khora_cancel_probe", List::Nil));
+  with_db(pool, fn db => db.execute(
+    "create table khora_cancel_probe (id serial primary key, note text not null)", List::Nil));
+}
+
+fn main() -> Int {
+  let crew = Fibers::open();
+  let pool = open_pool(crew, settings(), 2);
+  schema(pool);
+
+  let f = Fiber::spawn(fn () => interrupted(pool)!);
+  Fiber::join(f);
+  print("the parent carried on");
+
+  // The connection the cancelled fiber used goes back to the pool, and this
+  // may well be the same one. A transaction left open would make this hang or
+  // fail; a transaction rolled back leaves it ready.
+  committed(pool);
+  count(pool);
+
+  close_pool(pool);
+  0
+}
+"#;
+
+    let exe = build("postgres_cancelled_transaction", main);
+    let ran = std::process::Command::new(&exe).output().expect("the program should run");
+    let out = String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n");
+    assert_eq!(ran.status.code(), Some(0), "the program should end cleanly: {out}");
+    assert_eq!(
+        out,
+        "the parent carried on\nwrote one\nrows: 1\n",
+        "the cancelled insert must be gone and the committed one must be there"
+    );
+}

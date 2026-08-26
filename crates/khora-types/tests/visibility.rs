@@ -255,3 +255,60 @@ fn a_mutable_field_three_modules_away_still_refuses() {
         "a `mut` field three modules away is still a race: {found:?}"
     );
 }
+
+/// **An opaque type's whole answer is its impl, and the impl has to travel.**
+///
+/// `Channel` is `export type Channel<A>;` with `impl Share for Channel<A>`
+/// beside it: there is no body to look inside, so the assertion *is* the
+/// shareability. Reaching through a field found the bodies of everything
+/// mentioned and stopped there, which left the opaque ones behind — a `Pool`
+/// holding a channel was refused in a file that imported `Pool` but not
+/// `Channel`, and accepted in one that imported both. The same "same type,
+/// same question, two answers" this file already refuses, one shape further
+/// along.
+///
+/// `Share` alone, and only for names actually reached: every other trait is
+/// about resolving something the program wrote, and importing those would put
+/// methods within reach of a file that cannot name the type they are on.
+#[test]
+fn an_opaque_types_share_impl_travels_with_a_type_that_holds_one() {
+    let deep = "module deep;\n\
+                export trait Share {}\n\
+                export type Pipe<A>;\n\
+                impl<A> Share for Pipe<A> {}\n";
+    let middle = "module middle;\n\
+                  import deep::{Pipe};\n\
+                  export type Plumbing = { pipe: Pipe<Int> };\n";
+    let user = "module user;\n\
+                export trait Share {}\n\
+                import middle::{Plumbing};\n\
+                fn takes<A: Share>(value: A) -> () { }\n\
+                fn use_it(p: Plumbing) -> () { takes(p) }\n";
+    let found = errors_in_three(deep, middle, user);
+    assert!(
+        found.is_empty(),
+        "`Plumbing` holds a `Pipe`, which says it is shareable: {found:?}"
+    );
+}
+
+/// And an opaque type that says nothing is still refused, however it is
+/// reached. The widening carries an assertion; it does not invent one.
+#[test]
+fn an_opaque_type_without_an_impl_is_still_refused_through_a_field() {
+    let deep = "module deep;\n\
+                export trait Share {}\n\
+                export type Pipe<A>;\n";
+    let middle = "module middle;\n\
+                  import deep::{Pipe};\n\
+                  export type Plumbing = { pipe: Pipe<Int> };\n";
+    let user = "module user;\n\
+                export trait Share {}\n\
+                import middle::{Plumbing};\n\
+                fn takes<A: Share>(value: A) -> () { }\n\
+                fn use_it(p: Plumbing) -> () { takes(p) }\n";
+    let found = errors_in_three(deep, middle, user);
+    assert!(
+        found.iter().any(|e| e.contains("does not implement `Share`")),
+        "a type with no body and no assertion cannot be shared: {found:?}"
+    );
+}

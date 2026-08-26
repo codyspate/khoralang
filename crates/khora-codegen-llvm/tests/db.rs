@@ -28,9 +28,18 @@ fn std_source(name: &str) -> String {
 }
 
 fn run(name: &str, body: &str) -> String {
+    run_with(name, "", body)
+}
+
+/// [`run`], with extra items above `main`.
+///
+/// A test that needs a fiber needs something to spawn, and a thunk is not an
+/// item — so the ones that reach for cancellation write functions of their own
+/// here rather than everything being squeezed into `main`.
+fn run_with(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Eq, List, Option, Result, Show, print}};
+import std::core::{{Eq, Fiber, List, Option, Result, Show, attempt, print}};
 import std::db::{{Cell, Db, DbError, Row, transaction}};
 
 /// A handler that says what it was told to do, as it is told.
@@ -60,6 +69,8 @@ fn recording(fails: Bool) -> Db {{
     }},
   }}
 }}
+
+{items}
 
 fn main() -> () {{
 {body}
@@ -165,4 +176,176 @@ fn cells_do_not_coerce() {
   print(number.show());"#,
     );
     assert_eq!(out, "not text\n42\ntrue\nfalse\n42\n");
+}
+
+// --- the third way out ------------------------------------------------------
+
+/// Items for the cancellation tests: something to fail with, something to
+/// fail at, and the runtime's own `khora_cancel`.
+///
+/// **The fiber cancels itself**, which `tests/fibers.rs` explains at greater
+/// length: a parent that cancels immediately after spawning wins the race and
+/// the child stops at its first mark, which is correct and proves less. Here
+/// the interesting moment is precisely "after `begin`, before `commit`", and
+/// that is a moment only the child can name.
+const CANCELLABLE: &str = r#"extern fn khora_cancel();
+
+export type Oops = | Bad;
+
+/// A fallible call, so that `!` marks a cancellation point. It never fails;
+/// the `!` is the whole of its job.
+fn mark() -> Int raises Oops { 1 }
+"#;
+
+/// **The half 13.3 named.** A fiber cancelled inside a transaction rolls back,
+/// and does not commit.
+///
+/// The cancellation never touches a line of `transaction`: it travels out of
+/// the body on a tagged return, and what runs the rollback is the region
+/// ending — the same mechanism that would have run it if the body had raised,
+/// reached by a path the source of `transaction` does not mention.
+#[test]
+fn a_cancelled_fiber_rolls_back_and_does_not_commit() {
+    let out = run_with(
+        "db_cancelled",
+        &format!(
+            r#"{CANCELLABLE}
+fn worker() -> () raises Oops {{
+  let db = recording(false);
+  transaction(db, fn () => {{
+    db.execute("insert", List::Nil);
+    khora_cancel();
+    mark()!;
+    print("the body carried on, which is wrong");
+    Result::Ok(1)
+  }})!;
+  print("the transaction returned, which is wrong");
+}}
+"#
+        ),
+        r#"  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::join(f);
+  print("the parent carried on");"#,
+    );
+    assert_eq!(
+        out,
+        "begin\nexecute\nrollback\nthe parent carried on\n",
+        "a cancelled transaction must roll back, and must not commit"
+    );
+}
+
+/// The finalizer does not fire twice, and the ordinary path is unchanged: a
+/// body that commits has nothing left for the region to undo.
+///
+/// Worth its own test because "roll back unless settled" is a flag, and a flag
+/// read on the wrong side of the commit would send a `ROLLBACK` after every
+/// successful transaction — which no engine would refuse and every reader
+/// would eventually notice.
+#[test]
+fn a_committed_transaction_does_not_roll_back_on_the_way_out() {
+    let out = run_with(
+        "db_commit_settles",
+        &format!(
+            r#"{CANCELLABLE}
+fn worker() -> () raises Oops {{
+  let db = recording(false);
+  match transaction(db, fn () => {{
+    mark()!;
+    Result::Ok(7)
+  }})! {{
+    Result::Ok(value) => print(Int::to_string(value)),
+    Result::Err(problem) => print(problem.show()),
+  }}
+}}
+"#
+        ),
+        r#"  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::join(f);"#,
+    );
+    assert_eq!(out, "begin\ncommit\n7\n", "no rollback after a commit");
+}
+
+/// A body that fails rolls back exactly once, not once for the `match` and
+/// again for the region.
+#[test]
+fn a_failed_body_rolls_back_exactly_once() {
+    let out = run_with(
+        "db_rollback_once",
+        &format!(
+            r#"{CANCELLABLE}
+fn worker() -> () raises Oops {{
+  let db = recording(false);
+  let answer: Result<Int, DbError> = transaction(db, fn () => {{
+    mark()!;
+    Result::Err(DbError::Rejected("no"))
+  }})!;
+  match answer {{
+    Result::Ok(_) => print("committed, which is wrong"),
+    Result::Err(problem) => print(problem.show()),
+  }}
+}}
+"#
+        ),
+        r#"  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::join(f);"#,
+    );
+    assert_eq!(out, "begin\nrollback\nrolled back: rejected: no\n");
+}
+
+/// **The rollback's own work is not cancellable.** A real `rollback` sends a
+/// statement and reads a reply, and every `!` on that path is a cancellation
+/// point that would find the flag still set — so a rollback caused by a
+/// cancellation would be interrupted by the same cancellation, before it
+/// reached the server.
+///
+/// The handler here stands in for that: it does fallible work before saying it
+/// rolled back. Without `cancel::Shielded` in the runtime, the `!` inside
+/// `attempt` fires, `rollback` never prints, and the connection goes back to
+/// the pool inside an open transaction.
+#[test]
+fn a_rollback_may_do_fallible_work_while_the_cancellation_waits() {
+    let out = run_with(
+        "db_rollback_shielded",
+        &format!(
+            r#"{CANCELLABLE}
+/// Like `recording`, but its rollback has a cancellation point in it.
+fn talkative() -> Db {{
+  handler for Db {{
+    query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    execute: fn (_sql, _binds) => Result::Ok(1),
+    begin: fn () => {{ print("begin"); Result::Ok(()) }},
+    commit: fn () => {{ print("commit"); Result::Ok(()) }},
+    rollback: fn () => {{
+      // Two statements and a mark between them: if the cancellation were
+      // observed here, the second would not run.
+      print("rolling back");
+      match attempt(fn () => mark()!) {{
+        Result::Ok(_) => print("rolled back"),
+        Result::Err(_) => print("the rollback failed"),
+      }};
+      Result::Ok(())
+    }},
+  }}
+}}
+
+fn worker() -> () raises Oops {{
+  let db = talkative();
+  transaction(db, fn () => {{
+    khora_cancel();
+    mark()!;
+    Result::Ok(1)
+  }})!;
+  print("the transaction returned, which is wrong");
+}}
+"#
+        ),
+        r#"  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::join(f);
+  print("the parent carried on");"#,
+    );
+    assert_eq!(
+        out,
+        "begin\nrolling back\nrolled back\nthe parent carried on\n",
+        "a finalizer must run to its end even though the fiber is stopping"
+    );
 }
