@@ -36,7 +36,13 @@ fn git(args: &[&str], cwd: &Path) {
 /// A dependency that reaches the operating system directly, in a repository of
 /// its own, and the URL to reach it by.
 fn reaching_package(at: &Path) -> String {
-    write(&at.join("khora.toml"), "[package]\nname = \"reaching\"\nversion = \"0.1.0\"\n");
+    // `publish = true` because a git dependency on a package that has not
+    // offered itself is refused before permissions are ever consulted, and this
+    // fixture is standing in for a library somebody published.
+    write(
+        &at.join("khora.toml"),
+        "[package]\nname = \"reaching\"\nversion = \"0.1.0\"\npublish = true\n",
+    );
     write(
         &at.join("src").join("reaching.kh"),
         "module reaching;\n\n\

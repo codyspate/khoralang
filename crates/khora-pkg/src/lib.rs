@@ -21,6 +21,7 @@
 
 mod fetch;
 mod hash;
+mod install;
 mod lock;
 mod resolve;
 pub mod sbom;
@@ -29,6 +30,7 @@ mod store;
 pub mod tasks;
 
 pub use hash::{tree as hash_tree, ContentHash};
+pub use install::{install, Installed};
 pub use lock::{Lockfile, LockedPackage, FORMAT_VERSION, LOCKFILE};
 pub use resolve::{resolve, Resolution, Resolved};
 pub use sbom::cyclonedx;

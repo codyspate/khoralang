@@ -47,6 +47,26 @@ pub struct Package {
     /// Authors, in `Name <email>` form.
     #[serde(default)]
     pub authors: Vec<String>,
+    /// Whether this package is offered for other people to depend on.
+    ///
+    /// **Absent means no**, and that is the opposite of Cargo's default for a
+    /// reason. Publishing to crates.io is an act somebody performs, so opting
+    /// *out* is the right shape there. Here a package is fetched from a git
+    /// URL, so publishing is *passive* — push a repository and it is already
+    /// installable. An active choice should be the one that is written down.
+    ///
+    /// It also matters for a repository that is not only a package. This one
+    /// holds `std`, three examples, four benchmarks and `packages/postgres`,
+    /// and exactly one of those is a library. Default-true would advertise the
+    /// lot.
+    ///
+    /// **It is an intent marker and not a permission**, which is worth being
+    /// plain about: anybody can set it, and anybody can write a `[dependencies]`
+    /// entry by hand whatever it says. What it prevents is depending on
+    /// somebody's application, or their half-finished experiment, by accident.
+    /// A `path` dependency ignores it — that is your own working copy.
+    #[serde(default)]
+    pub publish: Option<bool>,
     /// Language edition, such as `2026`.
     ///
     /// Left as a string rather than an enum: editions are minted over time, and
@@ -502,6 +522,15 @@ pub struct Dependency {
     /// Where the package is, relative to this manifest.
     #[serde(default)]
     pub path: Option<String>,
+    /// Where in the repository the package is, for a git dependency.
+    ///
+    /// **A git URL names a repository and not a package**, and the two are the
+    /// same thing only in the simplest layout. `packages/postgres` lives inside
+    /// a repository that is mostly a compiler, and without this there is no way
+    /// to say so — the resolver looked for `khora.toml` at the root, found the
+    /// wrong one or none, and the package was simply unreachable.
+    #[serde(default, rename = "subdir")]
+    pub subdir: Option<String>,
     /// A git repository to fetch the package from.
     ///
     /// **Added in phase 10.2, ahead of the registry**, because a `path`

@@ -3263,7 +3263,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.10 | Build profiles | **Not started.** `KHORA_DEBUG` is the only knob and it is a boolean. 12.4 says debug info "should become part of an optimization level when there is one"; 12.9 adds that the reproducible build is the one with debug info *off*, so profiles and reproducibility have to be designed together |
 | 13.11 | Public surface audit | **Not started.** `compatibility.md` has the policy; nothing has been checked against it |
 | 13.12 | Production ecosystem | **Not started.** `ecosystem.md` already decided Postgres is a package and not `std`, which this item agrees with |
-| 13.13 | Package distribution | **Half.** 10.2 built resolution, `khora.lock` and a content-addressed store; publishing and discovery have no mechanism |
+| 13.13 | Package distribution | **Publishing and consuming done; discovery deferred.** `publish = true`, `subdir`, and `khora install <url>` — see `docs/design/distribution.md`. No registry, so no search |
 | 13.14 | Installation | **Half.** 10.6 pins a version per project and links a local toolchain; there is nothing to *download* |
 | 13.15 | User documentation | **Not started.** Every document in `docs/` is written for somebody building the compiler |
 | 13.16 | Editor and tooling | **Half.** 10.4's language server does diagnostics, formatting, completion, hover and navigation; nothing is packaged |
@@ -3438,6 +3438,46 @@ memory-safety bugs and the people in it did not sign up for that.
 
 That order is a plan and not a promise; evidence from any step can reorder what
 follows it.
+
+### 13.13 — publishing, done while the Postgres package needed it
+
+Reached early because the Postgres package made it concrete: a driver nobody
+can install is not a deliverable, and the question "how would somebody actually
+get this" turned out to have an answer the resolver could not express.
+`docs/design/distribution.md` is the reasoning; three things landed.
+
+**`publish = true`, defaulting to no.** A package declares that it is offered
+for other people to depend on, and a git dependency on one that has not
+declared it is refused. The default is the opposite of Cargo's, for the
+opposite reason: publishing to a registry is an act somebody performs, so
+opting out is right there, but publishing here is *passive* — pushing a
+repository makes it fetchable — so the active choice is the one that should be
+written down. This repository is the argument by itself: a compiler, `std`,
+three examples, four benchmarks and one library. It is an intent marker and not
+a permission, and the documentation says so; what it prevents is depending on
+somebody's application by accident.
+
+**`subdir`, which was a gap and not an enhancement.** A git URL names a
+repository, and a repository is not a package. `packages/postgres` sits beside
+the compiler, so the resolver read the wrong `khora.toml` and the package was
+*unreachable* — no spelling of a dependency entry could have reached it. The
+lockfile records the subdirectory in the existing `path` field, because two
+packages from one repository at one revision differ only by it.
+
+**`khora install <url>`.** A convenience over hand-editing, fetching before it
+writes so a bad URL leaves the manifest alone. It exists because three things
+are easy to get wrong by hand: the package's real name (guessing it from a URL
+is right often enough to be a trap), whether it is offered at all, and whether
+`subdir` is needed. With no URL it locks what is already declared. A bare name
+is refused with a message about there being no registry, rather than resolved
+through a table of well-known names — which would be a registry without any of
+the parts that make one trustworthy.
+
+What is deliberately not here is **discovery**. There is no `khora search` and
+there cannot be until something holds a list; a curated list in the
+documentation is honest and a fake index would not be. Versions are recorded
+but not solved, which stays right until two packages in real use want different
+revisions of a third.
 
 ## When can libraries be written?
 

@@ -67,7 +67,10 @@ fn package_repo(at: &Path, name: &str, body: &str) -> (String, String) {
     std::fs::create_dir_all(at).expect("a directory");
     write(
         &at.join("khora.toml"),
-        &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+        // `publish = true`, because a git dependency on a package that has not
+        // offered itself is refused. Every fixture here stands in for a library
+        // somebody meant other people to depend on.
+        &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\npublish = true\n"),
     );
     write(&at.join("src").join(format!("{name}.kh")), body);
     commit_all(at);
@@ -267,7 +270,7 @@ fn a_dependencys_dependency_is_resolved_too() {
     write(
         &middle.join("khora.toml"),
         &format!(
-            "[package]\nname = \"middle\"\nversion = \"0.1.0\"\n\n\
+            "[package]\nname = \"middle\"\nversion = \"0.1.0\"\npublish = true\n\n\
              [dependencies]\ninner = {{ git = \"{inner_url}\", rev = \"main\" }}\n"
         ),
     );
@@ -304,7 +307,7 @@ fn two_packages_wanting_different_revisions_is_an_error() {
     write(
         &middle.join("khora.toml"),
         &format!(
-            "[package]\nname = \"middle\"\nversion = \"0.1.0\"\n\n\
+            "[package]\nname = \"middle\"\nversion = \"0.1.0\"\npublish = true\n\n\
              [dependencies]\nshared = {{ git = \"{b_url}\", rev = \"main\" }}\n"
         ),
     );
@@ -396,4 +399,136 @@ fn identical_contents_share_one_directory() {
         khora_pkg::hash_tree(&one).expect("a hash"),
         khora_pkg::hash_tree(&two).expect("a hash")
     );
+}
+
+// --- what a repository offers ----------------------------------------------
+
+/// A git URL names a repository, and a repository is not a package.
+///
+/// The one this test is modelled on is Khora's own: `packages/postgres` sits
+/// beside a compiler, three examples and four benchmarks. Without `subdir` the
+/// resolver reads the `khora.toml` at the root -- the wrong package entirely --
+/// and there is no way to say otherwise.
+#[test]
+fn a_package_in_a_subdirectory_is_reached_with_subdir() {
+    let w = world();
+    let outside = w.root.parent().unwrap().to_path_buf();
+
+    // A repository that is mostly something else, with one library inside it.
+    let repo = outside.join("monorepo");
+    write(&repo.join("khora.toml"), "[package]\nname = \"monorepo\"\nversion = \"0.1.0\"\n");
+    write(&repo.join("src").join("monorepo.kh"), "module monorepo;\n");
+    write(
+        &repo.join("packages").join("driver").join("khora.toml"),
+        "[package]\nname = \"driver\"\nversion = \"0.1.0\"\npublish = true\n",
+    );
+    write(
+        &repo.join("packages").join("driver").join("src").join("driver.kh"),
+        "module driver;\n",
+    );
+    commit_all(&repo);
+    let url = url_of(&repo);
+
+    write(
+        &w.root.join("khora.toml"),
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\ndriver = {{ git = \"{url}\", rev = \"main\", \
+             subdir = \"packages/driver\" }}\n"
+        ),
+    );
+
+    let resolution = resolve(&w.root.join("khora.toml"), &w.store, false).expect("resolution");
+    let driver = resolution.packages.iter().find(|p| p.name == "driver").expect("the driver");
+    assert!(
+        driver.directory.join("src").join("driver.kh").is_file(),
+        "the package root should be the subdirectory, not the checkout root: {}",
+        driver.directory.display()
+    );
+
+    // And the lockfile remembers it, because two packages from one repository at
+    // one revision differ only by the subdirectory.
+    let locked = Lockfile::read(&w.root.join("khora.lock")).expect("a lockfile");
+    let entry = locked.packages.iter().find(|p| p.name == "driver").expect("a locked driver");
+    assert_eq!(entry.path.as_deref(), Some("packages/driver"));
+}
+
+/// Depending on something that never offered itself is refused, and the message
+/// says what to do about it.
+///
+/// This is an intent marker rather than a permission -- anybody can set the flag
+/// -- so what it buys is a repository's own statement of which things in it are
+/// libraries. Here the root of the monorepo is an application.
+#[test]
+fn a_package_that_does_not_offer_itself_is_refused() {
+    let w = world();
+    let outside = w.root.parent().unwrap().to_path_buf();
+
+    let repo = outside.join("application");
+    write(&repo.join("khora.toml"), "[package]\nname = \"application\"\nversion = \"0.1.0\"\n");
+    write(&repo.join("src").join("application.kh"), "module application;\n");
+    commit_all(&repo);
+    let url = url_of(&repo);
+
+    write(
+        &w.root.join("khora.toml"),
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\napplication = {{ git = \"{url}\", rev = \"main\" }}\n"
+        ),
+    );
+
+    let error = resolve(&w.root.join("khora.toml"), &w.store, false)
+        .expect_err("a package that did not offer itself should be refused");
+    let text = format!("{error:#}");
+    assert!(text.contains("publish = true"), "the message should name the flag: {text}");
+    assert!(text.contains("path"), "and the way out for your own code: {text}");
+}
+
+/// `publish = false` is a no as clearly as leaving it out, and worth its own
+/// test because `Option<bool>` has three states and only one of them is yes.
+#[test]
+fn publish_false_is_also_a_no() {
+    let w = world();
+    let outside = w.root.parent().unwrap().to_path_buf();
+
+    let repo = outside.join("private");
+    write(
+        &repo.join("khora.toml"),
+        "[package]\nname = \"private\"\nversion = \"0.1.0\"\npublish = false\n",
+    );
+    write(&repo.join("src").join("private.kh"), "module private;\n");
+    commit_all(&repo);
+    let url = url_of(&repo);
+
+    write(
+        &w.root.join("khora.toml"),
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nprivate = {{ git = \"{url}\", rev = \"main\" }}\n"
+        ),
+    );
+
+    resolve(&w.root.join("khora.toml"), &w.store, false)
+        .expect_err("`publish = false` should be refused");
+}
+
+/// A `path` dependency never consults the flag. That is your own working copy,
+/// and asking you to publish to yourself would be nonsense.
+#[test]
+fn a_path_dependency_ignores_publish() {
+    let w = world();
+    let sibling = w.root.parent().unwrap().join("sibling");
+    write(&sibling.join("khora.toml"), "[package]\nname = \"sibling\"\nversion = \"0.1.0\"\n");
+    write(&sibling.join("src").join("sibling.kh"), "module sibling;\n");
+
+    write(
+        &w.root.join("khora.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nsibling = { path = \"../sibling\" }\n",
+    );
+
+    let resolution = resolve(&w.root.join("khora.toml"), &w.store, false)
+        .expect("a path dependency should not need to publish");
+    assert!(resolution.packages.iter().any(|p| p.name == "sibling"));
 }

@@ -108,6 +108,28 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Add a package to this project, or fetch what it already asks for.
+    ///
+    /// A git URL is the whole address, because there is no registry to look a
+    /// name up in. What this saves over editing `khora.toml` by hand is finding
+    /// out the package's real name, and whether it offers itself at all, before
+    /// the entry is written rather than after.
+    Install {
+        /// The git URL of the repository holding the package.
+        ///
+        /// Left out, this fetches and locks whatever `khora.toml` already
+        /// declares -- the thing to run after cloning a project.
+        url: Option<String>,
+        /// The branch, tag or commit to depend on.
+        #[arg(long, default_value = "main")]
+        rev: String,
+        /// Where in the repository the package is, if it is not the root.
+        #[arg(long)]
+        subdir: Option<String>,
+        /// The project to add it to.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -157,6 +179,9 @@ fn run() -> Result<bool> {
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out, lib } => build(&path, out.as_deref(), lib),
         Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
+        Command::Install { url, rev, subdir, path } => {
+            install(url.as_deref(), &rev, subdir.as_deref(), &path).map(|()| true)
+        }
         Command::Lsp => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
         Command::Toolchain { command } => toolchain(command),
@@ -977,6 +1002,68 @@ fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
 
 /// The `khora.toml` governing `start`: in it if it is a directory, beside it if
 /// it is a file, or in the nearest ancestor of either.
+/// `khora install [url]` -- add a dependency, or fetch the declared ones.
+///
+/// Two commands sharing a name, and they belong together: both end at "the
+/// lockfile now matches the manifest, and everything it names is on this
+/// machine". With a URL the manifest gains a line first.
+///
+/// A bare name is refused rather than guessed at. There is no registry, so
+/// there is nothing that could turn `postgres` into an address, and inventing
+/// a table of well-known names here would be a registry with none of the parts
+/// that make one trustworthy.
+fn install(url: Option<&str>, rev: &str, subdir: Option<&str>, path: &Path) -> Result<()> {
+    let manifest_path = nearest_manifest(path).with_context(|| {
+        format!(
+            "no `khora.toml` in {} or any directory above it, and installing is about a \
+             project",
+            path.display()
+        )
+    })?;
+    let store = khora_pkg::Store::open()?;
+
+    if let Some(url) = url {
+        if !looks_like_a_url(url) {
+            anyhow::bail!(
+                "`{url}` is not a URL, and there is no registry to look a name up in yet.\n\
+                 Install by address instead:\n    \
+                 khora install https://example.com/some/repo.git\n\
+                 and if the package sits inside the repository rather than at its root, \
+                 add `--subdir <directory>`"
+            );
+        }
+        let done = khora_pkg::install(&manifest_path, url, rev, subdir, &store)?;
+        let verb = done.outcome.verb();
+        println!(
+            "{verb} {} {} in {}",
+            done.name,
+            done.version,
+            manifest_path.display()
+        );
+        println!("  {url} at {}", done.revision);
+        println!("  import {}::...", done.name);
+    }
+
+    let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
+    let count = resolution.packages.len();
+    println!(
+        "{count} {} resolved",
+        if count == 1 { "package" } else { "packages" }
+    );
+    Ok(())
+}
+
+/// Whether an argument is an address rather than a bare name.
+///
+/// Deliberately loose. This only decides which of two error messages a person
+/// gets; git is the one that says whether an address works.
+fn looks_like_a_url(argument: &str) -> bool {
+    argument.contains("://")
+        || argument.starts_with("git@")
+        || argument.starts_with('.')
+        || argument.starts_with('/')
+}
+
 fn nearest_manifest(start: &Path) -> Option<PathBuf> {
     let mut here: Option<&Path> = Some(if start.is_dir() {
         start

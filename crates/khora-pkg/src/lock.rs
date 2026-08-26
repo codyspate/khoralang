@@ -155,12 +155,15 @@ pub fn entry(
     dependencies: BTreeMap<String, ()>,
 ) -> LockedPackage {
     match source {
-        Source::Git { url, rev } => LockedPackage {
+        Source::Git { url, rev, subdir } => LockedPackage {
             name: name.to_string(),
             source: "git".into(),
             url: Some(url.clone()),
             revision: Some(rev.clone()),
-            path: None,
+            // Reusing `path` for the subdirectory rather than adding a field:
+            // for a git package it has no other meaning, and the pair
+            // (`source`, `path`) already reads as "where, and where inside".
+            path: subdir.clone(),
             checksum: checksum.map(|c| c.to_string()),
             dependencies: dependencies.into_keys().collect(),
         },

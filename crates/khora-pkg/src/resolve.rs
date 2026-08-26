@@ -171,7 +171,7 @@ fn acquire(
                 requested_by: Vec::new(),
             })
         }
-        Source::Git { url, rev } => {
+        Source::Git { url, rev, subdir } => {
             // A lockfile's revision wins over the manifest's, which is the
             // whole point of having one: `rev = "main"` must keep meaning the
             // commit it meant when it was locked.
@@ -188,12 +188,19 @@ fn acquire(
             if let Some(pinned) = locked_to.pinned(name, &Source::Git {
                 url: url.clone(),
                 rev: wanted.clone(),
+                subdir: subdir.clone(),
             }) {
                 if store.contains(&pinned) {
+                    let root = within(store.path_of(&pinned), subdir.as_deref());
+                    published(name, &root)?;
                     return Ok(Resolved {
                         name: name.to_string(),
-                        source: Source::Git { url: url.clone(), rev: wanted },
-                        directory: store.path_of(&pinned),
+                        source: Source::Git {
+                            url: url.clone(),
+                            rev: wanted,
+                            subdir: subdir.clone(),
+                        },
+                        directory: root,
                         checksum: Some(pinned),
                         requested_by: Vec::new(),
                     });
@@ -206,9 +213,14 @@ fn acquire(
 
             // The commit id says what the server claimed. This says what
             // arrived. They disagreeing is the case the lockfile exists for.
-            if let Some(pinned) =
-                locked_to.pinned(name, &Source::Git { url: url.clone(), rev: wanted.clone() })
-            {
+            if let Some(pinned) = locked_to.pinned(
+                name,
+                &Source::Git {
+                    url: url.clone(),
+                    rev: wanted.clone(),
+                    subdir: subdir.clone(),
+                },
+            ) {
                 if pinned != checksum {
                     bail!(
                         "`{name}` at {wanted} does not hash to what the lockfile records.\n  \
@@ -219,10 +231,16 @@ fn acquire(
                 }
             }
 
+            let root = within(directory, subdir.as_deref());
+            published(name, &root)?;
             Ok(Resolved {
                 name: name.to_string(),
-                source: Source::Git { url: url.clone(), rev: wanted },
-                directory,
+                source: Source::Git {
+                    url: url.clone(),
+                    rev: wanted,
+                    subdir: subdir.clone(),
+                },
+                directory: root,
                 checksum: Some(checksum),
                 requested_by: Vec::new(),
             })
@@ -236,4 +254,52 @@ fn read_manifest(path: &Path) -> Result<Manifest> {
     let parsed = Manifest::parse(&text)
         .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     Ok(parsed.manifest)
+}
+
+/// The package's own root inside a checkout.
+///
+/// A git URL names a repository. Where the two coincide there is nothing to
+/// do; where they do not, this is the difference.
+fn within(checkout: std::path::PathBuf, subdir: Option<&str>) -> std::path::PathBuf {
+    match subdir {
+        Some(inner) => checkout.join(inner),
+        None => checkout,
+    }
+}
+
+/// Refuses a package that has not offered itself.
+///
+/// **An intent marker, not a permission**, and the message says so. Anybody can
+/// set `publish`, and anybody can point a `path` dependency at anything — what
+/// this prevents is depending on somebody's application, or their unfinished
+/// experiment, because it happened to be in a repository you fetched.
+///
+/// Absent means no. Publishing here is *passive* — a pushed repository is
+/// already fetchable — so the active choice is the one that should be written
+/// down. That is the opposite of Cargo's default and for the opposite reason:
+/// publishing to a registry is an act somebody performs, and opting out is the
+/// right shape there.
+///
+/// A `path` dependency never reaches this. That is your own working copy.
+fn published(name: &str, root: &Path) -> Result<()> {
+    let manifest = root.join("khora.toml");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        bail!(
+            "`{name}` has no `khora.toml` at {}. A git dependency names a repository, and \
+             the package inside it may need `subdir` to say where",
+            root.display()
+        )
+    };
+    let parsed = khora_manifest::Manifest::parse(&text)
+        .map_err(|e| anyhow::anyhow!("reading `{name}`'s manifest: {e}"))?;
+    if parsed.manifest.package.publish == Some(true) {
+        return Ok(());
+    }
+    bail!(
+        "`{name}` does not offer itself as a package: its `khora.toml` has no \
+         `publish = true` under `[package]`.\n\
+         That flag is how a repository says which of the things in it are libraries — this \
+         one may be an application, or unfinished. Ask its author to add it, or depend on a \
+         working copy with `path` if it is yours."
+    )
 }

@@ -25,7 +25,17 @@ pub enum Source {
     /// `rev` is whatever `git rev-parse` accepts and is resolved to a full
     /// commit id during resolution, so a lockfile never holds a name that can
     /// move.
-    Git { url: String, rev: String },
+    Git {
+        url: String,
+        rev: String,
+        /// Where in the repository the package is, if it is not the root.
+        ///
+        /// **A git URL names a repository and not a package.** The two coincide
+        /// only in the simplest layout; `packages/postgres` lives inside a
+        /// repository that is mostly a compiler, and without this the resolver
+        /// looks for `khora.toml` at the root and finds the wrong one.
+        subdir: Option<String>,
+    },
 }
 
 impl Source {
@@ -54,7 +64,11 @@ impl Source {
                          resolves to would change under you. Name one"
                     )
                 };
-                Ok(Source::Git { url: url.to_string(), rev: rev.to_string() })
+                Ok(Source::Git {
+                    url: url.to_string(),
+                    rev: rev.to_string(),
+                    subdir: dependency.subdir.clone(),
+                })
             }
             (None, Some(relative), None) => Ok(Source::Path(base.join(relative))),
             (None, None, Some(_)) => bail!(
@@ -81,7 +95,10 @@ impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Source::Path(p) => write!(f, "path {}", p.display()),
-            Source::Git { url, rev } => write!(f, "git {url}#{rev}"),
+            Source::Git { url, rev, subdir } => match subdir {
+                Some(inner) => write!(f, "git {url}#{rev} in {inner}"),
+                None => write!(f, "git {url}#{rev}"),
+            },
         }
     }
 }

@@ -97,6 +97,7 @@ fn every_key_the_schema_documents_is_recognized() {
         version = "0.1.0"
         authors = ["A <a@example.com>"]
         edition = "2026"
+        publish = true
 
         [permissions]
         network = []
@@ -113,6 +114,7 @@ fn every_key_the_schema_documents_is_recognized() {
 
         [dependencies]
         "std.effect" = { version = "1.0.0" }
+        inner = { git = "https://example.com/z.git", rev = "abc", subdir = "packages/inner" }
 
         [build]
         target = "wasm32-wasip1"
@@ -539,6 +541,7 @@ dangling-expression = "warn"
 [dependencies]
 by_path = { path = "../other" }
 by_git = { git = "https://example.com/x.git", rev = "abc" }
+by_subdir = { git = "https://example.com/z.git", rev = "abc", subdir = "packages/inner" }
 by_tag = { git = "https://example.com/y.git", tag = "v1" }
 
 [build]
@@ -574,4 +577,34 @@ fn the_toolchain_version_is_read() {
                 [toolchain]\nversion = \"0.2.0\"\n";
     let parsed = Manifest::parse(text).expect("a well-formed manifest");
     assert_eq!(parsed.manifest.toolchain.and_then(|t| t.version).as_deref(), Some("0.2.0"));
+}
+
+/// `publish` has three states and only one of them is yes, which is the point:
+/// absent is a no, because publishing here is passive -- pushing a repository
+/// makes it fetchable, so the active choice is the one written down.
+#[test]
+fn publish_is_absent_true_or_false() {
+    let absent = parse("[package]\nname = \"p\"\nversion = \"0.1.0\"\n");
+    assert_eq!(absent.manifest.package.publish, None);
+
+    let yes = parse("[package]\nname = \"p\"\nversion = \"0.1.0\"\npublish = true\n");
+    assert_eq!(yes.manifest.package.publish, Some(true));
+
+    let no = parse("[package]\nname = \"p\"\nversion = \"0.1.0\"\npublish = false\n");
+    assert_eq!(no.manifest.package.publish, Some(false));
+}
+
+/// A git URL names a repository, and a repository is not a package.
+#[test]
+fn a_git_dependency_may_name_a_subdirectory() {
+    let parsed = parse(
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\n\
+         inner = { git = \"https://example.com/z.git\", rev = \"abc\", subdir = \"packages/inner\" }\n\
+         outer = { git = \"https://example.com/z.git\", rev = \"abc\" }\n",
+    );
+    assert_eq!(warning_keys(&parsed), Vec::<&str>::new());
+    let deps = &parsed.manifest.dependencies;
+    assert_eq!(deps["inner"].subdir.as_deref(), Some("packages/inner"));
+    assert_eq!(deps["outer"].subdir, None);
 }

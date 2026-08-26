@@ -130,7 +130,7 @@ fn a_package_from_a_git_repository_is_resolved_compiled_and_run() {
 
     // 1. A package, in a repository of its own, outside anything being built.
     let package = tmp.path().join("tally");
-    write(&package.join("khora.toml"), "[package]\nname = \"tally\"\nversion = \"0.1.0\"\n");
+    write(&package.join("khora.toml"), "[package]\nname = \"tally\"\nversion = \"0.1.0\"\npublish = true\n");
     write(&package.join("src").join("tally.kh"), PACKAGE);
     git(&["init", "--quiet", "-b", "main"], &package);
     git(&["add", "-A"], &package);
@@ -197,7 +197,7 @@ fn a_locked_build_does_not_need_the_repository_again() {
     let tmp = tempfile::tempdir().expect("a temporary directory");
 
     let package = tmp.path().join("tally");
-    write(&package.join("khora.toml"), "[package]\nname = \"tally\"\nversion = \"0.1.0\"\n");
+    write(&package.join("khora.toml"), "[package]\nname = \"tally\"\nversion = \"0.1.0\"\npublish = true\n");
     write(&package.join("src").join("tally.kh"), "module tally;\n");
     git(&["init", "--quiet", "-b", "main"], &package);
     git(&["add", "-A"], &package);

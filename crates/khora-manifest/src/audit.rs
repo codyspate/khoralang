@@ -47,6 +47,7 @@ static PACKAGE: Schema = Schema::Fields(&[
     ("version", &OPEN),
     ("authors", &OPEN),
     ("edition", &OPEN),
+    ("publish", &OPEN),
 ]);
 
 static PERMISSIONS: Schema = Schema::Fields(&[
@@ -76,6 +77,7 @@ static DEPENDENCY: Schema = Schema::Fields(&[
     ("git", &OPEN),
     ("rev", &OPEN),
     ("tag", &OPEN),
+    ("subdir", &OPEN),
 ]);
 
 static BUILD: Schema = Schema::Fields(&[("target", &OPEN), ("plugin", &OPEN)]);
