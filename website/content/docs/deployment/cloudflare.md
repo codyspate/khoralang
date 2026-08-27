@@ -24,4 +24,4 @@ A Khora Worker application will need to:
 
 This page will contain copy-pasteable build and deploy commands only after the compiler, Worker bindings, runtime/platform split, packaging, and an end-to-end deployed Khora example are working together.
 
-Until then, do not choose Cloudflare Workers for a Khora application that needs a supported production deployment path. Use one of the targets listed as supported in [Supported targets](supported-targets.md).
+Until then, do not choose Cloudflare Workers for a Khora application that needs a supported production deployment path. Use one of the targets listed as supported in [Supported targets](./supported-targets/).
