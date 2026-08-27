@@ -142,8 +142,8 @@ fn entries_of(rows: List<Row>) -> List<Entry> {
 // ---------------------------------------------------------------------------
 //
 // **Every value is a bound parameter.** Not one of these builds SQL by
-// concatenation, which is the whole reason `ask` exists and the reason `Db`'s
-// operations take a `List<Cell>`.
+// concatenation. Database authority stays in the capability row, so these
+// functions say what they need without accepting a connection argument.
 
 /// Written the way it would be in a migration, which is what the backtick
 /// literal is for.
@@ -156,7 +156,9 @@ const SCHEMA: String = `
   )
 `;
 
-fn insert_entry(db: Db, account: String, amount: Int, memo: String) -> Result<Int, DbError> {
+fn insert_entry(account: String, amount: Int, memo: String) -> Result<Int, DbError>
+  with { db: Db }
+{
   let values =
   List::Cons(Cell::Text(account),
     List::Cons(Cell::Number(amount),
@@ -164,7 +166,9 @@ fn insert_entry(db: Db, account: String, amount: Int, memo: String) -> Result<In
   db.execute("insert into entries (account, amount, memo) values ($1, $2, $3)", values)
 }
 
-fn entries_for(db: Db, account: String) -> Result<List<Row>, DbError> {
+fn entries_for(account: String) -> Result<List<Row>, DbError>
+  with { db: Db }
+{
   db.query(
     "select id::int4, account, amount, memo from entries where account = $1 order by id desc",
     List::Cons(Cell::Text(account), List::Nil),
@@ -176,11 +180,25 @@ fn entries_for(db: Db, account: String) -> Result<List<Row>, DbError> {
 /// `coalesce` because `sum` over no rows is NULL rather than zero, and an
 /// account nobody has posted to has a balance of nothing rather than no
 /// balance.
-fn balance_for(db: Db, account: String) -> Result<List<Row>, DbError> {
+fn balance_for(account: String) -> Result<List<Row>, DbError>
+  with { db: Db }
+{
   db.query(
     "select coalesce(sum(amount), 0)::int4 from entries where account = $1",
     List::Cons(Cell::Text(account), List::Nil),
   )
+}
+
+fn health_query() -> Result<List<Row>, DbError>
+  with { db: Db }
+{
+  db.query("select 1::int4", List::Nil)
+}
+
+fn ensure_schema() -> Result<Int, DbError>
+  with { db: Db }
+{
+  db.execute(SCHEMA, List::Nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -264,10 +282,15 @@ fn posted(document: Json) -> Option<Entry> {
   }
 }
 
+fn store_entry(entry: Entry) -> Result<Int, DbError>
+  with { db: Db }
+{
+  transaction(fn () => insert_entry(entry.account, entry.amount, entry.memo))
+}
+
 fn stored(pool: Pool, tracer: Tracer, entry: Entry) -> Response {
   let attempted = around_result(tracer, "entries.create", fn () =>
-    with_db(pool, fn db => transaction(db, fn () =>
-        insert_entry(db, entry.account, entry.amount, entry.memo))));
+    with_db(pool, fn () => store_entry(entry)));
 
   match attempted {
     Result::Err(why) => refused(why),
@@ -294,7 +317,7 @@ fn listing(pool: Pool, tracer: Tracer, request: Request) -> Response {
     Option::None => Response::text(400, "expected an `account` query parameter"),
     Option::Some(account) => {
       let asked = around_result(tracer, "entries.list", fn () =>
-        with_db(pool, fn db => entries_for(db, account)));
+        with_db(pool, fn () => entries_for(account)));
       match asked {
         Result::Err(why) => refused(why),
         Result::Ok(inner) => match inner {
@@ -319,7 +342,7 @@ fn balance(pool: Pool, tracer: Tracer, request: Request) -> Response {
     Option::None => Response::text(400, "expected an account"),
     Option::Some(account) => {
       let asked = around_result(tracer, "entries.balance", fn () =>
-        with_db(pool, fn db => balance_for(db, account)));
+        with_db(pool, fn () => balance_for(account)));
       match asked {
         Result::Err(why) => refused(why),
         Result::Ok(inner) => match inner {
@@ -352,7 +375,7 @@ fn answered(account: String, rows: List<Row>) -> Response {
 /// connection being accepted.
 fn health(pool: Pool, tracer: Tracer, _request: Request) -> Response {
   let asked = around_result(tracer, "health", fn () =>
-    with_db(pool, fn db => db.query("select 1::int4", List::Nil)));
+    with_db(pool, health_query));
   let fields = Map::new();
   match asked {
     Result::Err(_) => {
@@ -415,7 +438,7 @@ pub fn main() raises HttpError {
     // a database that was not running, which is the more dangerous half of the
     // two to get wrong -- a start-up line that lies about the thing it just
     // checked.
-    match with_db(pool, fn db => db.execute(SCHEMA, List::Nil)) {
+    match with_db(pool, ensure_schema) {
       Result::Err(_) => print("no connection for the schema; starting anyway"),
       Result::Ok(inner) => match inner {
         Result::Ok(_) => print("schema ready"),
