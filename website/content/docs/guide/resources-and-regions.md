@@ -4,22 +4,134 @@ sidebar:
   order: 8
 ---
 
-Resources such as sockets, files, transactions, and temporary allocations have lifetimes. Khora's region model ties cleanup to structured scope so normal return, typed failure, and cancellation can share the same cleanup path.
+Resources such as sockets, files, transactions, and foreign handles have lifetimes that ordinary memory management cannot infer. Khora ties their cleanup to structured scopes so normal return, typed failure, early `return`, and cancellation use the same release path.
 
-The important programmer-facing rule is simple: acquire a resource inside the scope that owns it, and register cleanup with that scope rather than relying on a distant caller to remember it.
+The two everyday tools are `scoped`, which opens a resource scope, and `acquire`, which registers how a value is released.
 
-A region's deferred cleanup runs when the region exits. That makes resource release part of control-flow semantics rather than an optional convention.
+## Run work inside a scope
 
-## Cancellation is an exit path
+A function that acquires scoped resources states that requirement with `Scope`:
 
-Structured concurrency means a fiber may be cancelled while suspended. Resource APIs must therefore be cancellation-safe: cancellation should unwind through the owning region and run finalizers instead of abandoning sockets, files, database locks, or pooled connections.
+```khora
+fn use_resource() -> Int
+  with { scope: Scope }
+{
+  let handle = acquire(open_handle(), close_handle);
+  read_value(handle)
+}
+```
 
-## Transactions
+`acquire(value, release)` returns `value` immediately and registers `release(value)` for the end of the current scope. The caller that owns the lifetime installs the scope with `scoped`:
 
-Database transactions are a canonical example. A successful body commits. An ordinary failure rolls back. Cancellation must also roll back before the connection returns to its pool.
+```khora
+fn run() -> Int {
+  scoped(use_resource)
+}
+```
 
-That rule belongs in the shared transaction abstraction so every driver does not invent a different answer.
+The `scope` capability appears in `use_resource` and disappears from `run`: `scoped` provides it for exactly the lifetime of the body.
+
+The standard signatures are:
+
+```khora
+pub effect Scope {
+  defer: (() -> ()) -> (),
+}
+
+pub fn scoped<A, 'e, 'r>(
+  body: () -> A with { 'e | scope: Scope } raises 'r
+) -> A
+  with 'e
+  raises 'r
+
+pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
+  with { 'e | scope: Scope }
+```
+
+Pass a named function to `scoped` when the function receives the `scope` capability. That keeps capability passing explicit and lets row subtraction remove `scope` from the caller.
+
+## Regions are the primitive underneath
+
+`scoped` is built on `Region`. You can use a region directly when you need to register finalizers yourself:
+
+```khora
+fn work() -> Int {
+  let region = Region::open();
+
+  Region::defer(region, fn () => print("first cleanup"));
+  Region::defer(region, fn () => print("second cleanup"));
+
+  42
+}
+```
+
+When `work` exits, the finalizers run in reverse registration order: `second cleanup`, then `first cleanup`.
+
+The core region API is:
+
+```khora
+pub type Region;
+
+impl Region {
+  pub fn open() -> Region;
+  pub fn root() -> Region;
+  pub fn defer(self, finalizer: () -> ()) -> ();
+}
+```
+
+`Region::open()` creates a region owned by the current scope. `Region::root()` refers to the program's outer region, whose finalizers run when the program exits.
+
+## Cleanup runs on every structured exit
+
+A finalizer is not merely an end-of-block callback. It runs when the owning region is released, including when control leaves through an early return or a typed failure:
+
+```khora
+pub type LoadError = | Failed;
+
+fn load(should_fail: Bool) -> Int raises LoadError {
+  let region = Region::open();
+  Region::defer(region, fn () => print("released"));
+
+  if should_fail {
+    raise LoadError::Failed
+  }
+
+  7
+}
+```
+
+The same rule applies to cancellation. Cancellation unwinds through the structured scopes between the cancellation point and the fiber root, so registered finalizers run before the cancelled work is discarded.
+
+That is the property resource abstractions should depend on: **if the scope ends, cleanup runs**.
+
+## Cancellation points matter
+
+Cancellation is not an exception that can arrive between arbitrary instructions. A pending cancellation is observed at a cancellation/failure propagation point such as `!`.
+
+That makes code between marked points understandable while still allowing blocked or suspended work to be woken so it can unwind and release resources. A `catch` handles declared failures; it does not swallow cancellation.
+
+## Transactions follow the same rule
+
+A database transaction is a resource scope with a richer finalizer policy:
+
+- successful completion commits;
+- typed failure rolls back;
+- cancellation rolls back before the connection is returned to its pool.
+
+Put that policy in the transaction abstraction rather than asking every caller to remember all three paths.
 
 ## Prefer scoped APIs
 
-When designing packages, prefer an API that accepts a body to run inside an owned resource scope over an API that hands out a raw handle and hopes the caller closes it on every path.
+When designing a package, prefer this shape:
+
+```khora
+fn with_connection<A, 'e, 'r>(
+  body: (Connection) -> A with 'e raises 'r
+) -> A
+  with 'e
+  raises 'r
+```
+
+over returning a raw handle whose caller must remember to close it on every exit path.
+
+Use the [Memory and resources reference](/docs/reference/memory-and-resources/) for the exact lifetime rules and [Fibers and nurseries](/docs/guide/fibers-and-nurseries/) for how cancellation interacts with concurrent work.
