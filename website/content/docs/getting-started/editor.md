@@ -17,7 +17,19 @@ command: khora
 args:    lsp
 ```
 
-The server provides compiler-backed diagnostics, hover information, formatting, go-to-definition, references, document/workspace symbols, and navigation for local and module-level names. Rename is performed where the server can produce a complete safe edit; when it cannot, it refuses the rename rather than applying a partial change.
+The server currently provides:
+
+- compiler diagnostics and hover information;
+- formatting;
+- completion and signature help;
+- go-to-definition and find-references;
+- document and workspace symbols;
+- semantic tokens;
+- inlay hints;
+- code actions and code lenses;
+- local-variable rename.
+
+Rename is deliberately conservative. The current implementation renames locals and refuses a symbol it cannot edit completely rather than applying a partial project-wide change.
 
 The installed toolchain is the only server installation you need. Updating or pinning Khora also selects the compiler behavior your editor sees for that project.
 
