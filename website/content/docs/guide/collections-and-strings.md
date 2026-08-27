@@ -1,20 +1,99 @@
 ---
 title: Collections and strings
 sidebar:
-  order: 13
+  order: 14
 ---
 
-Khora's standard library provides persistent-style collection APIs and Unicode strings while the compiler/runtime optimize ownership and reuse where they can prove it is safe.
+Khora's standard library provides collection types and Unicode strings while the compiler/runtime optimize ownership and reuse where they can prove it is safe. At source level, ordinary collection code remains value-oriented.
 
-The programmer model stays functional: transforming a collection produces the next value. You do not write ownership annotations merely to let the compiler reuse storage.
+## List literals
 
-## Strings
+Square brackets create a `List`:
 
-Strings are text values, not byte arrays with a text-shaped API. String interpolation is available for ordinary formatting, while structured encoders such as JSON should be used for machine-readable output.
+```khora
+let numbers = [1, 2, 3, 4];
+let names = ["Ada", "Grace", "Linus"];
+let empty: List<Int> = [];
+```
 
-## Multiline strings
+A trailing comma is allowed in multiline literals:
 
-A quoted literal is one line. For text whose shape is worth keeping — embedded SQL, a shell command, a help message — use backticks:
+```khora
+let names = [
+  "Ada",
+  "Grace",
+  "Linus",
+];
+```
+
+Use higher-order operations when the result is another collection:
+
+```khora
+let doubled = numbers
+  |> List::map(fn value => value * 2);
+```
+
+An effectful or fallible function can be mapped directly because function types carry their own capability and failure rows:
+
+```khora
+let users = ids
+  |> List::map(fn id => load_user(id)!);
+```
+
+That form propagates the first `UserError`. To process every element and retain each failure as data, convert the failure channel with `attempt`:
+
+```khora
+let results = ids
+  |> List::map(fn id =>
+    attempt(fn () => load_user(id)!)
+  );
+```
+
+See [Typed failure with raises](./errors-and-raises.md#collect-failures-as-values-with-attempt).
+
+## `for` over a collection
+
+Use `for` when the body executed for each item is more important than producing another collection:
+
+```khora
+for name in names {
+  print(name);
+}
+```
+
+The left side is a pattern, so destructuring works there too.
+
+## Quoted strings
+
+Double quotes create a `String`:
+
+```khora
+let language = "Khora";
+```
+
+Standard escapes use `\`:
+
+```khora
+let two_lines = "first\nsecond";
+let quoted = "say \"hello\"";
+```
+
+## String interpolation
+
+`${...}` evaluates a Khora expression and inserts its string representation into the surrounding string:
+
+```khora
+let count = 3;
+let message = "processed ${Int::to_string(count)} item(s)";
+```
+
+Interpolation works in both quoted and backtick strings.
+
+Use interpolation for human-readable composition. Use structured encoders such as JSON when another program will consume the output.
+
+## Multiline backtick strings
+
+Use backticks for multiline text whose layout matters:
 
 ```khora
 const SCHEMA: String = `
@@ -25,20 +104,23 @@ const SCHEMA: String = `
 `;
 ```
 
-The indentation that lines the literal up with the code around it is **not part of the string**. The common prefix of the non-blank lines is removed, so relative indentation inside the text survives, and a delimiter on its own line contributes no blank line of its own.
+When the opening delimiter is followed by a newline, the common indentation prefix of non-blank lines is removed. That lets the literal line up with surrounding source without baking that indentation into the string.
 
-A backtick literal is an ordinary `String` in every other way. `${...}` interpolates exactly as it does in a quoted literal, `\n` and friends still escape, and a literal backtick is written `` \` ``.
+A backtick string otherwise behaves like an ordinary `String`: escapes still work, `${...}` still interpolates, and a literal backtick is escaped with `\``.
 
-A literal that opens on the same line as its content strips nothing, because that line shares no indentation. Put the delimiter on its own line when you want the stripping.
+If content begins on the same line as the opening backtick, indentation stripping does not apply:
 
-Use `Show` for human-readable representations and dedicated encoding traits such as `ToJson`/`FromJson` when an external format has a contract of its own.
+```khora
+let raw = `first
+  second`;
+```
 
-## Collection transforms
+## Choosing a collection
 
-Prefer high-level transforms when they communicate intent clearly. Whole-program ownership analysis may turn some apparently persistent transformations into in-place reuse when the input is uniquely owned.
+`List<A>` is a linked sequence suited to ordered transformation and iteration. `Vector<A>` is a growable contiguous sequence suited to accumulation and indexing. `Map<K, V>` is a mutable hash table; `Dict<K, V>` is a persistent ordered map.
 
-That optimization is deliberately invisible to source code: the meaning of the program does not depend on whether storage was reused.
+The exact operations for each type live in the [standard-library API reference](/docs/stdlib/api/core/). The language syntax is the same whichever collection type you use: normal calls, methods, pipelines, lambdas, `for`, and pattern matching.
 
-## Shared collections
+## Sharing collections
 
-If several fibers need to coordinate around one evolving collection, place the collection behind an explicit `Shared` boundary or an external capability rather than smuggling mutation into otherwise pure code.
+Mutating containers such as `Vector` and `Map` stay fiber-local. When several fibers need coordinated evolving state, use an explicit `Shared` boundary or an external capability rather than hidden shared mutation. See [Shared state](./shared-state.md).
