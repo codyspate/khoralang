@@ -523,6 +523,17 @@ fn narrow(paths: &[PathBuf], members: &[PathBuf], since: Option<&str>) -> Result
     Ok(selection.members)
 }
 
+/// Whether `file` is one of the things this command was pointed at.
+///
+/// A path named on the command line, or under a directory named on it. `std`
+/// and anything in the package store are not, which is the whole point: see
+/// the call site.
+fn owned(paths: &[PathBuf], file: &Path) -> bool {
+    let here = |path: &Path| path.canonicalize().map(khora_manifest::readable).ok();
+    let Some(file) = here(file) else { return true };
+    paths.iter().filter_map(|path| here(path)).any(|root| file == root || file.starts_with(&root))
+}
+
 /// `paths`, or the working directory when it is empty.
 ///
 /// **`khora check` and `khora check .` have to be the same command.** They
@@ -653,6 +664,16 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
             eprintln!();
             // Half of what a lint sees downstream of a type error is an
             // artefact of it.
+            continue;
+        }
+
+        // **Lints are about code somebody can change.** `collect_sources`
+        // hands a compilation the package, its dependencies and all of `std`,
+        // because that is what type checking needs; linting the lot means
+        // reporting `std` under this package's `[lints]`, which nobody here
+        // can act on. Errors above still cover every file, because an error in
+        // a dependency does stop this build.
+        if !owned(paths, path) {
             continue;
         }
 

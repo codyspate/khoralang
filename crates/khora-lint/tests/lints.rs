@@ -12,9 +12,20 @@ use khora_lint::{
     UNUSED_CAPABILITY,
 };
 
+/// What a package sees for this source without changing any level.
+///
+/// `findings` returns everything, including the lints that default to
+/// `allow` -- the level is the consumer's decision, and a manifest can raise
+/// one. A test about `unused-capability` does not mean those when it says
+/// "what was reported", and every fixture here would otherwise carry an
+/// `undocumented-export` for its own scaffolding.
 fn lint(db: &dyn Db, text: &str) -> Vec<Finding> {
     let file = SourceFile::new(db, "a.kh".into(), text.to_string());
-    findings(db, file).clone()
+    findings(db, file)
+        .iter()
+        .filter(|f| khora_lint::default_level(f.lint) != khora_manifest::LintLevel::Allow)
+        .cloned()
+        .collect()
 }
 
 fn names(found: &[Finding]) -> Vec<&str> {

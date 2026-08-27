@@ -38,6 +38,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod allow;
+mod exported;
 
 pub use crate::allow::MARKER;
 
@@ -67,9 +68,19 @@ pub const LINTS: &[&str] = &[
     UNREACHABLE_CODE,
     UNUSED_BINDING,
     UNUSED_IMPORT,
+    UNDOCUMENTED_EXPORT,
     UNUSED_CAPABILITY,
     USELESS_ALLOW,
 ];
+
+/// A `pub` item nobody described in one line.
+///
+/// **Off by default**, for the reason Rust's `missing_docs` is: a young
+/// package gets forty warnings on the first build, and the response to forty
+/// warnings is not to write forty doc comments. Switch it on with
+/// `[lints] undocumented-export = "warn"` when the package decides its
+/// surface is a promise. Roadmap 14.26.
+pub const UNDOCUMENTED_EXPORT: &str = "undocumented-export";
 
 /// An imported name the file never mentions.
 ///
@@ -114,7 +125,7 @@ pub const USELESS_ALLOW: &str = "useless-allow";
 /// server ask the same question -- they each had `unwrap_or(Warn)` written out
 /// before this existed, which is two places to forget.
 pub fn default_level(lint: &str) -> khora_manifest::LintLevel {
-    if lint == USELESS_ALLOW {
+    if lint == USELESS_ALLOW || lint == UNDOCUMENTED_EXPORT {
         khora_manifest::LintLevel::Allow
     } else {
         khora_manifest::LintLevel::Warn
@@ -161,6 +172,7 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
     }
 
     unused_imports(db, file, checked, &mut out);
+    undocumented_exports(db, file, &mut out);
 
     // **Here rather than in each consumer.** The CLI, the language server and
     // the MCP server all read this, and a suppression one of them honoured and
@@ -231,6 +243,30 @@ fn line_of(starts: &[u32], offset: u32) -> usize {
     match starts.binary_search(&offset) {
         Ok(exact) => exact,
         Err(after) => after - 1,
+    }
+}
+
+/// Public declarations with no `///` above them.
+fn undocumented_exports(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
+    let parse = khora_db::parse(db, file);
+    if !parse.errors().is_empty() {
+        // A file that does not parse has a tree full of holes, and reporting a
+        // missing doc comment on a node that is really a syntax error is noise
+        // on top of a message the reader already has.
+        return;
+    }
+    for export in exported::undocumented(&parse.syntax()) {
+        let named = match &export.name {
+            Some(name) => format!("`{name}`"),
+            None => format!("this {}", export.what),
+        };
+        out.push(Finding {
+            lint: UNDOCUMENTED_EXPORT,
+            message: format!(
+                "{named} is exported and has no `///` line. Describe what it is for, or stop exporting it"
+            ),
+            range: export.range,
+        });
     }
 }
 

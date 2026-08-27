@@ -203,3 +203,86 @@ fn a_wholly_unused_statement_is_not_reported_yet() {
         two(LIB, "module u;\n\nimport lib::{spare};\n\npub fn main() -> Int { 1 }\n");
     assert!(found.is_empty(), "{found:?}");
 }
+
+// ---------------------------------------------------------------------------
+// 14.26 undocumented-export
+
+fn exports(source: &str) -> Vec<Finding> {
+    of(source, khora_lint::UNDOCUMENTED_EXPORT)
+}
+
+#[test]
+fn a_pub_item_with_no_doc_line_is_reported() {
+    let found = exports("module t;\n\npub fn bare() -> Int { 1 }\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("bare"), "{:?}", found[0]);
+}
+
+#[test]
+fn a_documented_one_is_not() {
+    assert!(exports("module t;\n\n/// What it is for.\npub fn described() -> Int { 1 }\n")
+        .is_empty());
+}
+
+#[test]
+fn an_ordinary_comment_is_not_documentation() {
+    // `//` above an item is a note to whoever is editing it. `///` is a
+    // promise to whoever is using it, and only one of those is the floor.
+    let found = exports("module t;\n\n// A note about the implementation.\n\
+                         pub fn bare() -> Int { 1 }\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn a_blank_line_does_not_separate_a_doc_from_its_item() {
+    // Reporting something plainly documented because of a stray blank line is
+    // the kind of wrongness that gets a lint switched off.
+    assert!(exports("module t;\n\n/// What it is for.\n\npub fn described() -> Int { 1 }\n")
+        .is_empty());
+}
+
+#[test]
+fn a_private_item_is_not_an_export() {
+    assert!(exports("module t;\n\nfn hidden() -> Int { 1 }\n").is_empty());
+}
+
+/// `main` is what the language requires of an entry point, not a promise to
+/// anybody: nobody imports your `main`, so "describe it or stop exporting it"
+/// offers a choice that does not exist.
+#[test]
+fn main_is_not_a_surface() {
+    assert!(exports("module t;\n\npub fn main() -> Int { 0 }\n").is_empty());
+}
+
+#[test]
+fn types_traits_effects_and_constants_count_too() {
+    let found = exports(
+        "module t;\n\npub type Shape = { n: Int };\n\n\
+         pub trait Draw { fn draw(self) -> Int; }\n\n\
+         pub effect Log { write: (Int) -> (), }\n",
+    );
+    assert_eq!(found.len(), 3, "{found:?}");
+}
+
+/// Off unless a package asks for it, the way Rust's `missing_docs` is: forty
+/// warnings on a young package's first build is not a prompt to write forty
+/// doc comments.
+#[test]
+fn it_is_off_by_default() {
+    assert_eq!(
+        khora_lint::default_level(khora_lint::UNDOCUMENTED_EXPORT),
+        khora_manifest::LintLevel::Allow
+    );
+}
+
+#[test]
+fn the_caret_covers_the_heading_and_not_the_body() {
+    // A finding whose range covers a two-hundred-line type underlines two
+    // hundred lines.
+    let source = "module t;\n\npub fn bare() -> Int {\n  1\n}\n";
+    let found = exports(source);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let marked = &source[found[0].range];
+    assert!(!marked.contains('{'), "the body is underlined: {marked:?}");
+    assert!(marked.contains("bare"), "{marked:?}");
+}
