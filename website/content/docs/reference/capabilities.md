@@ -204,4 +204,4 @@ fn choose_bucket() -> Int
 
 A capability may be required by an operation that does not raise a recoverable failure. Conversely, a pure computation may use `raises` without any `with` requirement.
 
-See [Effects and rows](./effects.md) for effect declarations and [Failures](./failures.md) for typed failure.
+See [Effects and rows](./effects/) for effect declarations and [Failures](./failures/) for typed failure.
