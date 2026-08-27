@@ -4,17 +4,144 @@ sidebar:
   order: 20
 ---
 
-Khora provides automatic memory management without a tracing garbage collector and without requiring ordinary source code to carry borrow/lifetime annotations.
+Khora manages ordinary memory automatically. Resource lifetimes that have external meaning—files, sockets, transactions, foreign handles—use explicit structured cleanup.
 
-The runtime uses reference counting; compiler ownership analysis removes unnecessary retain/release work and may reuse uniquely owned storage when that does not change program meaning.
+## Ordinary memory
 
-This is an implementation strategy with programmer-visible guarantees:
+There is no source-level borrow or lifetime syntax for ordinary Khora values. The runtime uses reference counting and the compiler may remove retain/release operations or reuse uniquely owned storage when doing so cannot change program meaning.
 
-- values remain valid according to ordinary lexical/type semantics;
-- optimization must not make observable behavior depend on whether storage was reused;
-- sharing across fibers is explicit and subject to the language's sharing rules;
-- external resources are not memory and require structured cleanup.
+The programmer-visible rules are:
 
-Resources such as sockets, files, transactions, and foreign handles belong to regions/scopes with finalization rules. Cancellation must unwind through those scopes rather than bypassing cleanup.
+- a value remains valid according to ordinary lexical and type semantics;
+- optimization cannot make behavior depend on whether storage was reused;
+- writable state does not silently become cross-fiber shared state;
+- external resources require their own cleanup policy.
 
-Foreign/thread-affine resources may impose stronger rules than ordinary Khora values. The FFI reference documents those constraints where the compiler cannot infer them automatically.
+## Region syntax
+
+The primitive resource lifetime object is `Region`:
+
+```khora
+pub type Region;
+
+impl Region {
+  pub fn open() -> Region;
+  pub fn root() -> Region;
+  pub fn defer(self, finalizer: () -> ()) -> ();
+}
+```
+
+Open a region and register finalizers with `defer`:
+
+```khora
+fn work() -> Int {
+  let region = Region::open();
+  Region::defer(region, fn () => release_second());
+  Region::defer(region, fn () => release_first());
+  42
+}
+```
+
+Finalizers execute in **reverse registration order** when the region is released.
+
+`Region::root()` refers to the outer program region. Its finalizers run as the program exits.
+
+## Scope capability
+
+The standard structured-resource capability is:
+
+```khora
+pub effect Scope {
+  defer: (() -> ()) -> (),
+}
+```
+
+`scoped` creates a fresh region, installs a `Scope` handler over the body, and removes that capability from the caller's required row:
+
+```khora
+pub fn scoped<A, 'e, 'r>(
+  body: () -> A with { 'e | scope: Scope } raises 'r
+) -> A
+  with 'e
+  raises 'r
+```
+
+Example:
+
+```khora
+fn inside() -> Int
+  with { scope: Scope }
+{
+  scope.defer(fn () => cleanup());
+  7
+}
+
+fn outside() -> Int {
+  scoped(inside)
+}
+```
+
+A named function is the normal argument to `scoped` when that function requires the `scope` capability.
+
+## Acquire and release
+
+`acquire` registers a release operation and returns the acquired value:
+
+```khora
+pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
+  with { 'e | scope: Scope }
+```
+
+Typical form:
+
+```khora
+fn use_connection() -> ResultValue
+  with { scope: Scope }
+{
+  let connection = acquire(open_connection(), close_connection);
+  query(connection)
+}
+```
+
+`release(value)` runs when the enclosing resource scope ends.
+
+## Exit semantics
+
+A region is released on every structured path out of its owner:
+
+```khora
+pub type WorkError = | Failed;
+
+fn work(fail: Bool) -> Int raises WorkError {
+  let region = Region::open();
+  Region::defer(region, fn () => cleanup());
+
+  if fail {
+    raise WorkError::Failed
+  }
+
+  return 1;
+}
+```
+
+The finalizer runs on the normal path, the explicit `return`, and when the `raise` leaves the function.
+
+Cancellation uses the same structured unwind path. A pending cancellation observed at a cancellation point releases intervening regions and runs their finalizers before the fiber terminates.
+
+A `catch` handles failures in a `raises` row. Cancellation is not a failure variant and is not consumed by `catch`.
+
+## Resource APIs
+
+A resource-owning API should generally keep the lifetime inside one call:
+
+```khora
+fn with_resource<A, 'e, 'r>(
+  body: (Resource) -> A with 'e raises 'r
+) -> A
+  with 'e
+  raises 'r
+```
+
+rather than returning an unmanaged handle that callers must remember to close on every path.
+
+Foreign or thread-affine resources can impose rules beyond ordinary Khora values. See [FFI](/docs/reference/ffi/) for pointer and suspension constraints, [Concurrency](/docs/reference/concurrency/) for fiber lifetime rules, and [Sharing](/docs/reference/sharing/) for cross-fiber values.
