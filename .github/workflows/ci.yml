@@ -58,7 +58,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: clippy, rustfmt
@@ -75,7 +75,15 @@ jobs:
       # itself either way — the workspace suite is 116s under nextest against
       # 271s under `cargo test`, which runs one test *binary* at a time.
       # `.config/nextest.toml` names the tests that cannot have a process each.
-      - uses: taiki-e/install-action@0fbeb6419da029e13e7aa193f599bf6ed4375f14 # nextest
+      # `tool:` is spelled out because the ref is a commit. This action
+      # normally takes the tool from the tag it was called by --
+      # `install-action@nextest` -- and pinning the ref throws that name away:
+      # `inputs.tool` comes out empty, `main.sh` warns "no tool specified" and
+      # then **exits 0** for backward compatibility. The step would pass, and
+      # nextest would not be installed.
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: nextest
       - run: cargo nextest run --workspace
       # nextest drives libtest binaries and rustdoc does not produce one, so
       # the doctests are not in that run. Eleven seconds, and without it the
@@ -102,7 +110,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -112,7 +120,7 @@ jobs:
       # formula pinned at exactly 22.1.8.
       - name: Cache the Windows LLVM tarball
         if: runner.os == 'Windows'
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.llvm
           key: llvm-22.1.8-${{ runner.os }}
@@ -168,7 +176,15 @@ jobs:
       # step is what decides whether the baseline below takes 116s or 271s over
       # the suite. The separate `cargo test --workspace --features llvm` that
       # used to stand here was the baseline's own first step run twice.
-      - uses: taiki-e/install-action@0fbeb6419da029e13e7aa193f599bf6ed4375f14 # nextest
+      # `tool:` is spelled out because the ref is a commit. This action
+      # normally takes the tool from the tag it was called by --
+      # `install-action@nextest` -- and pinning the ref throws that name away:
+      # `inputs.tool` comes out empty, `main.sh` warns "no tool specified" and
+      # then **exits 0** for backward compatibility. The step would pass, and
+      # nextest would not be installed.
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: nextest
 
       # The whole baseline: the suite, clippy, the corpus check and formatter
       # over `std`, every reference application built, and twelve HTTP
