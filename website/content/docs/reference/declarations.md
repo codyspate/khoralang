@@ -4,7 +4,7 @@ sidebar:
   order: 1
 ---
 
-This page lists the declaration forms accepted at module scope. Local bindings and expression forms are covered in [Expressions](./expressions.md).
+This page lists the declaration forms accepted at module scope. Local bindings and expression forms are covered in [Expressions](./expressions/).
 
 ## Module declaration
 
@@ -159,7 +159,7 @@ A public external function can form part of a generated C-compatible library sur
 pub extern fn khora_add(left: Int, right: Int) -> Int;
 ```
 
-See [FFI](./ffi.md) for ABI rules and supported boundary types.
+See [FFI](./ffi/) for ABI rules and supported boundary types.
 
 ## Effect declarations
 
