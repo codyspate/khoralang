@@ -195,4 +195,4 @@ Common multi-character tokens include:
 
 Single-character punctuation includes `; , . : | = + - * / % ! < > ( ) { } [ ] _`.
 
-See [Expressions](./expressions.md) for operator precedence and [Declarations](./declarations.md) for the positions in which the declaration-oriented keywords appear.
+See [Expressions](./expressions/) for operator precedence and [Declarations](./declarations/) for the positions in which the declaration-oriented keywords appear.
