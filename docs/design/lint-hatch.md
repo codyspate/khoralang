@@ -12,9 +12,10 @@ lands first, and why:
 > turns half of them off, which is worse than not having them: a lint people
 > switch off wholesale stops being evidence about anything.
 
-**This is a language-surface decision and this document does not make it.** It
-lays out the options, argues for one, and stops. Roadmap 14.22 is blocked on
-the answer.
+**Decided: the checked pragma, spelled `// @klint allow <lint>`.** The rest of
+this document is the argument that led there, kept because the reasoning is
+what makes the answer reviewable. What changed from the recommendation is the
+spelling — see "The spelling, and why it is loud" at the end.
 
 ## What has to be true of the answer
 
@@ -63,10 +64,10 @@ of.
 ## Option B — a checked comment pragma
 
 ```khora
-// khora: allow discarded-result
+// @klint allow discarded-result
 save_to_disk(record);
 
-save_to_disk(record); // khora: allow discarded-result
+save_to_disk(record); // @klint allow discarded-result
 ```
 
 The lexer already emits `LINE_COMMENT` and `BLOCK_COMMENT` tokens and the CST
@@ -109,7 +110,7 @@ The roadmap notes this works "by luck rather than by design".
 capability is genuinely unused" or "this cycle is intended", and inventing one
 per lint is six small language decisions instead of one.
 
-## Recommendation: B, the checked comment pragma
+## Decided: B, the checked comment pragma
 
 Because the hatch has to exist before the six lints, and **attributes deserve
 to be designed as attributes** — by someone deciding the language should have
@@ -121,20 +122,29 @@ The pragma is small, checkable, and reversible: comments are mechanically
 findable, so if attributes arrive later for their own reasons, rewriting every
 pragma is a script rather than a migration.
 
-**The honest counter-argument**, which is the reason this is not being decided
-here: Khora's character is to make things the compiler understands rather than
-things it reads out of comments. Option B is the one place that would not be
-true. Someone who weighs that higher than the cost of introducing attributes
-should pick A, and would not be wrong.
+**The honest counter-argument, recorded because it was close:** Khora's
+character is to make things the compiler understands rather than things it
+reads out of comments, and this is the one place that is not true. Someone who
+weighed that above the cost of introducing attributes would have picked A and
+would not have been wrong. What tipped it is that the pragma is *checked*, so
+the usual price of a magic comment is not paid, and that it is reversible by
+script if attributes ever arrive on their own terms.
 
-## If B, then these too
+## The spelling, and why it is loud
 
-Four sub-decisions, so that "yes to B" is a complete answer rather than the
-start of another conversation.
+`// @klint allow <lint-name>`.
 
-**Spelling: `// khora: allow <lint-name>`.** Namespaced, so it cannot collide
-with prose, and readable as English. Not `#[...]` or `@...`, which would look
-like an attribute and invite the question of why it is not one.
+The recommendation here was `// khora: allow ...`, and it was wrong in a way
+worth recording: it reads like an aside. A directive that changes what the
+compiler reports about a line must not look like ordinary prose sitting beside
+the code, because the failure mode is somebody's eye sliding past it while
+reviewing exactly the line it excuses.
+
+`@klint` is deliberately conspicuous. It is greppable — one string finds every
+suppression in a repository — and it does not look like an attribute, which
+would raise the question of why it is not one.
+
+## The rest of the shape
 
 **Attachment: the statement the comment precedes, or the one it trails.** Both
 forms above mean the same thing. One statement, never a block — a block-level

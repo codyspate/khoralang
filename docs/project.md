@@ -525,6 +525,10 @@ The `khora` executable is a single static binary containing the compiler, packag
 * **Canonical Rules:**
 * 2-space indentation by default; `[fmt] indent-style` and `indent-width`
   change it, and nothing else in the formatter is configurable.
+* A lint is silenced at the line with `// @klint allow <lint-name>`, either on
+  the line before or trailing it. One statement, never a block. The name is
+  checked: a lint that does not exist is reported, and so is a suppression that
+  suppressed nothing. `docs/design/lint-hatch.md`.
 * Explicit semicolons, which are a rule of the grammar rather than a setting —
   see §14. `[fmt] explicit-semicolons` was briefly written here as though it
   were a choice; it was removed in 14.20b, and a manifest still carrying it

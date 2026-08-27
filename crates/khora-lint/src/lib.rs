@@ -37,6 +37,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod allow;
+
+pub use crate::allow::MARKER;
+
 use khora_db::{Db, SourceFile};
 use khora_types::{BodyTypes, Type};
 use khora_hir::body::{Body, Expr, LocalId, Pat, Stmt};
@@ -55,8 +59,47 @@ pub struct Finding {
 
 /// Every lint's name, so that a manifest naming one that does not exist can be
 /// told what does.
-pub const LINTS: &[&str] =
-    &[DANGLING_EXPRESSION, DISCARDED_RESULT, REFERENCE_CYCLE, UNUSED_CAPABILITY];
+pub const LINTS: &[&str] = &[
+    DANGLING_EXPRESSION,
+    DISCARDED_RESULT,
+    REFERENCE_CYCLE,
+    UNKNOWN_ALLOW,
+    UNUSED_CAPABILITY,
+    USELESS_ALLOW,
+];
+
+/// A `// @klint allow` naming something that is not a lint.
+///
+/// **This is what makes the pragma safe to have.** A misspelled name in a
+/// comment would otherwise suppress nothing and say nothing, and the reader
+/// would believe the line was handled. `docs/design/lint-hatch.md`.
+pub const UNKNOWN_ALLOW: &str = "unknown-allow";
+
+/// A `// @klint allow` that suppressed nothing.
+///
+/// Stale suppression is real debt: it hides the next finding on that line, and
+/// it tells a reader that something was considered when it no longer is.
+///
+/// **Off by default**, unlike every other lint here. It fires on exactly the
+/// lines somebody is already editing to satisfy a new lint, so switching it on
+/// while lints are still being added would produce churn in the files under
+/// the most pressure. Turn it on with `[lints] useless-allow = "warn"` once
+/// they have settled.
+pub const USELESS_ALLOW: &str = "useless-allow";
+
+/// How loud a lint is when the manifest does not say.
+///
+/// Warn for everything except [`USELESS_ALLOW`], for the reason on it. A
+/// function rather than a constant so that both the CLI and the language
+/// server ask the same question -- they each had `unwrap_or(Warn)` written out
+/// before this existed, which is two places to forget.
+pub fn default_level(lint: &str) -> khora_manifest::LintLevel {
+    if lint == USELESS_ALLOW {
+        khora_manifest::LintLevel::Allow
+    } else {
+        khora_manifest::LintLevel::Warn
+    }
+}
 
 /// A capability a signature asks for that its body cannot be using.
 pub const UNUSED_CAPABILITY: &str = "unused-capability";
@@ -94,8 +137,77 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
             discarded_results(body, types, &mut out);
         }
     }
+
+    // **Here rather than in each consumer.** The CLI, the language server and
+    // the MCP server all read this, and a suppression one of them honoured and
+    // another did not would be the worst kind of inconsistency: the editor
+    // says the line is fine and the build does not.
+    let text = file.text(db);
+    out = suppress(text, out);
+
     out.sort_by_key(|f| (f.range.start(), f.range.end()));
     out
+}
+
+/// Drops what the pragmas allow, and reports on the pragmas themselves.
+fn suppress(text: &str, found: Vec<Finding>) -> Vec<Finding> {
+    let mut allows = allow::allows(text);
+    if allows.is_empty() {
+        return found;
+    }
+    let starts = line_starts(text);
+
+    let mut kept = Vec::new();
+    for finding in found {
+        let line = line_of(&starts, u32::from(finding.range.start())) as u32;
+        let hit = allows
+            .iter_mut()
+            .find(|allow| allow.line == line && allow.lint == finding.lint);
+        match hit {
+            Some(allow) => allow.used = true,
+            None => kept.push(finding),
+        }
+    }
+
+    for allow in &allows {
+        if !LINTS.contains(&allow.lint.as_str()) {
+            kept.push(Finding {
+                lint: UNKNOWN_ALLOW,
+                message: format!(
+                    "`{}` is not a lint, so this allows nothing. What there is: {}",
+                    allow.lint,
+                    LINTS.join(", ")
+                ),
+                range: allow.range,
+            });
+        } else if !allow.used {
+            kept.push(Finding {
+                lint: USELESS_ALLOW,
+                message: format!("nothing here reports `{}`, so this allows nothing", allow.lint),
+                range: allow.range,
+            });
+        }
+    }
+    kept
+}
+
+/// The byte offset each line starts at.
+fn line_starts(text: &str) -> Vec<u32> {
+    let mut starts = vec![0u32];
+    for (at, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(at as u32 + 1);
+        }
+    }
+    starts
+}
+
+/// Which line an offset is on, zero-based.
+fn line_of(starts: &[u32], offset: u32) -> usize {
+    match starts.binary_search(&offset) {
+        Ok(exact) => exact,
+        Err(after) => after - 1,
+    }
 }
 
 /// A capability the signature asks for and the body cannot be using.

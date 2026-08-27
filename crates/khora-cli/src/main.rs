@@ -610,7 +610,7 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
         }
 
         for finding in khora_lint::findings(&db, *input) {
-            let level = levels.get(finding.lint).copied().unwrap_or(LintLevel::Warn);
+            let level = levels.get(finding.lint).copied().unwrap_or_else(|| khora_lint::default_level(finding.lint));
             if level == LintLevel::Allow {
                 continue;
             }

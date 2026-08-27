@@ -420,7 +420,7 @@ impl Server {
         }
 
         for finding in khora_lint::findings(&self.db, file) {
-            let level = self.levels.get(finding.lint).copied().unwrap_or(LintLevel::Warn);
+            let level = self.levels.get(finding.lint).copied().unwrap_or_else(|| khora_lint::default_level(finding.lint));
             if level == LintLevel::Allow {
                 continue;
             }

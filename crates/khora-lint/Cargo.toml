@@ -13,6 +13,7 @@ khora-hir.workspace = true
 # planner's answer, and a second opinion here could disagree with the one that
 # actually allocates.
 khora-perceus.workspace = true
+khora-syntax.workspace = true
 khora-types.workspace = true
 khora-manifest.workspace = true
 salsa.workspace = true

@@ -4227,13 +4227,19 @@ decision** — attributes do not exist, and inventing them for this is a large
 answer to a small question, where a comment-directed pragma is a small answer
 with a long tail. Not decided here; decided before 14.22.
 
-**`docs/design/lint-hatch.md` lays out the four options and argues for one.**
-The short version: the long tail a comment pragma is usually accused of is
-silent failure, and a pragma that is *checked* against `khora_lint::LINTS` does
-not have it — so the real question is whether Khora would rather pay for
-attributes now, as a feature designed on its own terms, than read one directive
-out of a comment. The doc recommends the pragma and says plainly why the other
-answer is defensible. **Still not decided; still blocks 14.22.**
+**Decided, and built: `// @klint allow <lint>`.** `docs/design/lint-hatch.md`
+keeps the argument. The short version is that the long tail a comment pragma is
+usually accused of is silent failure, and a pragma *checked* against
+`khora_lint::LINTS` does not have it — a name that is not a lint is reported,
+and so is a pragma that suppressed nothing. Attributes were the alternative and
+were declined on the grounds that a general extension point should be designed
+as one rather than arrive as the thing that had to happen before
+`unused-import` could ship.
+
+The spelling is loud on purpose. `@klint` is greppable and cannot be read as an
+aside, which a directive excusing the line it sits on must not be.
+
+**14.22–14.27 are unblocked.**
 
 ### The inner loop is four and a half minutes
 
