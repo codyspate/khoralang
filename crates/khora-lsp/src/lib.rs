@@ -89,6 +89,12 @@ pub struct Server {
     encoding: Encoding,
     /// How loud each lint is, from the workspace's manifest.
     levels: HashMap<String, LintLevel>,
+    /// The `[fmt]` settings, so that format-on-save and `khora fmt` agree.
+    ///
+    /// A formatter that gives one answer in the editor and another on the
+    /// command line is the worst possible kind: every save fights the last
+    /// build, and the diff blames whoever touched the file.
+    fmt: khora_fmt::Options,
     /// Set by `exit`, and by `shutdown` followed by a closed stream.
     pub finished: bool,
 }
@@ -101,6 +107,7 @@ impl Default for Server {
             lines: HashMap::new(),
             encoding: Encoding::default(),
             levels: HashMap::new(),
+            fmt: khora_fmt::Options::default(),
             finished: false,
         }
     }
@@ -306,6 +313,7 @@ impl Server {
         }
         SourceRoot::new(&self.db, files);
         self.levels = lint_levels(root);
+        self.fmt = fmt_options(root);
     }
 
     fn opened(&mut self, params: &Value) -> Vec<Value> {
@@ -851,7 +859,7 @@ impl Server {
         let index = self.lines.get(&url)?;
         let text = index.text();
 
-        let formatted = khora_fmt::format(text).ok()?;
+        let formatted = khora_fmt::format_with(text, &self.fmt).ok()?;
         if formatted == text {
             return Some(Vec::new());
         }
@@ -936,6 +944,24 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The `[lints]` levels for a workspace, or the defaults.
+/// The `[fmt]` settings for a workspace, or the formatter's own defaults.
+///
+/// The same reading `khora fmt` does, and it has to stay the same reading:
+/// see the `fmt` field.
+fn fmt_options(root: &Path) -> khora_fmt::Options {
+    let Ok(parsed) = khora_manifest::Manifest::load(&root.join("khora.toml")) else {
+        return khora_fmt::Options::default();
+    };
+    let Some(table) = parsed.manifest.fmt else { return khora_fmt::Options::default() };
+    match table.indent_style {
+        Some(khora_manifest::IndentStyle::Tab) => khora_fmt::Options::tabs(),
+        Some(khora_manifest::IndentStyle::Space) | None => match table.indent_width {
+            Some(width) => khora_fmt::Options::spaces(width),
+            None => khora_fmt::Options::default(),
+        },
+    }
+}
+
 fn lint_levels(root: &Path) -> HashMap<String, LintLevel> {
     let mut out = HashMap::new();
     let Ok(parsed) = khora_manifest::Manifest::load(&root.join("khora.toml")) else {

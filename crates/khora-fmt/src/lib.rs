@@ -35,23 +35,71 @@ use khora_syntax::{
     ParseError, SyntaxElement, SyntaxKind, SyntaxKind::*, SyntaxNode, SyntaxToken,
 };
 
-const INDENT: &str = "  ";
+/// What one level of indentation is.
+///
+/// **The only thing `[fmt]` actually configures.** §6.2 asks for two-space
+/// indent and that is the default; a project that wants four, or tabs, says so
+/// in its manifest. Everything else the formatter does -- where lines break,
+/// how imports sort, what spacing punctuation gets -- is not a setting,
+/// because a canonical formatter with knobs is two formatters.
+///
+/// `docs/roadmap.md` 14.20a: this table was parsed, validated, documented and
+/// read by nobody until it was wired up here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Options {
+    /// The string written once per level of depth.
+    indent: String,
+}
 
-/// Formats a source file.
+impl Default for Options {
+    fn default() -> Options {
+        Options { indent: "  ".to_string() }
+    }
+}
+
+impl Options {
+    /// Spaces, `width` of them.
+    ///
+    /// A width of zero is refused by being treated as the default rather than
+    /// as an error: this comes from a manifest, and a formatter that will not
+    /// run because a number is silly is worse than one that formats.
+    pub fn spaces(width: u8) -> Options {
+        match width {
+            0 => Options::default(),
+            n => Options { indent: " ".repeat(usize::from(n)) },
+        }
+    }
+
+    /// One tab per level.
+    ///
+    /// `indent-width` is ignored with tabs, and deliberately: the width of a
+    /// tab is the reader's setting, which is the entire reason somebody picks
+    /// tabs.
+    pub fn tabs() -> Options {
+        Options { indent: "\t".to_string() }
+    }
+}
+
+/// Formats a source file in the canonical style.
 ///
 /// Returns the parse diagnostics unchanged if the input does not parse; the
 /// caller decides whether to report them.
 pub fn format(src: &str) -> Result<String, Vec<ParseError>> {
+    format_with(src, &Options::default())
+}
+
+/// Formats a source file with the manifest's `[fmt]` settings.
+pub fn format_with(src: &str, options: &Options) -> Result<String, Vec<ParseError>> {
     let parse = khora_syntax::parse(src);
     if !parse.errors().is_empty() {
         return Err(parse.errors().to_vec());
     }
-    let mut f = Formatter::new();
+    let mut f = Formatter::new(options.indent.clone());
     f.node(&parse.syntax(), SOURCE_FILE);
     Ok(f.finish())
 }
 
-/// Whether `src` is already formatted.
+/// Whether `src` is already formatted in the canonical style.
 pub fn is_formatted(src: &str) -> Result<bool, Vec<ParseError>> {
     format(src).map(|formatted| formatted == src)
 }
@@ -70,6 +118,7 @@ enum Sep {
 
 struct Formatter {
     out: String,
+    indent: String,
     depth: usize,
     pending: Sep,
     /// The token most recently written, with the node that owned it. Spacing
@@ -83,9 +132,10 @@ struct Formatter {
 }
 
 impl Formatter {
-    fn new() -> Formatter {
+    fn new(indent: String) -> Formatter {
         Formatter {
             out: String::new(),
+            indent,
             depth: 0,
             pending: Sep::None,
             prev: None,
@@ -181,7 +231,7 @@ impl Formatter {
                 // multi-line pipeline.
                 let extra = usize::from(continues || is_continuation(kind, parent));
                 for _ in 0..self.depth + extra {
-                    self.out.push_str(INDENT);
+                    self.out.push_str(&self.indent);
                 }
             }
         }

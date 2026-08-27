@@ -580,6 +580,31 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
 /// A manifest that cannot be read contributes nothing rather than failing the
 /// command — complaining about the manifest is `khora check`'s job, not every
 /// other command's.
+/// The `[fmt]` settings governing `start`, or the formatter's own defaults.
+///
+/// A manifest that cannot be read contributes nothing rather than failing the
+/// command, the same rule `lint_levels` follows: complaining about the manifest
+/// is `khora check`'s job, and two commands reporting one error differently is
+/// worse than one reporting it.
+fn fmt_options(start: Option<&Path>) -> khora_fmt::Options {
+    let Some(manifest_path) = start.and_then(nearest_manifest) else {
+        return khora_fmt::Options::default();
+    };
+    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else {
+        return khora_fmt::Options::default();
+    };
+    let Some(table) = parsed.manifest.fmt else { return khora_fmt::Options::default() };
+    match table.indent_style {
+        Some(khora_manifest::IndentStyle::Tab) => khora_fmt::Options::tabs(),
+        // Spaces either way: `indent-width` on its own is a width in spaces,
+        // because nobody writes `indent-width = 4` meaning four tabs.
+        Some(khora_manifest::IndentStyle::Space) | None => match table.indent_width {
+            Some(width) => khora_fmt::Options::spaces(width),
+            None => khora_fmt::Options::default(),
+        },
+    }
+}
+
 fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintLevel> {
     let mut out = std::collections::BTreeMap::new();
     let Some(manifest_path) = start.and_then(nearest_manifest) else { return out };
@@ -974,16 +999,32 @@ fn fmt(paths: &[PathBuf], check: bool, since: Option<&str>) -> Result<bool> {
 }
 
 fn fmt_one(paths: &[PathBuf], check: bool) -> Result<bool> {
-    let files = collect_sources(paths)?;
+    // **Only what was named**, and not `collect_sources`, which is the
+    // compiler's question: an entry point's package, its dependencies, and the
+    // standard library. Formatting needs none of that -- a file is formatted
+    // by itself -- and pulling it in meant `khora fmt examples/ledger_service`
+    // reformatted `std`. That was invisible for as long as `[fmt]` was read by
+    // nobody and every file used the same two spaces; the moment a member
+    // could ask for four, it would have rewritten the standard library in a
+    // member's style. Roadmap 14.20a.
+    let roots: Vec<PathBuf> =
+        if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let mut files = Vec::new();
+    for root in &roots {
+        gather(root, &mut files)?;
+    }
+    files.sort();
+    files.dedup();
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
     }
+    let options = fmt_options(paths.first().map(PathBuf::as_path));
 
     let mut changed = Vec::new();
     let mut failed = 0usize;
     for path in &files {
         let src = read(path)?;
-        match khora_fmt::format(&src) {
+        match khora_fmt::format_with(&src, &options) {
             Ok(out) if out == src => {}
             Ok(out) => {
                 changed.push(path.clone());
