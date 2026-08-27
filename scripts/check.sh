@@ -2,7 +2,12 @@
 # The fast loop. `baseline.sh` is the slow one, and both have a job.
 #
 #     sh scripts/check.sh            front end only, no LLVM        ~20s
-#     sh scripts/check.sh native     the above plus code generation ~90s
+#     sh scripts/check.sh native     the above plus code generation ~2m
+#
+# **`native` is a gate and leaves a receipt**, `.khora-gate-fast`, which
+# `scripts/gate.sh fast` reads. The front-end-only run leaves nothing on
+# purpose: it does not compile a single program, so there is no honest question
+# it can be the answer to. Roadmap 14.32.
 #
 # **What this is for.** `baseline.sh` builds every reference application, runs
 # clippy over all targets, formats the corpus and talks to a real `curl`. It is
@@ -52,6 +57,10 @@ suite --workspace
 # every target from this host, so a mistake in a platform file is caught here
 # rather than by whoever next builds on that platform.
 
+# Removed before either tier runs, so that a run which dies halfway leaves no
+# receipt rather than a stale one.
+rm -f "$root/.khora-gate-fast"
+
 if [ "${1:-}" != native ]; then
     printf '\n%s\n' "front end clean. \`sh scripts/check.sh native\` also builds and runs \
 compiled programs; \`sh scripts/baseline.sh\` is the full one."
@@ -63,6 +72,11 @@ fi
 # process and talk to it over a socket.
 step 'code generation, and programs that run'
 suite --workspace --features llvm
+
+# The receipt, last, after both tiers have passed. What it records is which
+# *tree* passed, so editing a file afterwards invalidates it without anybody
+# having to remember that it should.
+sh "$root/scripts/tree-id.sh" > "$root/.khora-gate-fast"
 
 printf '\n%s\n' "native clean. \`sh scripts/baseline.sh\` adds clippy, the corpus check, \
 the reference applications and the HTTP conformance suite."

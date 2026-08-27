@@ -45,7 +45,8 @@ bench/*.pdb
 # The baseline's receipt. `scripts/baseline.sh` writes it on success and
 # `scripts/gate.sh` reads it; it names a working tree, so it is meaningless on
 # any other machine and belongs to nobody's history.
-/.khora-baseline-ok
+/.khora-gate-full
+/.khora-gate-fast
 
 # The peer servers `bench/compare.py` measures against, built by hand from
 # `bench/peers/`. Sources are tracked; binaries and build trees are not.

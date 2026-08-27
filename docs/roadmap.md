@@ -4221,7 +4221,7 @@ process start and a link of the test harness.
 | 14.30 | ~~**Fewer, larger test binaries**~~ | **Dropped by 14.31.** The rationale was that cargo starts binaries sequentially. Under nextest it does not, and merging binaries would only take work away from the scheduler |
 | 14.31 | ✅ **`cargo nextest`** | **271 s → 116 s.** See below |
 | 14.35 | **A trivial `khora build` takes 2.1 seconds** | Measured while sizing 14.28: 0.29 s of it is everything up to code generation, and the rest is the object write and the link. It has nothing to do with tests and it is the first number a newcomer feels. Nothing on this roadmap is about it |
-| 14.32 | **Split the baseline** | A fast gate and a full gate, the way `scripts/check.sh` and `scripts/baseline.sh` already almost are. The receipt from 13.20 makes "which one passed" a fact rather than a memory |
+| 14.32 | ✅ **Split the baseline** | Done. Two named gates with a receipt each: `sh scripts/gate.sh fast` asks about `check.sh native` (the whole test suite, front end and back end) and `sh scripts/gate.sh` asks about `baseline.sh`. **Passing the full gate satisfies the fast one**, which is the only sensible reading of a superset. The front-end-only run of `check.sh` deliberately leaves no receipt: it does not compile a single program, so there is no honest question it can be the answer to. Three distinct failures, each with its own message — no receipt at all, a receipt for another tree, and a receipt for *this* tree from the lesser gate, which is not a stale receipt and must not be reported as one |
 
 **Measured, and it argued against both.** The instrumentation came first, as
 this said it should, and 14.28 and 14.29 are struck out above on the strength

@@ -16,6 +16,13 @@
 # `git push --no-verify` still works, and that is on purpose. This exists to
 # stop the accident, not to stop the decision.
 #
+# **There is a fast gate too**, and no hook is installed for it. `sh
+# scripts/gate.sh fast` answers for `scripts/check.sh native` -- the whole test
+# suite, about two minutes -- and a pre-commit hook demanding that would make
+# every commit cost two minutes, which is the tax this file's opening
+# paragraph declines to levy. It is there for a person or a CI job to ask, not
+# for a hook to enforce. Roadmap 14.32.
+#
 # The working order it implies: **stage, then baseline, then commit, then
 # push.** Staging a new file changes the tracked list, which is part of what
 # the receipt names, so a baseline run before the `git add` does not count for

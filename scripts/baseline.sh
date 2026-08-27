@@ -13,12 +13,15 @@
 #
 # Exits non-zero on the first failure, and says which step.
 #
-# **It also leaves a receipt**, `.khora-baseline-ok`, naming the tree it
-# passed for. `scripts/gate.sh` reads it, and the pre-push hook
+# **It also leaves a receipt**, `.khora-gate-full`, naming the tree it passed
+# for. `scripts/gate.sh` reads it, and the pre-push hook
 # `scripts/install-hooks.sh` writes calls that. An exit status can be dropped
 # by the shell chain around this script — that has put three commits on a red
 # baseline, most recently a `| grep` taking grep's status — and a file on disk
 # cannot be. Roadmap 13.20.
+#
+# `scripts/check.sh native` leaves `.khora-gate-fast` the same way, and passing
+# this one satisfies that one. Roadmap 14.32.
 set -e
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -27,8 +30,11 @@ cd "$root"
 # Removed first, so that a run which dies halfway leaves no receipt at all
 # rather than a stale one. Every early exit below is a failure, and every one
 # of them now says so twice: a non-zero status, and nothing on disk.
-receipt="$root/.khora-baseline-ok"
-rm -f "$receipt"
+receipt="$root/.khora-gate-full"
+# The fast receipt goes too: this run is about to answer for both, and a stale
+# `fast` sitting beside a failed `full` would be a receipt for a tree whose
+# baseline is not known to pass.
+rm -f "$receipt" "$root/.khora-gate-fast"
 khora="./target/debug/khora.exe"
 [ -x "$khora" ] || khora="./target/debug/khora"
 
