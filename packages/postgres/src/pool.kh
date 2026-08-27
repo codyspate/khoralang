@@ -21,13 +21,17 @@ module postgres::pool;
 //! more load than the pool can serve, the waiting happens at the edge -- which
 //! is what stops a service from accepting work until it runs out of memory.
 //!
-//! # Leases, and the region they belong to
+//! # Leases, capabilities, and the region they belong to
 //!
-//! `with_db` takes a connection and must give it back, including when the body
-//! raises and including when the fiber running it is cancelled. That is
-//! `Scope`'s job: the return is registered with `acquire` before the body
-//! runs, and a region's finalizers run on the way out however the way out is
-//! reached.
+//! `with_db` takes a connection, installs it as `db: Db` for the body, and must
+//! give it back including when the body raises and including when the fiber
+//! running it is cancelled. Application code therefore keeps `Db` in its
+//! capability row instead of accepting a connection value just because the
+//! provider happens to be a pool.
+//!
+//! Returning the lease is `Scope`'s job: the return is registered with
+//! `acquire` before the body runs, and a region's finalizers run on the way out
+//! however the way out is reached.
 //!
 //! **The region has to be `with_db`'s own**, and the first version got this
 //! wrong in a way worth recording. It required a `Scope` from its caller,
@@ -36,9 +40,9 @@ module postgres::pool;
 //! two, all inside one `scoped`, took both connections and gave neither back:
 //! the third waited for ever. A pool of `n` behaved like a pool of `n` uses.
 //!
-//! So `with_db` opens a region per lease. A caller needs no capability for it,
-//! which is also the better API -- the lifetime of the lease is now the thing
-//! a reader can see, which is the call.
+//! So `with_db` opens a region per lease. A caller needs no `Scope` capability
+//! for it, and the `Db` requirement disappears at this boundary because the
+//! leased handler is installed here.
 //!
 //! **The transaction is covered too**, as of 13.3: `std::db::transaction`
 //! registers its rollback with a region of its own, so a fiber stopped
@@ -96,18 +100,22 @@ pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
   { idle: idle, crew: crew }
 }
 
-/// Runs `body` with a `Db` over one of the pool's connections.
+/// Runs `body` with a leased connection installed as the `db: Db` capability.
 ///
-/// Waits when they are all busy. The connection goes back **when this call
-/// returns**, however it returns -- normally, raising, or cancelled -- because
-/// the lease is registered with `acquire` in a region this function opens. A
-/// pool that loses a connection to an error is a pool that works until the
-/// first bad day; one that holds a lease past the call is a pool of `n` uses.
+/// Waits when all connections are busy. The connection goes back **when this
+/// call returns**, however it returns -- normally, raising, or cancelled --
+/// because the lease is registered with `acquire` in a region this function
+/// opens. A pool that loses a connection to an error is a pool that works until
+/// the first bad day; one that holds a lease past the call is a pool of `n`
+/// uses.
 ///
-/// The `Result` is about *getting* a connection. What the body did with one
-/// passes straight through on its own row, because folding a caller's error
-/// into `DbError` would lose its type.
-pub fn with_db<A, 'e, 'r>(pool: Pool, body: (Db) -> A raises 'r) -> Result<A, DbError>
+/// The `db` requirement is handled here and removed from the caller's row. Any
+/// other requirements and raised failures on `body` pass straight through.
+/// The `Result` is only about obtaining the lease.
+pub fn with_db<A, 'e, 'r>(
+  pool: Pool,
+  body: () -> A with { 'e | db: Db } raises 'r,
+) -> Result<A, DbError>
   with 'e
   raises 'r
 {
@@ -123,22 +131,22 @@ pub fn with_db<A, 'e, 'r>(pool: Pool, body: (Db) -> A raises 'r) -> Result<A, Db
 ///
 /// Separate from `with_db` because `acquire` needs a `Scope` and `with_db`'s
 /// whole point is that its caller does not have to have one.
-fn held<A, 'r>(
+fn held<A, 'e, 'r>(
   idle: Channel<Channel<Request>>,
   requests: Channel<Request>,
-  body: (Db) -> A raises 'r,
+  body: () -> A with { 'e | db: Db } raises 'r,
 ) -> Result<A, DbError>
-  with { scope: Scope }
+  with { 'e | scope: Scope }
   raises 'r
 {
   let leased = acquire(requests, fn back => give_back(idle, back));
-  Result::Ok(body(over(leased))!)
+  Result::Ok(body()! with { db: over(leased) })
 }
 
 /// Puts a connection back, or lets it go if the pool has closed.
 ///
 /// A failed send here is not an error to report: it means somebody closed the
-/// pool while this fiber held a lease, which is what shutting down looks like
+/// pool while this fiber held the lease, which is what shutting down looks like
 /// from the inside.
 fn give_back(idle: Channel<Channel<Request>>, requests: Channel<Request>) -> () {
   Channel::send(idle, requests);
