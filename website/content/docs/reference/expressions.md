@@ -1,17 +1,330 @@
 ---
 title: Expressions
 sidebar:
-  order: 5
+  order: 4
 ---
 
-Khora is expression-oriented: blocks, calls, control flow, matches, pipelines, and operators participate in producing values according to their types.
+Khora is expression-oriented. Literals, calls, blocks, conditionals, matches, pipelines, lambdas, handlers, and control-flow forms all appear in expression position according to their type.
 
-Function calls use ordinary positional arguments. Field projection uses `.`, while compile-time paths use `::`.
+## Literals
 
-The pipeline operator rewrites the flow of a value into a call without introducing a separate runtime abstraction. `x |> f(a)` passes `x` first; one `_` placeholder may choose another argument position.
+```khora
+42
+1_000_000
+3.14
+6.02e23
+19.99d
+true
+false
+"hello"
+`multiline text`
+```
 
-`!` is postfix failure propagation at a fallible call site. Prefix `!` remains boolean negation; their positions disambiguate them.
+See [Lexical structure](./lexical-structure.md) for exact literal and interpolation forms.
 
-Blocks evaluate to their final expression when a value is required. `let` introduces a binding; assignment is deliberately low precedence and right-associative.
+## Paths and names
 
-`match` is checked for exhaustiveness and unreachable arms. Loops and imperative forms exist for algorithms where they are clearer, while the language's default value model remains functional.
+```khora
+value
+app::model::User
+Result::Ok
+```
+
+`::` is compile-time namespacing for modules, types, constructors, and associated items.
+
+## Calls
+
+```khora
+parse(input)
+connect(host, port)
+```
+
+Arguments are positional and may have a trailing comma.
+
+## Runtime field projection and methods
+
+```khora
+user.name
+response.status
+user.display_name()
+```
+
+`.` operates on a runtime value. It is distinct from `::` path lookup.
+
+## Record literals
+
+```khora
+{
+  id: 42,
+  name: "Ada",
+}
+```
+
+An empty record is:
+
+```khora
+{}
+```
+
+A braced form beginning with `name:` is a record literal; an ordinary braced sequence is a block.
+
+## Tuple and unit expressions
+
+```khora
+()
+(1, "one")
+(1,)
+```
+
+Parentheses without a comma group an expression:
+
+```khora
+(value + 1)
+```
+
+## List literals
+
+```khora
+[]
+[1, 2, 3]
+[
+  "Ada",
+  "Grace",
+]
+```
+
+## Blocks
+
+```khora
+{
+  let subtotal = 40;
+  let tax = 2;
+  subtotal + tax
+}
+```
+
+The final expression without a semicolon is the block value. Statements before it are evaluated in order.
+
+## Local bindings
+
+```khora
+let value = compute();
+let value: Int = compute();
+let mut count = 0;
+let (left, right) = pair;
+```
+
+General form:
+
+```text
+let mut? Pattern (: Type)? = Expr ;
+```
+
+`let` is local. Module-level named expressions use `const`; see [Declarations](./declarations.md#constants).
+
+## Assignment
+
+```khora
+count = count + 1
+```
+
+Assignment is an expression of type `()` and is right-associative. The target must be writable, such as a `let mut` binding or a mutable record field.
+
+## Lambdas
+
+Single parameter:
+
+```khora
+fn value => value * 2
+```
+
+Ignored parameter:
+
+```khora
+fn _ => fixed_value
+```
+
+Several or annotated parameters:
+
+```khora
+fn (left: Int, right: Int) => left + right
+```
+
+Block body:
+
+```khora
+fn value => {
+  let doubled = value * 2;
+  doubled + 1
+}
+```
+
+## Pipeline `|>`
+
+First-argument insertion:
+
+```khora
+value |> transform(a, b)
+```
+
+is equivalent to:
+
+```khora
+transform(value, a, b)
+```
+
+One `_` placeholder selects another argument position:
+
+```khora
+value |> transform(a, _, b)
+```
+
+Bare unary function:
+
+```khora
+value |> normalize |> validate
+```
+
+Fallible stage:
+
+```khora
+value |> parse! |> validate(config)!
+```
+
+## Flow lambda `||>`
+
+`||>` starts a unary anonymous pipeline:
+
+```khora
+||> normalize
+|> validate!
+|> persist!
+```
+
+For example:
+
+```khora
+items |> List::map(
+  ||> normalize
+  |> validate!
+)
+```
+
+It is equivalent in shape to `fn value => value |> ...`. Following `|>` stages belong to the flow lambda until grouping ends; parenthesize the flow expression when piping the function value itself.
+
+## Operators and precedence
+
+From loosest to tightest:
+
+1. assignment `=` — right-associative
+2. pipeline `|>` — left-associative
+3. logical OR `||`
+4. logical AND `&&`
+5. comparisons `== != < > <= >=`
+6. addition/subtraction `+ -`
+7. multiplication/division/remainder `* / %`
+8. prefix negation `-` and boolean not `!`
+9. postfix call, field access, failure `!`, `catch`, and `with`
+
+Examples:
+
+```khora
+value + 1 |> double
+ready && count > 0
+!enabled
+-total
+```
+
+Prefix `!value` is boolean negation. Postfix `call()!` marks failure propagation; position disambiguates them.
+
+## Failure postfix `!`
+
+```khora
+load_user(id)!
+```
+
+The inner call keeps its normal value type while its declared failure row is allowed to leave the current computation. See [Failures](./failures.md).
+
+## `catch`
+
+```khora
+load_user(id)! catch {
+  UserError::NotFound(_) => User::guest(),
+  UserError::Unavailable(reason) => User::offline(reason),
+}
+```
+
+`catch` is postfix on the expression whose typed failures it handles.
+
+## Postfix capability installation
+
+```khora
+load_user(id)! with {
+  store: test_store,
+}
+```
+
+A named context can be supplied the same way:
+
+```khora
+load_user(id)! with Production
+```
+
+with overrides:
+
+```khora
+load_user(id)! with Production {
+  store: test_store,
+}
+```
+
+See [Capabilities](./capabilities.md).
+
+## Handler expressions
+
+```khora
+handler for Clock {
+  now: fn _ => fixed_instant,
+}
+```
+
+A handler expression produces a value implementing the named effect.
+
+## `with` blocks
+
+```khora
+with {
+  clock: fixed_clock,
+  store: test_store,
+} {
+  run_job()!
+}
+```
+
+Named context:
+
+```khora
+with Production {
+  run_server()!
+}
+```
+
+## Control-flow expressions
+
+The following forms are expressions or block-like expressions and have dedicated rules in [Control flow](./control-flow.md):
+
+```khora
+if condition { a } else { b }
+match value { Pattern => result, }
+while condition { body; }
+for pattern in iterable { body; }
+loop { body; }
+break
+break value
+continue
+return
+return value
+raise error
+```
+
+Patterns used by `match`, `for`, destructuring `let`, and `catch` are listed in [Patterns](./patterns.md).
