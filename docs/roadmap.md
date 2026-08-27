@@ -4166,6 +4166,52 @@ tidy without anybody deciding to tidy it.
 | 14.26 | **`undocumented-export`** | `khora-doc/tests/std_surface.rs` holds this floor for `std` and only for `std`, as a Rust test. As a lint it serves every package, at the level each chooses |
 | 14.27 | **Sharpen `unused-capability`** | It stays silent whenever a body contains any call, because a call may forward a capability without naming it. The fix is the per-call-site record of required labels — the *same* change 14.6 and completion want. One change, three consumers |
 
+#### Where a trivial build's two seconds go
+
+`crates/khora-codegen-llvm/tests/phases.rs` measures it, and the answer is not
+where 14.28 assumed. For a four-line `main` plus the fifteen `std` modules this
+host selects:
+
+| | |
+| --- | --- |
+| parse and type check | 0.29 s |
+| monomorphize, emit IR, verify | ~0.90 s |
+| write the object and link | 0.89 s |
+| **object produced** | **470,570 bytes** |
+| the same program with no `std` in the root | 1,685 bytes |
+
+**The program uses nothing from `std` and gets all of it anyway.**
+`khora_types::mono` is explicit that instances are found by reachability
+"starting from the functions already concrete" — and that is the whole of it:
+the root set is every non-generic function in every module.
+
+```rust
+// Roots: every function that is already concrete, in every module.
+for (index, unit) in units.iter().enumerate() {
+    for (name, _) in &unit.checked.bodies {
+```
+
+Generic functions are already demand-driven and correct. Concrete ones are
+enumerated. So `main` reaching nothing still emits `std::json`, `std::db`,
+`std::ai` and the rest, and then links them.
+
+**Why this is not a one-line change**, and why it is filed rather than done:
+
+- **The root set depends on the entry kind, which `mono` does not know.** An
+  executable's roots are `main`; a `--lib` build's are the `pub extern fn`s;
+  `compile_tests` and `compile_benches` have their own. `Entry` lives in the
+  backend, so the root set has to come from there.
+- **Correctness rests on `instantiations()` covering every way a function can
+  be named**, not only call sites — a function bound to a value, stored in a
+  capability record, or reached through a trait object. A miss is an undefined
+  symbol at link, which is loud rather than silent, but it is a miss in
+  somebody else's program rather than in this suite.
+- **It changes what the compiler emits**, so a green suite is weaker evidence
+  than usual: the untested combination is exactly the one that breaks.
+
+The payoff is large and user-facing — a 250x smaller object for a trivial
+program, most of a second of IR emission, and a shorter link on every build.
+
 #### The escape hatch has to come before the lints do
 
 `[lints]` sets a level per lint per package and that is the only dial. There is
@@ -4228,7 +4274,7 @@ process start and a link of the test harness.
 | 14.29 | ~~**Stop before the linker when nothing is run**~~ | **Dropped, measured.** The population it was for is empty. Across the codegen suite there are **406** call sites that compile, link and execute, and **11** that expect a compile error — and those eleven already never link, because `compile` returns `Err` before the object write. There is no meaningful set of tests that builds an executable it does not use |
 | 14.30 | ~~**Fewer, larger test binaries**~~ | **Dropped by 14.31.** The rationale was that cargo starts binaries sequentially. Under nextest it does not, and merging binaries would only take work away from the scheduler |
 | 14.31 | ✅ **`cargo nextest`** | **271 s → 116 s.** See below |
-| 14.35 | **A trivial `khora build` takes 2.1 seconds** | Measured while sizing 14.28: 0.29 s of it is everything up to code generation, and the rest is the object write and the link. It has nothing to do with tests and it is the first number a newcomer feels. Nothing on this roadmap is about it |
+| 14.35 | **A trivial `khora build` emits the whole standard library** | Measured, and the cause is found. A four-line `main` that uses nothing from `std` produces a **470,570-byte** object; the same program compiled without `std` in the source root produces **1,685**. Every concrete `std` function is emitted whether or not anything reaches it. The 2.1 s a newcomer waits is 0.29 s of parse and check, ~0.90 s of monomorphization and IR emission, and 0.89 s of object write and link — and the middle second, plus most of the last, is code for functions the program never calls. See below |
 | 14.32 | ✅ **Split the baseline** | Done. Two named gates with a receipt each: `sh scripts/gate.sh fast` asks about `check.sh native` (the whole test suite, front end and back end) and `sh scripts/gate.sh` asks about `baseline.sh`. **Passing the full gate satisfies the fast one**, which is the only sensible reading of a superset. The front-end-only run of `check.sh` deliberately leaves no receipt: it does not compile a single program, so there is no honest question it can be the answer to. Three distinct failures, each with its own message — no receipt at all, a receipt for another tree, and a receipt for *this* tree from the lesser gate, which is not a stale receipt and must not be reported as one |
 
 **Measured, and it argued against both.** The instrumentation came first, as

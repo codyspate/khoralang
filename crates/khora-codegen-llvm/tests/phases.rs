@@ -94,3 +94,79 @@ fn where_the_time_goes() {
         100.0 * verify / full_again
     );
 }
+
+/// The same split, for a build that includes the standard library.
+///
+/// **This is the one a person feels.** `khora build` compiles the program
+/// *and* every `std` module the host selects, which is what the codegen tests
+/// above deliberately do not do — so their 1-2 ms front end says nothing about
+/// what a real build costs. Roadmap 14.35.
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn where_a_real_build_spends_it() {
+    ensure_runtime();
+
+    let Some(std_dir) = khora_db::standard_library() else {
+        println!("\n  no standard library beside the compiler; nothing to measure\n");
+        return;
+    };
+
+    // Every `.kh` under `std` the host would select, which is what
+    // `collect_sources` hands a real build.
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    gather(&std_dir, &mut paths);
+    paths.sort();
+
+    let directory = std::env::temp_dir().join("khora-phases");
+    std::fs::create_dir_all(&directory).expect("a directory");
+    let exe = directory.join(if cfg!(windows) { "big.exe" } else { "big" });
+
+    let load = |db: &KhoraDatabase| {
+        let mut files = vec![SourceFile::new(
+            db,
+            "main.kh".into(),
+            "module app::main;\n\npub fn main() -> Int {\n  0\n}\n".to_string(),
+        )];
+        for path in &paths {
+            let text = std::fs::read_to_string(path).expect("a std file");
+            files.push(SourceFile::new(db, path.clone(), text));
+        }
+        SourceRoot::new(db, files)
+    };
+
+    let at = Instant::now();
+    let db = KhoraDatabase::new();
+    let root = load(&db);
+    khora_codegen_llvm::verify_for_target(&db, root).expect("std verifies");
+    let front = seconds(at);
+
+    let at = Instant::now();
+    let db = KhoraDatabase::new();
+    let root = load(&db);
+    khora_codegen_llvm::compile(&db, root, &exe).expect("it compiles");
+    let whole = seconds(at);
+
+    println!("\n  {} std module(s) plus a four-line program", paths.len());
+    println!("  up to and including verify   {front:7.3}s");
+    println!("  the whole build              {whole:7.3}s");
+    println!("  -> object and link           {:7.3}s", whole - front);
+    println!(
+        "  -> the back end is {:.0}% of it\n",
+        100.0 * (whole - front) / whole
+    );
+}
+
+/// Every `.kh` under `directory` this host would compile.
+fn gather(directory: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            gather(&path, out);
+        } else if path.extension().is_some_and(|e| e == "kh")
+            && khora_db::selected_for_target(&path, khora_db::host_target())
+        {
+            out.push(path);
+        }
+    }
+}
