@@ -16,7 +16,7 @@ name: release
 #
 # **Candidates go out the same way with the pre-release box ticked.** A
 # pre-release is published — installable by name, and with `install.sh --pre` —
-# and is excluded from `/releases/latest`, so it is testable without being what
+# and the installers skip it unless asked, so it is testable without being what
 # a plain `curl | sh` gets. Candidates are versions of their own,
 # `v0.2.0-rc.1` then `-rc.2`; the stable release is `v0.2.0` cut from the same
 # commit as the last candidate. Nothing is ever promoted in place, because a

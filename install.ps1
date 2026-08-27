@@ -65,15 +65,14 @@ if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
 }
 
 # Two channels, and GitHub already had them: a candidate is published as a
-# *pre-release*, which `/releases/latest` excludes. So a plain run never
-# reaches one and `-Pre` is how somebody volunteers to test. `-Pre` means
-# "include candidates" rather than "only candidates" — the narrower reading
-# would install the candidate that preceded a stable release the day after it
-# shipped.
+# *pre-release*. So a plain run never reaches one and `-Pre` is how somebody
+# volunteers to test. `-Pre` means "include candidates" rather than "only
+# candidates" — the narrower reading would install the candidate that preceded
+# a stable release the day after it shipped.
 #
-# **A 404 from `/releases/latest` is an answer, not a failure**, and it is the
+# **A failed request is an answer, not a failure**, and an empty list is the
 # answer whenever every release so far is a candidate. `Invoke-RestMethod`
-# throws on one, and `$ErrorActionPreference = "Stop"` turns that into a page
+# throws on a 404, and `$ErrorActionPreference = "Stop"` turns that into a page
 # of PowerShell exception text ending in `WebCmdletWebResponseException` --
 # which sends the reader to look at their network for something that is
 # working exactly as designed. So it is caught, and what is said instead names
@@ -86,19 +85,36 @@ function Ask($url) {
     }
 }
 
+# **`/releases/latest` is not asked any more, and the reason is a bug this
+# had.** It means "the newest release in this repository that is not a draft or
+# a pre-release" -- the whole repository. The VS Code extension is released
+# from here too, on `vscode-v*` tags, and it is not a pre-release, because
+# there is nothing provisional about it. So `/releases/latest` began returning
+# the editor extension, `TrimStart("v")` turned `vscode-v0.3.0` into
+# `scode-v0.3.0`, and a plain run went looking for
+# `khora-scode-v0.3.0-<triple>.zip`. `-Pre` broke the same way, because
+# `/releases` is newest first and the extension was newest.
+#
+# A tag names a toolchain when it is `v` and then a digit. `vscode-v0.3.0` also
+# starts with `v`; the digit is what tells them apart.
+function Toolchains($repo) {
+    $all = Ask "https://api.github.com/repos/$repo/releases"
+    if (-not $all) { return @() }
+    @($all | Where-Object { $_.tag_name -match '^v[0-9]' -and -not $_.draft })
+}
+
 if ($Version) {
     $tag = "v" + $Version.TrimStart("v")
 } elseif ($Pre) {
-    $all = Ask "https://api.github.com/repos/$Repo/releases"
-    $tag = ($all | Select-Object -First 1).tag_name
+    $tag = (Toolchains $Repo | Select-Object -First 1).tag_name
     if (-not $tag) { Fail "nothing has been released yet.`nSee https://github.com/$Repo/releases" }
 } else {
-    $tag = (Ask "https://api.github.com/repos/$Repo/releases/latest").tag_name
+    $toolchains = Toolchains $Repo
+    $tag = ($toolchains | Where-Object { -not $_.prerelease } | Select-Object -First 1).tag_name
     if (-not $tag) {
         # Distinguish "nothing at all" from "candidates only", because the two
         # want different things from the reader.
-        $any = Ask "https://api.github.com/repos/$Repo/releases"
-        $newest = ($any | Select-Object -First 1).tag_name
+        $newest = ($toolchains | Select-Object -First 1).tag_name
         if ($newest) {
             Fail @"
 no stable release yet. The newest is $newest, which is a candidate.

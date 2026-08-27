@@ -142,21 +142,56 @@ else
     die "this needs \`curl\` or \`wget\` and cannot find either"
 fi
 
-# The newest stable release. `/releases/latest` already excludes drafts and
-# pre-releases, which is the whole reason candidates are published as
-# pre-releases: there is nothing extra to filter here.
+# Every toolchain release, newest first, as `<tag> pre` or `<tag> stable`.
 #
-# Read without a JSON parser — one field, one line, and `jq` is not on a fresh
-# machine.
-latest() {
-    fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" \
+# **`/releases/latest` is not asked any more, and the reason is a bug this
+# had.** That endpoint means "the newest release in this repository that is
+# not a draft or a pre-release" — the whole repository. The VS Code extension
+# is released from here too, on `vscode-v*` tags, and it is not a pre-release,
+# because there is nothing provisional about it. So `/releases/latest` began
+# returning the editor extension, `${TAG#v}` turned `vscode-v0.3.0` into
+# `scode-v0.3.0`, and a plain `curl | sh` went looking for
+# `khora-scode-v0.3.0-<triple>.tar.gz`. `--pre` broke the same way, because
+# `/releases` is newest first and the extension was newest.
+#
+# So the filtering happens here: keep the tags that name a toolchain, and
+# choose between stable and candidate from the release's own flag.
+#
+# Read without a JSON parser — `jq` is not on a fresh machine. `tr` puts one
+# field on each line, and `awk` pairs each `tag_name` with the `prerelease`
+# that follows it inside the same release. The fields GitHub sends before
+# `tag_name` — `url`, `id`, `author`, `node_id` — contain no `prerelease`, so
+# the pairing cannot cross from one release into the next.
+#
+# A tag names a toolchain when it is `v` and then a digit. `vscode-v0.3.0`
+# also starts with `v`; the digit is what tells them apart.
+releases() {
+    fetch_stdout "https://api.github.com/repos/$REPO/releases" \
         | tr ',' '\n' \
-        | sed -n 's/.*"tag_name"[ ]*:[ ]*"\([^"]*\)".*/\1/p' \
-        | head -1
+        | awk '
+            /"tag_name"[ ]*:/ {
+                tag = $0
+                sub(/.*"tag_name"[ ]*:[ ]*"/, "", tag)
+                sub(/".*/, "", tag)
+                next
+            }
+            /"prerelease"[ ]*:/ {
+                if (tag ~ /^v[0-9]/) {
+                    print tag, ($0 ~ /true/ ? "pre" : "stable")
+                }
+                tag = ""
+            }
+        '
 }
 
-# The newest release of any kind. `/releases` is newest first, so this is the
-# first `tag_name` in it.
+# The newest stable toolchain. Empty when every release so far is a candidate,
+# which is a state this repository has been in for its whole life and which the
+# caller reports rather than papering over.
+latest() {
+    releases | awk '$2 == "stable" { print $1; exit }'
+}
+
+# The newest toolchain of any kind.
 #
 # **Newest, not "newest candidate".** `--pre` means "include candidates", the
 # way it does everywhere else, rather than "only candidates". The difference
@@ -164,10 +199,7 @@ latest() {
 # would install the candidate that *preceded* it, which is older than what a
 # plain install gets and is nobody's idea of the bleeding edge.
 newest_any() {
-    fetch_stdout "https://api.github.com/repos/$REPO/releases" \
-        | tr ',' '\n' \
-        | sed -n 's/.*"tag_name"[ ]*:[ ]*"\([^"]*\)".*/\1/p' \
-        | head -1
+    releases | awk '{ print $1; exit }'
 }
 
 # `<file>.sha256` holds `<digest>  <name>`, as `sha256sum` writes it.

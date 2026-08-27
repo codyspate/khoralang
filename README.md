@@ -50,8 +50,9 @@ The installer checks before downloading anything and says so.
 ### Release candidates
 
 **Before there is a stable release, this is the install.** A candidate is
-published as a GitHub pre-release, which `/releases/latest` excludes — so the
-plain command above cannot reach one, and says so rather than failing oddly.
+published as a GitHub pre-release, and the plain command above takes only the
+newest release that is not one — so it cannot reach a candidate, and says so
+rather than failing oddly.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/codyspate/khoralang/main/install.sh | sh -s -- --pre

@@ -15,12 +15,19 @@
 //! GitHub, by tag, following the same rules as `install.sh` so the two cannot
 //! disagree about which version is "latest":
 //!
-//! - A stable release is what `/releases/latest` returns; it excludes drafts
-//!   and pre-releases.
+//! - A stable release is the newest *toolchain* release that is not a
+//!   pre-release.
 //! - A candidate is published as a *pre-release*, so `--pre` — "include
 //!   candidates", never "only candidates" — takes the newest of any kind.
 //! - `--version` takes one verbatim, latest or not, which is how somebody goes
 //!   back.
+//!
+//! **"Toolchain" is doing work in those sentences.** This repository releases
+//! more than one thing: `vscode-v0.3.0` is the VS Code extension, on tags and a
+//! schedule of its own. It is not a pre-release — there is nothing provisional
+//! about it — so `/releases/latest`, which means "newest thing here that is not
+//! a draft or a candidate", returns it. That endpoint is not asked any more.
+//! Everything reads `/releases` and keeps the tags that name a toolchain.
 //!
 //! # What is shelled out to, and why
 //!
@@ -79,27 +86,28 @@ pub enum Wanted {
 /// Turns [`Wanted`] into a version number, asking GitHub when it has to.
 pub fn resolve(wanted: &Wanted) -> Result<String> {
     let repo = repository();
-    let (url, describe) = match wanted {
+    let describe = match wanted {
         Wanted::Exactly(version) => return Ok(version.trim_start_matches('v').to_string()),
-        Wanted::Latest => {
-            (format!("https://api.github.com/repos/{repo}/releases/latest"), "stable")
-        }
-        Wanted::Newest => (format!("https://api.github.com/repos/{repo}/releases"), "newest"),
+        Wanted::Latest => "stable",
+        Wanted::Newest => "newest",
     };
 
+    // One endpoint for both questions. `/releases/latest` would answer the
+    // stable one in a single request, and would answer it with the editor
+    // extension -- see the module header. Choosing here costs a longer body and
+    // makes both answers come from the same rule.
+    let url = format!("https://api.github.com/repos/{repo}/releases");
     let body =
         fetch_body(&url).with_context(|| format!("asking GitHub for the {describe} release"))?;
-    if let Some(tag) = first_tag(&body) {
-        // `/releases` is newest first, so the first tag is the answer for both
-        // shapes: an object for `latest`, an array for the rest.
+    if let Some(tag) = newest_toolchain(&body, matches!(wanted, Wanted::Latest)) {
         return Ok(tag.trim_start_matches('v').to_string());
     }
 
-    // **A 404 here is an answer, not a failure**, which is why this request
-    // does not ask curl to treat one as an error. `/releases/latest` 404s when
-    // every release so far is a pre-release — a repository with three
-    // candidates and no stable version is in exactly that state, and telling
-    // somebody their download failed would send them looking at their network.
+    // **An empty answer is an answer, not a failure**, which is why this
+    // request does not ask curl to treat a 404 as an error. A repository whose
+    // releases are all candidates has no stable toolchain to return, and
+    // telling somebody their download failed would send them looking at their
+    // network for something working exactly as designed.
     match complaint(&body) {
         Some(said) if said.eq_ignore_ascii_case("Not Found") || said.is_empty() => {}
         Some(said) => bail!("GitHub said: {said}"),
@@ -127,18 +135,78 @@ fn complaint(body: &str) -> Option<String> {
     Some(value[..close].to_string())
 }
 
-/// The first `"tag_name"` in a GitHub API response.
+/// Whether a tag names a toolchain release rather than something else the
+/// repository publishes.
+///
+/// A toolchain tag is `v` and then a digit. `vscode-v0.3.0` also begins with
+/// `v`, which is exactly the trap: `trim_start_matches('v')` turns it into
+/// `scode-v0.3.0` and the installer goes looking for
+/// `khora-scode-v0.3.0-<triple>.tar.gz`. The digit is what tells them apart.
+fn names_a_toolchain(tag: &str) -> bool {
+    tag.strip_prefix('v').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// The value of a string field, read from the start of `chunk`.
 ///
 /// One field out of a document nothing else here reads, so no JSON parser: a
 /// tag cannot contain a quote, and this is the same read `install.sh` does with
 /// `sed`, for the same reason.
-fn first_tag(body: &str) -> Option<String> {
-    let at = body.find("\"tag_name\"")?;
-    let rest = &body[at + "\"tag_name\"".len()..];
+fn string_field(chunk: &str, key: &str) -> Option<String> {
+    let at = chunk.find(key)?;
+    let rest = chunk[at + key.len()..].trim_start().strip_prefix(':')?;
     let open = rest.find('"')?;
     let value = &rest[open + 1..];
     let close = value.find('"')?;
     Some(value[..close].to_string())
+}
+
+/// The value of a boolean field in `chunk`.
+///
+/// Written out rather than matched against `"prerelease":true`, because GitHub
+/// sends `"prerelease": true` with a space and a literal would silently read
+/// every candidate as stable.
+fn bool_field(chunk: &str, key: &str) -> Option<bool> {
+    let at = chunk.find(key)?;
+    let rest = chunk[at + key.len()..].trim_start().strip_prefix(':')?.trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The newest toolchain tag in a `/releases` body, skipping candidates when
+/// `stable_only`.
+///
+/// `/releases` is newest first, so the first match is the answer.
+///
+/// The body is cut into one chunk per release at each `"tag_name"`. A release's
+/// `"prerelease"` follows its own `"tag_name"` and precedes the next one, so a
+/// chunk holds exactly one release's flag — the fields GitHub puts before
+/// `tag_name` (`url`, `id`, `author`, `node_id`) contain no `prerelease`.
+///
+/// A release with no `"prerelease"` at all is treated as stable, which is the
+/// reading that fails towards offering somebody a real release rather than
+/// hiding one.
+fn newest_toolchain(body: &str, stable_only: bool) -> Option<String> {
+    const KEY: &str = "\"tag_name\"";
+    let mut cuts: Vec<usize> = body.match_indices(KEY).map(|(at, _)| at).collect();
+    cuts.push(body.len());
+
+    for pair in cuts.windows(2) {
+        let chunk = &body[pair[0]..pair[1]];
+        let Some(tag) = string_field(chunk, KEY) else { continue };
+        if !names_a_toolchain(&tag) {
+            continue;
+        }
+        if stable_only && bool_field(chunk, "\"prerelease\"").unwrap_or(false) {
+            continue;
+        }
+        return Some(tag);
+    }
+    None
 }
 
 /// Downloads, verifies and unpacks a release into `<home>/toolchains/<version>`.
@@ -480,21 +548,66 @@ mod tests {
 
     #[test]
     fn a_tag_is_read_out_of_what_github_sends() {
-        let body = r#"{"url":"https://x","id":1,"tag_name":"v0.2.0","name":"0.2.0"}"#;
-        assert_eq!(first_tag(body).as_deref(), Some("v0.2.0"));
+        let body = r#"[{"url":"https://x","id":1,"tag_name":"v0.2.0","name":"0.2.0"}]"#;
+        assert_eq!(newest_toolchain(body, false).as_deref(), Some("v0.2.0"));
     }
 
     /// `/releases` is newest first, so the first tag is the newest release.
     #[test]
     fn the_first_tag_of_a_list_is_the_one_taken() {
         let body = r#"[{"tag_name":"v0.3.0-rc.1"},{"tag_name":"v0.2.0"}]"#;
-        assert_eq!(first_tag(body).as_deref(), Some("v0.3.0-rc.1"));
+        assert_eq!(newest_toolchain(body, false).as_deref(), Some("v0.3.0-rc.1"));
     }
 
     #[test]
     fn a_response_with_no_tag_is_none() {
-        assert_eq!(first_tag("[]"), None);
-        assert_eq!(first_tag(r#"{"message":"Not Found"}"#), None);
+        assert_eq!(newest_toolchain("[]", false), None);
+        assert_eq!(newest_toolchain(r#"{"message":"Not Found"}"#, false), None);
+    }
+
+    /// The regression that made this a filter rather than a `find`. The editor
+    /// extension is released from this repository, on `vscode-v*` tags, and it
+    /// is not a pre-release -- so it is the newest release of any kind, and the
+    /// newest that GitHub itself calls "latest". An installer that took it
+    /// would ask for `khora-scode-v0.3.0-<triple>.tar.gz`.
+    #[test]
+    fn the_editor_extension_is_not_a_toolchain() {
+        let body = r#"[
+            {"tag_name":"vscode-v0.3.0","prerelease":false},
+            {"tag_name":"v0.1.0-rc.3","prerelease":true},
+            {"tag_name":"v0.0.9","prerelease":false}
+        ]"#;
+        assert_eq!(newest_toolchain(body, false).as_deref(), Some("v0.1.0-rc.3"));
+        assert_eq!(newest_toolchain(body, true).as_deref(), Some("v0.0.9"));
+    }
+
+    /// Every release so far being a candidate is the state this repository is
+    /// actually in, and a plain install has to say so rather than offer one.
+    #[test]
+    fn candidates_only_means_there_is_no_stable_release() {
+        let body = r#"[{"tag_name":"v0.1.0-rc.3","prerelease":true}]"#;
+        assert_eq!(newest_toolchain(body, true), None);
+        assert_eq!(newest_toolchain(body, false).as_deref(), Some("v0.1.0-rc.3"));
+    }
+
+    /// GitHub sends `"prerelease": true`, with a space. Matching the literal
+    /// `"prerelease":true` would read every candidate as stable and hand one to
+    /// somebody who asked for a stable release.
+    #[test]
+    fn the_flag_is_read_with_whitespace_where_github_puts_it() {
+        let body = r#"[{"tag_name": "v0.1.0-rc.3", "prerelease": true}]"#;
+        assert_eq!(newest_toolchain(body, true), None);
+        assert_eq!(bool_field(r#""prerelease": false"#, "\"prerelease\""), Some(false));
+    }
+
+    /// A tag is matched by its shape, not by a list: `v` and then a digit.
+    #[test]
+    fn what_counts_as_a_toolchain_tag() {
+        assert!(names_a_toolchain("v0.1.0"));
+        assert!(names_a_toolchain("v10.2.3-rc.1"));
+        assert!(!names_a_toolchain("vscode-v0.3.0"));
+        assert!(!names_a_toolchain("nightly"));
+        assert!(!names_a_toolchain("0.1.0"));
     }
 
     /// `--version 0.2.0` and `--version v0.2.0` are the same request: the

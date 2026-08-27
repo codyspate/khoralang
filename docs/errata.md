@@ -1479,3 +1479,67 @@ disagreement go away; the thing that worked was making the disagreement
 describe itself. `Miss` and `KHORA_CACHE_EXPLAIN` are shipped, not scaffolding
 — a cache that cannot say why it missed is a cache nobody can maintain, and the
 next person to hit this deserves the sentence rather than the three guesses.
+
+## 52. Publishing a second thing broke the installer for the first
+
+Releasing the VS Code extension on its own `vscode-v*` tag broke
+`curl | sh`, in the twenty minutes between pushing the tag and noticing.
+
+`install.sh`, `install.ps1` and `khora toolchain install` all asked GitHub the
+same question:
+
+    https://api.github.com/repos/<repo>/releases/latest
+
+That endpoint does not mean "the newest version of your software". It means
+**the newest release in this repository that is not a draft and not a
+pre-release** — the whole repository, everything published from it.
+
+Every Khora toolchain release so far is a candidate, published as a
+pre-release. That was deliberate: it is how the two channels are built, and it
+is why a plain install correctly said "no stable release yet" while `--pre`
+found one. With only pre-releases present the endpoint 404s, and all three
+installers treat that 404 as an answer rather than an error — there is a
+paragraph in each of them saying so.
+
+Then `vscode-v0.3.0` was published. The extension is not provisional, so it is
+not a pre-release. It became the only non-pre-release in the repository, and
+therefore the answer to `/releases/latest`.
+
+What the installers then did with it is the part worth remembering:
+
+```sh
+TAG=vscode-v0.3.0
+NUMBER=${TAG#v}            # scode-v0.3.0
+BUNDLE="khora-$NUMBER-$TRIPLE.tar.gz"
+```
+
+`v` was being stripped by prefix, because every tag it had ever seen started
+with `v` and then a digit. `vscode-` starts with `v` too. So a fresh
+`curl -fsSL … | sh` went looking for
+`khora-scode-v0.3.0-x86_64-unknown-linux-gnu.tar.gz`, which has never existed,
+and reported a download failure naming a version nobody had ever released.
+
+`--pre` was left standing by luck rather than by design: it takes the first
+entry of `/releases`, and GitHub happened to order the older candidate ahead of
+the newer extension. Nothing guaranteed that.
+
+**The fix is that `/releases/latest` is no longer asked, anywhere.** All three
+installers list `/releases` and filter to the tags that name a toolchain — `v`
+followed by a digit — then pick the newest, or the newest that is not a
+pre-release, from the release's own flag. The filtering is theirs to do,
+because "which of the things this repository publishes is a compiler" is not a
+question GitHub has been told the answer to.
+
+**What generalises.** A repository that publishes one artifact can let the
+forge decide what "latest" means. The moment it publishes two, that endpoint
+starts answering a question nobody asked, and it answers it with a 200 and a
+plausible-looking tag rather than an error. The failure surfaced in the
+*consumer* — an installer for a component that had not changed — days or
+minutes after a change to something unrelated.
+
+The `v`-prefix strip is the second half. `trim_start_matches('v')` and
+`${TAG#v}` were reasonable when one tag series existed; they are silent
+corruption when a second one shares the first letter. Neither had a test with
+a tag it should refuse, because a tag it should refuse could not previously
+exist. `names_a_toolchain` is now a named predicate with those cases written
+down, in all three implementations.
