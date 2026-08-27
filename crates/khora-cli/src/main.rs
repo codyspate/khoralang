@@ -17,6 +17,8 @@ use khora_diagnostics::{
 };
 use khora_manifest::LintLevel;
 
+mod affected;
+
 #[derive(Parser)]
 #[command(
     name = "khora",
@@ -34,6 +36,15 @@ enum Command {
     Check {
         /// One or more `.kh` files, or directories to walk.
         paths: Vec<PathBuf>,
+        /// Only the members a diff since this revision can reach.
+        ///
+        /// A branch, a tag or a commit -- anything `git diff` takes. Exact
+        /// rather than heuristic: the resolver already knows which packages
+        /// each member compiles. A changed file that belongs to no member and
+        /// to nothing a member depends on selects *everything*, and says which
+        /// file did it. Only at a workspace root. `docs/roadmap.md` 14.16.
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
     },
     /// Print the token stream.
     Lex { path: PathBuf },
@@ -51,6 +62,15 @@ enum Command {
         /// Report which files would change instead of writing them.
         #[arg(long)]
         check: bool,
+        /// Only the members a diff since this revision can reach.
+        ///
+        /// A branch, a tag or a commit -- anything `git diff` takes. Exact
+        /// rather than heuristic: the resolver already knows which packages
+        /// each member compiles. A changed file that belongs to no member and
+        /// to nothing a member depends on selects *everything*, and says which
+        /// file did it. Only at a workspace root. `docs/roadmap.md` 14.16.
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
     },
     /// Manage the Khora versions installed on this machine.
     Toolchain {
@@ -243,8 +263,8 @@ enum ToolchainCommand {
 fn run() -> Result<bool> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Check { paths } => check(&paths),
-        Command::Fmt { paths, check } => fmt(&paths, check),
+        Command::Check { paths, since } => check(&paths, since.as_deref()),
+        Command::Fmt { paths, check, since } => fmt(&paths, check, since.as_deref()),
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out, lib, release } => {
@@ -272,11 +292,56 @@ fn run() -> Result<bool> {
 /// resolves one manifest for several programs and finds neither the
 /// dependency nor the reason it was missing. `scripts/baseline.sh` had that
 /// loop written in shell, with a comment explaining the workaround.
-fn check(paths: &[PathBuf]) -> Result<bool> {
+fn check(paths: &[PathBuf], since: Option<&str>) -> Result<bool> {
     if let Some(members) = workspace_members(paths) {
-        return over_members(&members, "check", |directory| check_one(std::slice::from_ref(directory)));
+        let members = narrow(paths, &members, since)?;
+        return over_members(&members, "check", |directory| {
+            check_one(std::slice::from_ref(directory))
+        });
+    }
+    if since.is_some() {
+        anyhow::bail!(
+            "`--since` selects members of a workspace, and this is not a workspace root. \
+             Run it where the `[workspace]` table is"
+        );
     }
     check_one(paths)
+}
+
+/// The members a `--since` diff can reach, reporting what it left out.
+///
+/// Without `--since`, everything, unchanged. **The report is not optional**: a
+/// command that quietly ran a third of what its name implies is one nobody can
+/// read a green tick from, and the skipped list is how somebody checks the
+/// answer against what they believe they changed.
+fn narrow(paths: &[PathBuf], members: &[PathBuf], since: Option<&str>) -> Result<Vec<PathBuf>> {
+    let Some(since) = since else { return Ok(members.to_vec()) };
+    let root = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+    let selection = affected::select(&root, members, since)?;
+
+    if let Some(file) = &selection.everything_because {
+        println!(
+            "every member, because {} is not inside any of them or anything they depend on",
+            file.display()
+        );
+        return Ok(selection.members);
+    }
+    if selection.members.is_empty() {
+        println!("no member is affected by the changes since {since}");
+    } else if !selection.skipped.is_empty() {
+        println!(
+            "{} of {} member(s) affected since {since}; skipping {}",
+            selection.members.len(),
+            members.len(),
+            selection
+                .skipped
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(selection.members)
 }
 
 /// The members of the workspace `paths` names, if it names exactly one and
@@ -810,10 +875,19 @@ fn lsp() -> Result<()> {
 }
 
 /// Formats files in place, or reports which would change.
-fn fmt(paths: &[PathBuf], check: bool) -> Result<bool> {
+fn fmt(paths: &[PathBuf], check: bool, since: Option<&str>) -> Result<bool> {
     if let Some(members) = workspace_members(paths) {
+        let members = narrow(paths, &members, since)?;
         let verb = if check { "check formatting" } else { "format" };
-        return over_members(&members, verb, |directory| fmt_one(std::slice::from_ref(directory), check));
+        return over_members(&members, verb, |directory| {
+            fmt_one(std::slice::from_ref(directory), check)
+        });
+    }
+    if since.is_some() {
+        anyhow::bail!(
+            "`--since` selects members of a workspace, and this is not a workspace root. \
+             Run it where the `[workspace]` table is"
+        );
     }
     fmt_one(paths, check)
 }

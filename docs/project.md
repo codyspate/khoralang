@@ -280,6 +280,21 @@ still be left out.
 `khora check` and `khora fmt` at a root run over every member, each as its own
 package with its own dependencies, and every member runs even after one fails.
 
+`--since <rev>` narrows either command to the members a diff can reach:
+
+```
+$ khora check . --since main
+1 of 8 member(s) affected since main; skipping examples/core_demo, ...
+```
+
+Exact rather than inferred. The resolver already knows which directories each
+member compiles, so a change inside a *dependency* selects the members that
+reach it and not the ones that do not. A changed file inside no member and
+inside nothing a member depends on — the compiler, the root manifest, a script
+— selects **every** member and says which file did it: a tool that answers
+"nothing was affected" about a file it did not recognise is worse than no tool.
+Untracked files count.
+
 There is one `khora.lock`, at the root, and every member seeds the resolution
 that writes it. So two members cannot quietly hold two revisions of a shared
 dependency: the second one to ask is refused, naming both. The cost is that
