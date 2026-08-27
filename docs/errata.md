@@ -1689,3 +1689,89 @@ purpose. It was found by writing the negative case for a new feature -- the
 test asserting that the **old** behaviour still worked -- which is an argument
 for writing those even when the answer seems obvious. The answer was not what
 anybody would have guessed.
+
+## 55. Two modules importing each other panicked the compiler
+
+Seven lines, and `khora check` exits 101 with a Rust backtrace:
+
+```khora
+// a.kh                        // b.kh
+module demo::a;                module demo::b;
+import demo::b::{b};           import demo::a::{a};
+pub fn a() -> Int { 1 }        pub fn b() -> Int { a() }
+```
+
+```
+thread 'main' panicked at salsa-0.28.2/src/function/fetch.rs:176:21:
+dependency graph cycle when querying type_map(Id(0)),
+set cycle_fn/cycle_initial to fixpoint iterate.
+Query stack:
+[ diagnostics(Id(0)), derive_report(Id(0)), type_map(Id(0)),
+  type_map(Id(1)), derived(Id(1)), file_scope(Id(1)) ]
+```
+
+### Where it came from
+
+`type_map` resolves an imported name by asking the exporting file for *its*
+`type_map`:
+
+```rust
+let exported = type_map(db, source);     // khora-types/src/map.rs
+```
+
+with one guard beside it:
+
+```rust
+if source == file { continue; }
+```
+
+That catches a file importing itself and nothing else. Two files importing
+each other each ask for the other, for ever. Salsa cannot know that the
+recursion is the program's fault rather than the compiler's, so it panics --
+and its message suggests `cycle_fn`/`cycle_initial`, which is advice for a
+query that is *meant* to converge. This one is not; it is a user error that
+had never been given a diagnostic.
+
+### The fix, and which layer it belongs to
+
+Two new queries in `khora-hir`:
+
+- `module_imports(file)` -- the module paths one file imports, and nothing
+  else. Separate from `item_map` on purpose: a map carries ranges, so every
+  edit that moved a span would rebuild the cycle check and everything behind
+  it. A list of paths changes only when an `import` line does.
+- `import_cycles(root)` -- depth-first from each module, looking for a way back
+  to itself.
+
+The refusal goes in `file_scope`, which is the layer that matters: it is what
+builds `scope.origins`, and `import_types` walks `scope.origins` to decide
+whose `type_map` to ask for. Drop the import there and the recursion never
+starts. Reporting it in `type_map` instead would have been reporting it after
+the crash.
+
+The message names both modules and draws the ring:
+
+```
+error: `demo.a` and `demo.b` import each other: demo.a -> demo.b -> demo.a.
+       Move what they share into a module they can both import
+```
+
+### What generalises
+
+**A cycle in the input becomes a cycle in the query graph**, and a memoizing
+compiler turns that into a panic rather than an error, in a component that
+knows nothing about the language. Salsa is right to panic -- a cyclic query
+graph *is* a bug in the caller -- but the caller here is a compiler being told
+about a cyclic program, and the distinction has to be made before the query
+runs, not inside it.
+
+The cheap way to find the rest of these is to ask which queries take a
+`SourceFile` and call themselves on a *different* one. `type_map` was the only
+one, because it is the only place a file's meaning depends on another file's
+meaning rather than on its surface: `file_scope` and `module_api` reach across
+files too, and both stop at what a file *declares*, which cannot cycle.
+
+The five tests are the fix and its boundary: a two-module ring, a three-module
+ring, a plain assertion that it does not panic, and -- the two that matter --
+a diamond and a chain, neither of which is a cycle and both of which a
+careless reachability check would call one.

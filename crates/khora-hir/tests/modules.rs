@@ -427,3 +427,82 @@ fn a_trait_method_needs_no_export_on_the_impl() {
         ),
     ]);
 }
+
+// --- import cycles ---------------------------------------------------------
+//
+// A cycle used to be a **panic**, not a diagnostic: `type_map` resolves an
+// imported name by asking the exporting file for its `type_map`, so two
+// modules importing each other asked for each other for ever and Salsa gave
+// up with `dependency graph cycle when querying type_map`. Errata 55.
+
+/// Two modules importing each other is an error with a message, and the
+/// message draws the cycle.
+#[test]
+fn a_two_module_cycle_is_reported() {
+    assert_reports(
+        &[
+            ("a.kh", "module demo::a;\nimport demo::b::{b};\npub fn a() -> Int { 1 }\n"),
+            ("b.kh", "module demo::b;\nimport demo::a::{a};\npub fn b() -> Int { a() }\n"),
+        ],
+        "import each other",
+    );
+}
+
+/// And it does not crash, which is the whole point. `assert_reports` would
+/// panic with the query stack rather than fail, so this says it plainly.
+#[test]
+fn a_cycle_does_not_panic() {
+    let found = errors(&[
+        ("a.kh", "module demo::a;\nimport demo::b::{b};\npub fn a() -> Int { 1 }\n"),
+        ("b.kh", "module demo::b;\nimport demo::a::{a};\npub fn b() -> Int { a() }\n"),
+    ]);
+    assert!(!found.is_empty(), "a cycle has to be reported, not ignored");
+}
+
+/// Three modules round a ring, which the two-module check would miss.
+#[test]
+fn a_longer_cycle_is_reported() {
+    assert_reports(
+        &[
+            ("a.kh", "module demo::a;\nimport demo::b::{b};\npub fn a() -> Int { b() }\n"),
+            ("b.kh", "module demo::b;\nimport demo::c::{c};\npub fn b() -> Int { c() }\n"),
+            ("c.kh", "module demo::c;\nimport demo::a::{a};\npub fn c() -> Int { a() }\n"),
+        ],
+        "import each other",
+    );
+}
+
+/// **A diamond is not a cycle**, and this is the case a careless reachability
+/// check turns into one: two modules importing a third, and a fourth importing
+/// both. Nothing here can reach itself.
+#[test]
+fn a_diamond_is_not_a_cycle() {
+    assert_clean(&[
+        ("base.kh", "module demo::base;\npub fn base() -> Int { 1 }\n"),
+        (
+            "left.kh",
+            "module demo::left;\nimport demo::base::{base};\npub fn left() -> Int { base() }\n",
+        ),
+        (
+            "right.kh",
+            "module demo::right;\nimport demo::base::{base};\npub fn right() -> Int { base() }\n",
+        ),
+        (
+            "top.kh",
+            "module demo::top;\n\
+             import demo::left::{left};\n\
+             import demo::right::{right};\n\
+             pub fn top() -> Int { left() + right() }\n",
+        ),
+    ]);
+}
+
+/// A chain is not a cycle either, however long.
+#[test]
+fn a_chain_is_not_a_cycle() {
+    assert_clean(&[
+        ("a.kh", "module demo::a;\npub fn a() -> Int { 1 }\n"),
+        ("b.kh", "module demo::b;\nimport demo::a::{a};\npub fn b() -> Int { a() }\n"),
+        ("c.kh", "module demo::c;\nimport demo::b::{b};\npub fn c() -> Int { b() }\n"),
+    ]);
+}

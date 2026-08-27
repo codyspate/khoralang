@@ -479,6 +479,76 @@ pub fn module_graph(db: &dyn Db, root: khora_db::SourceRoot) -> ModuleGraph {
     graph
 }
 
+/// The modules one file imports, and nothing else.
+///
+/// Separate from [`item_map`] so that [`import_cycles`] can be built without
+/// depending on it: a map carries ranges, so every edit that moves a span
+/// would rebuild the cycle check and everything behind it. A list of paths
+/// changes only when an `import` line does.
+#[salsa::tracked(returns(ref))]
+pub fn module_imports(db: &dyn Db, file: SourceFile) -> Vec<ModulePath> {
+    item_map(db, file).imports.iter().map(|i| i.path.clone()).collect()
+}
+
+/// Import cycles, as the modules on them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImportCycles {
+    /// One entry per module that can reach itself through imports, holding a
+    /// path back to itself for the message.
+    through: Vec<(ModulePath, Vec<ModulePath>)>,
+}
+
+impl ImportCycles {
+    /// The cycle `module` sits on, if it sits on one.
+    pub fn through(&self, module: &ModulePath) -> Option<&[ModulePath]> {
+        self.through.iter().find(|(m, _)| m == module).map(|(_, path)| path.as_slice())
+    }
+}
+
+/// Which modules import themselves, directly or through others.
+///
+/// **A cycle is an error rather than a shape to support**, and finding it here
+/// is what stops it being a crash. `type_map` resolves an imported name by
+/// asking for the exporting file's `type_map`, so two modules that import each
+/// other ask for each other for ever -- and Salsa, which has no way to know
+/// the recursion is the program's fault rather than the compiler's, panics
+/// with `dependency graph cycle when querying type_map`. Seven lines of Khora
+/// were enough. Errata 55.
+///
+/// Built from paths alone, so it costs one walk of the imports and is
+/// invalidated only by an `import` line changing.
+#[salsa::tracked(returns(ref))]
+pub fn import_cycles(db: &dyn Db, root: khora_db::SourceRoot) -> ImportCycles {
+    let graph = module_graph(db, root);
+    let mut out = ImportCycles::default();
+
+    for start in graph.paths() {
+        // Depth-first from `start`, looking only for a way back to it. The
+        // first one found is the one reported: a module on two cycles has one
+        // problem, and naming both would not help fix either.
+        let mut stack = vec![(start.clone(), vec![start.clone()])];
+        let mut seen: Vec<ModulePath> = Vec::new();
+        while let Some((at, path)) = stack.pop() {
+            if seen.contains(&at) {
+                continue;
+            }
+            seen.push(at.clone());
+            let Some(file) = graph.file(&at) else { continue };
+            for next in module_imports(db, file) {
+                let mut path = path.clone();
+                path.push(next.clone());
+                if *next == *start {
+                    out.through.push((start.clone(), path));
+                    stack.clear();
+                    break;
+                }
+                stack.push((next.clone(), path));
+            }
+        }
+    }
+    out
+}
+
 /// Every name a file can use without qualifying it.
 ///
 /// One entry per *bare* name: what this file declares, plus what it imported.
@@ -546,6 +616,8 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     let Some(root) = khora_db::source_root(db) else { return out };
     let graph = module_graph(db, root);
 
+    let cycles = import_cycles(db, root);
+
     for import in &map.imports {
         let Some(source) = graph.file(&import.path) else {
             out.errors.push(HirError {
@@ -554,6 +626,29 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             });
             continue;
         };
+        // **A cycle is refused here, and that is what keeps it from being a
+        // crash.** Dropping the import rather than resolving it means
+        // `import_types` never asks the other module for its `type_map`,
+        // which is where the recursion was. Errata 55.
+        if let Some(mine) = map.module.as_ref() {
+            if let Some(path) = cycles.through(mine) {
+                if path.contains(&import.path) {
+                    let drawn: Vec<String> =
+                        path.iter().map(ModulePath::to_string).collect();
+                    out.errors.push(HirError {
+                        message: format!(
+                            "`{}` and `{}` import each other: {}. Move what they \
+                             share into a module they can both import",
+                            mine,
+                            import.path,
+                            drawn.join(" -> ")
+                        ),
+                        range: import.range,
+                    });
+                    continue;
+                }
+            }
+        }
         let exported = module_api(db, source);
 
         match &import.kind {
