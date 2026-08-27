@@ -53,9 +53,10 @@ Arguments need `sh -s --` when this is piped:
 
     curl -fsSL .../install.sh | sh -s -- --pre
 
-A candidate is published as a pre-release, which the API's idea of "latest"
-excludes -- so a plain run never reaches one, and --pre is how somebody
-volunteers to test. It means "candidates as well", not "candidates only".
+A candidate is published as a pre-release, and a plain run takes only the
+newest release that is not one -- so it never reaches a candidate, and --pre
+is how somebody volunteers to test. It means "candidates as well", not
+"candidates only".
 
 Nothing is compiled, nothing needs root, and `rm -rf ~/.khora` undoes it.
 END

@@ -105,6 +105,24 @@ jobs:
             || { echo "no language client in $file"; exit 1; }
           echo "$file looks like an extension"
 
+      # **`--prerelease`, on a release that is not provisional.** The flag is
+      # not a claim about the extension's quality; on GitHub it means "do not
+      # treat this as the repository's headline release", and the repository's
+      # headline release is the compiler.
+      #
+      # Publishing 0.3.0 without it is what caused errata 52: it became the
+      # only non-pre-release here, so `/releases/latest` returned it, and every
+      # installer that trusted that endpoint went looking for a compiler inside
+      # an editor plugin. The installers no longer trust it -- they filter tags
+      # themselves -- so this flag is belt and braces rather than the fix. It
+      # earns its place anyway, because the copies of `khora update` already on
+      # people's machines have the old resolver baked in and cannot be fixed
+      # from here. Setting the flag repaired every one of them at once.
+      #
+      # Worth revisiting when there is a stable toolchain release: from that
+      # point "latest" has an obviously right answer and this is only about the
+      # badge. Until then it is load-bearing for anybody already installed.
+      #
       # The notes are a file in the repository rather than a string in this
       # step. Shell quoting has corrupted committed text here before, and
       # release notes are prose, inside shell, inside YAML -- three layers of
@@ -119,9 +137,10 @@ jobs:
           notes=editors/vscode/RELEASE.md
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" dist/*.vsix --clobber
-            gh release edit "$TAG" --notes-file "$notes"
+            gh release edit "$TAG" --notes-file "$notes" --prerelease
           else
             gh release create "$TAG" dist/*.vsix \
               --title "Khora for VS Code $TAG" \
+              --prerelease \
               --notes-file "$notes"
           fi

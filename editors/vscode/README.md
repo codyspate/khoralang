@@ -44,7 +44,12 @@ the extension loaded live. Reload the host window after editing `src/`.
 
 **Download the `.vsix` from a release.** The extension is released on its own
 tags — `vscode-v0.3.0` and so on — separately from the toolchain, because it
-versions and changes for its own reasons:
+versions and changes for its own reasons.
+
+GitHub marks those releases *Pre-release*, and that is not a warning about the
+extension. It means "this is not the repository's headline release", which is
+true: the headline release is the compiler. Errata 52 is what happens when it
+is not marked.
 
 <https://github.com/codyspate/khoralang/releases?q=vscode&expanded=true>
 
