@@ -4,40 +4,43 @@ sidebar:
   order: 0
 ---
 
-This section is the precise lookup-oriented reference for Khora. The Guide teaches the language in a useful order; the Reference records the rules a programmer can rely on.
+The Language Reference is the lookup-oriented description of Khora's syntax and semantic rules. The [Guide](/docs/guide/) teaches features in context; the Reference gives the accepted forms directly.
 
-## Core syntax
+Every language construct should have concrete Khora code here. If you know the name of the construct, this section should be enough to answer “what does it look like?” without reading compiler source or internal design documents.
 
-Khora is expression-oriented. Functions use `fn`, immutable bindings use `let`, compile-time paths use `::`, and runtime field projection uses `.`.
+## Source and declarations
 
-Operator precedence from loosest to tightest is:
+- [Lexical structure](./lexical-structure.md) — identifiers, row variables, numeric/string literals, interpolation, comments, keywords, and punctuation.
+- [Declarations](./declarations.md) — `module`, `import`, `pub`, `const`, `type`, `derive`, `fn`, `extern fn`, `effect`, `context`, `trait`, `impl`, `test`, and `bench`.
+- [Grammar and precedence](./grammar.md) — compact grammar shapes, operator precedence, and parsing rules that disambiguate similar forms.
 
-1. assignment `=` (right-associative)
-2. pipeline `|>`
-3. `||`
-4. `&&`
-5. comparisons
-6. `+ -`
-7. `* / %`
-8. prefix `- !`
-9. calls and field access
+## Expressions and control flow
 
-`|>` passes its left value as the first argument of a call unless the stage contains one `_` placeholder selecting another argument position.
+- [Expressions](./expressions.md) — literals, calls, fields, records, tuples, lists, blocks, `let`, assignment, lambdas, `|>`, `||>`, postfix `!`, `catch`, handlers, and `with`.
+- [Control flow](./control-flow.md) — `if`, `match`, guards, `while`, `for`, `loop`, `break`, `continue`, `return`, and typed-failure exits.
+- [Patterns](./patterns.md) — wildcard, binding, literal, constructor, record, tuple, guarded, `let`, `for`, and `catch` patterns.
 
-## Types
+## Types and abstraction
 
-The language includes primitive values, tuples, records, algebraic data types, generic types, higher-kinded types, and traits. Type inference is Hindley-Milner-style with row polymorphism for effects and failures.
+- [Types](./types.md) — path, unit, tuple, record, mutable-field, variant, function, row, union, generic, literal, opaque, and `forall` types.
+- [Generics](./generics.md) — type parameters, bounds, const generics, row variables, higher-kinded use, explicit `forall`, and variance.
+- [Traits](./traits.md) — trait declarations, supertraits, associated types, trait `impl`, inherent `impl`, bounds, and `derive(...)`.
 
-## Effects and failure
+## Effects, authority, and failure
 
-`with` rows state capability requirements. `raises` rows state typed recoverable failures. `!` propagates a declared failure to the caller. Handlers provide effects for a scope.
+- [Effects and rows](./effects.md) — `effect` declarations and the relationship between `with` and `raises` rows.
+- [Capabilities](./capabilities.md) — handlers, capability rows, postfix/block `with`, named `context`, sequential composition, and overrides.
+- [Failures](./failures.md) — `raises`, `raise`, postfix `!`, pattern-based `catch`, failure translation, `attempt`, and collection of failures.
 
-## Memory and concurrency
+## Runtime-facing language rules
 
-Memory management is automatic from the programmer's perspective. The compiler/runtime use reference counting and ownership/reuse analysis without exposing a Rust-style borrow checker in ordinary source.
+- [Memory and resources](./memory-and-resources.md) — automatic memory management, regions, finalization, and resource boundaries.
+- [Concurrency](./concurrency.md) — fibers, structured ownership, cancellation, and sharing rules.
+- [FFI](./ffi.md) — `extern fn`, native library exports, pointers, and C-compatible boundaries.
+- [Traps](./traps.md) — invariant failures that are intentionally separate from typed `raises`.
 
-Concurrency is structured around fibers and nurseries. Cancellation is distinct from ordinary safepoint preemption and must run structured cleanup.
+## Exact library declarations
 
-## Authoritative grammar
+Language syntax tells you how to express a call or type. Concrete library signatures live in the [Standard Library API reference](/docs/stdlib/api/core/), generated from the declarations shipped with the toolchain.
 
-The compiler repository's `docs/grammar.ebnf` is the current implemented grammar while these public reference pages are being expanded. Before public release, this section must be complete enough that users do not need internal design documents for ordinary language questions.
+For example, the Reference explains the syntax of a capability and a handler; the stdlib reference tells you the actual operations of `Random`, `Clock`, `Shared`, `List`, HTTP types, and other shipped APIs.
