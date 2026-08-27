@@ -384,8 +384,6 @@ fn against_a_real_server() {
         return;
     }
 
-    // A plain string: nothing is interpolated here, and `format!` over a
-    // literal is its own lint.
     let main = "module demo::main;
 import std::core::{List, Option, Result, print};
 import std::db::{Cell, Row};
@@ -423,8 +421,6 @@ fn main() -> Int {
       1
     },
     Result::Ok(c) => {
-      // Every shape the driver claims to map: an int4, a text, a bool, and a
-      // NULL that is not an empty string.
       match run(c, \"select 42::int4, 'ada'::text, true, null::text\") {
         Result::Err(why) => {
           match why {
@@ -448,9 +444,6 @@ fn main() -> Int {
               },
             }
           };
-          // A statement that fails has to leave the connection usable, which
-          // is what `ReadyForQuery` after an error is for. If this second
-          // query hangs or returns nothing, the stream desynchronised.
           match run(c, \"select * from a_table_that_is_not_there\") {
             Result::Err(_) => print(\"rejected\"),
             Result::Ok(_) => print(\"NOT rejected\"),
@@ -555,31 +548,17 @@ fn main() -> Int {
   match open(\"127.0.0.1\", 5433, \"khora\", \"khora\", \"khora\") {
     Result::Err(_) => 1,
     Result::Ok(c) => {
-      // Each of the four cell kinds the driver can send, back out again.
       say(c, \"select $1::int4\", one(Cell::Number(42)));
       say(c, \"select $1::text\", one(Cell::Text(\"ada\")));
       say(c, \"select $1::bool\", one(Cell::Flag(true)));
       say(c, \"select $1::text\", one(Cell::Null));
-
-      // Two of them, and one used twice, which is the numbering working.
       say(c, \"select $1::int4 + $2::int4, $1::int4\",
         List::Cons(Cell::Number(3), List::Cons(Cell::Number(4), List::Nil)));
-
-      // The point of the exercise. Concatenated, this ends the string and
-      // starts a comment; bound, it is a five-character value and the server
-      // says so.
       say(c, \"select $1::text\", one(Cell::Text(\"'; --\")));
-
-      // An empty string and a NULL are different rows, which is the -1 length
-      // meaning what it should.
       say(c, \"select $1::text is null\", one(Cell::Text(\"\")));
       say(c, \"select $1::text is null\", one(Cell::Null));
-
-      // A rejected statement still has to leave the connection usable: the
-      // extended protocol's error arrives before `ReadyForQuery` too.
       say(c, \"select $1::int4\", one(Cell::Text(\"not a number\")));
       say(c, \"select $1::int4\", one(Cell::Number(7)));
-
       close(c);
       0
     },
@@ -667,21 +646,23 @@ fn show(answer: Result<List<Row>, DbError>) -> String {
   }
 }
 
-/// Every `Result` is matched rather than marked. `expr!` is a mark on the
-/// *effect row* and the identity on values, so `db.execute(..)!` as a
-/// statement discards the answer -- which is how the first draft of this test
-/// reported a transaction as committed when the server had aborted it.
-fn insert(db: Db, n: Int) -> Result<Int, DbError> {
+fn insert(n: Int) -> Result<Int, DbError>
+  with { db: Db }
+{
   db.execute(\"insert into kept (n) values ($1)\", one(Cell::Number(n)))
 }
 
-fn good(db: Db) -> Result<Int, DbError> { insert(db, 1) }
+fn good() -> Result<Int, DbError>
+  with { db: Db }
+{
+  insert(1)
+}
 
-fn bad(db: Db) -> Result<Int, DbError> {
-  match insert(db, 2) {
+fn bad() -> Result<Int, DbError>
+  with { db: Db }
+{
+  match insert(2) {
     Result::Err(why) => Result::Err(why),
-    // A statement the server refuses, after a good one. The insert above is
-    // the thing that must not survive.
     Result::Ok(_) => match db.query(\"select * from nowhere\", List::Nil) {
       Result::Err(why) => Result::Err(why),
       Result::Ok(_) => Result::Ok(0),
@@ -689,38 +670,40 @@ fn bad(db: Db) -> Result<Int, DbError> {
   }
 }
 
-/// A transaction that succeeds. The row it inserts survives the commit.
-fn keeps(db: Db) -> () {
-  match transaction(db, fn () => good(db)) {
+fn keeps() -> ()
+  with { db: Db }
+{
+  match transaction(fn () => good()) {
     Result::Ok(_) => print(\"committed\"),
     Result::Err(_) => print(\"NOT committed\"),
   };
   print(show(db.query(\"select count(*)::int4 from kept\", List::Nil)));
 }
 
-/// A transaction whose body fails. Nobody wrote the rollback.
-fn discards(db: Db) -> () {
-  match transaction(db, fn () => bad(db)) {
+fn discards() -> ()
+  with { db: Db }
+{
+  match transaction(fn () => bad()) {
     Result::Err(DbError::RolledBack(_)) => print(\"rolled back\"),
     Result::Err(_) => print(\"failed, but not as a rollback\"),
     Result::Ok(_) => print(\"NOT rolled back\"),
   };
-  // Still one row: the first transaction's. The second left nothing behind.
   print(show(db.query(\"select count(*)::int4 from kept\", List::Nil)));
 }
 
 fn work(requests: Channel<Request>) -> () {
-  let db = over(requests);
-  match db.execute(\"drop table if exists kept\", List::Nil) {
-    Result::Ok(_) => (),
-    Result::Err(_) => print(\"could not drop\"),
-  };
-  match db.execute(\"create table kept (n int4)\", List::Nil) {
-    Result::Ok(_) => (),
-    Result::Err(_) => print(\"could not create\"),
-  };
-  keeps(db);
-  discards(db);
+  with { db: over(requests) } {
+    match db.execute(\"drop table if exists kept\", List::Nil) {
+      Result::Ok(_) => (),
+      Result::Err(_) => print(\"could not drop\"),
+    };
+    match db.execute(\"create table kept (n int4)\", List::Nil) {
+      Result::Ok(_) => (),
+      Result::Err(_) => print(\"could not create\"),
+    };
+    keeps();
+    discards();
+  }
 }
 
 fn main() -> Int {
@@ -737,8 +720,6 @@ fn main() -> Int {
     nursery.adopt(Fiber::spawn(fn () => serve(settings, requests)));
   };
   work(requests);
-  // Closing the requests is what ends the serving fiber, which closes the
-  // connection on its way out -- and `wait` is what waits for that.
   Channel::close(requests);
   Fibers::wait(crew);
   0
@@ -764,11 +745,6 @@ fn main() -> Int {
 /// survives a body that leaves badly**: the third fiber's work raises, and the
 /// pool still has both connections afterwards, because `with_db` registers the
 /// return with `Scope` before the body runs.
-///
-/// A pool that loses a connection to an error is a pool that works until the
-/// first bad day, so the count at the end is the assertion that matters.
-///
-/// Skipped without `KHORA_POSTGRES`, like its neighbours.
 #[test]
 fn a_pool_against_a_real_server() {
     if std::env::var_os("KHORA_POSTGRES").is_none() {
@@ -780,12 +756,11 @@ fn a_pool_against_a_real_server() {
     }
 
     let main = "module demo::main;
-import std::core::{Channel, Fiber, Fibers, List, Option, Result, Scope, nursery, print, scoped};
+import std::core::{Channel, Fibers, List, Result, print};
 import std::db::{Cell, Db, DbError, Row};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close, open, with_db};
 
-pub effect Nursery { adopt: (Fiber) -> (), }
 pub type Oops = | Failed;
 
 fn number(answer: Result<List<Row>, DbError>) -> Int {
@@ -807,22 +782,29 @@ fn number(answer: Result<List<Row>, DbError>) -> Int {
   }
 }
 
-/// One unit of work: ask the server to add two numbers.
-fn add(db: Db, a: Int, b: Int) -> Int {
+fn add(a: Int, b: Int) -> Int
+  with { db: Db }
+{
   number(db.query(\"select ($1::int4 + $2::int4)\",
     List::Cons(Cell::Number(a), List::Cons(Cell::Number(b), List::Nil))))
 }
 
 fn one_job(pool: Pool, n: Int) -> () {
-  match with_db(pool, fn db => add(db, n, n)) {
+  match with_db(pool, fn () => add(n, n)) {
     Result::Ok(total) => print(Int::to_string(total)),
     Result::Err(_) => print(\"no connection\"),
   };
 }
 
-/// A body that raises. The lease must come back anyway.
+fn fail_while_leased() -> ()
+  with { db: Db }
+  raises Oops
+{
+  raise Oops::Failed
+}
+
 fn bad_job(pool: Pool) -> () raises Oops {
-  with_db(pool, fn db => raise Oops::Failed)!;
+  with_db(pool, fail_while_leased)!;
 }
 
 fn run_jobs(pool: Pool) -> () {
@@ -846,16 +828,8 @@ fn main() -> Int {
   };
   let crew = Fibers::open();
   let pool = open(crew, settings, 2);
-
-  // No `scoped` here on purpose: a caller needs no capability to lease a
-  // connection, and the lease ends with the `with_db` call rather than with
-  // whatever region happens to enclose it.
   run_jobs(pool);
-
-  // Both connections are idle again -- including the one the raising body
-  // held, which is the whole point of leasing through `Scope`.
   print(Int::to_string(Channel::depth(pool.idle)));
-
   close(pool);
   Fibers::wait(crew);
   0
@@ -875,15 +849,6 @@ fn main() -> Int {
 
 /// **13.3, against the server that has to believe it.** A fiber cancelled
 /// inside a transaction leaves nothing behind.
-///
-/// The recording handler in `tests/db.rs` proves the *shape* — rollback
-/// happened, commit did not — and can prove nothing else, because it is not a
-/// database. This asks PostgreSQL whether the row is there, which is the only
-/// question a person actually has. It also exercises the parts the double
-/// cannot: a real `ROLLBACK` on the wire, sent from a finalizer, on a fiber
-/// that has already been asked to stop.
-///
-/// Skipped without `KHORA_POSTGRES`, like its neighbours.
 #[test]
 fn a_cancelled_transaction_leaves_nothing_behind() {
     if std::env::var_os("KHORA_POSTGRES").is_none() {
@@ -900,14 +865,10 @@ import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Settings};
 import postgres::pool::{Pool, close as close_pool, open as open_pool, with_db};
 
-/// The runtime's own, so the fiber can stop *itself* at the one moment that
-/// matters: after the insert, before the commit. A parent cancelling from
-/// outside would be racing that window.
 extern fn khora_cancel();
 
 pub type Oops = | Bad;
 
-/// A fallible call, so that `!` marks a cancellation point.
 fn mark() -> Int raises Oops { 1 }
 
 fn settings() -> Settings {
@@ -922,31 +883,36 @@ fn settings() -> Settings {
 
 fn one(c: Cell) -> List<Cell> { List::Cons(c, List::Nil) }
 
-/// Writes a row and is stopped before it can commit.
-fn interrupted(pool: Pool) -> () raises Oops {
-  with_db(pool, fn db => transaction(db, fn () => {
+fn interrupted_transaction() -> Result<Int, DbError>
+  with { db: Db }
+  raises Oops
+{
+  transaction(fn () => {
     db.execute("insert into khora_cancel_probe (note) values ($1)",
       one(Cell::Text("should not survive")));
     khora_cancel();
     mark()!;
     Result::Ok(1)
-  })!)!;
+  })!
+}
+
+fn interrupted(pool: Pool) -> () raises Oops {
+  with_db(pool, interrupted_transaction)!;
   print("the fiber carried on, which is wrong");
 }
 
-/// Writes a row the ordinary way, so the test can tell "rolled back" from
-/// "never worked".
-///
-/// **Both results, and the inner one is the transaction's.** `with_db` answers
-/// whether a connection was available; what was done with it comes back inside
-/// that, and matching only the outer one is how a draft of the ledger service
-/// reported a schema as ready against a database that was not running.
-fn committed(pool: Pool) -> () {
-  match with_db(pool, fn db => transaction(db, fn () => {
+fn committed_transaction() -> Result<Int, DbError>
+  with { db: Db }
+{
+  transaction(fn () => {
     db.execute("insert into khora_cancel_probe (note) values ($1)",
       one(Cell::Text("should survive")));
     Result::Ok(1)
-  })) {
+  })
+}
+
+fn committed(pool: Pool) -> () {
+  match with_db(pool, committed_transaction) {
     Result::Err(problem) => print("no connection: " + problem.show()),
     Result::Ok(inner) => match inner {
       Result::Ok(_) => print("wrote one"),
@@ -955,8 +921,14 @@ fn committed(pool: Pool) -> () {
   }
 }
 
+fn count_rows() -> Result<List<Row>, DbError>
+  with { db: Db }
+{
+  db.query("select count(*)::int4 from khora_cancel_probe", List::Nil)
+}
+
 fn count(pool: Pool) -> () {
-  match with_db(pool, fn db => db.query("select count(*)::int4 from khora_cancel_probe", List::Nil)) {
+  match with_db(pool, count_rows) {
     Result::Err(problem) => print("no connection: " + problem.show()),
     Result::Ok(inner) => match inner {
       Result::Err(problem) => print("query failed: " + problem.show()),
@@ -971,10 +943,18 @@ fn count(pool: Pool) -> () {
   }
 }
 
+fn prepare_schema() -> ()
+  with { db: Db }
+{
+  let _ = db.execute("drop table if exists khora_cancel_probe", List::Nil);
+  let _ = db.execute(
+    "create table khora_cancel_probe (id serial primary key, note text not null)",
+    List::Nil,
+  );
+}
+
 fn schema(pool: Pool) -> () {
-  with_db(pool, fn db => db.execute("drop table if exists khora_cancel_probe", List::Nil));
-  with_db(pool, fn db => db.execute(
-    "create table khora_cancel_probe (id serial primary key, note text not null)", List::Nil));
+  with_db(pool, prepare_schema);
 }
 
 fn main() -> Int {
@@ -986,9 +966,6 @@ fn main() -> Int {
   Fiber::join(f);
   print("the parent carried on");
 
-  // The connection the cancelled fiber used goes back to the pool, and this
-  // may well be the same one. A transaction left open would make this hang or
-  // fail; a transaction rolled back leaves it ready.
   committed(pool);
   count(pool);
 
