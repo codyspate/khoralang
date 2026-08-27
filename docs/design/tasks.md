@@ -1,7 +1,13 @@
 # Tasks
 
-`khora run <name>` runs a task from `[tasks]`, and everything it depends on
+`khora task <name>` runs a task from `[tasks]`, and everything it depends on
 first. Roadmap 14.18.
+
+**It was `khora run` for a day.** `run` is what every other toolchain means by
+"build this program and start it", and it is the first command a newcomer
+types; a language that spent it on a task runner would be surprising in the
+worst possible place. `khora run` is now the program runner and this is
+`khora task`. Renamed while the cost was one commit.
 
 ```toml
 [tasks.migrate]
@@ -25,7 +31,7 @@ dependency must not run its code on your machine**. A task runner that shells
 out looks, at a glance, like the thing that decision was against. It is not,
 and the difference is worth being exact about:
 
-- A task runs only when somebody types `khora run <name>`.
+- A task runs only when somebody types `khora task <name>`.
 - It runs the `[tasks]` table of the manifest they are standing in, or of the
   members of the workspace they are standing in.
 - **A dependency's `[tasks]` table is never read.** `khora_pkg::resolve` looks
@@ -104,7 +110,7 @@ failure produces cascading noise from one cause.
   once. Sequential first, because a task runner whose interleaved output cannot
   be read is worse than a slow one, and the answer to that is per-task output
   capture, which is its own piece of work.
-- **No caching.** Re-running `khora run ci` re-runs everything, even the parts
+- **No caching.** Re-running `khora task ci` re-runs everything, even the parts
   nothing changed under. `--since` narrows to affected *members*, which is the
   coarse half of the same idea; 14.17'''s content-addressed cache is the fine
   half, and it wants a sound key more than it wants to exist.

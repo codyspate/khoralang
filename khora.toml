@@ -58,9 +58,9 @@ extern = []
 
 # What somebody runs before pushing. Roadmap 14.18.
 #
-# Declared at the root, so it runs once here rather than eight times, one per
-# member: `ci` in a monorepo means "run the pipeline", not "run something
-# called ci in each package".
+# Run with `khora task ci`. Declared at the root, so it runs once here rather
+# than eight times, one per member: `ci` in a monorepo means "run the pipeline",
+# not "run something called ci in each package".
 [tasks.ci]
 description = "The full baseline: clippy, tests, the corpus, the conformance suite"
 run = "bash scripts/baseline.sh"

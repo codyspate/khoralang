@@ -1,8 +1,13 @@
-//! `khora run <task>`.
+//! `khora task <name>`.
 //!
 //! The `[tasks]` table has been parsed since the manifest existed, and
 //! `khora_pkg::tasks::plan` has ordered it and refused cycles for just as
 //! long. Nothing ran it. Roadmap 14.18.
+//!
+//! **This was `khora run` for about a day.** `run` is what every other
+//! toolchain calls "build this program and start it", and a language that
+//! spent it on a task runner would be surprising in the one command a
+//! newcomer types first. Renamed while the cost was one commit.
 //!
 //! # What a task is allowed to be
 //!

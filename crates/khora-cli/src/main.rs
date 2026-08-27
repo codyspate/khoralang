@@ -20,7 +20,7 @@ use khora_manifest::LintLevel;
 mod affected;
 #[cfg(feature = "llvm")]
 mod cache;
-mod run;
+mod task;
 mod workspace_cmds;
 
 #[derive(Parser)]
@@ -194,6 +194,29 @@ enum Command {
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Compile the program and run it.
+    ///
+    /// What `cargo run` is for: the shortest path from a source file to its
+    /// output. The build goes through the cache, so the second run of an
+    /// unchanged program starts almost immediately.
+    ///
+    /// Arguments after `--` go to the program, not to `khora`. The program's
+    /// exit status becomes this command's, so `khora run` is usable in a
+    /// script the way running the executable directly would be.
+    Run {
+        /// A `.kh` file, or a directory containing one.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Optimize, and drop debug information.
+        #[arg(long)]
+        release: bool,
+        /// Compile even if the cache already has this exact build.
+        #[arg(long)]
+        no_cache: bool,
+        /// Arguments for the program.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Run a task from `[tasks]`, and everything it depends on first.
     ///
     /// With no name, lists what there is to run. At a workspace root the task
@@ -204,9 +227,9 @@ enum Command {
     /// code execution coming back: nothing reaches a task except somebody
     /// typing its name, and a dependency's `[tasks]` table is never read.
     /// `docs/design/tasks.md`.
-    Run {
+    Task {
         /// The task to run. Omitted, lists them.
-        task: Option<String>,
+        name: Option<String>,
         /// The package or workspace root.
         #[arg(long, default_value = ".")]
         path: PathBuf,
@@ -277,9 +300,8 @@ fn main() -> ExitCode {
     // version whose flags this build does not recognise must still work.
     hand_over_if_pinned();
 
-    match run() {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+    match dispatch() {
+        Ok(code) => code,
         Err(err) => {
             eprintln!("khora: {err:#}");
             ExitCode::FAILURE
@@ -337,9 +359,14 @@ enum ToolchainCommand {
     },
 }
 
-fn run() -> Result<bool> {
+/// Runs the command, and says what to exit with.
+///
+/// **An `ExitCode` rather than a bool**, because `khora run` has to hand back
+/// the program's own status. Every other command still answers "did it work",
+/// and is mapped at the bottom; only the one that needs a number returns one.
+fn dispatch() -> Result<ExitCode> {
     let cli = Cli::parse();
-    match cli.command {
+    let worked = match cli.command {
         Command::Check { paths, since } => check(&paths, since.as_deref()),
         Command::Fmt { paths, check, since } => fmt(&paths, check, since.as_deref()),
         Command::Lex { path } => lex(&path).map(|()| true),
@@ -356,8 +383,11 @@ fn run() -> Result<bool> {
         Command::Lsp => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
         Command::Toolchain { command } => toolchain(command),
-        Command::Run { task, path, since } => match task {
-            Some(task) => {
+        Command::Run { path, release, no_cache, args } => {
+            return run_program(&path, release, no_cache, &args)
+        }
+        Command::Task { name, path, since } => match name {
+            Some(name) => {
                 let members = match workspace_members(std::slice::from_ref(&path)) {
                     Some(members) => {
                         Some(narrow(std::slice::from_ref(&path), &members, since.as_deref())?)
@@ -368,9 +398,9 @@ fn run() -> Result<bool> {
                     ),
                     None => None,
                 };
-                run::run(&path, &task, members.as_deref())
+                task::run(&path, &name, members.as_deref())
             }
-            None => run::list(&path).map(|()| true),
+            None => task::list(&path).map(|()| true),
         },
         Command::New { path, lib } => workspace_cmds::new(&path, lib).map(|()| true),
         Command::Why { name, path } => workspace_cmds::why(&path, &name).map(|()| true),
@@ -381,7 +411,8 @@ fn run() -> Result<bool> {
         Command::Update { pre } => update(pre),
         Command::Test { path, filter } => test(&path, filter.as_deref()),
         Command::Bench { path, filter } => bench(&path, filter.as_deref()),
-    }
+    }?;
+    Ok(if worked { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 /// Parse and type check.
@@ -393,6 +424,7 @@ fn run() -> Result<bool> {
 /// dependency nor the reason it was missing. `scripts/baseline.sh` had that
 /// loop written in shell, with a comment explaining the workaround.
 fn check(paths: &[PathBuf], since: Option<&str>) -> Result<bool> {
+    let paths = &here_if_empty(paths);
     if let Some(members) = workspace_members(paths) {
         let members = narrow(paths, &members, since)?;
         return over_members(&members, "check", |directory| {
@@ -442,6 +474,27 @@ fn narrow(paths: &[PathBuf], members: &[PathBuf], since: Option<&str>) -> Result
         );
     }
     Ok(selection.members)
+}
+
+/// `paths`, or the working directory when it is empty.
+///
+/// **`khora check` and `khora check .` have to be the same command.** They
+/// were not: an empty list reached `collect_sources`, which substitutes `.`
+/// there and nowhere else, so the bare form walked the whole repository as one
+/// compilation while the explicit form fanned out over eight members. Two
+/// commands, one name, and the difference was a character somebody did or did
+/// not type.
+///
+/// Normalised here rather than by giving the argument a `default_value`,
+/// because clap's default would make `paths` non-empty before anything could
+/// tell the two apart -- which is the right answer, and this says why in a
+/// place a reader will find it.
+fn here_if_empty(paths: &[PathBuf]) -> Vec<PathBuf> {
+    if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    }
 }
 
 /// The members of the workspace `paths` names, if it names exactly one and
@@ -1024,6 +1077,7 @@ fn lsp() -> Result<()> {
 
 /// Formats files in place, or reports which would change.
 fn fmt(paths: &[PathBuf], check: bool, since: Option<&str>) -> Result<bool> {
+    let paths = &here_if_empty(paths);
     if let Some(members) = workspace_members(paths) {
         let members = narrow(paths, &members, since)?;
         let verb = if check { "check formatting" } else { "format" };
@@ -1187,6 +1241,7 @@ fn build(
     release: bool,
     no_cache: bool,
 ) -> Result<bool> {
+    one_program(path, "build")?;
     let (db, inputs, root) = load(path)?;
 
     // `--release` wins over the variable, and the variable is how everything
@@ -1319,6 +1374,102 @@ fn build(
 #[cfg(feature = "llvm")]
 fn library_extension(lib: bool) -> &'static str {
     if lib { std::env::consts::DLL_EXTENSION } else { std::env::consts::EXE_EXTENSION }
+}
+
+/// `khora run`: compile the program and start it.
+///
+/// **The build goes through `build`, cache and all**, rather than having a
+/// compile path of its own. A `run` that could disagree with `build` about
+/// what the program is would be the worst kind of convenience, and the cache
+/// is what makes the second run fast enough for this to be the command
+/// somebody reaches for.
+///
+/// The program's exit status becomes ours. That is the whole point of a
+/// runner: `khora run` in a script has to behave the way running the
+/// executable would, including when the program fails.
+#[cfg(feature = "llvm")]
+fn run_program(path: &Path, release: bool, no_cache: bool, args: &[String]) -> Result<ExitCode> {
+    one_program(path, "run")?;
+    let target = executable_for(path)?;
+    if !build(path, Some(&target), false, release, no_cache)? {
+        // `build` has already said what was wrong, at the offending line.
+        return Ok(ExitCode::FAILURE);
+    }
+
+    // Separated from the program's own output, because the next thing on the
+    // terminal belongs to the program and not to the toolchain.
+    println!("running {}\n", target.display());
+    // Flushed before handing the terminal over: the child writes to the same
+    // stdout, and a buffered line of ours arriving after its first line is
+    // the kind of interleaving nobody can debug.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+
+    let status = std::process::Command::new(&target)
+        .args(args)
+        .status()
+        .with_context(|| format!("running {}", target.display()))?;
+
+    match status.code() {
+        Some(code) => Ok(ExitCode::from(u8::try_from(code.rem_euclid(256)).unwrap_or(1))),
+        // Killed by a signal, which has no exit code to forward. 1 rather
+        // than 0, because the program did not finish.
+        None => {
+            eprintln!("khora: {} did not exit normally", target.display());
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Refuses a workspace root where exactly one program is meant.
+///
+/// **Picking a member for somebody is how they end up running the wrong one
+/// for ten minutes.** `khora build` at this repository's root used to choose
+/// whichever member's source happened to contain `fn main(` first, which was
+/// `bench/floor`, silently -- and then print a path deep inside a directory
+/// nobody had named. `khora check` and `khora fmt` fan out because doing all
+/// of them is a sensible reading of "check the workspace"; building all of
+/// them into one executable is not a reading of anything.
+#[cfg(feature = "llvm")]
+fn one_program(path: &Path, verb: &str) -> Result<()> {
+    let Some(members) = workspace_members(std::slice::from_ref(&path.to_path_buf())) else {
+        return Ok(());
+    };
+    let names: Vec<String> = members.iter().map(|m| m.display().to_string()).collect();
+    anyhow::bail!(
+        "this is a workspace root, so there is no one program to {verb}. Name a member: {}",
+        names.join(", ")
+    )
+}
+
+/// Where `khora run` puts the executable it is about to start.
+///
+/// The same place `khora build` would, so the two share a cache entry and an
+/// output rather than each having their own idea of where a program lives.
+#[cfg(feature = "llvm")]
+fn executable_for(path: &Path) -> Result<PathBuf> {
+    let files = collect_sources(std::slice::from_ref(&path.to_path_buf()))?;
+    let entry = files
+        .iter()
+        .find(|file| read(file).is_ok_and(|text| text.contains("fn main(")))
+        .or_else(|| files.first())
+        .with_context(|| format!("no `.kh` files under {}", path.display()))?;
+    let stem = entry.file_stem().unwrap_or_default();
+    Ok(entry.with_file_name(stem).with_extension(library_extension(false)))
+}
+
+/// `khora run`, in a build that cannot compile anything.
+#[cfg(not(feature = "llvm"))]
+fn run_program(
+    _path: &Path,
+    _release: bool,
+    _no_cache: bool,
+    _args: &[String],
+) -> Result<ExitCode> {
+    anyhow::bail!(
+        "this `khora` was built without the LLVM backend, so there is nothing to run. \
+         Rebuild with `--features llvm`; see docs/llvm-setup.md."
+    )
 }
 
 /// Every source under `path`, parsed, in one compilation.

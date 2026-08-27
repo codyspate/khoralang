@@ -14,27 +14,18 @@
 //!
 //! # Why the runtime archive is pinned to a copy
 //!
-//! `khora-codegen-llvm`'s harness runs `cargo build -p khora-rt` from inside a
-//! test, so that an edit to the runtime cannot leave a stale archive. That
-//! build uses a different feature set from the one `cargo nextest --features
-//! llvm` resolved, so cargo relinks the staticlib — and `target/debug`'s
-//! archive flips between two different files **while other tests are
-//! running**.
-//!
-//! The archive is in the cache key, correctly: a program linked against a
-//! different runtime is a different program. So these tests kept missing, and
-//! the cache was right every time. `KHORA_RT_LIB` points every build here at
-//! one copy that nothing else touches, which is what the tests meant all
-//! along.
-//!
-//! It is worth being clear about which part is a test-harness problem and
-//! which is not. Two `khora build` runs seconds apart during a parallel test
-//! run genuinely link different runtimes. Nothing else had ever noticed.
+//! Because it moves. `pinned` has the whole story; the short version is that
+//! `target/debug`'s archive flips between two files while other tests run, the
+//! archive is in the cache key -- correctly, since a program linked against a
+//! different runtime is a different program -- and so these tests kept
+//! missing while the cache was right every time. Errata 51.
 
 #![cfg(feature = "llvm")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+mod pinned;
 
 struct World {
     _tmp: tempfile::TempDir,
@@ -74,40 +65,9 @@ fn source(answer: i64) -> String {
     format!("module app::main;\n\npub fn main() -> Int {{\n  {answer}\n}}\n")
 }
 
-/// One copy of the runtime archive, which nothing else rebuilds.
-///
-/// Copied once per test run rather than once per test: the archive is tens of
-/// megabytes. Written under a temporary name and renamed, so two test
-/// processes racing both end up pointing at a complete file.
-fn pinned_runtime() -> Option<PathBuf> {
-    let real = find_runtime()?;
-    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pinned-rt");
-    std::fs::create_dir_all(&directory).ok()?;
-    let pinned = directory.join(real.file_name()?);
-    if pinned.is_file() {
-        return Some(pinned);
-    }
-    let staged = directory.join(format!("tmp-{}", std::process::id()));
-    std::fs::copy(&real, &staged).ok()?;
-    if std::fs::rename(&staged, &pinned).is_err() {
-        let _ = std::fs::remove_file(&staged);
-    }
-    pinned.is_file().then_some(pinned)
-}
-
-/// The archive `khora build` would have found on its own.
-fn find_runtime() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "khora_rt.lib" } else { "libkhora_rt.a" };
-    // `CARGO_BIN_EXE_khora` is `target/<profile>/khora`, and the archive sits
-    // beside it -- the first place `toolchain::runtime_archive` looks.
-    let exe = PathBuf::from(env!("CARGO_BIN_EXE_khora"));
-    let beside = exe.parent()?.join(name);
-    beside.is_file().then_some(beside)
-}
-
 fn khora(w: &World, args: &[&str]) -> (bool, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_khora"));
-    if let Some(pinned) = pinned_runtime() {
+    if let Some(pinned) = pinned::runtime() {
         command.env("KHORA_RT_LIB", pinned);
     }
     let out = command
@@ -204,7 +164,7 @@ fn debug_information_is_in_the_key() {
     build(&w, &[]);
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_khora"));
-    if let Some(pinned) = pinned_runtime() {
+    if let Some(pinned) = pinned::runtime() {
         command.env("KHORA_RT_LIB", pinned);
     }
     let out = command

@@ -298,6 +298,17 @@ inside nothing a member depends on — the compiler, the root manifest, a script
 "nothing was affected" about a file it did not recognise is worse than no tool.
 Untracked files count.
 
+`khora run` compiles the program and starts it, forwarding its exit status and
+passing anything after `--` to it. Every path argument is optional — `khora
+run`, `khora build`, `khora check` all mean here — and naming one still
+works. At a workspace root the commands that produce *one* program refuse and
+name the members, because picking one for somebody is how they end up running
+the wrong one for ten minutes; `check` and `fmt` fan out instead, because
+doing all of them is a reading of "check the workspace" and building all of
+them into one executable is not a reading of anything.
+
+`khora task <name>` is the `[tasks]` runner. `docs/design/tasks.md`.
+
 `khora build` reuses an artifact it has already produced from the same inputs,
 where "inputs" includes the compiler and linker binaries and not just the
 source. Because release builds are bit-for-bit reproducible, a release hit is

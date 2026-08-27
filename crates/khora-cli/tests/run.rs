@@ -1,270 +1,234 @@
-//! `khora run <task>`.
+//! `khora run`, and paths that do not have to be typed.
 //!
-//! The `[tasks]` DAG was parsed, ordered and cycle-checked for a long time
-//! before anything ran it, so these tests are about the running: what a name
-//! resolves to, what order members go in, and what a run that did nothing
-//! says. Roadmap 14.18.
+//! `run` is the first command a newcomer reaches for and the one a script
+//! wraps, so what is tested here is mostly about *statuses and streams*: the
+//! program's exit code has to arrive intact, and its output has to be the next
+//! thing on the terminal.
+
+#![cfg(feature = "llvm")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A workspace root with `packages/*` as its members.
-fn workspace(name: &str) -> PathBuf {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("run").join(name);
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("a scratch directory");
-    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
-        .expect("the root manifest");
-    root
+mod pinned;
+
+struct World {
+    _tmp: tempfile::TempDir,
+    home: PathBuf,
+    project: PathBuf,
 }
 
-/// A package with a manifest body of the caller's choosing.
-fn package(at: &Path, name: &str, extra: &str) {
-    std::fs::create_dir_all(at.join("src")).expect("a package directory");
-    std::fs::write(
-        at.join("khora.toml"),
-        format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\npublish = true\n{extra}"
-        ),
-    )
-    .expect("a manifest");
-    std::fs::write(
-        at.join("src").join("lib.kh"),
-        format!("module {name}::lib;\n\npub fn go() -> Int {{\n  1\n}}\n"),
-    )
-    .expect("a module");
+fn world(body: &str) -> World {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("a src directory");
+    std::fs::write(project.join("khora.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n")
+        .expect("a manifest");
+    std::fs::write(project.join("src").join("main.kh"), body).expect("a source file");
+    World { _tmp: tmp, home, project }
 }
 
-fn run(at: &Path, args: &[&str]) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+/// A program whose exit status is `answer`.
+fn returning(answer: i64) -> String {
+    format!("module app::main;\n\npub fn main() -> Int {{\n  {answer}\n}}\n")
+}
+
+/// Runs `khora` in `cwd`, returning the exit code and the merged output.
+fn khora(w: &World, cwd: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_khora"));
+    // One archive for the whole test run. `pinned` says why a test has to
+    // care.
+    if let Some(archive) = pinned::runtime() {
+        command.env("KHORA_RT_LIB", archive);
+    }
+    let out = command
         .args(args)
-        .current_dir(at)
+        .current_dir(cwd)
+        .env("KHORA_HOME", &w.home)
         .output()
         .expect("could not run `khora`");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.success(), text)
-}
-
-/// An `echo` that works on both shells this runs through.
-fn echo(what: &str) -> String {
-    format!("echo {what}")
+    (out.status.code(), text)
 }
 
 #[test]
-fn a_task_runs_its_command() {
-    let root = workspace("one_task");
-    let member = root.join("packages").join("alpha");
-    package(&member, "alpha", &format!("\n[tasks.greet]\nrun = \"{}\"\n", echo("marker-one")));
+fn run_compiles_and_starts_the_program() {
+    let w = world(&returning(0));
 
-    let (ok, output) = run(&member, &["run", "greet"]);
-    assert!(ok, "{output}");
-    assert!(output.contains("marker-one"), "the command's own output: {output}");
+    let (code, output) = khora(&w, &w.project, &["run"]);
+    assert_eq!(code, Some(0), "{output}");
+    assert!(output.contains("running"), "{output}");
 }
 
 #[test]
-fn a_dependency_runs_first() {
-    let root = workspace("order");
-    let member = root.join("packages").join("alpha");
-    package(
-        &member,
-        "alpha",
-        &format!(
-            "\n[tasks.first]\nrun = \"{}\"\n\n[tasks.second]\nrun = \"{}\"\ndepends_on = [\"first\"]\n",
-            echo("marker-first"),
-            echo("marker-second")
-        ),
-    );
+fn the_programs_exit_status_becomes_ours() {
+    // The whole point of a runner. `khora run` in a script has to behave the
+    // way running the executable would, including when the program fails.
+    let w = world(&returning(7));
 
-    let (ok, output) = run(&member, &["run", "second"]);
-    assert!(ok, "{output}");
-    let first = output.find("marker-first").expect("the dependency ran");
-    let second = output.find("marker-second").expect("the goal ran");
-    assert!(first < second, "the dependency should run first:\n{output}");
+    let (code, output) = khora(&w, &w.project, &["run"]);
+    assert_eq!(code, Some(7), "{output}");
 }
 
 #[test]
-fn a_failing_step_stops_the_run() {
-    let root = workspace("failing");
-    let member = root.join("packages").join("alpha");
-    package(
-        &member,
-        "alpha",
-        &format!(
-            "\n[tasks.bad]\nrun = \"exit 3\"\n\n[tasks.after]\nrun = \"{}\"\ndepends_on = [\"bad\"]\n",
-            echo("marker-after")
-        ),
-    );
+fn a_program_that_does_not_compile_does_not_run() {
+    let w = world("module app::main;\n\npub fn main() -> Int {\n  \"not an Int\"\n}\n");
 
-    let (ok, output) = run(&member, &["run", "after"]);
-    assert!(!ok, "a failing step should fail the run: {output}");
-    assert!(!output.contains("marker-after"), "the later step ran anyway: {output}");
+    let (code, output) = khora(&w, &w.project, &["run"]);
+    assert_ne!(code, Some(0), "{output}");
+    assert!(!output.contains("running"), "it should not have started: {output}");
 }
 
 #[test]
-fn a_grouping_task_says_it_ran_nothing() {
-    // Otherwise a task that exists only to depend on other things looks, from
-    // the output, like a task that did something.
-    let root = workspace("grouping");
-    let member = root.join("packages").join("alpha");
-    package(
-        &member,
-        "alpha",
-        &format!("\n[tasks.one]\nrun = \"{}\"\n\n[tasks.all]\ndepends_on = [\"one\"]\n", echo("m")),
-    );
+fn the_second_run_comes_from_the_cache() {
+    // Which is what makes this the command somebody reaches for rather than
+    // one they wait on.
+    let w = world(&returning(0));
+    khora(&w, &w.project, &["run"]);
 
-    let (ok, output) = run(&member, &["run", "all"]);
-    assert!(ok, "{output}");
-    assert!(output.contains("nothing of its own to run"), "{output}");
+    let (code, output) = khora(&w, &w.project, &["run"]);
+    assert_eq!(code, Some(0), "{output}");
+    assert!(output.contains("reused"), "{output}");
 }
 
 #[test]
-fn a_built_in_name_runs_the_toolchains_own_verb() {
-    let root = workspace("built_in");
-    let member = root.join("packages").join("alpha");
-    package(&member, "alpha", "\n[tasks.ci]\ndepends_on = [\"check\"]\n");
+fn arguments_after_a_double_dash_are_the_programs() {
+    // They must not be parsed as `khora`'s. `--release` is a real flag of
+    // ours, which makes it the one worth testing.
+    let w = world(&returning(0));
 
-    let (ok, output) = run(&member, &["run", "ci"]);
-    assert!(ok, "{output}");
-    assert!(output.contains("no errors"), "`khora check` should have run: {output}");
+    let (code, output) = khora(&w, &w.project, &["run", "--", "--release", "--no-cache"]);
+    assert_eq!(code, Some(0), "{output}");
+    assert!(output.contains("[debug]") || output.contains("reused"), "{output}");
+    assert!(!output.contains("[release]"), "the program's flags leaked into ours: {output}");
 }
 
 #[test]
-fn lint_runs_the_check_and_says_that_is_what_it_did() {
-    // There is no `khora lint` -- the lints run inside the check -- and
-    // §4.1's own example depends on `lint`, so the substitution has to happen
-    // and has to be visible.
-    let root = workspace("lint");
-    let member = root.join("packages").join("alpha");
-    package(&member, "alpha", "");
+fn release_before_the_dashes_is_ours() {
+    let w = world(&returning(0));
 
-    let (ok, output) = run(&member, &["run", "lint"]);
-    assert!(ok, "{output}");
-    assert!(output.contains("`lint` runs inside it"), "{output}");
+    let (code, output) = khora(&w, &w.project, &["run", "--release"]);
+    assert_eq!(code, Some(0), "{output}");
+    assert!(output.contains("[release]"), "{output}");
 }
 
 #[test]
-fn an_unknown_task_names_what_there_is() {
-    let root = workspace("unknown");
-    let member = root.join("packages").join("alpha");
-    package(&member, "alpha", "\n[tasks.greet]\nrun = \"echo hi\"\n");
-
-    let (ok, output) = run(&member, &["run", "nonsense"]);
-    assert!(!ok, "{output}");
-    assert!(output.contains("no task called `nonsense`"), "{output}");
-}
-
-#[test]
-fn a_cycle_is_named_rather_than_recursed_into() {
-    let root = workspace("cycle");
-    let member = root.join("packages").join("alpha");
-    package(
-        &member,
-        "alpha",
-        "\n[tasks.a]\ndepends_on = [\"b\"]\n\n[tasks.b]\ndepends_on = [\"a\"]\n",
-    );
-
-    let (ok, output) = run(&member, &["run", "a"]);
-    assert!(!ok, "{output}");
-    assert!(output.contains("depends on itself"), "{output}");
-    assert!(output.contains("->"), "the loop should be drawn: {output}");
-}
-
-#[test]
-fn a_workspace_runs_the_task_in_dependency_order() {
-    // `beta` depends on `alpha`, so `alpha` goes first -- and that is not
-    // alphabetical luck, because the next test reverses it.
-    let root = workspace("ws_order");
-    package(&root.join("packages").join("alpha"), "alpha", &format!("\n[tasks.g]\nrun = \"{}\"\n", echo("marker-alpha")));
-    package(
-        &root.join("packages").join("beta"),
-        "beta",
-        &format!(
-            "\n[dependencies]\nalpha = {{ path = \"../alpha\" }}\n\n[tasks.g]\nrun = \"{}\"\n",
-            echo("marker-beta")
-        ),
-    );
-
-    let (ok, output) = run(&root, &["run", "g"]);
-    assert!(ok, "{output}");
-    let alpha = output.find("marker-alpha").expect("alpha ran");
-    let beta = output.find("marker-beta").expect("beta ran");
-    assert!(alpha < beta, "alpha is depended on and should go first:\n{output}");
-    assert!(output.contains("ran in 2 member(s)"), "{output}");
-}
-
-#[test]
-fn the_order_follows_the_graph_and_not_the_alphabet() {
-    let root = workspace("ws_reverse");
-    package(
-        &root.join("packages").join("alpha"),
-        "alpha",
-        &format!(
-            "\n[dependencies]\nbeta = {{ path = \"../beta\" }}\n\n[tasks.g]\nrun = \"{}\"\n",
-            echo("marker-alpha")
-        ),
-    );
-    package(&root.join("packages").join("beta"), "beta", &format!("\n[tasks.g]\nrun = \"{}\"\n", echo("marker-beta")));
-
-    let (ok, output) = run(&root, &["run", "g"]);
-    assert!(ok, "{output}");
-    let alpha = output.find("marker-alpha").expect("alpha ran");
-    let beta = output.find("marker-beta").expect("beta ran");
-    assert!(beta < alpha, "beta is depended on now and should go first:\n{output}");
-}
-
-#[test]
-fn a_goal_no_member_has_is_an_error_rather_than_a_green_tick() {
-    let root = workspace("nothing_to_do");
-    package(&root.join("packages").join("alpha"), "alpha", "");
-
-    let (ok, output) = run(&root, &["run", "deploy"]);
-    assert!(!ok, "a run that did nothing should not look like a pass: {output}");
-    assert!(output.contains("no member has anything to run for `deploy`"), "{output}");
-}
-
-#[test]
-fn listing_shows_descriptions_and_the_built_ins() {
-    let root = workspace("listing");
-    let member = root.join("packages").join("alpha");
-    package(
-        &member,
-        "alpha",
-        "\n[tasks.greet]\ndescription = \"say hello\"\nrun = \"echo hi\"\n",
-    );
-
-    let (ok, output) = run(&member, &["run"]);
-    assert!(ok, "{output}");
-    assert!(output.contains("greet"), "{output}");
-    assert!(output.contains("say hello"), "{output}");
-    assert!(output.contains("always available"), "{output}");
-}
-
-#[test]
-fn a_task_the_root_declares_runs_once_at_the_root() {
-    // `ci` at the top of a monorepo means "run the pipeline", not "run
-    // something called ci in each of eight members".
-    let root = workspace("root_task");
+fn a_workspace_root_has_no_one_program_to_run() {
+    let w = world(&returning(0));
+    let root = w.project.join("mono");
+    std::fs::create_dir_all(root.join("packages").join("alpha").join("src"))
+        .expect("a member");
+    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
+        .expect("a root manifest");
     std::fs::write(
-        root.join("khora.toml"),
-        format!(
-            "[workspace]{n}members = [{q}packages/*{q}]{n}{n}[tasks.ci]{n}run = {q}{cmd}{q}{n}",
-            n = "
-",
-            q = '"',
-            cmd = echo("marker-root")
-        ),
+        root.join("packages").join("alpha").join("khora.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n",
     )
-    .expect("the root manifest");
-    package(
-        &root.join("packages").join("alpha"),
-        "alpha",
-        &format!("{n}[tasks.ci]{n}run = {q}{cmd}{q}{n}", n = "
-", q = '"', cmd = echo("marker-member")),
-    );
+    .expect("a member manifest");
+    std::fs::write(
+        root.join("packages").join("alpha").join("src").join("main.kh"),
+        "module alpha::main;\n\npub fn main() -> Int {\n  0\n}\n",
+    )
+    .expect("a member source");
 
-    let (ok, output) = run(&root, &["run", "ci"]);
-    assert!(ok, "{output}");
-    assert!(output.contains("marker-root"), "{output}");
-    assert!(!output.contains("marker-member"), "the root task should not fan out: {output}");
+    let (code, output) = khora(&w, &root, &["run"]);
+    assert_ne!(code, Some(0), "{output}");
+    assert!(output.contains("no one program to run"), "{output}");
+    assert!(output.contains("alpha"), "it should name the members: {output}");
+}
+
+#[test]
+fn build_refuses_a_workspace_root_the_same_way() {
+    // `build` used to pick whichever member's source contained `fn main(`
+    // first and say nothing. `check` and `fmt` fan out because doing all of
+    // them is a reading of "check the workspace"; building all of them into
+    // one executable is not a reading of anything.
+    let w = world(&returning(0));
+    let root = w.project.join("mono");
+    std::fs::create_dir_all(root.join("packages").join("alpha").join("src"))
+        .expect("a member");
+    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
+        .expect("a root manifest");
+    std::fs::write(
+        root.join("packages").join("alpha").join("khora.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("a member manifest");
+    std::fs::write(
+        root.join("packages").join("alpha").join("src").join("main.kh"),
+        "module alpha::main;\n\npub fn main() -> Int {\n  0\n}\n",
+    )
+    .expect("a member source");
+
+    let (code, output) = khora(&w, &root, &["build"]);
+    assert_ne!(code, Some(0), "{output}");
+    assert!(output.contains("no one program to build"), "{output}");
+}
+
+#[test]
+fn a_named_path_still_works() {
+    // The point of making it optional is that it stays allowed.
+    let w = world(&returning(3));
+
+    let (code, output) = khora(&w, &w.project, &["run", "."]);
+    assert_eq!(code, Some(3), "{output}");
+}
+
+#[test]
+fn check_bare_and_check_dot_are_the_same_command() {
+    // They were not: an empty list reached `collect_sources`, which
+    // substitutes `.` there and nowhere else, so the bare form walked the
+    // whole tree as one compilation while the explicit form fanned out over
+    // the members.
+    let w = world(&returning(0));
+    let root = w.project.join("mono");
+    for name in ["alpha", "beta"] {
+        let member = root.join("packages").join(name);
+        std::fs::create_dir_all(member.join("src")).expect("a member");
+        std::fs::write(
+            member.join("khora.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+        )
+        .expect("a member manifest");
+        std::fs::write(
+            member.join("src").join("lib.kh"),
+            format!("module {name}::lib;\n\npub fn go() -> Int {{\n  1\n}}\n"),
+        )
+        .expect("a member source");
+    }
+    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
+        .expect("a root manifest");
+
+    let (bare_code, bare) = khora(&w, &root, &["check"]);
+    let (dot_code, dot) = khora(&w, &root, &["check", "."]);
+    assert_eq!(bare_code, dot_code, "bare:\n{bare}\ndot:\n{dot}");
+    assert!(bare.contains("2 member(s) clean"), "bare:\n{bare}");
+    assert!(dot.contains("2 member(s) clean"), "dot:\n{dot}");
+}
+
+#[test]
+fn fmt_bare_and_fmt_dot_are_the_same_command() {
+    let w = world(&returning(0));
+    let root = w.project.join("mono");
+    let member = root.join("packages").join("alpha");
+    std::fs::create_dir_all(member.join("src")).expect("a member");
+    std::fs::write(
+        member.join("khora.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("a member manifest");
+    std::fs::write(
+        member.join("src").join("lib.kh"),
+        "module alpha::lib;\n\npub fn go() -> Int {\n  1\n}\n",
+    )
+    .expect("a member source");
+    std::fs::write(root.join("khora.toml"), "[workspace]\nmembers = [\"packages/*\"]\n")
+        .expect("a root manifest");
+
+    let (bare_code, bare) = khora(&w, &root, &["fmt", "--check"]);
+    let (dot_code, dot) = khora(&w, &root, &["fmt", ".", "--check"]);
+    assert_eq!(bare_code, dot_code, "bare:\n{bare}\ndot:\n{dot}");
+    assert!(bare.contains("1 member(s) clean"), "bare:\n{bare}");
 }
