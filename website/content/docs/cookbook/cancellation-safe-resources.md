@@ -4,29 +4,75 @@ sidebar:
   order: 5
 ---
 
-Cancellation is not an exceptional afterthought in a concurrent service. A fiber may be cancelled while it is waiting for I/O, a timer, a child, scheduler capacity, or a downstream dependency.
+A resource should register its cleanup as soon as acquisition succeeds. In Khora, `scoped` creates the lifetime and `acquire` ties a value's release function to that lifetime.
 
-Resource-owning code should therefore register cleanup with the region that owns the resource as soon as acquisition succeeds.
+That means the same cleanup path runs when the body returns normally, raises a typed failure, or is unwound by cancellation.
 
-## The rule
+## Complete example
 
-If a scope can exit by success, typed failure, or cancellation, all three paths must leave the resource in a valid state.
+This example intentionally raises after acquiring a resource. The registered release still runs before the failure leaves the scope:
 
-Examples include:
+```khora
+module main;
 
-- close sockets and files;
-- roll back open database transactions;
-- return pooled connections only after cleanup;
-- release permits/semaphores;
-- remove temporary files where the API promises that behavior;
-- finish or abandon tracing spans consistently.
+import std::core::{Scope, acquire, print, scoped};
 
-## Do not rely on the next line running
+pub type Resource = {
+  name: String,
+};
 
-Code shaped conceptually as "acquire; do work; close" is only safe if `close` is structurally guaranteed. A cancellation point inside "do work" can prevent ordinary sequential cleanup from executing.
+pub type UseError =
+  | Failed;
 
-Prefer region/defer or scoped helper APIs that make cleanup part of the lifetime contract.
+fn open_resource() -> Resource {
+  print("open connection");
+  { name: "orders" }
+}
 
-## Test it
+fn close_resource(resource: Resource) -> () {
+  print("close ${resource.name}");
+}
 
-For every production resource abstraction, include a test that cancels the owning fiber while it is suspended inside the resource scope and verifies cleanup still happens before the scope is considered finished.
+fn fail_after_open() -> Int
+  with { scope: Scope }
+  raises UseError
+{
+  let resource = acquire(open_resource(), close_resource);
+  print("using ${resource.name}");
+  raise UseError::Failed
+}
+
+pub fn main() {
+  let result = scoped(fail_after_open)! catch {
+    UseError::Failed => -1,
+  };
+
+  print("result = ${Int::to_string(result)}");
+}
+```
+
+The lifetime is established here:
+
+```khora
+let resource = acquire(open_resource(), close_resource);
+```
+
+`acquire` returns the resource immediately, but also registers `close_resource(resource)` with the active `Scope`. The body does not need a later `close_resource(...)` line that can be skipped by non-local control flow.
+
+`scoped` supplies the `scope` capability required by `fail_after_open`:
+
+```khora
+scoped(fail_after_open)
+```
+
+When `fail_after_open` raises, the scope unwinds, the registered release runs, and only then does `UseError::Failed` continue outward to the `catch` in `main`.
+
+## Cancellation uses the same lifetime rule
+
+Cancellation does not require a second cleanup mechanism. If a fiber is cancelled at a cancellation point while it owns this scope, unwinding releases the scope and runs the same registered finalizers before the fiber is finished.
+
+That is the key production rule: **do not rely on the line after the work to release a resource**. Put release behavior into the resource lifetime itself.
+
+The same pattern underlies cancellation-safe transactions, pooled connections, sockets, files, permits, and tracing spans.
+
+See [Resources and regions](/docs/guide/resources-and-regions/) for `Region`, `Scope`, `scoped`, and `acquire`, and [Fibers and nurseries](/docs/guide/fibers-and-nurseries/) for cancellation behavior.
