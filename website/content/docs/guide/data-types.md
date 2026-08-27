@@ -26,7 +26,7 @@ let approximate = 0.1;
 let exact = 0.1d;
 ```
 
-See [Collections and strings](./collections-and-strings.md) for interpolation and multiline string syntax.
+See [Collections and strings](./collections-and-strings/) for interpolation and multiline string syntax.
 
 ## Type aliases
 
@@ -116,7 +116,7 @@ let message = match state {
 };
 ```
 
-See [Pattern matching](./pattern-matching.md) for destructuring and guards.
+See [Pattern matching](./pattern-matching/) for destructuring and guards.
 
 ## Generic types
 
@@ -132,7 +132,7 @@ pub type Outcome<A, E> =
   | Err(error: E);
 ```
 
-Use generics when the structure is independent of the concrete element type. Trait bounds, const parameters, row variables, and higher-kinded forms are covered in [Generics and traits](./generics-and-traits.md).
+Use generics when the structure is independent of the concrete element type. Trait bounds, const parameters, row variables, and higher-kinded forms are covered in [Generics and traits](./generics-and-traits/).
 
 ## Deriving structural behavior
 
