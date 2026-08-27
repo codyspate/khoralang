@@ -63,7 +63,7 @@ test "missing users are reported" {
 }
 ```
 
-See [Typed failure with raises](./errors-and-raises.md) for the failure model.
+See [Typed failure with raises](./errors-and-raises/) for the failure model.
 
 ## Test capabilities with handlers
 
@@ -125,4 +125,4 @@ khora test .
 
 Projects that rely on performance budgets can run selected `khora bench` workloads separately from correctness CI.
 
-For concurrent tests, continue with [Fibers and nurseries](./fibers-and-nurseries.md) and [Resources and regions](./resources-and-regions.md).
+For concurrent tests, continue with [Fibers and nurseries](./fibers-and-nurseries/) and [Resources and regions](./resources-and-regions/).
