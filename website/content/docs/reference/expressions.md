@@ -20,7 +20,7 @@ false
 `multiline text`
 ```
 
-See [Lexical structure](./lexical-structure.md) for exact literal and interpolation forms.
+See [Lexical structure](./lexical-structure/) for exact literal and interpolation forms.
 
 ## Paths and names
 
@@ -120,7 +120,7 @@ General form:
 let mut? Pattern (: Type)? = Expr ;
 ```
 
-`let` is local. Module-level named expressions use `const`; see [Declarations](./declarations.md#constants).
+`let` is local. Module-level named expressions use `const`; see [Declarations](./declarations/#constants).
 
 ## Assignment
 
@@ -243,7 +243,7 @@ Prefix `!value` is boolean negation. Postfix `call()!` marks failure propagation
 load_user(id)!
 ```
 
-The inner call keeps its normal value type while its declared failure row is allowed to leave the current computation. See [Failures](./failures.md).
+The inner call keeps its normal value type while its declared failure row is allowed to leave the current computation. See [Failures](./failures/).
 
 ## `catch`
 
@@ -278,7 +278,7 @@ load_user(id)! with Production {
 }
 ```
 
-See [Capabilities](./capabilities.md).
+See [Capabilities](./capabilities/).
 
 ## Handler expressions
 
@@ -311,7 +311,7 @@ with Production {
 
 ## Control-flow expressions
 
-The following forms are expressions or block-like expressions and have dedicated rules in [Control flow](./control-flow.md):
+The following forms are expressions or block-like expressions and have dedicated rules in [Control flow](./control-flow/):
 
 ```khora
 if condition { a } else { b }
@@ -327,4 +327,4 @@ return value
 raise error
 ```
 
-Patterns used by `match`, `for`, destructuring `let`, and `catch` are listed in [Patterns](./patterns.md).
+Patterns used by `match`, `for`, destructuring `let`, and `catch` are listed in [Patterns](./patterns/).
