@@ -1,70 +1,90 @@
-# Packages the Khora extension as a .vsix and installs it into VS Code.
+# Builds the Khora extension from this checkout and installs it into VS Code.
+#
+# **Most people should not run this.** Download the `.vsix` from a `vscode-v*`
+# release and `code --install-extension` it; this is for working *on* the
+# extension, where the point is to install what is in the tree right now.
 #
 # Dropping the folder into ~/.vscode/extensions works only if VS Code happens to
 # rescan the directory, and it never appears in its extensions index. Installing
 # a real package registers it the same way a marketplace extension would, so it
 # survives restarts and shows up in `code --list-extensions`.
 #
-# Needs no npm: a .vsix is a zip with an OPC manifest, which PowerShell can build.
+# # Why this prefers `vsce`
+#
+# It used to build the zip by hand, on the grounds that a .vsix is an OPC
+# package and PowerShell can write one without npm. It can — but the hand-built
+# one copied `package.json`, the language configuration, the README and the
+# syntaxes, and **not `src/extension.js` and not `node_modules`**. That
+# package installs without complaint, contributes highlighting, and has no
+# language server in it at all: no errors, no hover, no completion. Which is
+# the failure a user reports as "the extension is broken".
+#
+# So `vsce` is used when Node is there, and the hand-rolled path is gone
+# rather than kept as a fallback that produces something worse than nothing.
 
 $ErrorActionPreference = "Stop"
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pkg = Get-Content (Join-Path $here "package.json") -Raw | ConvertFrom-Json
 $id = "$($pkg.publisher).$($pkg.name)"
-$staging = Join-Path ([System.IO.Path]::GetTempPath()) "khora-vsix"
-$vsix = Join-Path $here "$id-$($pkg.version).vsix"
+$vsix = Join-Path $here "$id.vsix"
 
-if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
-New-Item -ItemType Directory -Path (Join-Path $staging "extension") | Out-Null
-
-foreach ($item in @("package.json", "language-configuration.json", "README.md", "syntaxes")) {
-    $src = Join-Path $here $item
-    if (Test-Path $src) {
-        Copy-Item $src -Destination (Join-Path $staging "extension") -Recurse -Force
-    }
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Write-Host "npm is not on PATH, and packaging an extension needs it." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Install Node, or download the .vsix from a release instead:"
+    Write-Host "  https://github.com/codyspate/khoralang/releases"
+    Write-Host ""
+    Write-Host "  then:  code --install-extension khora-vscode-<version>.vsix"
+    exit 1
 }
 
-$contentTypes = @'
-<?xml version="1.0" encoding="utf-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="json" ContentType="application/json" />
-  <Default Extension="md" ContentType="text/markdown" />
-  <Default Extension="vsixmanifest" ContentType="text/xml" />
-</Types>
-'@
-# [Content_Types].xml must be written with .NET: PowerShell treats the square
-# brackets in the filename as a wildcard.
-$utf8 = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText((Join-Path $staging "[Content_Types].xml"), $contentTypes, $utf8)
+Push-Location $here
+try {
+    if (-not (Test-Path (Join-Path $here "node_modules"))) {
+        npm ci
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+    }
+    npm run package
+    if ($LASTEXITCODE -ne 0) { throw "vsce package failed" }
+} finally {
+    Pop-Location
+}
 
-$manifest = @"
-<?xml version="1.0" encoding="utf-8"?>
-<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
-  <Metadata>
-    <Identity Language="en-US" Id="$($pkg.name)" Version="$($pkg.version)" Publisher="$($pkg.publisher)" />
-    <DisplayName>$($pkg.displayName)</DisplayName>
-    <Description xml:space="preserve">$($pkg.description)</Description>
-    <Categories>Programming Languages</Categories>
-  </Metadata>
-  <Installation>
-    <InstallationTarget Id="Microsoft.VisualStudio.Code" />
-  </Installation>
-  <Dependencies />
-  <Assets>
-    <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true" />
-  </Assets>
-</PackageManifest>
-"@
-[System.IO.File]::WriteAllText((Join-Path $staging "extension.vsixmanifest"), $manifest, $utf8)
-
-if (Test-Path $vsix) { Remove-Item $vsix -Force }
-Compress-Archive -Path (Join-Path $staging "*") -DestinationPath "$vsix.zip" -Force
-Move-Item "$vsix.zip" $vsix -Force
+# The check the hand-rolled path needed and did not have. Windows PowerShell
+# does not load the compression assembly on its own.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead($vsix)
+try {
+    $entries = $zip.Entries.FullName
+    if (-not ($entries -contains "extension/src/extension.js")) {
+        throw "$vsix has no extension.js -- it would install and do nothing"
+    }
+    if (-not ($entries | Where-Object { $_ -like "*vscode-languageclient*" })) {
+        throw "$vsix has no language client -- it would install and do nothing"
+    }
+} finally {
+    $zip.Dispose()
+}
 
 # A stale folder install shadows the packaged one, so clear it first.
 $folder = Join-Path $env:USERPROFILE ".vscode\extensions\$id-$($pkg.version)"
 if (Test-Path $folder) { Remove-Item $folder -Recurse -Force }
 
+# `$ErrorActionPreference` says nothing about a native program's exit status,
+# so this has to be read. It was not, and the script cheerfully reported
+# success over "Please restart VS Code before reinstalling Khora" -- which is
+# what `code` says when the running instance still holds the old version, and
+# is a real failure: the tree you just built is not what is installed.
 & code --install-extension $vsix --force
-Write-Host "`nInstalled $id. Restart VS Code, then open a .kh file." -ForegroundColor Green
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "code --install-extension failed." -ForegroundColor Red
+    Write-Host "If it asked you to restart VS Code, close every window -- including"
+    Write-Host "the one you ran this from -- and run this again. The .vsix is built"
+    Write-Host "and fine; it is the install that did not happen:"
+    Write-Host "  $vsix"
+    exit 1
+}
+
+Write-Host "`nInstalled $id $($pkg.version). Restart VS Code, then open a .kh file." -ForegroundColor Green

@@ -3,7 +3,11 @@
 # `node_modules` is *not* here: an extension ships its runtime dependencies,
 # and `vscode-languageclient` is the only one. `vsce` prunes dev dependencies
 # on its own.
+# `RELEASE.md` is the release *page*, written for somebody deciding whether to
+# download this; the packaged `readme.md` is for somebody who already has it.
+# Shipping both would put two overlapping introductions inside the extension.
 .vscode/**
 .gitignore
 install.ps1
+RELEASE.md
 *.vsix

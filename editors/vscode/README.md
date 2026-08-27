@@ -40,22 +40,53 @@ Open **this folder** (`editors/vscode`) in VS Code, run `npm install` once, and
 press **F5**. That launches an Extension Development Host — a second window with
 the extension loaded live. Reload the host window after editing `src/`.
 
-## Installing it for real
+## Installing it
+
+**Download the `.vsix` from a release.** The extension is released on its own
+tags — `vscode-v0.3.0` and so on — separately from the toolchain, because it
+versions and changes for its own reasons:
+
+<https://github.com/codyspate/khoralang/releases?q=vscode&expanded=true>
 
 ```bash
-cd editors/vscode
-npm install
-npm run package
-code --install-extension khora-lang.khora.vsix --force
+code --install-extension khora-vscode-0.3.0.vsix
 ```
+
+or in VS Code: **Extensions**, the `...` menu, **Install from VSIX**.
 
 Then **fully quit and reopen VS Code** — extensions are scanned at startup, so
 reloading the window is not enough. Confirm with `code --list-extensions`, which
-should list `khora-lang.khora`.
+should list `khora-lang.khora`. If `code` says *Please restart VS Code before
+reinstalling*, it means exactly that, and the install did not happen.
 
-`install.ps1` builds a `.vsix` without npm, by hand, from PowerShell. It was
-written when this machine had no Node and is kept for a machine that has none;
-it packages the declarative half only, so it cannot produce a working client.
+It needs `khora` on `PATH`; see the toolchain releases, or set
+`khora.server.path`.
+
+### From this checkout
+
+To install what is in the tree rather than what was released — which is what
+you want when working on the extension or on the compiler:
+
+```powershell
+editors\vscode\install.ps1
+```
+
+```bash
+cd editors/vscode && npm ci && npm run package
+code --install-extension khora-lang.khora.vsix --force
+```
+
+`install.ps1` is the second of those with the mistakes taken out: it checks that
+the `.vsix` it built actually contains `src/extension.js` and
+`vscode-languageclient`, and it reads `code`'s exit status instead of announcing
+success over a failed install.
+
+That check is there because it used to build the zip by hand — a `.vsix` is an
+OPC package and PowerShell can write one without npm — and the hand-built one
+copied the manifest, the language configuration and the syntaxes, and *not*
+`src/extension.js` and not `node_modules`. It installed without complaint, lit
+up the keywords, and had no language server in it at all. Highlighting without
+diagnostics is the visible symptom; there was no error anywhere to find it by.
 
 **Do not just drop the folder into `~/.vscode/extensions`.** That was the first
 approach here and it silently did nothing: the extension never entered VS Code's

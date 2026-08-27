@@ -1,0 +1,127 @@
+name: extension
+
+# Packages the VS Code extension and publishes it on a release of its own.
+#
+# **Separate from the toolchain, deliberately.** `release.yml` ships `khora`:
+# three platform archives, built from the compiler, versioned with the
+# language. The extension is JavaScript with no native code in it, it has its
+# own version in `editors/vscode/package.json`, and it changes for its own
+# reasons — a fix to hover rendering has nothing to do with a compiler release
+# and should not wait for one, nor drag one along. Bundling them would mean a
+# `.vsix` that is only ever as current as the last toolchain, and a toolchain
+# release that cannot go out while the extension is mid-change.
+#
+# rustup and rust-analyzer are the same split for the same reason.
+#
+# The flow, which mirrors `release.yml` without sharing its tags:
+#
+#   1. Tag `vscode-v<version>`, matching `package.json`.
+#   2. Push it. This runs, packages the `.vsix`, and creates the release.
+#   3. Install with `code --install-extension`, or from VS Code's
+#      "Install from VSIX".
+#
+# `vscode-` rather than `extension-`, because 14.11 wants Zed and the others
+# eventually and each will want a series of its own.
+#
+# Until 14.12 puts this on the marketplace and OpenVSX, a release asset is the
+# whole installation story.
+
+on:
+  push:
+    tags:
+      - "vscode-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to publish, e.g. vscode-v0.3.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+
+jobs:
+  package:
+    name: package and publish
+    runs-on: ubuntu-latest
+    steps:
+      # The tag, not the default branch. On a tag push those are the same
+      # thing and the `ref` is redundant; on `workflow_dispatch` they are not,
+      # and without this the run would package whatever `main` holds today and
+      # publish it under a tag naming a different commit.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # **The tag has to agree with `package.json`.** VS Code shows the
+      # version from the manifest whatever the file is called, so a tag that
+      # says otherwise produces a release whose name is a lie about what
+      # installs. Checked here rather than trusted, because the two are edited
+      # in different places by different hands.
+      - name: The tag and the manifest have to agree
+        working-directory: editors/vscode
+        run: |
+          set -eu
+          declared=$(node -p "require('./package.json').version")
+          tagged=${TAG#vscode-v}
+          if [ "$declared" != "$tagged" ]; then
+            echo "The tag says $tagged and package.json says $declared."
+            echo "Bump one of them; a release named for a version it does not"
+            echo "contain is worse than no release."
+            exit 1
+          fi
+          echo "version $declared"
+
+      # `npm ci` rather than `npm install`: the lockfile is committed, and a
+      # release should build what it says rather than what the registry has
+      # today.
+      - name: Package
+        working-directory: editors/vscode
+        run: |
+          set -eu
+          npm ci
+          npm run package
+          version=$(node -p "require('./package.json').version")
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          mv khora-lang.khora.vsix "$GITHUB_WORKSPACE/dist/khora-vscode-$version.vsix"
+
+      # The one check worth having: a `.vsix` missing `extension.js` or the
+      # language client installs cleanly and then does nothing, which is the
+      # failure a user reports as "the extension is broken". `install.ps1`
+      # produced exactly that package for a while.
+      - name: It has to contain an extension
+        run: |
+          set -eu
+          file=$(ls dist/*.vsix)
+          unzip -l "$file" | grep -q "extension/src/extension.js" \
+            || { echo "no extension.js in $file"; exit 1; }
+          unzip -l "$file" | grep -q "vscode-languageclient" \
+            || { echo "no language client in $file"; exit 1; }
+          echo "$file looks like an extension"
+
+      # The notes are a file in the repository rather than a string in this
+      # step. Shell quoting has corrupted committed text here before, and
+      # release notes are prose, inside shell, inside YAML -- three layers of
+      # escaping deep, and the corruption is only visible once it is published.
+      # A file has none of that, and shows up in the diff that changes it.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          notes=editors/vscode/RELEASE.md
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.vsix --clobber
+            gh release edit "$TAG" --notes-file "$notes"
+          else
+            gh release create "$TAG" dist/*.vsix \
+              --title "Khora for VS Code $TAG" \
+              --notes-file "$notes"
+          fi

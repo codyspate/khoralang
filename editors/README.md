@@ -18,8 +18,17 @@ Everything needs the same two things:
 
 ## VS Code
 
-`editors/vscode`, which is packaged and installed rather than configured. See
-its README.
+`editors/vscode`, which is packaged and installed rather than configured.
+Download the `.vsix` from a `vscode-v*` release and
+
+```bash
+code --install-extension khora-vscode-<version>.vsix
+```
+
+The extension is released on tags of its own, separately from the toolchain —
+it is JavaScript with no compiler in it, and a fix to hover rendering should
+not have to wait for a language release or drag one along. See its README, and
+`.github/workflows/extension.yml`.
 
 ## Helix
 
