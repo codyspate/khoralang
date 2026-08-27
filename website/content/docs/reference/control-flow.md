@@ -71,7 +71,7 @@ match value {
 }
 ```
 
-Patterns are checked for exhaustiveness and reachability. See [Patterns](./patterns.md).
+Patterns are checked for exhaustiveness and reachability. See [Patterns](./patterns/).
 
 ## Match guards
 
@@ -193,7 +193,7 @@ load_user(id)! catch {
 }
 ```
 
-`raise`, `!`, and `catch` participate in typed failure rows rather than ordinary function return. See [Failures](./failures.md).
+`raise`, `!`, and `catch` participate in typed failure rows rather than ordinary function return. See [Failures](./failures/).
 
 ## Capability installation as control scope
 
@@ -213,4 +213,4 @@ with Production {
 }
 ```
 
-See [Capabilities](./capabilities.md) for context rows and overrides.
+See [Capabilities](./capabilities/) for context rows and overrides.
