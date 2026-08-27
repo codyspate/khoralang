@@ -63,7 +63,7 @@ let category = match score {
 };
 ```
 
-The compiler checks pattern exhaustiveness and unreachable arms. See [Pattern matching](./pattern-matching/) for all pattern forms.
+The compiler checks pattern exhaustiveness and unreachable arms. See [Pattern matching](/docs/guide/pattern-matching/) for all pattern forms.
 
 ## `while`
 
@@ -178,4 +178,4 @@ let user = load_user(id)! catch {
 };
 ```
 
-See [Typed failure with raises](./errors-and-raises/) for the full failure model.
+See [Typed failure with raises](/docs/guide/errors-and-raises/) for the full failure model.
