@@ -1456,6 +1456,22 @@ link against different runtimes. That was true before the cache existed and
 nothing had ever noticed, because nothing else in this repository compares two
 builds for identity. Filed as 14.33.
 
+**Fixed, and the numbers are worth keeping.** `cargo build -p khora-rt` writes
+98,725,916 bytes; `cargo build --workspace --features llvm` writes 98,490,170.
+They are not the same archive and never were — the harness was not refreshing
+a stale file, it was substituting a differently-resolved one. It now builds
+only when the archive is older than the runtime's sources, which is the
+question its own doc comment was asking all along. With the archive current a
+codegen test takes 1.0 s and leaves it alone; touch a runtime source and the
+same test takes 8.0 s and rebuilds it. Roadmap 14.33.
+
+One thing the fix exposed and did not solve: a `touch` with no content change
+rebuilds the archive to *different bytes at the same size*. The Rust staticlib
+is not byte-reproducible across rebuilds. That is upstream of Khora's own
+reproducibility claim, which is about the compiler's output given a fixed
+archive, but it does mean the cache key's runtime component changes whenever
+`khora-rt` is relinked even without a real change — correct, and pessimistic.
+
 **What generalises.** A cache is an oracle for "did anything change", and
 pointing one at your own build is a stronger check than any test that only asks
 whether the build succeeded. The first three fixes were attempts to make a

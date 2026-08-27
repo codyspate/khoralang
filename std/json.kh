@@ -507,7 +507,7 @@ fn escape_for(byte: Int) -> Option<String> {
   }
 }
 
-/// One lowercase hex digit. Lowercase because `` is what every other
+/// One lowercase hex digit. Lowercase because `\u001f` is what every other
 /// encoder writes, and a document that differs only in case reads as changed.
 fn hex_digit(value: Int) -> String {
   byte_text(if value < 10 { 48 + value } else { 87 + value })

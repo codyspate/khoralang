@@ -1,18 +1,24 @@
 //! One runtime archive that nothing else rebuilds.
 //!
 //! **Why a test has to think about this at all.**
-//! `khora-codegen-llvm`'s harness runs `cargo build -p khora-rt` from inside a
-//! test, so that an edit to the runtime cannot leave a stale archive behind.
-//! That build resolves a different feature set from the one
-//! `cargo nextest --features llvm` resolved, so cargo relinks the staticlib
-//! and `target/debug`'s archive flips between two files **while other tests
-//! are running**.
-//!
 //! The archive is an input to every compiled program, and 14.17's build cache
 //! keys on it — correctly, because a program linked against a different
 //! runtime is a different program. So any test that expects two builds to
-//! agree has to be looking at one archive. Errata 51; the underlying problem
-//! is roadmap 14.33.
+//! agree has to be looking at one archive.
+//!
+//! The specific bug that made this necessary is fixed: `khora-codegen-llvm`'s
+//! harness used to run `cargo build -p khora-rt` unconditionally from inside a
+//! test, which resolved a different feature set from the enclosing run and
+//! replaced the archive while fifty other test binaries were linking against
+//! it. It now builds only when the archive is older than the runtime's
+//! sources. Errata 51, roadmap 14.33.
+//!
+//! **The pin stays anyway**, and not out of superstition. Anything that
+//! rebuilds `khora-rt` while these tests run moves an input underneath them —
+//! a future harness, a `cargo build` in another terminal, an editor's
+//! save-and-build. A test whose whole claim is "two builds agree" should not
+//! depend on nobody doing that, and one copy of a file is a cheap way not
+//! to.
 //!
 //! Copied once per test *run* rather than once per test: the archive is tens
 //! of megabytes.

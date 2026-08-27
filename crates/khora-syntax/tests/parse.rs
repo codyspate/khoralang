@@ -699,7 +699,7 @@ fn arbitrary_bytes_never_panic() {
         "|>|>|>",
         "match match {",
         "type T = | | |;",
-        "'''",
+        "'''", // deliberate nonsense, not a quoting slip: mangled-text-ok
         "0.0.0.0",
     ] {
         assert_round_trip(src);

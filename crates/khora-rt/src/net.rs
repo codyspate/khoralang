@@ -482,7 +482,7 @@ mod tests {
     /// The regression `SO_RCVTIMEO` would have become. A connected, silent peer
     /// is exactly the slow client `std::net::http` sets ten seconds against;
     /// with the socket prepared the kernel's option can never fire, so the
-    /// scheduler'''s timer has to — and it has to look from Khora exactly like
+    /// scheduler's timer has to — and it has to look from Khora exactly like
     /// the failed read it replaces, which is a negative return.
     #[test]
     fn a_receive_deadline_reports_a_timeout_the_way_the_kernel_did() {

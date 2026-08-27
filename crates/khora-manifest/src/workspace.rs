@@ -138,7 +138,7 @@ impl Root {
     /// A member whose manifest does not parse contributes no name, which is
     /// the right failure here: the policy check would otherwise refuse the
     /// *root* over a mistake in a member, and reporting that member is
-    /// somebody else'''s job.
+    /// somebody else's job.
     pub(crate) fn member_names(&self) -> Vec<String> {
         self.members
             .iter()

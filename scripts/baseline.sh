@@ -71,6 +71,12 @@ fi
 step 'clippy, all targets'
 cargo clippy --workspace --features llvm --all-targets -- -D warnings
 
+step 'no text a quoting slip mangled'
+# Cheap, and it catches a class nothing else does: a doc comment that is a
+# valid program and not English. `scripts/no-mangled-text.sh` names the three
+# that reached `main` before it existed.
+sh "$root/scripts/no-mangled-text.sh"
+
 step 'the corpus checks'
 # `std` on its own, because it is not a workspace member: it is found beside
 # the compiler rather than resolved through a manifest, and it has no

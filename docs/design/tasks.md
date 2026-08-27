@@ -112,5 +112,5 @@ failure produces cascading noise from one cause.
   capture, which is its own piece of work.
 - **No caching.** Re-running `khora task ci` re-runs everything, even the parts
   nothing changed under. `--since` narrows to affected *members*, which is the
-  coarse half of the same idea; 14.17'''s content-addressed cache is the fine
+  coarse half of the same idea; 14.17's content-addressed cache is the fine
   half, and it wants a sound key more than it wants to exist.
