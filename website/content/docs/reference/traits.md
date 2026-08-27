@@ -219,4 +219,4 @@ pub trait Convert<A> {
 
 Trait parameters use the normal generic parameter syntax, including bounds, const parameters, and variance where meaningful.
 
-See [Generics](./generics.md) for parameter forms and [Declarations](./declarations.md) for the top-level grammar shared by traits and implementations.
+See [Generics](./generics/) for parameter forms and [Declarations](./declarations/) for the top-level grammar shared by traits and implementations.
