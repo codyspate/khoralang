@@ -156,4 +156,4 @@ let user = load_user(id)! catch {
 };
 ```
 
-Unlike an ordinary `match`, `catch` also changes the surrounding failure row: a fully handled failure type no longer propagates. See [Typed failure with raises](./errors-and-raises.md).
+Unlike an ordinary `match`, `catch` also changes the surrounding failure row: a fully handled failure type no longer propagates. See [Typed failure with raises](./errors-and-raises/).
