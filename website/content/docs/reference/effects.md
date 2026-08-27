@@ -155,7 +155,7 @@ with {
 }
 ```
 
-Named contexts and overrides are specified in [Capabilities](./capabilities.md).
+Named contexts and overrides are specified in [Capabilities](./capabilities/).
 
 ## Effect-polymorphic higher-order functions
 
@@ -185,7 +185,7 @@ operation()! catch {
 }
 ```
 
-See [Failures](./failures.md) for `raise`, `!`, `catch`, and `attempt` semantics.
+See [Failures](./failures/) for `raise`, `!`, `catch`, and `attempt` semantics.
 
 ## Capabilities and failures are independent
 
