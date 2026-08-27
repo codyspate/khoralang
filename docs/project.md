@@ -280,6 +280,13 @@ still be left out.
 `khora check` and `khora fmt` at a root run over every member, each as its own
 package with its own dependencies, and every member runs even after one fails.
 
+There is one `khora.lock`, at the root, and every member seeds the resolution
+that writes it. So two members cannot quietly hold two revisions of a shared
+dependency: the second one to ask is refused, naming both. The cost is that
+resolving any member resolves all of them. What comes back to a build is still
+only what that member reaches -- the lock covers the workspace, the compilation
+does not.
+
 A member takes a shared value by asking for it:
 
 ```toml

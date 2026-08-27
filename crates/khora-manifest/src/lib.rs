@@ -58,6 +58,28 @@ pub use crate::model::{
     Build, Category, Default_, Dependency, Fmt, FsGrants, IndentStyle, Lint, LintLevel, Lints, Manifest, Package, Permissions, Task, Toolchain, WorkspacePackage, granted_host, granted_name, granted_path,
 };
 pub use crate::semver::Version;
+
+/// A canonical path without Windows' `\\?\` prefix.
+///
+/// `canonicalize` returns a *verbatim* path, which is correct and which no
+/// person wants to read in a diagnostic: `\\?\C:\Users\...\khora.lock` is the
+/// same file as `C:\Users\...\khora.lock` and looks like a mistake. The prefix
+/// only turns off path normalisation these paths do not need, so the stripped
+/// form is safe to keep using and not only to print.
+///
+/// Here rather than in a utilities crate because there is no utilities crate,
+/// and this is the lowest thing every caller already depends on. A no-op
+/// everywhere but Windows, which is why it is not behind a `cfg`.
+pub fn readable(path: std::path::PathBuf) -> std::path::PathBuf {
+    let Some(text) = path.to_str() else { return path };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => std::path::PathBuf::from(rest),
+        None => path,
+    }
+}
 pub use crate::warning::{Warning, WarningKind};
 pub use crate::workspace::{enclosing, read as read_workspace, Workspace as WorkspaceLayout};
 

@@ -97,7 +97,16 @@ impl Source {
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Source::Path(p) => write!(f, "path {}", p.display()),
+            // Canonicalized for display, because this is mostly read in "asked
+            // for twice and differently", where the two spellings are the
+            // whole message -- and `packages/a/../../vendor/dep1` next to
+            // `packages\../../vendor/dep2` makes two paths that differ
+            // look like two paths that differ in a way that matters.
+            Source::Path(p) => {
+                let shown =
+                    khora_manifest::readable(p.canonicalize().unwrap_or_else(|_| p.clone()));
+                write!(f, "path {}", shown.display())
+            }
             Source::Git { url, rev, subdir } => match subdir {
                 Some(inner) => write!(f, "git {url}#{rev} in {inner}"),
                 None => write!(f, "git {url}#{rev}"),

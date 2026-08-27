@@ -10,4 +10,4 @@ version = 1
 [[package]]
 name = "postgres"
 source = "path"
-path = "examples/ledger_service/../../packages/postgres"
+path = "packages/postgres"

@@ -45,7 +45,14 @@ pub fn read(manifest: &Path) -> Result<Option<Workspace>, ManifestError> {
     let parsed = Manifest::parse(&text)?.manifest;
     let Some(table) = parsed.workspace else { return Ok(None) };
 
-    let root = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
+    // An empty parent is the manifest in the working directory, which is `.`
+    // rather than nowhere. Left as `""` it canonicalizes to nothing, and every
+    // path built from it comes out as a relative walk from wherever the command
+    // happened to run.
+    let root = match manifest.parent() {
+        Some(directory) if !directory.as_os_str().is_empty() => directory.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
     let excluded: Vec<PathBuf> =
         table.exclude.iter().map(|entry| root.join(entry)).collect();
 
@@ -74,7 +81,8 @@ pub fn read(manifest: &Path) -> Result<Option<Workspace>, ManifestError> {
 /// without being told. The first `khora.toml` with a `[workspace]` table wins;
 /// a member's own manifest is passed over rather than stopping the walk.
 pub fn enclosing(start: &Path) -> Option<Workspace> {
-    let mut here = if start.is_dir() { Some(start) } else { start.parent() };
+    let from = absolute(if start.is_dir() { start } else { start.parent()? });
+    let mut here = Some(from.as_path());
     while let Some(directory) = here {
         let candidate = directory.join("khora.toml");
         if candidate.is_file() {
@@ -85,6 +93,28 @@ pub fn enclosing(start: &Path) -> Option<Workspace> {
         here = directory.parent();
     }
     None
+}
+
+/// `start` as an absolute path, so that a walk upwards can leave the working
+/// directory.
+///
+/// **The reason this is not optional.** `examples/ledger_service` has two
+/// parents as a relative path -- `examples`, then `""` -- and the walk stops
+/// there. Run from the repository root that finds the root manifest by luck,
+/// because `""/khora.toml` is `khora.toml`; run from `examples/` and the same
+/// member is suddenly in no workspace at all. A lockfile that moves depending
+/// on which directory somebody stood in is not a lockfile.
+fn absolute(path: &Path) -> PathBuf {
+    if let Ok(found) = path.canonicalize() {
+        return crate::readable(found);
+    }
+    // Canonicalizing an empty path fails, and an empty path is what
+    // `Path::new("member").parent()` gives -- meaning the working directory,
+    // not nowhere.
+    match std::env::current_dir() {
+        Ok(here) => here.join(path),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// A workspace root, for inheritance: its table, and who it lists.
@@ -115,7 +145,8 @@ impl Root {
 /// this one, and it does not list you" is a better thing to be told than a
 /// silent search past it.
 pub(crate) fn enclosing_root(start: &Path) -> Option<Root> {
-    let mut here = Some(start);
+    let from = absolute(start);
+    let mut here = Some(from.as_path());
     while let Some(directory) = here {
         let candidate = directory.join("khora.toml");
         if candidate.is_file() {

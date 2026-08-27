@@ -36,6 +36,28 @@ use crate::source::Source;
 /// The name of the file, everywhere.
 pub const LOCKFILE: &str = "khora.lock";
 
+/// How a path dependency is written down, relative to the lockfile.
+///
+/// **Not the path the resolution happened to build.** A workspace's lock lives
+/// at the root, and a `path` dependency reached through a member arrives as
+/// `examples/ledger_service/../../packages/postgres` -- which is correct, and
+/// is also a sentence nobody should have to read in a committed file. Worse,
+/// it depends on which member asked and on the working directory the command
+/// ran in, and a lockfile whose text depends on where you stood is one that
+/// rewrites itself on alternate builds.
+///
+/// Canonicalized first, so `..` is gone and the answer is the same from
+/// anywhere. A path that cannot be canonicalized -- a dependency pointing at a
+/// directory that is not there -- keeps its literal spelling, because the
+/// resolution is about to fail anyway and the spelling is the clue.
+fn relative_to(lock_dir: &Path, path: &Path) -> String {
+    let written = match (lock_dir.canonicalize(), path.canonicalize()) {
+        (Ok(base), Ok(full)) => full.strip_prefix(&base).unwrap_or(&full).to_path_buf(),
+        _ => path.to_path_buf(),
+    };
+    written.display().to_string().replace('\\', "/")
+}
+
 /// A parsed `khora.lock`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lockfile {
@@ -158,6 +180,7 @@ pub fn entry(
     source: &Source,
     checksum: Option<&ContentHash>,
     dependencies: BTreeMap<String, ()>,
+    lock_dir: &Path,
 ) -> LockedPackage {
     match source {
         Source::Git { url, rev, subdir } => LockedPackage {
@@ -177,7 +200,7 @@ pub fn entry(
             source: "path".into(),
             url: None,
             revision: None,
-            path: Some(p.display().to_string().replace('\\', "/")),
+            path: Some(relative_to(lock_dir, p)),
             checksum: None,
             dependencies: dependencies.into_keys().collect(),
         },

@@ -1189,14 +1189,37 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// different: nothing else will say so, so that error is returned.
 fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
     let Some(manifest_path) = nearest_manifest(root) else { return Ok(Vec::new()) };
-    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else {
-        return Ok(Vec::new());
+    let parsed = match khora_manifest::Manifest::load(&manifest_path) {
+        Ok(parsed) => parsed,
+        // A manifest that is wrong *at a place* -- syntax, or a key holding
+        // the wrong kind of value -- carries a line and a column, and is
+        // `khora check` on the manifest's to report. Two commands reporting
+        // the same error differently is worse than one reporting it.
+        Err(why) if why.location().is_some() => return Ok(Vec::new()),
+        // Everything else has no line to point at because it is not about a
+        // line: a `workspace = true` with no root, a member the root does not
+        // list. **Nothing else will say so**, and the alternative is what this
+        // used to do -- return no dependencies and let the compiler report
+        // fifteen type errors in a program that was fine.
+        Err(why) => anyhow::bail!("{why}"),
     };
 
     let store = khora_pkg::Store::open()?;
     let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
 
     check_extern_allowlist(&parsed.manifest.permissions, &resolution)?;
+
+    // A workspace has one lockfile, at the root. One left behind in a member
+    // is not read any more, and a lockfile that silently stopped being read is
+    // the kind of thing somebody finds out about during an incident. Said
+    // rather than deleted: removing a committed file is the reader's call.
+    for stray in &resolution.stray_locks {
+        eprintln!(
+            "khora: {} is no longer read -- the workspace root holds the only lockfile \
+             now. Delete it.",
+            stray.display()
+        );
+    }
 
     Ok(resolution.directories())
 }

@@ -17,6 +17,24 @@
 //! **Nothing is fetched twice.** A package is keyed by name, and a second
 //! request for a name already resolved is checked for agreement rather than
 //! re-fetched.
+//!
+//! # One lock for a workspace
+//!
+//! A workspace resolves as one graph, into one `khora.lock` at the root. Two
+//! members cannot then be quietly holding two revisions of a shared
+//! dependency: the second one to ask hits the same "asked for twice and
+//! differently" error that two packages in one graph already did, and the
+//! single-version rule is most of what makes a monorepo coherent rather than a
+//! directory of projects. Roadmap 14.15.
+//!
+//! The cost is real and worth stating: resolving *any* member resolves every
+//! member, so a member with no dependencies of its own still pays for the
+//! fetches of one that has them, and a member whose manifest does not parse
+//! breaks the others. That is the price of the graph being one graph, and
+//! Cargo charges it too.
+//!
+//! What comes *back* is still only what the asking member reaches. The lock
+//! covers the workspace; the compilation does not.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -56,6 +74,14 @@ pub struct Resolution {
     pub lockfile: Lockfile,
     /// Whether the lockfile differs from the one that was read.
     pub changed: bool,
+    /// Member lockfiles that are no longer read, because the root holds the
+    /// only one now.
+    ///
+    /// Returned rather than deleted, and rather than ignored. Deleting a
+    /// committed file is not this function's call to make, and a lockfile that
+    /// silently stopped being read is the kind of thing somebody finds out
+    /// about during an incident.
+    pub stray_locks: Vec<PathBuf>,
 }
 
 impl Resolution {
@@ -71,27 +97,49 @@ impl Resolution {
 /// that would need a new resolution is a build whose lockfile was not committed.
 pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Resolution> {
     let root_dir = manifest_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let lock_path = root_dir.join(lock::LOCKFILE);
+
+    // The workspace this manifest belongs to, if it belongs to one. Being
+    // *under* a root is not being *in* it, which is the same rule inheritance
+    // uses: a directory the root does not list keeps its own lockfile.
+    let workspace = khora_manifest::enclosing(&root_dir)
+        .filter(|found| same(&found.root, &root_dir) || found.members.iter().any(|m| same(m, &root_dir)));
+
+    let lock_dir = workspace.as_ref().map_or_else(|| root_dir.clone(), |found| found.root.clone());
+    let lock_path = lock_dir.join(lock::LOCKFILE);
     let existing =
         if lock_path.is_file() { Lockfile::read(&lock_path)? } else { Lockfile::default() };
 
     let root = read_manifest(manifest_path)?;
-    // A workspace root resolves under its own directory name. It has no
-    // package name, and the name is only ever used to say *who asked* for a
-    // dependency -- for which the directory is a perfectly good answer and
-    // better than inventing one.
-    let root_name = match root.package() {
-        Some(package) => package.name.clone(),
-        None => root_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "the workspace".to_string()),
-    };
+    let root_name = holder_name(&root, &root_dir);
 
     let mut resolved: BTreeMap<String, Resolved> = BTreeMap::new();
     let mut edges: BTreeMap<String, BTreeMap<String, ()>> = BTreeMap::new();
     let mut queue: VecDeque<(String, Manifest, PathBuf)> =
         VecDeque::from([(root_name.clone(), root, root_dir.clone())]);
+
+    // Every member seeds the queue, so the lock describes the workspace rather
+    // than whichever member happened to be built.
+    let mut stray_locks = Vec::new();
+    if let Some(found) = &workspace {
+        for member in &found.members {
+            let stray = member.join(lock::LOCKFILE);
+            if !same(member, &lock_dir) && stray.is_file() {
+                stray_locks.push(stray);
+            }
+            if same(member, &root_dir) {
+                continue;
+            }
+            let manifest = member.join("khora.toml");
+            let parsed = read_manifest(&manifest).with_context(|| {
+                format!(
+                    "resolving the workspace at {}: every member is resolved into the one \
+                     lockfile, so this manifest has to parse even to build a different member",
+                    found.root.display()
+                )
+            })?;
+            queue.push_back((holder_name(&parsed, member), parsed, member.clone()));
+        }
+    }
 
     while let Some((holder, manifest, base)) = queue.pop_front() {
         for (name, dependency) in &manifest.dependencies {
@@ -149,6 +197,7 @@ pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Reso
             &package.source,
             package.checksum.as_ref(),
             edges.get(name).cloned().unwrap_or_default(),
+            &lock_dir,
         ));
     }
     lockfile.normalise();
@@ -167,7 +216,56 @@ pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Reso
         lockfile.write(&lock_path)?;
     }
 
-    Ok(Resolution { packages: resolved.into_values().collect(), lockfile, changed })
+    // **The lock covers the workspace; the compilation does not.** Handing a
+    // member every package in the workspace would compile its siblings'
+    // dependencies into it, and a package that builds only because a sibling
+    // happens to depend on something is a package that stops building the day
+    // the sibling stops.
+    let wanted = reachable(&root_name, &edges);
+    let packages =
+        resolved.into_iter().filter(|(name, _)| wanted.contains(name)).map(|(_, p)| p).collect();
+
+    Ok(Resolution { packages, lockfile, changed, stray_locks })
+}
+
+/// The name a manifest goes by when saying who asked for a dependency.
+///
+/// A workspace root has no package name, and the name is only ever used to say
+/// *who asked* -- for which the directory is a perfectly good answer and better
+/// than inventing one.
+fn holder_name(manifest: &Manifest, directory: &Path) -> String {
+    match manifest.package() {
+        Some(package) => package.name.clone(),
+        None => directory
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "the workspace".to_string()),
+    }
+}
+
+/// Every package `start` reaches, following the graph the resolution built.
+fn reachable(
+    start: &str,
+    edges: &BTreeMap<String, BTreeMap<String, ()>>,
+) -> std::collections::BTreeSet<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut queue = VecDeque::from([start.to_string()]);
+    while let Some(here) = queue.pop_front() {
+        for name in edges.get(&here).into_iter().flatten().map(|(name, ())| name) {
+            if seen.insert(name.clone()) {
+                queue.push_back(name.clone());
+            }
+        }
+    }
+    seen
+}
+
+/// Whether two paths name the same directory.
+fn same(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => left == right,
+    }
 }
 
 /// Gets one package's files onto disk, verifying anything the lockfile pins.
