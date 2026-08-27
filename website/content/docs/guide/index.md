@@ -4,45 +4,48 @@ sidebar:
   order: 0
 ---
 
-The Khora Guide teaches the language from the programmer's point of view. It is meant to be read in order the first time and used as a set of practical explanations afterward.
+The Khora Guide teaches the language from the programmer's point of view. Read it in order the first time, then return to individual pages for practical examples.
 
 If you have not built a Khora program yet, start with [Getting Started](/docs/getting-started/) and come back here once the basic toolchain workflow works.
 
-## Start with the core language
+## Core syntax and data
 
-1. [Values and functions](/docs/guide/values-and-functions/) — expressions, immutable bindings, functions, and return values.
-2. [Data types](/docs/guide/data-types/) — records, algebraic data types, constructors, and modeling data explicitly.
-3. [Pattern matching](/docs/guide/pattern-matching/) — destructure values and make branching exhaustive.
-4. [Collections and strings](/docs/guide/collections-and-strings/) — work with the everyday data structures used by applications.
-5. [Generics and traits](/docs/guide/generics-and-traits/) — write reusable code while keeping behavior statically constrained.
-6. [Pipelines](/docs/guide/pipelines/) — compose transformations with Khora's `|>` call-insertion syntax.
+1. [Values and functions](/docs/guide/values-and-functions/) — `let`, `mut`, `const`, `pub`, functions, lambdas, function types, and return values.
+2. [Control flow](/docs/guide/control-flow/) — blocks, `if`, `match`, `while`, `for`, `loop`, `break`, `continue`, and `return`.
+3. [Data types](/docs/guide/data-types/) — literals, tuples, records, variants, generic types, and `derive(...)`.
+4. [Pattern matching](/docs/guide/pattern-matching/) — wildcard, literal, binding, constructor, tuple, record, guarded, `let`, `for`, and `catch` patterns.
+5. [Pipelines](/docs/guide/pipelines/) — `|>`, `_` insertion, fallible stages, and unary flow lambdas with `||>`.
+6. [Generics and traits](/docs/guide/generics-and-traits/) — type parameters, bounds, traits, `impl`, associated types, const generics, row variables, `forall`, and variance.
 
-After these pages you should be comfortable reading ordinary pure Khora code.
+After these pages you should be able to read the syntax of ordinary Khora programs rather than encountering unexplained language forms later in the Guide.
 
-## Learn typed failure and capabilities
+## Typed failure and capabilities
 
-7. [Errors and raises](/docs/guide/errors-and-raises/) — model recoverable failure in function types and propagate it with `!`.
-8. [Effects and capabilities](/docs/guide/effects-and-capabilities/) — make external authority visible with `with` rows and provide it through handlers.
+7. [Typed failure with raises](/docs/guide/errors-and-raises/) — `raises`, explicit `raise`, propagation with `!`, pattern-based `catch`, error translation, and `attempt`.
+8. [Effects and capabilities](/docs/guide/effects-and-capabilities/) — `effect`, capability rows, `handler`, postfix and block `with`, named `context`, overrides, and open rows.
 
-These are separate dimensions of a function type: `raises` says what recoverable failures may occur; `with` says what external capabilities the computation requires.
+These are separate dimensions of a function type: `raises` says what recoverable failures may leave the computation; `with` says what capabilities it requires.
 
-## Add resources and concurrency
+## Resources and concurrency
 
-9. [Resources and regions](/docs/guide/resources-and-regions/) — scope resource lifetimes and cleanup.
+9. [Resources and regions](/docs/guide/resources-and-regions/) — resource acquisition, lexical lifetime, finalization, and cleanup across failure and cancellation.
 10. [Fibers and nurseries](/docs/guide/fibers-and-nurseries/) — run concurrent work without detached lifetime management.
 11. [Shared state](/docs/guide/shared-state/) — make intentional shared mutable state explicit.
 
 Khora's concurrency model is structured: child work belongs to a scope, cancellation participates in cleanup, and resource lifetimes remain visible in the program model.
 
-## Build packages and tests
+## Tests, modules, and everyday library values
 
-12. [Testing](/docs/guide/testing/) — write `test` blocks and test effectful code with controlled capabilities.
-13. [Modules and packages](/docs/guide/modules-and-packages/) — organize code, imports, dependencies, lockfiles, and public package APIs.
+12. [Testing and benchmarks](/docs/guide/testing/) — `test`, `bench`, controlled capabilities, failure tests, and the CLI runners.
+13. [Modules and packages](/docs/guide/modules-and-packages/) — `module`, grouped/glob/aliased `import`, `pub`, dependencies, lockfiles, and package boundaries.
+14. [Collections and strings](/docs/guide/collections-and-strings/) — list literals, `for`, transforms, interpolation, escapes, and multiline backtick strings.
 
 ## Guide or reference?
 
-Use the **Guide** when you want to understand a feature, see ordinary patterns, or decide how to structure code.
+Use the **Guide** when you want to learn a construct in context and see how it is normally used.
 
-Use the [Language Reference](/docs/reference/) when you already know what you are looking for and need the exact syntax or semantic rule. Use the [Standard Library](/docs/stdlib/) when you need a concrete API.
+Use the [Language Reference](/docs/reference/) when you already know what you are looking for and need the exact accepted forms, precedence, type rules, or compact syntax examples. The Reference is intentionally redundant with the Guide at the syntax level: a language construct should never exist only in prose or only in the parser.
 
-If you are coming from TypeScript + Effect, Go, or Rust, read the core Guide first, then use the migration pages to map familiar concepts onto Khora rather than treating the other language as Khora's mental model.
+Use the [Standard Library](/docs/stdlib/) when you need the concrete declarations and behavior of a library API.
+
+If you are coming from TypeScript + Effect, Go, or Rust, learn Khora's own syntax and model here first, then use the migration pages to map familiar concepts onto it.
