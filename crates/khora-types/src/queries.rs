@@ -31,6 +31,33 @@ pub struct BodyTypes {
     /// needs is the callee's row, which only the checker has read, so the
     /// answer is published here rather than guessed at twice.
     lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
+    /// What each call site asked of the function containing it.
+    ///
+    /// **The checker computes this and used to drop it.** Row subtraction needs
+    /// the callee's `with` and `raises` at every call, so the work is already
+    /// done; nothing downstream could see the answer. Three things wanted it
+    /// and each was going to derive it again: inlay hints, so a reader can see
+    /// what a call costs without opening the callee; `khora-lint`'s
+    /// `unused_capabilities`, which goes quiet whenever a body contains a call
+    /// because it cannot tell which labels were forwarded; and completion
+    /// inside a `with { .. }` row.
+    ///
+    /// Recorded as demanded, before any `with` block or `catch` discharges it —
+    /// what the *call* needs, rather than what survives to the signature.
+    call_rows: HashMap<ExprId, CallRows>,
+}
+
+/// The effect rows one call site asked for.
+///
+/// `None` means the row was empty, which is the ordinary case and is why this
+/// is two options rather than two rows: a call that needs nothing and cannot
+/// fail should render as nothing at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallRows {
+    /// Capabilities the callee requires.
+    pub requires: Option<Type>,
+    /// Errors it may raise.
+    pub raises: Option<Type>,
 }
 
 impl BodyTypes {
@@ -38,6 +65,16 @@ impl BodyTypes {
     /// determine, which is also what an id it never visited reports.
     pub fn of(&self, id: ExprId) -> &Type {
         self.exprs.get(&id).unwrap_or(&Type::Unknown)
+    }
+
+    /// What the call at `id` asked for, if it asked for anything.
+    pub fn call_rows(&self, id: ExprId) -> Option<&CallRows> {
+        self.call_rows.get(&id)
+    }
+
+    /// Every call site that asked for something, in no particular order.
+    pub fn calls_with_rows(&self) -> impl Iterator<Item = (ExprId, &CallRows)> {
+        self.call_rows.iter().map(|(id, rows)| (*id, rows))
     }
 
     pub fn local(&self, id: LocalId) -> &Type {
@@ -83,6 +120,7 @@ impl BodyTypes {
             // generic body does, and there is nothing in a `LocalId` to
             // substitute.
             lambda_captures: self.lambda_captures.clone(),
+            call_rows: self.call_rows.clone(),
         }
     }
 }
@@ -145,6 +183,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             projections: Vec::new(),
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
+            call_rows: HashMap::new(),
             installed: Vec::new(),
             loops: Vec::new(),
             open_raises: Vec::new(),
@@ -177,9 +216,10 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             })
             .collect();
         let lambda_captures = std::mem::take(&mut checker.lambda_captures);
+        let call_rows = std::mem::take(&mut checker.call_rows);
         out.bodies.push((
             name.clone(),
-            BodyTypes { exprs, locals, instantiations, lambda_captures },
+            BodyTypes { exprs, locals, instantiations, lambda_captures, call_rows },
         ));
     }
     out

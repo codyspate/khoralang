@@ -120,6 +120,10 @@ code with a build, and shipping half of one would be worse than saying so.
 | Completion | yes — after `.`, after `Type::`, in an import list, and in scope |
 | Rename | **locals only.** A declaration is refused with a reason, see below |
 | Semantic highlighting | yes — a local told apart from an import, a field from a method |
+| Inlay hints | yes — the `with` and `raises` rows of each call |
+| Quick fixes | yes, where the diagnostic names one exact edit |
+| Signature help | yes, with parameter names |
+| Run lens above each `test` | VS Code only — it needs a command the editor can run |
 
 **References are found by resolution, not by matching text**, so they cross
 files and two modules that each declare an `add` stay apart. The identity is the
@@ -135,6 +139,19 @@ A method lands on its **trait** rather than its `impl`, because `khora-hir` does
 not collect impl members. Completion does not have that problem: it reads
 methods off `khora-types`' signature keys, which is where impl members *are*
 recorded.
+
+**Inlay hints are the one no other language can show.** Every other editor's
+hints show inferred *types*, because a type is the only thing their checker
+works out that the source does not say. Khora's signatures are explicit, so the
+types are already on screen — what is not is the `with` and `raises` rows of
+each call, which the checker computes at every call site and, until 14.6, threw
+away:
+
+```khora
+let answer = charge(account, amount);   // with { db: Db } raises DbError
+```
+
+A call that needs nothing and cannot fail gets no hint, which is most calls.
 
 **Highlighting is two layers.** A TextMate grammar
 (`editors/vscode/syntaxes`) colours keywords, literals and punctuation, and

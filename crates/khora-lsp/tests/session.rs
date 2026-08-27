@@ -145,16 +145,20 @@ fn a_client_that_offers_nothing_gets_utf16() {
 /// A request nobody implements must still be answered, or the client waits
 /// forever for a reply that is not coming.
 ///
-/// This named `textDocument/rename` until rename was implemented, at which
-/// point it started asserting that an implemented request was unimplemented.
-/// `codeAction` is 14.7 and is the next one to fall; whoever builds it should
-/// move this to something further down the list rather than delete it.
+/// **This test has now moved twice**, and the pattern is the point: it named
+/// `rename`, then `codeAction`, and each time the feature landed it began
+/// asserting that an implemented request was unimplemented.
+///
+/// It names `foldingRange` now, which is on no roadmap list. If that ever
+/// changes, move it again rather than deleting it — what it holds is that an
+/// unanswered *request* hangs the client, which stays true of whatever is
+/// unimplemented next.
 #[test]
 fn an_unimplemented_request_gets_an_error_rather_than_silence() {
     let w = workspace(&[("src/main.kh", "module app::main;\n")]);
     let replies = session(&[
         initialize(&w.root),
-        json!({ "jsonrpc": "2.0", "id": 7, "method": "textDocument/codeAction", "params": {} }),
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "textDocument/foldingRange", "params": {} }),
         exit(),
     ]);
     let reply = replies.iter().find(|r| r.get("id") == Some(&json!(7))).expect("a reply");
@@ -1302,4 +1306,315 @@ fn a_module_path_is_coloured_by_what_it_resolves_to() {
     assert_eq!(module.kind, index("namespace"), "{module:?}");
     let function = found.iter().find(|t| t.line == 2 && t.column == 25).expect("`add`");
     assert_eq!(function.kind, index("function"), "{function:?}");
+}
+
+// --- inlay hints for rows ---------------------------------------------------
+
+fn inlay_hints(path: &Path, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 9999, "character": 0 }
+            }
+        }
+    })
+}
+
+/// The labels, trimmed, in the order they were sent.
+fn hint_labels(replies: &[Value], id: i64) -> Vec<String> {
+    result_of(replies, id)
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|h| Some(h.get("label")?.as_str()?.trim().to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_server_offers_inlay_hints() {
+    let w = workspace(&[("src/main.kh", "module main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    assert_eq!(
+        result_of(&replies, 1).pointer("/capabilities/inlayHintProvider"),
+        Some(&json!(true))
+    );
+}
+
+/// **The roadmap's own example.** A call whose callee requires a capability
+/// says so at the call, where nothing in the source does.
+#[test]
+fn a_call_shows_the_capability_it_needs() {
+    let text = concat!(
+        "module main;\n",
+        "\n",
+        "pub type Clock = { now: () -> Int };\n",
+        "\n",
+        "effect Timing {\n",
+        "  fn tick() -> Int;\n",
+        "}\n",
+        "\n",
+        "fn charge() -> Int with { timing: Timing } { timing.tick() }\n",
+        "\n",
+        "fn go() -> Int with { timing: Timing } { charge() }\n",
+    );
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, text), inlay_hints(&file, 2), exit()]);
+
+    let labels = hint_labels(&replies, 2);
+    assert!(
+        labels.iter().any(|l| l.contains("with") && l.contains("Timing")),
+        "the call to `charge` needs `timing`, and nothing on that line says so: {labels:?}"
+    );
+}
+
+/// And what it can raise, which is the other row.
+#[test]
+fn a_call_shows_what_it_can_raise() {
+    let text = concat!(
+        "module main;\n",
+        "\n",
+        "pub type Broken = { why: String };\n",
+        "\n",
+        "fn risky() -> Int raises Broken { raise Broken { why: \"no\" } }\n",
+        "\n",
+        "fn go() -> Int raises Broken { risky()! }\n",
+    );
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, text), inlay_hints(&file, 2), exit()]);
+
+    let labels = hint_labels(&replies, 2);
+    assert!(
+        labels.iter().any(|l| l.contains("raises") && l.contains("Broken")),
+        "{labels:?}"
+    );
+}
+
+/// **A call that costs nothing gets no hint**, which is most calls. A hint on
+/// every line is a hint nobody reads; the point is that a marked line is one
+/// where something crosses a boundary.
+#[test]
+fn an_ordinary_call_is_not_annotated() {
+    let text = "module main;\n\nfn double(n: Int) -> Int { n + n }\n\nfn go() -> Int { double(2) }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, text), inlay_hints(&file, 2), exit()]);
+    assert!(hint_labels(&replies, 2).is_empty(), "{:?}", hint_labels(&replies, 2));
+}
+
+// --- quick fixes ------------------------------------------------------------
+
+/// A code action request carrying the diagnostics the client already has.
+fn code_action(path: &Path, diagnostics: Vec<Value>, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 0 }
+            },
+            "context": { "diagnostics": diagnostics }
+        }
+    })
+}
+
+/// **The whole loop**: the server reports a diagnostic, the client hands it
+/// back, and the server offers the edit its own message describes.
+#[test]
+fn the_renamed_keyword_is_offered_a_fix() {
+    let text = "module main;\n\nexport fn go() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    // First, whatever the server actually said about it.
+    let reported = session(&[initialize(&w.root), did_open(&file, text), exit()]);
+    let found = last_diagnostics(&reported);
+    let renamed = found
+        .iter()
+        .find(|d| {
+            d.get("message").and_then(Value::as_str).is_some_and(|m| m.contains("spelled `pub`"))
+        })
+        .cloned()
+        .expect("the rename diagnostic");
+
+    // Then hand it back, the way an editor does.
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        code_action(&file, vec![renamed], 2),
+        exit(),
+    ]);
+
+    let actions = result_of(&replies, 2);
+    let list = actions.as_array().expect("a list");
+    assert_eq!(list.len(), 1, "{actions}");
+    assert_eq!(list[0].get("kind"), Some(&json!("quickfix")), "{actions}");
+
+    let edits = list[0]
+        .pointer("/edit/changes")
+        .and_then(Value::as_object)
+        .and_then(|c| c.values().next())
+        .and_then(Value::as_array)
+        .expect("edits");
+    assert_eq!(edits[0].get("newText"), Some(&json!("pub")), "{actions}");
+    // And it replaces the `export` on line 2, not something else.
+    assert_eq!(edits[0].pointer("/range/start/line"), Some(&json!(2)), "{actions}");
+}
+
+/// **A diagnostic with no mechanical fix is offered nothing**, which is the
+/// rule: an action is applied by somebody who read four words of the message,
+/// so one that guesses is worse than none.
+#[test]
+fn a_type_error_is_offered_no_action() {
+    let text = "module main;\n\nfn go() -> Int { \"not an int\" }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let reported = session(&[initialize(&w.root), did_open(&file, text), exit()]);
+    let found = last_diagnostics(&reported);
+    assert!(!found.is_empty(), "there should be a type error to ask about");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        code_action(&file, found, 2),
+        exit(),
+    ]);
+    assert_eq!(result_of(&replies, 2), json!([]), "no guessing");
+}
+
+// --- signature help ---------------------------------------------------------
+
+fn signature_help(path: &Path, line: u32, character: u32, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/signatureHelp",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "position": { "line": line, "character": character }
+        }
+    })
+}
+
+/// Parameter *names*, which `Signature` does not carry — they come from the
+/// callee's lowered body.
+#[test]
+fn signature_help_shows_named_parameters() {
+    let text = "module main;\n\nfn charge(account: Int, amount: Int) -> Int { account + amount }\n\nfn go() -> Int { charge(\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        signature_help(&file, 4, 24, 2),
+        exit(),
+    ]);
+
+    let help = result_of(&replies, 2);
+    let label = help.pointer("/signatures/0/label").and_then(Value::as_str).unwrap_or_default();
+    assert!(label.contains("account: Int"), "names, not just types: {help}");
+    assert!(label.contains("amount: Int"), "{help}");
+    assert_eq!(help.get("activeParameter"), Some(&json!(0)), "{help}");
+}
+
+/// A comma moves to the next parameter.
+#[test]
+fn a_comma_advances_the_active_parameter() {
+    let text = "module main;\n\nfn charge(account: Int, amount: Int) -> Int { account + amount }\n\nfn go() -> Int { charge(1, \n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        signature_help(&file, 4, 27, 2),
+        exit(),
+    ]);
+    assert_eq!(result_of(&replies, 2).get("activeParameter"), Some(&json!(1)), "{:?}", result_of(&replies, 2));
+}
+
+/// **The unmatched paren, not the first one.** Inside `outer(inner(a, b), ` the
+/// help is about `outer`, which is the case somebody typing a nested call
+/// actually needs.
+#[test]
+fn a_nested_call_reports_the_outer_one() {
+    let text = "module main;\n\nfn inner(a: Int) -> Int { a }\n\nfn outer(x: Int, y: Int) -> Int { x + y }\n\nfn go() -> Int { outer(inner(1), \n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        signature_help(&file, 6, 33, 2),
+        exit(),
+    ]);
+
+    let help = result_of(&replies, 2);
+    let label = help.pointer("/signatures/0/label").and_then(Value::as_str).unwrap_or_default();
+    assert!(label.starts_with("outer("), "the outer call: {help}");
+    assert_eq!(help.get("activeParameter"), Some(&json!(1)), "{help}");
+}
+
+// --- run lenses -------------------------------------------------------------
+
+/// A lens above each `test` block, carrying what `--filter` needs.
+#[test]
+fn each_test_gets_a_run_lens() {
+    let text = "module main;\n\ntest \"adds\" {\n  assert(1 + 1 == 2);\n}\n\ntest \"subtracts\" {\n  assert(2 - 1 == 1);\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        json!({
+            "jsonrpc": "2.0", "id": 2, "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": url_of(&file) } }
+        }),
+        exit(),
+    ]);
+
+    let lenses = result_of(&replies, 2);
+    let list = lenses.as_array().expect("a list");
+    assert_eq!(list.len(), 2, "one per test: {lenses}");
+
+    let names: Vec<&str> = list
+        .iter()
+        .filter_map(|l| l.pointer("/command/arguments/0")?.as_str())
+        .collect();
+    assert_eq!(names, vec!["adds", "subtracts"], "{lenses}");
+    assert_eq!(list[0].pointer("/command/command"), Some(&json!("khora.runTest")), "{lenses}");
+}
+
+/// A file with no tests gets no lenses, rather than an empty decoration.
+#[test]
+fn a_file_with_no_tests_gets_no_lenses() {
+    let text = "module main;\n\nfn go() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        json!({
+            "jsonrpc": "2.0", "id": 2, "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": url_of(&file) } }
+        }),
+        exit(),
+    ]);
+    assert_eq!(result_of(&replies, 2), json!([]));
 }

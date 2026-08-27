@@ -1,8 +1,8 @@
 {
   "name": "khora",
   "displayName": "Khora",
-  "description": "Language support for Khora (.kh): errors as you type, hover types, and format on save.",
-  "version": "0.2.0",
+  "description": "Language support for Khora (.kh): errors as you type, hover types, go to definition, completion, semantic highlighting, effect-row inlay hints, and format on save.",
+  "version": "0.3.0",
   "publisher": "khora-lang",
   "license": "MIT OR Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/codyspate/khoralang" },
@@ -50,6 +50,10 @@
       {
         "command": "khora.showOutput",
         "title": "Khora: Show Language Server Output"
+      },
+      {
+        "command": "khora.runTest",
+        "title": "Khora: Run Test"
       }
     ],
     "configurationDefaults": {

@@ -36,9 +36,12 @@
 
 mod completion;
 mod definition;
+mod fixes;
+mod hints;
 mod position;
 mod references;
 mod semantic;
+mod signature;
 mod symbols;
 mod transport;
 
@@ -125,6 +128,18 @@ impl Server {
             }
             ("textDocument/definition", Some(id)) => {
                 vec![ok(id, self.definition(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/signatureHelp", Some(id)) => {
+                vec![ok(id, self.signature_help(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/codeLens", Some(id)) => {
+                vec![ok(id, self.code_lenses(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/codeAction", Some(id)) => {
+                vec![ok(id, self.code_actions(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/inlayHint", Some(id)) => {
+                vec![ok(id, self.inlay_hints(&params).unwrap_or(Value::Null))]
             }
             ("textDocument/semanticTokens/full", Some(id)) => {
                 vec![ok(id, self.semantic_tokens(&params).unwrap_or(Value::Null))]
@@ -240,6 +255,16 @@ impl Server {
                         },
                     ),
                 ),
+                code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+                code_lens_provider: Some(lsp_types::CodeLensOptions { resolve_provider: Some(false) }),
+                signature_help_provider: Some(lsp_types::SignatureHelpOptions {
+                    // `(` opens the popup and `,` moves it to the next
+                    // parameter. Without the comma it would show parameter one
+                    // for the whole call.
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    ..Default::default()
+                }),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
@@ -490,6 +515,142 @@ impl Server {
         }
 
         Some(json!({ "data": data }))
+    }
+
+    /// The parameters of the call being typed.
+    fn signature_help(&self, params: &Value) -> Option<Value> {
+        let (file, offset) = self.locate(params)?;
+        let root = khora_db::source_root(&self.db)?;
+        let help = signature::at(&self.db, root, file, offset)?;
+
+        let spans: Vec<Value> = help
+            .spans()
+            .into_iter()
+            .map(|(start, end)| json!({ "label": [start, end] }))
+            .collect();
+
+        Some(json!({
+            "signatures": [{
+                "label": help.label(),
+                "parameters": spans,
+            }],
+            "activeSignature": 0,
+            // Clamped, because a call with more arguments than parameters is
+            // an error the checker reports and not a reason to point at a
+            // parameter that does not exist.
+            "activeParameter": help.active.min(help.parameters.len().saturating_sub(1)),
+        }))
+    }
+
+    /// A "Run test" above each `test` block.
+    ///
+    /// The command is the extension's, not the server's: a language server
+    /// cannot run anything, and should not — what it can do is say *where* the
+    /// runnable things are and what to call them. `khora test --filter` is
+    /// what the extension shells out to, which is the same command a person
+    /// would type.
+    fn code_lenses(&self, params: &Value) -> Option<Value> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let index = LineIndex::new(file.text(&self.db));
+        let map = khora_hir::item_map(&self.db, file);
+
+        let out: Vec<Value> = map
+            .tests
+            .iter()
+            .map(|test| {
+                let start = index.position(test.range.start(), self.encoding);
+                json!({
+                    "range": { "start": start, "end": start },
+                    "command": {
+                        "title": "▶ Run",
+                        "command": "khora.runTest",
+                        // The directory, so the extension runs in the package
+                        // rather than wherever the editor happened to be, and
+                        // the name, which is what `--filter` matches.
+                        "arguments": [test.name, path.parent().map(|p| p.to_string_lossy().to_string())],
+                    },
+                })
+            })
+            .collect();
+        Some(Value::Array(out))
+    }
+
+    /// The edits offered for the diagnostics under the cursor.
+    ///
+    /// **The client sends the diagnostics back**, in `context.diagnostics`, so
+    /// there is no need to recompute them and no risk of offering a fix for a
+    /// diagnostic the editor has already cleared. What this adds is the source
+    /// each one covers, which is what lets a replacement keep the part of the
+    /// line it is not changing.
+    fn code_actions(&self, params: &Value) -> Option<Value> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let index = self.lines.get(&url)?;
+        let text = file.text(&self.db);
+
+        let reported = params
+            .pointer("/context/diagnostics")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut out = Vec::new();
+        for diagnostic in reported {
+            let Some(range) = range_of(&diagnostic, index, self.encoding) else { continue };
+            let message = diagnostic.get("message").and_then(Value::as_str).unwrap_or_default();
+            let code = diagnostic.get("code").and_then(Value::as_str);
+            let covered = text.get(usize::from(range.start())..usize::from(range.end()))?;
+
+            for fix in fixes::for_diagnostic(message, code, range, covered) {
+                out.push(json!({
+                    "title": fix.title,
+                    "kind": "quickfix",
+                    // The diagnostic it answers, so an editor can group the
+                    // action with the squiggle it belongs to.
+                    "diagnostics": [diagnostic],
+                    "edit": { "changes": { url.as_str(): [{
+                        "range": Range {
+                            start: index.position(fix.range.start(), self.encoding),
+                            end: index.position(fix.range.end(), self.encoding),
+                        },
+                        "newText": fix.replacement,
+                    }]}},
+                }));
+            }
+        }
+        Some(Value::Array(out))
+    }
+
+    /// What each call costs, shown after the call.
+    ///
+    /// The request carries a range — an editor asks about the part of the file
+    /// on screen — and this ignores it and answers for the whole document.
+    /// Computing the hints costs one `checked` query, which salsa has already
+    /// done for diagnostics, so filtering would be work to save nothing.
+    fn inlay_hints(&self, params: &Value) -> Option<Value> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let index = LineIndex::new(file.text(&self.db));
+
+        let out: Vec<Value> = hints::in_file(&self.db, file)
+            .into_iter()
+            .map(|hint| {
+                json!({
+                    "position": index.position(hint.at, self.encoding),
+                    "label": format!("  {}", hint.label),
+                    // `Type` is 1: this is a hint about what a call needs, not
+                    // about a parameter.
+                    "kind": 1,
+                    "paddingLeft": true,
+                    "tooltip": hint.detail,
+                })
+            })
+            .collect();
+        Some(Value::Array(out))
     }
 
     /// What could be written at the cursor.
@@ -802,6 +963,24 @@ fn workspace_root(params: &Value) -> Option<PathBuf> {
         }
     }
     params.get("rootPath").and_then(Value::as_str).map(PathBuf::from)
+}
+
+/// The byte range a diagnostic covers, back from the client's own units.
+///
+/// The client sends what the server sent it, so this is the inverse of the
+/// conversion in `diagnostics` — and it has to use the same `LineIndex` and
+/// the same encoding, or a fix lands a column away from the squiggle it
+/// answers.
+fn range_of(
+    diagnostic: &Value,
+    index: &LineIndex,
+    encoding: Encoding,
+) -> Option<text_size::TextRange> {
+    let start: lsp_types::Position =
+        serde_json::from_value(diagnostic.pointer("/range/start")?.clone()).ok()?;
+    let end: lsp_types::Position =
+        serde_json::from_value(diagnostic.pointer("/range/end")?.clone()).ok()?;
+    Some(text_size::TextRange::new(index.offset(start, encoding), index.offset(end, encoding)))
 }
 
 fn url_of(params: &Value) -> Option<Url> {

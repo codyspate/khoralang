@@ -98,6 +98,12 @@ pub(crate) struct Checker<'a> {
     pub(crate) enclosing_lambdas: Vec<(ExprId, Vec<khora_hir::body::LocalId>)>,
     /// The finished answer, moved out as each lambda closes.
     pub(crate) lambda_captures: HashMap<ExprId, Vec<khora_hir::body::LocalId>>,
+    /// What each call site asked for, published as [`crate::CallRows`].
+    ///
+    /// Filled where the demand is raised rather than reconstructed afterwards,
+    /// because afterwards the row has been through subtraction and no longer
+    /// says what the *call* wanted.
+    pub(crate) call_rows: HashMap<ExprId, crate::CallRows>,
     /// The capabilities in scope from enclosing `with` blocks.
     ///
     /// A call inside one is served by it, so its labels never reach the

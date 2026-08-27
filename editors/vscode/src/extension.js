@@ -28,6 +28,7 @@ async function activate(context) {
   context.subscriptions.push(
     commands.registerCommand("khora.restartServer", () => restart(context)),
     commands.registerCommand("khora.showOutput", () => output.show(true)),
+    commands.registerCommand("khora.runTest", runTest),
   );
 
   await start(context);
@@ -82,6 +83,34 @@ async function start(context) {
       commands.executeCommand("workbench.action.openSettings", "khora.server.path");
     }
   }
+}
+
+/**
+ * Runs one test, from the lens above it.
+ *
+ * **A terminal rather than a task or a captured process.** The output of a
+ * test run is the thing somebody is asking for, and a terminal shows it as it
+ * arrives, keeps it after the run, and can be scrolled and re-run. Capturing it
+ * into a channel would be more code for a worse version of what the terminal
+ * already is.
+ *
+ * The command is the same one a person would type, which is the point: nothing
+ * here is a private path into the compiler.
+ */
+function runTest(name, directory) {
+  const command = serverCommand();
+  const terminal = window.createTerminal({ name: `khora test`, cwd: directory });
+  terminal.show(true);
+  terminal.sendText(`${quote(command)} test ${quote(directory ?? ".")} --filter ${quote(name)}`);
+}
+
+/** Quotes an argument for whichever shell the terminal is running. */
+function quote(value) {
+  const text = String(value ?? "");
+  // Only when it needs it: quoting everything makes the command line in the
+  // terminal harder to read and to copy, and reading it is half of why the
+  // terminal was chosen.
+  return /[\s"']/.test(text) ? JSON.stringify(text) : text;
 }
 
 /**

@@ -146,6 +146,20 @@ impl<'a> Checker<'a> {
             // something with labels in it, the row itself says so, and
             // `check_effects` re-reads the row.
             let known_fallible = matches!(&row, Type::Row { fields, .. } if !fields.is_empty());
+
+            // Published for whoever wants to *show* this rather than check it.
+            // Here rather than afterwards: by the time the demand list is
+            // reconciled with the signature, a `with` block or a `catch` has
+            // subtracted from the row and it no longer says what the call
+            // asked for. `crate::CallRows`.
+            if let Some(at) = callee_site {
+                let entry = self.call_rows.entry(at).or_default();
+                match clause {
+                    Clause::Requires => entry.requires = Some(row.clone()),
+                    Clause::Raises => entry.raises = Some(row.clone()),
+                }
+            }
+
             self.demanded.push(Demand {
                 fallible: clause == Clause::Raises && known_fallible,
                 clause,
