@@ -8,6 +8,70 @@ const source = path.join(root, 'content', 'docs');
 const collectionRoot = path.join(root, 'src', 'content', 'docs');
 const target = path.join(collectionRoot, 'docs');
 
+function isInternalMarkdownSourceUrl(url) {
+  const targetUrl = url.trim().replace(/^<|>$/g, '');
+  if (/^[a-z][a-z0-9+.-]*:/i.test(targetUrl) || targetUrl.startsWith('//')) return false;
+  return /\.md(?:[?#].*)?$/i.test(targetUrl);
+}
+
+function lineAt(text, index) {
+  return text.slice(0, index).split(/\r?\n/).length;
+}
+
+function sourceFileLinks(text) {
+  const found = [];
+  const patterns = [
+    // Inline Markdown links and images. The public site routes to pages, not
+    // the .md source files Starlight consumed.
+    /!?\[[^\]]*\]\(\s*<?([^\s)>]+)>?[^)]*\)/g,
+    // Raw HTML occasionally appears in docs and follows the same URL rule.
+    /href\s*=\s*["']([^"']+)["']/gi,
+    // Reference-style Markdown: [label]: ./page.md
+    /^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?/gm,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const url = match[1];
+      if (isInternalMarkdownSourceUrl(url)) {
+        found.push({ url, line: lineAt(text, match.index ?? 0) });
+      }
+    }
+  }
+
+  return found;
+}
+
+async function validateDocLinks(dir) {
+  const broken = [];
+
+  async function visit(current) {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await visit(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.md') && !entry.name.endsWith('.mdx')) continue;
+
+      const text = await readFile(full, 'utf8');
+      for (const link of sourceFileLinks(text)) {
+        broken.push(`${path.relative(source, full)}:${link.line} -> ${link.url}`);
+      }
+    }
+  }
+
+  await visit(dir);
+  if (broken.length > 0) {
+    throw new Error(
+      `Public documentation links must use rendered routes, not .md source URLs:\n${broken
+        .map((link) => `  ${link}`)
+        .join('\n')}`,
+    );
+  }
+}
+
+await validateDocLinks(source);
 await rm(collectionRoot, { recursive: true, force: true });
 await mkdir(target, { recursive: true });
 await cp(source, target, { recursive: true });
