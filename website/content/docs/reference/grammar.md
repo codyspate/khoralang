@@ -149,7 +149,7 @@ while condition { body; }
 for pattern in iterable { body; }
 loop { body; }
 raise error
-handler for Effect { operation: fn _ => value }
+handler for Effect { operation: fn () => value }
 with Context { body; }
 break
 continue

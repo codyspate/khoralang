@@ -35,7 +35,7 @@ A spawned closure may capture values that satisfy the sharing rules:
 
 ```khora
 fn print_later(value: Int) -> () {
-  let child = Fiber::spawn(fn () => print(value));
+  let child = Fiber::spawn(fn () => print(Int::to_string(value)));
   Fiber::join(child);
 }
 ```

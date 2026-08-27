@@ -19,7 +19,7 @@ let name: String = "Khora";
 let nothing: () = ();
 ```
 
-A fractional literal without a suffix is a `Float`. The `d` suffix makes an exact `Decimal` literal:
+A fractional literal without a suffix is a `Float`. The `d` suffix makes an exact `Decimal` literal, and the module has to have `import std::decimal::{Decimal};` for the literal to have a type:
 
 ```khora
 let approximate = 0.1;

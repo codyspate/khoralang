@@ -151,8 +151,9 @@ for (key, value) in entries {
 
 ```khora
 let user = load_user(id)! catch {
-  DbError::NotFound(_) => User::guest(),
-  DbError::Unavailable(reason) => User::offline(reason),
+  DbError::Rejected(_) => User::guest(),
+  DbError::Disconnected(reason) => User::offline(reason),
+  DbError::RolledBack(reason) => User::offline(reason),
 };
 ```
 

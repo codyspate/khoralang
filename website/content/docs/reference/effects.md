@@ -119,7 +119,7 @@ Clauses belong to the function arrow they follow.
 
 ```khora
 handler for Clock {
-  now: fn _ => fixed_instant,
+  now: fn () => fixed_instant,
 }
 ```
 

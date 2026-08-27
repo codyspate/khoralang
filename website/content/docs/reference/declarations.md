@@ -185,7 +185,7 @@ Effect members are named function types separated by commas.
 
 ```khora
 pub context Production {
-  scope: Scope::root,
+  scope: Scope::root(),
   db: postgres_db()!,
   store: sql_store(),
 }
@@ -215,7 +215,7 @@ With supertraits and an associated type:
 ```khora
 pub trait Iterator: Show {
   type Item;
-  fn next(self) -> Option<Item>;
+  fn next(self) -> Step<Self, Self::Item>;
 }
 ```
 

@@ -70,14 +70,14 @@ Prefer selected imports in most application code because they make dependencies 
 Khora deliberately uses different syntax for compile-time names and runtime values:
 
 ```khora
-let response = http::Response::ok();
-print(response.status);
+let response = http::Response::text(200, "ok");
+print(Int::to_string(response.status));
 ```
 
 - `::` walks modules, types, constructors, and associated items.
 - `.` projects a field or calls behavior on a runtime value.
 
-That keeps `Response::ok` visibly different from `response.status`.
+That keeps `Response::text` visibly different from `response.status`.
 
 ## Public declarations with `pub`
 

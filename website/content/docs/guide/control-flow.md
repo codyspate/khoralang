@@ -95,6 +95,12 @@ for (key, value) in entries {
 }
 ```
 
+`for` is desugared to the `Iterator` trait's `next`, which hands back the next item and the iterator that follows it. Both `Iterator` and `Step` have to be in scope where the loop is written:
+
+```khora
+import std::core::{Iterator, List, Step};
+```
+
 Use collection transforms such as `List::map` when the result is another collection; use `for` when the important part is the body executed for each element.
 
 ## `loop`
@@ -173,8 +179,9 @@ fn maybe_print(enabled: Bool) -> () {
 
 ```khora
 let user = load_user(id)! catch {
-  DbError::NotFound(_) => User::guest(),
-  DbError::Unavailable(_) => User::offline(),
+  DbError::Rejected(_) => User::guest(),
+  DbError::Disconnected(_) => User::offline(),
+  DbError::RolledBack(_) => User::offline(),
 };
 ```
 

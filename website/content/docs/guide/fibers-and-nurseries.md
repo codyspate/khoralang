@@ -23,7 +23,7 @@ A spawned closure may capture ordinary shareable values from its environment:
 
 ```khora
 fn print_double(value: Int) -> () {
-  let worker = Fiber::spawn(fn () => print(value * 2));
+  let worker = Fiber::spawn(fn () => print(Int::to_string(value * 2)));
   Fiber::join(worker);
 }
 ```

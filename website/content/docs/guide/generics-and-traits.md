@@ -117,7 +117,7 @@ A trait may name a type that each implementation chooses:
 ```khora
 pub trait Iterator {
   type Item;
-  fn next(self) -> Option<Item>;
+  fn next(self) -> Step<Self, Self::Item>;
 }
 ```
 
@@ -127,7 +127,7 @@ An implementation supplies the associated type:
 impl Iterator for UserIterator {
   type Item = User;
 
-  fn next(self) -> Option<User> {
+  fn next(self) -> Step<UserIterator, User> {
     // ...
   }
 }

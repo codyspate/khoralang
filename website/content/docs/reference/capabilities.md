@@ -59,7 +59,7 @@ fn run<A, 'e>(body: () -> A with 'e) -> A
 
 ```khora
 let fixed_clock = handler for Clock {
-  now: fn _ => fixed_instant,
+  now: fn () => fixed_instant,
 };
 ```
 
@@ -112,7 +112,7 @@ Bindings inside a context row are sequential. A later expression may use handler
 ```khora
 with {
   config: env_config(),
-  scope: Scope::root,
+  scope: Scope::root(),
   db: postgres_db()!,
   store: sql_store(),
 } {
@@ -127,7 +127,7 @@ This allows service construction to remain flat rather than nesting one installa
 ```khora
 pub context Production {
   config: env_config(),
-  scope: Scope::root,
+  scope: Scope::root(),
   db: postgres_db()!,
   store: sql_store(),
 }

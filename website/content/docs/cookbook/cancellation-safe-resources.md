@@ -62,7 +62,7 @@ let resource = acquire(open_resource(), close_resource);
 `scoped` supplies the `scope` capability required by `fail_after_open`:
 
 ```khora
-scoped(fail_after_open)
+scoped(fail_after_open)!
 ```
 
 When `fail_after_open` raises, the scope unwinds, the registered release runs, and only then does `UseError::Failed` continue outward to the `catch` in `main`.

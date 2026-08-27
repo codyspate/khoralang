@@ -284,7 +284,7 @@ See [Capabilities](./capabilities/).
 
 ```khora
 handler for Clock {
-  now: fn _ => fixed_instant,
+  now: fn () => fixed_instant,
 }
 ```
 

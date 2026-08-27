@@ -14,7 +14,7 @@ This module implements a small console tracer and uses `around` to guarantee the
 module main;
 
 import std::core::{print};
-import std::trace::{Context, Status, Tracer, around};
+import std::trace::{Context, Span, Status, Tracer, around};
 
 fn console_tracer() -> Tracer {
   handler for Tracer {

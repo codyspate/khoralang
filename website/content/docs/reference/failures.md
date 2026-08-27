@@ -149,7 +149,9 @@ fn analyze(id: Id) -> Report
 {
   analyze_model(id)! catch {
     ModelError::RateLimited(_) => Report::deferred(id),
-    ModelError::InvalidOutput(_) => Report::unavailable(id),
+    ModelError::ContextLengthExceeded(_) => Report::unavailable(id),
+    ModelError::InferenceEngineFailure(_) => Report::unavailable(id),
+    ModelError::SchemaExtractionError(_) => Report::unavailable(id),
   }
 }
 ```

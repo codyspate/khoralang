@@ -73,7 +73,7 @@ Declare an associated type:
 ```khora
 pub trait Iterator {
   type Item;
-  fn next(self) -> Option<Item>;
+  fn next(self) -> Step<Self, Self::Item>;
 }
 ```
 
@@ -82,7 +82,7 @@ With a bound:
 ```khora
 pub trait Iterator {
   type Item: Show;
-  fn next(self) -> Option<Item>;
+  fn next(self) -> Step<Self, Self::Item>;
 }
 ```
 
@@ -92,7 +92,7 @@ Supply it in an implementation:
 impl Iterator for Users {
   type Item = User;
 
-  fn next(self) -> Option<User> {
+  fn next(self) -> Step<Users, User> {
     // ...
   }
 }

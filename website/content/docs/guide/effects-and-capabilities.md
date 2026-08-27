@@ -58,7 +58,7 @@ Capability labels such as `store` and `clock` are ordinary names in the function
 
 ```khora
 let fixed_clock = handler for Clock {
-  now: fn _ => Instant::from_unix_seconds(0),
+  now: fn () => Instant::from_unix_seconds(0),
 };
 ```
 
@@ -111,7 +111,7 @@ Bindings in a `with` row are sequential. A handler may use bindings declared abo
 ```khora
 with {
   config: env_config(),
-  scope: Scope::root,
+  scope: Scope::root(),
   db: postgres_db()!,
   store: sql_store(),
 } {
@@ -128,7 +128,7 @@ Use `context` to name a reusable bundle of handlers:
 ```khora
 pub context Production {
   config: env_config(),
-  scope: Scope::root,
+  scope: Scope::root(),
   db: postgres_db()!,
   store: sql_store(),
 }

@@ -71,7 +71,7 @@ Effectful code can receive controlled handlers instead of reaching real external
 
 ```khora
 const fixed_clock = handler for Clock {
-  now: fn _ => fixed_instant,
+  now: fn () => fixed_instant,
 };
 
 test "session uses the supplied clock" {

@@ -61,7 +61,7 @@ for name in names {
 }
 ```
 
-The left side is a pattern, so destructuring works there too.
+The left side is a pattern, so destructuring works there too. `for` uses the `Iterator` trait, so the module needs `import std::core::{Iterator, Step};` alongside whatever collection it walks.
 
 ## Quoted strings
 

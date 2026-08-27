@@ -167,7 +167,7 @@ handler in context test bench derive extern
 Examples of their keyword positions:
 
 ```khora
-handler for Clock { now: fn _ => fixed_instant }
+handler for Clock { now: fn () => fixed_instant }
 for item in items { process(item); }
 context Production { clock: live_clock }
 test "works" { assert(true); }

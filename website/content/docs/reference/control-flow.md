@@ -111,6 +111,12 @@ for (key, value) in entries {
 }
 ```
 
+`for` desugars to `Iterator::next`, so both `Iterator` and `Step` must be in scope in the module that writes the loop:
+
+```khora
+import std::core::{Iterator, Step};
+```
+
 ## `loop`
 
 ```khora
