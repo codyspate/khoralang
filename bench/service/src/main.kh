@@ -9,6 +9,6 @@ import std::net::http::{HttpError, Response, Router};
 
 pub fn main() raises HttpError {
   Router::new()
-    |> Router::get("/health", SharedFn::of(fn request => Response::json(200, "{\"status\":\"ok\"}")))
+    |> Router::get("/health", SharedFn::of(fn _request => Response::json(200, "{\"status\":\"ok\"}")))
     |> Router::listen(18952)!
 }

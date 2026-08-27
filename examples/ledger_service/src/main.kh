@@ -350,7 +350,7 @@ fn answered(account: String, rows: List<Row>) -> Response {
 /// **Asks the database.** A health check that answers 200 because the process
 /// is running tells a load balancer nothing it did not already know from the
 /// connection being accepted.
-fn health(pool: Pool, tracer: Tracer, request: Request) -> Response {
+fn health(pool: Pool, tracer: Tracer, _request: Request) -> Response {
   let asked = around_result(tracer, "health", fn () =>
     with_db(pool, fn db => db.query("select 1::int4", List::Nil)));
   let fields = Map::new();

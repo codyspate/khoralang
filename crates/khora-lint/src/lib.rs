@@ -64,9 +64,23 @@ pub const LINTS: &[&str] = &[
     DISCARDED_RESULT,
     REFERENCE_CYCLE,
     UNKNOWN_ALLOW,
+    UNREACHABLE_CODE,
+    UNUSED_BINDING,
     UNUSED_CAPABILITY,
     USELESS_ALLOW,
 ];
+
+/// A binding nothing reads.
+///
+/// Locals, parameters, and the names a pattern binds. `_` is the escape, and
+/// so is a leading underscore — see [`unused_bindings`]. Roadmap 14.23.
+pub const UNUSED_BINDING: &str = "unused-binding";
+
+/// A statement that cannot run, because the one before it left the block.
+///
+/// Cheap and always a mistake: nobody writes a line after a `return` on
+/// purpose. Roadmap 14.24.
+pub const UNREACHABLE_CODE: &str = "unreachable-code";
 
 /// A `// @klint allow` naming something that is not a lint.
 ///
@@ -132,6 +146,8 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
         // types — one whose `derive` was refused, say — is skipped rather than
         // guessed at: `reference_cycles` needs to know what is on the heap and
         // has nothing useful to say without it.
+        unreachable_code(body, &mut out);
+        unused_bindings(body, &mut out);
         if let Some((_, types)) = checked.bodies.iter().find(|(n, _)| n == name) {
             reference_cycles(body, types, &mut out);
             discarded_results(body, types, &mut out);
@@ -207,6 +223,150 @@ fn line_of(starts: &[u32], offset: u32) -> usize {
     match starts.binary_search(&offset) {
         Ok(exact) => exact,
         Err(after) => after - 1,
+    }
+}
+
+/// Bindings nothing reads.
+///
+/// # What counts as reading one
+///
+/// Any mention. **Including the target of an assignment**, which means
+/// `let mut n = 1; n = 2;` with no read does not fire. That is a miss rather
+/// than a false report, and deliberately: "assigned and never read" is a
+/// different lint about a different mistake, and catching it here by accident
+/// would mean reporting it with this one's message.
+///
+/// # Two escapes, and why there are two
+///
+/// A `_` pattern binds nothing at all, so it never reaches this — that is the
+/// escape the language already had, from `let _ = f()`.
+///
+/// A name *starting* with `_` also silences it, and that is a convention this
+/// lint introduces. The reason is parameters: a function implementing a trait
+/// or matching a callback shape often cannot use an argument and still wants
+/// to *name* it, because the name is what tells the next reader what the
+/// argument is. Forcing `_` there throws away documentation to satisfy a lint,
+/// which is the wrong trade.
+///
+/// # What it leaves alone
+///
+/// Capability bindings from a `with` row. Those are [`UNUSED_CAPABILITY`]'s,
+/// and reporting one thing twice under two names is worse than reporting it
+/// once under the right one.
+fn unused_bindings(body: &Body, out: &mut Vec<Finding>) {
+    let mut read: Vec<LocalId> = Vec::new();
+    for (_, expr) in body.exprs() {
+        if let Expr::Local(local) = expr {
+            read.push(*local);
+        }
+    }
+
+    // Whatever the `with` row bound, by the pattern it bound it through.
+    let mut capabilities: Vec<LocalId> = Vec::new();
+    for (_, pat) in &body.evidence {
+        if let Pat::Bind(local) = body.pat(*pat) {
+            capabilities.push(*local);
+        }
+    }
+
+    // **And whatever a `with` *block* installs.** Such a block lowers to
+    // ordinary `let`s, so its labels look like bindings -- but a capability is
+    // used by calling something that requires it, not by naming it, so a
+    // `with { clock: Clock::real() }` around code that reads the clock has no
+    // mention of `clock` anywhere. Reporting those was this lint's one class
+    // of false positive, and it fired on every reference application.
+    //
+    // By name rather than by binding, because `installs` records the labels
+    // and the `let`s they lower to are not distinguishable afterwards. That
+    // over-excludes an ordinary `let clock = ...` in a body that also installs
+    // `clock`, which is a miss and not a wrong report.
+    let installed: Vec<&str> =
+        body.installs.values().flatten().map(String::as_str).collect();
+
+    for (id, local) in body.locals() {
+        if local.name.starts_with('_')
+            || read.contains(&id)
+            || capabilities.contains(&id)
+            || installed.contains(&local.name.as_str())
+        {
+            continue;
+        }
+        out.push(Finding {
+            lint: UNUSED_BINDING,
+            message: format!(
+                "`{}` is bound and never read. Delete it, or rename it to `_{}` if it has \
+                 to stay",
+                local.name, local.name
+            ),
+            range: local.range,
+        });
+    }
+}
+
+/// Statements after the one that leaves the block.
+///
+/// **One finding per block, not one per statement.** Three lines after a
+/// `return` are one mistake, and three warnings about it is the kind of
+/// output people learn to scroll past. The range covers the first dead
+/// statement, which is where the reader has to start deleting.
+///
+/// `break` and `continue` count as leaving. They do not leave the *function*,
+/// but they leave the block, and the statement after one is just as dead.
+///
+/// **The caret is narrow when the dead statement is a `let`.** `Body` carries
+/// a range per *expression* and none per statement, so the best available
+/// anchor is the initializer -- right line, narrow mark. Widening it wants
+/// statement ranges in the HIR, which several diagnostics would use and none
+/// has needed enough to add.
+fn unreachable_code(body: &Body, out: &mut Vec<Finding>) {
+    for (_, expr) in body.exprs() {
+        let Expr::Block { stmts, tail } = expr else { continue };
+
+        // The statement that ends the block, and what it was.
+        let mut ends_at: Option<(usize, &'static str)> = None;
+        for (at, stmt) in stmts.iter().enumerate() {
+            let Stmt::Expr(id) = stmt else { continue };
+            if let Some(how) = leaves(body.expr(*id)) {
+                ends_at = Some((at, how));
+                break;
+            }
+        }
+        let Some((at, how)) = ends_at else { continue };
+
+        // What follows it: the rest of the statements, then the tail.
+        let dead = stmts.get(at + 1).and_then(|stmt| match stmt {
+            Stmt::Expr(id) => Some(*id),
+            Stmt::Let { init, .. } => *init,
+        });
+        let dead = dead.or(if at + 1 == stmts.len() { *tail } else { None });
+        let Some(dead) = dead else { continue };
+
+        out.push(Finding {
+            lint: UNREACHABLE_CODE,
+            message: format!(
+                "this cannot run: the `{how}` above it always leaves the block first"
+            ),
+            range: body.range(dead),
+        });
+    }
+}
+
+/// How an expression leaves the block it is a statement of, if it does.
+///
+/// Deliberately only the four that always do. An `if` where both arms return
+/// also leaves, and a `match` where every arm does, and working that out is a
+/// reachability analysis rather than a look at one node — worth having, and
+/// worth having as its own thing rather than smuggled into a lint. Until then
+/// this is quiet about them, which is the right direction to be wrong in:
+/// a lint that misses a case annoys nobody, and one that reports live code
+/// gets switched off.
+fn leaves(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Return(_) => Some("return"),
+        Expr::Raise(_) => Some("raise"),
+        Expr::Break(_) => Some("break"),
+        Expr::Continue => Some("continue"),
+        _ => None,
     }
 }
 

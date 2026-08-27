@@ -20,17 +20,17 @@ impl Eq for RiskLevel {
     match self {
       RiskLevel::Low => match other {
         RiskLevel::Low => true,
-        RiskLevel::Moderate(r) => false,
-        RiskLevel::Critical(a) => false,
+        RiskLevel::Moderate(_r) => false,
+        RiskLevel::Critical(_a) => false,
       },
       RiskLevel::Moderate(mine) => match other {
         RiskLevel::Low => false,
         RiskLevel::Moderate(theirs) => mine == theirs,
-        RiskLevel::Critical(a) => false,
+        RiskLevel::Critical(_a) => false,
       },
       RiskLevel::Critical(mine) => match other {
         RiskLevel::Low => false,
-        RiskLevel::Moderate(r) => false,
+        RiskLevel::Moderate(_r) => false,
         RiskLevel::Critical(theirs) => mine == theirs,
       },
     }
@@ -146,8 +146,8 @@ pub fn analyze_transaction_risk(account_id: String) -> AnalysisReport
 
   match report.risk {
     RiskLevel::Low => (),
-    RiskLevel::Moderate(reason) => ledger.flag_account(account_id, report.risk)!,
-    RiskLevel::Critical(action) => {
+    RiskLevel::Moderate(_reason) => ledger.flag_account(account_id, report.risk)!,
+    RiskLevel::Critical(_action) => {
       ledger.flag_account(account_id, report.risk)!;
       print("ALERT: Critical threat detected on " + account_id);
     }
@@ -181,8 +181,8 @@ pub fn handle(req: Request) -> Response
 }
 
 const mock_ledger = handler for Ledger {
-  get_history: fn id => "Transaction: $50000 to offshore entity",
-  flag_account: fn (id, risk) => (),
+  get_history: fn _id => "Transaction: $50000 to offshore entity",
+  flag_account: fn (_id, _risk) => (),
 };
 
 /// One line each, because the effect is two small things. This used to have to

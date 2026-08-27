@@ -46,7 +46,7 @@ pub fn invalid_handle() -> Int { 0 - 1 }
 /// fills in and nothing here reads — it is an out-parameter that has to exist.
 pub fn start() -> Bool {
   let data: Array<U8> = Array::new(512, 0);
-  Array::with_data(data, fn (buffer, n) => WSAStartup(U16::of(514), buffer) == I32::of(0))
+  Array::with_data(data, fn (buffer, _n) => WSAStartup(U16::of(514), buffer) == I32::of(0))
 }
 
 /// A socket listening on `port`, or [`invalid_handle`].
@@ -62,7 +62,7 @@ pub fn listen_on(port: Int) -> Int {
     handle
   } else {
     let address = sockaddr_in(port);
-    let bound = Array::with_data(address, fn (bytes, n) => bind(handle, bytes, I32::of(16)));
+    let bound = Array::with_data(address, fn (bytes, _n) => bind(handle, bytes, I32::of(16)));
     // **511, not 16.** The backlog is the queue of connections the kernel has
     // accepted and this program has not yet taken, which is to say it *is* the
     // buffer `bounded_nursery` means when it says overload "becomes latency

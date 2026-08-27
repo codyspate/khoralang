@@ -285,10 +285,10 @@ impl<A> Option<A> {
   ///
   /// For a condition. Reaching for the value afterwards means matching twice;
   /// `match` once instead.
-  pub fn is_some(self) -> Bool { match self { Option::Some(v) => true, Option::None => false } }
+  pub fn is_some(self) -> Bool { match self { Option::Some(_v) => true, Option::None => false } }
 
   /// Whether there is not.
-  pub fn is_none(self) -> Bool { match self { Option::Some(v) => false, Option::None => true } }
+  pub fn is_none(self) -> Bool { match self { Option::Some(_v) => false, Option::None => true } }
 
   /// The value, or `fallback` if there is none.
   ///
@@ -316,10 +316,10 @@ impl<A> Option<A> {
 
 impl<A, E> Result<A, E> {
   /// Whether this succeeded.
-  pub fn is_ok(self) -> Bool { match self { Result::Ok(v) => true, Result::Err(e) => false } }
+  pub fn is_ok(self) -> Bool { match self { Result::Ok(_v) => true, Result::Err(_e) => false } }
 
   /// Whether it did not.
-  pub fn is_err(self) -> Bool { match self { Result::Ok(v) => false, Result::Err(e) => true } }
+  pub fn is_err(self) -> Bool { match self { Result::Ok(_v) => false, Result::Err(_e) => true } }
 
   /// The value, or `fallback` if there was an error.
   ///
@@ -327,12 +327,12 @@ impl<A, E> Result<A, E> {
   /// caller has already decided the reason does not change what they do; when
   /// it might, `match`.
   pub fn unwrap_or(self, fallback: A) -> A {
-    match self { Result::Ok(v) => v, Result::Err(e) => fallback }
+    match self { Result::Ok(v) => v, Result::Err(_e) => fallback }
   }
 
   /// Discards the error, which is the one direction that cannot fail.
   pub fn ok(self) -> Option<A> {
-    match self { Result::Ok(v) => Option::Some(v), Result::Err(e) => Option::None }
+    match self { Result::Ok(v) => Option::Some(v), Result::Err(_e) => Option::None }
   }
 
   /// Rewrites the error and leaves the value alone.
@@ -450,19 +450,19 @@ impl<A> List<A> {
   /// Whether there is nothing in it.
   ///
   /// Constant time, which `length() == 0` is not.
-  pub fn is_empty(self) -> Bool { match self { List::Nil => true, List::Cons(h, t) => false } }
+  pub fn is_empty(self) -> Bool { match self { List::Nil => true, List::Cons(_h, _t) => false } }
 
   /// How many elements there are.
   ///
   /// **Walks the list.** Nothing here caches it, so a loop that asks each time
   /// round is quadratic — take it once.
   pub fn length(self) -> Int {
-    match self { List::Nil => 0, List::Cons(h, t) => 1 + t.length() }
+    match self { List::Nil => 0, List::Cons(_h, t) => 1 + t.length() }
   }
 
   /// The first element, or `None` for an empty list.
   pub fn head(self) -> Option<A> {
-    match self { List::Nil => Option::None, List::Cons(h, t) => Option::Some(h) }
+    match self { List::Nil => Option::None, List::Cons(h, _t) => Option::Some(h) }
   }
 
   /// Prepends, which is the cheap end. Appending walks the whole list, so it
@@ -1456,7 +1456,7 @@ impl<K: Hash, V> Chain<K, V> {
   /// Whether `key` is in this bucket.
   fn holds(self, key: K) -> Bool {
     match Chain::find(self, key) {
-      Option::Some(v) => true,
+      Option::Some(_v) => true,
       Option::None => false,
     }
   }
@@ -1517,7 +1517,7 @@ impl<K, V> Dict<K, V> {
   pub fn size(self) -> Int {
     match self {
       Dict::Empty => 0,
-      Dict::Node(count, k, v, l, r) => count,
+      Dict::Node(count, _k, _v, _l, _r) => count,
     }
   }
 
@@ -1559,13 +1559,13 @@ impl<K, V> Dict<K, V> {
     match right {
       // Unreachable: an empty side is never the heavy one.
       Dict::Empty => Dict::node(key, value, left, Dict::Empty),
-      Dict::Node(n, rk, rv, rl, rr) =>
+      Dict::Node(_n, rk, rv, rl, rr) =>
       if Dict::size(rl) < 2 * Dict::size(rr) {
         Dict::node(rk, rv, Dict::node(key, value, left, rl), rr)
       } else {
         match rl {
           Dict::Empty => Dict::node(rk, rv, Dict::node(key, value, left, Dict::Empty), rr),
-          Dict::Node(m, rlk, rlv, rll, rlr) =>
+          Dict::Node(_m, rlk, rlv, rll, rlr) =>
           Dict::node(
             rlk,
             rlv,
@@ -1581,13 +1581,13 @@ impl<K, V> Dict<K, V> {
   pub fn rotate_right(key: K, value: V, left: Dict<K, V>, right: Dict<K, V>) -> Dict<K, V> {
     match left {
       Dict::Empty => Dict::node(key, value, Dict::Empty, right),
-      Dict::Node(n, lk, lv, ll, lr) =>
+      Dict::Node(_n, lk, lv, ll, lr) =>
       if Dict::size(lr) < 2 * Dict::size(ll) {
         Dict::node(lk, lv, ll, Dict::node(key, value, lr, right))
       } else {
         match lr {
           Dict::Empty => Dict::node(lk, lv, ll, Dict::node(key, value, Dict::Empty, right)),
-          Dict::Node(m, lrk, lrv, lrl, lrr) =>
+          Dict::Node(_m, lrk, lrv, lrl, lrr) =>
           Dict::node(
             lrk,
             lrv,
@@ -1609,7 +1609,7 @@ impl<K, V> Dict<K, V> {
   fn gather(self, after: List<Pair<K, V>>) -> List<Pair<K, V>> {
     match self {
       Dict::Empty => after,
-      Dict::Node(n, k, v, l, r) =>
+      Dict::Node(_n, k, v, l, r) =>
       Dict::gather(l, List::Cons({ key: k, value: v }, Dict::gather(r, after))),
     }
   }
@@ -1620,7 +1620,7 @@ impl<K: Ord, V> Dict<K, V> {
   pub fn get(self, key: K) -> Option<V> {
     match self {
       Dict::Empty => Option::None,
-      Dict::Node(n, nk, nv, l, r) =>
+      Dict::Node(_n, nk, nv, l, r) =>
       if key < nk {
         Dict::get(l, key)
       } else if nk < key {
@@ -1635,7 +1635,7 @@ impl<K: Ord, V> Dict<K, V> {
   pub fn contains(self, key: K) -> Bool {
     match Dict::get(self, key) {
       Option::None => false,
-      Option::Some(found) => true,
+      Option::Some(_found) => true,
     }
   }
 
@@ -1659,7 +1659,7 @@ impl<K: Ord, V> Dict<K, V> {
   pub fn remove(self, key: K) -> Dict<K, V> {
     match self {
       Dict::Empty => Dict::Empty,
-      Dict::Node(n, nk, nv, l, r) =>
+      Dict::Node(_n, nk, nv, l, r) =>
       if key < nk {
         Dict::balance(nk, nv, Dict::remove(l, key), r)
       } else if nk < key {
@@ -1686,7 +1686,7 @@ impl<K: Ord, V> Dict<K, V> {
   fn least(self) -> Option<Least<K, V>> {
     match self {
       Dict::Empty => Option::None,
-      Dict::Node(n, nk, nv, l, r) =>
+      Dict::Node(_n, nk, nv, l, r) =>
       match Dict::least(l) {
         // Nothing smaller: this node is it, and the right side is what is left.
         Option::None => Option::Some({ key: nk, value: nv, rest: r }),
@@ -2598,8 +2598,8 @@ pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
   let mut outcome = attempt(body);
   while left > 0 {
     match outcome {
-      Result::Ok(value) => left = 0,
-      Result::Err(error) => {
+      Result::Ok(_value) => left = 0,
+      Result::Err(_error) => {
         outcome = attempt(body);
         left = left - 1;
       }
@@ -2620,11 +2620,11 @@ pub fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> I
   let mut done = 0;
   while left > 0 {
     match attempt(body) {
-      Result::Ok(value) => {
+      Result::Ok(_value) => {
         done = done + 1;
         left = left - 1;
       }
-      Result::Err(error) => left = 0,
+      Result::Err(_error) => left = 0,
     };
   }
   done

@@ -191,7 +191,7 @@ fn follow(store: Store, request: Request) -> Response
 }
 
 /// `GET /links` — everything, newest first.
-fn listing(store: Store, request: Request) -> Response {
+fn listing(store: Store, _request: Request) -> Response {
   let table = Shared::get(store.links);
   // Into a `Vector` and back out, which is the shape a listing wants: the
   // entries arrive in key order and have to come out in time order, and
@@ -213,7 +213,7 @@ fn listing(store: Store, request: Request) -> Response {
 }
 
 /// `GET /health` — how long, and how many.
-fn health(store: Store, request: Request) -> Response
+fn health(store: Store, _request: Request) -> Response
   with { clock: Clock }
 {
   let fields = Map::new();
@@ -251,7 +251,7 @@ fn absolute(url: String) -> Bool {
 /// The `url` of a JSON object, if the body was one and it had a string there.
 fn url_of(body: String) -> Option<String> {
   match parse(body) {
-    Result::Err(why) => Option::None,
+    Result::Err(_why) => Option::None,
     Result::Ok(value) =>
     match Json::field(value, "url") {
       Option::None => Option::None,

@@ -412,7 +412,7 @@ fn a_matched_result_is_not_reported() {
         &db,
         &format!(
             "{RESULTS}\nfn f() -> Int {{\n  \
-             match work() {{ Result::Ok(n) => n, Result::Err(e) => 0 }}\n}}\n"
+             match work() {{ Result::Ok(n) => n, Result::Err(_e) => 0 }}\n}}\n"
         ),
     );
     assert!(found.is_empty(), "{found:?}");

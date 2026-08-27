@@ -2013,7 +2013,7 @@ fn split_authority(authority: String, secure: Bool) -> Option<Where> {
 
 /// A port that has to be digits, because `host:` and `host:abc` are mistakes
 /// worth naming rather than defaulting past.
-fn port_of(host: String, text: String, secure: Bool) -> Option<Where> {
+fn port_of(host: String, text: String, _secure: Bool) -> Option<Where> {
   let length = String::byte_length(text);
   if length == 0 || String::byte_length(host) == 0 {
     Option::None
