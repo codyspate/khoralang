@@ -1,15 +1,174 @@
 ---
 title: Patterns
 sidebar:
-  order: 3
+  order: 6
 ---
 
-Patterns appear in `match` arms and in irrefutable destructuring positions such as `let` bindings.
+Patterns appear in `match` and `catch` arms, local destructuring, `for` bindings, and other positions that bind or inspect a value.
 
-A `match` pattern may select an algebraic-data-type variant and bind its payload, destructure tuples or records, and nest those forms where the value's type permits it.
+## Wildcard
 
-The compiler checks match exhaustiveness and arm reachability. A match over a closed ADT should normally enumerate the meaningful cases rather than use a catch-all solely to avoid future compiler errors.
+```khora
+_
+```
 
-Irrefutable patterns are accepted where the type guarantees the shape always matches. Refutable patterns belong in control flow that has an explicit non-match path.
+The wildcard matches a value without binding it.
 
-Adding a new ADT variant can intentionally make existing exhaustive matches fail to compile; those diagnostics identify sites that must decide what the new case means.
+## Binding identifier
+
+```khora
+value
+```
+
+A bare identifier normally binds the matched value. A bare identifier that resolves to a nullary constructor is treated as that constructor rather than as a new binding.
+
+## Literal patterns
+
+```khora
+0
+3.14
+"ready"
+true
+false
+```
+
+Integer, floating-point, string, and boolean literals can be used as literal patterns.
+
+## Nullary constructor path
+
+```khora
+Option::None
+Status::Ready
+```
+
+A qualified path selects the named constructor.
+
+## Constructor payload pattern
+
+```khora
+Option::Some(value)
+Result::Err(error)
+Message::Move(x, y)
+```
+
+The patterns inside parentheses correspond to the constructor's payload positions.
+
+## Record pattern
+
+Shorthand field binding:
+
+```khora
+User { id, name }
+```
+
+Explicit nested pattern:
+
+```khora
+User {
+  id: user_id,
+  name: "admin",
+}
+```
+
+General shape:
+
+```text
+Path {
+  field,
+  field: Pattern,
+  ...
+}
+```
+
+A record pattern begins with a path and may bind fields by shorthand or supply another pattern after `:`.
+
+## Tuple pattern
+
+```khora
+(left, right)
+(x, y, z)
+```
+
+Tuple patterns may nest other patterns:
+
+```khora
+(Result::Ok(value), _)
+```
+
+## Patterns in `match`
+
+```khora
+match result {
+  Result::Ok(value) => use_value(value),
+  Result::Err(error) => handle(error),
+}
+```
+
+The compiler checks exhaustiveness and unreachable arms.
+
+## Match guards
+
+A guard belongs to the arm after the pattern:
+
+```khora
+match score {
+  value if value >= 90 => "high",
+  value if value >= 50 => "medium",
+  _ => "low",
+}
+```
+
+General form:
+
+```text
+Pattern if BoolExpr => Expr
+```
+
+The guard runs only after the pattern itself matches.
+
+## Patterns in `let`
+
+```khora
+let (left, right) = pair;
+let User { id, name } = user;
+```
+
+A pattern used directly by `let` must be valid for the value's type without requiring a missing-case branch. Refutable alternatives belong in `match`.
+
+## Patterns in `for`
+
+```khora
+for (key, value) in entries {
+  use_entry(key, value);
+}
+```
+
+The pattern binds each yielded item.
+
+## Patterns in `catch`
+
+```khora
+load_user(id)! catch {
+  UserError::NotFound(missing_id) => fallback(missing_id),
+  UserError::Unavailable(reason) => offline(reason),
+}
+```
+
+`catch` reuses the pattern syntax but adds failure-row semantics: exhaustively handling a failure type removes that type from the failures that can leave the expression.
+
+## Nesting
+
+Patterns compose recursively:
+
+```khora
+match value {
+  Envelope {
+    payload: Result::Ok(User { id, name }),
+  } => use_user(id, name),
+  _ => fallback(),
+}
+```
+
+Use nesting when it makes the shape clearer; split deeply nested business decisions into smaller matches when a single arm becomes difficult to read.
+
+See [Control flow](./control-flow.md) for `match` result rules and [Failures](./failures.md) for `catch` semantics.
