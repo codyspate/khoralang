@@ -309,6 +309,11 @@ them into one executable is not a reading of anything.
 
 `khora task <name>` is the `[tasks]` runner. `docs/design/tasks.md`.
 
+`khora release --since <rev>` says which members changed since a revision and
+what the next version would be. It never tags and never pushes, and it does not
+choose the semver level: which one a change is, is a judgement about observable
+behaviour. `docs/design/releasing.md`.
+
 `khora build` reuses an artifact it has already produced from the same inputs,
 where "inputs" includes the compiler and linker binaries and not just the
 source. Because release builds are bit-for-bit reproducible, a release hit is

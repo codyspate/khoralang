@@ -20,6 +20,7 @@ use khora_manifest::LintLevel;
 mod affected;
 #[cfg(feature = "llvm")]
 mod cache;
+mod release;
 mod task;
 mod workspace_cmds;
 
@@ -274,6 +275,37 @@ enum Command {
         #[arg(long)]
         dot: bool,
     },
+    /// Report what a release would contain, and what to call it.
+    ///
+    /// **It never tags and never pushes.** `.github/workflows/release.yml`
+    /// puts a person between "built" and "visible" on purpose; this reports,
+    /// and with `--major`, `--minor` or `--patch` writes one number into the
+    /// root manifest. `docs/design/releasing.md`.
+    Release {
+        /// The revision to compare against, usually the last release's tag.
+        #[arg(long, value_name = "REV")]
+        since: String,
+        /// The workspace root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Move the major version, and write it.
+        #[arg(long, group = "step")]
+        major: bool,
+        /// Move the minor version, and write it.
+        #[arg(long, group = "step")]
+        minor: bool,
+        /// Move the patch version, and write it.
+        #[arg(long, group = "step")]
+        patch: bool,
+        /// Draft the release notes into this file.
+        ///
+        /// A draft. The pre-1.0 rule wants every behaviour change described in
+        /// both directions, which a commit subject does not contain, so it
+        /// leaves that section empty rather than pretending to have written
+        /// it.
+        #[arg(long, value_name = "FILE")]
+        notes: Option<PathBuf>,
+    },
     /// Show what the build cache holds, or empty it.
     ///
     /// One entry per (sources, compiler, linker, runtime, target, profile).
@@ -373,6 +405,21 @@ fn dispatch() -> Result<ExitCode> {
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
         Command::Build { path, out, lib, release, no_cache } => {
             build(&path, out.as_deref(), lib, release, no_cache)
+        }
+        Command::Release { since, path, major, minor, patch, notes } => {
+            let step = match (major, minor, patch) {
+                (true, _, _) => Some(release::Step::Major),
+                (_, true, _) => Some(release::Step::Minor),
+                (_, _, true) => Some(release::Step::Patch),
+                _ => None,
+            };
+            let members = workspace_members(std::slice::from_ref(&path)).with_context(|| {
+                format!(
+                    "{} is not a workspace root, and a release is about a workspace",
+                    path.display()
+                )
+            })?;
+            release::release(&path, &since, step, notes.as_deref(), &members)
         }
         Command::Cache { clear } => cache_command(clear).map(|()| true),
         Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
