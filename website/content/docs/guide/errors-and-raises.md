@@ -4,28 +4,186 @@ sidebar:
   order: 6
 ---
 
-Khora does not use unchecked exceptions for ordinary recoverable failures. A function that can fail declares that possibility in its type with `raises`.
+Khora uses typed failure for recoverable conditions. A function declares the failures that can leave it with `raises`, creates a failure with `raise`, propagates a fallible call with `!`, and handles failures with `catch`.
 
-```khora
-fn load_user(id: Id) -> User raises DbError
+The four pieces fit together like this:
+
+```text
+raise E                    create a typed failure
+foo()!                     allow E to propagate from foo
+foo()! catch { ... }       handle E here
+attempt(fn () => foo()!)   turn E into Result<A, E>
 ```
 
-Callers can propagate a declared failure with `!`:
+## Declare and raise a failure
+
+Failure types are ordinary algebraic data types. Give variants enough information for a caller to make a useful decision.
 
 ```khora
-let user = load_user(id)!;
+pub type RandomFailure =
+  | BelowThreshold(value: Int);
 ```
 
-The caller's own failure row must then account for `DbError`, or the failure must be handled before leaving the current scope.
+A function includes the type in its `raises` row and uses `raise` where normal control flow should stop:
 
-Use `catch` or an effect handler when the current layer has enough context to make a decision. Do not catch merely to convert a typed failure into an unstructured string.
+```khora
+fn determine_random() -> Bool
+  with { random: Random }
+  raises RandomFailure
+{
+  let value = random.in_range(0, 100);
+
+  if value >= 50 {
+    true
+  } else {
+    raise RandomFailure::BelowThreshold(value)
+  }
+}
+```
+
+`raise` is an expression of type `Never`: that path does not produce the function's normal return value. It leaves through the typed failure channel instead.
+
+## Propagate with `!`
+
+A caller that is not ready to handle the failure can propagate it. The `!` marks the call site where control may leave the current function:
+
+```khora
+fn decide() -> Bool
+  with { random: Random }
+  raises RandomFailure
+{
+  determine_random()!
+}
+```
+
+Because `decide` propagates `RandomFailure`, its own signature must include that failure.
+
+## Handle a failure with `catch`
+
+`catch` handles a failure before it reaches the caller. Its arms use the same pattern syntax as `match`:
+
+```khora
+fn decide_or_false() -> Bool
+  with { random: Random }
+{
+  determine_random()! catch {
+    RandomFailure::BelowThreshold(value) => false,
+  }
+}
+```
+
+The normal path still produces the `Bool` returned by `determine_random`. If `RandomFailure::BelowThreshold` is raised, the matching arm produces the replacement `Bool` instead.
+
+After the `catch`, `RandomFailure` is no longer part of this function's failure row. The failure has been consumed.
+
+### Catch arms are typed patterns
+
+A `catch` arm may destructure the failure just like a `match` arm:
+
+```khora
+let allowed = determine_random()! catch {
+  RandomFailure::BelowThreshold(value) => {
+    print("random value was ${Int::to_string(value)}");
+    false
+  },
+};
+```
+
+Handling a failure type commits to handling that type. If `RandomFailure` had several variants, the `catch` arms for `RandomFailure` would need to cover them exhaustively. There is no wildcard arm that silently discards an unknown open failure row.
+
+## Translate one failure into another
+
+A layer often should not expose failures from the layer below it. Catch the lower-level failure and `raise` a failure in the vocabulary of the current API:
+
+```khora
+pub type ApiError =
+  | ServiceUnavailable(message: String)
+  | Internal(message: String);
+
+fn determine_for_api() -> Bool
+  with { random: Random }
+  raises ApiError
+{
+  determine_random()! catch {
+    RandomFailure::BelowThreshold(value) =>
+      raise ApiError::ServiceUnavailable(
+        "random value ${Int::to_string(value)} was below the threshold"
+      ),
+  }
+}
+```
+
+`RandomFailure` does not escape `determine_for_api`; callers only need to know about `ApiError`.
+
+This is the usual boundary pattern:
+
+```text
+infrastructure/domain failure
+          ↓ catch + raise
+application/API failure
+          ↓ catch
+response or other boundary value
+```
+
+## Turn a failure into an API response
+
+At the outer HTTP boundary, the failure usually stops being a failure and becomes a normal `Response`. A `catch` arm can `return` a response while the success path continues normally:
+
+```khora
+fn handle_request() -> Response
+  with { random: Random }
+{
+  let allowed = determine_for_api()! catch {
+    ApiError::ServiceUnavailable(message) =>
+      return Response::text(503, message),
+
+    ApiError::Internal(message) =>
+      return Response::text(500, message),
+  };
+
+  if allowed {
+    Response::text(200, "allowed")
+  } else {
+    Response::text(403, "denied")
+  }
+}
+```
+
+That function has no `raises ApiError` clause because it handles every `ApiError` itself. The HTTP layer exposes HTTP responses; it does not leak application error types to the network boundary.
+
+## Collect failures as values with `attempt`
+
+Sometimes the caller does not want to handle a failure immediately. `attempt` converts the failure channel into an ordinary `Result` value:
+
+```khora
+let result = attempt(fn () => determine_random()!);
+
+match result {
+  Result::Ok(value) => print("success"),
+  Result::Err(RandomFailure::BelowThreshold(value)) =>
+    print("failed at ${Int::to_string(value)}"),
+}
+```
+
+This is especially useful when mapping a fallible operation over a collection and you want every element to run:
+
+```khora
+let results = items
+  |> List::map(fn item =>
+    attempt(fn () => process(item)!)
+  );
+```
+
+The result is a `List<Result<Output, ProcessError>>` rather than a `List<Output>` that aborts at the first `ProcessError`.
 
 ## Failure is part of the API
 
 A function's `raises` row is documentation the compiler checks. It answers a question that many languages leave to prose: what normal failure conditions must a caller be prepared to handle?
 
-Keep failure types meaningful at the abstraction boundary. A database package may expose detailed driver errors internally while an application repository converts them into a smaller domain-specific failure type.
+Keep failure types meaningful at abstraction boundaries. Low-level packages can expose precise operational failures internally, application services can translate those into domain failures, and the outermost boundary can consume them into responses, exit codes, or other protocol values.
+
+For the other half of an effectful function signature, see [Effects and capabilities](./effects-and-capabilities.md). `with` says what authority a computation needs; `raises` says how its normal result may fail.
 
 ## Traps are different
 
-Bounds violations, arithmetic overflow, and similar traps represent bugs or violated invariants rather than routine business failure. They are intentionally distinct from `raises`; callers should not be forced to model programming errors as ordinary recoverable outcomes.
+Bounds violations, arithmetic overflow, and similar traps represent bugs or violated invariants rather than routine recoverable failure. They are intentionally distinct from `raises`; callers should not be forced to model programming errors as ordinary outcomes.
