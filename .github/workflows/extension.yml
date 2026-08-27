@@ -51,11 +51,11 @@ jobs:
       # thing and the `ref` is redundant; on `workflow_dispatch` they are not,
       # and without this the run would package whatever `main` holds today and
       # publish it under a tag naming a different commit.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 
