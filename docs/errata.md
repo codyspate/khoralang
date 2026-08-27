@@ -1775,3 +1775,72 @@ The five tests are the fix and its boundary: a two-module ring, a three-module
 ring, a plain assertion that it does not panic, and -- the two that matter --
 a diamond and a chain, neither of which is a cycle and both of which a
 careless reachability check would call one.
+
+## 56. `--lib` named its output after whatever sorted first
+
+`khora build . --lib`, run on Linux in a package of one module, printed:
+
+```
+library /home/codys/dev/khora/std/ai.so from 16 module(s) [debug]
+header  /home/codys/dev/khora/std/ai.h
+```
+
+It built the right code. It named the artifact after the **standard library's**
+`ai` module, and wrote a 31 MB shared object and a header into `std/`.
+
+### The line
+
+```rust
+// The binary is named after the module holding `main`, or after the one
+// file when there is only one.
+let entry = inputs
+    .iter()
+    .find(|(_, text, _)| text.contains("fn main("))
+    .or_else(|| inputs.first())
+    .expect("at least one source");
+```
+
+The comment says "the one file when there is only one". The code says
+`inputs.first()`, with no such condition -- and `inputs` is every source the
+build reads: the package, its dependencies, **and the whole standard library**,
+sorted by canonical path. A library has no `fn main(`, so the fallback always
+ran, and it picked whichever of those sorted earliest.
+
+### Why Windows passed
+
+Sorting by canonical path means the answer depends on where the package
+happens to live:
+
+| | package | standard library | first |
+| --- | --- | --- | --- |
+| Linux | `/tmp/...` | `/mnt/c/.../std` | **std** |
+| Windows | `...\AppData\Local\Temp\...` | `...\dev\khora\std` | **package** |
+
+`AppData` sorts before `dev`; `/mnt` sorts before `/tmp`. The test passed on
+Windows for four years' worth of no reason at all, and `a_library_build_caches_
+its_header_too` failed on every Linux runner with "the header should come back
+with the library" -- which was true, and about the wrong header.
+
+### The fix
+
+The entry is chosen from the sources the *package* owns, falling back to any
+source only when there is no package to speak of. `package_of` answers for both
+spellings of the argument -- `khora build .` names a directory, `khora build
+src/main.kh` names a file inside one.
+
+The `fn main(` search is restricted the same way, which was a second latent
+bug: a dependency containing `fn main(` could have named the executable.
+
+### What generalises
+
+**A fallback with no condition is a fallback that always runs.** The comment
+described a guard -- "when there is only one" -- that the code never had, and a
+comment that describes an intention rather than the behaviour is worse than
+none, because it stops the next reader looking.
+
+And the shape of the near-miss is worth keeping: **sorting made this
+deterministic per platform and different across them**, which is the most
+expensive kind of bug to own. It cannot be reproduced by re-running, it looks
+like a platform difference in the compiler, and the platform it fails on is the
+one nobody develops on. The fix for that class is not more testing on Linux;
+it is not choosing anything by sort order that has a meaning available.

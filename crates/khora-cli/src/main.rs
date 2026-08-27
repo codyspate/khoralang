@@ -1321,11 +1321,30 @@ fn build(
         khora_codegen_llvm::Profile::from_env()
     };
 
-    // The binary is named after the module holding `main`, or after the one
-    // file when there is only one.
+    // The artifact is named after the module holding `main`, and for a
+    // library -- which has none -- after the package's own first source.
+    //
+    // **"The package's own" is the whole of this.** `inputs` carries the
+    // standard library and every dependency as well as the package, sorted by
+    // canonical path, so the old fallback of `inputs.first()` took whichever
+    // of *those* sorted earliest. Which file that is depends on where the
+    // package happens to live:
+    //
+    //   Linux    project in `/tmp/..`, std in `/mnt/c/..`  -> std wins
+    //   Windows  project in `..\AppData\..`, std in `..\dev\..` -> project wins
+    //
+    // So `khora build . --lib` wrote `ai.so` and `ai.h` into the standard
+    // library's own directory on Linux, and passed on Windows by the alphabet.
+    // Errata 56.
+    let owned = package_of(path);
+    let mine = |file: &Path| match &owned {
+        Some(root) => file.starts_with(root),
+        None => true,
+    };
     let entry = inputs
         .iter()
-        .find(|(_, text, _)| text.contains("fn main("))
+        .find(|(file, text, _)| mine(file) && text.contains("fn main("))
+        .or_else(|| inputs.iter().find(|(file, _, _)| mine(file)))
         .or_else(|| inputs.first())
         .expect("at least one source");
     let target = out.map(Path::to_path_buf).unwrap_or_else(|| {
@@ -1551,6 +1570,23 @@ fn run_program(
 /// on stderr by then.
 #[cfg(feature = "llvm")]
 type Loaded = (KhoraDatabase, Vec<(PathBuf, String, SourceFile)>, SourceRoot);
+
+/// The package directory a build argument refers to.
+///
+/// `khora build .` names a directory and `khora build src/main.kh` names a
+/// file inside one; both have to answer with the directory, because that is
+/// what decides which sources belong to the thing being built rather than to
+/// the standard library or a dependency.
+#[cfg(feature = "llvm")]
+fn package_of(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() {
+        let manifest = path.join("khora.toml");
+        if manifest.is_file() {
+            return Some(path.to_path_buf());
+        }
+    }
+    enclosing_package(path)
+}
 
 #[cfg(feature = "llvm")]
 fn load(path: &Path) -> Result<Loaded> {

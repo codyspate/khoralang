@@ -105,6 +105,19 @@ fn x86_64_linux_is_emitted() {
 
 /// A triple no backend was built for is refused by name, rather than
 /// producing something that cannot be run.
+///
+/// **The triple has to be an unknown *architecture*, not a real one this LLVM
+/// happens to lack.** This asked for `sparc64-unknown-linux-gnu`, on the
+/// reasoning that nothing here enables SPARC. That is true of the pinned
+/// Windows LLVM and false of Ubuntu's, where SPARC is a registered target: code
+/// generation succeeded, emitted a SPARC object, and the failure arrived from
+/// the host linker instead --
+///
+///     Relocations in generic ELF (EM: 43)
+///
+/// which is a different refusal with a different message, so the test failed
+/// on every Linux runner. Which targets a build has is a property of how LLVM
+/// was configured; `nonesuch` is not an architecture anywhere.
 #[test]
 fn an_unknown_triple_is_refused() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("targets_bad");
@@ -119,14 +132,14 @@ fn an_unknown_triple_is_refused() {
     let root = SourceRoot::new(&db, files);
 
     // SAFETY-of-a-sort: as above.
-    unsafe { std::env::set_var("KHORA_TARGET", "sparc64-unknown-linux-gnu") };
+    unsafe { std::env::set_var("KHORA_TARGET", "nonesuch-unknown-none") };
     let outcome = khora_codegen_llvm::compile(&db, root, &dir.join("program.exe"));
     unsafe { std::env::remove_var("KHORA_TARGET") };
 
     let errors = outcome.expect_err("a target with no backend should be refused");
     let said = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
     assert!(
-        said.contains("sparc64") && said.contains("inkwell"),
+        said.contains("nonesuch") && said.contains("inkwell"),
         "the refusal should name the triple and where the target list comes from: {said}"
     );
 }

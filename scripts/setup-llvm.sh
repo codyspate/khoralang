@@ -98,8 +98,17 @@ case "$(uname -s)" in
                 #     could not find native static library `Polly`
                 #
                 # which names neither apt nor the missing package.
+                # `libzstd-dev` for the same reason as Polly, one layer out:
+                # the link line ends in `-lzstd`, and Ubuntu ships
+                # `libzstd.so.1` without the unversioned symlink that `-l`
+                # needs. GitHub's runner image has the -dev package already, so
+                # CI never saw this and a clean Ubuntu died at
+                #
+                #     rust-lld: error: unable to find library -lzstd
+                #
+                # after compiling the entire workspace.
                 say "Adding the libraries llvm-sys links against."
-                sudo apt-get install -y "llvm-$MAJOR-dev" "libpolly-$MAJOR-dev"
+                sudo apt-get install -y "llvm-$MAJOR-dev" "libpolly-$MAJOR-dev" libzstd-dev
 
                 prefix="/usr/lib/llvm-$MAJOR"
             else
