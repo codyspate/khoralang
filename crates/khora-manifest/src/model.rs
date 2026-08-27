@@ -114,6 +114,14 @@ impl RawManifest {
             || self.fmt.as_ref().is_some_and(|fmt| fmt.workspace)
     }
 
+    /// Whether this manifest grants any capability at all.
+    ///
+    /// The question that decides whether `[workspace.policy]` has to be
+    /// consulted. A package that grants nothing cannot exceed a cap.
+    pub(crate) fn asks_for_anything(&self) -> bool {
+        !self.permissions.is_only_the_flag() || self.permissions.workspace
+    }
+
     /// Fills in every inherited field from `root`, or explains why it cannot.
     ///
     /// `root` is the `[workspace]` table of the manifest above this one, and
@@ -314,6 +322,62 @@ pub struct Workspace {
     /// `[workspace.lints]`, for a member writing `workspace = true`.
     #[serde(default)]
     pub lints: Lints,
+    /// `[workspace.policy]`: a cap on what any member may ask for.
+    pub policy: Option<Policy>,
+}
+
+/// The `[workspace.policy]` table: who is allowed to ask for what.
+///
+/// **Not the same thing as `[workspace.permissions]`**, and the difference is
+/// the whole feature. `[workspace.permissions]` is a *default* a member opts
+/// into with `workspace = true`; this is a *cap* a member cannot opt out of. A
+/// root that says only the gateway may reach the network turns "we have a rule
+/// about which services talk to the internet" from a code-review convention
+/// into a build failure. `docs/design/permissions.md`.
+///
+/// Each field lists the **package names** allowed to grant that category. An
+/// absent field caps nothing, because a workspace that has not thought about
+/// the network should not be punished for it -- the same "tightening is
+/// opt-in" rule the per-package table follows. `[]` is the interesting value:
+/// nobody at all.
+///
+/// Names rather than the directory paths `members` uses. A path in a policy
+/// stops matching the day somebody moves a directory, and stops matching
+/// *silently* -- which for a cap means it quietly stops capping. A name that
+/// matches no member is refused for the same reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Policy {
+    /// Members that may grant `network`.
+    #[serde(default)]
+    pub network: Option<Vec<String>>,
+    /// Members that may grant `fs`.
+    #[serde(default)]
+    pub fs: Option<Vec<String>>,
+    /// Members that may grant `env`.
+    #[serde(default)]
+    pub env: Option<Vec<String>>,
+    /// Members that may declare `extern fn`, or allow a dependency to.
+    #[serde(default, rename = "extern")]
+    pub extern_: Option<Vec<String>>,
+}
+
+impl Policy {
+    /// The members allowed to grant `category`, or `None` if it is uncapped.
+    pub fn allowed(&self, category: Category) -> Option<&[String]> {
+        match category {
+            Category::Network => self.network.as_deref(),
+            Category::Fs => self.fs.as_deref(),
+            Category::Env => self.env.as_deref(),
+        }
+    }
+
+    /// Every name the policy mentions, for checking them against the members.
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        [&self.network, &self.fs, &self.env, &self.extern_]
+            .into_iter()
+            .flatten()
+            .flatten()
+    }
 }
 
 /// The `[workspace.package]` table.

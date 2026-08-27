@@ -369,8 +369,15 @@ fn acquire(
     }
 }
 
+/// The manifest at `path`, read for what a resolution needs from it.
+///
+/// `load_for_resolution` rather than `load`: this reads every member of a
+/// workspace in order to build one lockfile, and a member's
+/// `[workspace.policy]` standing is not a fact about the lockfile. Reported
+/// where somebody asked about that member, and not from underneath a build of
+/// a different one.
 fn read_manifest(path: &Path) -> Result<Manifest> {
-    let parsed = Manifest::load(path).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let parsed = Manifest::load_for_resolution(path).map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(parsed.manifest)
 }
 

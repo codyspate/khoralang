@@ -4058,7 +4058,7 @@ it.
 | 14.16 | ✅ **Affected-only** | Done. `khora check . --since main` and the same for `khora fmt`. Exact, and for the reason the section below gives: the resolver already knows which directories each member compiles, so a change inside a *dependency* selects the members that reach it and not the ones that do not. The rule that makes it safe to trust is the fallback — a changed file inside no member and inside nothing a member depends on selects **everything**, and names the file, because a tool that answers "nothing was affected" over a file it did not recognise is worse than no tool. Untracked files count: the change most likely to be the one being tested is the one nobody has `git add`ed. Stops at file granularity rather than module granularity, which is a refinement with the same shape |
 | 14.17 | **A build cache with a sound key** | See below. Reproducible builds make this provable rather than hopeful |
 | 14.18 | ✅ **`[tasks]` gets a runner** | Done. `khora run <name>`, and `khora run` to list. `Task` gained a `run` line, which is the field that was missing — the table could only ever have grouped built-ins without it. **Not `build.rs` coming back**: a task runs when somebody types its name in a manifest they are standing in, and a dependency’s `[tasks]` table is never read at all. At a root, a task the root declares runs once there (`ci` means “run the pipeline”); otherwise it runs in every member that has it, in dependency order taken from the resolver rather than guessed. `lint` runs `khora check` and says so, because the lints live there and there is no `khora lint`. `--since` narrows the members the same way 14.16 does. `docs/design/tasks.md` |
-| 14.19 | **Workspace permissions as policy** | A root that caps what any member may request, not just what each declares. See below |
+| 14.19 | ✅ **Workspace permissions as policy** | Done, as `[workspace.policy]` — a *different* table from `[workspace.permissions]`, which 14.14 made the inheritable **default**; this is the **cap** a member cannot opt out of. This repository now says only the three examples that answer on a port may reach the network, and `extern = []`: nothing here may declare an `extern fn` or hand that permission to a dependency. Caps *which member may ask*, not what it may ask for — capping values needs a checkable definition of “narrower” for a glob, and getting that subtly wrong gives a cap that looks enforced and is not. Package names rather than paths, and a name matching no member is refused: a typo in a cap fails open, so it has to be loud. Enforced in `Manifest::parse_at`, so it holds for every command rather than the one it was written for |
 | 14.20a | **The formatter reads `[fmt]`** | Found while doing 14.14: `khora_fmt::format` takes a string and nothing else, so `indent-width`, `indent-style` and `explicit-semicolons` are parsed, validated, inheritable, documented — and read by nobody. Either wire them through or delete the table; a setting that silently does nothing is worse than one that does not exist |
 | 14.20 | **Release tooling** | Which members changed, bump them and their dependents, write the notes. `publish = true` already exists per package; this is the part that decides what to do with it |
 | 14.21 | ✅ **`khora new`, `khora why`, `khora graph`** | Done. `new` writes a manifest that fits where it lands — inside a workspace that shares a version it writes `version.workspace = true`, because a scaffold that hard-codes one creates the drift 14.14 exists to prevent — and says so when the root’s `members` will not pick the directory up. `why` prints **every** chain, shortest first: printing one of three reasons is how somebody removes a dependency and finds the package still there. `graph` draws a tree, or Graphviz with `--dot`. Writing `why` found a bug worth the whole item: two members reaching one directory two ways — `../../vendor/shared` and `../shared` — compared as different sources, so a diamond, the most ordinary shape in a monorepo, was an “asked for twice and differently” error |
@@ -4104,10 +4104,15 @@ network hosts, filesystem paths, environment variables, `extern` symbols. In a
 single package that is a good idea. In a monorepo it is a **policy surface**:
 
 ```toml
-[workspace.permissions]
+[workspace.policy]
 # No member may reach the network except through the two that are meant to.
-network = { allow = ["services/gateway", "packages/postgres"] }
+network = ["gateway", "postgres"]
 ```
+
+(`[workspace.policy]`, not `[workspace.permissions]` as this sketch first
+said: 14.14 took the latter for the inheritable *default*, and a default and a
+cap are different enough to want different names. Names rather than paths, for
+the reason `docs/design/permissions.md` gives.)
 
 A workspace root that caps what any member may request turns "we have a rule
 about which services talk to the internet" from a code-review convention into a

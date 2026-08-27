@@ -132,6 +132,26 @@ impl Root {
     pub(crate) fn lists(&self, directory: &Path) -> bool {
         self.members.iter().any(|member| same(member, directory))
     }
+
+    /// The package name of each member, for checking a policy against them.
+    ///
+    /// A member whose manifest does not parse contributes no name, which is
+    /// the right failure here: the policy check would otherwise refuse the
+    /// *root* over a mistake in a member, and reporting that member is
+    /// somebody else'''s job.
+    pub(crate) fn member_names(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .filter_map(|member| {
+                // `load_for_resolution`, for two reasons that pull the same
+                // way: a member that inherits its version cannot be read from
+                // text alone, and a read that enforced the policy would
+                // recurse -- the policy check is what is asking.
+                let parsed = Manifest::load_for_resolution(&member.join("khora.toml")).ok()?;
+                Some(parsed.manifest.package()?.name.clone())
+            })
+            .collect()
+    }
 }
 
 /// The nearest workspace root at or above `start`.

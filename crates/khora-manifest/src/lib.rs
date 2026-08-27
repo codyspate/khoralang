@@ -49,13 +49,14 @@ mod audit;
 mod error;
 pub(crate) mod inherit;
 mod model;
+mod policy;
 mod semver;
 mod warning;
 mod workspace;
 
 pub use crate::error::{Location, ManifestError};
 pub use crate::model::{
-    Build, Category, Default_, Dependency, Fmt, FsGrants, IndentStyle, Lint, LintLevel, Lints, Manifest, Package, Permissions, Task, Toolchain, WorkspacePackage, granted_host, granted_name, granted_path,
+    Build, Category, Default_, Dependency, Fmt, FsGrants, IndentStyle, Lint, LintLevel, Lints, Manifest, Package, Permissions, Policy, Task, Toolchain, WorkspacePackage, granted_host, granted_name, granted_path,
 };
 pub use crate::semver::Version;
 
@@ -83,6 +84,15 @@ pub fn readable(path: std::path::PathBuf) -> std::path::PathBuf {
 pub use crate::warning::{Warning, WarningKind};
 pub use crate::workspace::{enclosing, read as read_workspace, Workspace as WorkspaceLayout};
 
+/// Whether a read enforces `[workspace.policy]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Policing {
+    /// The manifest somebody asked about.
+    Enforced,
+    /// A sibling, read for its `[dependencies]`.
+    Skipped,
+}
+
 /// The result of a successful parse.
 ///
 /// Warnings ride alongside the manifest rather than being logged from inside the
@@ -104,9 +114,28 @@ impl Manifest {
     /// by walking up from the file — which [`Manifest::parse`] cannot do,
     /// because it has only text.
     pub fn load(path: &Path) -> Result<Parsed, ManifestError> {
+        Manifest::read(path, Policing::Enforced)
+    }
+
+    /// [`Manifest::load`], without the `[workspace.policy]` check.
+    ///
+    /// **For reading a member you were not asked about.** The one lockfile
+    /// needs every member's `[dependencies]`, and a member's permissions are
+    /// not a fact about the lockfile. Checking the policy here would report a
+    /// violation in one member while somebody was building another, wrapped in
+    /// an explanation about lockfiles -- and then report it again, correctly,
+    /// when that member's own turn came.
+    ///
+    /// Inheritance is still resolved: a `version.workspace = true` in a
+    /// sibling is a fact the resolution genuinely needs.
+    pub fn load_for_resolution(path: &Path) -> Result<Parsed, ManifestError> {
+        Manifest::read(path, Policing::Skipped)
+    }
+
+    fn read(path: &Path, policing: Policing) -> Result<Parsed, ManifestError> {
         let text = std::fs::read_to_string(path)
             .map_err(|why| ManifestError::io(&format!("reading {}", path.display()), &why))?;
-        Manifest::parse_at(&text, path).map_err(|error| error.with_file(path))
+        Manifest::at(&text, path, policing).map_err(|error| error.with_file(path))
     }
 
     /// Parses manifest text that belongs at `path`.
@@ -115,6 +144,10 @@ impl Manifest {
     /// unsaved, but the workspace root it inherits from is not, so the text
     /// comes from the caller and the root comes from the disk.
     pub fn parse_at(text: &str, path: &Path) -> Result<Parsed, ManifestError> {
+        Manifest::at(text, path, Policing::Enforced)
+    }
+
+    fn at(text: &str, path: &Path, policing: Policing) -> Result<Parsed, ManifestError> {
         let raw: crate::model::RawManifest =
             toml::from_str(text).map_err(|error| ManifestError::from_toml(error, text))?;
 
@@ -122,36 +155,55 @@ impl Manifest {
         // Finding one expands the member list, which is a `read_dir` per
         // pattern; almost every manifest writes all its own fields and should
         // not pay for a question it did not ask.
-        let root = if raw.inherits_anything() {
+        // The root is wanted for two different reasons, and either is enough
+        // to go looking: to fill in an inherited field, and to enforce a cap a
+        // member cannot opt out of. A member that inherits nothing and asks
+        // for nothing pays for neither.
+        let root = if raw.inherits_anything() || raw.asks_for_anything() {
             // Above *this* manifest's directory, not at it. A root resolving
             // its own `[package]` against its own `[workspace.package]` is not
             // wrong exactly, but nothing has wanted it and allowing it means
             // deciding what a cycle means.
             let here = path.parent().unwrap_or(Path::new("."));
             let found = here.parent().and_then(crate::workspace::enclosing_root);
-            if let Some(root) = &found {
+            match found {
                 // Being *under* a root is not being *in* it. A directory the
-                // root does not list is not a member, and taking a version
-                // from a workspace you are not part of is the kind of thing
-                // that is only noticed once it is published.
-                if !root.lists(here) {
-                    return Err(ManifestError::invalid_value(
-                        "workspace",
-                        format!(
-                            "this manifest inherits from a workspace, and the root at {} does \
-                             not list it as a member. Add it to `members` there, or write the \
-                             values here",
-                            root.directory.join("khora.toml").display()
-                        ),
-                    ));
+                // root does not list is not a member: it inherits nothing and
+                // it is capped by nothing.
+                Some(root) if !root.lists(here) => {
+                    // Silent for a manifest that only *grants* something --
+                    // it is simply not in this workspace, which is not a
+                    // mistake. Loud for one that asks to inherit, because
+                    // there is then a value it cannot be given and taking one
+                    // from a workspace you are not part of is only noticed
+                    // once it is published.
+                    if raw.inherits_anything() {
+                        return Err(ManifestError::invalid_value(
+                            "workspace",
+                            format!(
+                                "this manifest inherits from a workspace, and the root at {} \
+                                 does not list it as a member. Add it to `members` there, or \
+                                 write the values here",
+                                root.directory.join("khora.toml").display()
+                            ),
+                        ));
+                    }
+                    None
                 }
+                other => other,
             }
-            found
         } else {
             None
         };
 
-        Manifest::finish(raw, root.as_ref().map(|root| &root.table), text)
+        let table = root.as_ref().map(|found| &found.table);
+        let parsed = Manifest::finish(raw, table, text)?;
+        if let (Policing::Enforced, Some(found), Some(policy)) =
+            (policing, &root, table.and_then(|table| table.policy.as_ref()))
+        {
+            crate::policy::enforce(&parsed.manifest, policy, found)?;
+        }
+        Ok(parsed)
     }
 
     /// Parses manifest text.

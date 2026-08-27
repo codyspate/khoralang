@@ -242,12 +242,76 @@ reference application. The run-time half needs `Net` and `Env` to exist. Both
 arrive with phase 8, and the rules being decided and tested first is what stops
 them being decided twice.
 
+## A workspace caps its members
+
+Everything above is a package speaking for itself. In a monorepo the root can
+speak for all of them, and that is a different table:
+
+```toml
+[workspace.policy]
+network = ["ledger_service", "link_shortener", "risk_analyzer"]
+env = ["ledger_service", "link_shortener", "risk_analyzer"]
+fs = ["link_shortener", "risk_analyzer"]
+extern = []
+```
+
+**A cap, not a default.** `[workspace.permissions]` is a table a member opts
+into with `workspace = true`; `[workspace.policy]` is one a member cannot opt
+out of. A fourth example deciding to reach the network is a build failure
+rather than something a reviewer has to notice:
+
+```
+khora: bench/floor/khora.toml: `permissions.network`: `floor` is not allowed
+to grant `network`. The workspace at .../khora.toml caps it to
+ledger_service, link_shortener, risk_analyzer. Add `floor` to
+`[workspace.policy] network` if it should be, or drop the grant
+```
+
+Four decisions inside that, each of which could have gone the other way:
+
+**It caps which member may ask, not what it may ask for.** `network =
+["gateway"]` says only `gateway` may have a `[permissions] network` entry at
+all; it says nothing about which hosts. Capping the *values* — "no member may
+reach anything outside `*.internal`" — is a real feature and a different one:
+it needs a rule for what "narrower" means for a glob, and getting that subtly
+wrong produces a cap that looks enforced and is not.
+
+**Names, not the directory paths `members` uses.** A path in a policy stops
+matching the day somebody moves a directory, and stops matching *silently* —
+which for a cap means it quietly stops capping. For the same reason, a name
+matching no member is refused rather than ignored: a typo in a cap fails open,
+so it has to be loud.
+
+**An absent category caps nothing.** The same "tightening is opt-in" rule the
+per-package table follows. `[]` is the interesting value: nobody at all, which
+is what this repository says about `extern`.
+
+**An empty grant is not a request.** `network = []` in a member is a package
+that has thought about the network and decided on none, and refusing that would
+refuse a manifest for being careful.
+
+Enforced in `Manifest::parse_at`, which every command that reads a manifest off
+disk goes through — a cap that held for `khora build` and not for `khora check`
+would be a convention with extra steps. The one exception is
+`Manifest::load_for_resolution`, which reads a *sibling* member because one
+lockfile needs every member's `[dependencies]`; a member's standing under the
+policy is not a fact about the lockfile, and reporting it there would report a
+violation in one member while somebody was building another.
+
+No other monorepo tool can do this, because no other language has the grants in
+the manifest and enforced by the compiler. Roadmap 14.19.
+
 ## Not decided here
 
 - **What a denied access does at run time.** `Fs::real()` raising `IoError` is
   the obvious answer for the file system and probably wrong for a clock. Each
   capability's real implementation decides, and each is a small enough question
   to answer when the capability is written.
+- **Whether a policy can narrow values and not only askers.** The section
+  above says why it does not today. A root that could say "any host under
+  `*.internal`" and have members narrow further is the shape a platform team
+  will eventually want, and it needs a definition of "narrower" that is
+  checkable rather than plausible.
 - **Whether the compile-time gate is a hard error or a lint.** A hard error is
   the assumption above. `[lints] unused-capabilities` already exists in the
   manifest, so there is a precedent for the other shape, and the two could

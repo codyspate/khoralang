@@ -38,6 +38,25 @@ indent-style = "space"
 indent-width = 2
 explicit-semicolons = true
 
+# A cap on what any member may ask for. Roadmap 14.19.
+#
+# **Not the same table as `[workspace.permissions]`.** That one is a default a
+# member opts into with `workspace = true`; this is a cap a member cannot opt
+# out of. Only the three examples that answer on a port may reach the network,
+# and a fourth one that decides to is a build failure rather than something a
+# reviewer has to notice.
+#
+# `extern = []` is the strict one and the one that matters most: nothing here
+# may declare an `extern fn` or hand that permission to a dependency. `std`
+# always may, which is the design rather than an exception to it -- everything
+# leaving Khora goes through functions whose signatures carry capability rows,
+# and those live in `std`. `docs/design/permissions.md`.
+[workspace.policy]
+network = ["ledger_service", "link_shortener", "risk_analyzer"]
+env = ["ledger_service", "link_shortener", "risk_analyzer"]
+fs = ["link_shortener", "risk_analyzer"]
+extern = []
+
 # What somebody runs before pushing. Roadmap 14.18.
 #
 # Declared at the root, so it runs once here rather than eight times, one per

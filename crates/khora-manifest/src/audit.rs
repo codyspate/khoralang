@@ -50,6 +50,14 @@ static WORKSPACE: Schema = Schema::Fields(&[
     ("permissions", &PERMISSIONS),
     ("fmt", &FMT),
     ("lints", &LINTS),
+    ("policy", &POLICY),
+]);
+
+static POLICY: Schema = Schema::Fields(&[
+    ("network", &OPEN),
+    ("fs", &OPEN),
+    ("env", &OPEN),
+    ("extern", &OPEN),
 ]);
 
 // No `name`: a name is what makes a member a distinct package, so there is
