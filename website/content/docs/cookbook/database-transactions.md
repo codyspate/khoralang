@@ -4,7 +4,7 @@ sidebar:
   order: 2
 ---
 
-Khora keeps the transaction contract in `std::db` while concrete database engines live in packages. Application code should depend on the `Db` **capability**, not thread a database value through every function call.
+Khora keeps the transaction contract in `std::db` while concrete database engines live in packages. Application code depends on the `Db` **capability**, not on a database value threaded through every function call.
 
 That distinction is the point of the API. A function that talks to the database says so in its type:
 
@@ -21,7 +21,7 @@ fn load_account(id: Int) -> Result<List<Row>, DbError>
 
 There is no `db: Db` parameter. `with { db: Db }` is the function's authority to perform database operations, and the caller supplies that authority at a boundary.
 
-The contract of `transaction` is the other important part: commit when the body returns `Result::Ok`, roll back when it returns `Result::Err`, and roll back during cancellation before the transaction scope is released.
+`transaction` follows the same rule. It requires `db: Db` through its capability row, so transaction boundaries do not turn the capability back into explicit dependency plumbing.
 
 ## Complete example
 
@@ -95,9 +95,8 @@ fn transfer(
 ) -> Result<(), DbError>
   with { db: Db }
 {
-  transaction(
-    db,
-    fn () => transfer_body(from_account, to_account, amount),
+  transaction(fn () =>
+    transfer_body(from_account, to_account, amount)
   )
 }
 
@@ -111,12 +110,14 @@ pub fn main() {
 }
 ```
 
-The dependency flow is now visible directly in the signatures:
+The dependency flow is visible directly in the signatures:
 
 ```text
 main installs db
      ↓
 transfer      with { db: Db }
+     ↓
+transaction   with { db: Db }
      ↓
 transfer_body with { db: Db }
      ↓
@@ -124,8 +125,6 @@ db.execute(...)
 ```
 
 Neither `transfer` nor `transfer_body` knows whether `db` is PostgreSQL, SQLite, D1, an in-memory test handler, or something else. They know only that a `Db` capability is available.
-
-`transaction` currently receives the capability binding itself because it owns the begin/commit/rollback protocol. That is infrastructure plumbing inside the standard helper; it is not a reason to expose `Db` as an ordinary parameter throughout application code.
 
 ## Failure behavior
 
@@ -153,15 +152,15 @@ with { db: postgres_db } {
 }
 ```
 
-When a pool leases a handler through a callback, adapt the lease at that same boundary rather than passing it through the application:
+The PostgreSQL pool helper does the same installation for a leased connection. Its callback requires `db: Db`; `with_db` supplies it and removes that requirement from the caller:
 
 ```khora
-with_db(pool, fn leased =>
-  transfer(10, 20, 2500) with { db: leased }
+with_db(pool, fn () =>
+  transfer(10, 20, 2500)
 )
 ```
 
-Everything beneath that line remains capability-driven.
+That is the useful layering: the pool owns connection acquisition and release, while application code simply declares the database authority it needs.
 
 ## Testing becomes substitution, not plumbing
 
