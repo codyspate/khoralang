@@ -4,48 +4,147 @@ sidebar:
   order: 2
 ---
 
-A Khora package has a `khora.toml` manifest and Khora source under `src/`.
+A Khora package has a `khora.toml` manifest and source files under `src/`. This walkthrough adds a small function and a test, then formats, checks, tests, builds, and runs the package with the installed `khora` toolchain.
 
-The examples in the repository are the best current templates while the project-creation command is still being finalized.
+If `khora --version` does not work yet, start with [Installation](/docs/getting-started/installation/).
 
-## Build an existing example
+## Package structure
 
-From the compiler repository:
+Create a directory like this:
 
-```bash
-cargo run -p khora-cli --features llvm -- build examples/core_demo
+```text
+hello-khora/
+├── khora.toml
+└── src/
+    └── main.kh
 ```
 
-That command takes the package through parsing, name resolution, type inference, exhaustiveness checking, monomorphization, reference-count planning, LLVM code generation, and linking.
+The manifest names the package and selects the language edition:
+
+```toml
+[package]
+name = "hello-khora"
+version = "0.1.0"
+edition = "2026"
+```
+
+## Write some Khora
+
+Put this in `src/main.kh`:
+
+```khora
+module main;
+
+import std::core::{assert, print};
+
+fn double(value: Int) -> Int {
+  value * 2
+}
+
+test "double returns twice its input" {
+  assert(double(21) == 42);
+}
+
+fn main() -> Int {
+  print("Hello, Khora!");
+  0
+}
+```
+
+There are three ordinary language ideas here:
+
+- `fn` declares a function. The parameter and return types are part of its public shape.
+- `test` declares a test that the package test runner can execute.
+- `import std::core::{...}` brings standard-library names into the module.
+
+The [Language Guide](/docs/guide/) goes deeper on each of these after you have the workflow running.
 
 ## Check before building
 
-Use `khora check` for the fast feedback loop:
+From the package root:
 
 ```bash
-cargo run -p khora-cli -- check examples/core_demo
+khora check .
 ```
 
-Checking does not require native code generation and is the command editors and CI should use for ordinary diagnostics.
+Use `check` constantly while you work. It validates the package without paying the cost of native code generation and linking.
 
 ## Format
 
-Khora has a canonical formatter:
+Khora has one canonical formatter:
 
 ```bash
-cargo run -p khora-cli -- fmt examples/core_demo
+khora fmt .
 ```
 
-Use `--check` in CI when you want formatting differences to fail the build.
-
-## Tests
-
-Khora packages can be tested through the CLI:
+In CI, check formatting without changing files:
 
 ```bash
-cargo run -p khora-cli -- test examples/core_demo
+khora fmt . --check
 ```
+
+See [Values and functions](/docs/guide/values-and-functions/) for the core expression and function model.
+
+## Run the tests
+
+```bash
+khora test .
+```
+
+The test runner discovers `test` blocks in the package and reports failures through the CLI. For testing patterns around capabilities, typed failure, and cancellation, see [Testing](/docs/guide/testing/).
+
+## Build a native executable
+
+```bash
+khora build . --out hello
+```
+
+Run it on macOS or Linux:
+
+```bash
+./hello
+```
+
+Or on Windows:
+
+```powershell
+.\hello.exe
+```
+
+You should see:
+
+```text
+Hello, Khora!
+```
+
+For an optimized build, add `--release`:
+
+```bash
+khora build . --release --out hello
+```
+
+## The everyday loop
+
+For most projects, these are the commands you will use repeatedly:
+
+```bash
+khora fmt .
+khora check .
+khora test .
+khora build .
+```
+
+The language server uses the same compiler queries as `khora check`, so editor diagnostics and command-line diagnostics stay aligned. Continue with [Editor setup](/docs/getting-started/editor/) when you want that feedback in your editor.
 
 ## What to learn next
 
-Start with the Language Guide rather than the compiler design documents. The Guide explains the programmer-facing model: values and functions, algebraic data types, pattern matching, pipelines, typed failure, effects and capabilities, structured concurrency, and resource cleanup.
+A useful path from here is:
+
+1. [Values and functions](/docs/guide/values-and-functions/)
+2. [Data types](/docs/guide/data-types/)
+3. [Pattern matching](/docs/guide/pattern-matching/)
+4. [Pipelines](/docs/guide/pipelines/)
+5. [Errors and raises](/docs/guide/errors-and-raises/)
+6. [Effects and capabilities](/docs/guide/effects-and-capabilities/)
+
+For exact declarations while you work, browse the [Standard Library](/docs/stdlib/) reference.
