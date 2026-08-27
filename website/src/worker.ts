@@ -3,23 +3,44 @@ interface Env {
 }
 
 const DOCS_PREFIX = '/docs';
+const HOMEPAGE_ASSET = '/homepage.txt';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // The product homepage is available only at the canonical root URL.
-    // /home and /home.html are implementation details and redirect away.
-    if (url.pathname === '/home' || url.pathname === '/home/' || url.pathname === '/home.html') {
+    // The product homepage has one public URL. These legacy/implementation
+    // paths always canonicalize back to the site root.
+    if (
+      url.pathname === '/home' ||
+      url.pathname === '/home/' ||
+      url.pathname === '/home.html' ||
+      url.pathname === HOMEPAGE_ASSET
+    ) {
       return Response.redirect(new URL('/', url), 301);
     }
 
-    // The product homepage is a standalone static page. Starlight remains
-    // mounted under /docs so every existing documentation URL stays stable.
+    // Keep the homepage payload as a non-HTML static asset internally. If the
+    // asset itself were named *.html, Cloudflare's HTML asset handling could
+    // canonicalize that internal request and create a redirect loop with the
+    // public /home -> / rule above.
     if (url.pathname === '/') {
       const assetUrl = new URL(url);
-      assetUrl.pathname = '/home.html';
-      return env.ASSETS.fetch(new Request(assetUrl, request));
+      assetUrl.pathname = HOMEPAGE_ASSET;
+      const homepage = await env.ASSETS.fetch(new Request(assetUrl, request));
+
+      if (!homepage.ok) {
+        return homepage;
+      }
+
+      const headers = new Headers(homepage.headers);
+      headers.set('content-type', 'text/html; charset=utf-8');
+
+      return new Response(homepage.body, {
+        status: homepage.status,
+        statusText: homepage.statusText,
+        headers,
+      });
     }
 
     if (url.pathname === DOCS_PREFIX) {
