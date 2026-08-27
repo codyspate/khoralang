@@ -22,7 +22,19 @@ This gives Khora dependency injection without a runtime service locator and make
 
 ## Capabilities are authority
 
-Treat a capability as permission to perform an effectful class of operations, not merely as a bag of helper functions. Database access, clocks, tracing, files, and external services are natural capability boundaries because they cross from pure computation into the outside world.
+Treat a capability as permission to perform an effectful class of operations, not merely as a bag of helper functions. Database access, clocks, tracing, files, randomness, and external services are natural capability boundaries because they cross from pure computation into the outside world.
+
+For example, randomness appears as an explicit requirement:
+
+```khora
+fn choose_bucket() -> Int
+  with { random: Random }
+{
+  random.in_range(0, 10)
+}
+```
+
+Tests can provide a deterministic `Random` handler without changing `choose_bucket`.
 
 ## Keep application APIs small
 
@@ -30,4 +42,14 @@ Do not expose every infrastructure capability at every layer. A high-level funct
 
 ## Effects compose with typed failure
 
-`with` answers what authority a computation needs. `raises` answers what recoverable failures it may produce. They are separate dimensions of the API and can be read independently.
+`with` answers what authority a computation needs. `raises` answers what recoverable failures it may produce. They are separate dimensions of the API and can be read independently:
+
+```khora
+fn determine_random() -> Bool
+  with { random: Random }
+  raises RandomFailure
+```
+
+The function needs access to randomness and may fail with `RandomFailure`; neither fact implies the other.
+
+For the full failure flow—including explicit `raise`, propagation with `!`, pattern-based `catch`, translating one failure type into another, converting failures into API responses, and collecting failures with `attempt`—see [Typed failure with raises](./errors-and-raises.md).
