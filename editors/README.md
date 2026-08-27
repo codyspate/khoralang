@@ -114,18 +114,27 @@ code with a build, and shipping half of one would be worse than saying so.
 | Errors and warnings as you type | yes |
 | Hover: the type under the cursor | yes |
 | Format on save | yes, where the editor can be told to format on save |
-| Go to definition | yes, for `::` paths — not for locals, see below |
-| Completion, find references, rename | **not yet** — roadmap 14.4, 14.8 |
+| Go to definition | yes, paths and locals |
+| Find references | yes, across files |
+| Document outline and workspace search | yes |
+| Completion | yes — after `.`, after `Type::`, in an import list, and in scope |
+| Rename | **locals only.** A declaration is refused with a reason, see below |
 | Semantic highlighting | **not yet** — roadmap 14.5 |
 
-Go to definition answers a `::` path — a function, type, trait, effect, context
-or constant, and a constructor by way of the type that declares it. It does not
-answer a local binding: that resolves in a body rather than in the module, and
-it is the case where the answer is already three lines up the screen. 14.8 wants
-the same information for rename, so it is a gap to fill once rather than twice.
+**References are found by resolution, not by matching text**, so they cross
+files and two modules that each declare an `add` stay apart. The identity is the
+declaration, not the spelling.
+
+**Rename covers locals.** For a local the set of edits is provably complete —
+one body, and the compiler already recorded which uses bind to which binding.
+For a declaration it is not, and a rename that misses one occurrence breaks a
+build silently in a file nobody had open, so renaming one is refused with a
+sentence saying which two things are missing.
 
 A method lands on its **trait** rather than its `impl`, because `khora-hir` does
-not collect impl members.
+not collect impl members. Completion does not have that problem: it reads
+methods off `khora-types`' signature keys, which is where impl members *are*
+recorded.
 
 Highlighting today is a TextMate grammar (`editors/vscode/syntaxes`), which
 regex-matches text and cannot tell a local from an import. Every editor that

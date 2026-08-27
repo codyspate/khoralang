@@ -43,9 +43,9 @@ tree-sitter grammar, which is a second parser and therefore a cost rather than
 a feature — `editors/vscode/README.md` has the argument. Roadmap 14.5 is the
 answer that does not need one.
 
-`vim.lsp.buf.definition()` works for a `::` path. Completion and rename are
-14.4 and 14.8 and are not there yet — the server does not advertise them, so
-asking does nothing rather than something wrong.
+`vim.lsp.buf.definition()`, `references()`, `document_symbol()` and completion
+all work. `vim.lsp.buf.rename()` works on a local and refuses a declaration with
+a reason.
 
 ## Checking it
 

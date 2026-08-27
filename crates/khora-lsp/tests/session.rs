@@ -960,3 +960,158 @@ fn a_parameter_finds_itself() {
     let start = found.pointer("/range/start/character").and_then(Value::as_i64).expect("a column");
     assert_eq!(start, 6, "the parameter, at `count` in the signature: {found}");
 }
+
+// --- completion -------------------------------------------------------------
+
+fn completion(path: &Path, line: u32, character: u32, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/completion",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "position": { "line": line, "character": character }
+        }
+    })
+}
+
+/// The labels offered, for an assertion that reads.
+fn labels(replies: &[Value], id: i64) -> Vec<String> {
+    result_of(replies, id)
+        .as_array()
+        .map(|items| {
+            items.iter().filter_map(|i| i.get("label")?.as_str().map(str::to_string)).collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_server_offers_completion_and_says_what_triggers_it() {
+    let w = workspace(&[("src/main.kh", "module main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let caps = result_of(&replies, 1);
+    let triggers = caps
+        .pointer("/capabilities/completionProvider/triggerCharacters")
+        .and_then(Value::as_array)
+        .expect("trigger characters");
+    assert!(triggers.contains(&json!(".")), "{caps}");
+    assert!(triggers.contains(&json!(":")), "{caps}");
+}
+
+/// **The case that has to work in code that does not parse.** `s.` is a syntax
+/// error and a request for the methods of `s` at the same moment.
+#[test]
+fn after_a_dot_the_methods_of_the_receiver() {
+    // The import matters and is not decoration: `import_inherent` is what
+    // brings a module's methods into a file's type map, so a file importing
+    // nothing genuinely has no `String` methods to offer. Real code imports.
+    let text =
+        "module main;\n\nimport std::core::{print};\n\nfn go() -> Int {\n  let s = \"x\";\n  s.\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        // Line 6 is `  s.`; the cursor sits after the dot.
+        completion(&file, 6, 4, 2),
+        exit(),
+    ]);
+
+    let offered = labels(&replies, 2);
+    assert!(!offered.is_empty(), "a broken line should still offer something");
+    assert!(
+        offered.iter().any(|l| l == "byte_length"),
+        "String methods, from the checker rather than from the words on screen: {offered:?}"
+    );
+    // And nothing belonging to a different type.
+    assert!(
+        !offered.iter().any(|l| l == "push"),
+        "an Array method has no business here: {offered:?}"
+    );
+}
+
+/// After `Type::`, that type's constructors.
+#[test]
+fn after_a_type_and_colons_the_constructors() {
+    let level = "module level;\n\npub type Risk =\n  | Low\n  | High;\n";
+    let main = "module main;\n\nimport level::{Risk};\n\nfn go() -> Int {\n  Risk::\n}\n";
+    let w = workspace(&[("src/level.kh", level), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, main),
+        completion(&file, 5, 8, 2),
+        exit(),
+    ]);
+
+    let offered = labels(&replies, 2);
+    assert!(offered.iter().any(|l| l == "Low"), "{offered:?}");
+    assert!(offered.iter().any(|l| l == "High"), "{offered:?}");
+}
+
+/// Inside an import list, what the module actually exports — and nothing it
+/// keeps to itself.
+#[test]
+fn inside_an_import_list_the_modules_exports() {
+    let helper =
+        "module helper;\n\npub fn shown() -> Int { 1 }\n\nfn hidden() -> Int { 2 }\n";
+    let main = "module main;\n\nimport helper::{};\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, main),
+        // Just after the `{`.
+        completion(&file, 2, 16, 2),
+        exit(),
+    ]);
+
+    let offered = labels(&replies, 2);
+    assert!(offered.iter().any(|l| l == "shown"), "{offered:?}");
+    assert!(
+        !offered.iter().any(|l| l == "hidden"),
+        "a private declaration is not an export: {offered:?}"
+    );
+}
+
+/// Otherwise: the locals of the body, and what the file declares.
+#[test]
+fn elsewhere_the_names_in_scope() {
+    let text =
+        "module main;\n\nfn helper() -> Int { 1 }\n\nfn go() -> Int {\n  let total = 1;\n  t\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        completion(&file, 6, 3, 2),
+        exit(),
+    ]);
+
+    let offered = labels(&replies, 2);
+    assert!(offered.iter().any(|l| l == "total"), "the local: {offered:?}");
+    assert!(offered.iter().any(|l| l == "helper"), "a sibling function: {offered:?}");
+    assert!(offered.iter().any(|l| l == "go"), "and this one: {offered:?}");
+}
+
+/// No prefix filtering here: an editor does that, and doing it twice means two
+/// answers that disagree about which is best.
+#[test]
+fn nothing_is_filtered_by_what_has_been_typed() {
+    let text = "module main;\n\nfn alpha() -> Int { 1 }\n\nfn go() -> Int {\n  zzz\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        completion(&file, 5, 5, 2),
+        exit(),
+    ]);
+    assert!(
+        labels(&replies, 2).iter().any(|l| l == "alpha"),
+        "the editor filters, not the server"
+    );
+}

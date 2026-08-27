@@ -34,6 +34,7 @@
 
 #![deny(missing_docs)]
 
+mod completion;
 mod definition;
 mod position;
 mod references;
@@ -124,6 +125,9 @@ impl Server {
             ("textDocument/definition", Some(id)) => {
                 vec![ok(id, self.definition(&params).unwrap_or(Value::Null))]
             }
+            ("textDocument/completion", Some(id)) => {
+                vec![ok(id, self.completion(&params).unwrap_or(Value::Null))]
+            }
             ("textDocument/references", Some(id)) => {
                 vec![ok(id, self.references(&params).unwrap_or(Value::Null))]
             }
@@ -201,6 +205,14 @@ impl Server {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(lsp_types::CompletionOptions {
+                    // The two characters that change what is on offer. Without
+                    // them an editor only asks after a letter, and `s.` with
+                    // nothing typed after it -- which is when somebody wants
+                    // the list most -- would offer nothing.
+                    trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+                    ..Default::default()
+                }),
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
@@ -406,6 +418,24 @@ impl Server {
                 end: target_index.position(found.range.end(), self.encoding),
             },
         }))
+    }
+
+    /// What could be written at the cursor.
+    fn completion(&self, params: &Value) -> Option<Value> {
+        let (file, offset) = self.locate(params)?;
+        let root = khora_db::source_root(&self.db)?;
+
+        let items: Vec<Value> = completion::at(&self.db, root, file, offset)
+            .into_iter()
+            .map(|candidate| {
+                json!({
+                    "label": candidate.label,
+                    "kind": candidate.kind,
+                    "detail": candidate.detail,
+                })
+            })
+            .collect();
+        Some(Value::Array(items))
     }
 
     /// Every mention of the thing under the cursor.
