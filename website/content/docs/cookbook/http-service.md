@@ -4,30 +4,79 @@ sidebar:
   order: 1
 ---
 
-Khora's HTTP stack is layered so applications can use the reference router or build a different framework over the public codec and connection layers.
+Khora's shipped HTTP router works directly with `Request`, `Response`, `Router`, and shareable handler functions. A small service does not need an application framework before it can route requests.
 
-A production service should separate three limits:
+## Complete example
 
-1. how many client connections may remain open;
-2. how many request handlers may actively consume application capacity;
-3. how much concurrency downstream resources such as a database can sustain.
+This service exposes `/health` and `/hello?name=...` and listens on port 8080:
 
-Cheap fibers do not remove the need for backpressure.
+```khora
+module main;
 
-## Keep handlers explicit
+import std::core::{Option, SharedFn};
+import std::net::http::{HttpError, Request, Response, Router};
 
-Parse external input into domain types early. Return structured application failures to an HTTP boundary that decides the status code and response shape. Do not scatter transport-specific status decisions throughout domain code.
+fn health(_request: Request) -> Response {
+  Response::text(200, "ok")
+}
 
-## Bound work
+fn hello(request: Request) -> Response {
+  let name = match request.query("name") {
+    Option::Some(value) => value,
+    Option::None => "world",
+  };
 
-Use bounded concurrency around work that can exhaust a downstream dependency. When the server reaches sustainable capacity, prefer bounded queues and controlled rejection over accepting unlimited work and allowing latency and memory to grow without limit.
+  Response::text(200, "hello ${name}")
+}
 
-## Timeouts and cancellation
+pub fn main()
+  raises HttpError
+{
+  Router::new()
+    |> Router::get("/health", SharedFn::of(health))
+    |> Router::get("/hello", SharedFn::of(hello))
+    |> Router::listen(8080)!
+}
+```
 
-A disconnected or timed-out request should cancel work that exists only for that request. Cleanup must still run for resources owned by the request scope.
+A route handler is an ordinary direct-style function from `Request` to `Response`:
 
-## Observability
+```khora
+fn hello(request: Request) -> Response
+```
 
-Extract incoming trace context at the HTTP boundary, attach it to the request fiber, and create child spans around meaningful operations. Propagation should remain structural as fibers spawn or move between scheduler workers.
+`SharedFn::of` certifies the handler for the router's concurrent serving boundary. The router can then invoke the handler from request fibers without turning the handler into a special async type.
 
-The reference applications in `examples/` demonstrate the current HTTP APIs while the generated standard-library reference is being built.
+## Read request data once it reaches the handler
+
+The HTTP layer parses the request before routing it. Handlers can read the normalized path, matched route parameters, query values, headers, and body directly from `Request`.
+
+For example, a route with a path parameter can inspect it through `request.params`:
+
+```khora
+fn show_user(request: Request) -> Response {
+  match request.params.get("id") {
+    Option::Some(id) => Response::text(200, "user ${id}"),
+    Option::None => Response::text(400, "missing id"),
+  }
+}
+```
+
+and mount it with:
+
+```khora
+Router::new()
+  |> Router::get("/users/:id", SharedFn::of(show_user))
+```
+
+## Return transport decisions at the HTTP boundary
+
+A handler should translate application outcomes into HTTP status codes and response bodies at the boundary. Domain functions below the handler can keep their own typed failures instead of knowing about status code 404 or 503.
+
+For typed request/response bodies, continue with [JSON API](/docs/cookbook/json-api/). For failure translation before the HTTP boundary, see [Typed failure with raises](/docs/guide/errors-and-raises/#translate-one-failure-into-another).
+
+## Bound the resource that is actually constrained
+
+The router already owns request fibers. If a downstream resource has a smaller capacity—for example a database pool—bound concurrency around that work rather than treating the total number of HTTP connections as the same limit. See [Bounded concurrency](/docs/cookbook/bounded-concurrency/).
+
+For the complete router, request, response, and client surface, see the [HTTP API reference](/docs/stdlib/api/net/http/).
