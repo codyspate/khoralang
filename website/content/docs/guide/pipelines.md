@@ -1,10 +1,12 @@
 ---
 title: Pipelines
 sidebar:
-  order: 4
+  order: 5
 ---
 
 Khora's pipeline operator `|>` keeps left-to-right data transformations readable without requiring every API to be designed around unary functions.
+
+## Pipe into the first argument
 
 ```khora
 value |> transform(a, b)
@@ -16,27 +18,66 @@ passes `value` as the first argument, equivalent to:
 transform(value, a, b)
 ```
 
-When the value belongs somewhere else in the call, use a single `_` placeholder:
-
-```khora
-value |> insert_before(existing, _, suffix)
-```
-
-A stage may contain at most one placeholder. A bare function works as expected:
+A bare function is the unary case:
 
 ```khora
 value |> normalize |> validate
 ```
 
-Pipelines have deliberately low precedence so a multi-step transformation reads as one expression rather than a nest of calls.
+## Choose another argument with `_`
 
-Fallible stages can use the ordinary `!` propagation syntax at the stage where failure occurs. The pipeline does not introduce a second error model; it is only call syntax arranged around the value flowing through the expression.
+When the piped value belongs somewhere else in the call, use one `_` placeholder:
 
-Use pipelines when they make the data flow clearer. Ordinary calls remain preferable when the operation itself, rather than the transformed value, is the main idea of the line.
+```khora
+value |> insert_before(existing, _, suffix)
+```
 
-## The flow operator
+which is equivalent to:
 
-`||>` creates a unary anonymous function whose argument becomes the starting value of the pipeline.
+```khora
+insert_before(existing, value, suffix)
+```
+
+A pipeline stage may contain at most one placeholder.
+
+## Fallible pipeline stages
+
+A fallible stage uses the same `!` as an ordinary call:
+
+```khora
+raw
+|> parse!
+|> validate(config)!
+|> persist!
+```
+
+The pipeline does not introduce another error model. `!` still marks the exact call where typed failure may leave the current function, and `catch` can still handle the result of a stage or the completed pipeline.
+
+```khora
+let user = (
+  raw
+  |> parse!
+  |> validate!
+) catch {
+  ParseError::Invalid(message) => User::invalid(message),
+};
+```
+
+See [Typed failure with raises](./errors-and-raises.md) for failure handling.
+
+## Pipeline precedence
+
+`|>` binds more loosely than arithmetic, comparisons, and ordinary calls, so stage expressions stay readable:
+
+```khora
+value + 1 |> double
+```
+
+means the result of `value + 1` is piped to `double`. Use parentheses whenever grouping would otherwise be unclear to a reader.
+
+## The flow operator `||>`
+
+`||>` creates a unary anonymous function whose argument becomes the starting value of the pipeline:
 
 ```khora
 users |> List::map(
@@ -46,7 +87,7 @@ users |> List::map(
 )
 ```
 
-That is exactly the same program as naming the value yourself:
+That is the same shape as naming the value yourself:
 
 ```khora
 users |> List::map(fn value =>
@@ -57,20 +98,26 @@ users |> List::map(fn value =>
 )
 ```
 
-The flow operator is the shorter way to write it when the name would be read once and mean nothing. It is sugar and nothing more: effects, failures and captures are inferred exactly as they are for the lambda it stands for, and `!` behaves the same in both.
+The flow operator is useful when the lambda parameter would only be named so it can immediately enter a pipeline. Effects, failures, and captures are inferred exactly as they are for the equivalent `fn` lambda.
 
-**A named function needs no flow operator.** Pass it directly:
+A named function needs no flow operator:
 
 ```khora
-List::map(normalize)
+users |> List::map(normalize)
 ```
 
-Two rules are worth knowing.
+## Flow pipelines are greedy
 
-The flow operator is **greedy** — every `|>` after the first stage belongs to it. To pipe the function it makes somewhere else, use parentheses:
+Every following `|>` stage belongs to the flow lambda. If you want to pipe the function value created by `||>` somewhere else, parenthesize it:
 
 ```khora
 (||> normalize) |> apply_twice
 ```
 
-And it is always **unary**. A pipeline is one value moving through stages, so a function of two arguments still wants `fn`.
+`||>` is always unary. Use `fn` when the anonymous function itself needs several parameters:
+
+```khora
+fn (left: Int, right: Int) => left + right
+```
+
+Use pipelines when they make the value moving through the expression easier to follow. Ordinary calls remain preferable when the operation itself is the main idea of the line.
