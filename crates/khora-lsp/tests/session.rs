@@ -1115,3 +1115,191 @@ fn nothing_is_filtered_by_what_has_been_typed() {
         "the editor filters, not the server"
     );
 }
+
+// --- semantic tokens --------------------------------------------------------
+
+fn semantic_tokens(path: &Path, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/semanticTokens/full",
+        "params": { "textDocument": { "uri": url_of(path) } }
+    })
+}
+
+/// One decoded token: absolute line and column, and its type index.
+#[derive(Debug, PartialEq, Eq)]
+struct Decoded {
+    line: u32,
+    column: u32,
+    length: u32,
+    kind: u32,
+    modifiers: u32,
+}
+
+/// Undoes the relative encoding, which is what an editor does.
+///
+/// Decoding rather than asserting on raw integers, because the raw form is
+/// unreadable and the bug worth catching — a `deltaStart` not reset at a new
+/// line — is invisible in it and obvious here.
+fn decode(replies: &[Value], id: i64) -> Vec<Decoded> {
+    let data: Vec<u32> = result_of(replies, id)
+        .pointer("/data")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|n| n.as_u64().map(|n| n as u32)).collect())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    let (mut line, mut column) = (0u32, 0u32);
+    for chunk in data.chunks(5) {
+        let [delta_line, delta_start, length, kind, modifiers] = chunk else { continue };
+        if *delta_line > 0 {
+            line += delta_line;
+            column = *delta_start;
+        } else {
+            column += delta_start;
+        }
+        out.push(Decoded {
+            line,
+            column,
+            length: *length,
+            kind: *kind,
+            modifiers: *modifiers,
+        });
+    }
+    out
+}
+
+/// The legend's order is the wire encoding, so a token type is only meaningful
+/// against the legend the same reply declared.
+fn legend(replies: &[Value]) -> Vec<String> {
+    result_of(replies, 1)
+        .pointer("/capabilities/semanticTokensProvider/legend/tokenTypes")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_server_declares_a_legend() {
+    let w = workspace(&[("src/main.kh", "module main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let types = legend(&replies);
+    assert!(types.contains(&"variable".to_string()), "{types:?}");
+    assert!(types.contains(&"parameter".to_string()), "{types:?}");
+    assert!(types.contains(&"method".to_string()), "{types:?}");
+    assert!(types.contains(&"property".to_string()), "{types:?}");
+    assert_eq!(
+        result_of(&replies, 1).pointer("/capabilities/semanticTokensProvider/full"),
+        Some(&json!(true))
+    );
+}
+
+/// **The distinction a regular expression cannot make**: a parameter, a local,
+/// and a function are three different things with the same shape.
+#[test]
+fn a_parameter_a_local_and_a_function_are_told_apart() {
+    let text = "module main;\n\nfn helper() -> Int { 1 }\n\nfn go(count: Int) -> Int {\n  let total = count;\n  total\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, text), semantic_tokens(&file, 2), exit()]);
+
+    let types = legend(&replies);
+    let index = |name: &str| types.iter().position(|t| t == name).expect("in the legend") as u32;
+    let found = decode(&replies, 2);
+    assert!(!found.is_empty(), "nothing was classified");
+
+    // Line 4 is `fn go(count: Int) -> Int {` — `count` at column 6 is a
+    // parameter, and it is *declared* there.
+    let parameter = found
+        .iter()
+        .find(|t| t.line == 4 && t.column == 6)
+        .expect("the parameter declaration");
+    assert_eq!(parameter.kind, index("parameter"), "{parameter:?}");
+    assert_eq!(parameter.modifiers, 1, "declaration: {parameter:?}");
+
+    // Line 5 is `  let total = count;` — `total` is a local, `count` a use of
+    // the parameter, and they must not be the same colour.
+    let local = found.iter().find(|t| t.line == 5 && t.column == 6).expect("the local");
+    assert_eq!(local.kind, index("variable"), "{local:?}");
+    let use_of_parameter =
+        found.iter().find(|t| t.line == 5 && t.column == 14).expect("the use");
+    assert_eq!(use_of_parameter.kind, index("parameter"), "{use_of_parameter:?}");
+    assert_eq!(use_of_parameter.modifiers, 0, "a use, not a declaration");
+}
+
+/// **A field and a method have identical syntax**, and only the compiler knows
+/// which is which.
+#[test]
+fn a_field_and_a_method_are_told_apart() {
+    let text = "module main;\n\nimport std::core::{print};\n\npub type Box = { size: Int };\n\nfn go(b: Box, s: String) -> Int {\n  let n = b.size;\n  s.byte_length()\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, text), semantic_tokens(&file, 2), exit()]);
+
+    let types = legend(&replies);
+    let index = |name: &str| types.iter().position(|t| t == name).expect("in the legend") as u32;
+    let found = decode(&replies, 2);
+
+    // Line 7 is `  let n = b.size;` — `size` is a property.
+    let property = found
+        .iter()
+        .find(|t| t.line == 7 && t.kind == index("property"))
+        .expect("the field");
+    assert_eq!(property.length, 4, "`size`: {property:?}");
+
+    // Line 8 is `  s.byte_length()` — the same syntax, and a method.
+    let method =
+        found.iter().find(|t| t.line == 8 && t.kind == index("method")).expect("the method");
+    assert_eq!(method.length, 11, "`byte_length`: {method:?}");
+}
+
+/// **Every token is sorted and non-overlapping**, which the protocol requires
+/// and two independent passes make easy to get wrong.
+#[test]
+fn tokens_are_sorted_and_do_not_overlap() {
+    let text = "module main;\n\nimport std::core::{print};\n\npub type Box = { size: Int };\n\nfn go(b: Box) -> Int {\n  let n = b.size;\n  n\n}\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, text), semantic_tokens(&file, 2), exit()]);
+
+    let found = decode(&replies, 2);
+    assert!(found.len() > 3, "not enough to be a real check: {found:?}");
+    for pair in found.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        assert!(
+            (b.line, b.column) > (a.line, a.column),
+            "out of order: {a:?} then {b:?}"
+        );
+        if a.line == b.line {
+            assert!(a.column + a.length <= b.column, "overlapping: {a:?} then {b:?}");
+        }
+    }
+}
+
+/// A path's leading segments are modules and its last is what it resolves to,
+/// which is the other thing a grammar guesses at by capitalisation.
+#[test]
+fn a_module_path_is_coloured_by_what_it_resolves_to() {
+    let helper = "module helper;\n\npub fn add(a: Int) -> Int { a }\n";
+    let main = "module main;\n\nfn go() -> Int { helper::add(1) }\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&file, main), semantic_tokens(&file, 2), exit()]);
+
+    let types = legend(&replies);
+    let index = |name: &str| types.iter().position(|t| t == name).expect("in the legend") as u32;
+    let found = decode(&replies, 2);
+
+    // Line 2 is `fn go() -> Int { helper::add(1) }`.
+    let module = found.iter().find(|t| t.line == 2 && t.column == 17).expect("`helper`");
+    assert_eq!(module.kind, index("namespace"), "{module:?}");
+    let function = found.iter().find(|t| t.line == 2 && t.column == 25).expect("`add`");
+    assert_eq!(function.kind, index("function"), "{function:?}");
+}

@@ -175,6 +175,7 @@ fn it_advertises_what_the_extension_relies_on() {
     assert_eq!(caps.get("documentSymbolProvider"), Some(&serde_json::json!(true)), "{caps}");
     assert!(caps.get("completionProvider").is_some(), "{caps}");
     assert!(caps.get("renameProvider").is_some(), "{caps}");
+    assert!(caps.get("semanticTokensProvider").is_some(), "{caps}");
     assert!(caps.get("textDocumentSync").is_some(), "{caps}");
 }
 

@@ -19,7 +19,9 @@ do when working on the compiler itself.
 | --- | --- |
 | Errors and warnings as you type | `khora_types::diagnostics` and `khora_lint::findings` |
 | Hover: the type of the thing under the cursor | the checker's `BodyTypes` |
-| Go to definition, on a `::` path | `khora_hir::resolve_path` |
+| Go to definition, references, rename | `khora_hir::resolve_path`, and `Body` for locals |
+| Completion | the checker's types, and `khora-types`' signature keys |
+| Semantic highlighting over the grammar | the resolver, for what a regex cannot decide |
 | Format on save | `khora_fmt`, the same formatter the baseline gates on |
 | Highlighting, comment toggling, bracket matching | the TextMate grammar here |
 
@@ -70,11 +72,10 @@ Syntax support is three separate layers, and this file is only the first:
 | Tree-sitter | Neovim, Helix, Zed, Emacs 29+, GitHub code navigation | Incremental parser, grammar in JS compiled to C |
 | LSP semantic tokens | Every editor with an LSP client | Driven by the actual compiler |
 
-**Semantic tokens over LSP is the real answer** (roadmap 14.5). It is
+**Semantic tokens over LSP is the real answer, and it is now here.** It is
 editor-agnostic by construction and reuses the compiler instead of duplicating
-it, which is the only way `Type.member` can be colored correctly — see the
-limits section below. The client half is now here, so what that needs is the
-server half.
+it, which is the only way a local can be told from an import. The grammar below
+is the base layer it sits on.
 
 A tree-sitter grammar would mean maintaining a *second* parser alongside the
 `rowan` one. The cost of even a single duplicate is visible here: the
@@ -111,10 +112,10 @@ constructors and associated items color correctly, and a name after `.` is
 never mistaken for a type.
 
 What a regex still cannot do is anything needing resolution — telling a local
-binding from an imported name, or a field from a method. That wants semantic
-tokens from the language server (roadmap phase 8.4), which will layer over this
-grammar the same way rust-analyzer layers over Rust's. This is the base layer,
-and it now carries more of the load than planned.
+binding from an imported name, or a field from a method. **Semantic tokens do
+that now**, layered over this grammar the same way rust-analyzer layers over
+Rust's. This is the base layer: keywords, literals and punctuation, which the
+server deliberately does not send a second opinion about.
 
 ## Keeping it in sync
 

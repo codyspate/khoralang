@@ -38,6 +38,7 @@ mod completion;
 mod definition;
 mod position;
 mod references;
+mod semantic;
 mod symbols;
 mod transport;
 
@@ -124,6 +125,9 @@ impl Server {
             }
             ("textDocument/definition", Some(id)) => {
                 vec![ok(id, self.definition(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/semanticTokens/full", Some(id)) => {
+                vec![ok(id, self.semantic_tokens(&params).unwrap_or(Value::Null))]
             }
             ("textDocument/completion", Some(id)) => {
                 vec![ok(id, self.completion(&params).unwrap_or(Value::Null))]
@@ -213,6 +217,29 @@ impl Server {
                     trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
                     ..Default::default()
                 }),
+                semantic_tokens_provider: Some(
+                    lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        lsp_types::SemanticTokensOptions {
+                            legend: lsp_types::SemanticTokensLegend {
+                                token_types: semantic::TOKEN_TYPES
+                                    .iter()
+                                    .map(|name| lsp_types::SemanticTokenType::new(name))
+                                    .collect(),
+                                token_modifiers: semantic::TOKEN_MODIFIERS
+                                    .iter()
+                                    .map(|name| lsp_types::SemanticTokenModifier::new(name))
+                                    .collect(),
+                            },
+                            // Whole-document only. Range and delta are both
+                            // optimisations for a file large enough to notice,
+                            // and neither is worth a second code path until
+                            // something measured says so.
+                            full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
+                            range: Some(false),
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
@@ -418,6 +445,51 @@ impl Server {
                 end: target_index.position(found.range.end(), self.encoding),
             },
         }))
+    }
+
+    /// Every span in the file the compiler can classify, as the protocol wants
+    /// it: five integers each, positions relative to the token before.
+    ///
+    /// **Relative encoding is the format, not a compression trick.** A token is
+    /// `deltaLine, deltaStart, length, type, modifiers`, where `deltaStart` is
+    /// relative to the previous token only when they share a line. Getting that
+    /// reset wrong shifts every colour after it by a column, which looks like a
+    /// highlighting bug and is an arithmetic one.
+    fn semantic_tokens(&self, params: &Value) -> Option<Value> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let root = khora_db::source_root(&self.db)?;
+        let index = LineIndex::new(file.text(&self.db));
+
+        let mut data: Vec<u32> = Vec::new();
+        let mut previous: Option<Position> = None;
+
+        for token in semantic::tokens(&self.db, root, file) {
+            let start = index.position(token.range.start(), self.encoding);
+            let end = index.position(token.range.end(), self.encoding);
+            // A token that spans a line has no length the protocol can carry.
+            // No name does, so this is a guard rather than a case.
+            if end.line != start.line {
+                continue;
+            }
+            let length = end.character.saturating_sub(start.character);
+            if length == 0 {
+                continue;
+            }
+
+            let (delta_line, delta_start) = match previous {
+                Some(before) if before.line == start.line => {
+                    (0, start.character - before.character)
+                }
+                Some(before) => (start.line - before.line, start.character),
+                None => (start.line, start.character),
+            };
+            data.extend_from_slice(&[delta_line, delta_start, length, token.kind, token.modifiers]);
+            previous = Some(start);
+        }
+
+        Some(json!({ "data": data }))
     }
 
     /// What could be written at the cursor.

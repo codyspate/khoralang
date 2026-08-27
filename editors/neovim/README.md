@@ -38,10 +38,12 @@ Errors and warnings as you type, the type of the thing under the cursor on
 hover, and formatting — all from the compiler, so they agree with
 `khora check` and `khora fmt` exactly.
 
-No highlighting. Neovim takes that from tree-sitter and Khora has no
-tree-sitter grammar, which is a second parser and therefore a cost rather than
-a feature — `editors/vscode/README.md` has the argument. Roadmap 14.5 is the
-answer that does not need one.
+**Highlighting comes from the server**, not from tree-sitter. Khora has no
+tree-sitter grammar — a second parser is a cost rather than a feature, and
+`editors/vscode/README.md` has the argument — so what colours a buffer here is
+LSP semantic tokens, which Neovim applies on its own with no configuration.
+It covers what needs resolution: locals, parameters, fields, methods, modules
+and what a path resolves to. Keywords and literals are not in it.
 
 `vim.lsp.buf.definition()`, `references()`, `document_symbol()` and completion
 all work. `vim.lsp.buf.rename()` works on a local and refuses a declaration with

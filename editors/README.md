@@ -119,7 +119,7 @@ code with a build, and shipping half of one would be worse than saying so.
 | Document outline and workspace search | yes |
 | Completion | yes — after `.`, after `Type::`, in an import list, and in scope |
 | Rename | **locals only.** A declaration is refused with a reason, see below |
-| Semantic highlighting | **not yet** — roadmap 14.5 |
+| Semantic highlighting | yes — a local told apart from an import, a field from a method |
 
 **References are found by resolution, not by matching text**, so they cross
 files and two modules that each declare an `add` stay apart. The identity is the
@@ -136,10 +136,15 @@ not collect impl members. Completion does not have that problem: it reads
 methods off `khora-types`' signature keys, which is where impl members *are*
 recorded.
 
-Highlighting today is a TextMate grammar (`editors/vscode/syntaxes`), which
-regex-matches text and cannot tell a local from an import. Every editor that
-reads TextMate grammars can use it; the real answer is semantic tokens from the
-server, which is 14.5.
+**Highlighting is two layers.** A TextMate grammar
+(`editors/vscode/syntaxes`) colours keywords, literals and punctuation, and
+every editor that reads TextMate grammars can use it. Over that, the server
+sends semantic tokens for everything a regular expression cannot decide: a
+local against an imported name, a parameter against a local, a field against a
+method, and a path's module segments against what the path resolves to.
+
+An editor with no TextMate grammar — Neovim, Helix — gets the semantic layer
+alone, which is the more informative half.
 
 ## A note on what is tested
 
