@@ -63,7 +63,7 @@ let user = (
 };
 ```
 
-See [Typed failure with raises](./errors-and-raises.md) for failure handling.
+See [Typed failure with raises](./errors-and-raises/) for failure handling.
 
 ## Pipeline precedence
 
