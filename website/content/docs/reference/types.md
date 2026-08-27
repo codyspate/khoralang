@@ -1,31 +1,269 @@
 ---
 title: Types
 sidebar:
-  order: 2
+  order: 3
 ---
 
-Khora is statically typed with inference for ordinary local expressions and explicit annotations available at API boundaries.
+Khora is statically typed with inference for ordinary local expressions and explicit annotations where a boundary or ambiguity needs one.
 
-The type system includes primitive types, tuples, records, algebraic data types, parametric generics, higher-kinded types, traits, const generics, and row-polymorphic effects/failures.
+## Type annotations
 
-## Inference
+Bindings:
 
-Local types are inferred using Hindley-Milner-style unification extended with Khora's rows and trait constraints. When inference cannot determine a type because no use constrains it, add an annotation at the binding or call boundary that owns the ambiguity.
+```khora
+let count: Int = 42;
+let names: List<String> = [];
+```
 
-## Nominal data and traits
+Parameters and returns:
 
-Declared algebraic data types are nominal. Traits state reusable behavioral constraints and can be derived for common operations such as equality, ordering, display, hashing, and JSON conversion where supported.
+```khora
+fn add(left: Int, right: Int) -> Int {
+  left + right
+}
+```
+
+## Path types
+
+A named type is a path, optionally with generic arguments:
+
+```khora
+Int
+String
+app::model::User
+List<User>
+Result<User, DbError>
+```
+
+Compile-time path segments use `::`.
+
+## Unit
+
+```khora
+()
+```
+
+`()` is both the unit type and unit value.
+
+## Tuple types
+
+```khora
+(Int, String)
+(Int, String, Bool)
+(Int,)
+```
+
+Parentheses without a comma group a type:
+
+```khora
+(Int)
+```
+
+## Record types
+
+```khora
+{
+  id: Int,
+  name: String,
+}
+```
+
+Record fields may be explicitly mutable:
+
+```khora
+{
+  mut count: Int,
+  name: String,
+}
+```
+
+A `mut` field can be assigned through a value of that record type; an ordinary field cannot.
+
+## Variant types
+
+```khora
+| None
+| Some(value: A)
+```
+
+A normal named declaration uses a variant type on the right-hand side:
+
+```khora
+pub type Option<A> =
+  | Some(value: A)
+  | None;
+```
+
+Payloads may be named:
+
+```khora
+| Point(x: Int, y: Int)
+```
+
+or positional:
+
+```khora
+| Pair(Int, String)
+```
 
 ## Function types
 
-A function type may include capability requirements and recoverable failures in addition to arguments and result:
+Unary function:
 
 ```khora
-fn load(id: Id) -> User with { db: Db } raises DbError
+A -> B
 ```
 
-These rows participate in type checking and generic composition rather than being comments attached to the function.
+Several parameters are represented by the parameter tuple on the left:
 
-## Memory is not a source-level type burden
+```khora
+(A, B) -> C
+```
 
-Khora's automatic memory management and compiler ownership analysis do not add borrow/lifetime parameters to ordinary application types. FFI/thread-affine resources are the major boundary where extra lifetime rules may need explicit API design.
+Function arrows are right-associative:
+
+```khora
+A -> B -> C
+```
+
+means a function from `A` to a function from `B` to `C`.
+
+## Capability clauses on function types
+
+```khora
+Request -> Response with { db: Db }
+```
+
+Open capability row:
+
+```khora
+A -> B with 'e
+```
+
+A function type can carry both requirements and failures:
+
+```khora
+Request -> Response
+  with { db: Db, clock: Clock }
+  raises DbError + ValidationError
+```
+
+The clauses belong to the arrow they follow.
+
+## Failure unions
+
+`+` forms the union used by `raises` rows:
+
+```khora
+DbError + ValidationError + HttpError
+```
+
+For a declaration:
+
+```khora
+fn serve() -> Response
+  raises DbError + HttpError
+{
+  // ...
+}
+```
+
+## Generic type arguments
+
+```khora
+List<String>
+Map<String, User>
+Matrix<Float, 4, 4>
+```
+
+Type arguments can include integer literal types for const-generic parameters.
+
+## Row variables
+
+A row variable starts with `'`:
+
+```khora
+'e
+'r
+```
+
+They are used where an API is polymorphic over capabilities or failures:
+
+```khora
+A -> B with 'e raises 'r
+```
+
+The letter after `'` has no built-in meaning; `'e` and `'r` are conventions only.
+
+## Record rows and open tails
+
+A closed capability-shaped row:
+
+```khora
+{ db: Db, clock: Clock }
+```
+
+A row with an open tail:
+
+```khora
+{ db: Db | 'e }
+```
+
+Rows may merge additional row values in the tail position:
+
+```khora
+{ 'left | 'right | clock: Clock }
+```
+
+Rows are structural; ordinary declared ADTs remain nominal.
+
+## Explicit polymorphic types with `forall`
+
+```khora
+forall<A>. A -> A
+```
+
+Several parameters, including const parameters, use the normal generic parameter list:
+
+```khora
+forall<A, const N: Int>. Vector<A>
+```
+
+Most named generic functions do not need explicit `forall`; the declaration's own type parameter list introduces their parameters.
+
+## Opaque types
+
+A type declaration may omit its definition:
+
+```khora
+pub type Handle;
+```
+
+The representation is not available to ordinary source using the type.
+
+## Type aliases and named data
+
+Alias:
+
+```khora
+pub type UserId = Int;
+```
+
+Record:
+
+```khora
+pub type User = {
+  id: UserId,
+  name: String,
+};
+```
+
+Variant:
+
+```khora
+pub type Lookup =
+  | Found(user: User)
+  | Missing;
+```
+
+See [Declarations](./declarations.md) for visibility, `derive`, and complete declaration forms; see [Generics](./generics.md) for bounds, const parameters, variance, and polymorphism.
