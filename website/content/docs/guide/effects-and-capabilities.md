@@ -178,7 +178,7 @@ A record row can also keep named entries while accepting an open tail:
 { clock: Clock | 'e }
 ```
 
-See [Generics and traits](./generics-and-traits.md#failure-and-capability-row-variables) for row variables in higher-order function types.
+See [Generics and traits](./generics-and-traits/#failure-and-capability-row-variables) for row variables in higher-order function types.
 
 ## Capabilities and failures are separate
 
@@ -192,4 +192,4 @@ fn determine_random() -> Bool
 
 The function needs access to randomness and may fail with `RandomFailure`; neither fact implies the other.
 
-For explicit `raise`, propagation with `!`, pattern-based `catch`, error translation, and `attempt`, continue with [Typed failure with raises](./errors-and-raises.md).
+For explicit `raise`, propagation with `!`, pattern-based `catch`, error translation, and `attempt`, continue with [Typed failure with raises](./errors-and-raises/).
