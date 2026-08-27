@@ -24,7 +24,7 @@ Use destructuring when the shape is already known:
 let (left, right) = pair;
 ```
 
-More pattern forms are covered in [Pattern matching](./pattern-matching.md).
+More pattern forms are covered in [Pattern matching](./pattern-matching/).
 
 ## Explicit mutation with `let mut`
 
@@ -38,7 +38,7 @@ while attempts < 3 {
 }
 ```
 
-A normal `let` binding cannot be assigned to later. Shared mutable state uses a separate `Shared` boundary; see [Shared state](./shared-state.md).
+A normal `let` binding cannot be assigned to later. Shared mutable state uses a separate `Shared` boundary; see [Shared state](./shared-state/).
 
 ## Module constants with `const`
 
@@ -169,7 +169,7 @@ let describe = fn value => {
 };
 ```
 
-For unary transformation lambdas written as a pipeline, Khora also provides `||>`; see [Pipelines](./pipelines.md#the-flow-operator).
+For unary transformation lambdas written as a pipeline, Khora also provides `||>`; see [Pipelines](./pipelines/#the-flow-operator).
 
 ## Capabilities and failures are part of a function type
 
@@ -186,4 +186,4 @@ pub fn load_user(id: Id) -> User
 
 Read that as: given an `Id`, the function produces a `User`, requires the `db` capability, and may fail with `DbError`.
 
-Public signatures make those requirements explicit. Private helpers can often let the compiler infer them. Continue with [Typed failure with raises](./errors-and-raises.md) and [Effects and capabilities](./effects-and-capabilities.md) for the complete syntax.
+Public signatures make those requirements explicit. Private helpers can often let the compiler infer them. Continue with [Typed failure with raises](./errors-and-raises/) and [Effects and capabilities](./effects-and-capabilities/) for the complete syntax.
