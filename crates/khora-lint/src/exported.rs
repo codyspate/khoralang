@@ -90,22 +90,29 @@ fn is_public(node: &SyntaxNode) -> bool {
 
 /// Whether a `///` block sits immediately above it.
 ///
-/// Walks back over whitespace and ordinary comments. A blank line does not
-/// break the association: `/// text` then a blank then the item still reads as
-/// documentation of the item, and treating it otherwise would report something
-/// that is plainly documented.
+/// **The same rule `khora_doc::doc_of` uses, and that is the requirement.**
+/// A blank line ends the block, and so does an ordinary `//` note. This lint
+/// was written more leniently at first — skipping both — and the two answers
+/// disagreeing is a bug rather than a matter of taste: `khora check` would
+/// call an item documented while `khora doc` published nothing for it, which
+/// is the worst of both, since the page is what a reader actually gets.
+///
+/// So a `///` block has to be the thing immediately above the declaration.
+/// Anything between detaches it, in both tools, the same way.
 fn documented(node: &SyntaxNode) -> bool {
     let mut before = node.first_token().and_then(|token| token.prev_token());
     while let Some(token) = before {
         match token.kind() {
+            // `////` is a divider somebody drew, not documentation, which is
+            // the one place `strip` is subtler than a prefix test.
             SyntaxKind::LINE_COMMENT => {
-                if token.text().starts_with("///") {
-                    return true;
-                }
-                // An ordinary `//` note above an item is not documentation,
-                // and does not stop a `///` above *it* from being.
+                return token.text().starts_with("///") && !token.text().starts_with("////")
             }
-            SyntaxKind::WHITESPACE | SyntaxKind::BLOCK_COMMENT => {}
+            SyntaxKind::WHITESPACE => {
+                if token.text().matches('\n').count() > 1 {
+                    return false;
+                }
+            }
             _ => return false,
         }
         before = token.prev_token();
@@ -134,4 +141,73 @@ fn name_of(node: &SyntaxNode) -> Option<String> {
         .filter_map(|it| it.into_token())
         .find(|token| token.kind() == SyntaxKind::IDENT)
         .map(|token| token.text().to_string())
+}
+
+/// A function whose constructor name disagrees with its shape.
+pub struct Misnamed {
+    /// The heading, to point at.
+    pub range: TextRange,
+    /// What to say about it.
+    pub message: String,
+}
+
+/// Functions named `new`, `empty`, `root` or `of*` whose arity contradicts
+/// what the name claims.
+///
+/// `docs/design/naming.md` is the rule and the message points there. Only the
+/// two consequences a machine can check are checked -- whether a thing *grows*
+/// decides `new` against `empty` and no compiler can see it.
+///
+/// **A function that did not choose one of these names is never reported.**
+/// Calling something `make` or `create` opts out entirely, which is what lets
+/// this default to `warn` without having an opinion about anybody's package.
+pub fn misnamed_constructors(tree: &SyntaxNode) -> Vec<Misnamed> {
+    let mut out = Vec::new();
+    for node in tree.descendants() {
+        if node.kind() != SyntaxKind::FN_DECL {
+            continue;
+        }
+        let Some(name) = name_of(&node) else { continue };
+        let takes = parameters(&node);
+
+        // `of` is a conversion, so it takes what it converts from.
+        let converts = name == "of" || name.starts_with("of_");
+        if converts && takes == 0 {
+            out.push(Misnamed {
+                range: heading(&node),
+                message: format!(
+                    "`{name}` names a conversion and takes nothing to convert. `docs/design/naming.md`"
+                ),
+            });
+            continue;
+        }
+
+        // `new`, `empty` and `root` name a thing there is one obvious version
+        // of, so an argument means the name describes something else.
+        if matches!(name.as_str(), "new" | "empty" | "root") && takes > 0 {
+            out.push(Misnamed {
+                range: heading(&node),
+                message: format!(
+                    "`{name}` names an empty or outermost one and takes {takes} argument(s). `docs/design/naming.md`"
+                ),
+            });
+        }
+    }
+    out
+}
+
+/// How many parameters a declaration takes, not counting `self`.
+fn parameters(node: &SyntaxNode) -> usize {
+    let Some(list) = node.children().find(|c| c.kind() == SyntaxKind::PARAM_LIST) else {
+        return 0;
+    };
+    list.children()
+        .filter(|c| c.kind() == SyntaxKind::PARAM)
+        .filter(|param| {
+            // `self` is an ordinary `PARAM` in the tree, and a receiver is not
+            // an argument for this purpose: `Method::of(text)` and a method
+            // `of(self, text)` are the same claim about the same name.
+            param.text().to_string().trim() != "self"
+        })
+        .count()
 }

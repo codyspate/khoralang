@@ -233,12 +233,26 @@ fn an_ordinary_comment_is_not_documentation() {
     assert_eq!(found.len(), 1, "{found:?}");
 }
 
+/// A blank line *does* separate them, because `khora doc` says so.
+///
+/// The lenient reading was tempting and wrong: `khora_doc::doc_of` stops at a
+/// blank line, so a doc block with a gap under it publishes nothing. A lint
+/// that called that documented would disagree with the page a reader gets.
 #[test]
-fn a_blank_line_does_not_separate_a_doc_from_its_item() {
-    // Reporting something plainly documented because of a stray blank line is
-    // the kind of wrongness that gets a lint switched off.
-    assert!(exports("module t;\n\n/// What it is for.\n\npub fn described() -> Int { 1 }\n")
-        .is_empty());
+fn a_blank_line_separates_a_doc_from_its_item() {
+    let found =
+        exports("module t;\n\n/// What it is for.\n\npub fn described() -> Int { 1 }\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+/// And an ordinary note between them detaches it, for the same reason.
+#[test]
+fn a_note_between_the_doc_and_the_item_detaches_it() {
+    let found = exports(
+        "module t;\n\n/// What it is for.\n// A note about the implementation.\n\
+         pub fn described() -> Int { 1 }\n",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
 }
 
 #[test]
@@ -285,4 +299,72 @@ fn the_caret_covers_the_heading_and_not_the_body() {
     let marked = &source[found[0].range];
     assert!(!marked.contains('{'), "the body is underlined: {marked:?}");
     assert!(marked.contains("bare"), "{marked:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 14.25 inconsistent-constructor
+
+fn ctors(source: &str) -> Vec<Finding> {
+    of(source, khora_lint::INCONSISTENT_CONSTRUCTOR)
+}
+
+#[test]
+fn a_conversion_with_nothing_to_convert_is_reported() {
+    let found = ctors("module t;\n\npub fn of() -> Int { 1 }\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("conversion"), "{:?}", found[0]);
+}
+
+#[test]
+fn a_conversion_that_takes_something_is_not() {
+    assert!(ctors("module t;\n\npub fn of(value: Int) -> Int { value }\n").is_empty());
+    assert!(ctors("module t;\n\npub fn of_minutes(n: Int) -> Int { n }\n").is_empty());
+}
+
+#[test]
+fn an_empty_one_that_takes_arguments_is_reported() {
+    // The shape `std` itself got wrong: `Array::new(length, fill)`.
+    for name in ["new", "empty", "root"] {
+        let source = format!("module t;\n\npub fn {name}(n: Int) -> Int {{ n }}\n");
+        let found = ctors(&source);
+        assert_eq!(found.len(), 1, "`{name}` should be reported: {found:?}");
+        assert!(found[0].message.contains("argument"), "{:?}", found[0]);
+    }
+}
+
+#[test]
+fn an_empty_one_that_takes_nothing_is_not() {
+    for name in ["new", "empty", "root"] {
+        let source = format!("module t;\n\npub fn {name}() -> Int {{ 1 }}\n");
+        assert!(ctors(&source).is_empty(), "`{name}` should be quiet");
+    }
+}
+
+/// **Naming a function anything else opts out entirely.** That is what lets
+/// this default to `warn` without having an opinion about somebody's package:
+/// the lint only speaks about names that claim to follow the convention.
+#[test]
+fn a_name_outside_the_convention_is_never_reported() {
+    for name in ["make", "create", "build", "from_parts", "renew"] {
+        let source = format!("module t;\n\npub fn {name}() -> Int {{ 1 }}\n");
+        assert!(ctors(&source).is_empty(), "`{name}` is not one of the four");
+    }
+}
+
+#[test]
+fn a_receiver_is_not_an_argument() {
+    // `Method::of(text)` and a method `of(self, text)` make the same claim
+    // about the same name, so `self` must not tip the count.
+    let source = "module t;\n\npub type T = { n: Int };\n\n\
+                  impl T {\n  pub fn root(self) -> Int { self.n }\n}\n";
+    assert!(ctors(source).is_empty(), "{:?}", ctors(source));
+}
+
+/// The rule this cannot check, recorded so nobody expects it to: whether a
+/// thing *grows* is what decides `new` against `empty`, and no compiler sees
+/// that. `docs/design/naming.md` is where the full rule lives.
+#[test]
+fn it_does_not_try_to_tell_new_from_empty() {
+    assert!(ctors("module t;\n\npub fn new() -> Int { 1 }\n").is_empty());
+    assert!(ctors("module t;\n\npub fn empty() -> Int { 1 }\n").is_empty());
 }

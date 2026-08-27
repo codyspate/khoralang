@@ -63,15 +63,22 @@ pub struct Finding {
 pub const LINTS: &[&str] = &[
     DANGLING_EXPRESSION,
     DISCARDED_RESULT,
+    INCONSISTENT_CONSTRUCTOR,
     REFERENCE_CYCLE,
+    UNDOCUMENTED_EXPORT,
     UNKNOWN_ALLOW,
     UNREACHABLE_CODE,
     UNUSED_BINDING,
-    UNUSED_IMPORT,
-    UNDOCUMENTED_EXPORT,
     UNUSED_CAPABILITY,
+    UNUSED_IMPORT,
     USELESS_ALLOW,
 ];
+
+/// A constructor whose name disagrees with what it takes.
+///
+/// `new`, `empty`, `root` and `of` follow a rule `std` already keeps and had
+/// written down nowhere until `docs/design/naming.md`. Roadmap 14.25.
+pub const INCONSISTENT_CONSTRUCTOR: &str = "inconsistent-constructor";
 
 /// A `pub` item nobody described in one line.
 ///
@@ -255,6 +262,14 @@ fn undocumented_exports(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
         // on top of a message the reader already has.
         return;
     }
+    for bad in exported::misnamed_constructors(&parse.syntax()) {
+        out.push(Finding {
+            lint: INCONSISTENT_CONSTRUCTOR,
+            message: bad.message,
+            range: bad.range,
+        });
+    }
+
     for export in exported::undocumented(&parse.syntax()) {
         let named = match &export.name {
             Some(name) => format!("`{name}`"),

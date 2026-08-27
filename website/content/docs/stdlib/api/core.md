@@ -1195,6 +1195,13 @@ pub fn new(length: Int, fill: A) -> Array<A>
 
 `length` elements, every one of them `fill`.
 
+**The one place `std` disagrees with its own naming rule.** `new`
+means "an empty one of something that grows", and an array does
+neither -- `Array::empty` sits above this for the empty case.
+`Array::filled(length, fill)` is what the rule asks for, and
+renaming a published `std` signature is a compatibility decision
+rather than a style one. `docs/design/naming.md` records it.
+
 #### length
 
 ```khora
