@@ -1,0 +1,29 @@
+# Keeps the pinned actions fresh.
+#
+# The workflows pin third-party actions to a full commit SHA, because a tag is
+# a label the other repository can move and `@v2` means "whatever they call v2
+# today". A pin is only half the job: an unattended pin is a version that never
+# gets a security fix, which is worse than the moving tag it replaced. This is
+# the other half.
+#
+# Dependabot rewrites the SHA and the trailing `# v2` comment together, so the
+# comment stays true about which release the pin names.
+#
+# Only `github-actions` here. Cargo dependencies are deliberately few and are
+# reviewed by hand; a weekly pull request for each of them would be noise on a
+# repository with one maintainer.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+    groups:
+      # One pull request a month rather than one per action. These are all
+      # build-plumbing and they are reviewed the same way -- read the upstream
+      # diff, or do not take the bump.
+      actions:
+        patterns:
+          - "*"

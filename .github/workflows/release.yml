@@ -43,8 +43,16 @@ on:
         description: "The tag of the draft release to attach to, e.g. v0.1.0"
         required: true
 
+# **Read by default, and write only where something is written.** This was
+# `contents: write` for the whole workflow, which handed a token that can push
+# commits and publish releases to every step in it -- including three
+# third-party actions in `build`, which compiles Rust and produces files and
+# has no business writing to the repository.
+#
+# Only `attach` uploads, so only `attach` has it. The third-party actions all
+# live in `build`, and now run with a read-only token.
 permissions:
-  contents: write
+  contents: read
 
 env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -66,8 +74,8 @@ jobs:
         with:
           ref: ${{ github.event.release.target_commitish || github.ref }}
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: release-${{ matrix.os }}
 
@@ -140,6 +148,9 @@ jobs:
 
   attach:
     name: attach to ${{ github.event.release.tag_name || inputs.tag }}
+    # The one job that writes, and the only one with a token that can.
+    permissions:
+      contents: write
     needs: build
     runs-on: ubuntu-latest
     steps:
