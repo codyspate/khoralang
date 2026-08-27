@@ -10,35 +10,35 @@ Every language construct should have concrete Khora code here. If you know the n
 
 ## Source and declarations
 
-- [Lexical structure](./lexical-structure.md) — identifiers, row variables, numeric/string literals, interpolation, comments, keywords, and punctuation.
-- [Declarations](./declarations.md) — `module`, `import`, `pub`, `const`, `type`, `derive`, `fn`, `extern fn`, `effect`, `context`, `trait`, `impl`, `test`, and `bench`.
-- [Grammar and precedence](./grammar.md) — compact grammar shapes, operator precedence, and parsing rules that disambiguate similar forms.
+- [Lexical structure](./lexical-structure/) — identifiers, row variables, numeric/string literals, interpolation, comments, keywords, and punctuation.
+- [Declarations](./declarations/) — `module`, `import`, `pub`, `const`, `type`, `derive`, `fn`, `extern fn`, `effect`, `context`, `trait`, `impl`, `test`, and `bench`.
+- [Grammar and precedence](./grammar/) — compact grammar shapes, operator precedence, and parsing rules that disambiguate similar forms.
 
 ## Expressions and control flow
 
-- [Expressions](./expressions.md) — literals, calls, fields, records, tuples, lists, blocks, `let`, assignment, lambdas, `|>`, `||>`, postfix `!`, `catch`, handlers, and `with`.
-- [Control flow](./control-flow.md) — `if`, `match`, guards, `while`, `for`, `loop`, `break`, `continue`, `return`, and typed-failure exits.
-- [Patterns](./patterns.md) — wildcard, binding, literal, constructor, record, tuple, guarded, `let`, `for`, and `catch` patterns.
+- [Expressions](./expressions/) — literals, calls, fields, records, tuples, lists, blocks, `let`, assignment, lambdas, `|>`, `||>`, postfix `!`, `catch`, handlers, and `with`.
+- [Control flow](./control-flow/) — `if`, `match`, guards, `while`, `for`, `loop`, `break`, `continue`, `return`, and typed-failure exits.
+- [Patterns](./patterns/) — wildcard, binding, literal, constructor, record, tuple, guarded, `let`, `for`, and `catch` patterns.
 
 ## Types and abstraction
 
-- [Types](./types.md) — path, unit, tuple, record, mutable-field, variant, function, row, union, generic, literal, opaque, and `forall` types.
-- [Generics](./generics.md) — type parameters, bounds, const generics, row variables, higher-kinded use, explicit `forall`, and variance.
-- [Traits](./traits.md) — trait declarations, supertraits, associated types, trait `impl`, inherent `impl`, bounds, and `derive(...)`.
+- [Types](./types/) — path, unit, tuple, record, mutable-field, variant, function, row, union, generic, literal, opaque, and `forall` types.
+- [Generics](./generics/) — type parameters, bounds, const generics, row variables, higher-kinded use, explicit `forall`, and variance.
+- [Traits](./traits/) — trait declarations, supertraits, associated types, trait `impl`, inherent `impl`, bounds, and `derive(...)`.
 
 ## Effects, authority, and failure
 
-- [Effects and rows](./effects.md) — `effect` declarations and the relationship between `with` and `raises` rows.
-- [Capabilities](./capabilities.md) — handlers, capability rows, postfix/block `with`, named `context`, sequential composition, and overrides.
-- [Failures](./failures.md) — `raises`, `raise`, postfix `!`, pattern-based `catch`, failure translation, `attempt`, and collection of failures.
+- [Effects and rows](./effects/) — `effect` declarations and the relationship between `with` and `raises` rows.
+- [Capabilities](./capabilities/) — handlers, capability rows, postfix/block `with`, named `context`, sequential composition, and overrides.
+- [Failures](./failures/) — `raises`, `raise`, postfix `!`, pattern-based `catch`, failure translation, `attempt`, and collection of failures.
 
 ## Runtime-facing language rules
 
-- [Memory and resources](./memory-and-resources.md) — `Region`, `Scope`, `scoped`, `acquire`, finalizer order, and cleanup on structured exits.
-- [Sharing](./sharing.md) — `Share`, `Shared`, `Changed`, `Channel`, `SharedFn`, critical-section rules, and cross-fiber values.
-- [Concurrency](./concurrency.md) — `Fiber`, `Nursery`, `nursery`, `bounded_nursery`, cancellation, suspension, and structured ownership.
-- [Traps](./traps.md) — checked overflow, bounds failures, process-fatal behavior, backtraces, and exported-call containment.
-- [FFI](./ffi.md) — importing with `extern fn`, exporting with `pub extern fn`, `Ptr`, borrowed buffers, and the C ABI boundary.
+- [Memory and resources](./memory-and-resources/) — `Region`, `Scope`, `scoped`, `acquire`, finalizer order, and cleanup on structured exits.
+- [Sharing](./sharing/) — `Share`, `Shared`, `Changed`, `Channel`, `SharedFn`, critical-section rules, and cross-fiber values.
+- [Concurrency](./concurrency/) — `Fiber`, `Nursery`, `nursery`, `bounded_nursery`, cancellation, suspension, and structured ownership.
+- [Traps](./traps/) — checked overflow, bounds failures, process-fatal behavior, backtraces, and exported-call containment.
+- [FFI](./ffi/) — importing with `extern fn`, exporting with `pub extern fn`, `Ptr`, borrowed buffers, and the C ABI boundary.
 
 ## Exact library declarations
 
