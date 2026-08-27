@@ -49,7 +49,7 @@ let results = ids
   );
 ```
 
-See [Typed failure with raises](./errors-and-raises.md#collect-failures-as-values-with-attempt).
+See [Typed failure with raises](./errors-and-raises/#collect-failures-as-values-with-attempt).
 
 ## `for` over a collection
 
@@ -123,4 +123,4 @@ The exact operations for each type live in the [standard-library API reference](
 
 ## Sharing collections
 
-Mutating containers such as `Vector` and `Map` stay fiber-local. When several fibers need coordinated evolving state, use an explicit `Shared` boundary or an external capability rather than hidden shared mutation. See [Shared state](./shared-state.md).
+Mutating containers such as `Vector` and `Map` stay fiber-local. When several fibers need coordinated evolving state, use an explicit `Shared` boundary or an external capability rather than hidden shared mutation. See [Shared state](./shared-state/).
