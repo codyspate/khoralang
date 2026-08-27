@@ -6,7 +6,7 @@ sidebar:
 
 This section covers deploying **Khora applications**.
 
-Start with [Supported targets](supported-targets.md) to see which platforms are actually supported by the current toolchain. Platform-specific pages then cover how to build, package, and run Khora programs on those targets.
+Start with [Supported targets](./supported-targets/) to see which platforms are actually supported by the current toolchain. Platform-specific pages then cover how to build, package, and run Khora programs on those targets.
 
 A target is only described as supported when the compiler, runtime, linker/sysroot, packaging, and deployment path work end to end. Compiler code generation by itself does not make a platform deployable.
 
