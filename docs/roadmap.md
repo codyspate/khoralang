@@ -3923,6 +3923,32 @@ budget. The third has not been tested at all, because there has never been a
 client to measure a response to. A7's stated comparison is rust-analyzer, and
 the gap between rust-analyzer and hover-only is this phase.
 
+### 14.3's index, which did not need building
+
+The row above asked for "a position → resolution map and a declaration site per
+resolution", and called it the index the rest of the list needs. Building it was
+the first thing tried and it was the wrong thing.
+
+**Both halves already existed.** `khora_hir::resolve_path` answers a path, and
+it has since name resolution landed. And rowan keeps every byte of the source,
+so "what is under this offset" is `token_at_offset` and a walk up to the nearest
+`PATH` — a tree lookup rather than something recorded during lowering. The whole
+feature is eighty lines that join two things nothing had asked to be joined.
+
+That matters for what comes next. 14.4 and 14.8 were sized on the assumption
+that an index had to be built first; they need the same two calls, plus a way to
+walk every file for 14.8's find-all-references. What is genuinely missing is
+narrower than the list implies:
+
+  - **Locals.** `x` in `let x = 1; x + 1` resolves in a body, not a module, so
+    `resolve_path` does not see it. `Body` records what is needed. Skipped on
+    purpose: it is the case where the answer is already on the screen, and 14.8
+    wants the same information for rename — so it is a gap to fill once.
+  - **Impl members.** `Show::show` lands on `trait Show`, because
+    `khora_hir::collect_decl` returns early on `Decl::Impl` and no method has a
+    range. This is the same absence that made `khora-doc` read the syntax tree
+    instead of the HIR, and it is now two features asking for the same fix.
+
 ### Where the editor actually stands, which is behind where the list said
 
 The 13.16 row claimed the language server "does diagnostics, formatting,
@@ -3940,9 +3966,9 @@ to fix and it is an afternoon.
 
 | # | Item | Why it is here |
 | --- | --- | --- |
-| 14.1 | **The extension speaks to the server** | Give the extension a `main`, an activation event on `.kh`, and a `vscode-languageclient` that spawns `khora lsp`. Everything below is invisible until this exists |
-| 14.2 | **Format on save** | `khora-fmt` is already the canonical formatter and the baseline already gates on it. `textDocument/formatting` and `documentRangeFormatting` wire the existing crate to the editor; the extension sets `editor.formatOnSave` for `.kh` by default. The smallest item here with the largest daily effect |
-| 14.3 | **Go to definition** | Ctrl-click. HIR already resolves every name to a `Resolution`; what is missing is a position → resolution map and a declaration site per resolution. That map is the index the rest of this list needs |
+| 14.1 | ✅ **The extension speaks to the server** | Done. A hundred lines of JavaScript, and `khora-cli/tests/lsp.rs` now covers the path an editor actually takes — `khora lsp` as a subprocess over framed pipes, which no test reached before |
+| 14.2 | ✅ **Format on save** | Done, `textDocument/formatting` only — range formatting has no caller and `khora-fmt` formats whole files. One edit over the document rather than a fake minimal diff, and a file that does not parse comes back untouched |
+| 14.3 | ✅ **Go to definition** | Done for `::` paths. **The index this row asked for turned out not to be needed** — see below. Locals are not answered, and 14.8 is where that gap gets filled |
 | 14.4 | **Completion** | Context-aware rather than word-based: after `.` the methods of the receiver's type, after `Type::` that type's own, inside an import list the module's exports, and inside a `with { .. }` row **the handlers that satisfy it** — see below |
 | 14.5 | **Semantic tokens** | A TextMate grammar cannot tell a local from an import or a field from a method, and `editors/vscode/README.md` has said so since it was written. This is the editor-agnostic answer and it reuses the compiler instead of duplicating it |
 | 14.6 | **Inlay hints for rows** | The one thing no other language's editor can show, because no other language has the rows. See below |
@@ -3950,7 +3976,7 @@ to fix and it is an afternoon.
 | 14.8 | **References, rename, symbols** | Find-all-references, workspace-wide rename, document outline and `Ctrl+T`. All the same index as 14.3, read backwards |
 | 14.9 | **Signature help and run lenses** | Parameter hints while typing a call; a "Run test" lens above each `test` block, which `khora test --filter` already supports from the command line |
 | 14.10 | **Cancellation and debounce** | The server is one thread, one message at a time, with no cancellation — fine for hover on a small file and not for completion on a keystroke. Decision A3 chose Salsa for `docs/project.md` §6.5's sub-15 ms responses and said the incrementality "is not a bolt-on"; the measurement it was chosen for has still never been taken, because nothing has ever sent the server a request in anger |
-| 14.11 | **Beyond VS Code** | An LSP client for Zed and Neovim is small once 14.1 exists. A tree-sitter grammar is a *second parser* and `editors/vscode/README.md` argues against it; semantic tokens reach the same editors without the duplication |
+| 14.11 | **Beyond VS Code** | **Mostly done, and mostly not code.** `editors/README.md` covers Helix, Neovim, Emacs and Sublime; Helix and Neovim have real config files. Only the VS Code one has been run. Zed is the exception and needs an extension compiled to WebAssembly, which is code with a build |
 | 14.12 | **Published, not built by hand** | The marketplace and OpenVSX, and an extension that finds or fetches a matching server. Today installation is a PowerShell script that packages a `.vsix` because the machine has no Node |
 
 #### Inlay hints for rows, which is the one worth building for its own sake

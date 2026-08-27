@@ -170,6 +170,7 @@ fn it_advertises_what_the_extension_relies_on() {
 
     assert_eq!(caps.get("hoverProvider"), Some(&serde_json::json!(true)), "{caps}");
     assert_eq!(caps.get("documentFormattingProvider"), Some(&serde_json::json!(true)), "{caps}");
+    assert_eq!(caps.get("definitionProvider"), Some(&serde_json::json!(true)), "{caps}");
     assert!(caps.get("textDocumentSync").is_some(), "{caps}");
 }
 

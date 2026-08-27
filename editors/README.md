@@ -1,9 +1,9 @@
 # Khora in your editor
 
 **There is one implementation, and it is `khora lsp`.** Errors as you type,
-hover types and formatting are answered by the compiler itself over the
-Language Server Protocol, so every editor below gets the same answers from the
-same queries. A diagnostic in your editor is the diagnostic `khora check`
+hover types, formatting and go to definition are answered by the compiler
+itself over the Language Server Protocol, so every editor below gets the same
+answers from the same queries. A diagnostic in your editor is the diagnostic `khora check`
 gives.
 
 That is why this directory is mostly configuration. `editors/vscode` has a
@@ -114,8 +114,18 @@ code with a build, and shipping half of one would be worse than saying so.
 | Errors and warnings as you type | yes |
 | Hover: the type under the cursor | yes |
 | Format on save | yes, where the editor can be told to format on save |
-| Go to definition, completion, rename | **not yet** — roadmap 14.3, 14.4, 14.8 |
+| Go to definition | yes, for `::` paths — not for locals, see below |
+| Completion, find references, rename | **not yet** — roadmap 14.4, 14.8 |
 | Semantic highlighting | **not yet** — roadmap 14.5 |
+
+Go to definition answers a `::` path — a function, type, trait, effect, context
+or constant, and a constructor by way of the type that declares it. It does not
+answer a local binding: that resolves in a body rather than in the module, and
+it is the case where the answer is already three lines up the screen. 14.8 wants
+the same information for rename, so it is a gap to fill once rather than twice.
+
+A method lands on its **trait** rather than its `impl`, because `khora-hir` does
+not collect impl members.
 
 Highlighting today is a TextMate grammar (`editors/vscode/syntaxes`), which
 regex-matches text and cannot tell a local from an import. Every editor that

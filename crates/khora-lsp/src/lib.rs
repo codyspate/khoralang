@@ -22,15 +22,16 @@
 //!
 //! # What it answers
 //!
-//! Diagnostics, hover, and formatting. All three come from things that already
-//! existed: `khora_db::parse`, `khora_types::diagnostics`, `khora_lint::findings`,
-//! the checker's `BodyTypes`, and `khora_fmt`. Completion, rename and capability
-//! inlay hints are the roadmap's list and are not here — each needs an index
-//! this does not build yet, and a half-answering completion is worse than
-//! none.
+//! Diagnostics, hover, formatting, and go to definition. All of them come from
+//! things that already existed: `khora_db::parse`, `khora_types::diagnostics`,
+//! `khora_lint::findings`, the checker's `BodyTypes`, `khora_fmt`, and
+//! `khora_hir::resolve_path`. Completion, rename and capability inlay hints are
+//! the roadmap's list and are not here — a half-answering completion is worse
+//! than none.
 
 #![deny(missing_docs)]
 
+mod definition;
 mod position;
 mod transport;
 
@@ -115,6 +116,9 @@ impl Server {
             ("textDocument/formatting", Some(id)) => {
                 vec![ok(id, self.formatting(&params).map_or(Value::Null, to_value))]
             }
+            ("textDocument/definition", Some(id)) => {
+                vec![ok(id, self.definition(&params).unwrap_or(Value::Null))]
+            }
             ("exit", _) => {
                 self.finished = true;
                 Vec::new()
@@ -170,6 +174,7 @@ impl Server {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -323,6 +328,48 @@ impl Server {
             });
         }
         out
+    }
+
+    /// Where the path under the cursor is declared.
+    ///
+    /// **The range comes back in the *defining* file's own coordinates**, which
+    /// is why this builds a `LineIndex` for it rather than reusing the one for
+    /// the file the request came from. Jumping across files is the whole point,
+    /// and a byte offset read against the wrong text lands somewhere plausible
+    /// and wrong — the worst kind of wrong for a feature whose only job is to
+    /// take you somewhere.
+    ///
+    /// A file the editor has never opened has no cached index, so the text
+    /// comes from the database, which is the same text every other query is
+    /// answering about.
+    fn definition(&self, params: &Value) -> Option<Value> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let index = self.lines.get(&url)?;
+
+        let position: lsp_types::Position =
+            serde_json::from_value(params.get("position")?.clone()).ok()?;
+        let offset = index.offset(position, self.encoding);
+
+        let root = khora_db::source_root(&self.db)?;
+        let found = definition::at(&self.db, root, file, offset)?;
+
+        let target_path = found.file.path(&self.db).clone();
+        let target_url = Url::from_file_path(&target_path).ok()?;
+        let target_index = LineIndex::new(found.file.text(&self.db));
+
+        // Built as JSON rather than `lsp_types::Location`, because that
+        // carries the crate's own `Uri` and everything else here — starting
+        // with `publishDiagnostics` — already speaks `url::Url`. One
+        // conversion at the edge beats two URL types in the same file.
+        Some(json!({
+            "uri": target_url.as_str(),
+            "range": Range {
+                start: target_index.position(found.range.start(), self.encoding),
+                end: target_index.position(found.range.end(), self.encoding),
+            },
+        }))
     }
 
     /// The whole file, formatted, as one edit.

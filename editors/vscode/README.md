@@ -19,6 +19,7 @@ do when working on the compiler itself.
 | --- | --- |
 | Errors and warnings as you type | `khora_types::diagnostics` and `khora_lint::findings` |
 | Hover: the type of the thing under the cursor | the checker's `BodyTypes` |
+| Go to definition, on a `::` path | `khora_hir::resolve_path` |
 | Format on save | `khora_fmt`, the same formatter the baseline gates on |
 | Highlighting, comment toggling, bracket matching | the TextMate grammar here |
 

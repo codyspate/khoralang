@@ -500,3 +500,134 @@ fn formatting_uses_the_edited_buffer_rather_than_the_file() {
         .expect("an edit");
     assert!(new_text.contains('2'), "the buffer, not the file: {new_text}");
 }
+
+// --- go to definition -------------------------------------------------------
+
+fn definition(path: &Path, line: u32, character: u32, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "position": { "line": line, "character": character }
+        }
+    })
+}
+
+#[test]
+fn the_server_offers_to_go_to_definitions() {
+    let w = workspace(&[("src/main.kh", "module main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let caps = result_of(&replies, 1);
+    assert_eq!(caps.pointer("/capabilities/definitionProvider"), Some(&json!(true)), "{caps}");
+}
+
+/// **The case the feature exists for: another file.** A cursor on `helper::add`
+/// in `main.kh` lands on `fn add` in `helper.kh`, and the range is read against
+/// *that* file's text — a byte offset measured against the wrong source lands
+/// somewhere plausible and wrong.
+#[test]
+fn a_path_into_another_module_finds_it_there() {
+    let helper = "module helper;\n\npub fn add(a: Int, b: Int) -> Int { a + b }\n";
+    let main = "module main;\n\nimport helper::{add};\n\nfn go() -> Int { helper::add(1, 2) }\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let main_path = w.root.join("src/main.kh");
+
+    // Line 4, on the `add` of `helper::add`.
+    let column = main.lines().nth(4).expect("a fifth line").find("add").expect("the call") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, main),
+        definition(&main_path, 4, column + 1, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    let uri = found.get("uri").and_then(Value::as_str).unwrap_or_default();
+    assert!(uri.ends_with("helper.kh"), "it should cross the file boundary: {found}");
+
+    // `pub fn add` is on line 2 of `helper.kh`, and the range must be read
+    // against helper's text rather than main's.
+    assert_eq!(found.pointer("/range/start/line"), Some(&json!(2)), "{found}");
+}
+
+/// A type is a declaration like any other.
+#[test]
+fn a_type_path_finds_its_declaration() {
+    let shapes = "module shapes;\n\npub type Point = { x: Int, y: Int };\n";
+    let main = "module main;\n\nimport shapes::{Point};\n\nfn go(p: shapes::Point) -> Int { p.x }\n";
+    let w = workspace(&[("src/shapes.kh", shapes), ("src/main.kh", main)]);
+    let main_path = w.root.join("src/main.kh");
+
+    let column = main.lines().nth(4).expect("a fifth line").find("Point").expect("it") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, main),
+        definition(&main_path, 4, column + 1, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    assert!(
+        found.get("uri").and_then(Value::as_str).is_some_and(|u| u.ends_with("shapes.kh")),
+        "{found}"
+    );
+    assert_eq!(found.pointer("/range/start/line"), Some(&json!(2)), "{found}");
+}
+
+/// **A constructor lands on the type that declares it.** `khora_hir::Variant`
+/// records a name and a type and no range, so there is nothing narrower to jump
+/// to — and the type is where a reader wants to end up anyway.
+#[test]
+fn a_constructor_finds_the_type_that_declares_it() {
+    let level = "module level;\n\npub type Risk =\n  | Low\n  | High;\n";
+    let main = "module main;\n\nimport level::{Risk};\n\nfn go() -> Risk { level::Risk::Low }\n";
+    let w = workspace(&[("src/level.kh", level), ("src/main.kh", main)]);
+    let main_path = w.root.join("src/main.kh");
+
+    let column = main.lines().nth(4).expect("a fifth line").find("Low").expect("it") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, main),
+        definition(&main_path, 4, column + 1, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    assert!(
+        found.get("uri").and_then(Value::as_str).is_some_and(|u| u.ends_with("level.kh")),
+        "{found}"
+    );
+}
+
+/// Nothing under the cursor is a null result rather than a guess.
+#[test]
+fn asking_about_whitespace_finds_nothing() {
+    let main = "module main;\n\nfn go() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", main)]);
+    let main_path = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, main),
+        definition(&main_path, 1, 0, 2),
+        exit(),
+    ]);
+    assert_eq!(result_of(&replies, 2), Value::Null);
+}
+
+/// A name that does not resolve produces nothing, rather than the wrong thing.
+#[test]
+fn an_unresolved_name_finds_nothing() {
+    let main = "module main;\n\nfn go() -> Int { nowhere::missing(1) }\n";
+    let w = workspace(&[("src/main.kh", main)]);
+    let main_path = w.root.join("src/main.kh");
+
+    let column = main.lines().nth(2).expect("a third line").find("missing").expect("it") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main_path, main),
+        definition(&main_path, 2, column + 1, 2),
+        exit(),
+    ]);
+    assert_eq!(result_of(&replies, 2), Value::Null);
+}
