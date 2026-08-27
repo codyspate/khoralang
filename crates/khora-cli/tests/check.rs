@@ -286,3 +286,43 @@ edition = \"2026\"
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("registry"), "expected the missing registry to be named:\n{text}");
 }
+
+/// The manifest audit reaches a person.
+///
+/// It did not until 14.20b: `khora-manifest` produced a `Warning` per
+/// unrecognized key and every caller dropped the vector. A whole module
+/// arriving nowhere.
+#[test]
+fn a_manifest_warning_is_printed_and_is_not_fatal() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("manifest_warning");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("a package");
+    std::fs::write(
+        dir.join("khora.toml"),
+        "[package]{n}name = {q}warned{q}{n}version = {q}0.1.0{q}{n}{n}[fmt]{n}         explicit-semicolons = true{n}future-knob = 3{n}"
+            .replace("{n}", "
+")
+            .replace("{q}", "\""),
+    )
+    .expect("a manifest");
+    std::fs::write(
+        dir.join("src").join("lib.kh"),
+        "module warned::lib;{n}{n}pub fn go() -> Int {{{n}  1{n}}}{n}"
+            .replace("{n}", "
+"),
+    )
+    .expect("a module");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(&dir)
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "a warning is not a failure: {text}");
+    assert!(text.contains("removed key"), "{text}");
+    assert!(text.contains("never a choice"), "the reason, not just the fact: {text}");
+    assert!(text.contains("unrecognized key"), "the other kind still works: {text}");
+}

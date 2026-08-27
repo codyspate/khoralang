@@ -36,7 +36,6 @@ edition = "2026"
 [workspace.fmt]
 indent-style = "space"
 indent-width = 2
-explicit-semicolons = true
 
 # A cap on what any member may ask for. Roadmap 14.19.
 #

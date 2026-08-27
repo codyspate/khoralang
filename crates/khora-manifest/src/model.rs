@@ -704,19 +704,23 @@ pub struct Fmt {
     #[serde(rename = "indent-style")]
     pub indent_style: Option<IndentStyle>,
     /// Columns per indentation level.
+    ///
+    /// Ignored when `indent_style` is `Tab`: the width of a tab is the
+    /// reader's setting, which is the entire reason somebody picks tabs.
     #[serde(rename = "indent-width")]
     pub indent_width: Option<u8>,
-    /// Whether the formatter writes statement terminators explicitly.
-    #[serde(rename = "explicit-semicolons")]
-    pub explicit_semicolons: Option<bool>,
 }
+
+// There was an `explicit-semicolons` here. It was never a setting: semicolons
+// are required by the grammar, so `false` was not a value a project could
+// choose, and a knob whose only legal position is the one it is already in
+// misleads about what the formatter can be asked to do. Removed in 14.20b; the
+// key still warns, with a sentence, from `audit::SEMICOLONS`.
 
 impl Fmt {
     /// Whether nothing but `workspace = true` was written.
     pub(crate) fn is_only_the_flag(&self) -> bool {
-        self.indent_style.is_none()
-            && self.indent_width.is_none()
-            && self.explicit_semicolons.is_none()
+        self.indent_style.is_none() && self.indent_width.is_none()
     }
 }
 

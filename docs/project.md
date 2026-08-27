@@ -218,10 +218,14 @@ read = ["/etc/config", "./data/**"]
 write = ["./tmp/**"]
 
 # Unified Toolchain Config
+#
+# The whole table. Two knobs, because everything else the formatter does --
+# where lines break, how imports sort, what spacing punctuation gets -- is not
+# a setting: a canonical formatter with knobs is two formatters. `indent-width`
+# is ignored with tabs, since the width of a tab is the reader's setting.
 [fmt]
 indent-style = "space"
 indent-width = 2
-explicit-semicolons = true
 
 [lints]
 unused-capabilities = "deny"
@@ -264,7 +268,6 @@ edition = "2026"
 [workspace.fmt]
 indent-style = "space"
 indent-width = 2
-explicit-semicolons = true
 
 [workspace.lints]
 unused-capabilities = "deny"
@@ -502,8 +505,12 @@ The `khora` executable is a single static binary containing the compiler, packag
 
 * **Speed Target:** Sub-millisecond formatting powered by `rowan` lossless CST traversal (similar to Biome / `rustfmt`).
 * **Canonical Rules:**
-* 2-space indentation.
-* Explicit semicolons enforced.
+* 2-space indentation by default; `[fmt] indent-style` and `indent-width`
+  change it, and nothing else in the formatter is configurable.
+* Explicit semicolons, which are a rule of the grammar rather than a setting —
+  see §14. `[fmt] explicit-semicolons` was briefly written here as though it
+  were a choice; it was removed in 14.20b, and a manifest still carrying it
+  gets a warning saying why rather than "unrecognized key".
 * Multi-line pipeline (`|>`) indentation aligned to the source expression.
 * Alphabetized, deduplicated prefix imports (`import a.b.{A, B, C};`).
 

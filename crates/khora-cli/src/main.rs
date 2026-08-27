@@ -490,6 +490,8 @@ fn over_members(
 }
 
 fn check_one(paths: &[PathBuf]) -> Result<bool> {
+    report_manifest_warnings(paths.first().map(PathBuf::as_path));
+
     let files = collect_sources(paths)?;
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
@@ -580,6 +582,27 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
 /// A manifest that cannot be read contributes nothing rather than failing the
 /// command — complaining about the manifest is `khora check`'s job, not every
 /// other command's.
+/// Prints what the manifest audit noticed, if anything.
+///
+/// **Nothing printed these until now.** `khora-manifest` has read every
+/// manifest a second time as a tree of keys since it existed, compared it
+/// against a hand-written schema, and produced a `Warning` per key the schema
+/// does not describe -- and every caller dropped the vector on the floor. A
+/// whole module, its schema and its tests, arriving nowhere. Found while
+/// giving `explicit-semicolons` a good message to be removed with, which is
+/// its own small lesson about who reads a diagnostic. Roadmap 14.20b.
+///
+/// On stderr and never fatal: a manifest written against a newer toolchain has
+/// to stay buildable by an older one, which is the whole reason the audit
+/// warns rather than erroring.
+fn report_manifest_warnings(start: Option<&Path>) {
+    let Some(manifest_path) = start.and_then(nearest_manifest) else { return };
+    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else { return };
+    for warning in &parsed.warnings {
+        eprintln!("warning: {}: {warning}", manifest_path.display());
+    }
+}
+
 /// The `[fmt]` settings governing `start`, or the formatter's own defaults.
 ///
 /// A manifest that cannot be read contributes nothing rather than failing the

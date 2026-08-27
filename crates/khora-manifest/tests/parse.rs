@@ -63,7 +63,6 @@ fn the_reference_manifest_parses_with_no_warnings() {
     let fmt = manifest.fmt.expect("the reference manifest configures `[fmt]`");
     assert_eq!(fmt.indent_style, Some(IndentStyle::Space));
     assert_eq!(fmt.indent_width, Some(2));
-    assert_eq!(fmt.explicit_semicolons, Some(true));
 
     assert_eq!(
         manifest.lints.keys().collect::<Vec<_>>(),
@@ -113,7 +112,6 @@ fn every_key_the_schema_documents_is_recognized() {
         [fmt]
         indent-style = "tab"
         indent-width = 4
-        explicit-semicolons = false
 
         [lints]
         bare = "allow"
@@ -408,7 +406,37 @@ fn fmt_settings_are_individually_optional() {
     let fmt = parsed.manifest.fmt.expect("`[fmt]` was written, so it should be present");
     assert_eq!(fmt.indent_width, Some(8));
     assert_eq!(fmt.indent_style, None, "an unset knob keeps the formatter's own default");
-    assert_eq!(fmt.explicit_semicolons, None);
+}
+
+#[test]
+fn a_key_this_toolchain_removed_says_so_and_says_what_to_do() {
+    // Not "unrecognized key". That reads as "your toolchain is too old", which
+    // is the opposite of the truth, and it is what somebody would be told
+    // about a line `docs/project.md` §4.1 asked them to write. Roadmap 14.20b.
+    let parsed = parse(
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[fmt]\nexplicit-semicolons = true\n",
+    );
+
+    let warning = match parsed.warnings.as_slice() {
+        [only] => only,
+        other => panic!("expected exactly one warning, got {other:?}"),
+    };
+    assert_eq!(warning.kind(), WarningKind::RemovedKey);
+    assert_eq!(warning.key(), "fmt.explicit-semicolons");
+    assert!(warning.note().is_some_and(|note| note.contains("grammar")), "{warning}");
+    assert!(warning.to_string().contains("Delete the line"), "{warning}");
+}
+
+#[test]
+fn a_removed_key_is_not_fatal() {
+    // An older manifest still builds. The whole reason the audit warns rather
+    // than erroring is that a manifest outliving a toolchain version is normal.
+    let parsed = parse(
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n\
+         [fmt]\nindent-width = 4\nexplicit-semicolons = true\n",
+    );
+    let fmt = parsed.manifest.fmt.expect("the rest of the table still reads");
+    assert_eq!(fmt.indent_width, Some(4));
 }
 
 #[test]

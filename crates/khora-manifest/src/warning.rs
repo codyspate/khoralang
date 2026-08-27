@@ -13,12 +13,22 @@ use std::ops::Range;
 pub enum WarningKind {
     /// A key that no table in this toolchain's schema declares.
     UnknownKey,
+    /// A key this toolchain used to have and deliberately does not any more.
+    ///
+    /// Separate from [`WarningKind::UnknownKey`] because the two want opposite
+    /// reactions. An unknown key may be from a *newer* toolchain and the right
+    /// move is to leave it alone; a removed one is from an older one, is never
+    /// coming back, and should be deleted. Telling somebody "unrecognized key"
+    /// about a line the documentation told them to write last month is the
+    /// sort of thing that makes a warning stop being read.
+    RemovedKey,
 }
 
 impl fmt::Display for WarningKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WarningKind::UnknownKey => f.write_str("unrecognized key"),
+            WarningKind::RemovedKey => f.write_str("removed key"),
         }
     }
 }
@@ -28,6 +38,8 @@ impl fmt::Display for WarningKind {
 pub struct Warning {
     kind: WarningKind,
     key: String,
+    /// What to do instead, for a key that was removed rather than never known.
+    note: Option<&'static str>,
     span: Option<Range<usize>>,
     location: Option<Location>,
 }
@@ -37,6 +49,22 @@ impl Warning {
         Warning {
             kind: WarningKind::UnknownKey,
             key,
+            note: None,
+            location: span.as_ref().map(|span| Location::from_offset(text, span.start)),
+            span,
+        }
+    }
+
+    pub(crate) fn removed_key(
+        key: String,
+        note: &'static str,
+        span: Option<Range<usize>>,
+        text: &str,
+    ) -> Warning {
+        Warning {
+            kind: WarningKind::RemovedKey,
+            key,
+            note: Some(note),
             location: span.as_ref().map(|span| Location::from_offset(text, span.start)),
             span,
         }
@@ -56,6 +84,14 @@ impl Warning {
         &self.key
     }
 
+    /// What to do about it, when there is something specific to say.
+    ///
+    /// Only a removed key has one: for an unknown key this toolchain has, by
+    /// definition, nothing to add.
+    pub fn note(&self) -> Option<&'static str> {
+        self.note
+    }
+
     /// Where the key is, when the position survived parsing.
     pub fn location(&self) -> Option<Location> {
         self.location
@@ -70,8 +106,12 @@ impl Warning {
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.location {
-            Some(at) => write!(f, "{}: {} `{}`", at, self.kind, self.key),
-            None => write!(f, "{} `{}`", self.kind, self.key),
+            Some(at) => write!(f, "{}: {} `{}`", at, self.kind, self.key)?,
+            None => write!(f, "{} `{}`", self.kind, self.key)?,
+        }
+        match self.note {
+            Some(note) => write!(f, ": {note}"),
+            None => Ok(()),
         }
     }
 }

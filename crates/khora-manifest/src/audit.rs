@@ -27,6 +27,13 @@ enum Schema {
     /// Anything at all. Scalars, arrays, and tables whose keys are defined by
     /// something other than the manifest schema.
     Open,
+    /// A key this toolchain used to have. The string says what to do instead.
+    ///
+    /// Kept in the schema rather than dropped out of it, so that a manifest
+    /// written against an older toolchain gets a sentence about the key it
+    /// actually wrote instead of "unrecognized key" -- which reads as "this
+    /// toolchain is too old" and is the opposite of the truth.
+    Removed(&'static str),
 }
 
 static OPEN: Schema = Schema::Open;
@@ -92,8 +99,16 @@ static FMT: Schema = Schema::Fields(&[
     ("workspace", &OPEN),
     ("indent-style", &OPEN),
     ("indent-width", &OPEN),
-    ("explicit-semicolons", &OPEN),
+    ("explicit-semicolons", &SEMICOLONS),
 ]);
+
+// Not a setting and never was one. `docs/project.md` §14: every statement,
+// module declaration, type definition and multi-line pipe must end in a
+// semicolon, and the parser agrees -- so `false` was never a value a project
+// could choose. Roadmap 14.20b.
+static SEMICOLONS: Schema = Schema::Removed(
+    "semicolons are required by the grammar, so this was never a choice. Delete the line",
+);
 
 // Open on purpose: a lint's options are declared by the lint, not by the
 // manifest format, so `max = 15` must not read as a mistake.
@@ -149,7 +164,7 @@ fn walk(node: &Node, schema: &Schema, path: &mut String, text: &str, out: &mut V
         let below = match schema {
             // Whatever keys sit below belong to something other than the
             // manifest schema, so there is nothing here to check them against.
-            Schema::Open => return,
+            Schema::Open | Schema::Removed(_) => return,
             Schema::Map(values) => Some(*values),
             Schema::Fields(fields) => {
                 fields.iter().find(|(name, _)| *name == entry.key).map(|(_, values)| *values)
@@ -159,6 +174,9 @@ fn walk(node: &Node, schema: &Schema, path: &mut String, text: &str, out: &mut V
         let restore = path.len();
         push_key(path, &entry.key);
         match below {
+            Some(Schema::Removed(note)) => {
+                out.push(Warning::removed_key(path.clone(), note, entry.span.clone(), text))
+            }
             Some(values) => walk(&entry.value, values, path, text, out),
             // Reported at the unknown key itself and not descended into: a
             // warning per key underneath an unknown table would bury the one
