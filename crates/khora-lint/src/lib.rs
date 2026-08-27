@@ -66,9 +66,15 @@ pub const LINTS: &[&str] = &[
     UNKNOWN_ALLOW,
     UNREACHABLE_CODE,
     UNUSED_BINDING,
+    UNUSED_IMPORT,
     UNUSED_CAPABILITY,
     USELESS_ALLOW,
 ];
+
+/// An imported name the file never mentions.
+///
+/// The most-fired lint in every language that has one. Roadmap 14.22.
+pub const UNUSED_IMPORT: &str = "unused-import";
 
 /// A binding nothing reads.
 ///
@@ -154,6 +160,8 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
         }
     }
 
+    unused_imports(db, file, checked, &mut out);
+
     // **Here rather than in each consumer.** The CLI, the language server and
     // the MCP server all read this, and a suppression one of them honoured and
     // another did not would be the worst kind of inconsistency: the editor
@@ -223,6 +231,128 @@ fn line_of(starts: &[u32], offset: u32) -> usize {
     match starts.binary_search(&offset) {
         Ok(exact) => exact,
         Err(after) => after - 1,
+    }
+}
+
+/// Imported names the file never mentions.
+///
+/// # Two ways a name can be used, and the second is not lexical
+///
+/// **Written down.** The name appears as an identifier token somewhere outside
+/// the import statements. Not "resolves to the import" — that would mean
+/// enumerating every position a name can be resolved from: expressions,
+/// patterns, type annotations, trait bounds, `impl` heads. Missing one is a
+/// false report, and a false report here is expensive, because this is the
+/// lint people meet first and the fix it suggests is deleting a line.
+///
+/// **Or never written at all.** This one cost a corpus-wide revert to find:
+///
+/// ```khora
+/// import postgres::conn::{Answer, ask};
+/// // ...
+/// Result::Ok(answer) => Result::Ok(answer.rows),
+/// ```
+///
+/// `Answer` appears nowhere but the import, and deleting it breaks the file —
+/// `answer.rows` needs the type in scope to know it has fields. The type is
+/// *inferred*, so nothing writes its name.
+///
+/// So a type also counts as used when **some expression or binding in the file
+/// has that type**, which the checker knows and nothing was asking. Types are
+/// compared by their rendering, which over-matches — a type parameter named
+/// `Answer` would count — and over-matching means a miss, which is the safe
+/// direction.
+///
+/// The lexical half is wrong in the same direction: a local variable sharing a
+/// name with an unused import silences it. A miss annoys nobody; a false
+/// report gets the lint switched off.
+///
+/// # What it will not touch
+///
+/// **A glob import.** `import a.*` names nothing, so there is nothing to check
+/// and nothing to suggest deleting.
+///
+/// **The last used name from an import statement.** `khora_types::map`'s
+/// `import_inherent` runs once per imported *origin* and copies the defining
+/// module's inherent methods into this file's view — so an import statement
+/// can be load-bearing for `value.method()` without any of its names being
+/// mentioned. Reporting the last name of a statement could therefore suggest
+/// deleting a line that a method call depends on invisibly.
+///
+/// So a name is only reported when **another name in the same statement is
+/// still used**, which keeps the statement — and its methods — in place. The
+/// whole-statement case is left alone until `import_inherent` is keyed on the
+/// type rather than on the module, which its own doc comment says is the
+/// intent: methods should arrive "whether or not the file imported `Params`".
+fn unused_imports(
+    db: &dyn Db,
+    file: SourceFile,
+    checked: &khora_types::Checked,
+    out: &mut Vec<Finding>,
+) {
+    let items = khora_hir::item_map(db, file);
+    if items.imports.is_empty() {
+        return;
+    }
+
+    // Every identifier in the file, and where. Import statements are excluded
+    // by range, so an import naming itself does not count as using itself.
+    let text = file.text(db);
+    let lexed = khora_syntax::LexedStr::new(text);
+    let mut mentioned: Vec<&str> = Vec::new();
+    for index in 0..lexed.len() {
+        if lexed.kind(index) != khora_syntax::SyntaxKind::IDENT {
+            continue;
+        }
+        let at = lexed.range(index);
+        if items.imports.iter().any(|import| import.range.contains_range(at)) {
+            continue;
+        }
+        mentioned.push(lexed.text(index));
+    }
+
+    // Every name that shows up in the *type* of anything in this file. See
+    // the doc comment: a type reached only through a value is never written.
+    let mut in_types: Vec<String> = Vec::new();
+    for (name, body) in khora_hir::body::bodies(db, file) {
+        let Some((_, types)) = checked.bodies.iter().find(|(n, _)| n == name) else { continue };
+        let mut rendered = String::new();
+        for (id, _) in body.exprs() {
+            rendered.push_str(&types.of(id).to_string());
+            rendered.push(' ');
+        }
+        for (id, _) in body.locals() {
+            rendered.push_str(&types.local(id).to_string());
+            rendered.push(' ');
+        }
+        for word in rendered.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if !word.is_empty() {
+                in_types.push(word.to_string());
+            }
+        }
+    }
+
+    for import in &items.imports {
+        let khora_hir::ImportKind::Named(names) = &import.kind else { continue };
+        let used = |name: &khora_hir::ImportedName| {
+            mentioned.contains(&name.alias.as_str())
+                || in_types.iter().any(|seen| seen == &name.alias)
+        };
+        // See the doc comment: without a surviving name, deleting the reported
+        // one could take the statement's methods with it.
+        if !names.iter().any(used) {
+            continue;
+        }
+        for name in names {
+            if used(name) {
+                continue;
+            }
+            out.push(Finding {
+                lint: UNUSED_IMPORT,
+                message: format!("`{}` is imported and never used", name.alias),
+                range: name.range,
+            });
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 module main;
 
-import std::core::{SharedFn, print};
+import std::core::{SharedFn};
 import std::net::http::{HttpError, Response, Router};
 
 // The whole thing: accept, read, parse, route, render. Against `bench/floor`

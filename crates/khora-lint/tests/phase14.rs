@@ -130,3 +130,76 @@ fn assigning_to_a_binding_counts_as_using_it() {
     // it with this lint's message.
     assert!(of(&body("  let mut a = 1;\n  a = 2;\n  0"), UNUSED_BINDING).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// 14.22 unused-import
+
+/// Two files, because an import needs something to import from.
+fn two(defining: &str, using: &str) -> Vec<Finding> {
+    let db = KhoraDatabase::new();
+    let a = SourceFile::new(&db, "lib.kh".into(), defining.to_string());
+    let b = SourceFile::new(&db, "use.kh".into(), using.to_string());
+    SourceRoot::new(&db, vec![a, b]);
+    khora_lint::findings(&db, b)
+        .iter()
+        .filter(|f| f.lint == khora_lint::UNUSED_IMPORT)
+        .cloned()
+        .collect()
+}
+
+const LIB: &str = "module lib;\n\n\
+                   pub type Answer = { rows: Int }\n\n\
+                   pub fn used() -> Int { 1 }\n\n\
+                   pub fn spare() -> Int { 2 }\n\n\
+                   pub fn make() -> Answer { Answer { rows: 3 } }\n";
+
+#[test]
+fn a_name_nothing_mentions_is_reported() {
+    let found = two(
+        LIB,
+        "module u;\n\nimport lib::{used, spare};\n\npub fn main() -> Int { used() }\n",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("spare"), "{:?}", found[0]);
+}
+
+/// **The case that cost a corpus-wide revert.**
+///
+/// `Answer` appears nowhere but the import, and deleting it breaks the file:
+/// `a.rows` needs the type in scope to know it has fields, and the type is
+/// inferred, so nothing writes its name down. A lexical check reported it, the
+/// removal looked safe, and three members stopped compiling.
+#[test]
+fn a_type_reached_only_through_a_value_is_used() {
+    let found = two(
+        LIB,
+        "module u;\n\nimport lib::{Answer, make, used};\n\n\
+         pub fn main() -> Int {\n  let a = make();\n  a.rows + used()\n}\n",
+    );
+    assert!(found.is_empty(), "`Answer` is what makes `a.rows` work: {found:?}");
+}
+
+#[test]
+fn an_alias_is_judged_by_the_local_name() {
+    let found = two(
+        LIB,
+        "module u;\n\nimport lib::{used as handy, spare};\n\n\
+         pub fn main() -> Int { handy() }\n",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("spare"), "{:?}", found[0]);
+}
+
+/// A statement whose names are *all* unused is left alone.
+///
+/// Deleting it would take the defining module's inherent methods with it:
+/// `import_inherent` runs once per imported *origin*, not per name, so the
+/// statement is load-bearing for `value.method()` even when nothing it names
+/// is mentioned. Reporting the last surviving name would suggest a deletion
+/// that breaks the file.
+#[test]
+fn a_wholly_unused_statement_is_not_reported_yet() {
+    let found =
+        two(LIB, "module u;\n\nimport lib::{spare};\n\npub fn main() -> Int { 1 }\n");
+    assert!(found.is_empty(), "{found:?}");
+}

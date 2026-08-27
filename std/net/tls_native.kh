@@ -1,6 +1,6 @@
 module std::net::tls;
 
-import std::core::{Array, Ptr, Result, Scope, Share, acquire};
+import std::core::{Array, Ptr, Scope, Share, acquire};
 
 //! TLS, over the sockets in `std::net::socket`.
 //!

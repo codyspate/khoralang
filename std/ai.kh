@@ -24,7 +24,7 @@ module std::ai;
 //! reports exist -- the handler answers `complete: Prompt -> String`, and
 //! `Extract` turns that string into the type the call site asked for.
 
-import std::core::{List, Option, Show};
+import std::core::{List, Option};
 
 /// Where a tensor's memory lives.
 ///

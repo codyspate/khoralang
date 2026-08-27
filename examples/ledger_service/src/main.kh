@@ -1,12 +1,12 @@
 module main;
 
-import std::core::{Channel, Fibers, List, Map, Option, Result, SharedFn, Show, print};
+import std::core::{Fibers, List, Map, Option, Result, SharedFn, Show, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import std::env::{Clock, Env, variable_or};
 import std::json::{Json, JsonError, parse};
 import std::net::http::{HttpError, Params, Request, Response, Router};
-import std::trace::{Attribute, Status, Tracer, around_result, number, text};
-import postgres::db::{Request as PgRequest, Settings};
+import std::trace::{Tracer, around_result, text};
+import postgres::db::{Settings};
 import postgres::pool::{Pool, open as open_pool, with_db};
 
 // A ledger, and the third program here meant to be *run* rather than to

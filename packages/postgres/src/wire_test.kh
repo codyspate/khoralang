@@ -10,7 +10,7 @@ module postgres::wire_test;
 // found in a day: `Vector` has no `to_array`, and a test cannot say what it
 // expected. `docs/roadmap.md` Phase 13.
 
-import std::core::{Array, Option, Show, assert, print};
+import std::core::{Array, Option, assert};
 import std::core::{List};
 import postgres::wire::{Message, Reader, Writer, bind, describe_portal, execute, extended, framed, message_at, message_width, parse, password, query, startup, sync, terminate};
 

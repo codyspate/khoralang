@@ -1,6 +1,6 @@
 module postgres::conn;
 
-import std::core::{Array, List, Option, Result, Vector, print};
+import std::core::{Array, List, Option, Result, Vector};
 import std::db::{Cell, DbError, Row};
 import std::decimal::{Decimal};
 import std::net::socket::{connect_to, invalid_handle, receive, shut, start, transmit_bytes};
