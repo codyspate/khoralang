@@ -182,7 +182,7 @@ A function's `raises` row is documentation the compiler checks. It answers a que
 
 Keep failure types meaningful at abstraction boundaries. Low-level packages can expose precise operational failures internally, application services can translate those into domain failures, and the outermost boundary can consume them into responses, exit codes, or other protocol values.
 
-For the other half of an effectful function signature, see [Effects and capabilities](./effects-and-capabilities.md). `with` says what authority a computation needs; `raises` says how its normal result may fail.
+For the other half of an effectful function signature, see [Effects and capabilities](./effects-and-capabilities/). `with` says what authority a computation needs; `raises` says how its normal result may fail.
 
 ## Traps are different
 
