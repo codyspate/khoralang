@@ -151,4 +151,4 @@ Khora packages distribute source and are compiled as part of the consuming progr
 
 When a stable C-compatible boundary is required, use `extern fn` and the library build flow described in [FFI](/docs/reference/ffi/).
 
-Continue with [Testing](./testing.md) for package tests and benchmarks or the [Language Reference](/docs/reference/) for exact declaration syntax.
+Continue with [Testing](./testing/) for package tests and benchmarks or the [Language Reference](/docs/reference/) for exact declaration syntax.
