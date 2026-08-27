@@ -293,7 +293,7 @@ Path { field, field: Pattern, ... }
 (Pattern, ...)
 ```
 
-See [Patterns](./patterns.md) for binding and exhaustiveness rules.
+See [Patterns](./patterns/) for binding and exhaustiveness rules.
 
 ## Numeric literals
 
