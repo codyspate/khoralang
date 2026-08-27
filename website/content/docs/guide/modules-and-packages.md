@@ -1,10 +1,10 @@
 ---
 title: Modules and packages
 sidebar:
-  order: 12
+  order: 13
 ---
 
-Khora packages group source code, dependencies, and compiler configuration behind a `khora.toml` manifest. Modules give names and visibility to the source inside a package.
+Khora packages group source code, dependencies, and compiler configuration behind a `khora.toml` manifest. Modules give stable paths and visibility to the declarations inside a package.
 
 ## Package manifest
 
@@ -17,26 +17,110 @@ version = "0.1.0"
 edition = "2026"
 ```
 
-Source lives under `src/`. An executable package normally has a module containing `main`.
+Source lives under `src/`. See [Your first Khora project](/docs/getting-started/first-project/) for a complete minimal package.
 
-See [Your first Khora project](/docs/getting-started/first-project/) for a complete minimal package.
+## Declare a module
 
-## Modules, paths, and fields
-
-Khora separates compile-time paths from runtime field access:
-
-- use `::` for modules, types, constructors, and associated items;
-- use `.` for projecting a field from a runtime value.
-
-That keeps a name such as `http::Response` visibly different from a field access such as `response.status`.
-
-Imports bring names into the current module explicitly. For example:
+A source file begins with its module path:
 
 ```khora
-import std::core::{print};
+module app::orders;
 ```
 
-Trait visibility can affect method and operator resolution, so an imported trait is part of the local meaning of an expression rather than something discovered from a process-wide registry.
+`::` separates compile-time path segments. The module declaration belongs at the start of the file.
+
+## Import selected names
+
+Import names explicitly from another module:
+
+```khora
+import std::core::{List, Option, print};
+```
+
+A trailing comma is allowed:
+
+```khora
+import std::core::{
+  List,
+  Option,
+  print,
+};
+```
+
+## Rename an import with `as`
+
+```khora
+import app::storage::{User as StoredUser};
+```
+
+The alias is the name used in the importing module.
+
+## Glob imports
+
+Import every public name from a module with `::*`:
+
+```khora
+import app::prelude::*;
+```
+
+Prefer selected imports in most application code because they make dependencies visible. A glob is most useful for deliberately curated prelude-style modules.
+
+## Paths versus fields
+
+Khora deliberately uses different syntax for compile-time names and runtime values:
+
+```khora
+let response = http::Response::ok();
+print(response.status);
+```
+
+- `::` walks modules, types, constructors, and associated items.
+- `.` projects a field or calls behavior on a runtime value.
+
+That keeps `Response::ok` visibly different from `response.status`.
+
+## Public declarations with `pub`
+
+Top-level declarations are module-private unless marked `pub`:
+
+```khora
+const INTERNAL_LIMIT: Int = 10;
+
+pub const DEFAULT_LIMIT: Int = 50;
+
+fn normalize(input: String) -> String {
+  input |> String::trim
+}
+
+pub fn parse(input: String) -> String {
+  normalize(input)
+}
+```
+
+The same modifier applies to types, traits, effects, contexts, functions, constants, and public inherent methods:
+
+```khora
+pub type User = {
+  id: Int,
+  name: String,
+};
+
+pub trait Named {
+  fn name(self) -> String;
+}
+```
+
+Current Khora spells public visibility `pub`. Older source using `export` should be updated to `pub`.
+
+## Module-level values are `const`
+
+`let` is a local binding. At module scope, declare a named constant with `const`:
+
+```khora
+const SERVICE_NAME = "orders";
+```
+
+Khora does not have a mutable global binding. Shared evolving state is explicit through `Shared` or a capability.
 
 ## Dependencies and lockfiles
 
@@ -55,16 +139,16 @@ version = "0.2.0"
 
 The pin takes precedence over the machine default. See [Installation](/docs/getting-started/installation/#pin-a-project-to-a-compiler-version) for toolchain management.
 
-## Public API design
+## Package boundaries and API design
 
-Export the domain types and operations callers need; keep implementation helpers private. Capabilities are especially useful at package boundaries because a signature can state the external authority a package needs without exposing how a particular application provides it.
+Expose the domain types and operations callers need and keep helpers private. Capabilities are useful at package boundaries because a signature can state the external authority a package needs without exposing how an application provides it.
 
-Adding a required capability or a new recoverable failure to a public function changes what callers must provide or handle, so treat those changes as part of the package's public compatibility surface.
+Adding a required capability or a recoverable failure to a public function changes what callers must provide or handle, so treat those changes as part of the package's public compatibility surface.
 
-## Source compatibility and native ABI
+## Native binary boundaries
 
 Khora packages distribute source and are compiled as part of the consuming program. Whole-program monomorphization and native optimization mean Khora does not define a stable Khora-to-Khora binary ABI for separately compiled package binaries.
 
-When a stable binary boundary is required, use the C-compatible `extern` FFI boundary documented in [FFI](/docs/reference/ffi/).
+When a stable C-compatible boundary is required, use `extern fn` and the library build flow described in [FFI](/docs/reference/ffi/).
 
-Continue with [Testing](/docs/guide/testing/) for package tests or the [Language Reference](/docs/reference/) for exact module and type-system rules.
+Continue with [Testing](./testing.md) for package tests and benchmarks or the [Language Reference](/docs/reference/) for exact declaration syntax.
