@@ -1,33 +1,160 @@
 ---
 title: Data types
 sidebar:
-  order: 2
+  order: 3
 ---
 
-Khora's core data model is built from primitive values, tuples, records, and algebraic data types.
+Khora's data model is built from primitive values, tuples, records, algebraic data types, and generic types. Types are declared with `type`; add `pub` when the type belongs to the module's public API.
 
-## Primitive values
+## Primitive values and literals
 
-The standard numeric types include `Int` and IEEE `Float`. Exact base-10 arithmetic is provided by `Decimal` for values such as money where binary floating-point is the wrong representation.
+Common scalar values include integers, floating-point numbers, exact decimals, booleans, strings, and unit:
 
-Strings are Unicode text values. `Bool` represents `true` and `false`; `()` is the unit value used when a computation has no meaningful result value.
+```khora
+let count: Int = 42;
+let ratio: Float = 0.75;
+let price: Decimal = 19.99d;
+let enabled: Bool = true;
+let name: String = "Khora";
+let nothing: () = ();
+```
 
-## Tuples and records
+A fractional literal without a suffix is a `Float`. The `d` suffix makes an exact `Decimal` literal:
 
-Tuples group values positionally. Records group named fields. Prefer records when names carry domain meaning or when a value will cross an API boundary.
+```khora
+let approximate = 0.1;
+let exact = 0.1d;
+```
+
+See [Collections and strings](./collections-and-strings.md) for interpolation and multiline string syntax.
+
+## Type aliases
+
+Give an existing type a domain name with a type declaration:
+
+```khora
+pub type UserId = Int;
+```
+
+Aliases are useful when the name improves the API, but they do not create a new runtime representation by themselves.
+
+## Tuples and unit
+
+Tuples group values positionally:
+
+```khora
+let point = (10, 20);
+let tagged = ("ready", true, 3);
+```
+
+Tuple types use the same shape:
+
+```khora
+fn dimensions() -> (Int, Int) {
+  (1920, 1080)
+}
+```
+
+`()` is both the unit value and the unit type. It is the result of a computation with no meaningful value to return.
+
+## Record types and record values
+
+Records give fields names:
+
+```khora
+pub type User = {
+  id: Int,
+  name: String,
+  active: Bool,
+};
+```
+
+Construct a record with a record literal:
+
+```khora
+let user = {
+  id: 42,
+  name: "Ada",
+  active: true,
+};
+```
+
+Read fields with `.`:
+
+```khora
+print(user.name);
+```
+
+Use records when field names carry meaning or when a value will cross an API boundary.
 
 ## Algebraic data types
 
-ADTs let a type enumerate the valid shapes a value can have. They are the normal way to model domain alternatives without nullable sentinel values or unchecked string tags.
+A variant type enumerates the shapes a value may have:
 
-An option-like value, for example, has two meaningful cases: a value exists or it does not. A result-like value has success and failure cases. Pattern matching makes callers account for the cases explicitly.
+```khora
+pub type LoadState =
+  | Idle
+  | Loading
+  | Loaded(value: String)
+  | Failed(message: String);
+```
 
-## Derivation
+Constructors are namespaced with `::`:
 
-Khora can derive common traits such as equality, ordering, display, hashing, and JSON encoding/decoding where the data supports them. Derivation is preferable to handwritten boilerplate because the compiler can keep behavior aligned with the type definition.
+```khora
+let state = LoadState::Loaded("done");
+```
+
+Variants may have no payload, named payloads, or positional payloads. Pattern matching opens the value safely:
+
+```khora
+let message = match state {
+  LoadState::Idle => "idle",
+  LoadState::Loading => "loading",
+  LoadState::Loaded(value) => value,
+  LoadState::Failed(reason) => "failed: ${reason}",
+};
+```
+
+See [Pattern matching](./pattern-matching.md) for destructuring and guards.
+
+## Generic types
+
+Types can take parameters:
+
+```khora
+pub type Box<A> = {
+  value: A,
+};
+
+pub type Outcome<A, E> =
+  | Ok(value: A)
+  | Err(error: E);
+```
+
+Use generics when the structure is independent of the concrete element type. Trait bounds, const parameters, row variables, and higher-kinded forms are covered in [Generics and traits](./generics-and-traits.md).
+
+## Deriving structural behavior
+
+For structural traits whose implementation follows directly from the fields, place `derive(...)` immediately before the type declaration:
+
+```khora
+derive(Eq, Show, ToJson, FromJson)
+pub type User = {
+  id: Int,
+  name: String,
+};
+```
+
+Khora can derive `Eq`, `Ord`, `Show`, `Hash`, `ToJson`, and `FromJson` when the fields support the requested trait. Use a handwritten `impl` when the behavior is a domain decision rather than a structural consequence of the data.
 
 ## Exact decimals
 
-`Decimal` is intentionally distinct from `Float`. Decimal values preserve base-10 meaning and scale, so values such as `1.50` can remain `1.50` when displayed while still comparing numerically with equivalent scales.
+`Decimal` is intentionally distinct from `Float`. Use `Float` for approximate numerical computation and `Decimal` when base-10 representation is part of correctness, such as money or externally specified decimal values:
 
-Use `Float` for approximate numerical computation and `Decimal` when exact decimal representation is part of correctness.
+```khora
+let tax_rate: Decimal = 0.0825d;
+let subtotal: Decimal = 19.99d;
+```
+
+The distinction is visible in source so callers can tell whether an API is doing approximate binary floating-point or exact decimal arithmetic.
