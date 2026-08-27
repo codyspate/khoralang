@@ -298,6 +298,13 @@ inside nothing a member depends on — the compiler, the root manifest, a script
 "nothing was affected" about a file it did not recognise is worse than no tool.
 Untracked files count.
 
+`khora build` reuses an artifact it has already produced from the same inputs,
+where "inputs" includes the compiler and linker binaries and not just the
+source. Because release builds are bit-for-bit reproducible, a release hit is
+provably the artifact a fresh build would have made, and the baseline checks
+that by building both and comparing. `khora cache` shows what is held;
+`khora cache --clear` empties it. `docs/design/cache.md`.
+
 There is one `khora.lock`, at the root, and every member seeds the resolution
 that writes it. So two members cannot quietly hold two revisions of a shared
 dependency: the second one to ask is refused, naming both. The cost is that

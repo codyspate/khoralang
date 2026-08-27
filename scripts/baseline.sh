@@ -104,9 +104,33 @@ step 'every reference application builds'
 # `packages/postgres`, so building it is what catches a package change that
 # breaks its only real consumer. It is not *run* here -- that needs a database,
 # which `crates/khora-codegen-llvm/tests/postgres.rs` gates on KHORA_POSTGRES.
+#
+# `--no-cache`, because this step's claim is that the compiler builds them and
+# not that it built them once. 14.17's key includes the compiler binary, so a
+# hit is only possible when the compiler and the sources are both unchanged and
+# a cached build would not actually be hiding anything -- but a gate that can
+# be satisfied by a lookup is a gate with a moving part, and this one is the
+# receipt everything else is measured against.
 for app in examples/core_demo examples/risk_analyzer examples/link_shortener examples/ledger_service; do
-    "$khora" build "$app"
+    "$khora" build "$app" --no-cache
 done
+
+step 'the build cache answers, and answers with the right bytes'
+# The claim 14.17 rests on, checked against the real corpus rather than a
+# fixture: a release build reused from the cache is byte-identical to one made
+# with `--no-cache`. That only holds because 13.10 made release reproducible,
+# so this is also a standing check that it still is.
+cached=$(mktemp -d)
+"$khora" build examples/core_demo --release --no-cache -o "$cached/fresh" > /dev/null
+"$khora" build examples/core_demo --release -o "$cached/reused" > /dev/null
+if cmp -s "$cached/fresh" "$cached/reused"; then
+    printf '  ok    a release hit is the artifact the build would have produced\n'
+else
+    printf '  FAILED  a cached release build differs from a fresh one\n' >&2
+    rm -rf "$cached"
+    exit 1
+fi
+rm -rf "$cached"
 
 step 'the reference applications that end on their own, run'
 "$(built ./examples/core_demo/src/main)" > /dev/null

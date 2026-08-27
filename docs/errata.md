@@ -1403,3 +1403,63 @@ file named outright is read even when its target suffix says another host. That
 test asserts an exact count rather than "it worked", which is the only reason
 the extra twelve files were visible at all. A test that had asserted success
 would have passed.
+
+## 51. The cache was right and the repository was wrong
+
+14.17's build cache keys on the source *and the toolchain that turns it into
+bytes*: the compiler binary, the linker binary, the runtime archive. Its tests
+build a program twice and expect the second to be reused.
+
+Under a full `cargo nextest run` they failed about one run in three. Alone, and
+even alone at sixteen threads, they never failed at all.
+
+**Three rounds of diagnosis were guesses**, and each was plausible enough to
+act on. Windows holding a freshly linked executable open. A directory rename
+losing to a virus scanner. Hashing the source of a copy rather than the copy.
+Two of those produced real fixes worth keeping — the rename now retries and
+reports instead of silently treating every failure as a lost race, and the
+stored artifact is hashed rather than the one it was copied from — and neither
+was the bug.
+
+**What ended it was making the cache able to explain itself.** `Miss` gained a
+`Display`, `KHORA_CACHE_EXPLAIN=1` made `khora build` print the key and every
+ingredient of it, and the tests started carrying every build's output into the
+assertion message. The next failure said:
+
+```
+khora: key from compiler af126c475886 linker 8bbe086dfb0f runtime 1ecc48dd160a ...
+khora: key from compiler af126c475886 linker 8bbe086dfb0f runtime 52c957453b73 ...
+```
+
+Same compiler, same linker, same sources, **different runtime archive**, in two
+builds seconds apart inside one test.
+
+`crates/khora-codegen-llvm/tests/harness/mod.rs` runs `cargo build -p khora-rt`
+from inside a test, and its own comment explains why: an edit to the runtime
+otherwise leaves a stale archive and every compiled program links the previous
+version. It even says it must be called from *every* test binary, because
+"cargo runs test binaries in parallel, so a single binary building the archive
+is a race the others lose".
+
+That build resolves a different feature set from the one
+`cargo nextest --features llvm` resolved, so cargo relinks the staticlib, and
+`target/debug/khora_rt.lib` flips between two files **while other tests are
+running**.
+
+So the cache missed because an input had changed. It was correct every single
+time.
+
+**The fix is in the test, and the finding is not.** The cache tests now point
+`KHORA_RT_LIB` at one copy nothing else rebuilds. But the underlying fact
+stands: during a parallel test run, two `khora build` invocations seconds apart
+link against different runtimes. That was true before the cache existed and
+nothing had ever noticed, because nothing else in this repository compares two
+builds for identity. Filed as 14.22.
+
+**What generalises.** A cache is an oracle for "did anything change", and
+pointing one at your own build is a stronger check than any test that only asks
+whether the build succeeded. The first three fixes were attempts to make a
+disagreement go away; the thing that worked was making the disagreement
+describe itself. `Miss` and `KHORA_CACHE_EXPLAIN` are shipped, not scaffolding
+— a cache that cannot say why it missed is a cache nobody can maintain, and the
+next person to hit this deserves the sentence rather than the three guesses.

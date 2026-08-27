@@ -18,6 +18,8 @@ use khora_diagnostics::{
 use khora_manifest::LintLevel;
 
 mod affected;
+#[cfg(feature = "llvm")]
+mod cache;
 mod run;
 mod workspace_cmds;
 
@@ -130,6 +132,13 @@ enum Command {
         /// flag of their own. `docs/design/profiles.md`.
         #[arg(long)]
         release: bool,
+        /// Compile even if the cache already has this exact build.
+        ///
+        /// The output still goes into the cache. For measuring how long a
+        /// build takes, and for doubting the cache -- `docs/design/cache.md`
+        /// says why doubting it should be answerable by rebuilding.
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Write a software bill of materials for a package's dependencies.
     ///
@@ -242,6 +251,15 @@ enum Command {
         #[arg(long)]
         dot: bool,
     },
+    /// Show what the build cache holds, or empty it.
+    ///
+    /// One entry per (sources, compiler, linker, runtime, target, profile).
+    /// `docs/design/cache.md`.
+    Cache {
+        /// Delete every entry.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Get the newest Khora and make it the default.
     ///
     /// `khora toolchain install` plus `khora toolchain default`, which is what
@@ -326,9 +344,10 @@ fn run() -> Result<bool> {
         Command::Fmt { paths, check, since } => fmt(&paths, check, since.as_deref()),
         Command::Lex { path } => lex(&path).map(|()| true),
         Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
-        Command::Build { path, out, lib, release } => {
-            build(&path, out.as_deref(), lib, release)
+        Command::Build { path, out, lib, release, no_cache } => {
+            build(&path, out.as_deref(), lib, release, no_cache)
         }
+        Command::Cache { clear } => cache_command(clear).map(|()| true),
         Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
         Command::Doc { paths, out, check } => doc(&paths, &out, check),
         Command::Install { url, rev, subdir, path } => {
@@ -1161,7 +1180,13 @@ fn bench(_path: &Path, _filter: Option<&str>) -> Result<bool> {
 /// Semantic errors are reported through the same renderer `check` uses, so a
 /// diagnostic reads identically whichever command surfaced it.
 #[cfg(feature = "llvm")]
-fn build(path: &Path, out: Option<&Path>, lib: bool, release: bool) -> Result<bool> {
+fn build(
+    path: &Path,
+    out: Option<&Path>,
+    lib: bool,
+    release: bool,
+    no_cache: bool,
+) -> Result<bool> {
     let (db, inputs, root) = load(path)?;
 
     // `--release` wins over the variable, and the variable is how everything
@@ -1185,6 +1210,74 @@ fn build(path: &Path, out: Option<&Path>, lib: bool, release: bool) -> Result<bo
         entry.0.with_file_name(stem).with_extension(library_extension(lib))
     });
 
+    // **Everything the output depends on**, which is the source plus the
+    // toolchain that turns it into bytes. `cache::Cache` is where the argument
+    // for each field is; the short version is that a cache whose key is only
+    // the source is a cache that hands you last week's compiler's answer.
+    let sources: Vec<(PathBuf, String)> =
+        inputs.iter().map(|(path, text, _)| (path.clone(), text.clone())).collect();
+    let wanted = cache::Inputs {
+        sources: &sources,
+        profile: profile.name(),
+        debug_info: profile.debug_info(),
+        kind: if lib { cache::Kind::Library } else { cache::Kind::Executable },
+    };
+    // A cache that cannot be opened is a cache that is not used. Never fatal:
+    // see the module comment.
+    let store = cache::Cache::open().ok();
+    let key = store.as_ref().and_then(|store| store.key(&wanted));
+    // **A build that is not cached says so.** The key needs the compiler, the
+    // linker and the runtime archive to be identifiable, and if one of them is
+    // not this build silently becomes uncacheable -- and so does the next one,
+    // and nobody ever finds out why the cache is not working. The no-linker
+    // case is about to fail loudly anyway, so the extra line costs nothing
+    // where it is not wanted.
+    if store.is_some() && key.is_none() {
+        eprintln!(
+            "khora: the toolchain could not be identified, so this build is not cached"
+        );
+    }
+
+    if let (true, Some(store), Some(key)) = (cache::Cache::explaining(), &store, &key) {
+        let _ = store;
+        eprintln!("khora: cache key {key}");
+    }
+    if !no_cache {
+        if let (Some(store), Some(key)) = (&store, &key) {
+            match store.lookup(key) {
+                Ok(hit) => match cache::Cache::place(&hit, &target) {
+                    Ok(()) => {
+                        println!(
+                            "reused {} from the cache [{}, {}]",
+                            target.display(),
+                            &hit.key[..12],
+                            profile.name()
+                        );
+                        if lib {
+                            println!("header {}", target.with_extension("h").display());
+                        }
+                        return Ok(true);
+                    }
+                    // The entry was there and could not be put where it was
+                    // wanted. Falling through to a real build is the answer a
+                    // person would give.
+                    Err(why) => eprintln!("khora: the cache had this build but {why:#}"),
+                },
+                Err(miss) => {
+                    if cache::Cache::explaining() {
+                        eprintln!("khora: cache miss, {miss}");
+                        let held = store.keys();
+                        eprintln!(
+                            "khora: the cache holds {} entr(y/ies): {}",
+                            held.len(),
+                            held.join(", ")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     let outcome = if lib {
         khora_codegen_llvm::compile_library_with(&db, root, &target, profile)
     } else {
@@ -1202,6 +1295,12 @@ fn build(path: &Path, out: Option<&Path>, lib: bool, release: bool) -> Result<bo
             if lib {
                 println!("header {}", target.with_extension("h").display());
             }
+            if let (Some(store), Some(key)) = (&store, &key) {
+                let header = lib.then(|| target.with_extension("h"));
+                if let Err(why) = store.store(key, &target, header.as_deref()) {
+                    eprintln!("khora: the build worked and did not go into the cache: {why:#}");
+                }
+            }
             Ok(true)
         }
         Err(errors) => {
@@ -1215,6 +1314,9 @@ fn build(path: &Path, out: Option<&Path>, lib: bool, release: bool) -> Result<bo
 ///
 /// Not `std::env::consts::DLL_EXTENSION` alone: a Unix shared object also wants
 /// the `lib` prefix, which is what `-lname` looks for.
+///
+/// Only `build` asks, and `build` needs the backend.
+#[cfg(feature = "llvm")]
 fn library_extension(lib: bool) -> &'static str {
     if lib { std::env::consts::DLL_EXTENSION } else { std::env::consts::EXE_EXTENSION }
 }
@@ -1278,11 +1380,68 @@ fn report_build_errors(
 }
 
 #[cfg(not(feature = "llvm"))]
-fn build(_path: &Path, _out: Option<&Path>, _lib: bool, _release: bool) -> Result<bool> {
+fn build(
+    _path: &Path,
+    _out: Option<&Path>,
+    _lib: bool,
+    _release: bool,
+    _no_cache: bool,
+) -> Result<bool> {
     anyhow::bail!(
         "this `khora` was built without the LLVM backend. \
          Rebuild with `--features llvm`; see docs/llvm-setup.md."
     )
+}
+
+/// `khora cache`, in a build that has never produced an artifact to cache.
+#[cfg(not(feature = "llvm"))]
+fn cache_command(_clear: bool) -> Result<()> {
+    anyhow::bail!(
+        "this `khora` was built without the LLVM backend, so it has never built anything \
+         to cache. Rebuild with `--features llvm`; see docs/llvm-setup.md."
+    )
+}
+
+/// `khora cache`: what is in it, or nothing in it.
+///
+/// **No eviction policy, deliberately.** A cache that decides for itself what
+/// to throw away needs a rule -- least recently used, a size budget -- and a
+/// wrong rule is a cache that evicts the entry somebody was about to hit.
+/// `--clear` is the whole of the management story until somebody's disk says
+/// otherwise, and the numbers this prints are how they will know.
+#[cfg(feature = "llvm")]
+fn cache_command(clear: bool) -> Result<()> {
+    let store = cache::Cache::open()?;
+    if clear {
+        let (entries, bytes) = store.size();
+        store.clear()?;
+        println!("cleared {entries} entr(y/ies), {} back", human(bytes));
+        return Ok(());
+    }
+    let (entries, bytes) = store.size();
+    println!("{}", store.root().display());
+    println!("{entries} entr(y/ies), {}", human(bytes));
+    if entries > 0 {
+        println!("\n`khora cache --clear` empties it.");
+    }
+    Ok(())
+}
+
+/// A byte count somebody can read at a glance.
+#[cfg(feature = "llvm")]
+fn human(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 fn lex(path: &Path) -> Result<()> {

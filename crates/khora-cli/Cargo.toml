@@ -27,6 +27,7 @@ khora-codegen-llvm.workspace = true
 khora-hir.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+sha2 = "0.10"
 
 [features]
 # `khora build` needs the LLVM backend; everything else works without it.
