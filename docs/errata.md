@@ -1454,7 +1454,7 @@ time.
 stands: during a parallel test run, two `khora build` invocations seconds apart
 link against different runtimes. That was true before the cache existed and
 nothing had ever noticed, because nothing else in this repository compares two
-builds for identity. Filed as 14.22.
+builds for identity. Filed as 14.33.
 
 **What generalises.** A cache is an oracle for "did anything change", and
 pointing one at your own build is a stronger check than any test that only asks
