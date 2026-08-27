@@ -579,3 +579,72 @@ fn a_closure_requires_only_what_it_could_not_reach() {
         "ai: Ai",
     );
 }
+
+// --- a `with` used as a value ----------------------------------------------
+
+/// The shape these are about: something that installs a capability over a
+/// generic body and hands the result back inside a wrapper.
+const INSTALLING: &str = "module m;\n\
+                          pub type Counter;\n\
+                          pub type Oops;\n\
+                          fn counter() -> Counter;\n\
+                          fn ok<T>(value: T) -> T;\n";
+
+/// **A postfix `with` in argument position types as its body.** It did not.
+///
+/// `expr with { .. }` lowers to a block whose statements bind the capabilities
+/// and whose *tail* is `expr`. The hint describing the block's value was being
+/// consumed by the first statement instead of the tail, so the capability's
+/// type was unified with whatever the caller was waiting on.
+///
+/// Only visible when the hint is an unsolved variable -- as it is for a call
+/// argument. Against a concrete hint the unification simply fails and is
+/// discarded, which is why the same expression checked clean as a function's
+/// tail and failed one layer in. Errata 53.
+#[test]
+fn an_installed_value_has_the_type_of_its_body() {
+    assert_clean(&format!(
+        "{INSTALLING}\
+         fn body() -> Int with {{ counter: Counter }};\n\
+         pub fn go() -> Int {{ ok(body() with {{ counter: counter() }}) }}\n"
+    ));
+}
+
+/// The same, generic, which is `postgres::pool::held`. This reported that the
+/// caller's own type parameter "cannot be assumed to be `Counter`".
+#[test]
+fn an_installed_value_keeps_a_caller_chosen_type() {
+    assert_clean(&format!(
+        "{INSTALLING}\
+         pub fn hold<A>(body: () -> A with {{ counter: Counter }}) -> A {{\n\
+         \x20 ok(body() with {{ counter: counter() }})\n\
+         }}\n"
+    ));
+}
+
+/// The other half, and the one a careless fix takes away: the hint still
+/// reaches the **tail**.
+///
+/// An integer literal is `Int` unless something is asking for a narrower one,
+/// so `take({ 5 })` only checks if the argument's `U8` hint reaches the
+/// literal through the block. Deleting the restore in `infer_block` fails
+/// this, which is what makes it a guard rather than decoration.
+#[test]
+fn the_tail_of_a_block_sees_the_hint() {
+    assert_clean(
+        "module m;\n\
+         fn take(b: U8) -> Int;\n\
+         pub fn go() -> Int { take({ 5 }) }\n",
+    );
+}
+
+/// And it still reaches the tail with a statement in front of it -- the case
+/// the bug broke, on the ordinary blocks a `with` is lowered to.
+#[test]
+fn the_tail_sees_the_hint_past_a_statement() {
+    assert_clean(
+        "module m;\n\
+         fn take(b: U8) -> Int;\n\
+         pub fn go() -> Int { take({ let _n = 1; 5 }) }\n",
+    );
+}

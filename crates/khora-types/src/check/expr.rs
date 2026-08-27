@@ -508,6 +508,24 @@ impl<'a> Checker<'a> {
     /// has type `Never`, not `()`, or an `if` whose branch returns would
     /// wrongly disagree with the other branch.
     pub(super) fn infer_block(&mut self, stmts: &[Stmt], tail: Option<ExprId>) -> Type {
+        // **The hint describes the block's value, which is its tail.** Held
+        // here so the statements cannot consume it: `self.hint` is taken by
+        // the first `infer` that runs, and without this that is the first
+        // statement rather than the tail.
+        //
+        // Usually harmless, because unifying a concrete hint with an unrelated
+        // statement type simply fails and `hint_at` discards the failure. It
+        // is not harmless when the hint is an unsolved variable, because then
+        // the unification *succeeds* and solves the caller's variable to
+        // whatever that statement happened to be:
+        //
+        //     Result::Ok(body() with { db: over(leased) })
+        //
+        // A `with` lowers to a block whose first statement binds the
+        // capability, so `Ok`'s payload variable was solved to `Db` before the
+        // tail was ever looked at -- and the real type then "disagreed" with
+        // it. Errata 53.
+        let hint = self.hint.take();
         let mut diverged = false;
         for stmt in stmts {
             match stmt {
@@ -537,6 +555,7 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        self.hint = hint;
         let tail_ty = tail.map(|t| self.infer(t)).unwrap_or(Type::Unit);
         if diverged {
             Type::Never

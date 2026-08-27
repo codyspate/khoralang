@@ -1543,3 +1543,78 @@ corruption when a second one shares the first letter. Neither had a test with
 a tag it should refuse, because a tag it should refuse could not previously
 exist. `names_a_toolchain` is now a named predicate with those cases written
 down, in all three implementations.
+
+## 53. A block's type hint was eaten by its first statement
+
+`postgres::pool::held` installs a leased connection as a capability and hands
+the body's result back:
+
+```khora
+Result::Ok(body()! with { db: over(leased) })
+```
+
+which the checker rejected, twice:
+
+    this argument: `A` is a type the caller chooses, so it cannot be
+    assumed to be `Db`
+
+`A` is `held`'s own type parameter. Nothing in that line says `A` is `Db`, and
+the postfix `with` is ordinary Khora -- `WithExpr` is in the grammar and the
+AST documents it as `analyze(id) with { .. }`.
+
+### Not the parse, and not generics
+
+The syntax tree is identical in both positions -- `WITH_EXPR[ CALL_EXPR,
+RECORD_EXPR ]` -- and the same expression checks clean as a function's tail,
+with a concrete type *and* with a generic one. It fails only as a **call
+argument**. Three facts that together name the culprit: it is the hint, and it
+only matters when the hint is an unsolved variable.
+
+### What was happening
+
+`expr with { .. }` lowers to a block: the row becomes `let` statements binding
+the capabilities, and `expr` becomes the tail. That is the whole of
+installation, and it is why an inner `with` shadows an outer one for free.
+
+`Expr::Block` set `self.hint` and called `infer_block`, and `self.hint` is
+*taken* by the first `infer` that runs. In a block with statements, that is
+the first statement -- not the tail it describes.
+
+Against a concrete hint this is invisible. `hint_at` unifies and throws the
+result away, so `Int` against `Db` simply fails and nothing is said. Against an
+unsolved variable it is not invisible, because the unification **succeeds**:
+
+    Result::Ok( body() with { db: over(leased) } )
+                ^ the hint here is Ok's payload variable ?P
+      let db = over(leased);   ->  hint_at(?P, Db)  ->  ?P := Db
+      body()                   ->  A
+
+So `Ok`'s payload was decided to be `Db` before the tail was looked at, and the
+tail's real type then "disagreed" with a variable the block itself had solved.
+The error named the innocent line.
+
+### The fix
+
+`infer_block` takes the hint at entry and restores it immediately before
+inferring the tail. Statements are checked on their own terms; the tail gets
+the hint that was always meant for it.
+
+Both halves have tests, and the second is the one worth having: deleting the
+restore makes `take({ 5 })` fail, because a block's tail stops narrowing a
+literal. A fix for the first half that quietly dropped the hint would have
+passed everything else.
+
+### What generalises
+
+**A hint is a statement about a value, so it belongs to the expression that
+produces the value.** `self.hint` is a field rather than an argument, which
+makes "whoever infers next" the recipient, and in a block that is the wrong
+expression by construction.
+
+The reason this survived so long is the more useful half. Passing a capability
+as an *argument* is what the pool did before, and every other `with` in the
+repository is either a signature row or the block form, whose body is a block
+in tail position. `pool.kh` was the first postfix `with` in a call argument
+anywhere -- so the combination that fails is one nothing had written down yet.
+A feature that is in the grammar, in the AST, in the formatter and in no test
+is a feature nobody has run.
