@@ -7,6 +7,8 @@ const root = path.resolve(here, '..');
 const source = path.join(root, 'content', 'docs');
 const collectionRoot = path.join(root, 'src', 'content', 'docs');
 const target = path.join(collectionRoot, 'docs');
+const unstableBanner =
+  'Khora is unstable before v1. Syntax, standard-library APIs, and behavior may change before v1.';
 
 function lineAt(text, index) {
   return text.slice(0, index).split(/\r?\n/).length;
@@ -45,14 +47,55 @@ function routeForFile(file) {
   return `/docs/${routePath ? `${routePath}/` : ''}`;
 }
 
+function isExternalUrl(raw) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//');
+}
+
+function splitUrl(raw) {
+  const hashAt = raw.indexOf('#');
+  const queryAt = raw.indexOf('?');
+  const cutAt = [hashAt, queryAt].filter((index) => index >= 0).sort((a, b) => a - b)[0];
+  return cutAt === undefined
+    ? { pathname: raw, suffix: '' }
+    : { pathname: raw.slice(0, cutAt), suffix: raw.slice(cutAt) };
+}
+
+function looksLikeDocPath(pathname) {
+  if (!pathname) return true;
+  if (pathname.endsWith('/')) return true;
+  return !path.posix.basename(pathname).includes('.');
+}
+
+function sourceRelativeRoute(url, fromFile) {
+  const raw = url.trim().replace(/^<|>$/g, '');
+  if (!raw || raw.startsWith('#') || isExternalUrl(raw)) return null;
+  if (raw.startsWith('/')) return null;
+
+  const { pathname, suffix } = splitUrl(raw);
+  if (!looksLikeDocPath(pathname)) return null;
+
+  const relativeSourceFile = path.relative(source, fromFile).split(path.sep).join('/');
+  const base = new URL(relativeSourceFile, 'https://khora-doc-source.invalid/');
+  const resolved = new URL(pathname || '.', base);
+  let routePath = resolved.pathname.replace(/^\/+/, '').replace(/\/+/g, '/');
+  if (!routePath.endsWith('/')) routePath += '/';
+  return { route: `/docs/${routePath}`, suffix };
+}
+
+function absoluteDocRoute(url) {
+  const raw = url.trim().replace(/^<|>$/g, '');
+  if (!raw.startsWith('/docs/')) return null;
+  const { pathname, suffix } = splitUrl(raw);
+  let route = pathname.replace(/\/+/g, '/');
+  if (!route.endsWith('/')) route += '/';
+  return { route, suffix };
+}
+
 function linksIn(text) {
   const found = [];
   const patterns = [
-    // Markdown links, but not images. Link titles after the URL are allowed.
     /(?<!!)\[[^\]]*\]\(\s*<?([^\s)>]+)>?[^)]*\)/g,
-    // Raw HTML links.
     /href\s*=\s*["']([^"']+)["']/gi,
-    // Reference-style Markdown: [label]: /docs/page/
     /^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?/gm,
   ];
 
@@ -65,40 +108,29 @@ function linksIn(text) {
   return found;
 }
 
-function internalRoute(url, fromRoute) {
+function resolvedDocLink(url, fromFile) {
   const raw = url.trim().replace(/^<|>$/g, '');
-  if (!raw || raw.startsWith('#')) return fromRoute;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//')) return null;
-
-  const resolved = new URL(raw, `https://khoralang.com${fromRoute}`);
-  if (!resolved.pathname.startsWith('/docs/')) return null;
-
-  let pathname = resolved.pathname.replace(/\/+/g, '/');
-  if (!pathname.endsWith('/')) pathname += '/';
-  return pathname;
+  if (/\.mdx?(?:[?#].*)?$/i.test(raw)) {
+    return { error: 'source filename is not a rendered route' };
+  }
+  return absoluteDocRoute(raw) ?? sourceRelativeRoute(raw, fromFile);
 }
 
-async function validateDocLinks(dir) {
-  const files = await collectDocFiles(dir);
-  const routeByFile = new Map(files.map((file) => [file, routeForFile(file)]));
-  const knownRoutes = new Set(routeByFile.values());
+async function validateDocLinks(files, knownRoutes) {
   const broken = [];
 
   for (const file of files) {
     const text = await readFile(file, 'utf8');
-    const fromRoute = routeByFile.get(file);
-
     for (const link of linksIn(text)) {
-      const renderedRoute = internalRoute(link.url, fromRoute);
-      if (!renderedRoute) continue;
-
-      const sourceUrl = /\.mdx?(?:[?#].*)?$/i.test(link.url.trim().replace(/^<|>$/g, ''));
-      if (sourceUrl || !knownRoutes.has(renderedRoute)) {
-        const reason = sourceUrl
-          ? 'source filename is not a rendered route'
-          : `resolves to missing route ${renderedRoute}`;
+      const resolved = resolvedDocLink(link.url, file);
+      if (!resolved) continue;
+      if (resolved.error) {
+        broken.push(`${path.relative(source, file)}:${link.line} -> ${link.url} (${resolved.error})`);
+        continue;
+      }
+      if (!knownRoutes.has(resolved.route)) {
         broken.push(
-          `${path.relative(source, file)}:${link.line} -> ${link.url} (${reason})`,
+          `${path.relative(source, file)}:${link.line} -> ${link.url} (resolves to missing route ${resolved.route})`,
         );
       }
     }
@@ -111,7 +143,41 @@ async function validateDocLinks(dir) {
   }
 }
 
-await validateDocLinks(source);
+function rewriteDocUrl(url, fromFile, knownRoutes) {
+  const resolved = resolvedDocLink(url, fromFile);
+  if (!resolved || resolved.error || !knownRoutes.has(resolved.route)) return url;
+  return `${resolved.route}${resolved.suffix}`;
+}
+
+function rewriteDocLinks(text, fromFile, knownRoutes) {
+  text = text.replace(
+    /((?<!!)\[[^\]]*\]\(\s*<?)([^\s)>]+)(>?[^)]*\))/g,
+    (whole, before, url, after) => `${before}${rewriteDocUrl(url, fromFile, knownRoutes)}${after}`,
+  );
+  text = text.replace(
+    /(href\s*=\s*["'])([^"']+)(["'])/gi,
+    (whole, before, url, after) => `${before}${rewriteDocUrl(url, fromFile, knownRoutes)}${after}`,
+  );
+  return text.replace(
+    /^(\s*\[[^\]]+\]:\s*<?)([^\s>]+)(>?)/gm,
+    (whole, before, url, after) => `${before}${rewriteDocUrl(url, fromFile, knownRoutes)}${after}`,
+  );
+}
+
+function addBanner(text) {
+  const bannerYaml = `banner:\n  content: "${unstableBanner}"\n`;
+  if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) return text;
+  const frontmatterEnd = text.indexOf('\n---\n', 4);
+  if (frontmatterEnd < 0) return text;
+  const frontmatter = text.slice(0, frontmatterEnd);
+  if (/^banner\s*:/m.test(frontmatter)) return text;
+  return `${text.slice(0, frontmatterEnd)}\n${bannerYaml}${text.slice(frontmatterEnd)}`;
+}
+
+const sourceFiles = await collectDocFiles(source);
+const knownRoutes = new Set(sourceFiles.map(routeForFile));
+await validateDocLinks(sourceFiles, knownRoutes);
+
 await rm(collectionRoot, { recursive: true, force: true });
 await mkdir(target, { recursive: true });
 await cp(source, target, { recursive: true });
@@ -127,17 +193,23 @@ async function normalizeMarkdown(dir) {
 
     if (!isDocFile(entry.name)) continue;
 
-    const sourceText = await readFile(full, 'utf8');
-    if (sourceText.startsWith('---\n') || sourceText.startsWith('---\r\n')) continue;
+    const relative = path.relative(target, full);
+    const canonicalSource = path.join(source, relative);
+    let text = await readFile(full, 'utf8');
 
-    const h1 = sourceText.match(/^#\s+(.+)$/m)?.[1]?.trim();
-    const fallback = path.basename(entry.name, path.extname(entry.name))
-      .split('-')
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(' ');
-    const title = (h1 ?? fallback).replaceAll('"', '\\"');
+    if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) {
+      const h1 = text.match(/^#\s+(.+)$/m)?.[1]?.trim();
+      const fallback = path.basename(entry.name, path.extname(entry.name))
+        .split('-')
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+      const title = (h1 ?? fallback).replaceAll('"', '\\"');
+      text = `---\ntitle: "${title}"\n---\n\n${text}`;
+    }
 
-    await writeFile(full, `---\ntitle: "${title}"\n---\n\n${sourceText}`, 'utf8');
+    text = rewriteDocLinks(text, canonicalSource, knownRoutes);
+    text = addBanner(text);
+    await writeFile(full, text, 'utf8');
   }
 }
 
