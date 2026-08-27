@@ -8,65 +8,105 @@ const source = path.join(root, 'content', 'docs');
 const collectionRoot = path.join(root, 'src', 'content', 'docs');
 const target = path.join(collectionRoot, 'docs');
 
-function isInternalMarkdownSourceUrl(url) {
-  const targetUrl = url.trim().replace(/^<|>$/g, '');
-  if (/^[a-z][a-z0-9+.-]*:/i.test(targetUrl) || targetUrl.startsWith('//')) return false;
-  return /\.md(?:[?#].*)?$/i.test(targetUrl);
-}
-
 function lineAt(text, index) {
   return text.slice(0, index).split(/\r?\n/).length;
 }
 
-function sourceFileLinks(text) {
-  const found = [];
-  const patterns = [
-    // Inline Markdown links and images. The public site routes to pages, not
-    // the .md source files Starlight consumed.
-    /!?\[[^\]]*\]\(\s*<?([^\s)>]+)>?[^)]*\)/g,
-    // Raw HTML occasionally appears in docs and follows the same URL rule.
-    /href\s*=\s*["']([^"']+)["']/gi,
-    // Reference-style Markdown: [label]: ./page.md
-    /^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?/gm,
-  ];
-
-  for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) {
-      const url = match[1];
-      if (isInternalMarkdownSourceUrl(url)) {
-        found.push({ url, line: lineAt(text, match.index ?? 0) });
-      }
-    }
-  }
-
-  return found;
+function isDocFile(name) {
+  return name.endsWith('.md') || name.endsWith('.mdx');
 }
 
-async function validateDocLinks(dir) {
-  const broken = [];
+async function collectDocFiles(dir) {
+  const files = [];
 
   async function visit(current) {
     for (const entry of await readdir(current, { withFileTypes: true })) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) {
         await visit(full);
-        continue;
-      }
-      if (!entry.name.endsWith('.md') && !entry.name.endsWith('.mdx')) continue;
-
-      const text = await readFile(full, 'utf8');
-      for (const link of sourceFileLinks(text)) {
-        broken.push(`${path.relative(source, full)}:${link.line} -> ${link.url}`);
+      } else if (isDocFile(entry.name)) {
+        files.push(full);
       }
     }
   }
 
   await visit(dir);
+  return files;
+}
+
+function routeForFile(file) {
+  const relative = path.relative(source, file).split(path.sep).join('/');
+  const withoutExtension = relative.replace(/\.(?:md|mdx)$/i, '');
+  const routePath = withoutExtension.endsWith('/index')
+    ? withoutExtension.slice(0, -'/index'.length)
+    : withoutExtension === 'index'
+      ? ''
+      : withoutExtension;
+  return `/docs/${routePath ? `${routePath}/` : ''}`;
+}
+
+function linksIn(text) {
+  const found = [];
+  const patterns = [
+    // Markdown links, but not images. Link titles after the URL are allowed.
+    /(?<!!)\[[^\]]*\]\(\s*<?([^\s)>]+)>?[^)]*\)/g,
+    // Raw HTML links.
+    /href\s*=\s*["']([^"']+)["']/gi,
+    // Reference-style Markdown: [label]: /docs/page/
+    /^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?/gm,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      found.push({ url: match[1], line: lineAt(text, match.index ?? 0) });
+    }
+  }
+
+  return found;
+}
+
+function internalRoute(url, fromRoute) {
+  const raw = url.trim().replace(/^<|>$/g, '');
+  if (!raw || raw.startsWith('#')) return fromRoute;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//')) return null;
+
+  const resolved = new URL(raw, `https://khoralang.com${fromRoute}`);
+  if (!resolved.pathname.startsWith('/docs/')) return null;
+
+  let pathname = resolved.pathname.replace(/\/+/g, '/');
+  if (!pathname.endsWith('/')) pathname += '/';
+  return pathname;
+}
+
+async function validateDocLinks(dir) {
+  const files = await collectDocFiles(dir);
+  const routeByFile = new Map(files.map((file) => [file, routeForFile(file)]));
+  const knownRoutes = new Set(routeByFile.values());
+  const broken = [];
+
+  for (const file of files) {
+    const text = await readFile(file, 'utf8');
+    const fromRoute = routeByFile.get(file);
+
+    for (const link of linksIn(text)) {
+      const renderedRoute = internalRoute(link.url, fromRoute);
+      if (!renderedRoute) continue;
+
+      const sourceUrl = /\.mdx?(?:[?#].*)?$/i.test(link.url.trim().replace(/^<|>$/g, ''));
+      if (sourceUrl || !knownRoutes.has(renderedRoute)) {
+        const reason = sourceUrl
+          ? 'source filename is not a rendered route'
+          : `resolves to missing route ${renderedRoute}`;
+        broken.push(
+          `${path.relative(source, file)}:${link.line} -> ${link.url} (${reason})`,
+        );
+      }
+    }
+  }
+
   if (broken.length > 0) {
     throw new Error(
-      `Public documentation links must use rendered routes, not .md source URLs:\n${broken
-        .map((link) => `  ${link}`)
-        .join('\n')}`,
+      `Broken internal documentation links:\n${broken.map((link) => `  ${link}`).join('\n')}`,
     );
   }
 }
@@ -85,7 +125,7 @@ async function normalizeMarkdown(dir) {
       continue;
     }
 
-    if (!entry.name.endsWith('.md') && !entry.name.endsWith('.mdx')) continue;
+    if (!isDocFile(entry.name)) continue;
 
     const sourceText = await readFile(full, 'utf8');
     if (sourceText.startsWith('---\n') || sourceText.startsWith('---\r\n')) continue;
