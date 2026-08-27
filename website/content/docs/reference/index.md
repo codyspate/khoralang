@@ -34,13 +34,14 @@ Every language construct should have concrete Khora code here. If you know the n
 
 ## Runtime-facing language rules
 
-- [Memory and resources](./memory-and-resources.md) — automatic memory management, regions, finalization, and resource boundaries.
-- [Concurrency](./concurrency.md) — fibers, structured ownership, cancellation, and sharing rules.
-- [FFI](./ffi.md) — `extern fn`, native library exports, pointers, and C-compatible boundaries.
-- [Traps](./traps.md) — invariant failures that are intentionally separate from typed `raises`.
+- [Memory and resources](./memory-and-resources.md) — `Region`, `Scope`, `scoped`, `acquire`, finalizer order, and cleanup on structured exits.
+- [Sharing](./sharing.md) — `Share`, `Shared`, `Changed`, `Channel`, `SharedFn`, critical-section rules, and cross-fiber values.
+- [Concurrency](./concurrency.md) — `Fiber`, `Nursery`, `nursery`, `bounded_nursery`, cancellation, suspension, and structured ownership.
+- [Traps](./traps.md) — checked overflow, bounds failures, process-fatal behavior, backtraces, and exported-call containment.
+- [FFI](./ffi.md) — importing with `extern fn`, exporting with `pub extern fn`, `Ptr`, borrowed buffers, and the C ABI boundary.
 
 ## Exact library declarations
 
 Language syntax tells you how to express a call or type. Concrete library signatures live in the [Standard Library API reference](/docs/stdlib/api/core/), generated from the declarations shipped with the toolchain.
 
-For example, the Reference explains the syntax of a capability and a handler; the stdlib reference tells you the actual operations of `Random`, `Clock`, `Shared`, `List`, HTTP types, and other shipped APIs.
+For example, the Reference explains the syntax and semantic rules of a capability, shared value, or fiber; the stdlib reference gives the complete operations of `Random`, `Clock`, `Shared`, `Channel`, `Fiber`, `List`, HTTP types, and other shipped APIs.
