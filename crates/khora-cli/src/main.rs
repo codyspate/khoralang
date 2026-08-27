@@ -437,8 +437,7 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
 fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintLevel> {
     let mut out = std::collections::BTreeMap::new();
     let Some(manifest_path) = start.and_then(nearest_manifest) else { return out };
-    let Ok(text) = std::fs::read_to_string(&manifest_path) else { return out };
-    let Ok(parsed) = khora_manifest::Manifest::parse(&text) else { return out };
+    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else { return out };
 
     for (name, lint) in &parsed.manifest.lints {
         out.insert(name.clone(), lint.level);
@@ -1190,16 +1189,13 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// different: nothing else will say so, so that error is returned.
 fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
     let Some(manifest_path) = nearest_manifest(root) else { return Ok(Vec::new()) };
-    let Ok(text) = std::fs::read_to_string(&manifest_path) else { return Ok(Vec::new()) };
-    if khora_manifest::Manifest::parse(&text).is_err() {
+    let Ok(parsed) = khora_manifest::Manifest::load(&manifest_path) else {
         return Ok(Vec::new());
-    }
+    };
 
     let store = khora_pkg::Store::open()?;
     let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
 
-    let parsed = khora_manifest::Manifest::parse(&text)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
     check_extern_allowlist(&parsed.manifest.permissions, &resolution)?;
 
     Ok(resolution.directories())
@@ -1330,10 +1326,8 @@ fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
             path.display()
         )
     })?;
-    let text = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let parsed = khora_manifest::Manifest::parse(&text)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
+    let parsed =
+        khora_manifest::Manifest::load(&manifest_path).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let store = khora_pkg::Store::open()?;
     let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
@@ -1626,10 +1620,8 @@ fn enclosing_package(start: &Path) -> Option<PathBuf> {
     while let Some(directory) = here {
         let candidate = directory.join("khora.toml");
         if candidate.is_file() {
-            let declares_package = std::fs::read_to_string(&candidate)
-                .ok()
-                .and_then(|text| khora_manifest::Manifest::parse(&text).ok())
-                .is_some_and(|parsed| parsed.manifest.package.is_some());
+            let declares_package = khora_manifest::Manifest::load(&candidate)
+                .is_ok_and(|parsed| parsed.manifest.package.is_some());
             if declares_package {
                 // An empty path is the manifest in the working directory,
                 // which is `.` rather than nowhere.

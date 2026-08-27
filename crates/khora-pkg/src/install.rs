@@ -80,7 +80,7 @@ pub fn install(
     let text = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
     // Parsed only to fail early on a manifest this cannot safely edit.
-    Manifest::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
+    Manifest::load(manifest_path).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let revision = fetch::resolve_revision(url, rev)?;
     let offered = inspect(url, &revision, subdir, store)?;
@@ -125,12 +125,13 @@ fn inspect(url: &str, revision: &str, subdir: Option<&str>, store: &Store) -> Re
         bail!("{hint}");
     }
 
-    let text = std::fs::read_to_string(&manifest)
-        .with_context(|| format!("reading {}", manifest.display()))?;
+    // Read before the checkout goes away, and *loaded* rather than parsed:
+    // with `--subdir` this is a member of a monorepo, and its `version` may
+    // live in the workspace root two directories up. The root is in the same
+    // checkout, which is the only moment it is reachable.
+    let parsed = Manifest::load(&manifest).map_err(|e| anyhow::anyhow!("{e}"));
     let _ = std::fs::remove_dir_all(&staged);
-
-    let parsed =
-        Manifest::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", manifest.display()))?;
+    let parsed = parsed?;
     let Some(package) = parsed.manifest.package else {
         bail!(
             "{} is a workspace root rather than a package: it has a `[workspace]` table and \

@@ -17,3 +17,23 @@
 
 [workspace]
 members = ["examples/*", "packages/*", "bench/*"]
+
+# What every member takes with `field.workspace = true`. Roadmap 14.14.
+#
+# Nothing is inherited implicitly: a member that wants the shared version says
+# so. The alternative -- a root value that applies unless overridden -- means
+# reading a member's manifest tells you what it *adds*, and the only way to
+# know what it *is* is to read two files and remember which wins.
+[workspace.package]
+version = "0.1.0"
+edition = "2026"
+
+# The formatter, in one place.
+#
+# This block was copied into three of the four examples verbatim, which is the
+# argument for the feature in miniature: three copies of a decision that was
+# only ever made once, and nothing to notice when one of them drifts.
+[workspace.fmt]
+indent-style = "space"
+indent-width = 2
+explicit-semicolons = true

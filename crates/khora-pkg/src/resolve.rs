@@ -272,10 +272,7 @@ fn acquire(
 }
 
 fn read_manifest(path: &Path) -> Result<Manifest> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let parsed = Manifest::parse(&text)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let parsed = Manifest::load(path).map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(parsed.manifest)
 }
 
@@ -306,14 +303,14 @@ fn within(checkout: std::path::PathBuf, subdir: Option<&str>) -> std::path::Path
 /// A `path` dependency never reaches this. That is your own working copy.
 fn published(name: &str, root: &Path) -> Result<()> {
     let manifest = root.join("khora.toml");
-    let Ok(text) = std::fs::read_to_string(&manifest) else {
+    if !manifest.is_file() {
         bail!(
             "`{name}` has no `khora.toml` at {}. A git dependency names a repository, and \
              the package inside it may need `subdir` to say where",
             root.display()
         )
-    };
-    let parsed = khora_manifest::Manifest::parse(&text)
+    }
+    let parsed = khora_manifest::Manifest::load(&manifest)
         .map_err(|e| anyhow::anyhow!("reading `{name}`'s manifest: {e}"))?;
     if parsed.manifest.package().is_some_and(|p| p.publish == Some(true)) {
         return Ok(());

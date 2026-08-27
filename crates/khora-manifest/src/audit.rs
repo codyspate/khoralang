@@ -43,7 +43,23 @@ static ROOT: Schema = Schema::Fields(&[
     ("toolchain", &TOOLCHAIN),
 ]);
 
-static WORKSPACE: Schema = Schema::Fields(&[("members", &OPEN), ("exclude", &OPEN)]);
+static WORKSPACE: Schema = Schema::Fields(&[
+    ("members", &OPEN),
+    ("exclude", &OPEN),
+    ("package", &WORKSPACE_PACKAGE),
+    ("permissions", &PERMISSIONS),
+    ("fmt", &FMT),
+    ("lints", &LINTS),
+]);
+
+// No `name`: a name is what makes a member a distinct package, so there is
+// nothing for a root to share.
+static WORKSPACE_PACKAGE: Schema = Schema::Fields(&[
+    ("version", &OPEN),
+    ("authors", &OPEN),
+    ("edition", &OPEN),
+    ("publish", &OPEN),
+]);
 
 static PACKAGE: Schema = Schema::Fields(&[
     ("name", &OPEN),
@@ -54,6 +70,7 @@ static PACKAGE: Schema = Schema::Fields(&[
 ]);
 
 static PERMISSIONS: Schema = Schema::Fields(&[
+    ("workspace", &OPEN),
     ("default", &OPEN),
     ("network", &OPEN),
     ("fs", &OPEN),
@@ -64,6 +81,7 @@ static PERMISSIONS: Schema = Schema::Fields(&[
 static TOOLCHAIN: Schema = Schema::Fields(&[("version", &OPEN)]);
 
 static FMT: Schema = Schema::Fields(&[
+    ("workspace", &OPEN),
     ("indent-style", &OPEN),
     ("indent-width", &OPEN),
     ("explicit-semicolons", &OPEN),

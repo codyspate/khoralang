@@ -4,9 +4,15 @@ use khora_manifest::{IndentStyle, LintLevel, Manifest, ManifestError, Parsed, Wa
 
 /// The manifest from `docs/project.md` §4.1, as an actual project ships it.
 ///
-/// Included from the example rather than copied, so that a change to the format
+/// Read from the example rather than copied, so that a change to the format
 /// that forgets this crate fails here instead of silently diverging.
-const EXAMPLE: &str = include_str!("../../../examples/risk_analyzer/khora.toml");
+///
+/// **By path rather than `include_str!`**, because the example is a workspace
+/// member: it takes its version, its edition and its `[fmt]` table from the
+/// root, and text alone cannot find a root. That is the whole of what
+/// `Manifest::load` is for. Roadmap 14.14.
+const EXAMPLE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/risk_analyzer/khora.toml");
 
 fn parse(text: &str) -> Parsed {
     match Manifest::parse(text) {
@@ -28,7 +34,8 @@ fn warning_keys(parsed: &Parsed) -> Vec<&str> {
 
 #[test]
 fn the_reference_manifest_parses_with_no_warnings() {
-    let parsed = parse(EXAMPLE);
+    let parsed = Manifest::load(std::path::Path::new(EXAMPLE))
+        .expect("the reference manifest should load");
 
     assert_eq!(
         warning_keys(&parsed),

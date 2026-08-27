@@ -43,8 +43,11 @@
 
 #![deny(missing_docs)]
 
+use std::path::Path;
+
 mod audit;
 mod error;
+pub(crate) mod inherit;
 mod model;
 mod semver;
 mod warning;
@@ -52,7 +55,7 @@ mod workspace;
 
 pub use crate::error::{Location, ManifestError};
 pub use crate::model::{
-    Build, Category, Default_, Dependency, Fmt, FsGrants, IndentStyle, Lint, LintLevel, Manifest, Package, Permissions, Task, Toolchain, granted_host, granted_name, granted_path,
+    Build, Category, Default_, Dependency, Fmt, FsGrants, IndentStyle, Lint, LintLevel, Lints, Manifest, Package, Permissions, Task, Toolchain, WorkspacePackage, granted_host, granted_name, granted_path,
 };
 pub use crate::semver::Version;
 pub use crate::warning::{Warning, WarningKind};
@@ -72,14 +75,85 @@ pub struct Parsed {
 }
 
 impl Manifest {
+    /// Reads and parses the manifest at `path`, inheriting from its workspace.
+    ///
+    /// **The entry point for everything that reads a manifest off disk.**
+    /// `workspace = true` needs a root to resolve against, and a root is found
+    /// by walking up from the file — which [`Manifest::parse`] cannot do,
+    /// because it has only text.
+    pub fn load(path: &Path) -> Result<Parsed, ManifestError> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|why| ManifestError::io(&format!("reading {}", path.display()), &why))?;
+        Manifest::parse_at(&text, path).map_err(|error| error.with_file(path))
+    }
+
+    /// Parses manifest text that belongs at `path`.
+    ///
+    /// For an editor holding a buffer that has not been saved: the buffer is
+    /// unsaved, but the workspace root it inherits from is not, so the text
+    /// comes from the caller and the root comes from the disk.
+    pub fn parse_at(text: &str, path: &Path) -> Result<Parsed, ManifestError> {
+        let raw: crate::model::RawManifest =
+            toml::from_str(text).map_err(|error| ManifestError::from_toml(error, text))?;
+
+        // **The root is only looked for when something asks to inherit.**
+        // Finding one expands the member list, which is a `read_dir` per
+        // pattern; almost every manifest writes all its own fields and should
+        // not pay for a question it did not ask.
+        let root = if raw.inherits_anything() {
+            // Above *this* manifest's directory, not at it. A root resolving
+            // its own `[package]` against its own `[workspace.package]` is not
+            // wrong exactly, but nothing has wanted it and allowing it means
+            // deciding what a cycle means.
+            let here = path.parent().unwrap_or(Path::new("."));
+            let found = here.parent().and_then(crate::workspace::enclosing_root);
+            if let Some(root) = &found {
+                // Being *under* a root is not being *in* it. A directory the
+                // root does not list is not a member, and taking a version
+                // from a workspace you are not part of is the kind of thing
+                // that is only noticed once it is published.
+                if !root.lists(here) {
+                    return Err(ManifestError::invalid_value(
+                        "workspace",
+                        format!(
+                            "this manifest inherits from a workspace, and the root at {} does \
+                             not list it as a member. Add it to `members` there, or write the \
+                             values here",
+                            root.directory.join("khora.toml").display()
+                        ),
+                    ));
+                }
+            }
+            found
+        } else {
+            None
+        };
+
+        Manifest::finish(raw, root.as_ref().map(|root| &root.table), text)
+    }
+
     /// Parses manifest text.
     ///
     /// Takes text rather than a path so that the language server can parse an
     /// unsaved buffer; attach the file name to a failure with
     /// [`ManifestError::with_file`].
+    ///
+    /// **`workspace = true` is an error here**, naming the reason: with no
+    /// path there is no root to take the value from. [`Manifest::load`] is the
+    /// one to use for a manifest that exists as a file.
     pub fn parse(text: &str) -> Result<Parsed, ManifestError> {
-        let manifest: Manifest =
+        let raw: crate::model::RawManifest =
             toml::from_str(text).map_err(|error| ManifestError::from_toml(error, text))?;
+        Manifest::finish(raw, None, text)
+    }
+
+    /// Resolves inheritance and runs the checks both entry points share.
+    fn finish(
+        raw: crate::model::RawManifest,
+        root: Option<&crate::model::Workspace>,
+        text: &str,
+    ) -> Result<Parsed, ManifestError> {
+        let manifest = raw.resolve(root)?;
         // A file with neither table is not a manifest. Said here rather than
         // by serde, because serde's own message for a missing `[package]`
         // would now be wrong half the time -- a workspace root is allowed to

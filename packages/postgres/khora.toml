@@ -1,13 +1,17 @@
 [package]
 name = "postgres"
-version = "0.1.0"
-edition = "2026"
+version.workspace = true
+edition.workspace = true
 # Offered for other people to depend on. Absent means no: a pushed repository
 # is already fetchable, so the active choice is the one written down, and this
 # repository is mostly a compiler with one library in it.
+#
+# Not inherited, and it is the clearest case for why inheritance is opt-in:
+# exactly one thing in this repository is a library, and a root that said
+# `publish = true` for everybody would advertise the benchmarks.
 publish = true
 
 # A driver reaches the operating system through `std::net::socket`, which is
 # `std`'s to declare. Nothing here declares an `extern fn` of its own, so this
-# package needs no entry in the parent's `[permissions] extern` list — see
+# package needs no entry in the parent's `[permissions] extern` list -- see
 # `docs/design/permissions.md`.

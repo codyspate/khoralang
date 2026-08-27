@@ -244,6 +244,73 @@ depends_on = ["lint", "test", "build"]
 
 ```
 
+#### The workspace, and fields a member inherits
+
+A repository holding several packages puts a `[workspace]` table in a
+`khora.toml` at its root. That manifest has no `[package]`: the root is not one,
+and a root forced to declare a package would be inventing a name for a thing
+that does not exist.
+
+```toml
+[workspace]
+members = ["examples/*", "packages/*", "bench/*"]
+exclude = ["examples/scratch"]
+
+# What a member takes with `field.workspace = true`.
+[workspace.package]
+version = "0.1.0"
+edition = "2026"
+
+[workspace.fmt]
+indent-style = "space"
+indent-width = 2
+explicit-semicolons = true
+
+[workspace.lints]
+unused-capabilities = "deny"
+```
+
+A pattern is a directory, optionally with a trailing `*` matching one level
+down. Not a glob language: `**`, character classes and brace expansion are a
+syntax to document and a set of edge cases to get subtly wrong, and a member
+that does not fit a pattern is listed by name. A directory with no `khora.toml`
+is quietly not a member; `exclude` is for one that has a manifest and should
+still be left out.
+
+`khora check` and `khora fmt` at a root run over every member, each as its own
+package with its own dependencies, and every member runs even after one fails.
+
+A member takes a shared value by asking for it:
+
+```toml
+[package]
+name = "postgres"
+version.workspace = true
+edition.workspace = true
+publish = true          # not inherited: exactly one thing here is a library
+
+[fmt]
+workspace = true
+
+[lints]
+workspace = true
+```
+
+**Nothing is inherited implicitly.** A root value that applied unless overridden
+would mean reading a member's manifest tells you what it *adds*, and the only
+way to know what it *is* would be to read two files and remember which wins.
+
+`name` is not inheritable — it is the one thing that makes a member a distinct
+package. `[fmt]`, `[lints]` and `[permissions]` are taken whole rather than
+field by field: a half-inherited permission set is one nobody can read off
+either file, and "what may this package do" wants one answer in one place.
+Writing a grant beside `workspace = true` is an error rather than a silent loss.
+
+Three ways to get this wrong, each with its own message: asking a root for a
+field it does not set, asking with no workspace root above you at all, and
+asking from a directory the root does not list as a member.
+
+
 ### 4.2 Application Code (`src/main.kh`)
 
 ```typescript

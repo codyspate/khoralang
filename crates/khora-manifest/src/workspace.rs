@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::model::Workspace as WorkspaceTable;
 use crate::{Manifest, ManifestError};
 
 /// A workspace root and the members under it.
@@ -79,6 +80,58 @@ pub fn enclosing(start: &Path) -> Option<Workspace> {
         if candidate.is_file() {
             if let Ok(Some(found)) = read(&candidate) {
                 return Some(found);
+            }
+        }
+        here = directory.parent();
+    }
+    None
+}
+
+/// A workspace root, for inheritance: its table, and who it lists.
+pub(crate) struct Root {
+    /// The directory holding the root manifest.
+    pub(crate) directory: PathBuf,
+    /// The `[workspace]` table itself, which is what a member inherits from.
+    pub(crate) table: WorkspaceTable,
+    /// The members, expanded.
+    members: Vec<PathBuf>,
+}
+
+impl Root {
+    /// Whether the root lists `directory` as a member.
+    pub(crate) fn lists(&self, directory: &Path) -> bool {
+        self.members.iter().any(|member| same(member, directory))
+    }
+}
+
+/// The nearest workspace root at or above `start`.
+///
+/// **Only reached by a manifest that actually inherits something**, which is
+/// why expanding the member list here is affordable: it costs a `read_dir` per
+/// pattern, and a manifest that writes all its own fields never asks.
+///
+/// The walk stops at the first root rather than looking for one that lists the
+/// member. A workspace inside a workspace is not supported, and "your root is
+/// this one, and it does not list you" is a better thing to be told than a
+/// silent search past it.
+pub(crate) fn enclosing_root(start: &Path) -> Option<Root> {
+    let mut here = Some(start);
+    while let Some(directory) = here {
+        let candidate = directory.join("khora.toml");
+        if candidate.is_file() {
+            // Parsed rather than loaded, because a root does not inherit:
+            // loading it would look above it for a root of its own.
+            if let Ok(text) = std::fs::read_to_string(&candidate) {
+                if let Ok(parsed) = Manifest::parse(&text) {
+                    if let Some(table) = parsed.manifest.workspace.clone() {
+                        let found = read(&candidate).ok().flatten();
+                        return Some(Root {
+                            directory: directory.to_path_buf(),
+                            table,
+                            members: found.map(|w| w.members).unwrap_or_default(),
+                        });
+                    }
+                }
             }
         }
         here = directory.parent();

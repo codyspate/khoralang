@@ -938,8 +938,9 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) {
 /// The `[lints]` levels for a workspace, or the defaults.
 fn lint_levels(root: &Path) -> HashMap<String, LintLevel> {
     let mut out = HashMap::new();
-    let Ok(text) = std::fs::read_to_string(root.join("khora.toml")) else { return out };
-    let Ok(parsed) = khora_manifest::Manifest::parse(&text) else { return out };
+    let Ok(parsed) = khora_manifest::Manifest::load(&root.join("khora.toml")) else {
+        return out;
+    };
     for (name, lint) in &parsed.manifest.lints {
         out.insert(name.clone(), lint.level);
     }

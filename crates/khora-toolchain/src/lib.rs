@@ -144,8 +144,7 @@ pub fn pinned_version(start: &Path) -> Option<String> {
     while let Some(dir) = here {
         let candidate = dir.join("khora.toml");
         if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate).ok()?;
-            let parsed = khora_manifest::Manifest::parse(&text).ok()?;
+            let parsed = khora_manifest::Manifest::load(&candidate).ok()?;
             return parsed.manifest.toolchain.and_then(|t| t.version);
         }
         here = dir.parent();

@@ -1,8 +1,8 @@
 [package]
 name = "risk_analyzer"
-version = "0.1.0"
+version.workspace = true
 authors = ["Engineering Team <dev@khora.internal>"]
-edition = "2026"
+edition.workspace = true
 
 # What this program may reach outside itself.
 #
@@ -20,10 +20,9 @@ env = ["DB_*"]
 read = ["/etc/config", "./data/**"]
 write = ["./tmp/**"]
 
+# The repository's formatter settings, from `[workspace.fmt]` in the root.
 [fmt]
-indent-style = "space"
-indent-width = 2
-explicit-semicolons = true
+workspace = true
 
 [lints]
 unused-capabilities = "deny"

@@ -10,9 +10,17 @@ use serde::de::{self, MapAccess, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Deref;
 
-/// A parsed `khora.toml`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+use crate::error::ManifestError;
+use crate::inherit::{Maybe, Resolved};
+
+/// A parsed `khora.toml`, with every inherited field already filled in.
+///
+/// **Nothing here remembers whether a value was written or inherited**, which
+/// is the point: a `version` is a `String`, so no reader has to cope with one
+/// that has not arrived. See [`crate::inherit`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     /// Package identity, absent in a workspace root that is only a workspace.
     ///
@@ -30,24 +38,234 @@ pub struct Manifest {
     /// The members this manifest is the root of.
     pub workspace: Option<Workspace>,
     /// OS capabilities the package is allowed to ask for.
-    #[serde(default)]
     pub permissions: Permissions,
     /// Formatter settings, when the manifest configures the formatter.
     pub fmt: Option<Fmt>,
     /// Lint configuration, keyed by lint name.
-    #[serde(default)]
-    pub lints: BTreeMap<String, Lint>,
+    pub lints: Lints,
     /// Dependencies, keyed by module path such as `std.effect`.
-    #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
     /// Which compiler this project expects.
-    #[serde(default)]
     pub toolchain: Option<Toolchain>,
     /// Build settings, when the manifest configures the build.
     pub build: Option<Build>,
     /// Task-runner entries, keyed by task name.
-    #[serde(default)]
     pub tasks: BTreeMap<String, Task>,
+}
+
+/// A `khora.toml` as written, before the workspace root has been consulted.
+///
+/// The only difference from [`Manifest`] is that the inheritable fields may
+/// still say `workspace = true`. It exists so that [`Manifest`] cannot.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct RawManifest {
+    pub(crate) package: Option<RawPackage>,
+    pub(crate) workspace: Option<Workspace>,
+    #[serde(default)]
+    pub(crate) permissions: Permissions,
+    pub(crate) fmt: Option<Fmt>,
+    #[serde(default)]
+    pub(crate) lints: Lints,
+    #[serde(default)]
+    pub(crate) dependencies: BTreeMap<String, Dependency>,
+    #[serde(default)]
+    pub(crate) toolchain: Option<Toolchain>,
+    pub(crate) build: Option<Build>,
+    #[serde(default)]
+    pub(crate) tasks: BTreeMap<String, Task>,
+}
+
+/// A `[package]` table as written.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct RawPackage {
+    // Not inheritable, and deliberately: a name is the one thing that makes a
+    // member a distinct package, and a workspace whose members all inherited
+    // one would have several packages with the same name.
+    pub(crate) name: String,
+    // Required, and not an `Option`, so that a `[package]` with no version at
+    // all is serde's "missing field `version`" reported at the table's own
+    // span. `version.workspace = true` is a version that is *present* and
+    // written elsewhere, which is a different thing from an absent one.
+    pub(crate) version: Maybe<String>,
+    pub(crate) authors: Option<Maybe<Vec<String>>>,
+    pub(crate) publish: Option<Maybe<bool>>,
+    pub(crate) edition: Option<Maybe<String>>,
+}
+
+impl RawManifest {
+    /// Whether anything here says `workspace = true`.
+    ///
+    /// The question [`crate::Manifest::parse_at`] asks before going to the
+    /// filesystem for a root, so that a manifest inheriting nothing never
+    /// pays for the search.
+    pub(crate) fn inherits_anything(&self) -> bool {
+        let package = self.package.as_ref().is_some_and(|raw| {
+            let fields = [
+                matches!(raw.version, Maybe::FromWorkspace),
+                matches!(raw.authors, Some(Maybe::FromWorkspace)),
+                matches!(raw.publish, Some(Maybe::FromWorkspace)),
+                matches!(raw.edition, Some(Maybe::FromWorkspace)),
+            ];
+            fields.into_iter().any(|asked| asked)
+        });
+        package
+            || self.permissions.workspace
+            || self.lints.workspace
+            || self.fmt.as_ref().is_some_and(|fmt| fmt.workspace)
+    }
+
+    /// Fills in every inherited field from `root`, or explains why it cannot.
+    ///
+    /// `root` is the `[workspace]` table of the manifest above this one, and
+    /// `None` covers both "there is no workspace above" and "this was parsed
+    /// from text with no path to look above". A manifest that inherits nothing
+    /// does not care which.
+    pub(crate) fn resolve(self, root: Option<&Workspace>) -> Result<Manifest, ManifestError> {
+        let shared = root.and_then(|table| table.package.as_ref());
+
+        let package = match self.package {
+            None => None,
+            Some(raw) => {
+                let version =
+                    Maybe::resolve(Some(raw.version), shared.and_then(|s| s.version.clone()));
+                let authors = Maybe::resolve(raw.authors, shared.and_then(|s| s.authors.clone()));
+                let publish = Maybe::resolve(raw.publish, shared.and_then(|s| s.publish));
+                let edition = Maybe::resolve(raw.edition, shared.and_then(|s| s.edition.clone()));
+                for (field, missing) in [
+                    ("version", version.is_missing()),
+                    ("authors", authors.is_missing()),
+                    ("publish", publish.is_missing()),
+                    ("edition", edition.is_missing()),
+                ] {
+                    if missing {
+                        return Err(inheritance_error(
+                            root.is_some(),
+                            &format!("package.{field}"),
+                            &format!("`{field}` under `[workspace.package]`"),
+                        ));
+                    }
+                }
+                let (Resolved::Own(version) | Resolved::Inherited(version)) = version else {
+                    // Unreachable: `Absent` needs an `Option` field and this
+                    // one is not, and `Missing` was just returned above.
+                    return Err(inheritance_error(
+                        root.is_some(),
+                        "package.version",
+                        "`version` under `[workspace.package]`",
+                    ));
+                };
+                Some(Package {
+                    name: raw.name,
+                    version,
+                    authors: authors.into_option().unwrap_or_default(),
+                    publish: publish.into_option(),
+                    edition: edition.into_option(),
+                })
+            }
+        };
+
+        let permissions = if self.permissions.workspace {
+            if !self.permissions.is_only_the_flag() {
+                return Err(ManifestError::invalid_value(
+                    "permissions",
+                    "`workspace = true` takes the whole table from the root, so the grants \
+                     beside it would be silently dropped"
+                        .to_string(),
+                ));
+            }
+            match root.and_then(|table| table.permissions.clone()) {
+                Some(inherited) => inherited,
+                None => {
+                    return Err(inheritance_error(
+                        root.is_some(),
+                        "permissions",
+                        "a `[workspace.permissions]` table",
+                    ))
+                }
+            }
+        } else {
+            self.permissions
+        };
+
+        let fmt = match self.fmt {
+            Some(own) if own.workspace => {
+                if !own.is_only_the_flag() {
+                    return Err(ManifestError::invalid_value(
+                        "fmt",
+                        "`workspace = true` takes the whole table from the root, so the \
+                         settings beside it would be silently dropped"
+                            .to_string(),
+                    ));
+                }
+                match root.and_then(|table| table.fmt.clone()) {
+                    Some(inherited) => Some(inherited),
+                    None => {
+                        return Err(inheritance_error(
+                            root.is_some(),
+                            "fmt",
+                            "a `[workspace.fmt]` table",
+                        ))
+                    }
+                }
+            }
+            other => other,
+        };
+
+        let lints = if self.lints.workspace {
+            if !self.lints.entries.is_empty() {
+                return Err(ManifestError::invalid_value(
+                    "lints",
+                    "`workspace = true` takes the whole table from the root, so the lints \
+                     beside it would be silently dropped"
+                        .to_string(),
+                ));
+            }
+            match root.map(|table| table.lints.clone()) {
+                Some(inherited) => inherited,
+                None => {
+                    return Err(inheritance_error(
+                        root.is_some(),
+                        "lints",
+                        "a `[workspace.lints]` table",
+                    ))
+                }
+            }
+        } else {
+            self.lints
+        };
+
+        Ok(Manifest {
+            package,
+            workspace: self.workspace,
+            permissions,
+            fmt,
+            lints,
+            dependencies: self.dependencies,
+            toolchain: self.toolchain,
+            build: self.build,
+            tasks: self.tasks,
+        })
+    }
+}
+
+/// Why `workspace = true` could not be honoured.
+///
+/// Two different mistakes, and telling them apart is most of the value: a
+/// missing `[workspace.package]` entry is a one-line fix in a file the reader
+/// can open, and no workspace at all means the member is not where they think
+/// it is.
+fn inheritance_error(had_root: bool, key: &str, add: &str) -> ManifestError {
+    let why = if had_root {
+        format!(
+            "says `workspace = true`, and the workspace root does not set it. Add {add} to \
+             the root manifest, or write the value here"
+        )
+    } else {
+        "says `workspace = true`, and there is no workspace root above this manifest \
+         to take it from"
+            .to_string()
+    };
+    ManifestError::invalid_value(key, why)
 }
 
 impl Manifest {
@@ -69,7 +287,7 @@ impl Manifest {
 }
 
 /// The `[workspace]` table.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Workspace {
     /// Directories holding members, relative to this manifest.
     ///
@@ -87,6 +305,36 @@ pub struct Workspace {
     /// pattern and list the rest by hand.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// `[workspace.package]`: the field values members may ask for.
+    pub package: Option<WorkspacePackage>,
+    /// `[workspace.permissions]`, for a member writing `workspace = true`.
+    pub permissions: Option<Permissions>,
+    /// `[workspace.fmt]`, for a member writing `workspace = true`.
+    pub fmt: Option<Fmt>,
+    /// `[workspace.lints]`, for a member writing `workspace = true`.
+    #[serde(default)]
+    pub lints: Lints,
+}
+
+/// The `[workspace.package]` table.
+///
+/// Every field is optional, because a root supplies the ones its members
+/// actually share. A member asking for one the root does not set is an error
+/// naming both halves rather than a silent default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct WorkspacePackage {
+    /// The version members take with `version.workspace = true`.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The authors members take with `authors.workspace = true`.
+    #[serde(default)]
+    pub authors: Option<Vec<String>>,
+    /// What members take with `publish.workspace = true`.
+    #[serde(default)]
+    pub publish: Option<bool>,
+    /// The edition members take with `edition.workspace = true`.
+    #[serde(default)]
+    pub edition: Option<String>,
 }
 
 /// The `[package]` table.
@@ -155,6 +403,13 @@ pub enum Default_ {
 /// one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Permissions {
+    /// `workspace = true`: take the whole table from `[workspace.permissions]`.
+    ///
+    /// Whole table, not field by field. A half-inherited permission set is a
+    /// set nobody can read off either file, and the question a reader has is
+    /// "what may this package do" — which wants one answer in one place.
+    #[serde(default)]
+    pub workspace: bool,
     /// What a category nobody mentioned grants.
     #[serde(default)]
     pub default: Default_,
@@ -197,6 +452,18 @@ pub struct FsGrants {
 }
 
 impl Permissions {
+    /// Whether nothing but `workspace = true` was written.
+    ///
+    /// A grant beside the flag would be silently dropped by inheritance, which
+    /// is worth an error rather than a surprise.
+    pub(crate) fn is_only_the_flag(&self) -> bool {
+        matches!(self.default, Default_::Allow)
+            && self.network.is_none()
+            && self.fs.is_none()
+            && self.env.is_none()
+            && self.extern_.is_none()
+    }
+
     /// Whether the manifest grants this category at all.
     ///
     /// The compile-time half of the decision, and the only half the compiler
@@ -366,6 +633,9 @@ fn splits(value: &str, limit: usize) -> impl Iterator<Item = usize> + '_ {
 /// having to restate the formatter's defaults, which live in the formatter.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Fmt {
+    /// `workspace = true`: take the whole table from `[workspace.fmt]`.
+    #[serde(default)]
+    pub workspace: bool,
     /// Whether indentation is spaces or tabs.
     #[serde(rename = "indent-style")]
     pub indent_style: Option<IndentStyle>,
@@ -375,6 +645,15 @@ pub struct Fmt {
     /// Whether the formatter writes statement terminators explicitly.
     #[serde(rename = "explicit-semicolons")]
     pub explicit_semicolons: Option<bool>,
+}
+
+impl Fmt {
+    /// Whether nothing but `workspace = true` was written.
+    pub(crate) fn is_only_the_flag(&self) -> bool {
+        self.indent_style.is_none()
+            && self.indent_width.is_none()
+            && self.explicit_semicolons.is_none()
+    }
 }
 
 /// What `indent-style` may say.
@@ -459,6 +738,76 @@ impl<'de> Deserialize<'de> for LintLevel {
         LintLevel::from_name(&name).ok_or_else(|| {
             de::Error::invalid_value(Unexpected::Str(&name), &"`allow`, `warn` or `deny`")
         })
+    }
+}
+
+/// The `[lints]` table.
+///
+/// A map of lint name to configuration, plus the one key that is not a lint:
+/// `workspace = true`, which takes the root's table whole.
+///
+/// **`workspace` is therefore not available as a lint name.** Cargo has the
+/// same collision and resolves it the same way. A lint called `workspace`
+/// would be a lint about workspaces, and it can be called something else.
+///
+/// Derefs to the map, so `manifest.lints["unused-capabilities"]` and iterating
+/// read exactly as they did before the key existed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Lints {
+    /// `workspace = true`: take the whole table from `[workspace.lints]`.
+    pub workspace: bool,
+    /// The lints themselves, keyed by name.
+    pub entries: BTreeMap<String, Lint>,
+}
+
+impl Deref for Lints {
+    type Target = BTreeMap<String, Lint>;
+
+    fn deref(&self) -> &BTreeMap<String, Lint> {
+        &self.entries
+    }
+}
+
+impl<'a> IntoIterator for &'a Lints {
+    type Item = (&'a String, &'a Lint);
+    type IntoIter = std::collections::btree_map::Iter<'a, String, Lint>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
+impl FromIterator<(String, Lint)> for Lints {
+    fn from_iter<I: IntoIterator<Item = (String, Lint)>>(entries: I) -> Lints {
+        Lints { workspace: false, entries: entries.into_iter().collect() }
+    }
+}
+
+impl<'de> Deserialize<'de> for Lints {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Lints, D::Error> {
+        deserializer.deserialize_map(LintsVisitor)
+    }
+}
+
+struct LintsVisitor;
+
+impl<'de> Visitor<'de> for LintsVisitor {
+    type Value = Lints;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a table of lint names, optionally with `workspace = true`")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Lints, A::Error> {
+        let mut out = Lints::default();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "workspace" {
+                out.workspace = map.next_value::<bool>()?;
+            } else {
+                out.entries.insert(key, map.next_value::<Lint>()?);
+            }
+        }
+        Ok(out)
     }
 }
 
