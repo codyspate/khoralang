@@ -171,4 +171,4 @@ match value {
 
 Use nesting when it makes the shape clearer; split deeply nested business decisions into smaller matches when a single arm becomes difficult to read.
 
-See [Control flow](./control-flow.md) for `match` result rules and [Failures](./failures.md) for `catch` semantics.
+See [Control flow](./control-flow/) for `match` result rules and [Failures](./failures/) for `catch` semantics.
