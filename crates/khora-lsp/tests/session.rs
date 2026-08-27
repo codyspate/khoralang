@@ -144,12 +144,17 @@ fn a_client_that_offers_nothing_gets_utf16() {
 
 /// A request nobody implements must still be answered, or the client waits
 /// forever for a reply that is not coming.
+///
+/// This named `textDocument/rename` until rename was implemented, at which
+/// point it started asserting that an implemented request was unimplemented.
+/// `codeAction` is 14.7 and is the next one to fall; whoever builds it should
+/// move this to something further down the list rather than delete it.
 #[test]
 fn an_unimplemented_request_gets_an_error_rather_than_silence() {
     let w = workspace(&[("src/main.kh", "module app::main;\n")]);
     let replies = session(&[
         initialize(&w.root),
-        json!({ "jsonrpc": "2.0", "id": 7, "method": "textDocument/rename", "params": {} }),
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "textDocument/codeAction", "params": {} }),
         exit(),
     ]);
     let reply = replies.iter().find(|r| r.get("id") == Some(&json!(7))).expect("a reply");
@@ -630,4 +635,328 @@ fn an_unresolved_name_finds_nothing() {
         exit(),
     ]);
     assert_eq!(result_of(&replies, 2), Value::Null);
+}
+
+// --- references, rename, symbols --------------------------------------------
+
+fn references(path: &Path, line: u32, character: u32, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/references",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "position": { "line": line, "character": character },
+            "context": { "includeDeclaration": true }
+        }
+    })
+}
+
+fn prepare_rename(path: &Path, line: u32, character: u32, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/prepareRename",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "position": { "line": line, "character": character }
+        }
+    })
+}
+
+fn rename(path: &Path, line: u32, character: u32, to: &str, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/rename",
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "position": { "line": line, "character": character },
+            "newName": to
+        }
+    })
+}
+
+/// The error for the request with this id, if it was answered with one.
+fn error_of(replies: &[Value], id: i64) -> Option<String> {
+    replies
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_i64) == Some(id))
+        .and_then(|m| m.pointer("/error/message"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+#[test]
+fn the_server_offers_the_navigation_it_can_do() {
+    let w = workspace(&[("src/main.kh", "module main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let caps = result_of(&replies, 1);
+    assert_eq!(caps.pointer("/capabilities/referencesProvider"), Some(&json!(true)), "{caps}");
+    assert_eq!(caps.pointer("/capabilities/documentSymbolProvider"), Some(&json!(true)), "{caps}");
+    assert_eq!(caps.pointer("/capabilities/workspaceSymbolProvider"), Some(&json!(true)), "{caps}");
+    assert_eq!(
+        caps.pointer("/capabilities/renameProvider/prepareProvider"),
+        Some(&json!(true)),
+        "{caps}"
+    );
+}
+
+// --- locals ---
+
+const COUNTER: &str =
+    "module main;\n\nfn go() -> Int {\n  let total = 1;\n  let other = 2;\n  total + total + other\n}\n";
+
+/// A local declaration and both its uses, and nothing belonging to the binding
+/// beside it.
+#[test]
+fn references_to_a_local_are_exactly_its_own() {
+    let w = workspace(&[("src/main.kh", COUNTER)]);
+    let file = w.root.join("src/main.kh");
+    // Line 5 is `  total + total + other`; column 3 is inside the first name.
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, COUNTER),
+        references(&file, 5, 3, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    let list = found.as_array().expect("a list");
+    // The `let total` and its two uses. `other` must not be in there.
+    assert_eq!(list.len(), 3, "{found}");
+    let lines: Vec<i64> =
+        list.iter().filter_map(|l| l.pointer("/range/start/line")?.as_i64()).collect();
+    assert_eq!(lines, vec![3, 5, 5], "the binding on line 3, two uses on line 5: {found}");
+}
+
+/// **Rename edits the binding as well as the uses.** One that changed the uses
+/// and left the `let` alone would produce a program that does not compile,
+/// which is the failure worth a test of its own.
+#[test]
+fn renaming_a_local_edits_the_binding_too() {
+    let w = workspace(&[("src/main.kh", COUNTER)]);
+    let file = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, COUNTER),
+        rename(&file, 5, 3, "sum", 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    let changes = found.pointer("/changes").and_then(Value::as_object).expect("changes");
+    let edits = changes.values().next().and_then(Value::as_array).expect("edits");
+    assert_eq!(edits.len(), 3, "the binding and both uses: {found}");
+    assert!(edits.iter().all(|e| e.get("newText") == Some(&json!("sum"))), "{found}");
+    assert!(
+        edits.iter().any(|e| e.pointer("/range/start/line") == Some(&json!(3))),
+        "the `let` on line 3 must be edited: {found}"
+    );
+}
+
+/// The cursor on the `let` itself is as natural a place to ask from as a use.
+#[test]
+fn a_rename_can_be_asked_for_from_the_binding() {
+    let w = workspace(&[("src/main.kh", COUNTER)]);
+    let file = w.root.join("src/main.kh");
+    // Line 3 is `  let total = 1;`.
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, COUNTER),
+        prepare_rename(&file, 3, 7, 2),
+        exit(),
+    ]);
+    let answer = result_of(&replies, 2);
+    assert_eq!(answer.get("placeholder"), Some(&json!("total")), "{answer}");
+}
+
+/// **A declaration is refused with a reason, not with silence.** `null` from
+/// `prepareRename` makes an editor say "cannot be renamed" and explain nothing.
+#[test]
+fn renaming_a_declaration_is_refused_and_says_why() {
+    let helper = "module helper;\n\npub fn add(a: Int, b: Int) -> Int { a + b }\n";
+    let main = "module main;\n\nimport helper::{add};\n\nfn go() -> Int { helper::add(1, 2) }\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+    let column = main.lines().nth(4).expect("a line").find("add").expect("it") as u32;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, main),
+        prepare_rename(&file, 4, column + 1, 2),
+        exit(),
+    ]);
+
+    let why = error_of(&replies, 2).expect("a refusal with a reason");
+    assert!(why.contains("not supported yet"), "{why}");
+    assert!(why.contains("local binding works"), "it should say what does work: {why}");
+}
+
+// --- items ---
+
+/// **References to an item are found by resolution, not by text**, so they
+/// cross files and cannot match a different declaration that happens to share
+/// a name.
+#[test]
+fn references_to_an_item_cross_files_and_ignore_a_namesake() {
+    let helper = "module helper;\n\npub fn add(a: Int, b: Int) -> Int { a + b }\n";
+    // A second `add`, in another module, which must not be swept up.
+    let other = "module other;\n\npub fn add(a: Int) -> Int { a }\n";
+    let main =
+        "module main;\n\nfn go() -> Int { helper::add(1, 2) + helper::add(3, 4) + other::add(5) }\n";
+    let w =
+        workspace(&[("src/helper.kh", helper), ("src/other.kh", other), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+    let column = main.lines().nth(2).expect("a line").find("helper::add").expect("it") as u32 + 8;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, main),
+        references(&file, 2, column, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    let list = found.as_array().expect("a list");
+
+    let in_other = list
+        .iter()
+        .filter(|l| l.get("uri").and_then(Value::as_str).is_some_and(|u| u.ends_with("other.kh")))
+        .count();
+    assert_eq!(in_other, 0, "a namesake in another module is not a reference: {found}");
+
+    let in_main = list
+        .iter()
+        .filter(|l| l.get("uri").and_then(Value::as_str).is_some_and(|u| u.ends_with("main.kh")))
+        .count();
+    assert_eq!(in_main, 2, "both calls: {found}");
+
+    assert!(
+        list.iter().any(|l| l
+            .get("uri")
+            .and_then(Value::as_str)
+            .is_some_and(|u| u.ends_with("helper.kh"))),
+        "the declaration: {found}"
+    );
+}
+
+// --- symbols ---
+
+#[test]
+fn the_outline_lists_what_a_file_declares() {
+    let text =
+        "module app;\n\npub type Point = { x: Int };\n\npub fn go() -> Int { 1 }\n\nconst LIMIT: Int = 3;\n";
+    let w = workspace(&[("src/app.kh", text)]);
+    let file = w.root.join("src/app.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        json!({
+            "jsonrpc": "2.0", "id": 2, "method": "textDocument/documentSymbol",
+            "params": { "textDocument": { "uri": url_of(&file) } }
+        }),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    let names: Vec<&str> =
+        found.as_array().expect("a list").iter().filter_map(|s| s.get("name")?.as_str()).collect();
+    assert_eq!(names, vec!["Point", "go", "LIMIT"], "in declaration order: {found}");
+}
+
+/// Ctrl+T across the workspace, with the module named so three `parse`s can be
+/// told apart.
+#[test]
+fn a_workspace_search_finds_by_substring_and_says_which_module() {
+    let one = "module one;\n\npub fn parse_header() -> Int { 1 }\n";
+    let w = workspace(&[("src/one.kh", one), ("src/two.kh", "module two;\n\npub fn unrelated() -> Int { 2 }\n")]);
+    let file = w.root.join("src/one.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, one),
+        json!({
+            "jsonrpc": "2.0", "id": 2, "method": "workspace/symbol",
+            "params": { "query": "parse" }
+        }),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    let list = found.as_array().expect("a list");
+    assert!(list.iter().any(|s| s.get("name") == Some(&json!("parse_header"))), "{found}");
+    assert!(
+        !list.iter().any(|s| s.get("name") == Some(&json!("unrelated"))),
+        "the substring should exclude it: {found}"
+    );
+    let entry = list.iter().find(|s| s.get("name") == Some(&json!("parse_header"))).expect("it");
+    assert_eq!(entry.get("containerName"), Some(&json!("one")), "{entry}");
+}
+
+/// **The gap 14.3 left, closed.** A cursor on a use of a local lands on its
+/// binding, in the same file.
+#[test]
+fn a_local_finds_its_binding() {
+    let w = workspace(&[("src/main.kh", COUNTER)]);
+    let file = w.root.join("src/main.kh");
+    // Line 5 is `  total + total + other`.
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, COUNTER),
+        definition(&file, 5, 3, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    assert_eq!(found.pointer("/range/start/line"), Some(&json!(3)), "the `let`: {found}");
+    assert!(
+        found.get("uri").and_then(Value::as_str).is_some_and(|u| u.ends_with("main.kh")),
+        "{found}"
+    );
+}
+
+/// **A type in a signature is not the parameter it annotates**, which is the
+/// regression that made the lookup order load-bearing.
+///
+/// `khora_hir::Local::range` for a parameter covers `p: shapes::Point` entire,
+/// so a binding check running before paths answers "the parameter `p`" for a
+/// cursor on `Point` — and go-to-definition on a type in a signature lands
+/// three characters to the left instead of in another file.
+#[test]
+fn a_type_in_a_signature_beats_the_parameter_it_annotates() {
+    let shapes = "module shapes;\n\npub type Point = { x: Int };\n";
+    let main = "module main;\n\nimport shapes::{Point};\n\nfn go(p: shapes::Point) -> Int { p.x }\n";
+    let w = workspace(&[("src/shapes.kh", shapes), ("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+    let column = main.lines().nth(4).expect("a line").find("shapes::Point").expect("it") as u32 + 9;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, main),
+        definition(&file, 4, column, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    assert!(
+        found.get("uri").and_then(Value::as_str).is_some_and(|u| u.ends_with("shapes.kh")),
+        "the type, in the other file, not the parameter: {found}"
+    );
+}
+
+/// And the parameter itself still answers, when that is what the cursor is on.
+#[test]
+fn a_parameter_finds_itself() {
+    let main = "module main;\n\nfn go(count: Int) -> Int { count + 1 }\n";
+    let w = workspace(&[("src/main.kh", main)]);
+    let file = w.root.join("src/main.kh");
+    let column = main.lines().nth(2).expect("a line").rfind("count").expect("the use") as u32 + 1;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, main),
+        definition(&file, 2, column, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2);
+    assert_eq!(found.pointer("/range/start/line"), Some(&json!(2)), "{found}");
+    let start = found.pointer("/range/start/character").and_then(Value::as_i64).expect("a column");
+    assert_eq!(start, 6, "the parameter, at `count` in the signature: {found}");
 }

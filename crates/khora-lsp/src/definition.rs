@@ -17,12 +17,29 @@
 //! functions, types, traits, effects, contexts, constants, and a constructor
 //! by way of the type that declares it.
 //!
-//! **Locals are deliberately not here.** `x` in `let x = 1; x + 1` resolves in
-//! a body rather than in the module, and jumping to a binding three lines up is
-//! the case where the answer is already on the screen. It is also the case
-//! where getting it wrong is most visible. `Body` records what would be needed
-//! and 14.8 wants the same information for rename, so this is a gap to fill
-//! once rather than twice.
+//! **Locals are here too**, and are a different question with a different
+//! answer. A local resolves in a body rather than in the module, so
+//! `resolve_path` never sees it — but `Body` already records a range per
+//! binding and an `Expr::Local(id)` per use, which is everything a definition,
+//! a reference list and a rename need. [`local_at`] is that lookup, and it is
+//! shared: 14.8 asks it the same question with a different answer in mind.
+//!
+//! # The order the three lookups run in, which is load-bearing
+//!
+//! 1. A **use** of a local: `Expr::Local` carries the binding's id, and its
+//!    range is one name.
+//! 2. A **path**, resolved against the module graph.
+//! 3. A **binding**: a `let`, or a parameter.
+//!
+//! Binding last, and that is not arbitrary. A parameter's range covers its
+//! annotation as well as its name — `p: shapes::Point` entire — so a binding
+//! check that ran first would answer "the parameter `p`" for a cursor on
+//! `Point`, and go-to-definition on a type in a signature would land three
+//! characters to the left instead of in another file. Paths are narrower and
+//! go first.
+//!
+//! Within that, **a local shadows an item**, which is what shadowing means
+//! everywhere else in the language.
 //!
 //! **A method is answered by its trait, not by its `impl`.** `khora_hir` does
 //! not collect impl members — `collect_decl` returns early on `Decl::Impl`,
@@ -45,19 +62,122 @@ pub struct Definition {
     pub range: TextRange,
 }
 
+/// A local binding, and every place in its body that names it.
+///
+/// One structure for definition, references and rename, because all three want
+/// the same set: for a definition it is `binding`, for references it is `uses`,
+/// and for a rename it is both — a rename that edited the uses and left the
+/// `let` alone would produce a program that does not compile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalBinding {
+    /// What it is called, which a rename has to be given a new value for.
+    pub name: String,
+    /// Where it was introduced: a `let`, a parameter, or a pattern binding.
+    pub binding: TextRange,
+    /// Every `Expr::Local` naming it, in the order they were lowered.
+    pub uses: Vec<TextRange>,
+}
+
+impl LocalBinding {
+    /// The binding and its uses together, which is what a rename edits.
+    pub fn everywhere(&self) -> Vec<TextRange> {
+        let mut all = Vec::with_capacity(self.uses.len() + 1);
+        all.push(self.binding);
+        all.extend(self.uses.iter().copied());
+        all.sort_by_key(|r| r.start());
+        all.dedup();
+        all
+    }
+}
+
+/// The local named at `offset`, whether the cursor is on a use or the binding.
+///
+/// **Both ends, because a rename is asked for from either.** Somebody renaming
+/// `total` is as likely to have the cursor on the `let` as on one of the uses,
+/// and a lookup that only understood uses would refuse the more natural of the
+/// two.
+///
+/// Bodies are searched in order and the first hit wins. A body's ranges do not
+/// overlap another's — a function is one body — so there is no ambiguity to
+/// resolve, only a scan to stop early.
+/// A local named by a *use* at `offset`.
+///
+/// The narrow half, and the one that runs before paths: an `Expr::Local`'s
+/// range is a single name, so a hit here is unambiguous.
+pub fn local_use_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<LocalBinding> {
+    for (_, body) in khora_hir::body::bodies(db, file) {
+        let found = body.exprs().find_map(|(id, expr)| match expr {
+            khora_hir::body::Expr::Local(local) if body.range(id).contains_inclusive(offset) => {
+                Some(*local)
+            }
+            _ => None,
+        });
+        if let Some(local) = found {
+            return Some(gather(body, local));
+        }
+    }
+    None
+}
+
+/// A local named by its *binding* at `offset`.
+///
+/// **The wide half, and it must run after paths.** A parameter's range is the
+/// whole pattern including its annotation, so `p: shapes::Point` answers to a
+/// cursor anywhere in it — including on `Point`, which is a different question
+/// with an answer in another file.
+pub fn local_binding_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<LocalBinding> {
+    for (_, body) in khora_hir::body::bodies(db, file) {
+        // The narrowest, so an annotation mentioning a type does not beat a
+        // binding written inside it.
+        let found = body
+            .locals()
+            .filter(|(_, local)| local.range.contains_inclusive(offset))
+            .min_by_key(|(_, local)| local.range.len())
+            .map(|(id, _)| id);
+        if let Some(local) = found {
+            return Some(gather(body, local));
+        }
+    }
+    None
+}
+
+/// The binding and every use of one local.
+fn gather(body: &khora_hir::body::Body, local: khora_hir::body::LocalId) -> LocalBinding {
+    let declared = body.local(local);
+    let uses = body
+        .exprs()
+        .filter(|(_, expr)| matches!(expr, khora_hir::body::Expr::Local(l) if *l == local))
+        .map(|(id, _)| body.range(id))
+        .collect();
+    LocalBinding { name: declared.name.clone(), binding: declared.range, uses }
+}
+
 /// The declaration named by whatever is at `offset`, if that is a path.
 pub fn at(db: &dyn Db, root: SourceRoot, file: SourceFile, offset: TextSize) -> Option<Definition> {
+    // A use of a local shadows an item, and is narrower than either.
+    if let Some(local) = local_use_at(db, file, offset) {
+        return Some(Definition { file, range: local.binding });
+    }
+
     let tree = khora_db::parse(db, file).syntax();
-    let path = path_at(&tree, offset)?;
+    let Some(path) = path_at(&tree, offset) else {
+        // No path: a binding is the remaining reading, and the cursor may be
+        // sitting on the `let` or the parameter name itself.
+        return local_binding_at(db, file, offset)
+            .map(|local| Definition { file, range: local.binding });
+    };
 
     // **Up to and including the segment under the cursor**, not the whole path.
     // In `std::core::print`, clicking `core` should reach the module and
     // clicking `print` the function, and truncating is the whole of the
     // difference between those two answers.
-    let segments = segments_through(&path, offset)?;
-    let resolution = khora_hir::resolve_path(db, root, file, &segments).ok()?;
+    let by_path = segments_through(&path, offset)
+        .and_then(|segments| khora_hir::resolve_path(db, root, file, &segments).ok())
+        .and_then(|resolution| locate(db, root, &resolution));
 
-    locate(db, root, &resolution)
+    by_path.or_else(|| {
+        local_binding_at(db, file, offset).map(|local| Definition { file, range: local.binding })
+    })
 }
 
 /// The innermost `PATH` covering `offset`.

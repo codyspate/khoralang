@@ -22,17 +22,22 @@
 //!
 //! # What it answers
 //!
-//! Diagnostics, hover, formatting, and go to definition. All of them come from
-//! things that already existed: `khora_db::parse`, `khora_types::diagnostics`,
-//! `khora_lint::findings`, the checker's `BodyTypes`, `khora_fmt`, and
-//! `khora_hir::resolve_path`. Completion, rename and capability inlay hints are
-//! the roadmap's list and are not here — a half-answering completion is worse
-//! than none.
+//! Diagnostics, hover, formatting, go to definition, find references, rename,
+//! and symbols. All of them come from things that already existed:
+//! `khora_db::parse`, `khora_types::diagnostics`, `khora_lint::findings`, the
+//! checker's `BodyTypes`, `khora_fmt`, `khora_hir::resolve_path` and
+//! `khora_hir::item_map`.
+//!
+//! **Rename covers locals only**, and refuses a declaration with a reason
+//! rather than editing one badly — `references` has the argument. Completion
+//! and capability inlay hints are not here at all.
 
 #![deny(missing_docs)]
 
 mod definition;
 mod position;
+mod references;
+mod symbols;
 mod transport;
 
 use std::collections::HashMap;
@@ -119,6 +124,27 @@ impl Server {
             ("textDocument/definition", Some(id)) => {
                 vec![ok(id, self.definition(&params).unwrap_or(Value::Null))]
             }
+            ("textDocument/references", Some(id)) => {
+                vec![ok(id, self.references(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/documentSymbol", Some(id)) => {
+                vec![ok(id, self.document_symbols(&params).unwrap_or(Value::Null))]
+            }
+            ("workspace/symbol", Some(id)) => {
+                vec![ok(id, self.workspace_symbols(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/prepareRename", Some(id)) => match self.prepare_rename(&params) {
+                Ok(value) => vec![ok(id, value)],
+                // **A refusal, not an empty answer.** `null` from
+                // `prepareRename` makes VS Code say "the element can't be
+                // renamed" with no reason; an error carries the sentence
+                // explaining which part is missing.
+                Err(why) => vec![error(id, -32803, &why)],
+            },
+            ("textDocument/rename", Some(id)) => match self.rename(&params) {
+                Ok(value) => vec![ok(id, value)],
+                Err(why) => vec![error(id, -32803, &why)],
+            },
             ("exit", _) => {
                 self.finished = true;
                 Vec::new()
@@ -175,6 +201,16 @@ impl Server {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                // `prepareProvider`, so an editor asks before it opens the box
+                // and hears the refusal as a message rather than as an edit
+                // that does nothing.
+                rename_provider: Some(OneOf::Right(lsp_types::RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -370,6 +406,162 @@ impl Server {
                 end: target_index.position(found.range.end(), self.encoding),
             },
         }))
+    }
+
+    /// Every mention of the thing under the cursor.
+    fn references(&self, params: &Value) -> Option<Value> {
+        let (file, offset) = self.locate(params)?;
+        let root = khora_db::source_root(&self.db)?;
+        let include = params
+            .pointer("/context/includeDeclaration")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+
+        let found = references::at(&self.db, root, file, offset, include)?;
+        let mut out = Vec::new();
+        for (each, ranges) in found.sites {
+            let index = LineIndex::new(each.text(&self.db));
+            let Ok(url) = Url::from_file_path(each.path(&self.db)) else { continue };
+            for range in ranges {
+                out.push(json!({
+                    "uri": url.as_str(),
+                    "range": Range {
+                        start: index.position(range.start(), self.encoding),
+                        end: index.position(range.end(), self.encoding),
+                    },
+                }));
+            }
+        }
+        Some(Value::Array(out))
+    }
+
+    /// Whether a rename may proceed, and over what.
+    fn prepare_rename(&self, params: &Value) -> Result<Value, String> {
+        let Some((file, offset)) = self.locate(params) else {
+            return Ok(Value::Null);
+        };
+        let Some(root) = khora_db::source_root(&self.db) else { return Ok(Value::Null) };
+        let url = url_of(params).ok_or_else(|| "no document".to_string())?;
+        let index = self.lines.get(&url).ok_or_else(|| "that file is not open".to_string())?;
+
+        match references::renameable(&self.db, root, file, offset) {
+            references::Renameable::Local { name, ranges } => {
+                // The range under the cursor is what the editor pre-fills.
+                let here = ranges
+                    .iter()
+                    .find(|r| r.contains_inclusive(offset))
+                    .copied()
+                    .unwrap_or_else(|| ranges[0]);
+                Ok(json!({
+                    "range": Range {
+                        start: index.position(here.start(), self.encoding),
+                        end: index.position(here.end(), self.encoding),
+                    },
+                    "placeholder": name,
+                }))
+            }
+            references::Renameable::Refused(why) => Err(why.to_string()),
+            references::Renameable::Nothing => Ok(Value::Null),
+        }
+    }
+
+    /// The edits a rename would make.
+    fn rename(&self, params: &Value) -> Result<Value, String> {
+        let new_name =
+            params.get("newName").and_then(Value::as_str).ok_or("no new name given")?;
+        let Some((file, offset)) = self.locate(params) else { return Ok(Value::Null) };
+        let Some(root) = khora_db::source_root(&self.db) else { return Ok(Value::Null) };
+        let url = url_of(params).ok_or_else(|| "no document".to_string())?;
+        let index = self.lines.get(&url).ok_or_else(|| "that file is not open".to_string())?;
+        let _ = file;
+
+        match references::renameable(&self.db, root, file, offset) {
+            references::Renameable::Local { ranges, .. } => {
+                let edits: Vec<Value> = ranges
+                    .iter()
+                    .map(|range| {
+                        json!({
+                            "range": Range {
+                                start: index.position(range.start(), self.encoding),
+                                end: index.position(range.end(), self.encoding),
+                            },
+                            "newText": new_name,
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "changes": { url.as_str(): edits } }))
+            }
+            references::Renameable::Refused(why) => Err(why.to_string()),
+            references::Renameable::Nothing => Ok(Value::Null),
+        }
+    }
+
+    /// The outline of one file.
+    fn document_symbols(&self, params: &Value) -> Option<Value> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let index = LineIndex::new(file.text(&self.db));
+
+        let out: Vec<Value> = symbols::in_file(&self.db, file)
+            .into_iter()
+            .map(|symbol| {
+                let range = Range {
+                    start: index.position(symbol.range.start(), self.encoding),
+                    end: index.position(symbol.range.end(), self.encoding),
+                };
+                json!({
+                    "name": symbol.name,
+                    "kind": symbol.kind,
+                    "range": range,
+                    // The same range for both: `selectionRange` must be inside
+                    // `range`, and the name has no range of its own to use.
+                    "selectionRange": range,
+                })
+            })
+            .collect();
+        Some(Value::Array(out))
+    }
+
+    /// Everything in the workspace matching a query.
+    fn workspace_symbols(&self, params: &Value) -> Option<Value> {
+        let root = khora_db::source_root(&self.db)?;
+        let query = params.get("query").and_then(Value::as_str).unwrap_or_default();
+
+        let mut out = Vec::new();
+        for (file, symbol) in symbols::in_workspace(&self.db, root, query) {
+            let Ok(url) = Url::from_file_path(file.path(&self.db)) else { continue };
+            let index = LineIndex::new(file.text(&self.db));
+            out.push(json!({
+                "name": symbol.name,
+                "kind": symbol.kind,
+                // The module, so a picker showing three `parse`s says which is
+                // which without the reader opening all three.
+                "containerName": symbol.module.map(|m| m.to_string()),
+                "location": {
+                    "uri": url.as_str(),
+                    "range": Range {
+                        start: index.position(symbol.range.start(), self.encoding),
+                        end: index.position(symbol.range.end(), self.encoding),
+                    },
+                },
+            }));
+        }
+        Some(Value::Array(out))
+    }
+
+    /// The file and byte offset a positional request is about.
+    ///
+    /// Every one of them needs the same three lookups, and doing it in one
+    /// place is what keeps a new request from getting the encoding wrong.
+    fn locate(&self, params: &Value) -> Option<(SourceFile, text_size::TextSize)> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let index = self.lines.get(&url)?;
+        let position: lsp_types::Position =
+            serde_json::from_value(params.get("position")?.clone()).ok()?;
+        Some((file, index.offset(position, self.encoding)))
     }
 
     /// The whole file, formatted, as one edit.
