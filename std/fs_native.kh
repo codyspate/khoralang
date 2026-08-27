@@ -1,6 +1,6 @@
 module std::fs;
 
-import std::core::{Array, Ptr, Region, Scope, acquire};
+import std::core::{Array, Option, Ptr, Region, Scope, acquire};
 
 //! The file system, over ISO C.
 //!
@@ -45,21 +45,79 @@ pub type IoError =
 /// nothing but this module could construct — and an effect whose operations
 /// only the real implementation can satisfy is not a seam, it is a wrapper.
 /// Streaming will want one and can have its own effect when something needs it.
+///
+/// **Every operation here is one a test double has to write**, which is the
+/// standing argument against adding another. These seven are the ones a
+/// program cannot do without and cannot build out of the others: reading and
+/// writing are the two halves, appending is not a read-then-write because two
+/// writers would lose each other's bytes, and removing, renaming, asking
+/// whether something is there and asking how big it is each reach the file
+/// system without touching a file's contents at all.
+///
+/// Copying is *not* here, because it is `read` then `write` and nothing is
+/// gained by letting a handler disagree. It is a function below.
 pub effect Fs {
   read: (String) -> Array<U8> raises IoError,
   write: (String, Array<U8>) -> () raises IoError,
+  /// Adds to the end, creating the file when it is not there.
+  append: (String, Array<U8>) -> () raises IoError,
+  /// Deletes a file. Not a directory — `rmdir` is a different call and this
+  /// module does not have it yet.
+  remove: (String) -> () raises IoError,
+  /// Moves or renames. Across file systems C's `rename` fails rather than
+  /// copying, and that failure is reported rather than papered over.
+  rename: (String, String) -> () raises IoError,
+  /// Whether the path can be opened for reading.
+  ///
+  /// **Not "whether it exists".** ISO C has no `stat`, so the only portable
+  /// question is whether `fopen` succeeds, and a file that is there but
+  /// unreadable answers `false`. The name says `exists` because that is what
+  /// callers mean; this comment is where the difference is kept honest, and a
+  /// caller that needs the distinction wants a permissions API rather than
+  /// this one.
+  exists: (String) -> Bool,
+  /// How many bytes the file holds.
+  size: (String) -> Int raises IoError,
 }
 
 impl Fs {
   /// The real file system.
   ///
-  /// Everything else in this module exists so that this is three lines.
+  /// Everything else in this module exists so that this is short.
   pub fn real() -> Fs {
     handler for Fs {
       read: fn path => read_whole(path)!,
       write: fn (path, bytes) => write_whole(path, bytes)!,
+      append: fn (path, bytes) => append_whole(path, bytes)!,
+      remove: fn path => remove_file(path)!,
+      rename: fn (from, to) => rename_file(from, to)!,
+      exists: fn path => can_open(path),
+      size: fn path => size_of_path(path)!,
     }
   }
+}
+
+/// Copies a file, replacing the destination.
+///
+/// Read then write, deliberately: it is not an operation of `Fs` because a
+/// handler that implemented it differently from its own `read` and `write`
+/// would be lying about itself, and a test double would have to write a third
+/// thing that agreed with the other two.
+///
+/// The whole file passes through memory, which is the same limit `read` has.
+pub fn copy(from: String, to: String) -> ()
+  with { fs: Fs }
+  raises IoError
+{
+  fs.write(to, fs.read(from)!)!
+}
+
+/// Adds text to the end of a file, creating it when it is not there.
+pub fn append_text(path: String, text: String) -> ()
+  with { fs: Fs }
+  raises IoError
+{
+  fs.append(path, String::bytes(text))!
 }
 
 /// Writes text to a file, replacing whatever was there.
@@ -92,6 +150,109 @@ pub fn read_text(path: String) -> String
 }
 
 // ---------------------------------------------------------------------------
+// Paths, which are strings and need no capability
+// ---------------------------------------------------------------------------
+//
+// A path is text until something opens it, so none of this belongs in the
+// effect: joining two names reaches nothing and a test that installs a mock
+// `Fs` should not have to mock string handling too.
+//
+// **Both separators are separators.** Windows accepts `/` everywhere and
+// splits on either, so reading treats `\\` and `/` alike and writing always
+// emits `/` — one rule, and the one that works on all three platforms.
+
+/// Joins two path pieces with a single separator.
+///
+/// An empty base is `child`, so folding over a list of segments needs no
+/// special first step.
+pub fn join(base: String, child: String) -> String {
+  if String::byte_length(base) == 0 {
+    child
+  } else if ends_with_separator(base) {
+    "${base}${child}"
+  } else {
+    "${base}/${child}"
+  }
+}
+
+/// Everything before the last separator, or `None` for a bare name.
+pub fn parent(path: String) -> Option<String> {
+  match last_separator(path) {
+    Option::None => Option::None,
+    Option::Some(at) => Option::Some(String::slice(path, 0, at)),
+  }
+}
+
+/// Everything after the last separator, which is the whole path when there is
+/// none.
+pub fn file_name(path: String) -> String {
+  match last_separator(path) {
+    Option::None => path,
+    Option::Some(at) => String::slice(path, at + 1, String::byte_length(path)),
+  }
+}
+
+/// The extension of the last component, without its dot.
+///
+/// `None` for a name with no dot, and for a leading dot — `.gitignore` is a
+/// name rather than an extension, which is the rule every other language
+/// settled on the hard way.
+pub fn extension(path: String) -> Option<String> {
+  let name = file_name(path);
+  match last_dot(name) {
+    Option::None => Option::None,
+    Option::Some(at) =>
+    if at == 0 {
+      Option::None
+    } else {
+      Option::Some(String::slice(name, at + 1, String::byte_length(name)))
+    },
+  }
+}
+
+/// The last component without its extension.
+pub fn stem(path: String) -> String {
+  let name = file_name(path);
+  match last_dot(name) {
+    Option::None => name,
+    Option::Some(at) => if at == 0 { name } else { String::slice(name, 0, at) },
+  }
+}
+
+/// The index of the last `/` or `\\`.
+fn last_separator(path: String) -> Option<Int> {
+  last_byte_of(path, String::byte_length(path) - 1, fn b => is_separator(b))
+}
+
+/// The index of the last `.`.
+fn last_dot(name: String) -> Option<Int> {
+  last_byte_of(name, String::byte_length(name) - 1, fn b => b == 46)
+}
+
+/// Walks back from `at` for the last byte `wanted` accepts.
+///
+/// Backwards rather than forwards because every caller wants the *last* one,
+/// and `String::find` only goes the other way.
+fn last_byte_of(text: String, at: Int, wanted: (U8) -> Bool) -> Option<Int> {
+  if at < 0 {
+    Option::None
+  } else if wanted(String::byte(text, at)) {
+    Option::Some(at)
+  } else {
+    last_byte_of(text, at - 1, wanted)
+  }
+}
+
+fn is_separator(byte: U8) -> Bool {
+  byte == 47 || byte == 92
+}
+
+fn ends_with_separator(text: String) -> Bool {
+  let length = String::byte_length(text);
+  if length == 0 { false } else { is_separator(String::byte(text, length - 1)) }
+}
+
+// ---------------------------------------------------------------------------
 // ISO C
 // ---------------------------------------------------------------------------
 //
@@ -109,6 +270,13 @@ extern fn khora_fs_open(path: Ptr, mode: Ptr) -> Ptr;
 extern fn khora_fs_read(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
 extern fn khora_fs_write(from: Ptr, size: Int, count: Int, file: Ptr) -> Int;
 extern fn khora_fs_close(file: Ptr) -> I32;
+
+// `remove` and `rename` are ISO C too, and they reach a disk, so they take the
+// same route off the worker. Both answer zero for success and non-zero for
+// failure, and neither says why in a way that is portable -- which is the
+// reason `IoError` is two cases rather than an errno.
+extern fn khora_fs_remove(path: Ptr) -> I32;
+extern fn khora_fs_rename(from: Ptr, to: Ptr) -> I32;
 
 // These two stay direct. They adjust a buffer rather than reach a disk in the
 // ordinary case, and both deal in C's `long` — thirty-two bits on Windows and
@@ -176,6 +344,70 @@ fn read_whole(path: String) -> Array<U8> raises IoError {
         let read = Array::with_data(bytes, fn (into, n) => khora_fs_read(into, 1, n, file));
         if read == size { bytes } else { raise IoError::Failed(path) }
       }
+    }
+  }
+}
+
+/// Whether `path` opens for reading.
+///
+/// The file is closed again immediately; this asks a question rather than
+/// keeping an answer. `acquire` is not used because there is no failure path
+/// between the open and the close for a finalizer to cover.
+fn can_open(path: String) -> Bool {
+  let file = open(path, "rb");
+  if Ptr::is_null(file) {
+    false
+  } else {
+    close(file);
+    true
+  }
+}
+
+/// How many bytes are in the file at `path`.
+fn size_of_path(path: String) -> Int raises IoError {
+  let region = Region::open();
+  with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
+    let file = acquire(open(path, "rb"), fn f => close(f));
+    if Ptr::is_null(file) {
+      raise IoError::NotFound(path)
+    } else {
+      let size = size_of(file);
+      if size < 0 { raise IoError::Failed(path) } else { size }
+    }
+  }
+}
+
+/// Deletes `path`.
+fn remove_file(path: String) -> () raises IoError {
+  let answer = String::with_c_string(path, fn p => khora_fs_remove(p));
+  if answer == I32::of(0) {} else { raise IoError::Failed(path) }
+}
+
+/// Moves `from` to `to`.
+///
+/// The error names `from`, because that is the path the caller is most likely
+/// to have got wrong and the one a message reads best about.
+fn rename_file(from: String, to: String) -> () raises IoError {
+  let answer =
+  String::with_c_string(from, fn f => String::with_c_string(to, fn t => khora_fs_rename(f, t)));
+  if answer == I32::of(0) {} else { raise IoError::Failed(from) }
+}
+
+/// Adds to the end of a file, creating it when it is not there.
+///
+/// `"ab"` rather than `"wb"`, which is the whole difference: the C library
+/// positions every write at the end, so two appenders interleave records
+/// instead of overwriting each other.
+fn append_whole(path: String, bytes: Array<U8>) -> () raises IoError {
+  let region = Region::open();
+  with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
+    let file = acquire(open(path, "ab"), fn f => close(f));
+    if Ptr::is_null(file) {
+      raise IoError::Failed(path)
+    } else {
+      let count = Array::length(bytes);
+      let written = Array::with_data(bytes, fn (from, n) => khora_fs_write(from, 1, n, file));
+      if written == count {} else { raise IoError::Failed(path) }
     }
   }
 }

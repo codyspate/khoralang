@@ -22,6 +22,15 @@
 //!
 //! Copied once per test *run* rather than once per test: the archive is tens
 //! of megabytes.
+//!
+//! **And re-copied when the real one is newer**, which it was not until the
+//! runtime grew a symbol. `std::fs` gained `remove` and `rename`, `khora-rt`
+//! gained the shims they call, and every test holding the old pin failed to
+//! link with `undefined symbol: khora_fs_remove` -- naming a function that
+//! exists, in a file that declares it, against an archive from before it was
+//! written. The pin was decided by whether the copy existed, so it never
+//! expired. This is the same mtime test errata 51 gave the code generation
+//! harness, for the same reason.
 
 use std::path::PathBuf;
 
@@ -31,7 +40,7 @@ pub fn runtime() -> Option<PathBuf> {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pinned-rt");
     std::fs::create_dir_all(&directory).ok()?;
     let pinned = directory.join(real.file_name()?);
-    if pinned.is_file() {
+    if is_current(&pinned, &real) {
         return Some(pinned);
     }
     // Written under a temporary name and renamed, so two test processes
@@ -42,6 +51,19 @@ pub fn runtime() -> Option<PathBuf> {
         let _ = std::fs::remove_file(&staged);
     }
     pinned.is_file().then_some(pinned)
+}
+
+/// Whether the copy is at least as new as what it was copied from.
+///
+/// Errs towards re-copying: a timestamp that cannot be read is treated as out
+/// of date, because copying tens of megabytes again is cheaper than a link
+/// error that names the wrong culprit.
+fn is_current(pinned: &std::path::Path, real: &std::path::Path) -> bool {
+    let stamp = |path: &std::path::Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    match (stamp(pinned), stamp(real)) {
+        (Some(copy), Some(source)) => copy >= source,
+        _ => false,
+    }
 }
 
 /// The archive `khora build` would have found on its own.

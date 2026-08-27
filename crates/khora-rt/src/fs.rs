@@ -44,6 +44,8 @@ unsafe extern "C" {
     fn fread(into: *mut u8, size: usize, count: usize, file: *mut c_void) -> usize;
     fn fwrite(from: *const u8, size: usize, count: usize, file: *mut c_void) -> usize;
     fn fclose(file: *mut c_void) -> i32;
+    fn remove(path: *const u8) -> i32;
+    fn rename(from: *const u8, to: *const u8) -> i32;
 }
 
 /// `fopen`, off the worker.
@@ -125,6 +127,35 @@ pub unsafe extern "C" fn khora_fs_close(file: *mut c_void) -> i32 {
     // SAFETY: the handle belongs to a suspended fiber and is not closed twice
     // — `std::fs` checks for null and drops its reference after this returns.
     blocking(move || unsafe { fclose(file as *mut c_void) })
+}
+
+/// `remove`, off the worker.
+///
+/// A directory entry disappearing is a write to the directory, so it reaches
+/// the disk and blocks like the rest of them.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated string that stays valid until this returns,
+/// which it does because its owner is the fiber suspended for the whole call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_remove(path: *const u8) -> i32 {
+    let path = path as usize;
+    // SAFETY: the string belongs to a suspended fiber, which cannot free it or
+    // hand it to another fiber before this returns.
+    blocking(move || unsafe { remove(path as *const u8) })
+}
+
+/// `rename`, off the worker.
+///
+/// # Safety
+///
+/// Both paths must be NUL-terminated strings valid for the call, as above.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_rename(from: *const u8, to: *const u8) -> i32 {
+    let (from, to) = (from as usize, to as usize);
+    // SAFETY: as above, for both strings.
+    blocking(move || unsafe { rename(from as *const u8, to as *const u8) })
 }
 
 #[cfg(test)]

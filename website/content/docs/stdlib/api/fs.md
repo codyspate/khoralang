@@ -53,6 +53,11 @@ file.
 pub effect Fs {
   read: (String) -> Array<U8> raises IoError,
   write: (String, Array<U8>) -> () raises IoError,
+  append: (String, Array<U8>) -> () raises IoError,
+  remove: (String) -> () raises IoError,
+  rename: (String, String) -> () raises IoError,
+  exists: (String) -> Bool,
+  size: (String) -> Int raises IoError,
 }
 ```
 
@@ -63,7 +68,41 @@ nothing but this module could construct — and an effect whose operations
 only the real implementation can satisfy is not a seam, it is a wrapper.
 Streaming will want one and can have its own effect when something needs it.
 
+**Every operation here is one a test double has to write**, which is the
+standing argument against adding another. These seven are the ones a
+program cannot do without and cannot build out of the others: reading and
+writing are the two halves, appending is not a read-then-write because two
+writers would lose each other's bytes, and removing, renaming, asking
+whether something is there and asking how big it is each reach the file
+system without touching a file's contents at all.
+
+Copying is *not* here, because it is `read` then `write` and nothing is
+gained by letting a handler disagree. It is a function below.
+
 ## Functions
+
+### copy
+
+```khora
+pub fn copy(from: String, to: String) ->() with { fs: Fs } raises IoError
+```
+
+Copies a file, replacing the destination.
+
+Read then write, deliberately: it is not an operation of `Fs` because a
+handler that implemented it differently from its own `read` and `write`
+would be lying about itself, and a test double would have to write a third
+thing that agreed with the other two.
+
+The whole file passes through memory, which is the same limit `read` has.
+
+### append_text
+
+```khora
+pub fn append_text(path: String, text: String) ->() with { fs: Fs } raises IoError
+```
+
+Adds text to the end of a file, creating it when it is not there.
 
 ### write_text
 
@@ -88,4 +127,52 @@ The bytes of a file, as text.
 A convenience over `read`, and the reason `Fs` traffics in bytes rather
 than strings: a file is bytes, and whether they are text is a question with
 a wrong answer. This one takes the optimistic view and is named for it.
+
+### join
+
+```khora
+pub fn join(base: String, child: String) -> String
+```
+
+Joins two path pieces with a single separator.
+
+An empty base is `child`, so folding over a list of segments needs no
+special first step.
+
+### parent
+
+```khora
+pub fn parent(path: String) -> Option<String>
+```
+
+Everything before the last separator, or `None` for a bare name.
+
+### file_name
+
+```khora
+pub fn file_name(path: String) -> String
+```
+
+Everything after the last separator, which is the whole path when there is
+none.
+
+### extension
+
+```khora
+pub fn extension(path: String) -> Option<String>
+```
+
+The extension of the last component, without its dot.
+
+`None` for a name with no dot, and for a leading dot — `.gitignore` is a
+name rather than an extension, which is the rule every other language
+settled on the hard way.
+
+### stem
+
+```khora
+pub fn stem(path: String) -> String
+```
+
+The last component without its extension.
 

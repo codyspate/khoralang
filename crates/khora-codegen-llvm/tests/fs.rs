@@ -60,7 +60,7 @@ fn run(name: &str, main: &str) -> Ran {
 
 const HEAD: &str = "module demo::main;
 import std::core::{Array, Option, Result, attempt};
-import std::fs::{Fs, IoError, read_text};
+import std::fs::{Fs, IoError, append_text, copy, read_text, write_text};
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -189,6 +189,11 @@ fn main() -> Int {{
   with {{ fs: handler for Fs {{
     read: fn path => String::bytes(\"pretend\"),
     write: fn (path, bytes) => (),
+    append: fn (path, bytes) => (),
+    remove: fn path => (),
+    rename: fn (from, to) => (),
+    exists: fn path => true,
+    size: fn path => 7,
   }} }} {{
     khora_print_int(work()! catch {{
       IoError::NotFound(p) => 0 - 1,
@@ -240,4 +245,193 @@ fn main() -> Int {
         messages.iter().any(|m| m.contains("fs")),
         "expected the missing capability to be named, got {messages:?}"
     );
+}
+
+// --- the rest of the surface -----------------------------------------------
+//
+// Each of these puts the work in a function with a `raises` row and catches
+// the call, rather than wrapping the `with` block in a `catch`: a `with`
+// block is block-like, so a trailing `catch` is a separate statement and does
+// not attach to it -- the same rule that lets `if c { .. }` stand without a
+// semicolon.
+
+/// `append` adds rather than replacing, which is the whole reason it is an
+/// operation instead of a read followed by a write.
+#[test]
+fn append_adds_to_the_end() {
+    let ran = run(
+        "fs_append",
+        &format!(
+            "{HEAD}
+fn work() -> () with {{ fs: Fs }} raises IoError {{
+  let path = \"@DIR@/notes.txt\";
+  write_text(path, \"one\\n\")!;
+  append_text(path, \"two\\n\")!;
+  append_text(path, \"three\\n\")!;
+  print(read_text(path)!);
+}}
+
+fn main() -> Int {{
+  with {{ fs: Fs::real() }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "one\ntwo\nthree\n\n", "three appends, in order");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `size` is the byte count, and `exists` distinguishes a file from nothing.
+#[test]
+fn size_and_exists_answer_about_a_real_file() {
+    let ran = run(
+        "fs_size_exists",
+        &format!(
+            "{HEAD}
+fn yes_no(b: Bool) -> String {{ if b {{ \"yes\" }} else {{ \"no\" }} }}
+
+fn work() -> () with {{ fs: Fs }} raises IoError {{
+  let path = \"@DIR@/sized.txt\";
+  write_text(path, \"12345\")!;
+  print(Int::to_string(fs.size(path)!));
+  print(yes_no(fs.exists(path)));
+  print(yes_no(fs.exists(\"@DIR@/never-written.txt\")));
+}}
+
+fn main() -> Int {{
+  with {{ fs: Fs::real() }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "5\nyes\nno\n", "five bytes, present, absent");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `rename` moves: the old name stops answering and the new one starts, and
+/// the bytes are the ones that were written.
+#[test]
+fn rename_moves_the_bytes() {
+    let ran = run(
+        "fs_rename",
+        &format!(
+            "{HEAD}
+fn yes_no(b: Bool) -> String {{ if b {{ \"yes\" }} else {{ \"no\" }} }}
+
+fn work() -> () with {{ fs: Fs }} raises IoError {{
+  let from = \"@DIR@/before.txt\";
+  let to = \"@DIR@/after.txt\";
+  write_text(from, \"carried\")!;
+  fs.rename(from, to)!;
+  print(yes_no(fs.exists(from)));
+  print(yes_no(fs.exists(to)));
+  print(read_text(to)!);
+}}
+
+fn main() -> Int {{
+  with {{ fs: Fs::real() }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "no\nyes\ncarried\n", "gone from one name, present under the other");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `remove` deletes, and removing what is not there fails rather than passing
+/// quietly -- a caller wanting "delete if present" asks `exists` first, and
+/// one that cannot tell the difference has a bug.
+#[test]
+fn remove_deletes_and_refuses_what_is_absent() {
+    let ran = run(
+        "fs_remove",
+        &format!(
+            "{HEAD}
+fn yes_no(b: Bool) -> String {{ if b {{ \"yes\" }} else {{ \"no\" }} }}
+
+fn work() -> () with {{ fs: Fs }} raises IoError {{
+  let path = \"@DIR@/doomed.txt\";
+  write_text(path, \"x\")!;
+  fs.remove(path)!;
+  print(yes_no(fs.exists(path)));
+}}
+
+fn again() -> () with {{ fs: Fs }} raises IoError {{
+  fs.remove(\"@DIR@/doomed.txt\")!;
+}}
+
+fn main() -> Int {{
+  with {{ fs: Fs::real() }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+    again()! catch {{
+      IoError::NotFound(p) => print(\"refused\"),
+      IoError::Failed(p) => print(\"refused\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "no\nrefused\n", "deleted, and deleting it again is refused");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// `copy` is `read` then `write` and is deliberately not an operation of the
+/// effect, so a double that answers those two gets a working `copy` for
+/// nothing. That is the argument for it being a function, tested rather than
+/// asserted.
+#[test]
+fn copy_goes_through_read_and_write() {
+    let ran = run(
+        "fs_copy",
+        &format!(
+            "{HEAD}
+fn work() -> () with {{ fs: Fs }} raises IoError {{
+  copy(\"a\", \"b\")!;
+}}
+
+fn main() -> Int {{
+  with {{ fs: handler for Fs {{
+    read: fn path => String::bytes(\"from the double\"),
+    write: fn (path, bytes) => print(String::from_bytes(bytes)),
+    append: fn (path, bytes) => (),
+    remove: fn path => (),
+    rename: fn (from, to) => (),
+    exists: fn path => true,
+    size: fn path => 0,
+  }} }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "from the double\n", "what `read` gave is what `write` got");
+    assert_eq!(ran.code, Some(0));
 }
