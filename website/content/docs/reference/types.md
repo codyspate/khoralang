@@ -266,4 +266,4 @@ pub type Lookup =
   | Missing;
 ```
 
-See [Declarations](./declarations.md) for visibility, `derive`, and complete declaration forms; see [Generics](./generics.md) for bounds, const parameters, variance, and polymorphism.
+See [Declarations](./declarations/) for visibility, `derive`, and complete declaration forms; see [Generics](./generics/) for bounds, const parameters, variance, and polymorphism.
