@@ -151,7 +151,7 @@ Integer literals can appear as const type arguments:
 let transform: Matrix<Float, 4, 4> = make_transform();
 ```
 
-This `const` is a generic parameter declaration. Module-level constants use the related but separate syntax described in [Values and functions](./values-and-functions.md#module-constants-with-const).
+This `const` is a generic parameter declaration. Module-level constants use the related but separate syntax described in [Values and functions](./values-and-functions/#module-constants-with-const).
 
 ## Failure and capability row variables
 
@@ -204,4 +204,4 @@ pub type Point = {
 };
 ```
 
-Use a handwritten `impl` when behavior is a semantic decision rather than a mechanical consequence of the fields. See [Data types](./data-types.md#deriving-structural-behavior) for the derivable set and the [Traits reference](/docs/reference/traits/) for exact forms.
+Use a handwritten `impl` when behavior is a semantic decision rather than a mechanical consequence of the fields. See [Data types](./data-types/#deriving-structural-behavior) for the derivable set and the [Traits reference](/docs/reference/traits/) for exact forms.
