@@ -236,4 +236,4 @@ This maps `Result<A, E>` to `Result<A, F>`. By contrast, `catch { ... raise F ..
 
 ## Traps are separate
 
-Arithmetic overflow, bounds failures, and other violated invariants are traps, not ordinary `raises` values. See [Traps](./traps.md).
+Arithmetic overflow, bounds failures, and other violated invariants are traps, not ordinary `raises` values. See [Traps](./traps/).
