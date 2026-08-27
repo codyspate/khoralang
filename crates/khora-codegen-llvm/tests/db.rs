@@ -110,14 +110,15 @@ fn main() -> () {{
 fn a_body_that_succeeds_commits() {
     let out = run(
         "db_commit",
-        r#"  let db = recording(false);
-  let answer = transaction(db, fn () => {
-    db.execute("insert", List::Nil);
-    Result::Ok(7)
-  });
-  match answer {
-    Result::Ok(value) => print(Int::to_string(value)),
-    Result::Err(problem) => print(problem.show()),
+        r#"  with { db: recording(false) } {
+    let answer = transaction(fn () => {
+      db.execute("insert", List::Nil);
+      Result::Ok(7)
+    });
+    match answer {
+      Result::Ok(value) => print(Int::to_string(value)),
+      Result::Err(problem) => print(problem.show()),
+    }
   }"#,
     );
     assert_eq!(out, "begin\nexecute\ncommit\n7\n");
@@ -129,15 +130,16 @@ fn a_body_that_succeeds_commits() {
 fn a_body_that_fails_rolls_back_and_does_not_commit() {
     let out = run(
         "db_rollback",
-        r#"  let db = recording(false);
-  // Annotated because the body only ever fails, so nothing says what `A` is.
-  let answer: Result<Int, DbError> = transaction(db, fn () => {
-    db.execute("insert", List::Nil);
-    Result::Err(DbError::Rejected("the invariant did not hold"))
-  });
-  match answer {
-    Result::Ok(_) => print("committed, which is wrong"),
-    Result::Err(problem) => print(problem.show()),
+        r#"  with { db: recording(false) } {
+    // Annotated because the body only ever fails, so nothing says what `A` is.
+    let answer: Result<Int, DbError> = transaction(fn () => {
+      db.execute("insert", List::Nil);
+      Result::Err(DbError::Rejected("the invariant did not hold"))
+    });
+    match answer {
+      Result::Ok(_) => print("committed, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }
   }"#,
     );
     assert_eq!(
@@ -152,11 +154,12 @@ fn a_body_that_fails_rolls_back_and_does_not_commit() {
 fn a_refused_commit_is_reported() {
     let out = run(
         "db_commit_fails",
-        r#"  let db = recording(true);
-  let answer = transaction(db, fn () => Result::Ok(1));
-  match answer {
-    Result::Ok(_) => print("succeeded, which is wrong"),
-    Result::Err(problem) => print(problem.show()),
+        r#"  with { db: recording(true) } {
+    let answer = transaction(fn () => Result::Ok(1));
+    match answer {
+      Result::Ok(_) => print("succeeded, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }
   }"#,
     );
     assert_eq!(out, "begin\ncommit\nrejected: no\n");
@@ -211,15 +214,16 @@ fn a_cancelled_fiber_rolls_back_and_does_not_commit() {
         &format!(
             r#"{CANCELLABLE}
 fn worker() -> () raises Oops {{
-  let db = recording(false);
-  transaction(db, fn () => {{
-    db.execute("insert", List::Nil);
-    khora_cancel();
-    mark()!;
-    print("the body carried on, which is wrong");
-    Result::Ok(1)
-  }})!;
-  print("the transaction returned, which is wrong");
+  with {{ db: recording(false) }} {{
+    transaction(fn () => {{
+      db.execute("insert", List::Nil);
+      khora_cancel();
+      mark()!;
+      print("the body carried on, which is wrong");
+      Result::Ok(1)
+    }})!;
+    print("the transaction returned, which is wrong");
+  }}
 }}
 "#
         ),
@@ -248,13 +252,14 @@ fn a_committed_transaction_does_not_roll_back_on_the_way_out() {
         &format!(
             r#"{CANCELLABLE}
 fn worker() -> () raises Oops {{
-  let db = recording(false);
-  match transaction(db, fn () => {{
-    mark()!;
-    Result::Ok(7)
-  }})! {{
-    Result::Ok(value) => print(Int::to_string(value)),
-    Result::Err(problem) => print(problem.show()),
+  with {{ db: recording(false) }} {{
+    match transaction(fn () => {{
+      mark()!;
+      Result::Ok(7)
+    }})! {{
+      Result::Ok(value) => print(Int::to_string(value)),
+      Result::Err(problem) => print(problem.show()),
+    }}
   }}
 }}
 "#
@@ -274,14 +279,15 @@ fn a_failed_body_rolls_back_exactly_once() {
         &format!(
             r#"{CANCELLABLE}
 fn worker() -> () raises Oops {{
-  let db = recording(false);
-  let answer: Result<Int, DbError> = transaction(db, fn () => {{
-    mark()!;
-    Result::Err(DbError::Rejected("no"))
-  }})!;
-  match answer {{
-    Result::Ok(_) => print("committed, which is wrong"),
-    Result::Err(problem) => print(problem.show()),
+  with {{ db: recording(false) }} {{
+    let answer: Result<Int, DbError> = transaction(fn () => {{
+      mark()!;
+      Result::Err(DbError::Rejected("no"))
+    }})!;
+    match answer {{
+      Result::Ok(_) => print("committed, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }}
   }}
 }}
 "#
@@ -329,13 +335,14 @@ fn talkative() -> Db {{
 }}
 
 fn worker() -> () raises Oops {{
-  let db = talkative();
-  transaction(db, fn () => {{
-    khora_cancel();
-    mark()!;
-    Result::Ok(1)
-  }})!;
-  print("the transaction returned, which is wrong");
+  with {{ db: talkative() }} {{
+    transaction(fn () => {{
+      khora_cancel();
+      mark()!;
+      Result::Ok(1)
+    }})!;
+    print("the transaction returned, which is wrong");
+  }}
 }}
 "#
         ),
