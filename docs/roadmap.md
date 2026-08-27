@@ -4216,16 +4216,42 @@ process start and a link of the test harness.
 
 | # | Item | Why it is here |
 | --- | --- | --- |
-| 14.28 | **One database per test binary** | `std` parsed and checked once instead of once per test. No product change, and it is what A3 bought |
-| 14.29 | **Stop before the linker when nothing is run** | `Stop::AtVerification` already exists. A test asserting that something compiles pays for a `clang` invocation it never uses |
+| 14.28 | ~~**One database per test binary**~~ | **Dropped, measured.** The premise was that every codegen test re-checks `std`. It does not: those tests build a *single-file* `SourceRoot` that never includes `std` at all, and their whole front end — parse, check, monomorphize, LLVM IR, verify — is **1–2 ms** against a 385 ms object-and-link. There is nothing to save. It is also harder than it looks: `SourceRoot` is a Salsa singleton input, so one database per binary means *replacing* the root between tests, which invalidates everything downstream of it. `crates/khora-codegen-llvm/tests/phases.rs` is the measurement |
+| 14.29 | ~~**Stop before the linker when nothing is run**~~ | **Dropped, measured.** The population it was for is empty. Across the codegen suite there are **406** call sites that compile, link and execute, and **11** that expect a compile error — and those eleven already never link, because `compile` returns `Err` before the object write. There is no meaningful set of tests that builds an executable it does not use |
 | 14.30 | ~~**Fewer, larger test binaries**~~ | **Dropped by 14.31.** The rationale was that cargo starts binaries sequentially. Under nextest it does not, and merging binaries would only take work away from the scheduler |
 | 14.31 | ✅ **`cargo nextest`** | **271 s → 116 s.** See below |
+| 14.35 | **A trivial `khora build` takes 2.1 seconds** | Measured while sizing 14.28: 0.29 s of it is everything up to code generation, and the rest is the object write and the link. It has nothing to do with tests and it is the first number a newcomer feels. Nothing on this roadmap is about it |
 | 14.32 | **Split the baseline** | A fast gate and a full gate, the way `scripts/check.sh` and `scripts/baseline.sh` already almost are. The receipt from 13.20 makes "which one passed" a fact rather than a memory |
 
-**Measure each before doing it.** Which of the rest dominates is not known —
-the 94% figure says *where*, not *why*. The instrumentation is one timing
-harness and it should come first, because the alternative is optimising the
-part that was easiest to see.
+**Measured, and it argued against both.** The instrumentation came first, as
+this said it should, and 14.28 and 14.29 are struck out above on the strength
+of it. `scripts/test-timing.py` reads a nextest run and reports in-binary time
+by crate; `crates/khora-codegen-llvm/tests/phases.rs` reports the per-phase
+split and is `#[ignore]`d because it is a report rather than an assertion.
+
+What the numbers say, on this machine:
+
+| | |
+| --- | --- |
+| codegen test, front end | 1–2 ms |
+| codegen test, object and link | 385 ms |
+| `khora check` on a trivial program, all of `std` | 0.29 s |
+| `khora build --no-cache` on the same | 2.1 s |
+| `khora build` from the cache | 0.23 s |
+
+**The back end is the whole cost and always was.** The front end that A3's
+incrementality was supposed to save is already too small to measure against a
+`clang` invocation. So the lever for suite time is not doing less front-end
+work; it is doing fewer *links*, and 14.29 established there are no spare ones.
+
+Which leaves two honest options, neither of them a test-harness change: make
+the back end faster, or run less of the suite in the loop. 14.32 is the second
+one, and it is the cheap one.
+
+One number worth keeping for its own sake: **a `khora build` of a four-line
+program takes 2.1 seconds**, of which 0.29 s is everything up to code
+generation. That is what a newcomer feels, it has nothing to do with tests, and
+nothing on this roadmap is currently about it.
 
 #### 14.31, done: 271 s → 116 s
 
