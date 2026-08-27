@@ -84,11 +84,15 @@ fn each_unused_capability_names_itself() {
     assert!(said.contains("clock") && said.contains("log"), "{found:?}");
 }
 
-/// The conservative half, and the reason for it: a call may be forwarding the
-/// capability, and nothing available here says whether it is. Reporting on a
-/// guess is how a lint gets ignored.
+/// A call to something that needs nothing does not excuse the capability.
+///
+/// This test used to assert the opposite, and its comment said why: "`g()`
+/// cannot need a Clock, but proving that needs the callee's row." The row is
+/// recorded now — `BodyTypes::call_rows`, per call site — so the lint no
+/// longer gives up the moment a body contains a call, which was almost every
+/// real function. Roadmap 14.27.
 #[test]
-fn a_body_that_calls_anything_is_left_alone() {
+fn a_call_that_needs_nothing_does_not_excuse_a_capability() {
     let db = KhoraDatabase::new();
     let found = lint(
         &db,
@@ -98,10 +102,41 @@ fn a_body_that_calls_anything_is_left_alone() {
              fn f() -> Int with {{ clock: Clock }} {{ g() }}\n"
         ),
     );
-    assert!(
-        found.is_empty(),
-        "`g()` cannot need a Clock, but proving that needs the callee's row: {found:?}"
+    assert_eq!(names(&found), [UNUSED_CAPABILITY], "{found:?}");
+}
+
+/// Forwarding is the case the old restriction existed to protect, and it is
+/// still protected — now by knowing rather than by declining to look.
+#[test]
+fn a_call_that_requires_the_capability_is_forwarding_it() {
+    let db = KhoraDatabase::new();
+    let found = lint(
+        &db,
+        &format!(
+            "{EFFECT}\n\
+             fn g() -> Int with {{ clock: Clock }} {{ clock.now() }}\n\
+             fn f() -> Int with {{ clock: Clock }} {{ g() }}\n"
+        ),
     );
+    assert!(found.is_empty(), "`g()` requires the clock, so `f` is passing it on: {found:?}");
+}
+
+/// And a capability nothing in the chain wants is still reported, even next to
+/// one that is forwarded.
+#[test]
+fn only_the_capability_nobody_needs_is_reported() {
+    let db = KhoraDatabase::new();
+    let found = lint(
+        &db,
+        &format!(
+            "{EFFECT}\n\
+             pub effect Log {{\n  write: (String) -> (),\n}}\n\
+             fn g() -> Int with {{ clock: Clock }} {{ clock.now() }}\n\
+             fn f() -> Int with {{ clock: Clock, log: Log }} {{ g() }}\n"
+        ),
+    );
+    assert_eq!(names(&found), [UNUSED_CAPABILITY], "{found:?}");
+    assert!(found[0].message.contains("log"), "the forwarded one is not it: {found:?}");
 }
 
 #[test]

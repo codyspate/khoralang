@@ -140,7 +140,6 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     let checked = khora_types::checked(db, file);
     for (name, body) in khora_hir::body::bodies(db, file) {
-        unused_capabilities(body, &mut out);
         dangling_expressions(body, &mut out);
         // Paired by name, which is how `Checked` keys them. A body with no
         // types — one whose `derive` was refused, say — is skipped rather than
@@ -149,6 +148,7 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
         unreachable_code(body, &mut out);
         unused_bindings(body, &mut out);
         if let Some((_, types)) = checked.bodies.iter().find(|(n, _)| n == name) {
+            unused_capabilities(body, types, &mut out);
             reference_cycles(body, types, &mut out);
             discarded_results(body, types, &mut out);
         }
@@ -378,45 +378,68 @@ fn leaves(expr: &Expr) -> Option<&'static str> {
 /// anywhere. A pass that looked only at reads would report every pass-through
 /// function in the standard library.
 ///
-/// Which labels a call needs is the callee's row, which the checker reads and
-/// does not keep. `Body::capabilities` is not it: lowering runs before the
-/// checker, so it records every label *in scope* at each call site rather than
-/// the ones the callee wanted.
+/// This used to give up entirely whenever a body contained a call, which meant
+/// it was silent about almost every real function. Roadmap 14.27 named the fix
+/// and it is now in place: `BodyTypes::call_rows` records, per call site, the
+/// labels the callee required — before any `with` block or `catch` discharges
+/// them, so it is what the *call* needed rather than what survived to the
+/// signature.
 ///
-/// So this stays quiet whenever the body contains a call at all. What it still
-/// catches is the case worth catching — a signature demanding a capability over
-/// a body that could not possibly use one:
+/// So "used" is now **read outright, or required by something this body
+/// calls**, and a body full of calls is no longer beyond reach:
 ///
 /// ```khora
+/// // Reported: nothing here needs a clock.
 /// fn area(r: Int) -> Int with { clock: Clock } { r * r }
+///
+/// // Not reported: `read` requires `fs`, so this forwards it.
+/// fn load(p: Path) -> String with { fs: Fs } { read(p) }
+///
+/// // Reported again: `parse` needs nothing, so `fs` buys its callers nothing.
+/// fn count(t: String) -> Int with { fs: Fs } { parse(t).length() }
 /// ```
 ///
-/// **To sharpen it**, `BodyTypes` needs a per-call-site record of the labels
-/// the callee required; `check/effects.rs` computes exactly that and drops it.
-/// With it, "used" becomes "read, or required by something this body calls" and
-/// the call-free restriction goes away. `lambda_captures` is the same fact
-/// published for a different consumer, and is the shape to copy.
-fn unused_capabilities(body: &Body, out: &mut Vec<Finding>) {
+/// # What it still gives up on
+///
+/// A call whose required row is *open* — a type variable tail, which is what a
+/// generic function's row looks like before it is instantiated — could require
+/// anything. Those are treated as forwarding every label, because the
+/// alternative is reporting a capability that a caller's instantiation does
+/// need. Quiet is the right direction to be wrong in here: this lint costs a
+/// caller nothing when it misses and costs them a signature change when it is
+/// wrong.
+fn unused_capabilities(body: &Body, types: &BodyTypes, out: &mut Vec<Finding>) {
     if body.evidence.is_empty() {
         return;
     }
 
     let mut read: Vec<LocalId> = Vec::new();
-    let mut calls = false;
     for (_, expr) in body.exprs() {
-        match expr {
-            Expr::Local(local) => read.push(*local),
-            Expr::Call { .. } => calls = true,
-            _ => {}
+        if let Expr::Local(local) = expr {
+            read.push(*local);
         }
     }
-    if calls {
+
+    // Every label some call in this body demanded, and whether any call's
+    // demand was open-ended.
+    let mut forwarded: Vec<&str> = Vec::new();
+    let mut anything_possible = false;
+    for (_, rows) in types.calls_with_rows() {
+        let Some(Type::Row { fields, tail }) = rows.requires.as_ref() else { continue };
+        for (label, _) in fields {
+            forwarded.push(label);
+        }
+        if tail.is_some() {
+            anything_possible = true;
+        }
+    }
+    if anything_possible {
         return;
     }
 
     for (label, pat) in &body.evidence {
         let Pat::Bind(local) = body.pat(*pat) else { continue };
-        if read.contains(local) {
+        if read.contains(local) || forwarded.contains(&label.as_str()) {
             continue;
         }
         out.push(Finding {
