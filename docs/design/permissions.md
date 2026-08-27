@@ -65,11 +65,19 @@ there are not many:
 
 | Manifest key | Capability type |
 | --- | --- |
-| `fs` | `std::fs::Fs` |
+| `fs` | `std::fs::FsRead`, `std::fs::FsWrite` |
 | `network` | `std::net::Net` |
 | `env` | `std::env::Env` |
 | `process` | `std::process::Process` |
 | `clock` | `std::time::Clock` |
+
+**`fs` maps to two types, and the pair is the point.** `[permissions.fs]`
+already had `read` and `write` as separate grants, and a single `Fs`
+capability made the finer half unexpressible: a package allowed only to read
+still handed every function it called the authority to delete. The manifest
+key stays one, because "reaching the file system" is one kind of access to the
+outside world; which half a given function needs is a question its signature
+answers.
 
 A capability the table does not mention — one an application defines for
 itself, like `Ledger` — is not governed by the manifest at all. It is not

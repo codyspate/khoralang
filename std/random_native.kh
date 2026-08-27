@@ -96,7 +96,7 @@ impl Random {
 // anybody's requirement row — and `docs/design/permissions.md` enforces grants
 // against exactly those rows, so a manifest that had not granted randomness
 // would not have stopped it. `Random::real` is the door, the same way
-// `Fs::real` is.
+// `FsRead::real` is.
 //
 // A caller who wants a seed they can write down draws one:
 //

@@ -42,15 +42,16 @@ is the superset and the narrower vendor drops what it cannot hold.
 A capability is an interception point. Instrumenting one is another handler:
 
 ```text
-fn traced(inner: Fs, tracer: Tracer) -> Fs {
-  handler for Fs {
+fn traced(inner: FsRead, tracer: Tracer) -> FsRead {
+  handler for FsRead {
     read: fn path => around(tracer, "fs.read", fn () => inner.read(path)),
     ..
   }
 }
 ```
 
-Every existing caller of `Fs` is instrumented and none of them changed.
+Every existing caller of `FsRead` is instrumented and none of them
+changed.
 That is what OpenTelemetry achieves with bytecode agents, and here it falls
 out of capability-passing because that is what a capability *is*.
 

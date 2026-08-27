@@ -1,6 +1,6 @@
 module std::fs;
 
-import std::core::{Array, Option, Ptr, Region, Scope, acquire};
+import std::core::{Array, List, Option, Ptr, Region, Scope, acquire};
 
 //! The file system, over ISO C.
 //!
@@ -14,12 +14,20 @@ import std::core::{Array, Option, Ptr, Region, Scope, acquire};
 //! same way that Rust's standard library is the place `unsafe` lives so that
 //! nothing above it needs to.
 //!
-//! *Outside* is the `Fs` effect, and nothing reaches a file without one. That
+//! *Outside* are the two effects, and nothing reaches a file without one. That
 //! buys two things at once. It is a **permission**: a function that reads a file
 //! says so in its signature, all the way up to the `main` that decided to allow
 //! it. And it is a **seam**: a test installs its own handler and the code under
 //! test cannot tell, which is the thing a file system mock is usually a poor
 //! imitation of.
+//!
+//! **Two effects rather than one**, `FsRead` and `FsWrite`, because
+//! `[permissions.fs]` already grants reading and writing separately and a
+//! single capability made the finer half unexpressible: a function allowed
+//! only to read still received the authority to delete. `copy` is the one
+//! helper here that needs both, and it says so.
+//!
+//! `docs/design/permissions.md` for the manifest half.
 //!
 //! `docs/design/ffi.md` for the boundary rules this obeys.
 
@@ -39,7 +47,14 @@ pub type IoError =
   | NotFound(path: String)
   | Failed(path: String);
 
-/// Access to the file system.
+/// Reading the file system.
+///
+/// **Split from writing, because the manifest already splits them.**
+/// `[permissions.fs]` has `read` and `write` as separate grants, and a
+/// capability that carried both made the finer half of that grant
+/// unexpressible: a program allowed only to read still received the authority
+/// to delete. Two effects say in a signature what the manifest says in a
+/// table.
 ///
 /// Whole files, not handles. A handle would have to be an opaque type, which
 /// nothing but this module could construct — and an effect whose operations
@@ -47,26 +62,10 @@ pub type IoError =
 /// Streaming will want one and can have its own effect when something needs it.
 ///
 /// **Every operation here is one a test double has to write**, which is the
-/// standing argument against adding another. These seven are the ones a
-/// program cannot do without and cannot build out of the others: reading and
-/// writing are the two halves, appending is not a read-then-write because two
-/// writers would lose each other's bytes, and removing, renaming, asking
-/// whether something is there and asking how big it is each reach the file
-/// system without touching a file's contents at all.
-///
-/// Copying is *not* here, because it is `read` then `write` and nothing is
-/// gained by letting a handler disagree. It is a function below.
-pub effect Fs {
+/// standing argument against adding another.
+pub effect FsRead {
+  /// The whole file, as bytes.
   read: (String) -> Array<U8> raises IoError,
-  write: (String, Array<U8>) -> () raises IoError,
-  /// Adds to the end, creating the file when it is not there.
-  append: (String, Array<U8>) -> () raises IoError,
-  /// Deletes a file. Not a directory — `rmdir` is a different call and this
-  /// module does not have it yet.
-  remove: (String) -> () raises IoError,
-  /// Moves or renames. Across file systems C's `rename` fails rather than
-  /// copying, and that failure is reported rather than papered over.
-  rename: (String, String) -> () raises IoError,
   /// Whether the path can be opened for reading.
   ///
   /// **Not "whether it exists".** ISO C has no `stat`, so the only portable
@@ -78,75 +77,120 @@ pub effect Fs {
   exists: (String) -> Bool,
   /// How many bytes the file holds.
   size: (String) -> Int raises IoError,
+  /// The names in a directory, without the directory.
+  ///
+  /// Names, not paths: joining is the caller's, and `join` is right here. `.`
+  /// and `..` are not included, which is the one place this differs from
+  /// `readdir` and the difference every caller would have written itself.
+  read_dir: (String) -> List<String> raises IoError,
+  /// Whether the path is a directory.
+  is_dir: (String) -> Bool,
 }
 
-impl Fs {
-  /// The real file system.
+/// Changing the file system.
+///
+/// The other half of `[permissions.fs]`. A function that takes this can alter
+/// what is on disk; one that takes only [`FsRead`] cannot, and its signature
+/// is the proof.
+pub effect FsWrite {
+  /// Replaces the file's contents, creating it when it is not there.
+  write: (String, Array<U8>) -> () raises IoError,
+  /// Adds to the end, creating the file when it is not there.
+  append: (String, Array<U8>) -> () raises IoError,
+  /// Deletes a file. Not a directory — that is `remove_dir`.
+  remove: (String) -> () raises IoError,
+  /// Moves or renames. Across file systems C's `rename` fails rather than
+  /// copying, and that failure is reported rather than papered over.
+  rename: (String, String) -> () raises IoError,
+  /// Creates one directory. The parents are **not** created: a caller that
+  /// wants that can walk the path, and one that did not ask should be told the
+  /// parent is missing rather than have four directories appear.
+  create_dir: (String) -> () raises IoError,
+  /// Removes an empty directory.
   ///
-  /// Everything else in this module exists so that this is short.
-  pub fn real() -> Fs {
-    handler for Fs {
+  /// Empty only, which is `rmdir`'s own rule and worth keeping: a recursive
+  /// delete that removed the wrong tree is the one file system mistake with no
+  /// undo.
+  remove_dir: (String) -> () raises IoError,
+}
+
+impl FsRead {
+  /// The real file system, reading.
+  pub fn real() -> FsRead {
+    handler for FsRead {
       read: fn path => read_whole(path)!,
-      write: fn (path, bytes) => write_whole(path, bytes)!,
-      append: fn (path, bytes) => append_whole(path, bytes)!,
-      remove: fn path => remove_file(path)!,
-      rename: fn (from, to) => rename_file(from, to)!,
       exists: fn path => can_open(path),
       size: fn path => size_of_path(path)!,
+      read_dir: fn path => list_dir(path)!,
+      is_dir: fn path => is_directory(path),
     }
   }
 }
 
-/// Copies a file, replacing the destination.
-///
-/// Read then write, deliberately: it is not an operation of `Fs` because a
-/// handler that implemented it differently from its own `read` and `write`
-/// would be lying about itself, and a test double would have to write a third
-/// thing that agreed with the other two.
-///
-/// The whole file passes through memory, which is the same limit `read` has.
-pub fn copy(from: String, to: String) -> ()
-  with { fs: Fs }
-  raises IoError
-{
-  fs.write(to, fs.read(from)!)!
-}
-
-/// Adds text to the end of a file, creating it when it is not there.
-pub fn append_text(path: String, text: String) -> ()
-  with { fs: Fs }
-  raises IoError
-{
-  fs.append(path, String::bytes(text))!
-}
-
-/// Writes text to a file, replacing whatever was there.
-///
-/// The other half of [`read_text`], and here for the same reason: `Fs` traffics
-/// in bytes because a file is bytes, and every caller that has a `String`
-/// should not have to remember which way round `String::bytes` goes.
-pub fn write_text(path: String, text: String) -> ()
-  with { fs: Fs }
-  raises IoError
-{
-  fs.write(path, String::bytes(text))!
+impl FsWrite {
+  /// The real file system, writing.
+  pub fn real() -> FsWrite {
+    handler for FsWrite {
+      write: fn (path, bytes) => write_whole(path, bytes)!,
+      append: fn (path, bytes) => append_whole(path, bytes)!,
+      remove: fn path => remove_file(path)!,
+      rename: fn (from, to) => rename_file(from, to)!,
+      create_dir: fn path => make_dir(path)!,
+      remove_dir: fn path => unmake_dir(path)!,
+    }
+  }
 }
 
 /// The bytes of a file, as text.
 ///
-/// A convenience over `read`, and the reason `Fs` traffics in bytes rather
-/// than strings: a file is bytes, and whether they are text is a question with
-/// a wrong answer. This one takes the optimistic view and is named for it.
+/// A convenience over `read`, and the reason the effect traffics in bytes
+/// rather than strings: a file is bytes, and whether they are text is a
+/// question with a wrong answer. This one takes the optimistic view and is
+/// named for it.
 pub fn read_text(path: String) -> String
-  with { fs: Fs }
+  with { reads: FsRead }
   raises IoError
 {
-  let bytes = fs.read(path)!;
+  let bytes = reads.read(path)!;
   // The policy lives here rather than in the conversion, which is the whole
   // reason `is_utf8` and `from_bytes` are two things: what to do about bytes
   // that are not text depends on where they came from, and here they came from
   // a file that was supposed to hold text.
   if Array::is_utf8(bytes) { String::from_bytes(bytes) } else { raise IoError::Failed(path) }
+}
+
+/// Writes text to a file, replacing whatever was there.
+pub fn write_text(path: String, text: String) -> ()
+  with { writes: FsWrite }
+  raises IoError
+{
+  writes.write(path, String::bytes(text))!
+}
+
+/// Adds text to the end of a file, creating it when it is not there.
+pub fn append_text(path: String, text: String) -> ()
+  with { writes: FsWrite }
+  raises IoError
+{
+  writes.append(path, String::bytes(text))!
+}
+
+/// Copies a file, replacing the destination.
+///
+/// Read then write, deliberately: it is not an operation of either effect
+/// because a handler that implemented it differently from its own `read` and
+/// `write` would be lying about itself, and a double would have to write a
+/// third thing that agreed with the other two.
+///
+/// **This is the function that shows the split doing its job.** It needs both
+/// capabilities and says so, where every other helper here needs one.
+///
+/// The whole file passes through memory, which is the same limit `read` has.
+pub fn copy(from: String, to: String) -> ()
+  with { reads: FsRead, writes: FsWrite }
+  raises IoError
+{
+  writes.write(to, reads.read(from)!)!
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +321,23 @@ extern fn khora_fs_close(file: Ptr) -> I32;
 // reason `IoError` is two cases rather than an errno.
 extern fn khora_fs_remove(path: Ptr) -> I32;
 extern fn khora_fs_rename(from: Ptr, to: Ptr) -> I32;
+
+// **Directories are the runtime's, and not because of the scheduler.** The
+// calls above wrap ISO C because `fopen` is the same call everywhere Khora
+// runs. There is no such call for a directory: POSIX has `opendir`/`readdir`,
+// Windows has `FindFirstFile`, and `readdir` returns a `struct dirent` whose
+// `d_name` sits at a different offset on Linux and macOS. Binding that here
+// would mean encoding three layouts and being wrong about one of them on a
+// machine nobody here owns.
+//
+// So the seam is in `crates/khora-rt/src/fs.rs`, where Rust has already made
+// the choice correctly, and this module stays one file instead of three.
+extern fn khora_fs_create_dir(path: Ptr) -> I32;
+extern fn khora_fs_remove_dir(path: Ptr) -> I32;
+extern fn khora_fs_is_dir(path: Ptr) -> I32;
+extern fn khora_fs_dir_open(path: Ptr) -> Ptr;
+extern fn khora_fs_dir_next(dir: Ptr, into: Ptr, cap: Int) -> Int;
+extern fn khora_fs_dir_close(dir: Ptr) -> ();
 
 // These two stay direct. They adjust a buffer rather than reach a disk in the
 // ordinary case, and both deal in C's `long` — thirty-two bits on Windows and
@@ -409,6 +470,68 @@ fn append_whole(path: String, bytes: Array<U8>) -> () raises IoError {
       let written = Array::with_data(bytes, fn (from, n) => khora_fs_write(from, 1, n, file));
       if written == count {} else { raise IoError::Failed(path) }
     }
+  }
+}
+
+/// Creates one directory.
+fn make_dir(path: String) -> () raises IoError {
+  let answer = String::with_c_string(path, fn p => khora_fs_create_dir(p));
+  if answer == I32::of(0) {} else { raise IoError::Failed(path) }
+}
+
+/// Removes an empty directory.
+fn unmake_dir(path: String) -> () raises IoError {
+  let answer = String::with_c_string(path, fn p => khora_fs_remove_dir(p));
+  if answer == I32::of(0) {} else { raise IoError::Failed(path) }
+}
+
+/// Whether the path is a directory.
+fn is_directory(path: String) -> Bool {
+  String::with_c_string(path, fn p => khora_fs_is_dir(p)) == I32::of(1)
+}
+
+/// How much room one name gets.
+///
+/// `NAME_MAX` is 255 on ext4 and 255 UTF-16 units on NTFS, so this is not a
+/// limit anybody meets by accident -- and the runtime reports a name that does
+/// not fit as an error rather than truncating it, because half a filename is
+/// worse than none.
+fn name_capacity() -> Int { 4096 }
+
+/// Every name in a directory.
+///
+/// The handle is closed on the way out however the way out is reached, which
+/// is what the region is for -- the same shape `read_whole` uses, and for the
+/// same reason: `raise` is one of the exits.
+fn list_dir(path: String) -> List<String> raises IoError {
+  let region = Region::open();
+  with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
+    let dir = acquire(
+      String::with_c_string(path, fn p => khora_fs_dir_open(p)),
+      fn d => khora_fs_dir_close(d),
+    );
+    if Ptr::is_null(dir) {
+      raise IoError::NotFound(path)
+    } else {
+      collect_names(dir, path)!
+    }
+  }
+}
+
+/// Reads names until the directory is exhausted.
+///
+/// Recursive rather than a loop because the result is a `List`, which is built
+/// from the end: a loop would have to accumulate and reverse.
+fn collect_names(dir: Ptr, path: String) -> List<String> raises IoError {
+  let buffer: Array<U8> = Array::new(name_capacity(), 0);
+  let written = Array::with_data(buffer, fn (into, n) => khora_fs_dir_next(dir, into, n));
+  if written == 0 {
+    List::Nil
+  } else if written < 0 {
+    raise IoError::Failed(path)
+  } else {
+    let name = String::slice(String::from_bytes(buffer), 0, written);
+    List::Cons(name, collect_names(dir, path)!)
   }
 }
 

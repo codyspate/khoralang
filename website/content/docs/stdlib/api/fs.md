@@ -17,12 +17,20 @@ not. That code is not exported. This module is the trusted boundary, in the
 same way that Rust's standard library is the place `unsafe` lives so that
 nothing above it needs to.
 
-*Outside* is the `Fs` effect, and nothing reaches a file without one. That
+*Outside* are the two effects, and nothing reaches a file without one. That
 buys two things at once. It is a **permission**: a function that reads a file
 says so in its signature, all the way up to the `main` that decided to allow
 it. And it is a **seam**: a test installs its own handler and the code under
 test cannot tell, which is the thing a file system mock is usually a poor
 imitation of.
+
+**Two effects rather than one**, `FsRead` and `FsWrite`, because
+`[permissions.fs]` already grants reading and writing separately and a
+single capability made the finer half unexpressible: a function allowed
+only to read still received the authority to delete. `copy` is the one
+helper here that needs both, and it says so.
+
+`docs/design/permissions.md` for the manifest half.
 
 `docs/design/ffi.md` for the boundary rules this obeys.
 
@@ -47,21 +55,26 @@ file.
 
 ## Effects
 
-### Fs
+### FsRead
 
 ```khora
-pub effect Fs {
+pub effect FsRead {
   read: (String) -> Array<U8> raises IoError,
-  write: (String, Array<U8>) -> () raises IoError,
-  append: (String, Array<U8>) -> () raises IoError,
-  remove: (String) -> () raises IoError,
-  rename: (String, String) -> () raises IoError,
   exists: (String) -> Bool,
   size: (String) -> Int raises IoError,
+  read_dir: (String) -> List<String> raises IoError,
+  is_dir: (String) -> Bool,
 }
 ```
 
-Access to the file system.
+Reading the file system.
+
+**Split from writing, because the manifest already splits them.**
+`[permissions.fs]` has `read` and `write` as separate grants, and a
+capability that carried both made the finer half of that grant
+unexpressible: a program allowed only to read still received the authority
+to delete. Two effects say in a signature what the manifest says in a
+table.
 
 Whole files, not handles. A handle would have to be an opaque type, which
 nothing but this module could construct — and an effect whose operations
@@ -69,64 +82,75 @@ only the real implementation can satisfy is not a seam, it is a wrapper.
 Streaming will want one and can have its own effect when something needs it.
 
 **Every operation here is one a test double has to write**, which is the
-standing argument against adding another. These seven are the ones a
-program cannot do without and cannot build out of the others: reading and
-writing are the two halves, appending is not a read-then-write because two
-writers would lose each other's bytes, and removing, renaming, asking
-whether something is there and asking how big it is each reach the file
-system without touching a file's contents at all.
+standing argument against adding another.
 
-Copying is *not* here, because it is `read` then `write` and nothing is
-gained by letting a handler disagree. It is a function below.
+### FsWrite
+
+```khora
+pub effect FsWrite {
+  write: (String, Array<U8>) -> () raises IoError,
+  append: (String, Array<U8>) -> () raises IoError,
+  remove: (String) -> () raises IoError,
+  rename: (String, String) -> () raises IoError,
+  create_dir: (String) -> () raises IoError,
+  remove_dir: (String) -> () raises IoError,
+}
+```
+
+Changing the file system.
+
+The other half of `[permissions.fs]`. A function that takes this can alter
+what is on disk; one that takes only [`FsRead`] cannot, and its signature
+is the proof.
 
 ## Functions
-
-### copy
-
-```khora
-pub fn copy(from: String, to: String) ->() with { fs: Fs } raises IoError
-```
-
-Copies a file, replacing the destination.
-
-Read then write, deliberately: it is not an operation of `Fs` because a
-handler that implemented it differently from its own `read` and `write`
-would be lying about itself, and a test double would have to write a third
-thing that agreed with the other two.
-
-The whole file passes through memory, which is the same limit `read` has.
-
-### append_text
-
-```khora
-pub fn append_text(path: String, text: String) ->() with { fs: Fs } raises IoError
-```
-
-Adds text to the end of a file, creating it when it is not there.
-
-### write_text
-
-```khora
-pub fn write_text(path: String, text: String) ->() with { fs: Fs } raises IoError
-```
-
-Writes text to a file, replacing whatever was there.
-
-The other half of [`read_text`], and here for the same reason: `Fs` traffics
-in bytes because a file is bytes, and every caller that has a `String`
-should not have to remember which way round `String::bytes` goes.
 
 ### read_text
 
 ```khora
-pub fn read_text(path: String) -> String with { fs: Fs } raises IoError
+pub fn read_text(path: String) -> String with { reads: FsRead } raises IoError
 ```
 
 The bytes of a file, as text.
 
-A convenience over `read`, and the reason `Fs` traffics in bytes rather
-than strings: a file is bytes, and whether they are text is a question with
-a wrong answer. This one takes the optimistic view and is named for it.
+A convenience over `read`, and the reason the effect traffics in bytes
+rather than strings: a file is bytes, and whether they are text is a
+question with a wrong answer. This one takes the optimistic view and is
+named for it.
+
+### write_text
+
+```khora
+pub fn write_text(path: String, text: String) ->() with { writes: FsWrite } raises IoError
+```
+
+Writes text to a file, replacing whatever was there.
+
+### append_text
+
+```khora
+pub fn append_text(path: String, text: String) ->() with { writes: FsWrite } raises IoError
+```
+
+Adds text to the end of a file, creating it when it is not there.
+
+### copy
+
+```khora
+pub fn copy(from: String, to: String) ->() with { reads: FsRead, writes: FsWrite } raises IoError
+```
+
+Copies a file, replacing the destination.
+
+Read then write, deliberately: it is not an operation of either effect
+because a handler that implemented it differently from its own `read` and
+`write` would be lying about itself, and a double would have to write a
+third thing that agreed with the other two.
+
+**This is the function that shows the split doing its job.** It needs both
+capabilities and says so, where every other helper here needs one.
+
+The whole file passes through memory, which is the same limit `read` has.
 
 ### join
 

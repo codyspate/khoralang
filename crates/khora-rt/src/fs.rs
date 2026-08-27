@@ -158,6 +158,168 @@ pub unsafe extern "C" fn khora_fs_rename(from: *const u8, to: *const u8) -> i32 
     blocking(move || unsafe { rename(from as *const u8, to as *const u8) })
 }
 
+// ---------------------------------------------------------------------------
+// Directories
+// ---------------------------------------------------------------------------
+//
+// **These are Rust rather than C, and the reason is not the scheduler.** The
+// four above wrap ISO C because `fopen` and friends are the same call on every
+// platform Khora targets. There is no such call for a directory: POSIX has
+// `opendir`/`readdir` and Windows has `FindFirstFile`, and `readdir` hands back
+// a `struct dirent` whose `d_name` sits at an offset that differs between
+// Linux and macOS. Binding that from Khora means encoding three layouts and
+// being wrong about one of them on a machine nobody here owns.
+//
+// So the platform seam is here, where `std::fs` in Rust has already made the
+// choice correctly, and `std::fs` in Khora stays one module rather than three.
+// The blocking pool still applies: a directory read reaches a disk.
+
+/// Turns a NUL-terminated C string into a path.
+///
+/// # Safety
+///
+/// `path` must be NUL-terminated and valid for the call.
+unsafe fn path_of(path: *const u8) -> Option<std::path::PathBuf> {
+    if path.is_null() {
+        return None;
+    }
+    // SAFETY: the caller promises a NUL-terminated string that outlives this.
+    let text = unsafe { core::ffi::CStr::from_ptr(path as *const core::ffi::c_char) };
+    text.to_str().ok().map(std::path::PathBuf::from)
+}
+
+/// `mkdir`, off the worker. Zero for success.
+///
+/// The parents are **not** created. A caller that wants that can walk the path
+/// itself, and one that did not ask for it should be told the parent is
+/// missing rather than have four directories appear.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated string valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_create_dir(path: *const u8) -> i32 {
+    let path = path as usize;
+    blocking(move || {
+        // SAFETY: the string belongs to a fiber suspended for the whole call.
+        let Some(path) = (unsafe { path_of(path as *const u8) }) else { return 1 };
+        if std::fs::create_dir(path).is_ok() { 0 } else { 1 }
+    })
+}
+
+/// `rmdir`, off the worker. Zero for success.
+///
+/// Empty directories only, which is `rmdir`'s own rule and worth keeping: a
+/// recursive delete that removed the wrong tree is the one file system mistake
+/// with no undo.
+///
+/// # Safety
+///
+/// As above.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_remove_dir(path: *const u8) -> i32 {
+    let path = path as usize;
+    blocking(move || {
+        // SAFETY: as above.
+        let Some(path) = (unsafe { path_of(path as *const u8) }) else { return 1 };
+        if std::fs::remove_dir(path).is_ok() { 0 } else { 1 }
+    })
+}
+
+/// Whether the path is a directory. One for yes, zero for anything else.
+///
+/// # Safety
+///
+/// As above.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_is_dir(path: *const u8) -> i32 {
+    let path = path as usize;
+    blocking(move || {
+        // SAFETY: as above.
+        let Some(path) = (unsafe { path_of(path as *const u8) }) else { return 0 };
+        i32::from(path.is_dir())
+    })
+}
+
+/// Opens a directory for reading, or null.
+///
+/// The handle is a boxed [`std::fs::ReadDir`]. It is opaque to Khora exactly
+/// as `FILE *` is, and has to be closed with [`khora_fs_dir_close`].
+///
+/// # Safety
+///
+/// As above.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_dir_open(path: *const u8) -> *mut c_void {
+    let path = path as usize;
+    blocking(move || {
+        // SAFETY: as above.
+        let Some(path) = (unsafe { path_of(path as *const u8) }) else { return 0 };
+        match std::fs::read_dir(path) {
+            Ok(entries) => Box::into_raw(Box::new(entries)) as usize,
+            Err(_) => 0,
+        }
+    }) as *mut c_void
+}
+
+/// The next entry's name, written into `into`.
+///
+/// Returns the number of bytes written, `0` when the directory is exhausted,
+/// and `-1` when something went wrong -- including a name too long for the
+/// buffer. **The entry is consumed either way**, so a caller cannot retry with
+/// a bigger buffer; the buffer is sized once, generously, by the caller, and a
+/// name longer than that is an error rather than a partial read. `NAME_MAX` is
+/// 255 on ext4 and 255 UTF-16 units on NTFS, so a few kilobytes is not a
+/// limit anybody meets by accident.
+///
+/// Only the name, never the directory it is in: joining is the caller's, and
+/// `std::fs::join` is right there.
+///
+/// # Safety
+///
+/// `dir` must be a live handle from [`khora_fs_dir_open`], and `into` writable
+/// for `cap` bytes. Both belong to the suspended fiber for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_dir_next(dir: *mut c_void, into: *mut u8, cap: usize) -> isize {
+    if dir.is_null() || into.is_null() {
+        return -1;
+    }
+    let (dir, into) = (dir as usize, into as usize);
+    blocking(move || {
+        // SAFETY: the handle came from `dir_open` and is not used concurrently:
+        // its owner is one fiber, suspended for this call.
+        let entries = unsafe { &mut *(dir as *mut std::fs::ReadDir) };
+        let Some(entry) = entries.next() else { return 0 };
+        let Ok(entry) = entry else { return -1 };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { return -1 };
+        let bytes = name.as_bytes();
+        if bytes.len() > cap {
+            return -1;
+        }
+        // SAFETY: the destination is writable for `cap` bytes and `bytes` is
+        // no longer than that, checked above.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), into as *mut u8, bytes.len()) };
+        bytes.len() as isize
+    })
+}
+
+/// Closes a directory handle.
+///
+/// # Safety
+///
+/// `dir` must be a live handle from [`khora_fs_dir_open`], and must not be
+/// closed twice.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_dir_close(dir: *mut c_void) {
+    if dir.is_null() {
+        return;
+    }
+    // SAFETY: the handle came from `dir_open`, which boxed it, and the caller
+    // promises this is its only close.
+    drop(unsafe { Box::from_raw(dir as *mut std::fs::ReadDir) });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

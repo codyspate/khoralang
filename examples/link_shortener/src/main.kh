@@ -2,7 +2,7 @@ module main;
 
 import std::core::{Changed, Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
 import std::env::{Clock, Env, variable_or};
-import std::fs::{Fs, IoError, read_text, write_text};
+import std::fs::{FsRead, FsWrite, IoError, read_text, write_text};
 import std::json::{Json, parse};
 import std::net::http::{HttpError, Params, Request, Response, Router};
 import std::random::{Random};
@@ -125,7 +125,7 @@ fn draw_code() -> String
 
 /// `POST /links` — shorten a URL.
 fn create(store: Store, request: Request) -> Response
-  with { random: Random, clock: Clock, fs: Fs, env: Env }
+  with { random: Random, clock: Clock, writes: FsWrite, env: Env }
 {
   match url_of(request.body) {
     Option::None => problem(400, "the body must be an object with a `url` string"),
@@ -156,7 +156,7 @@ fn create(store: Store, request: Request) -> Response
 
 /// `GET /l/:code` — follow a link, and count that it was followed.
 fn follow(store: Store, request: Request) -> Response
-  with { fs: Fs, env: Env }
+  with { writes: FsWrite, env: Env }
 {
   match Params::get(request.params, "code") {
     Option::None => problem(404, "no code in the path"),
@@ -303,7 +303,7 @@ fn links_file() -> String
 /// wrong for two. A service that needed better would write ahead of the
 /// change rather than after it.
 fn save(links: Shared<Dict<String, Link>>) -> ()
-  with { fs: Fs, env: Env }
+  with { writes: FsWrite, env: Env }
   raises IoError
 {
   let mut text = "";
@@ -329,7 +329,7 @@ fn save(links: Shared<Dict<String, Link>>) -> ()
 /// is skipped rather than fatal, because the alternative is a service that
 /// will not start until somebody edits a file by hand.
 fn load() -> Dict<String, Link>
-  with { fs: Fs, env: Env }
+  with { reads: FsRead, env: Env }
 {
   let mut left = read_text(links_file())! catch { _ => "" };
   let mut table = Dict::new();
@@ -412,7 +412,7 @@ fn port() -> Int
 }
 
 pub fn main() raises HttpError {
-  with { env: Env::real(), clock: Clock::real(), fs: Fs::real(), random: Random::real() } {
+  with { env: Env::real(), clock: Clock::real(), reads: FsRead::real(), writes: FsWrite::real(), random: Random::real() } {
     let store: Store = { links: Shared::of(load()), started: clock.monotonic_millis() };
     print("restored ${Int::to_string(Dict::size(Shared::get(store.links)))} link(s)");
 
