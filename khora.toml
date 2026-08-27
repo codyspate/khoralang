@@ -1,0 +1,19 @@
+# The workspace this repository is.
+#
+# **No `[package]`, because the root is not one.** `std`, four examples, four
+# benchmarks and a library live under it, and none of them is here. A root
+# forced to declare a package would be inventing a name for a thing that does
+# not exist, and that name would then turn up in error messages. Roadmap 14.13.
+#
+# What this buys, concretely: `khora check .` at the root checks every member,
+# each as its own package with its own dependencies. `scripts/baseline.sh` used
+# to do that with a `for` loop and a comment explaining why the loop was
+# necessary.
+#
+# `std` is not a member. It is found beside the compiler rather than resolved
+# through a manifest -- `khora_db::standard_library` -- and it has no
+# `khora.toml` at all, which is the same reason `khora check std` is still its
+# own line in the baseline.
+
+[workspace]
+members = ["examples/*", "packages/*", "bench/*"]

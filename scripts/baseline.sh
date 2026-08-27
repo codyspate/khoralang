@@ -72,24 +72,20 @@ step 'clippy, all targets'
 cargo clippy --workspace --features llvm --all-targets -- -D warnings
 
 step 'the corpus checks'
+# `std` on its own, because it is not a workspace member: it is found beside
+# the compiler rather than resolved through a manifest, and it has no
+# `khora.toml` at all.
 "$khora" check std
-# One at a time, because each example is its own package: `ledger_service`
-# depends on `packages/postgres`, and a check over the whole directory would
-# resolve one manifest for four programs and find neither the dependency nor
-# the reason it was missing.
-for app in examples/*/; do
-    "$khora" check "$app"
-done
-"$khora" check bench
-# Packages live in the tree while they are written — `docs/roadmap.md` 13.12
-# says why — so the baseline has to see them or they are not covered by it.
-"$khora" check packages
+# And everything else in one command. This used to be a `for` loop over
+# `examples/*/` with a comment explaining that each example is its own package
+# and a walk over the directory would resolve one manifest for four programs.
+# That comment was a workaround for a missing feature; `[workspace]` in the
+# root `khora.toml` is the feature. Roadmap 14.13.
+"$khora" check .
 
 step 'the corpus is formatted'
 "$khora" fmt std --check
-"$khora" fmt examples --check
-"$khora" fmt bench --check
-"$khora" fmt packages --check
+"$khora" fmt . --check
 
 step 'the standard library reference matches the standard library'
 # `--check` writes nothing and fails if the checked-in pages are stale, which

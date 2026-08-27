@@ -14,8 +14,21 @@ use std::fmt;
 /// A parsed `khora.toml`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Manifest {
-    /// Package identity.
-    pub package: Package,
+    /// Package identity, absent in a workspace root that is only a workspace.
+    ///
+    /// **Optional because a monorepo's root is not a package.** This repository
+    /// holds `std`, four examples, four benchmarks and a package, and none of
+    /// them is at the top; a root forced to declare a `[package]` would be
+    /// inventing a name for a thing that does not exist, and then that name
+    /// would appear in error messages. Cargo calls the shape a virtual
+    /// manifest and it is the right one.
+    ///
+    /// Exactly one rule holds it together, checked in `Manifest::parse`: a
+    /// manifest must have `[package]` or `[workspace]` or both, and a file with
+    /// neither is not a manifest at all.
+    pub package: Option<Package>,
+    /// The members this manifest is the root of.
+    pub workspace: Option<Workspace>,
     /// OS capabilities the package is allowed to ask for.
     #[serde(default)]
     pub permissions: Permissions,
@@ -35,6 +48,45 @@ pub struct Manifest {
     /// Task-runner entries, keyed by task name.
     #[serde(default)]
     pub tasks: BTreeMap<String, Task>,
+}
+
+impl Manifest {
+    /// The package this manifest declares.
+    ///
+    /// `None` for a workspace root, which is a real manifest describing no
+    /// package. Every caller that needs one has to say what it wanted it *for*,
+    /// which is why this returns an option rather than erroring here: "a
+    /// workspace root is not a package" means nothing without the sentence
+    /// about what was being attempted.
+    pub fn package(&self) -> Option<&Package> {
+        self.package.as_ref()
+    }
+
+    /// Whether this manifest is the root of a workspace.
+    pub fn is_workspace_root(&self) -> bool {
+        self.workspace.is_some()
+    }
+}
+
+/// The `[workspace]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Workspace {
+    /// Directories holding members, relative to this manifest.
+    ///
+    /// A trailing `*` matches every directory one level down, which is how
+    /// `packages/*` and `examples/*` are written. Deliberately not a full glob
+    /// language: `**` and character classes are a syntax to document and to get
+    /// subtly wrong, and nothing has wanted one. A member that does not fit the
+    /// pattern is listed by name, which is clearer anyway.
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// Members matched by `members` that should not be treated as such.
+    ///
+    /// For the directory inside `examples/*` that is a fixture rather than a
+    /// package. Without it the only way to exclude one is to stop using a
+    /// pattern and list the rest by hand.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// The `[package]` table.

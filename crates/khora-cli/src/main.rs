@@ -264,7 +264,86 @@ fn run() -> Result<bool> {
     }
 }
 
+/// Parse and type check.
+///
+/// **A workspace root fans out over its members**, one at a time, each as its
+/// own package. That is not an optimisation to skip: a member's dependencies
+/// come from *its* manifest, so checking a whole directory as one compilation
+/// resolves one manifest for several programs and finds neither the
+/// dependency nor the reason it was missing. `scripts/baseline.sh` had that
+/// loop written in shell, with a comment explaining the workaround.
 fn check(paths: &[PathBuf]) -> Result<bool> {
+    if let Some(members) = workspace_members(paths) {
+        return over_members(&members, "check", |directory| check_one(std::slice::from_ref(directory)));
+    }
+    check_one(paths)
+}
+
+/// The members of the workspace `paths` names, if it names exactly one and
+/// that one is a root.
+///
+/// One path, because `khora check a b` is a request about two things and
+/// fanning either of them out would make the report incomprehensible. And only
+/// a root named *directly*: being inside a workspace does not mean a bare
+/// `khora check .` in one member should check all of them.
+fn workspace_members(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let [only] = paths else { return None };
+    let manifest = if only.is_dir() { only.join("khora.toml") } else { return None };
+    let found = khora_manifest::read_workspace(&manifest).ok().flatten()?;
+    if found.members.is_empty() {
+        return None;
+    }
+    Some(found.members)
+}
+
+/// Runs `each` over every member, reporting per member and failing if any did.
+///
+/// **Every member runs even after one fails.** A monorepo command that stopped
+/// at the first failure would make a reader fix one thing, run again, and find
+/// the next — which is the loop the shell script had and the reason it was
+/// worth replacing.
+fn over_members(
+    members: &[PathBuf],
+    verb: &str,
+    mut each: impl FnMut(&PathBuf) -> Result<bool>,
+) -> Result<bool> {
+    let mut all_clean = true;
+    let mut failed = Vec::new();
+    for member in members {
+        println!("== {} {}", verb, member.display());
+        match each(member) {
+            Ok(true) => {}
+            Ok(false) => {
+                all_clean = false;
+                failed.push(member.clone());
+            }
+            Err(why) => {
+                // Reported and carried on with, for the reason above. The
+                // status still says the run failed.
+                eprintln!("khora: {}: {why:#}", member.display());
+                all_clean = false;
+                failed.push(member.clone());
+            }
+        }
+    }
+
+    // The count either way, so a clean run says how much it covered. "8
+    // members clean" is a different claim from "clean", and the second is what
+    // a workspace command silently makes when a pattern matched nothing.
+    if all_clean {
+        println!("\n{} member(s) clean", members.len());
+    } else {
+        println!(
+            "\n{} of {} member(s) failed: {}",
+            failed.len(),
+            members.len(),
+            failed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(all_clean)
+}
+
+fn check_one(paths: &[PathBuf]) -> Result<bool> {
     let files = collect_sources(paths)?;
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
@@ -733,6 +812,14 @@ fn lsp() -> Result<()> {
 
 /// Formats files in place, or reports which would change.
 fn fmt(paths: &[PathBuf], check: bool) -> Result<bool> {
+    if let Some(members) = workspace_members(paths) {
+        let verb = if check { "check formatting" } else { "format" };
+        return over_members(&members, verb, |directory| fmt_one(std::slice::from_ref(directory), check));
+    }
+    fmt_one(paths, check)
+}
+
+fn fmt_one(paths: &[PathBuf], check: bool) -> Result<bool> {
     let files = collect_sources(paths)?;
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
@@ -1051,13 +1138,7 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         // to look in `target`. Deduplication below handles the entry file
         // arriving twice.
         if root.is_file() {
-            if let Some(manifest) = nearest_manifest(root) {
-                // An empty parent is the manifest in the working directory,
-                // which is `.` rather than nowhere.
-                let package = match manifest.parent() {
-                    Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
-                    _ => PathBuf::from("."),
-                };
+            if let Some(package) = enclosing_package(root) {
                 gather(&package, &mut out)?;
             }
         }
@@ -1257,11 +1338,18 @@ fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
     let store = khora_pkg::Store::open()?;
     let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
 
-    let document = khora_pkg::cyclonedx(
-        &resolution.lockfile,
-        &parsed.manifest.package.name,
-        &parsed.manifest.package.version,
-    );
+    // An SBOM names the thing it describes, so a workspace root has nothing to
+    // put at the top of one. Refused rather than filled in with the directory
+    // name: a bill of materials is a document somebody may hand to an auditor,
+    // and a made-up subject is worse than no document.
+    let subject = parsed.manifest.package().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} is a workspace root rather than a package, so there is nothing for an SBOM \
+             to be *about*. Run this in a member directory.",
+            manifest_path.display()
+        )
+    })?;
+    let document = khora_pkg::cyclonedx(&resolution.lockfile, &subject.name, &subject.version);
     match out {
         Some(file) => std::fs::write(file, document)
             .with_context(|| format!("writing {}", file.display())),
@@ -1524,6 +1612,37 @@ fn looks_like_a_url(argument: &str) -> bool {
         || argument.starts_with("git@")
         || argument.starts_with('.')
         || argument.starts_with('/')
+}
+
+/// The directory of the package `start` is part of.
+///
+/// **The nearest manifest is not necessarily a package.** A workspace root has
+/// no `[package]`, and treating its directory as one made `khora check` on a
+/// single file compile every member of the workspace: the file's *package* was
+/// the whole repository. So a manifest without a `[package]` is walked past,
+/// exactly as a directory without a manifest is.
+fn enclosing_package(start: &Path) -> Option<PathBuf> {
+    let mut here = start.parent();
+    while let Some(directory) = here {
+        let candidate = directory.join("khora.toml");
+        if candidate.is_file() {
+            let declares_package = std::fs::read_to_string(&candidate)
+                .ok()
+                .and_then(|text| khora_manifest::Manifest::parse(&text).ok())
+                .is_some_and(|parsed| parsed.manifest.package.is_some());
+            if declares_package {
+                // An empty path is the manifest in the working directory,
+                // which is `.` rather than nowhere.
+                return Some(if directory.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    directory.to_path_buf()
+                });
+            }
+        }
+        here = directory.parent();
+    }
+    None
 }
 
 /// The `khora.toml` governing `start`: in it if it is a directory, beside it if

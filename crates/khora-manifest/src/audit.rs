@@ -33,6 +33,7 @@ static OPEN: Schema = Schema::Open;
 
 static ROOT: Schema = Schema::Fields(&[
     ("package", &PACKAGE),
+    ("workspace", &WORKSPACE),
     ("permissions", &PERMISSIONS),
     ("fmt", &FMT),
     ("lints", &LINTS),
@@ -41,6 +42,8 @@ static ROOT: Schema = Schema::Fields(&[
     ("tasks", &TASKS),
     ("toolchain", &TOOLCHAIN),
 ]);
+
+static WORKSPACE: Schema = Schema::Fields(&[("members", &OPEN), ("exclude", &OPEN)]);
 
 static PACKAGE: Schema = Schema::Fields(&[
     ("name", &OPEN),

@@ -37,10 +37,10 @@ fn the_reference_manifest_parses_with_no_warnings() {
     );
 
     let manifest = parsed.manifest;
-    assert_eq!(manifest.package.name, "risk_analyzer");
-    assert_eq!(manifest.package.version, "0.1.0");
-    assert_eq!(manifest.package.authors, ["Engineering Team <dev@khora.internal>"]);
-    assert_eq!(manifest.package.edition.as_deref(), Some("2026"));
+    assert_eq!(manifest.package().expect("a package").name, "risk_analyzer");
+    assert_eq!(manifest.package().expect("a package").version, "0.1.0");
+    assert_eq!(manifest.package().expect("a package").authors, ["Engineering Team <dev@khora.internal>"]);
+    assert_eq!(manifest.package().expect("a package").edition.as_deref(), Some("2026"));
 
     assert_eq!(
         manifest.permissions.network.as_deref(),
@@ -139,9 +139,9 @@ fn a_package_table_is_enough() {
 
     assert!(parsed.warnings.is_empty(), "a minimal manifest should be warning-free");
     let manifest = parsed.manifest;
-    assert_eq!(manifest.package.name, "p");
-    assert!(manifest.package.authors.is_empty(), "`authors` should default to empty");
-    assert_eq!(manifest.package.edition, None);
+    assert_eq!(manifest.package().expect("a package").name, "p");
+    assert!(manifest.package().expect("a package").authors.is_empty(), "`authors` should default to empty");
+    assert_eq!(manifest.package().expect("a package").edition, None);
     assert_eq!(manifest.permissions, Default::default(), "no grants means no capabilities");
     assert_eq!(manifest.fmt, None, "an absent `[fmt]` must stay distinguishable from an empty one");
     assert_eq!(manifest.build, None);
@@ -279,7 +279,7 @@ retries = 3
         "these are all unknown-key warnings"
     );
     assert_eq!(
-        parsed.manifest.package.name, "p",
+        parsed.manifest.package().expect("a package").name, "p",
         "the recognized part of the manifest must survive intact"
     );
     assert_eq!(parsed.manifest.dependencies["std.effect"].version.as_deref(), Some("1.0.0"));
@@ -328,7 +328,7 @@ fn an_unknown_key_holding_a_date_still_only_warns() {
     let parsed = parse("[package]\nname = \"p\"\nversion = \"0.1.0\"\nreleased = 2026-01-01\n");
 
     assert_eq!(warning_keys(&parsed), ["package.released"]);
-    assert_eq!(parsed.manifest.package.name, "p");
+    assert_eq!(parsed.manifest.package().expect("a package").name, "p");
 }
 
 #[test]
@@ -585,13 +585,13 @@ fn the_toolchain_version_is_read() {
 #[test]
 fn publish_is_absent_true_or_false() {
     let absent = parse("[package]\nname = \"p\"\nversion = \"0.1.0\"\n");
-    assert_eq!(absent.manifest.package.publish, None);
+    assert_eq!(absent.manifest.package().expect("a package").publish, None);
 
     let yes = parse("[package]\nname = \"p\"\nversion = \"0.1.0\"\npublish = true\n");
-    assert_eq!(yes.manifest.package.publish, Some(true));
+    assert_eq!(yes.manifest.package().expect("a package").publish, Some(true));
 
     let no = parse("[package]\nname = \"p\"\nversion = \"0.1.0\"\npublish = false\n");
-    assert_eq!(no.manifest.package.publish, Some(false));
+    assert_eq!(no.manifest.package().expect("a package").publish, Some(false));
 }
 
 /// A git URL names a repository, and a repository is not a package.

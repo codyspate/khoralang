@@ -4052,7 +4052,7 @@ it.
 
 | # | Item | Why it is here |
 | --- | --- | --- |
-| 14.13 | **`[workspace]`** | `members = ["packages/*", "examples/*"]` in a root manifest. One command covers every member, and `khora check` at the root stops being a loop in a shell script |
+| 14.13 | ✅ **`[workspace]`** | Done. The root `khora.toml` is virtual — no `[package]`, because the root is not one — and `khora check .` and `khora fmt .` fan out over its eight members, each as its own package. Every member runs even after one fails, because the shell loop this replaced stopped at the first. Patterns are a trailing `*` and nothing more: `**` and brace expansion are syntax to document and edge cases to get wrong, for a feature whose whole job is "which directories". Finding the root also exposed a real bug — `khora check <file>` took the *nearest* manifest as the file's package, so once a virtual one existed at the repository root, checking one file compiled the whole monorepo |
 | 14.14 | **Inherited fields** | `version.workspace = true`, and the same for `edition`, `authors`, `[lints]`, `[fmt]` and `[permissions]` defaults. This repository's own `Cargo.toml` already works this way, which is the argument |
 | 14.15 | **One lock, one version** | A single `khora.lock` at the root and one resolved graph, so two members cannot silently use two versions of a shared dependency. The single-version policy is most of what makes a monorepo coherent rather than a directory of projects |
 | 14.16 | **Affected-only** | Given a diff, run only the members it can reach. See below — Khora can do this *exactly* rather than heuristically |

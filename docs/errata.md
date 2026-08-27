@@ -1350,3 +1350,56 @@ from.
 13.24 exists for exactly this class, and this is its first finding: a
 clean-machine test is not the same test as a green suite, and the difference is
 not thoroughness. It is that a user's file gets made by a user's tools.
+
+## 50. The package a file belonged to was whichever manifest was nearest
+
+`khora check src/main.kh` does not check one file. An entry point names where a
+program starts, not everything it is made of, so the command finds the package
+that file belongs to and checks the package. That was errata 30's fix and it was
+right. The way it found the package was not:
+
+```rust
+if let Some(manifest) = nearest_manifest(root) {
+    let package = manifest.parent()...;
+    gather(&package, &mut out)?;
+}
+```
+
+The nearest `khora.toml` walking upwards. Which was correct for every manifest
+that existed, because every manifest that existed declared a `[package]`.
+
+**Then 14.13 added one that does not.** A workspace root is a `khora.toml` with
+a `[workspace]` table and no `[package]`, and this repository grew one at its
+top. Nothing about the change touched `collect_sources`, and the baseline stayed
+green. What broke was a test in `khora-cli/tests/check.rs` that checks one file
+in `target/tmp` and asserts on the file count:
+
+```
+assertion `left == right` failed: checked 28 file(s): no errors
+  left: 28
+ right: 16
+```
+
+Twenty-eight files, from a command naming one. The walk upwards had left the
+scratch directory, left `target`, reached the repository root, found a
+`khora.toml`, and concluded that the file's package was the entire monorepo —
+`std`, four examples, four benchmarks and a library. It compiled all of them and
+said "no errors", which was even true.
+
+**The fix is that a manifest without a `[package]` is walked past**, exactly as
+a directory without a manifest is. `enclosing_package` reads each candidate and
+keeps climbing until one declares a package, or the walk runs out of parents.
+
+**What is worth keeping.** The bug is not that the workspace root confused the
+lookup; it is that the lookup never asked the question it meant. "The nearest
+manifest" and "the package this file is in" were the same set for as long as
+there was only one kind of manifest, and code that conflates two things which
+happen to coincide reads as correct right up until they stop coinciding. There
+was no way to notice by reading `collect_sources`, because the difference did
+not exist yet.
+
+And it was caught by a test that is about something else entirely — whether a
+file named outright is read even when its target suffix says another host. That
+test asserts an exact count rather than "it worked", which is the only reason
+the extra twelve files were visible at all. A test that had asserted success
+would have passed.

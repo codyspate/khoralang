@@ -76,7 +76,17 @@ pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Reso
         if lock_path.is_file() { Lockfile::read(&lock_path)? } else { Lockfile::default() };
 
     let root = read_manifest(manifest_path)?;
-    let root_name = root.package.name.clone();
+    // A workspace root resolves under its own directory name. It has no
+    // package name, and the name is only ever used to say *who asked* for a
+    // dependency -- for which the directory is a perfectly good answer and
+    // better than inventing one.
+    let root_name = match root.package() {
+        Some(package) => package.name.clone(),
+        None => root_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "the workspace".to_string()),
+    };
 
     let mut resolved: BTreeMap<String, Resolved> = BTreeMap::new();
     let mut edges: BTreeMap<String, BTreeMap<String, ()>> = BTreeMap::new();
@@ -110,12 +120,19 @@ pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Reso
             let child = package.directory.join("khora.toml");
             if child.is_file() {
                 let parsed = read_manifest(&child)?;
-                if parsed.package.name != *name {
+                let Some(declared) = parsed.package() else {
+                    bail!(
+                        "`{holder}` asks for `{name}`, but {} is a workspace root rather \
+                         than a package. Point at one of its members with `subdir`",
+                        package.directory.display()
+                    );
+                };
+                if declared.name != *name {
                     bail!(
                         "`{holder}` asks for `{name}`, but the package at {} calls itself \
                          `{}`. A dependency's name has to be the name it answers to",
                         package.directory.display(),
-                        parsed.package.name
+                        declared.name
                     );
                 }
                 queue.push_back((name.clone(), parsed, package.directory.clone()));
@@ -298,7 +315,7 @@ fn published(name: &str, root: &Path) -> Result<()> {
     };
     let parsed = khora_manifest::Manifest::parse(&text)
         .map_err(|e| anyhow::anyhow!("reading `{name}`'s manifest: {e}"))?;
-    if parsed.manifest.package.publish == Some(true) {
+    if parsed.manifest.package().is_some_and(|p| p.publish == Some(true)) {
         return Ok(());
     }
     bail!(

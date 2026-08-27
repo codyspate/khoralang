@@ -82,6 +82,12 @@ impl ManifestError {
     /// span, because by this point the typed value has been parsed out of the
     /// document and the position is gone -- and a message naming
     /// `package.version` is enough to find it.
+    /// A file that could not be read, which is not a parse failure but reaches
+    /// the caller through the same channel.
+    pub(crate) fn io(doing: &str, why: &std::io::Error) -> ManifestError {
+        ManifestError { message: format!("{doing}: {why}"), span: None, location: None, file: None }
+    }
+
     pub(crate) fn invalid_value(key: &str, why: String) -> ManifestError {
         ManifestError { message: format!("`{key}`: {why}"), span: None, location: None, file: None }
     }

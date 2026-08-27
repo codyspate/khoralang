@@ -131,7 +131,14 @@ fn inspect(url: &str, revision: &str, subdir: Option<&str>, store: &Store) -> Re
 
     let parsed =
         Manifest::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", manifest.display()))?;
-    let package = parsed.manifest.package;
+    let Some(package) = parsed.manifest.package else {
+        bail!(
+            "{} is a workspace root rather than a package: it has a `[workspace]` table and \
+             no `[package]` one.\n\
+             Depend on one of its members instead -- the URL needs a `subdir` naming which.",
+            manifest.display()
+        );
+    };
 
     if package.publish != Some(true) {
         bail!(

@@ -48,6 +48,7 @@ mod error;
 mod model;
 mod semver;
 mod warning;
+mod workspace;
 
 pub use crate::error::{Location, ManifestError};
 pub use crate::model::{
@@ -55,6 +56,7 @@ pub use crate::model::{
 };
 pub use crate::semver::Version;
 pub use crate::warning::{Warning, WarningKind};
+pub use crate::workspace::{enclosing, read as read_workspace, Workspace as WorkspaceLayout};
 
 /// The result of a successful parse.
 ///
@@ -78,6 +80,19 @@ impl Manifest {
     pub fn parse(text: &str) -> Result<Parsed, ManifestError> {
         let manifest: Manifest =
             toml::from_str(text).map_err(|error| ManifestError::from_toml(error, text))?;
+        // A file with neither table is not a manifest. Said here rather than
+        // by serde, because serde's own message for a missing `[package]`
+        // would now be wrong half the time -- a workspace root is allowed to
+        // have none.
+        if manifest.package.is_none() && manifest.workspace.is_none() {
+            return Err(ManifestError::invalid_value(
+                "package",
+                "a manifest needs a `[package]` table, or a `[workspace]` one if it is the \
+                 root of a monorepo rather than a package itself"
+                    .to_string(),
+            ));
+        }
+
         // `version` is the field `docs/design/compatibility.md` is written
         // entirely in terms of -- what a major may break, what a minor may add
         // -- and none of that means anything against a string nobody parsed.
@@ -85,8 +100,10 @@ impl Manifest {
         // first place any of them would have been noticed is a resolver
         // comparing two and giving an answer nobody could explain. Roadmap
         // 10.1.
-        crate::semver::Version::parse(&manifest.package.version)
-            .map_err(|why| ManifestError::invalid_value("package.version", why))?;
+        if let Some(package) = &manifest.package {
+            crate::semver::Version::parse(&package.version)
+                .map_err(|why| ManifestError::invalid_value("package.version", why))?;
+        }
 
         // Second read: the typed one above cannot report what it ignored.
         let warnings = audit::unknown_keys(text)?;
