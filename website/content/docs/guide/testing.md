@@ -1,14 +1,14 @@
 ---
-title: Testing
+title: Testing and benchmarks
 sidebar:
-  order: 11
+  order: 12
 ---
 
-Khora tests are declared with `test` blocks and run with `khora test`. Pure code can be tested directly; effectful code can be tested by supplying controlled implementations for the capabilities it requires.
+Khora has first-class `test` and `bench` declarations. Tests run with `khora test`; benchmarks run with `khora bench`. Both live beside normal source rather than depending on a naming convention for functions.
 
 ## Write a test
 
-A test can live alongside the code it exercises:
+A test has a string name and a block:
 
 ```khora
 module pricing_test;
@@ -24,13 +24,13 @@ test "double returns twice its input" {
 }
 ```
 
-Run the package tests from the package root:
+Run package tests from the package root:
 
 ```bash
 khora test .
 ```
 
-To focus on matching tests while you work:
+Filter by a substring of the test name:
 
 ```bash
 khora test . --filter double
@@ -38,30 +38,80 @@ khora test . --filter double
 
 ## Test pure functions directly
 
-Pure functions need ordinary inputs and assertions over their returned values. Keep business logic pure when it naturally can be; tests then stay small and deterministic.
+Pure functions need ordinary inputs and assertions over their returned values:
 
-## Test capabilities at the boundary
+```khora
+test "discount never goes below zero" {
+  assert(discount(10, 20) == 0);
+}
+```
 
-Khora's effect and capability model makes tests explicit about the outside world they depend on. Code that requires `Db`, `Clock`, tracing, or another capability should not need a real database, wall clock, or telemetry backend just to exercise domain decisions.
+Keeping domain logic pure when it naturally can be keeps these tests small and deterministic.
 
-Provide a small deterministic handler or in-memory implementation for the same capability contract, then call the application code normally. The function's `with` row tells the test exactly which external authority must be supplied.
+## Test typed failures
 
-See [Effects and capabilities](/docs/guide/effects-and-capabilities/) for the capability model and [Errors and raises](/docs/guide/errors-and-raises/) for recoverable failures.
+Use the same `catch` or `attempt` syntax application code uses:
 
-## Test behavior, not plumbing
+```khora
+test "missing users are reported" {
+  let result = attempt(fn () => load_user(999)!);
 
-Prefer assertions over returned values and externally visible effects rather than compiler/runtime implementation details. A database transaction test, for example, should verify the result, commit or rollback behavior, and the failure observed by the caller—not internal scheduler choices.
+  match result {
+    Result::Ok(_) => assert(false),
+    Result::Err(UserError::NotFound(id)) => assert(id == 999),
+  }
+}
+```
 
-## Include failure and cancellation paths
+See [Typed failure with raises](./errors-and-raises.md) for the failure model.
 
-Khora's strongest guarantees matter when control flow does not return normally. Tests for resources, transactions, and concurrent code should include:
+## Test capabilities with handlers
 
-- successful completion;
-- typed failure;
-- cancellation where the operation can be cancelled;
-- cleanup or rollback behavior that must occur on those paths.
+Effectful code can receive controlled handlers instead of reaching real external services:
 
-For concurrent code, continue with [Fibers and nurseries](/docs/guide/fibers-and-nurseries/) and [Resources and regions](/docs/guide/resources-and-regions/).
+```khora
+const fixed_clock = handler for Clock {
+  now: fn _ => fixed_instant,
+};
+
+test "session uses the supplied clock" {
+  let session = create_session(user) with {
+    clock: fixed_clock,
+  };
+
+  assert(session.created_at == fixed_instant);
+}
+```
+
+The function's `with` row tells the test exactly which outside authority must be supplied. Named contexts can provide a normal application environment with one binding overridden for the test.
+
+## Write a benchmark
+
+A benchmark uses the same named-block shape with `bench`:
+
+```khora
+bench "parse representative payload" {
+  parse_payload(fixture)!;
+}
+```
+
+Run all benchmarks:
+
+```bash
+khora bench .
+```
+
+Or select matching names:
+
+```bash
+khora bench . --filter payload
+```
+
+The benchmark runner compiles and times `bench` blocks. Keep setup that is not part of the measurement outside the operation you intend to compare when the benchmark design allows it.
+
+## Test failure and cancellation paths
+
+Khora's strongest guarantees matter when control flow does not return normally. Tests for resources, transactions, and concurrent code should include successful completion, typed failure, cancellation where applicable, and the cleanup or rollback behavior required on those paths.
 
 ## Use the same commands in CI
 
@@ -73,4 +123,6 @@ khora check .
 khora test .
 ```
 
-That keeps formatting, compiler diagnostics, and tests on the same toolchain developers use locally.
+Projects that rely on performance budgets can run selected `khora bench` workloads separately from correctness CI.
+
+For concurrent tests, continue with [Fibers and nurseries](./fibers-and-nurseries.md) and [Resources and regions](./resources-and-regions.md).
