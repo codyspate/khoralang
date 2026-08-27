@@ -219,3 +219,35 @@ fn a_package_outside_any_workspace_keeps_its_own_lockfile() {
 
     assert!(solo.join("app").join("khora.lock").is_file(), "beside the package it describes");
 }
+
+#[test]
+fn two_members_reaching_one_directory_two_ways_is_not_a_disagreement() {
+    // A diamond is the most ordinary shape in a monorepo, and it used to be an
+    // error: `alpha` writes `../../vendor/shared` and `middle` writes
+    // `../shared`, which land on the same directory and compare as different
+    // strings. Path sources are canonicalized where they are built.
+    let root = workspace("diamond");
+    package(&root.join("vendor").join("shared"), "shared", "");
+    package(
+        &root.join("vendor").join("middle"),
+        "middle",
+        "\n[dependencies]\nshared = { path = \"../shared\" }\n",
+    );
+    package(
+        &root.join("packages").join("alpha"),
+        "alpha",
+        concat!(
+            "\n[dependencies]\n",
+            "middle = { path = \"../../vendor/middle\" }\n",
+            "shared = { path = \"../../vendor/shared\" }\n"
+        ),
+    );
+
+    let store = Store::open().expect("a store");
+    let member = root.join("packages").join("alpha").join("khora.toml");
+    let resolution = resolve(&member, &store, false).expect("a diamond is not a conflict");
+
+    let mut names: Vec<&str> = resolution.packages.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["middle", "shared"]);
+}

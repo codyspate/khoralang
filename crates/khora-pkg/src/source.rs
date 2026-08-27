@@ -73,7 +73,7 @@ impl Source {
                     subdir: dependency.subdir.clone(),
                 })
             }
-            (None, Some(relative), None) => Ok(Source::Path(base.join(relative))),
+            (None, Some(relative), None) => Ok(Source::Path(here(&base.join(relative)))),
             (None, None, Some(_)) => bail!(
                 "`{name}` is declared with a version, and resolving one needs a registry \
                  that does not exist yet. Point it at a `git` or `path` source for now"
@@ -94,19 +94,29 @@ impl Source {
     }
 }
 
+/// A path dependency as one directory rather than one route to it.
+///
+/// **Two members can reach the same directory two ways.** `alpha` writes
+/// `../../vendor/shared` and `middle` writes `../shared`, and both land on the
+/// same package -- but as strings they are different, and the resolver's
+/// "asked for twice and differently" check compares sources. Without this, the
+/// most ordinary shape in a monorepo, a diamond, is an error.
+///
+/// A path that cannot be canonicalized -- pointing at a directory that is not
+/// there -- keeps its literal spelling, because the resolver is about to say
+/// "which is not a directory" and the spelling is what makes that message
+/// useful.
+fn here(path: &Path) -> PathBuf {
+    match path.canonicalize() {
+        Ok(found) => khora_manifest::readable(found),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // Canonicalized for display, because this is mostly read in "asked
-            // for twice and differently", where the two spellings are the
-            // whole message -- and `packages/a/../../vendor/dep1` next to
-            // `packages\../../vendor/dep2` makes two paths that differ
-            // look like two paths that differ in a way that matters.
-            Source::Path(p) => {
-                let shown =
-                    khora_manifest::readable(p.canonicalize().unwrap_or_else(|_| p.clone()));
-                write!(f, "path {}", shown.display())
-            }
+            Source::Path(p) => write!(f, "path {}", p.display()),
             Source::Git { url, rev, subdir } => match subdir {
                 Some(inner) => write!(f, "git {url}#{rev} in {inner}"),
                 None => write!(f, "git {url}#{rev}"),

@@ -19,6 +19,7 @@ use khora_manifest::LintLevel;
 
 mod affected;
 mod run;
+mod workspace_cmds;
 
 #[derive(Parser)]
 #[command(
@@ -207,6 +208,40 @@ enum Command {
         #[arg(long, value_name = "REV")]
         since: Option<String>,
     },
+    /// Scaffold a new package.
+    ///
+    /// Inside a workspace that shares a version, the manifest it writes says
+    /// `version.workspace = true` -- a scaffold that hard-codes one into a
+    /// monorepo where everything else inherits has quietly created the drift
+    /// the inheritance existed to prevent.
+    New {
+        /// The directory to create. Its name is the package's name.
+        path: PathBuf,
+        /// Offer it as a library: `publish = true` and a `src/lib.kh`.
+        #[arg(long)]
+        lib: bool,
+    },
+    /// Explain why a package is in the build.
+    ///
+    /// Every chain from something you declared down to it, shortest first. A
+    /// package reached three ways has three reasons, and printing one of them
+    /// is how somebody removes a dependency and finds it still there.
+    Why {
+        /// The package to explain.
+        name: String,
+        /// The package or workspace to ask about.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Draw the dependency graph.
+    Graph {
+        /// The package or workspace root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Emit Graphviz `dot` instead of a tree.
+        #[arg(long)]
+        dot: bool,
+    },
     /// Get the newest Khora and make it the default.
     ///
     /// `khora toolchain install` plus `khora toolchain default`, which is what
@@ -318,6 +353,12 @@ fn run() -> Result<bool> {
             }
             None => run::list(&path).map(|()| true),
         },
+        Command::New { path, lib } => workspace_cmds::new(&path, lib).map(|()| true),
+        Command::Why { name, path } => workspace_cmds::why(&path, &name).map(|()| true),
+        Command::Graph { path, dot } => {
+            let members = workspace_members(std::slice::from_ref(&path));
+            workspace_cmds::graph(&path, members.as_deref(), dot).map(|()| true)
+        }
         Command::Update { pre } => update(pre),
         Command::Test { path, filter } => test(&path, filter.as_deref()),
         Command::Bench { path, filter } => bench(&path, filter.as_deref()),
