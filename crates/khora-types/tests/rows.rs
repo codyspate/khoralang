@@ -419,11 +419,119 @@ fn a_named_context_discharges_only_what_it_binds() {
     );
 }
 
+/// A name after `with` may be a `context` or a handler value, so a name that
+/// is neither says both rather than only the one it happened to look for
+/// first.
 #[test]
 fn a_context_that_does_not_exist_is_reported() {
     assert_reports(
         &format!("{TWO_SERVICES}pub fn go() -> Int {{ with Nope {{ 1 }} }}\n"),
-        "cannot find a `context` named `Nope`",
+        "`with` takes a handler value or the name of a `context`",
+    );
+}
+
+// --- installing a capability by its type -----------------------------------
+
+/// Two functions naming one capability type differently, which is the whole
+/// problem. `docs/design/capability-installation.md`.
+const TWO_LABELS: &str = "module m;\n\
+                          pub type Ledger;\n\
+                          pub type Clock;\n\
+                          fn a_ledger() -> Ledger;\n\
+                          fn a_clock() -> Clock;\n\
+                          fn transfer() -> Int with { ledger: Ledger };\n\
+                          fn reconcile() -> Int with { books: Ledger };\n\
+                          fn stamp() -> Int with { clock: Clock };\n";
+
+/// One value, two labels, neither of them the name it is bound under.
+#[test]
+fn one_value_supplies_every_label_of_its_type() {
+    assert_clean(&format!(
+        "{TWO_LABELS}\
+         const Books = a_ledger();\n\
+         pub fn go() -> Int {{ with Books {{ transfer() + reconcile() }} }}\n"
+    ));
+}
+
+/// And only labels of *its* type: a second capability is still missing.
+#[test]
+fn a_value_supplies_only_its_own_type() {
+    assert_reports(
+        &format!(
+            "{TWO_LABELS}\
+             const Books = a_ledger();\n\
+             pub fn go() -> Int {{ with Books {{ transfer() + stamp() }} }}\n"
+        ),
+        "clock: Clock",
+    );
+}
+
+/// Comma-separated, one per capability.
+#[test]
+fn several_values_may_be_installed_at_once() {
+    assert_clean(&format!(
+        "{TWO_LABELS}\
+         const Books = a_ledger();\n\
+         const Tick = a_clock();\n\
+         pub fn go() -> Int {{ with Books, Tick {{ reconcile() + stamp() }} }}\n"
+    ));
+}
+
+/// Nested installs each supply their own type.
+#[test]
+fn installs_by_type_nest() {
+    assert_clean(&format!(
+        "{TWO_LABELS}\
+         const Books = a_ledger();\n\
+         const Tick = a_clock();\n\
+         pub fn go() -> Int {{ with Books {{ with Tick {{ reconcile() + stamp() }} }} }}\n"
+    ));
+}
+
+/// The postfix form, which is the same installation on an expression.
+#[test]
+fn a_value_may_be_installed_postfix() {
+    assert_clean(&format!(
+        "{TWO_LABELS}\
+         const Books = a_ledger();\n\
+         pub fn go() -> Int {{ reconcile() with Books }}\n"
+    ));
+}
+
+/// **The right name and the wrong type is an error.** It was not: the label
+/// was matched and the type never looked at, so `with { ledger: a_clock() }`
+/// satisfied `ledger: Ledger`, compiled clean, and dispatched `ledger.note(5)`
+/// to `Clock::now`. Errata 54.
+#[test]
+fn a_label_of_the_wrong_type_is_refused() {
+    assert_reports(
+        &format!(
+            "{TWO_LABELS}\
+             pub fn go() -> Int {{ with {{ ledger: a_clock() }} {{ transfer() }} }}\n"
+        ),
+        "`ledger` here is `Clock`",
+    );
+}
+
+/// And the right name with the right type still passes, which is the half a
+/// careless fix takes away.
+#[test]
+fn a_label_of_the_right_type_is_accepted() {
+    assert_clean(&format!(
+        "{TWO_LABELS}\
+         pub fn go() -> Int {{ with {{ ledger: a_ledger() }} {{ transfer() }} }}\n"
+    ));
+}
+
+/// A capability that arrives from the function's *own* `with` clause is still
+/// charged to the signature rather than quietly discharged -- the mistake the
+/// first version of the type check made, which told `unused-capability` that
+/// every pass-through function used nothing.
+#[test]
+fn a_capability_from_the_signature_is_still_required() {
+    assert_reports(
+        &format!("{TWO_LABELS}pub fn go() -> Int {{ transfer() }}\n"),
+        "ledger: Ledger",
     );
 }
 

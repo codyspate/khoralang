@@ -367,11 +367,17 @@ fn lambda_or_arm_body(p: &mut Parser<'_>) {
 fn context_row(p: &mut Parser<'_>) {
     p.with_record_literals(|p| {
         let mut found = false;
-        if p.at(IDENT) {
+        // Several, comma-separated: `with MyDatabase, SystemClock { .. }`.
+        // Each is a whole capability rather than a field of one, which is why
+        // they are paths in a list and not a row.
+        while p.at(IDENT) {
             let m = p.start();
             path(p);
             m.complete(p, PATH_EXPR);
             found = true;
+            if !p.eat(COMMA) {
+                break;
+            }
         }
         // A named context may stand alone (`expr with Mock`), carry overrides
         // (`expr with Mock { ai: stub }`), or be replaced by a bare row.

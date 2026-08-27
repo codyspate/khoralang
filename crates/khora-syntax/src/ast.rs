@@ -1003,7 +1003,12 @@ impl WithExpr {
     }
     /// A named context, as in `expr with Mock`. Phase 4.4.
     pub fn context(&self) -> Option<Path> {
-        child::<PathExpr>(&self.0).and_then(|p| child(p.syntax()))
+        self.contexts().next()
+    }
+
+    /// Every path installed here: `expr with MyDatabase, SystemClock`.
+    pub fn contexts(&self) -> impl Iterator<Item = Path> + '_ {
+        children::<PathExpr>(&self.0).filter_map(|p| child(p.syntax()))
     }
 }
 
@@ -1015,7 +1020,12 @@ impl WithBlock {
         child(&self.0)
     }
     pub fn context(&self) -> Option<Path> {
-        child::<PathExpr>(&self.0).and_then(|p| child(p.syntax()))
+        self.contexts().next()
+    }
+
+    /// Every path installed here: `with MyDatabase, SystemClock { .. }`.
+    pub fn contexts(&self) -> impl Iterator<Item = Path> + '_ {
+        children::<PathExpr>(&self.0).filter_map(|p| child(p.syntax()))
     }
 }
 

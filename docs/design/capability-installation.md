@@ -1,7 +1,7 @@
 # Installing a capability by its type
 
-**Specified, not yet built.** This is the argument and the decisions; the
-implementation notes at the end are what to build against.
+**Built**, except the two lints and the unlabelled `context`, which are
+marked below. This was the specification; it now describes what exists.
 
 ## The problem
 
@@ -164,15 +164,41 @@ That suggests where it goes next, and the change is small enough to state:
 ```khora
 pub context Production {
   env_config(),
+  Scope::root,
   postgres_db()!,
   sql_ledger(),
+  openai_classifier()!,
 }
 ```
 
 Entries with no label bind by type, exactly as `with <value>` does. Entries
 that keep a label keep today's meaning, so nothing written now stops working
-and the two forms may be mixed in one context where one capability genuinely
-needs pinning to a particular label.
+and the two forms may be mixed where one capability genuinely needs pinning.
+
+**Sequential composition survives this, and that is the part worth checking.**
+A context's bindings are sequential so that a handler may use the ones above
+it, which is what keeps composition flat instead of nesting one `with` per
+service. It is fair to ask how an entry reaches the one above it once neither
+has a name.
+
+It already does not use the name. `docs/design/effects.md`'s own example is
+the proof:
+
+```khora
+pub fn postgres_db() -> Db with { config: Config, scope: Scope } raises ConfigError
+pub fn sql_ledger() -> Ledger with { db: Db }
+```
+
+`postgres_db()` reaches `config` through its **own capability row**, not by
+mentioning a binding called `config`. So in the labelled version the labels
+had to match what these functions call their requirements; in the unlabelled
+version the types match instead, and the same chain composes:
+`env_config()` satisfies `postgres_db`'s `config`, `postgres_db()!` satisfies
+`sql_ledger`'s `db`.
+
+The labels were carrying no information the types did not already have. That
+is the whole argument for removing them, and it is the same argument as the
+one for `with <value>`, applied one level up.
 
 **This is worth doing for a reason beyond tidiness.** A context cannot leave
 its file, because `context_bindings` looks only in the file's own

@@ -253,20 +253,20 @@ impl<'a> Ctx<'a> {
                 // overrides part of it. The context's bindings come first and
                 // the written ones after, so the ordinary rule decides: later
                 // shadows earlier, exactly as it does inside one row.
-                let mut row = match e.context() {
-                    Some(named) => self.context_bindings(&named, range),
-                    None => Vec::new(),
-                };
+                let contexts: Vec<ast::Path> = e.contexts().collect();
+                let (mut row, by_type) = self.installed_paths(contexts.into_iter());
                 row.extend(fields_of(e.row().as_ref()));
-                self.lower_installation(row, body.as_ref(), range)
+                self.lower_installation(row, by_type, body.as_ref(), range)
             }
             ast::Expr::WithBlock(e) => {
                 let body = e.body().map(ast::Expr::Block);
-                let row = match e.context() {
-                    Some(named) => self.context_bindings(&named, range),
-                    None => fields_of(e.row().as_ref()),
+                let contexts: Vec<ast::Path> = e.contexts().collect();
+                let (row, by_type) = if contexts.is_empty() {
+                    (fields_of(e.row().as_ref()), Vec::new())
+                } else {
+                    self.installed_paths(contexts.into_iter())
                 };
-                self.lower_installation(row, body.as_ref(), range)
+                self.lower_installation(row, by_type, body.as_ref(), range)
             }
         }
     }
@@ -278,7 +278,21 @@ impl<'a> Ctx<'a> {
             .find_map(ast::Path::cast)
             .map(|p| p.segments().filter_map(|s| s.ident()).collect())
             .unwrap_or_default();
+        self.lower_segments(segments, range)
+    }
 
+    /// The same resolution, from a bare `Path` rather than a `PathExpr`.
+    ///
+    /// `with MyDatabase { .. }` has only the path — the grammar puts no
+    /// expression around it — and installing a handler value has to resolve
+    /// that name exactly as any other mention of it would.
+    pub(super) fn lower_path(&mut self, path: &ast::Path, range: TextRange) -> ExprId {
+        let segments: Vec<String> =
+            path.segments().filter_map(|s| s.ident()).collect();
+        self.lower_segments(segments, range)
+    }
+
+    fn lower_segments(&mut self, segments: Vec<String>, range: TextRange) -> ExprId {
         // A bare name is a local first — shadowing is what people expect.
         if let [only] = segments.as_slice() {
             if let Some(local) = self.lookup(only) {

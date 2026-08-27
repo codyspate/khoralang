@@ -17,22 +17,39 @@ impl<'a> Ctx<'a> {
     ///
     /// A context is a named `with` row and nothing else, so installing one is
     /// installing its bindings: same `let`s, same labels, same subtraction.
+    /// Sorts a path after `with` into the two things it can be.
+    ///
+    /// A `context` contributes its labelled bindings. Anything else is a
+    /// handler value installed by its type, which is not an error to be
+    /// resolved here -- `lower_installation` resolves the name the same way
+    /// any other mention of it would, and reports it missing if it is.
+    ///
+    /// A context wins where a name is both, because that is what the name
+    /// means today. `docs/design/capability-installation.md`.
+    pub(super) fn installed_paths(
+        &mut self,
+        named: impl Iterator<Item = ast::Path>,
+    ) -> (Vec<ast::RecordExprField>, Vec<ast::Path>) {
+        let mut row = Vec::new();
+        let mut by_type = Vec::new();
+        for path in named {
+            match self.context_bindings(&path) {
+                Some(bindings) => row.extend(bindings),
+                None => by_type.push(path),
+            }
+        }
+        (row, by_type)
+    }
+
+    /// `None` when no context has that name, which is not an error: the path
+    /// may be naming a handler *value* to install by type instead, and only
+    /// the caller knows whether that is still open.
     pub(super) fn context_bindings(
         &mut self,
         named: &ast::Path,
-        range: TextRange,
-    ) -> Vec<ast::RecordExprField> {
+    ) -> Option<Vec<ast::RecordExprField>> {
         let name = named.text_path();
-        match self.contexts.iter().find(|(n, _)| n == &name) {
-            Some((_, decl)) => decl.bindings().collect(),
-            None => {
-                self.error(
-                    format!("cannot find a `context` named `{name}` in this file"),
-                    range,
-                );
-                Vec::new()
-            }
-        }
+        self.contexts.iter().find(|(n, _)| n == &name).map(|(_, decl)| decl.bindings().collect())
     }
 
     /// A mention of a module-level `let`, lowered into what it was bound to.
@@ -82,9 +99,20 @@ impl<'a> Ctx<'a> {
     }
 
     /// `with { ledger: h } { .. }` — the labels bound over a region.
+    ///
+    /// `by_type` are paths naming handler *values*: `with MyDatabase { .. }`.
+    /// They are bound first, so an explicitly labelled binding in the same
+    /// `with` shadows one -- the same "later wins" rule the labels follow
+    /// among themselves.
+    ///
+    /// Each is bound under the path as written. No callee asks for a
+    /// capability by that name, so the binding is invisible to the ordinary
+    /// by-label lookup; what makes it reachable is its type, and the checker
+    /// does that. `docs/design/capability-installation.md`.
     pub(super) fn lower_installation(
         &mut self,
         row: Vec<ast::RecordExprField>,
+        by_type: Vec<ast::Path>,
         body: Option<&ast::Expr>,
         range: TextRange,
     ) -> ExprId {
@@ -93,6 +121,32 @@ impl<'a> Ctx<'a> {
 
         let mut stmts = Vec::new();
         let mut labels = Vec::new();
+
+        for path in by_type {
+            let name = path.text_path();
+            let at = self.shifted(path.syntax().text_range());
+            let before = self.body.errors.len();
+            let value = self.lower_path(&path, at);
+            // **A name that resolves to nothing here gets a `with`-shaped
+            // message.** Ordinary resolution says "cannot find `Nope` in this
+            // scope", which is true and unhelpful in the one position where a
+            // reader may well have meant a `context` and mistyped it. The
+            // error is rewritten rather than added to, because two complaints
+            // about one name is worse than either.
+            if matches!(self.body.expr(value), Expr::Unresolved(_)) {
+                if let Some(reported) = self.body.errors.get_mut(before) {
+                    reported.message = format!(
+                        "cannot find `{name}` in this scope; `with` takes a handler value \
+                         or the name of a `context`"
+                    );
+                }
+            }
+            let local = self.declare(name.clone(), false, path.syntax().text_range());
+            self.in_scope.push((name, local));
+            self.body.by_type.push(local);
+            let pat = self.add_pat(Pat::Bind(local));
+            stmts.push(Stmt::Let { pat, ty: None, init: Some(value) });
+        }
         for field in row {
             let value = match field.value() {
                 Some(v) => self.lower_expr(&v),

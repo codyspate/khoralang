@@ -206,7 +206,18 @@ impl<'ctx> Lower<'_, 'ctx> {
         let wanted = wanted.clone();
         let mut out = Vec::with_capacity(wanted.len());
         for (label, ty) in wanted {
-            let Some(local) = self.body.capability_at(site, &label) else {
+            // By name first, then by type. A capability installed as
+            // `with MyDatabase { .. }` is bound under the path that was
+            // written, so no lookup by label finds it; the checker matched it
+            // to this label and recorded which binding won.
+            // `docs/design/capability-installation.md`.
+            let found = self.body.capability_at(site, &label).or_else(|| {
+                self.body
+                    .by_type_at(site)
+                    .into_iter()
+                    .find(|local| self.types.local(*local) == &ty)
+            });
+            let Some(local) = found else {
                 // Not a binding this body can name, but possibly one it was
                 // handed: a `with 'r` clause forwards capabilities it has no
                 // name for. Passed on as it arrived, with a `dup` to match the

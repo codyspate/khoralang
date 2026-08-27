@@ -1618,3 +1618,74 @@ in tail position. `pool.kh` was the first postfix `with` in a call argument
 anywhere -- so the combination that fails is one nothing had written down yet.
 A feature that is in the grammar, in the AST, in the formatter and in no test
 is a feature nobody has run.
+
+## 54. A capability was matched by name and never by type
+
+Found while building `with <handler value>`, by writing the test that says the
+*old* form still works:
+
+```khora
+fn transfer() -> Int with { ledger: Ledger } { ledger.note(5) }
+
+fn go() -> Int {
+  with { ledger: a_clock() } {   // a `Clock`, not a `Ledger`
+    transfer()
+  }
+}
+```
+
+This compiled with no errors, ran, and printed `777` -- the value of
+`Clock::now()`. `ledger.note(5)` had dispatched to a different operation of a
+different effect, and the argument was dropped on the way.
+
+### Why it was silent
+
+A capability requirement was discharged by **label**. The subtraction in
+`demand_rows` asked only whether the name was supplied:
+
+```rust
+.filter(|(l, _)| !self.installed.contains(l))
+```
+
+and the lexical check beside it asked only whether a binding of that name was
+in scope. Neither looked at what the binding *was*. A `with` row is an
+ordinary record literal, so nothing else in the pipeline had a reason to
+compare it against the requirement either: the row is checked as a record, and
+the requirement is checked as a row of labels, and the two were never brought
+together.
+
+Code generation then did exactly what it was told. It looked up `ledger`,
+found a `Clock` handler, and passed it where a `Ledger` was expected. Both are
+records of closures with compatible layout, so the call landed on whatever
+operation sat at that offset.
+
+### The fix
+
+When a label is in scope at a call site, its type is compared against the
+requirement and a mismatch is reported. Two details that are the whole of
+getting it right:
+
+- **Checked, not subtracted.** The first version discharged the requirement
+  as well as checking it, which is wrong: a label in scope is often the
+  function's *own* `with` parameter, which still has to be charged to the
+  signature. Subtracting it emptied `call_rows`, and `unused-capability`
+  promptly reported every pass-through function as not using the capability it
+  forwards. Four tests caught that, which is the argument for having them.
+- **Silent on anything undecided.** `Unknown`, a variable, `Never` and a rigid
+  parameter are all "not settled", and a second message about a type nothing
+  has decided is noise after the first.
+
+### What generalises
+
+**Two checks that never meet are one check.** The row was validated as a
+record and the requirement as a set of labels, and each was correct about its
+own half. The bug lived in the join, which nothing owned -- there was no line
+of code whose job was "these are the same capability".
+
+The reason it survived is worth more than the fix. Every `with` in the
+repository is *correct*, so no test ever supplied a wrong-typed capability;
+the hole was only reachable by writing a program nobody would write on
+purpose. It was found by writing the negative case for a new feature -- the
+test asserting that the **old** behaviour still worked -- which is an argument
+for writing those even when the answer seems obvious. The answer was not what
+anybody would have guessed.

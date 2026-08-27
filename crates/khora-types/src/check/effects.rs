@@ -121,15 +121,44 @@ impl<'a> Checker<'a> {
             // known by now, which is the ordinary case; one that is still a
             // variable simply has nothing to subtract.
             let mut row = self.unifier.zonk(row);
-            // Whatever an enclosing `with` block supplies is already answered.
+            // Whatever an enclosing `with` block supplies is already answered
+            // -- by label, and then by type for anything installed without one.
             if clause == Clause::Requires {
-                if let Type::Row { fields, tail } = &row {
-                    let left: Vec<(String, Type)> = fields
-                        .iter()
-                        .filter(|(l, _)| !self.installed.contains(l))
-                        .cloned()
-                        .collect();
-                    row = Type::row(left, tail.as_deref().cloned());
+                if let Type::Row { fields, tail } = row.clone() {
+                    let mut left: Vec<(String, Type)> = Vec::new();
+                    for (label, ty) in fields {
+                        // **A label in scope has to be the right type.**
+                        // Matching by name alone accepted
+                        // `with { ledger: a_clock() }` against
+                        // `ledger: Ledger`, and then dispatched
+                        // `ledger.note(5)` to `Clock::now` -- a clean compile
+                        // that ran the wrong function. Errata 54.
+                        //
+                        // Checked, not subtracted: a label in scope may be
+                        // this function's own `with` parameter, which still
+                        // has to be charged to the signature. Subtracting here
+                        // emptied the published row and told `unused-capability`
+                        // that a pass-through function used nothing.
+                        if let Some(local) =
+                            callee_site.and_then(|s| self.body.capability_at(s, &label))
+                        {
+                            self.check_capability_type(&label, &ty, local, range);
+                        }
+                        if self.installed.contains(&label) {
+                            continue;
+                        }
+                        // `with MyDatabase { .. }` binds a handler under the
+                        // path that was written, which is no label any callee
+                        // asks for. What answers `db: PostgresDb` is a binding
+                        // whose *type* is `PostgresDb`.
+                        let by_type = callee_site
+                            .is_some_and(|site| self.installed_by_type(site, &ty).is_some());
+                        if by_type {
+                            continue;
+                        }
+                        left.push((label, ty));
+                    }
+                    row = Type::row(left, tail.map(|t| *t));
                 }
             }
             if matches!(&row, Type::Row { fields, tail } if fields.is_empty() && tail.is_none()) {
@@ -249,7 +278,16 @@ impl<'a> Checker<'a> {
                         .site
                         .and_then(|site| self.body.capability_at(site, &label))
                         .is_some();
-                    if lexical || self.installed.contains(&label) {
+                    // Nothing of that name is in scope, but something of that
+                    // *type* may have been installed without one:
+                    // `with MyDatabase { .. }`. Recorded as well as accepted,
+                    // because code generation has to pass the same binding and
+                    // cannot answer a question about types.
+                    let by_type = !lexical
+                        && demand
+                            .site
+                            .is_some_and(|site| self.installed_by_type(site, &ty).is_some());
+                    if lexical || by_type || self.installed.contains(&label) {
                         left.push((label, ty));
                     } else if !mine.iter().any(|(l, _)| l == &label) {
                         mine.push((label, ty));
@@ -265,6 +303,57 @@ impl<'a> Checker<'a> {
         // happened; one of them sorting is how it does not happen again.
         mine.sort_by(|(a, _), (b, _)| a.cmp(b));
         Type::row(mine, None)
+    }
+
+    /// Reports a binding that has the right name and the wrong type.
+    ///
+    /// Silent for anything not yet solved: `Unknown` is downstream of an error
+    /// already reported, and a variable is a type nothing has decided, so
+    /// neither is a disagreement worth a second message.
+    fn check_capability_type(
+        &mut self,
+        label: &str,
+        wanted: &Type,
+        local: khora_hir::body::LocalId,
+        range: TextRange,
+    ) {
+        let Some(have) = self.locals.get(&local).cloned() else { return };
+        let have = self.unifier.zonk(&have);
+        let wanted = self.unifier.zonk(wanted);
+        let undecided = |t: &Type| {
+            matches!(t, Type::Unknown | Type::Var(_) | Type::Never | Type::Param(_))
+        };
+        if undecided(&have) || undecided(&wanted) || have == wanted {
+            return;
+        }
+        self.error(
+            format!("`{label}` here is `{have}`, but this call needs `{label}: {wanted}`"),
+            range,
+        );
+    }
+
+    /// The binding installed by type at `site` whose type is `wanted`.
+    ///
+    /// Innermost first, so an inner `with` shadows an outer one exactly as it
+    /// does for a named binding.
+    ///
+    /// Compared rather than unified. A capability is a declared effect type,
+    /// so equality is the right question, and asking it this way cannot bind a
+    /// variable as a side effect of a match that fails -- which a `unify` here
+    /// would, on every candidate it rejected.
+    fn installed_by_type(
+        &mut self,
+        site: ExprId,
+        wanted: &Type,
+    ) -> Option<khora_hir::body::LocalId> {
+        let wanted = self.unifier.zonk(wanted);
+        for local in self.body.by_type_at(site) {
+            let Some(have) = self.locals.get(&local) else { continue };
+            if self.unifier.zonk(have) == wanted {
+                return Some(local);
+            }
+        }
+        None
     }
 
     /// Records that a lambda uses a capability without naming it.

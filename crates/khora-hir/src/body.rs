@@ -376,6 +376,16 @@ pub struct Body {
     /// scopes, and the last declaration is not the one in scope at the first
     /// call.
     pub capabilities: std::collections::HashMap<ExprId, Vec<(String, LocalId)>>,
+    /// Bindings installed by *type* rather than by label: `with MyDatabase`.
+    ///
+    /// The name they are bound under is the path that was written, which no
+    /// callee asks for by name -- so a lookup in [`Body::capability_at`] will
+    /// never find one, and that is deliberate. What satisfies a requirement
+    /// from one of these is its **type**, which HIR does not have.
+    ///
+    /// So this records only *which* locals are open to that matching, and the
+    /// checker does the matching. `docs/design/capability-installation.md`.
+    pub by_type: Vec<LocalId>,
     pub root: Option<ExprId>,
     pub errors: Vec<HirError>,
 }
@@ -412,6 +422,22 @@ impl Body {
             .rev()
             .find(|(l, _)| l == label)
             .map(|(_, local)| *local)
+    }
+
+    /// The bindings in scope at `at` that were installed by type, innermost
+    /// first.
+    ///
+    /// Innermost first because that is the order the checker should try them
+    /// in: an inner `with` shadows an outer one, the same as every other
+    /// binding.
+    pub fn by_type_at(&self, at: ExprId) -> Vec<LocalId> {
+        let Some(visible) = self.capabilities.get(&at) else { return Vec::new() };
+        visible
+            .iter()
+            .rev()
+            .filter(|(_, local)| self.by_type.contains(local))
+            .map(|(_, local)| *local)
+            .collect()
     }
 
     pub fn local(&self, id: LocalId) -> &Local {
