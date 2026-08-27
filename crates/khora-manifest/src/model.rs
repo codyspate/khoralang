@@ -985,6 +985,20 @@ pub struct Build {
 pub struct Task {
     /// One-line summary, shown when tasks are listed.
     pub description: Option<String>,
+    /// The command line to run, handed to the platform shell.
+    ///
+    /// **This is not `build.rs` coming back.** `docs/project.md` §4.1 replaces
+    /// arbitrary build-time host code with sandboxed WASM plugins, and the
+    /// argument there is about a *dependency* running code on your machine
+    /// because you fetched it. A task runs only when somebody types
+    /// `khora run <name>` in a manifest they are standing in; nothing reaches
+    /// it during resolution, fetching or building, and a dependency's tasks
+    /// are never even read. `docs/design/tasks.md`.
+    ///
+    /// A task with no `run` is a grouping -- `ci` exists to depend on three
+    /// other things -- unless its name is one of the toolchain's own verbs, in
+    /// which case it runs that.
+    pub run: Option<String>,
     /// Tasks that must finish first.
     ///
     /// Not resolved here. §4.1's own example depends on `lint`, `test` and

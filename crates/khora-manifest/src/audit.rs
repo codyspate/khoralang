@@ -104,7 +104,8 @@ static DEPENDENCY: Schema = Schema::Fields(&[
 static BUILD: Schema = Schema::Fields(&[("target", &OPEN), ("plugin", &OPEN)]);
 
 static TASKS: Schema = Schema::Map(&TASK);
-static TASK: Schema = Schema::Fields(&[("description", &OPEN), ("depends_on", &OPEN)]);
+static TASK: Schema =
+    Schema::Fields(&[("description", &OPEN), ("depends_on", &OPEN), ("run", &OPEN)]);
 
 /// Collects a warning for every key in `text` that [`ROOT`] does not describe.
 ///

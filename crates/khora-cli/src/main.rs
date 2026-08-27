@@ -18,6 +18,7 @@ use khora_diagnostics::{
 use khora_manifest::LintLevel;
 
 mod affected;
+mod run;
 
 #[derive(Parser)]
 #[command(
@@ -183,6 +184,29 @@ enum Command {
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Run a task from `[tasks]`, and everything it depends on first.
+    ///
+    /// With no name, lists what there is to run. At a workspace root the task
+    /// runs in every member that has something to run for it, in dependency
+    /// order.
+    ///
+    /// A task's `run` line goes to the platform shell. That is not build-time
+    /// code execution coming back: nothing reaches a task except somebody
+    /// typing its name, and a dependency's `[tasks]` table is never read.
+    /// `docs/design/tasks.md`.
+    Run {
+        /// The task to run. Omitted, lists them.
+        task: Option<String>,
+        /// The package or workspace root.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Only the members a diff since this revision can reach.
+        ///
+        /// The same selection `khora check --since` makes. Only at a
+        /// workspace root.
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
+    },
     /// Get the newest Khora and make it the default.
     ///
     /// `khora toolchain install` plus `khora toolchain default`, which is what
@@ -278,6 +302,22 @@ fn run() -> Result<bool> {
         Command::Lsp => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
         Command::Toolchain { command } => toolchain(command),
+        Command::Run { task, path, since } => match task {
+            Some(task) => {
+                let members = match workspace_members(std::slice::from_ref(&path)) {
+                    Some(members) => {
+                        Some(narrow(std::slice::from_ref(&path), &members, since.as_deref())?)
+                    }
+                    None if since.is_some() => anyhow::bail!(
+                        "`--since` selects members of a workspace, and this is not a \
+                         workspace root. Run it where the `[workspace]` table is"
+                    ),
+                    None => None,
+                };
+                run::run(&path, &task, members.as_deref())
+            }
+            None => run::list(&path).map(|()| true),
+        },
         Command::Update { pre } => update(pre),
         Command::Test { path, filter } => test(&path, filter.as_deref()),
         Command::Bench { path, filter } => bench(&path, filter.as_deref()),

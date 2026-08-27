@@ -13,6 +13,7 @@ fn tasks_from(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Task> {
                 (*name).to_string(),
                 Task {
                     description: None,
+                    run: None,
                     depends_on: needs.iter().map(|n| (*n).to_string()).collect(),
                 },
             )
