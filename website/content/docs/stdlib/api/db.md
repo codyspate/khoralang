@@ -35,6 +35,11 @@ cancelled. **A handler that cannot promise that is a broken handler**, and
 the test beside this module is written against the promise rather than
 against any engine.
 
+Database authority is carried by the capability row all the way through.
+Application code says `with { db: Db }`; `transaction` says the same thing.
+The concrete handler belongs at a composition boundary, not as a `Db`
+parameter threaded through domain functions.
+
 All three ways out are covered, and the third took two pieces rather than
 one: the rollback is registered with a region before the body runs, and the
 body carries a `raises` row so that a cancellation has a channel to reach
@@ -241,11 +246,15 @@ fn show(self) -> String
 ### transaction
 
 ```khora
-pub fn transaction<A, 'c, 'r>(db: Db, body: () -> Result<A, DbError> with 'c raises 'r) -> Result<A, DbError> with 'c raises 'r
+pub fn transaction<A, 'c, 'r>(body: () -> Result<A, DbError> with 'c raises 'r) -> Result<A, DbError> with { 'c | db: Db } raises 'r
 ```
 
 Runs `body` in a transaction, committing on success and rolling back
 otherwise.
+
+The database is a capability, not an ordinary argument. The caller must
+have `db: Db` in its capability row; the same binding is used for begin,
+the body, commit, and rollback.
 
 **This is the function the whole module exists for.** A caller that wrote
 begin, body and commit by hand has written the correct thing only for the
