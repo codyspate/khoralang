@@ -226,4 +226,4 @@ pub trait Convert<A> {
 
 The parameter grammar is shared across functions, types, traits, effects, and implementation blocks.
 
-See [Traits](./traits.md) for associated types and implementations and [Types](./types.md) for function types, rows, and `forall` in context.
+See [Traits](./traits/) for associated types and implementations and [Types](./types/) for function types, rows, and `forall` in context.
