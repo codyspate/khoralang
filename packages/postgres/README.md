@@ -18,7 +18,68 @@ inside one that is mostly a compiler. The command writes the entry, so
 postgres = { git = "https://github.com/khora-lang/khora", rev = "main", subdir = "packages/postgres" }
 ```
 
-## Using it
+## Using it as a `Db` capability
+
+Application code should normally depend on `std::db::Db`, not on a PostgreSQL
+connection value. The pool owns the concrete connections and `with_db` installs
+a leased connection as the `db: Db` capability for the callback:
+
+```khora
+import std::core::{Fibers, List, Result, print};
+import std::db::{Cell, Db, DbError, transaction};
+import postgres::db::{Settings};
+import postgres::pool::{close, open, with_db};
+
+fn insert_person(name: String) -> Result<Int, DbError>
+  with { db: Db }
+{
+  db.execute(
+    "insert into people (name) values ($1)",
+    List::Cons(Cell::Text(name), List::Nil),
+  )
+}
+
+fn store_person(name: String) -> Result<Int, DbError>
+  with { db: Db }
+{
+  transaction(fn () => insert_person(name))
+}
+
+fn main() -> Int {
+  let settings: Settings = {
+    host: "127.0.0.1",
+    port: 5432,
+    user: "user",
+    database: "database",
+    secret: "secret",
+  };
+
+  let crew = Fibers::open();
+  let pool = open(crew, settings, 4);
+
+  let result = with_db(pool, fn () => store_person("Ada"));
+  match result {
+    Result::Err(_) => print("no database connection"),
+    Result::Ok(inner) => match inner {
+      Result::Err(_) => print("insert failed"),
+      Result::Ok(_) => print("stored"),
+    },
+  };
+
+  close(pool);
+  0
+}
+```
+
+The application functions have no `db: Db` parameter. Their external authority
+is part of their type via `with { db: Db }`. `with_db` is the composition
+boundary that satisfies that requirement for the duration of a connection
+lease.
+
+## Using a connection directly
+
+The lower-level connection API is available when writing database
+infrastructure or when the portable `Db` contract is not enough:
 
 ```khora
 import std::core::{List, Result, print};
@@ -94,8 +155,6 @@ Going the other way, `ask` accepts all five `Cell` kinds including `Money`.
   parse is not reused across calls. Round trips are unchanged — one write, one
   read — but a hot query pays a parse each time.
 - **Binary result format**, **`COPY`**, **notifications**, **cursors**.
-- **The `std::db::Db` capability.** The functions here are direct; wiring them
-  into `std::db`'s capability record is next.
 
 ## Testing
 
