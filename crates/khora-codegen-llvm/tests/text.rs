@@ -46,7 +46,15 @@ fn run(name: &str, main: &str) -> String {
 }
 
 const HEAD: &str = "module demo::main;
-import std::core::{Array, Eq, List, Option, Ord, Ordering, Split};
+import std::core::{Array, Dict, Eq, List, Option, Ord, Ordering, Pair, Shared, Show, Split};
+
+/// The two helpers every list test below wants: an empty `List<Int>` that
+/// inference can name, and an `Option<Int>` written out.
+fn empty() -> List<Int> { List::Nil }
+
+fn shown(value: Option<Int>) -> String {
+  match value { Option::Some(n) => Int::to_string(n), Option::None => \"none\" }
+}
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -415,4 +423,137 @@ fn splitting_a_long_line_stays_linear() {
     expected.push_str(&"f".repeat(500));
     expected.push('\n');
     assert_eq!(out, expected);
+}
+
+// --- the list toolkit, which was three functions deep ----------------------
+
+/// **`any` and `all` stop early**, which is what makes them worth having over
+/// the `fold` everybody was writing instead.
+///
+/// The counter says so: a fold visits five, and these visit as many as they
+/// need to decide.
+#[test]
+fn any_and_all_stop_as_soon_as_they_know() {
+    let out = run(
+        "list_any_all",
+        &program(r#"  let seen = Shared::of(0);
+  let count = fn (n: Int) => { Shared::update(seen, fn c => c + 1); n > 2 };
+
+  print(([1, 2, 3, 4, 5].any(count)).show());
+  print(Int::to_string(Shared::get(seen)));
+
+  Shared::set(seen, 0);
+  print(([1, 2, 3, 4, 5].all(count)).show());
+  print(Int::to_string(Shared::get(seen)));
+
+  // `all` of nothing is true, which is what makes it compose: asking each half
+  // of a split list gives the same answer as asking the whole.
+  print((empty().all(fn n => n > 100)).show());
+  print((empty().any(fn n => n > 100)).show());"#),
+    );
+
+    // `any` looks at three before 3 > 2; `all` stops at the first, 1.
+    assert_eq!(out, "true\n3\nfalse\n1\ntrue\nfalse\n");
+}
+
+/// `find`, `nth`, `last` and `contains` — the four ways to get one element out.
+#[test]
+fn the_four_ways_to_reach_one_element() {
+    let out = run(
+        "list_reach",
+        &program(r#"  let xs = [10, 20, 30];
+  print(shown(xs.find(fn n => n > 15)));
+  print(shown(xs.find(fn n => n > 99)));
+  print(shown(xs.nth(0)));
+  print(shown(xs.nth(2)));
+  print(shown(xs.nth(3)));
+  print(shown(xs.nth(0 - 1)));
+  print(shown(xs.last()));
+  print(shown(empty().last()));
+  print((xs.contains(20)).show());
+  print((xs.contains(21)).show());"#),
+    );
+
+    assert_eq!(
+        out,
+        "20\nnone\n10\n30\nnone\nnone\n30\nnone\ntrue\nfalse\n"
+    );
+}
+
+/// `take` and `drop` are total: a count past the end is the whole list or
+/// nothing, and a negative one is not an error.
+///
+/// Both matter because the count usually came from somewhere else — a page
+/// size, a header, an argument — and a version that refused would make every
+/// caller check first.
+#[test]
+fn taking_and_dropping_never_refuse() {
+    let out = run(
+        "list_take_drop",
+        &program(r#"  let xs = [1, 2, 3];
+  print(xs.take(2).show());
+  print(xs.take(0).show());
+  print(xs.take(0 - 5).show());
+  print(xs.take(99).show());
+  print(xs.drop(2).show());
+  print(xs.drop(0).show());
+  print(xs.drop(99).show());
+  // Together they partition, for any count.
+  print(xs.take(2).concat(xs.drop(2)).show());"#),
+    );
+
+    assert_eq!(
+        out,
+        "[1, 2]\n[]\n[]\n[1, 2, 3]\n[3]\n[1, 2, 3]\n[]\n[1, 2, 3]\n"
+    );
+}
+
+/// `zip` stops at the shorter, because there is nothing to pad a `List<A>`
+/// with — `A` is any type and this library has no default.
+#[test]
+fn zipping_stops_at_the_shorter() {
+    let out = run(
+        "list_zip",
+        &program(r#"  print(Int::to_string(List::length([1, 2, 3].zip(["a", "b"]))));
+  print(Int::to_string(List::length([1].zip(["a", "b", "c"]))));
+  print(Int::to_string(List::length(empty().zip(["a"]))));
+  let pairs = [1, 2].zip(["x", "y"]);
+  print(String::join(List::map(pairs, fn p => p.value + Int::to_string(p.key)), ","));"#),
+    );
+
+    assert_eq!(out, "2\n1\n0\nx1,y2\n");
+}
+
+/// `flat_map` and `sum`, and the empty cases both have to get right.
+#[test]
+fn flat_map_and_sum() {
+    let out = run(
+        "list_flat_sum",
+        &program(r#"  print([1, 2, 3].flat_map(fn n => [n, n]).show());
+  print([1, 2, 3].flat_map(fn _n => empty()).show());
+  print(empty().flat_map(fn n => [n]).show());
+  print(Int::to_string([1, 2, 3].sum()));
+  print(Int::to_string(empty().sum()));"#),
+    );
+
+    assert_eq!(out, "[1, 1, 2, 2, 3, 3]\n[]\n[]\n6\n0\n");
+}
+
+/// **`Dict` answers `keys` and `values`**, which `Map` always did.
+///
+/// Both in key order, because `entries` is and these are it read one way.
+#[test]
+fn a_dict_gives_up_its_keys_and_values() {
+    let out = run(
+        "dict_keys_values",
+        &program(r#"  let d = Dict::new()
+    |> Dict::insert(2, "two")
+    |> Dict::insert(1, "one")
+    |> Dict::insert(3, "three");
+  print(d.keys().show());
+  print(String::join(d.values(), ","));
+  print(Int::to_string(List::length(Dict::entries(d))));"#),
+    );
+
+    assert_eq!(out, "[1, 2, 3]\none,two,three\n3\n");
 }

@@ -679,6 +679,90 @@ impl<A> List<A> {
     }
   }
 
+  /// Whether any element satisfies `wanted`.
+  ///
+  /// **Stops at the first one**, which is what makes it worth having over a
+  /// `fold`: a fold visits everything, and the whole point of asking whether
+  /// *any* element matches is that the answer often arrives early.
+  pub fn any(self, wanted: (A) -> Bool) -> Bool {
+    match self {
+      List::Nil => false,
+      List::Cons(head, tail) => if wanted(head) { true } else { List::any(tail, wanted) },
+    }
+  }
+
+  /// Whether every element satisfies `wanted`. Stops at the first that does not.
+  ///
+  /// True of the empty list, which is the convention that makes `all` compose:
+  /// splitting a list in two and asking each half gives the same answer as
+  /// asking the whole, and that fails at the empty case under any other rule.
+  pub fn all(self, wanted: (A) -> Bool) -> Bool {
+    match self {
+      List::Nil => true,
+      List::Cons(head, tail) => if wanted(head) { List::all(tail, wanted) } else { false },
+    }
+  }
+
+  /// The first element satisfying `wanted`, or nothing.
+  pub fn find(self, wanted: (A) -> Bool) -> Option<A> {
+    match self {
+      List::Nil => Option::None,
+      List::Cons(head, tail) =>
+      if wanted(head) { Option::Some(head) } else { List::find(tail, wanted) },
+    }
+  }
+
+  /// The first `count` elements, or all of them if there are fewer.
+  ///
+  /// Below one is empty rather than an error: `take` is what a caller reaches
+  /// for when the count came from somewhere else, and refusing zero would make
+  /// every such caller check it first.
+  pub fn take(self, count: Int) -> List<A> {
+    if count < 1 {
+      List::Nil
+    } else {
+      match self {
+        List::Nil => List::Nil,
+        List::Cons(head, tail) => List::Cons(head, List::take(tail, count - 1)),
+      }
+    }
+  }
+
+  /// Everything after the first `count` elements.
+  pub fn drop(self, count: Int) -> List<A> {
+    if count < 1 {
+      self
+    } else {
+      match self {
+        List::Nil => List::Nil,
+        List::Cons(_head, tail) => List::drop(tail, count - 1),
+      }
+    }
+  }
+
+  /// The element at `index`, counting from zero, or nothing.
+  pub fn nth(self, index: Int) -> Option<A> {
+    if index < 0 {
+      Option::None
+    } else {
+      match self {
+        List::Nil => Option::None,
+        List::Cons(head, tail) => if index == 0 { Option::Some(head) } else { List::nth(tail, index - 1) },
+      }
+    }
+  }
+
+  /// The last element, or nothing.
+  pub fn last(self) -> Option<A> {
+    match self {
+      List::Nil => Option::None,
+      List::Cons(head, tail) => match tail {
+        List::Nil => Option::Some(head),
+        List::Cons(_h, _t) => List::last(tail),
+      },
+    }
+  }
+
   /// The elements `keep` accepts, in the order they were in.
   ///
   /// Inherent rather than a trait method, unlike `map`: `Functor` says how to
@@ -776,6 +860,66 @@ impl<A: Eq> Eq for List<A> {
         List::Cons(other_head, other_tail) =>
         Eq::eq(head, other_head) && List::eq(tail, other_tail),
       },
+    }
+  }
+}
+
+impl<A: Eq> List<A> {
+  /// Whether `wanted` is in the list.
+  ///
+  /// `A: Eq` rather than a predicate, because `contains` is the question
+  /// somebody asks about a value they are holding -- `List::any` is already
+  /// there for the predicate.
+  pub fn contains(self, wanted: A) -> Bool {
+    match self {
+      List::Nil => false,
+      List::Cons(head, tail) =>
+      if Eq::eq(head, wanted) { true } else { List::contains(tail, wanted) },
+    }
+  }
+}
+
+impl<A> List<A> {
+  /// Each element's list, laid end to end.
+  ///
+  /// `map` and then a flatten, written as one pass because the intermediate
+  /// list of lists is the only thing the two-step version allocates that
+  /// nobody wants.
+  pub fn flat_map<B>(self, step: (A) -> List<B>) -> List<B> {
+    match self {
+      List::Nil => List::Nil,
+      List::Cons(head, tail) => List::concat(step(head), List::flat_map(tail, step)),
+    }
+  }
+
+  /// Pairs, one from each, stopping at the shorter.
+  ///
+  /// **Stopping rather than padding**, because there is nothing to pad a
+  /// `List<A>` with: `A` is any type and this library has no notion of a
+  /// default. A caller who wants the tail of the longer one still has it.
+  pub fn zip<B>(self, other: List<B>) -> List<Pair<A, B>> {
+    match self {
+      List::Nil => List::Nil,
+      List::Cons(head, tail) => match other {
+        List::Nil => List::Nil,
+        List::Cons(other_head, other_tail) =>
+        List::Cons({ key: head, value: other_head }, List::zip(tail, other_tail)),
+      },
+    }
+  }
+}
+
+impl List<Int> {
+  /// Every element added together. Empty is zero.
+  ///
+  /// `Int` only, and deliberately: a `sum` over anything addable wants a
+  /// `Monoid`, and `std::core` has `Functor` and `Applicative` and not that
+  /// one yet. Naming the concrete case is honest; a half-general one would
+  /// have to be taken back.
+  pub fn sum(self) -> Int {
+    match self {
+      List::Nil => 0,
+      List::Cons(head, tail) => head + List::sum(tail),
     }
   }
 }
@@ -2083,6 +2227,20 @@ impl<K, V> Dict<K, V> {
 
   /// Every entry, smallest key first.
   pub fn entries(self) -> List<Pair<K, V>> { Dict::gather(self, List::Nil) }
+
+  /// Every key, in order.
+  ///
+  /// Here because `Map` has `keys` and `values` and this had only `entries`,
+  /// which left a reader who found one and not the other to work out whether
+  /// the difference meant something. It did not.
+  pub fn keys(self) -> List<K> {
+    List::map(Dict::entries(self), fn entry => entry.key)
+  }
+
+  /// Every value, in key order.
+  pub fn values(self) -> List<V> {
+    List::map(Dict::entries(self), fn entry => entry.value)
+  }
 
   /// The right side first, so what comes out is in key order.
   ///

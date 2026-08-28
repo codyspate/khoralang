@@ -1289,6 +1289,74 @@ Combines every element into one value, left to right.
 `step` is called with what has been accumulated so far and the next
 element. Summing is `fold(0, fn (a, b) => a + b)`.
 
+#### any
+
+```khora
+pub fn any(self, wanted: (A) -> Bool) -> Bool
+```
+
+Whether any element satisfies `wanted`.
+
+**Stops at the first one**, which is what makes it worth having over a
+`fold`: a fold visits everything, and the whole point of asking whether
+*any* element matches is that the answer often arrives early.
+
+#### all
+
+```khora
+pub fn all(self, wanted: (A) -> Bool) -> Bool
+```
+
+Whether every element satisfies `wanted`. Stops at the first that does not.
+
+True of the empty list, which is the convention that makes `all` compose:
+splitting a list in two and asking each half gives the same answer as
+asking the whole, and that fails at the empty case under any other rule.
+
+#### find
+
+```khora
+pub fn find(self, wanted: (A) -> Bool) -> Option<A>
+```
+
+The first element satisfying `wanted`, or nothing.
+
+#### take
+
+```khora
+pub fn take(self, count: Int) -> List<A>
+```
+
+The first `count` elements, or all of them if there are fewer.
+
+Below one is empty rather than an error: `take` is what a caller reaches
+for when the count came from somewhere else, and refusing zero would make
+every such caller check it first.
+
+#### drop
+
+```khora
+pub fn drop(self, count: Int) -> List<A>
+```
+
+Everything after the first `count` elements.
+
+#### nth
+
+```khora
+pub fn nth(self, index: Int) -> Option<A>
+```
+
+The element at `index`, counting from zero, or nothing.
+
+#### last
+
+```khora
+pub fn last(self) -> Option<A>
+```
+
+The last element, or nothing.
+
 #### filter
 
 ```khora
@@ -1305,6 +1373,73 @@ introduce one.
 
 `filter` then `map` is two walks; `fold` is one, and is what to reach for
 when that matters.
+
+### List<A>
+
+```khora
+impl<A: Eq> List<A>
+```
+
+#### contains
+
+```khora
+pub fn contains(self, wanted: A) -> Bool
+```
+
+Whether `wanted` is in the list.
+
+`A: Eq` rather than a predicate, because `contains` is the question
+somebody asks about a value they are holding -- `List::any` is already
+there for the predicate.
+
+### List<A>
+
+```khora
+impl<A> List<A>
+```
+
+#### flat_map
+
+```khora
+pub fn flat_map<B>(self, step: (A) -> List<B>) -> List<B>
+```
+
+Each element's list, laid end to end.
+
+`map` and then a flatten, written as one pass because the intermediate
+list of lists is the only thing the two-step version allocates that
+nobody wants.
+
+#### zip
+
+```khora
+pub fn zip<B>(self, other: List<B>) -> List<Pair<A, B>>
+```
+
+Pairs, one from each, stopping at the shorter.
+
+**Stopping rather than padding**, because there is nothing to pad a
+`List<A>` with: `A` is any type and this library has no notion of a
+default. A caller who wants the tail of the longer one still has it.
+
+### List<Int>
+
+```khora
+impl List<Int>
+```
+
+#### sum
+
+```khora
+pub fn sum(self) -> Int
+```
+
+Every element added together. Empty is zero.
+
+`Int` only, and deliberately: a `sum` over anything addable wants a
+`Monoid`, and `std::core` has `Functor` and `Applicative` and not that
+one yet. Naming the concrete case is honest; a half-general one would
+have to be taken back.
 
 ### Region
 
@@ -1648,6 +1783,26 @@ pub fn entries(self) -> List<Pair<K, V>>
 ```
 
 Every entry, smallest key first.
+
+#### keys
+
+```khora
+pub fn keys(self) -> List<K>
+```
+
+Every key, in order.
+
+Here because `Map` has `keys` and `values` and this had only `entries`,
+which left a reader who found one and not the other to work out whether
+the difference meant something. It did not.
+
+#### values
+
+```khora
+pub fn values(self) -> List<V>
+```
+
+Every value, in key order.
 
 ### Dict<K, V>
 
