@@ -3972,7 +3972,7 @@ to fix and it is an afternoon.
 | 14.4 | ✅ **Completion** | Done for three of the four: after `.` the receiver's methods, after `Type::` that type's own and its constructors, inside an import list the module's exports, and otherwise what is in scope. **A `with { .. }` row is not done.** The lesson worth keeping is in the module: completion runs on code that does not parse, and the trigger character lands in an `ERROR` node rather than in the path it belongs to — so all of it reads the *token stream* backwards rather than the node tree |
 | 14.5 | ✅ **Semantic tokens** | Done. Locals, parameters, fields, methods, constructors, and every path segment classified by what it resolves to — the things a regex cannot decide. Deliberately *not* keywords or literals: the TextMate grammar already gets those right and a second opinion is only a chance to disagree. Whole-document only; range and delta are optimisations nothing has measured a need for |
 | 14.6 | ✅ **Inlay hints for rows** | Done, and it did pay twice over. `BodyTypes::call_rows` publishes what each call site asked for — the fact the checker computed for row subtraction and then dropped. The hints read it; 14.27's sharper `unused-capability` and capability-aware completion can now read the same thing rather than deriving it again |
-| 14.7 | ✅ **Quick fixes** | Done for the three whose message names one exact edit: `export` → `pub`, a module-level `let` → `const`, and a discarded `Result` → `let _ =`. **Deliberately not** `Add the bound, as `T: Ord`` or `unused-capability`: an action is applied by somebody who read four words of the message, so one that guesses is worse than none |
+| 14.7 | ✅ **Quick fixes** | Done for four whose message names one exact edit: `export` → `pub`, a module-level `let` → `const`, a discarded `Result` → `let _ =`, and a missing `with`/`raises` entry → the clause on the enclosing signature. **Deliberately not** `Add the bound, as `T: Ord`` or `unused-capability`: an action is applied by somebody who read four words of the message, so one that guesses is worse than none. The fourth is the only one that edits somewhere other than the squiggle — see below for why it is allowed to |
 | 14.8 | ✅ **References, rename, symbols** | References, document outline and `Ctrl+T` are done. **Rename covers locals and refuses a declaration with a reason** — two specific things are missing and both are named in `khora-lsp/src/references.rs`: an item's *name* has no range (`Item::range` is the whole declaration), and `import m::{foo as bar}` needs the `foo` renamed and the `bar` left alone. A rename that misses one occurrence breaks a build silently in a file nobody was looking at, so it waits for those two rather than guessing |
 | 14.9 | ✅ **Signature help and run lenses** | Done. Signature help finds the *unmatched* paren, so a nested call reports the outer one, and shows parameter **names** — `Signature` carries only types, so the names come from the callee's lowered body. The lens carries the test name and directory; running it is the extension's job, because a language server cannot run anything and should not |
 | 14.10 | **Cancellation and debounce** | The server is one thread, one message at a time, with no cancellation — fine for hover on a small file and not for completion on a keystroke. Decision A3 chose Salsa for `docs/project.md` §6.5's sub-15 ms responses and said the incrementality "is not a bolt-on"; the measurement it was chosen for has still never been taken, because nothing has ever sent the server a request in anger |
@@ -4028,6 +4028,26 @@ was a deliberate choice long before anybody thought about code actions:
 Each of those is one edit away from being a lightbulb. The rename one is the
 clearest: it already recovers and reports one error per declaration, so
 "fix all in file" is well defined.
+
+The fourth one landed later and is worth separating out, because it breaks the
+shape the other three share: the edit is not where the diagnostic is.
+
+``` `load` needs `db: Db`, which this function does not require ``` is reported
+on the call, and the change belongs on the signature above it — appended to a
+`with` row that may or may not exist yet, in a function the message does not
+name. That is more than a text substitution, so the rule it has to pass is the
+same one that keeps `T: Ord` out: is there anything to choose? There is not.
+The label and the type are printed in full, exactly one function encloses the
+call, and a row is a set, so where in it the entry lands changes nothing.
+
+The half that is a judgement is what is *not* offered beside it. Propagating a
+requirement outwards is one of two answers — the other is to satisfy it here
+with a `with { db: .. }` block — and only the first is the one the message
+spells out. Offering both would be the lightbulb guessing, which is the thing
+`khora-lsp/src/fixes.rs` opens by refusing to do.
+
+The `raises` half comes free: the same sentence with a different verb, and a
+union takes another term the way a row takes another field.
 
 ### Where workspaces stand, which is nowhere
 

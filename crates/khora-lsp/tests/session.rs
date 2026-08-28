@@ -1497,6 +1497,61 @@ fn a_type_error_is_offered_no_action() {
     assert_eq!(result_of(&replies, 2), json!([]), "no guessing");
 }
 
+/// **A requirement that has to move outwards is offered the signature edit.**
+///
+/// The whole loop again, and this one is worth the round trip because the edit
+/// is nowhere near the squiggle: the diagnostic is on the call and the change
+/// belongs on the line above it. Nothing about that is visible to the unit
+/// tests, which are handed a signature rather than finding one.
+#[test]
+fn a_missing_capability_is_offered_the_clause_it_names() {
+    let text = "module main;\n\
+                \n\
+                effect Db {\n\
+                  get: (String) -> String,\n\
+                }\n\
+                \n\
+                fn load() -> String with { db: Db } { db.get(\"k\") }\n\
+                \n\
+                fn go() -> String { load() }\n";
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+
+    let reported = session(&[initialize(&w.root), did_open(&file, text), exit()]);
+    let missing = last_diagnostics(&reported)
+        .into_iter()
+        .find(|d| {
+            d.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains("does not require"))
+        })
+        .expect("the missing-capability diagnostic");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, text),
+        code_action(&file, vec![missing], 2),
+        exit(),
+    ]);
+
+    let actions = result_of(&replies, 2);
+    let list = actions.as_array().expect("a list");
+    assert_eq!(list.len(), 1, "{actions}");
+
+    let edits = list[0]
+        .pointer("/edit/changes")
+        .and_then(Value::as_object)
+        .and_then(|c| c.values().next())
+        .and_then(Value::as_array)
+        .expect("edits");
+    assert_eq!(edits[0].get("newText"), Some(&json!(" with { db: Db }")), "{actions}");
+    // On `go`'s return type, which is not where the diagnostic is -- the
+    // point of this fix, and the part only the server can work out.
+    assert_eq!(edits[0].pointer("/range/start/line"), Some(&json!(8)), "{actions}");
+    assert_eq!(edits[0].pointer("/range/start/character"), Some(&json!(17)), "{actions}");
+    assert_eq!(edits[0].pointer("/range/end"), edits[0].pointer("/range/start"), "an insert");
+}
+
 // --- signature help ---------------------------------------------------------
 
 fn signature_help(path: &Path, line: u32, character: u32, id: i64) -> Value {

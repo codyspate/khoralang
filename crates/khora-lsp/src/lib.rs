@@ -52,6 +52,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use khora_db::{KhoraDatabase, Setter, SourceFile, SourceRoot};
 use khora_manifest::LintLevel;
+use khora_syntax::ast::{AstNode, FnDecl};
+use khora_syntax::SyntaxNode;
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, Hover, HoverContents, HoverProviderCapability,
     InitializeResult, MarkupContent, MarkupKind, OneOf, Position, PositionEncodingKind, Range,
@@ -591,13 +593,15 @@ impl Server {
     /// there is no need to recompute them and no risk of offering a fix for a
     /// diagnostic the editor has already cleared. What this adds is the source
     /// each one covers, which is what lets a replacement keep the part of the
-    /// line it is not changing.
+    /// line it is not changing, and the signature of the function it sits in,
+    /// for the fixes that put a clause on one.
     fn code_actions(&self, params: &Value) -> Option<Value> {
         let url = url_of(params)?;
         let path = url.to_file_path().ok()?;
         let file = self.files.get(&path).copied()?;
         let index = self.lines.get(&url)?;
         let text = file.text(&self.db);
+        let tree = khora_db::parse(&self.db, file).syntax();
 
         let reported = params
             .pointer("/context/diagnostics")
@@ -611,8 +615,9 @@ impl Server {
             let message = diagnostic.get("message").and_then(Value::as_str).unwrap_or_default();
             let code = diagnostic.get("code").and_then(Value::as_str);
             let covered = text.get(usize::from(range.start())..usize::from(range.end()))?;
+            let enclosing = enclosing_signature(&tree, range.start());
 
-            for fix in fixes::for_diagnostic(message, code, range, covered) {
+            for fix in fixes::for_diagnostic(message, code, range, covered, enclosing.as_ref()) {
                 out.push(json!({
                     "title": fix.title,
                     "kind": "quickfix",
@@ -1008,6 +1013,42 @@ fn range_of(
     let end: lsp_types::Position =
         serde_json::from_value(diagnostic.pointer("/range/end")?.clone()).ok()?;
     Some(text_size::TextRange::new(index.offset(start, encoding), index.offset(end, encoding)))
+}
+
+/// The signature of the function containing `offset`.
+///
+/// **The nearest enclosing declaration, so a closure does not hide it.** A call
+/// inside `fn body => ..` still reports against the function the closure is
+/// written in, because that is whose row the checker compared -- a closure's is
+/// inferred and has nothing to edit.
+fn enclosing_signature(tree: &SyntaxNode, offset: text_size::TextSize) -> Option<fixes::Signature> {
+    // The token to the right first: a diagnostic points at the start of what it
+    // is about, so the right-hand token is the thing itself and the left-hand
+    // one is whatever whitespace came before it. Both usually sit under the
+    // same declaration; where they do not, the right one is the correct answer.
+    let at = tree.token_at_offset(offset);
+    let decl = at
+        .clone()
+        .right_biased()
+        .and_then(|t| t.parent_ancestors().find_map(FnDecl::cast))
+        .or_else(|| {
+            at.left_biased().and_then(|t| t.parent_ancestors().find_map(FnDecl::cast))
+        })?;
+    // Past the return type, or past the parameters when a signature has none
+    // to write it after.
+    let clauses_at = decl
+        .return_type()
+        .map(|ty| ty.syntax().text_range().end())
+        .or_else(|| decl.params().map(|p| p.syntax().text_range().end()))?;
+    let row = |ty: khora_syntax::ast::Type| fixes::Row {
+        range: ty.syntax().text_range(),
+        text: ty.syntax().text().to_string(),
+    };
+    Some(fixes::Signature {
+        clauses_at,
+        with_row: decl.with_clause().and_then(|c| c.row()).map(row),
+        raises_row: decl.raises_clause().and_then(|c| c.row()).map(row),
+    })
 }
 
 fn url_of(params: &Value) -> Option<Url> {
