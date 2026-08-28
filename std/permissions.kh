@@ -1,6 +1,6 @@
 module std::permissions;
 
-import std::core::{List};
+import std::core::{List, Option, Split};
 import std::permissions::grants::{fs_read, fs_write};
 
 //! What the manifest allows, as data the program carries.
@@ -49,7 +49,58 @@ import std::permissions::grants::{fs_read, fs_write};
 pub fn granted(grants: List<String>, path: String) -> Bool {
   let wanted = normalized(path);
   List::fold(grants, false, fn (found, grant) =>
-    found || matches(normalized(grant), wanted))
+    found || matches(normalized(grant), wanted, true))
+}
+
+/// Whether any grant covers `name`.
+///
+/// For things that are not paths -- an environment variable, a command --
+/// where there are no segments and so **`*` spans everything**. `DATABASE_*`
+/// covers `DATABASE_URL`, and `*` covers all of them.
+///
+/// `granted_name` in `khora-manifest` answers the same question for the
+/// compiler, and the two are tested against one table.
+pub fn granted_name(grants: List<String>, name: String) -> Bool {
+  List::fold(grants, false, fn (found, grant) => found || matches(grant, name, false))
+}
+
+/// Whether any grant covers `host`, which is `name` or `name:port`.
+///
+/// Two rules, and both are the reading that costs a newcomer least:
+///
+/// - **`*` spans dots**, so `*.internal` covers `db.eu.internal` and not only
+///   `db.internal`. That is what a Content-Security-Policy origin means by it;
+///   the one-label reading belongs to TLS certificates, and surprising
+///   somebody into a denied connection is the worse failure.
+/// - **A grant with no port covers every port**, which is what Deno's
+///   `--allow-net=example.com` does. `:*` says the same thing explicitly.
+pub fn granted_host(grants: List<String>, host: String) -> Bool {
+  let asked = split_port(host);
+  List::fold(grants, false, fn (found, grant) => found || host_matches(grant, asked))
+}
+
+/// One grant against one host.
+fn host_matches(grant: String, asked: Split) -> Bool {
+  let allowed = split_port(grant);
+  let port_ok =
+  String::byte_length(allowed.rest) == 0
+  || allowed.rest == "*"
+  || allowed.rest == asked.rest;
+  port_ok && matches(allowed.head, asked.head, false)
+}
+
+/// `name:port` split at the **last** colon, with an empty `rest` for no port.
+///
+/// The last rather than the first, so an IPv6 literal keeps its colons in the
+/// name where they belong. `Split` is reused rather than an `Option` because
+/// the absent case is "no port", and an empty string says that without a
+/// second shape to unwrap.
+fn split_port(text: String) -> Split {
+  match last_byte_of(text, String::byte_length(text) - 1, fn b => b == 58) {
+    Option::None => { head: text, rest: "" },
+    Option::Some(at) =>
+    { head: String::slice(text, 0, at), rest: String::slice(text, at + 1, String::byte_length(text)) },
+  }
 }
 
 /// `\\` becomes `/`, so one spelling is compared against one spelling.
@@ -68,9 +119,30 @@ fn swap_byte(text: String, at: Int, acc: String) -> String {
   }
 }
 
-/// Whether one pattern covers one path.
-fn matches(pattern: String, path: String) -> Bool {
-  walk(pattern, 0, path, 0)
+/// The index of the last byte `wanted` accepts, walking back from `at`.
+///
+/// Backwards because the caller wants the *last* colon, and `String::find`
+/// only goes the other way. A private copy rather than a `String` method:
+/// `std::fs` has the same three lines for the same reason, and two callers is
+/// not yet an argument for widening `core`'s surface.
+fn last_byte_of(text: String, at: Int, wanted: (U8) -> Bool) -> Option<Int> {
+  if at < 0 {
+    Option::None
+  } else if wanted(String::byte(text, at)) {
+    Option::Some(at)
+  } else {
+    last_byte_of(text, at - 1, wanted)
+  }
+}
+
+/// Whether one pattern covers one value.
+///
+/// `segmented` is what a single `*` may not cross: `true` stops it at `/`, for
+/// a path, and `false` lets it span anything, for a name or a host. `**` spans
+/// regardless. This is `boundary: Option<char>` in `khora-manifest`'s `glob`,
+/// spelled as the only two answers anybody passes.
+fn matches(pattern: String, path: String, segmented: Bool) -> Bool {
+  walk(pattern, 0, path, 0, segmented)
 }
 
 /// The matcher, as two cursors.
@@ -78,7 +150,7 @@ fn matches(pattern: String, path: String) -> Bool {
 /// Written as explicit indices rather than by slicing, because slicing a
 /// string builds one: a pattern of `n` characters against a path of `m` would
 /// allocate on every step, and this is called on every file operation.
-fn walk(pattern: String, p: Int, path: String, s: Int) -> Bool {
+fn walk(pattern: String, p: Int, path: String, s: Int, segmented: Bool) -> Bool {
   let plen = String::byte_length(pattern);
   let slen = String::byte_length(path);
   if p >= plen {
@@ -88,37 +160,40 @@ fn walk(pattern: String, p: Int, path: String, s: Int) -> Bool {
     // `**` may consume anything, separators included. Try the shortest first
     // and grow, which terminates because the path is finite.
     let after = skip_double_star(pattern, p);
-    any_suffix(pattern, after, path, s)
+    any_suffix(pattern, after, path, s, segmented)
   } else if String::byte(pattern, p) == 42 {
-    // A single `*` stops at a separator, so it may only consume the rest of
-    // this segment.
-    any_within_segment(pattern, p + 1, path, s)
+    // A single `*` stops at a separator only where there are segments.
+    if segmented {
+      any_within_segment(pattern, p + 1, path, s, segmented)
+    } else {
+      any_suffix(pattern, p + 1, path, s, segmented)
+    }
   } else if s < slen && String::byte(pattern, p) == String::byte(path, s) {
-    walk(pattern, p + 1, path, s + 1)
+    walk(pattern, p + 1, path, s + 1, segmented)
   } else {
     false
   }
 }
 
 /// Whether `**` can be made to work by consuming `path` from `s` onwards.
-fn any_suffix(pattern: String, after: Int, path: String, s: Int) -> Bool {
-  if walk(pattern, after, path, s) {
+fn any_suffix(pattern: String, after: Int, path: String, s: Int, segmented: Bool) -> Bool {
+  if walk(pattern, after, path, s, segmented) {
     true
   } else if s >= String::byte_length(path) {
     false
   } else {
-    any_suffix(pattern, after, path, s + 1)
+    any_suffix(pattern, after, path, s + 1, segmented)
   }
 }
 
 /// The same for a single `*`, which may not cross a separator.
-fn any_within_segment(pattern: String, after: Int, path: String, s: Int) -> Bool {
-  if walk(pattern, after, path, s) {
+fn any_within_segment(pattern: String, after: Int, path: String, s: Int, segmented: Bool) -> Bool {
+  if walk(pattern, after, path, s, segmented) {
     true
   } else if s >= String::byte_length(path) || String::byte(path, s) == 47 {
     false
   } else {
-    any_within_segment(pattern, after, path, s + 1)
+    any_within_segment(pattern, after, path, s + 1, segmented)
   }
 }
 

@@ -39,3 +39,19 @@ pub fn fs_write() -> List<String>
 
 Paths this program may write.
 
+### env
+
+```khora
+pub fn env() -> List<String>
+```
+
+Environment variables this program may read.
+
+### network
+
+```khora
+pub fn network() -> List<String>
+```
+
+Hosts this program may reach, as `name` or `name:port`.
+

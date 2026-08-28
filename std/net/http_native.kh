@@ -1,6 +1,8 @@
 module std::net::http;
 
 import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery, scoped};
+import std::permissions::{granted_host};
+import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 import std::net::tls::{TlsClient, TlsConnection, TlsError, TlsServer, client as tls_client, connect as tls_connect, receive as tls_receive, secure, server as tls_server, shut as tls_shut, transmit as tls_transmit};
 
@@ -1444,7 +1446,15 @@ pub type CallError =
   /// Something arrived and it was not an HTTP answer this can read.
   | Malformed(String)
   /// The answer was longer than the client was willing to hold.
-  | TooLarge(Int);
+  | TooLarge(Int)
+  /// The manifest does not grant this host.
+  ///
+  /// **Its own case, not `Unreachable`.** The two send a reader to different
+  /// places: `Unreachable` is DNS, a firewall, a service that is down, and
+  /// `Denied` is `[permissions] network` in `khora.toml`. Reported as
+  /// `host:port` so the line that would allow it can be copied out of the
+  /// message. `docs/design/permissions.md`.
+  | Denied(String);
 
 /// Making requests, as a capability.
 ///
@@ -1556,12 +1566,30 @@ impl HttpClient {
 fn perform(call: Call, limit: Int) -> Result<Answer, CallError> {
   match parse_url(call.url) {
     Option::None => Result::Err(CallError::BadUrl(call.url)),
+    // **Checked after the URL is parsed and before anything is dialled.**
+    // After, because the host is not known until then and a grant is about the
+    // host rather than the text somebody wrote; before, because the point of
+    // the grant is that no connection is attempted -- a refusal that has
+    // already resolved a name and opened a socket has already told the network
+    // what this program wanted.
+    Option::Some(url) if !granted_host(network(), authority_of(url)) =>
+    Result::Err(CallError::Denied(authority_of(url))),
     // **A region per call**, because `std::net::tls`'s client is registered
     // with `acquire` and ends with the scope that made it. The whole
     // conversation happens inside it, so the trust store outlives the session
     // that was opened from it.
     Option::Some(url) => scoped(fn () => attempted(url, call, limit)),
   }
+}
+
+/// `host:port`, which is what a grant is written against.
+///
+/// The port is always spelled out even when it is the scheme's default, so
+/// that a grant of `example.com:443` matches a URL written without one. A
+/// grant with no port covers every port, so the ordinary case is unaffected
+/// either way.
+fn authority_of(url: Url) -> String {
+  "${url.host}:${Int::to_string(url.port)}"
 }
 
 /// One call, with a scope to hold the trust store.

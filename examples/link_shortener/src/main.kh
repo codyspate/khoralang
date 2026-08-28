@@ -1,7 +1,7 @@
 module main;
 
 import std::core::{Changed, Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
-import std::env::{Clock, Env, variable_or};
+import std::env::{Clock, Env, EnvError, variable_or};
 import std::fs::{FsRead, FsWrite, IoError, read_text, write_text};
 import std::json::{Json, parse};
 import std::net::http::{HttpError, Params, Request, Response, Router};
@@ -283,8 +283,9 @@ fn values_of(table: Dict<String, Link>) -> List<Link> {
 /// Where the links are kept between runs.
 fn links_file() -> String
   with { env: Env }
+  raises EnvError
 {
-  variable_or("LINKS_FILE", "./links.txt")
+  variable_or("LINKS_FILE", "./links.txt")!
 }
 
 /// One link per line, tab separated.
@@ -304,7 +305,7 @@ fn links_file() -> String
 /// change rather than after it.
 fn save(links: Shared<Dict<String, Link>>) -> ()
   with { writes: FsWrite, env: Env }
-  raises IoError
+  raises IoError + EnvError
 {
   let mut text = "";
   let mut rest = Dict::entries(Shared::get(links));
@@ -320,7 +321,7 @@ fn save(links: Shared<Dict<String, Link>>) -> ()
       },
     }
   };
-  write_text(links_file(), text)!
+  write_text(links_file()!, text)!
 }
 
 /// What the last run left, or nothing at all.
@@ -330,8 +331,9 @@ fn save(links: Shared<Dict<String, Link>>) -> ()
 /// will not start until somebody edits a file by hand.
 fn load() -> Dict<String, Link>
   with { reads: FsRead, env: Env }
+  raises EnvError
 {
-  let mut left = read_text(links_file())! catch { _ => "" };
+  let mut left = read_text(links_file()!)! catch { _ => "" };
   let mut table = Dict::new();
   let mut going = true;
   while going {
@@ -397,12 +399,13 @@ fn parse_line(line: String) -> Option<Link> {
 /// The port, which is an operator's decision rather than a programmer's.
 fn port() -> Int
   with { env: Env }
+  raises EnvError
 {
   // A `PORT` that is not a number is the operator's mistake and worth saying
   // so about, but not worth refusing to start over: the default is a port,
   // and a service that came up somewhere findable beats one that did not come
   // up at all.
-  match Int::of_string(variable_or("PORT", "8080")) {
+  match Int::of_string(variable_or("PORT", "8080")!) {
     Option::Some(chosen) => chosen,
     Option::None => {
       print("PORT is not a number; using 8080");
@@ -411,9 +414,9 @@ fn port() -> Int
   }
 }
 
-pub fn main() raises HttpError {
+pub fn main() raises HttpError + EnvError {
   with { env: Env::real(), clock: Clock::real(), reads: FsRead::real(), writes: FsWrite::real(), random: Random::real() } {
-    let store: Store = { links: Shared::of(load()), started: clock.monotonic_millis() };
+    let store: Store = { links: Shared::of(load()!), started: clock.monotonic_millis() };
     print("restored ${Int::to_string(Dict::size(Shared::get(store.links)))} link(s)");
 
     // `SharedFn::of` at each mount is what lets the whole router cross into
@@ -425,6 +428,6 @@ pub fn main() raises HttpError {
       |> Router::get("/l/:code", SharedFn::of(fn request => follow(store, request)))
       |> Router::get("/links", SharedFn::of(fn request => listing(store, request)))
       |> Router::get("/health", SharedFn::of(fn request => health(store, request)))
-      |> Router::listen(port())!
+      |> Router::listen(port()!)!
   }
 }

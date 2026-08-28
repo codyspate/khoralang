@@ -456,7 +456,8 @@ pub type CallError =
   | Insecure(String)
   | Closed(String)
   | Malformed(String)
-  | TooLarge(Int);
+  | TooLarge(Int)
+  | Denied(String);
 ```
 
 What can go wrong reaching somebody else.
@@ -512,6 +513,20 @@ Something arrived and it was not an HTTP answer this can read.
 ```
 
 The answer was longer than the client was willing to hold.
+
+#### Denied
+
+```khora
+| Denied(String)
+```
+
+The manifest does not grant this host.
+
+**Its own case, not `Unreachable`.** The two send a reader to different
+places: `Unreachable` is DNS, a firewall, a service that is down, and
+`Denied` is `[permissions] network` in `khora.toml`. Reported as
+`host:port` so the line that would allow it can be copied out of the
+message. `docs/design/permissions.md`.
 
 ## Effects
 

@@ -27,3 +27,13 @@ pub fn fs_read() -> List<String> {
 pub fn fs_write() -> List<String> {
   List::Cons("**", List::Nil)
 }
+
+/// Environment variables this program may read.
+pub fn env() -> List<String> {
+  List::Cons("*", List::Nil)
+}
+
+/// Hosts this program may reach, as `name` or `name:port`.
+pub fn network() -> List<String> {
+  List::Cons("*", List::Nil)
+}

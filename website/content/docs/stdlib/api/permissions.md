@@ -57,6 +57,38 @@ Windows path spelled with `\\`. `granted_path` in `khora-manifest` answers
 the same question for the compiler and the two have to agree; the tests
 name the cases where agreement is not obvious.
 
+### granted_name
+
+```khora
+pub fn granted_name(grants: List<String>, name: String) -> Bool
+```
+
+Whether any grant covers `name`.
+
+For things that are not paths -- an environment variable, a command --
+where there are no segments and so **`*` spans everything**. `DATABASE_*`
+covers `DATABASE_URL`, and `*` covers all of them.
+
+`granted_name` in `khora-manifest` answers the same question for the
+compiler, and the two are tested against one table.
+
+### granted_host
+
+```khora
+pub fn granted_host(grants: List<String>, host: String) -> Bool
+```
+
+Whether any grant covers `host`, which is `name` or `name:port`.
+
+Two rules, and both are the reading that costs a newcomer least:
+
+- **`*` spans dots**, so `*.internal` covers `db.eu.internal` and not only
+  `db.internal`. That is what a Content-Security-Policy origin means by it;
+  the one-label reading belongs to TLS certificates, and surprising
+  somebody into a denied connection is the worse failure.
+- **A grant with no port covers every port**, which is what Deno's
+  `--allow-net=example.com` does. `:*` says the same thing explicitly.
+
 ### normalized
 
 ```khora

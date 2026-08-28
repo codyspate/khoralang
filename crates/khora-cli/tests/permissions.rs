@@ -253,3 +253,94 @@ fn no_permissions_table_grants_everything() {
     assert!(text.contains("wrote secrets/stolen.txt"), "nothing is denied: {text}");
     assert!(!text.contains("DENIED"), "no grant means no refusal: {text}");
 }
+
+/// A project granting one env prefix and one host.
+fn narrowed_project(name: &str, table: &str) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("a src directory");
+    std::fs::write(
+        root.join("khora.toml"),
+        format!("[package]\nname = \"narrowed\"\nversion = \"0.1.0\"\nedition = \"2026\"\n{table}"),
+    )
+    .expect("a manifest");
+    std::fs::write(
+        root.join("src").join("main.kh"),
+        "module main;\n\n\
+         import std::core::{Result, print};\n\
+         import std::env::{Env, EnvError, variable_or};\n\
+         import std::net::http::{Call, CallError, HttpClient};\n\n\
+         fn look(name: String) -> () with { env: Env } {\n\
+         \x20 print(variable_or(name, \"(unset)\")! catch {\n\
+         \x20   EnvError::Denied(n) => \"DENIED ${n}\",\n\
+         \x20 });\n\
+         }\n\n\
+         fn fetch(url: String) -> () with { http: HttpClient } {\n\
+         \x20 print(match http.send(Call::get(url)) {\n\
+         \x20   Result::Ok(_) => \"reached\",\n\
+         \x20   Result::Err(CallError::Denied(host)) => \"DENIED ${host}\",\n\
+         \x20   Result::Err(_) => \"tried\",\n\
+         \x20 });\n\
+         }\n\n\
+         fn main() -> Int {\n\
+         \x20 with { env: Env::real(), http: HttpClient::real() } {\n\
+         \x20   look(\"APP_NAME\");\n\
+         \x20   look(\"SECRET_KEY\");\n\
+         \x20   fetch(\"http://api.example.com/health\");\n\
+         \x20   fetch(\"http://evil.example.net/steal\");\n\
+         \x20 }\n\
+         \x20 0\n\
+         }\n",
+    )
+    .expect("a source file");
+    root
+}
+
+fn ran(root: &PathBuf) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(["run", "."])
+        .current_dir(root)
+        .output()
+        .expect("could not run `khora`");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// **`env` and `network` are enforced, and a grant is not a denial.**
+///
+/// `APP_NAME` is granted and simply not set, which is `(unset)` rather than a
+/// refusal -- the distinction `EnvError::Denied` exists for. `api.example.com`
+/// is granted, so it is *attempted*: it fails at the network, which is the
+/// right failure and a different one.
+#[test]
+fn env_and_network_grants_are_enforced_at_run_time() {
+    let text = ran(&narrowed_project(
+        "perm_env_net",
+        "\n[permissions]\nenv = [\"APP_*\"]\nnetwork = [\"api.example.com\"]\n",
+    ));
+
+    assert!(text.contains("(unset)"), "a granted variable that is unset is not denied: {text}");
+    assert!(text.contains("DENIED SECRET_KEY"), "{text}");
+    assert!(text.contains("DENIED evil.example.net:80"), "{text}");
+    assert!(
+        !text.contains("DENIED api.example.com"),
+        "a granted host must be attempted, not refused: {text}"
+    );
+}
+
+/// **Narrowing one category does not narrow another.** A manifest that
+/// mentions only `fs` still grants every variable and every host, which is the
+/// rule the table has always claimed and the one that makes tightening one
+/// thing at a time possible.
+#[test]
+fn narrowing_one_category_leaves_the_others_alone() {
+    let text = ran(&narrowed_project(
+        "perm_one_category",
+        "\n[permissions.fs]\nread = [\"data/**\"]\n",
+    ));
+
+    assert!(!text.contains("DENIED"), "only `fs` was narrowed: {text}");
+}

@@ -208,3 +208,73 @@ fn no_grants_cover_nothing() {
     assert!(!granted_path(&[], "./a"));
     assert!(!granted_host(&[], "example.com:443"));
 }
+
+// --- the table `std::permissions` is checked against ------------------------
+//
+// **Two matchers answer this question and they have to agree.** This one
+// decides whether a manifest satisfies `[workspace.policy]`; the one in
+// `std/permissions.kh` decides whether a running program may touch a path, a
+// variable or a host. A disagreement means a build that passes and a program
+// that refuses, or worse the other way round.
+//
+// The table is duplicated rather than shared, because the two are in different
+// languages and a generated fixture would be a third thing to keep true. What
+// keeps them honest is that both are written out and both are run: the Khora
+// side lives in `std::permissions`'s own tests and asserts the same answers.
+
+#[test]
+fn names_span_everything_because_they_have_no_segments() {
+    for (grant, value, want) in [
+        ("*", "DATABASE_URL", true),
+        ("DATABASE_*", "DATABASE_URL", true),
+        ("DATABASE_*", "OTHER_URL", false),
+        ("PORT", "PORT", true),
+        ("PORT", "PORTAL", false),
+        ("*_URL", "DATABASE_URL", true),
+    ] {
+        assert_eq!(
+            granted_name(&[grant.to_string()], value),
+            want,
+            "granted_name({grant:?}, {value:?})"
+        );
+    }
+}
+
+#[test]
+fn a_host_grant_spans_dots_and_a_missing_port_is_every_port() {
+    for (grant, value, want) in [
+        ("example.com", "example.com", true),
+        ("example.com", "example.com:443", true),
+        ("example.com:443", "example.com:443", true),
+        ("example.com:443", "example.com:80", false),
+        ("example.com:*", "example.com:80", true),
+        ("*.internal", "db.eu.internal", true),
+        ("*.internal", "db.internal", true),
+        ("*.internal", "elsewhere.com", false),
+        ("*", "anything.at.all:9000", true),
+    ] {
+        assert_eq!(
+            granted_host(&[grant.to_string()], value),
+            want,
+            "granted_host({grant:?}, {value:?})"
+        );
+    }
+}
+
+#[test]
+fn a_path_grant_keeps_its_segment_rule() {
+    for (grant, value, want) in [
+        ("data/*", "data/a.txt", true),
+        ("data/*", "data/deep/a.txt", false),
+        ("data/**", "data/deep/a.txt", true),
+        // `data/**` is what is *inside* `data`, which is `.gitignore`'s reading
+        // and the one `std::permissions` was changed to match.
+        ("data/**", "data", false),
+    ] {
+        assert_eq!(
+            granted_path(&[grant.to_string()], value),
+            want,
+            "granted_path({grant:?}, {value:?})"
+        );
+    }
+}

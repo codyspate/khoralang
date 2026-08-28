@@ -2,7 +2,7 @@ module main;
 
 import std::core::{Fibers, List, Map, Option, Result, SharedFn, Show, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
-import std::env::{Clock, Env, variable_or};
+import std::env::{Clock, Env, EnvError, variable_or};
 import std::json::{Json, JsonError, parse};
 import std::net::http::{HttpError, Params, Request, Response, Router};
 import std::trace::{Tracer, around_result, text};
@@ -399,12 +399,12 @@ fn health(pool: Pool, tracer: Tracer, _request: Request) -> Response {
 // Starting
 // ---------------------------------------------------------------------------
 
-fn setting(name: String, fallback: String) -> String with { env: Env } {
-  variable_or(name, fallback)
+fn setting(name: String, fallback: String) -> String with { env: Env } raises EnvError {
+  variable_or(name, fallback)!
 }
 
-fn number_setting(name: String, fallback: Int) -> Int with { env: Env } {
-  match Int::of_string(variable_or(name, Int::to_string(fallback))) {
+fn number_setting(name: String, fallback: Int) -> Int with { env: Env } raises EnvError {
+  match Int::of_string(variable_or(name, Int::to_string(fallback))!) {
     Option::Some(chosen) => chosen,
     // An operator's typo is worth saying so about and not worth refusing to
     // start over. `link_shortener` makes the same call for the same reason.
@@ -415,21 +415,21 @@ fn number_setting(name: String, fallback: Int) -> Int with { env: Env } {
   }
 }
 
-pub fn main() raises HttpError {
+pub fn main() raises HttpError + EnvError {
   with { env: Env::real(), clock: Clock::real() } {
     let settings: Settings = {
-      host: setting("PGHOST", "127.0.0.1"),
-      port: number_setting("PGPORT", 5433),
-      user: setting("PGUSER", "khora"),
-      database: setting("PGDATABASE", "khora"),
-      secret: setting("PGPASSWORD", "khora"),
+      host: setting("PGHOST", "127.0.0.1")!,
+      port: number_setting("PGPORT", 5433)!,
+      user: setting("PGUSER", "khora")!,
+      database: setting("PGDATABASE", "khora")!,
+      secret: setting("PGPASSWORD", "khora")!,
     };
 
     // The serving fibers live for the whole program, so the crew is opened
     // here and never waited on: a pool that outlives `main` is not a thing,
     // and `Router::listen` does not return.
     let crew = Fibers::open();
-    let pool = open_pool(crew, settings, number_setting("POOL", 4));
+    let pool = open_pool(crew, settings, number_setting("POOL", 4)!);
     let tracer = Tracer::none();
 
     // **Both results, and the inner one is the statement's.** `with_db` answers
@@ -452,6 +452,6 @@ pub fn main() raises HttpError {
       |> Router::get("/entries", SharedFn::of(fn request => listing(pool, tracer, request)))
       |> Router::get("/balance/:account", SharedFn::of(fn request => balance(pool, tracer, request)))
       |> Router::get("/health", SharedFn::of(fn request => health(pool, tracer, request)))
-      |> Router::listen(number_setting("PORT", 8080))!
+      |> Router::listen(number_setting("PORT", 8080)!)!
   }
 }

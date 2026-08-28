@@ -1577,13 +1577,18 @@ fn is_grants_module(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == "grants.kh")
 }
 
-/// `std::permissions::grants`, written from `[permissions.fs]`.
+/// `std::permissions::grants`, written from `[permissions]`.
 ///
-/// `None` when the manifest says nothing, which leaves the file on disk in
+/// `None` when the manifest narrows nothing, which leaves the file on disk in
 /// place -- and that file grants everything. **A missing `[permissions]` table
 /// grants everything** is a rule this keeps by doing nothing rather than by
 /// generating a permissive answer, so there is one place the default lives and
 /// it is a file somebody can read.
+///
+/// **A category the manifest does not mention keeps its own default**, rather
+/// than being narrowed because a *different* category was. Mentioning `fs`
+/// says nothing about `network`, which is the rule the table already follows
+/// and the one that makes tightening one thing at a time possible.
 ///
 /// The patterns are written as Khora string literals with the quotes and
 /// backslashes escaped, because a Windows path in a manifest is full of both
@@ -1593,18 +1598,67 @@ fn is_grants_module(path: &Path) -> bool {
 fn granted_source(target: &Path) -> Option<String> {
     let manifest_path = nearest_manifest(target)?;
     let parsed = khora_manifest::Manifest::load(&manifest_path).ok()?;
-    let fs = parsed.manifest.permissions.fs.clone()?;
-    Some(render_grants(&fs.read, &fs.write))
+    let permissions = &parsed.manifest.permissions;
+    let fs = permissions.fs.clone();
+    let env = permissions.env.clone();
+    let network = permissions.network.clone();
+    if fs.is_none() && env.is_none() && network.is_none() {
+        return None;
+    }
+    // `**` and `*` are what the checked-in file says, so a category nobody
+    // narrowed comes out of here identical to the default it replaces.
+    let everything_path = vec!["**".to_string()];
+    let everything = vec!["*".to_string()];
+    let fs = fs.unwrap_or(khora_manifest::FsGrants {
+        read: everything_path.clone(),
+        write: everything_path,
+    });
+    Some(render_grants(
+        &fs.read,
+        &fs.write,
+        &env.unwrap_or_else(|| everything.clone()),
+        &network.unwrap_or(everything),
+    ))
 }
 
 /// The generated module's text.
+///
+/// **Built line by line rather than as one literal.** The first version used
+/// `\` continuations inside a string, which keep the *source's* indentation in
+/// the string -- so every line of the generated module arrived with nine
+/// spaces in front of it. Khora does not care, so it parsed and every test
+/// passed, and the file somebody opened to check their permissions was
+/// crooked. A list of lines cannot do that.
 #[cfg(feature = "llvm")]
-fn render_grants(read: &[String], write: &[String]) -> String {
-    format!(
-        "module std::permissions::grants;\n\n         import std::core::{{List}};\n\n         //! Written by `khora build` from `[permissions.fs]`. What is checked\n         //! into `std/grants.kh` is the default, which grants everything; this\n         //! is what the manifest asked for instead.\n\n         /// Paths this program may read.\n         pub fn fs_read() -> List<String> {{\n{}\n}}\n\n         /// Paths this program may write.\n         pub fn fs_write() -> List<String> {{\n{}\n}}\n",
-        render_list(read),
-        render_list(write),
-    )
+fn render_grants(
+    read: &[String],
+    write: &[String],
+    env: &[String],
+    network: &[String],
+) -> String {
+    let mut out = vec![
+        "module std::permissions::grants;".to_string(),
+        String::new(),
+        "import std::core::{List};".to_string(),
+        String::new(),
+        "//! Written by `khora build` from `[permissions]`. What is checked into".to_string(),
+        "//! `std/grants.kh` is the default, which grants everything; this is what".to_string(),
+        "//! the manifest asked for instead.".to_string(),
+    ];
+    for (doc, name, patterns) in [
+        ("Paths this program may read.", "fs_read", read),
+        ("Paths this program may write.", "fs_write", write),
+        ("Environment variables this program may read.", "env", env),
+        ("Hosts this program may reach, as `name` or `name:port`.", "network", network),
+    ] {
+        out.push(String::new());
+        out.push(format!("/// {doc}"));
+        out.push(format!("pub fn {name}() -> List<String> {{"));
+        out.push(render_list(patterns));
+        out.push("}".to_string());
+    }
+    out.push(String::new());
+    out.join("\n")
 }
 
 /// A `List<String>` literal, innermost first.

@@ -52,7 +52,7 @@ fn build(name: &str, main: &str) -> PathBuf {
 
 const HEAD: &str = "module demo::main;
 import std::core::{List, Option};
-import std::env::{Clock, Env, variable_or};
+import std::env::{Clock, Env, EnvError, variable_or};
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -128,9 +128,9 @@ fn a_program_can_read_the_environment() {
         &format!(
             "{HEAD}
 fn work() -> Int with {{ env: Env }} {{
-  print(variable_or(\"KHORA_TEST_VALUE\", \"unset\"));
-  print(variable_or(\"KHORA_TEST_ABSENT\", \"fallback\"));
-  match env.variable(\"KHORA_TEST_ABSENT\") {{
+  print(variable_or(\"KHORA_TEST_VALUE\", \"unset\")! catch {{ _ => \"denied\" }});
+  print(variable_or(\"KHORA_TEST_ABSENT\", \"fallback\")! catch {{ _ => \"denied\" }});
+  match env.variable(\"KHORA_TEST_ABSENT\")! catch {{ _ => Option::None }} {{
     Option::None => print(\"really absent\"),
     Option::Some(found) => print(found),
   }};
@@ -193,7 +193,7 @@ fn the_environment_can_be_replaced_wholesale() {
             "{HEAD}
 /// Ordinary code. It has no idea whether a real environment exists.
 fn work() -> Int with {{ env: Env }} {{
-  print(variable_or(\"HOME\", \"nowhere\"));
+  print(variable_or(\"HOME\", \"nowhere\")! catch {{ _ => \"denied\" }});
   show_all(env.arguments());
   0
 }}
@@ -239,7 +239,7 @@ import std::env::{variable_or};
 extern fn khora_print_int(value: Int);
 
 fn main() -> Int {
-  khora_print_int(String::byte_length(variable_or(\"HOME\", \"\")));
+  khora_print_int(String::byte_length(variable_or(\"HOME\", \"\")!));
   0
 }
 "

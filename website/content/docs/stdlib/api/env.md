@@ -25,13 +25,27 @@ and is gone — so the generated `main` hands it to the runtime, and
 `time` is whole seconds and there is nothing finer that is spelled the same
 everywhere. The runtime already knows which target it was built for.
 
+## Types
+
+### EnvError
+
+```khora
+pub type EnvError = | Denied(name: String);
+```
+
+Why reading the environment did not work.
+
+One case, because there is one way for it to fail that is not "no such
+variable": the manifest did not grant it. Not being set is `None`, which is
+an answer rather than a failure.
+
 ## Effects
 
 ### Env
 
 ```khora
 pub effect Env {
-  variable: (String) -> Option<String>,
+  variable: (String) -> Option<String> raises EnvError,
   arguments: () -> List<String>,
 }
 ```
@@ -77,11 +91,16 @@ caller say which they meant.
 ### variable_or
 
 ```khora
-pub fn variable_or(name: String, fallback: String) -> String with { env: Env }
+pub fn variable_or(name: String, fallback: String) -> String with { env: Env } raises EnvError
 ```
 
 A variable, or a default when it is not set.
 
 The shape almost every caller wants, written once here rather than as a
 `match` at each of them.
+
+**The fallback is for "not set", not for "not allowed".** A denial passes
+through rather than quietly becoming the default: a program told it may not
+read `DATABASE_URL` and silently given `localhost` is a program that starts
+and does the wrong thing, which is worse than one that stops and says why.
 

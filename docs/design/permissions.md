@@ -66,8 +66,8 @@ there are not many:
 | Manifest key | Capability type | State |
 | --- | --- | --- |
 | `fs` | `std::fs::FsRead`, `std::fs::FsWrite` | **enforced** |
-| `network` | `std::net::HttpClient` | parsed, not consulted |
-| `env` | `std::env::Env` | parsed, not consulted |
+| `network` | `std::net::HttpClient` | **enforced** |
+| `env` | `std::env::Env` | **enforced** |
 | `extern` | — | **enforced**, at build time |
 
 **`process` and `clock` are not keys.** This table listed them for a long time
@@ -149,11 +149,33 @@ having to remember it.
 granted directory be emptied into an ungranted one, which is the whole of what
 the grant was meant to stop.
 
-`network` and `env` are parsed and matched and not yet consulted by their
-capabilities. `fs` is the pattern they should follow, with one thing to settle
-first for `env`: `Env::variable` returns `Option<String>` and has no error
-channel, so a denial has nowhere to go that is not `None` -- which would mean
-"not set", the exact conflation `IoError::Denied` exists to avoid.
+`env` follows the same shape, and settling it took a signature change.
+`Env::variable` returned `Option<String>` and had no error channel, so a denial
+had nowhere to go that was not `None` -- which means "not set", the exact
+conflation `IoError::Denied` exists to avoid. So `variable` and `variable_or`
+now `raises EnvError`, whose one case is `Denied(name)`. The cost is a `!` on
+every read of the environment; the alternative was a program told its
+`DATABASE_URL` is unset while the manifest is what actually refused it.
+
+The match is `granted_name` rather than `granted_path`: a variable name has no
+separators, so `DB_*` is one wildcard against one string and `**` would mean
+nothing.
+
+`network` is checked in `perform`, **after the URL is parsed and before
+anything is dialled**. After, because the host is not known until then and a
+grant is about the host rather than about the text somebody wrote; before,
+because the point of the grant is that no connection is attempted -- a refusal
+that has already resolved a name and opened a socket has already told the
+network what this program wanted. The refusal is `CallError::Denied`, its own
+case rather than `Unreachable`, because the two send a reader to different
+places: one is DNS or a firewall or a service that is down, the other is a line
+in `khora.toml`.
+
+The pattern is matched against `host:port`, with the port always spelled out
+even where it is the scheme's default -- so a grant of `example.com:443`
+matches a URL written without one. `granted_host` splits the port off before
+matching so that a grant with no port covers every port, which is what
+`example.com` visibly says.
 
 This is Deno's model, and it is Deno's model for the same reason: the check has
 to be where the value is.
@@ -166,7 +188,11 @@ starting — the same bargain Rust makes with `unsafe`, which is allowed until
 you write `#![forbid(unsafe_code)]`.
 
 **Each category is independent.** Mentioning `network` says nothing about `fs`;
-an unmentioned category is unrestricted. A rule that silently locked down
+an unmentioned category is unrestricted. This is held in one place --
+`granted_source` in `khora-cli` writes `**` or `*` for every category the
+manifest did not narrow, so the generated `std::permissions::grants` is
+identical to the checked-in default for those, and there is no second rule
+anywhere about what silence means. A rule that silently locked down
 everything the moment you named one thing would punish the first step towards
 being careful, which is exactly the wrong incentive.
 
