@@ -64,6 +64,7 @@ pub effect Clock {
   unix_seconds: () -> Int,
   unix_millis: () -> Int,
   monotonic_millis: () -> Int,
+  sleep: (Int) -> (),
 }
 ```
 

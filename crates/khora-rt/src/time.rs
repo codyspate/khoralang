@@ -1,7 +1,7 @@
-//! Clocks. One that a user can set and one that only goes forward.
+//! Clocks. One that a user can set, one that only goes forward, and waiting.
 
 use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 //
 // ISO C offers `time`, which is whole seconds, and nothing finer that is
@@ -59,4 +59,32 @@ pub extern "C" fn khora_monotonic_millis() -> i64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     let origin = *ORIGIN.get_or_init(Instant::now);
     origin.elapsed().as_millis().min(i64::MAX as u128) as i64
+}
+
+/// Waits `millis` before going on, giving the worker back while it waits.
+///
+/// **A fiber's sleep costs no thread.** `sleep_until` registers a deadline with
+/// the timer thread and suspends, so a worker is free for the whole wait and
+/// ten thousand sleeping fibers cost ten thousand entries in a heap rather than
+/// ten thousand stacks in the kernel. That is the difference this runtime
+/// exists to make, and it is why sleeping is a runtime export rather than a
+/// call to whatever the platform spells `Sleep`.
+///
+/// Off a scheduler -- `main` before anything is spawned, a test, a thread the
+/// blocking pool handed out -- there is no worker to give back, so the thread
+/// blocks as it always would. `sleep_until` answers false to say so, which is
+/// what distinguishes the two rather than a guess about where this is running.
+///
+/// Zero or less returns at once and does not yield. A caller who meant "let
+/// somebody else run" wants a safepoint, which every loop back-edge already
+/// has; making a zero sleep mean that too would give one word two jobs.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_sleep(millis: i64) {
+    if millis <= 0 {
+        return;
+    }
+    let patience = Duration::from_millis(millis as u64);
+    if !crate::scheduler::sleep_until(Instant::now() + patience) {
+        std::thread::sleep(patience);
+    }
 }

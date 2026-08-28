@@ -31,6 +31,7 @@ extern fn khora_arg_count() -> Int;
 extern fn khora_arg(index: Int) -> Ptr;
 extern fn khora_unix_millis() -> Int;
 extern fn khora_monotonic_millis() -> Int;
+extern fn khora_sleep(millis: Int) -> ();
 
 // ---------------------------------------------------------------------------
 // The interface
@@ -98,6 +99,23 @@ pub effect Clock {
   /// is always a real elapsed time — which is exactly what `unix_millis`
   /// cannot promise.
   monotonic_millis: () -> Int,
+  /// Waits this many milliseconds before going on.
+  ///
+  /// **An operation on the clock, and that is the whole design.** Waiting is
+  /// the one thing a program does that a test cannot afford to actually do, and
+  /// putting it here means a fake clock is `handler for Clock { sleep: fn ms
+  /// => .. }` and nothing else -- no test runtime, no special mode, no rule
+  /// about which fiber may advance time. The alternative is what every
+  /// language with an ambient sleep ends up building: a parallel clock the
+  /// runtime knows about, and documentation that has to open by warning you to
+  /// fork the sleeping code or deadlock.
+  ///
+  /// The capability *is* the seam, which is the argument `Random::seeded`
+  /// already makes about the other unrepeatable input.
+  ///
+  /// Zero or less returns at once. A caller who meant "let somebody else run"
+  /// wants a safepoint, and every loop back-edge already has one.
+  sleep: (Int) -> (),
 }
 
 impl Env {
@@ -125,6 +143,11 @@ impl Clock {
       unix_seconds: fn () => khora_unix_millis() / 1000,
       unix_millis: fn () => khora_unix_millis(),
       monotonic_millis: fn () => khora_monotonic_millis(),
+      // A *fiber's* sleep gives its worker back for the whole wait, so ten
+      // thousand sleeping fibers cost ten thousand entries in a heap rather
+      // than ten thousand stacks. Off a scheduler the thread blocks, which is
+      // what `main` does before anything is spawned.
+      sleep: fn millis => khora_sleep(millis),
     }
   }
 }

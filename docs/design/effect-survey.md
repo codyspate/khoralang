@@ -67,7 +67,7 @@ reach for by default was the one that made a struct unprintable.
 
 `show` gives `[a, b, c]`, which is how the literal is written.
 
-### `std/config.kh` — typed configuration
+### `std/config_native.kh` — typed configuration
 
 `string`, `integer`, `boolean`, `secret`, `or_default`, `report`, and a
 three-case `ConfigError`. Every reader answers `Validated`, so `map2` reports
@@ -95,6 +95,33 @@ Two details worth keeping:
 
 Nothing here raises: reading configuration is the one place where "tell me
 everything that is wrong" is the whole job, and a `raises` stops at the first.
+
+### `Clock.sleep` — `std/env_native.kh`
+
+**An operation on the clock, not an intrinsic**, and that is the whole design.
+Waiting is the one thing a program does that a test cannot afford to actually
+do, and putting it on the capability means a fake clock is
+`handler for Clock { sleep: fn ms => .. }` and nothing else — no test runtime,
+no special mode, no rule about which fiber may advance time.
+
+Effect's `TestClock` is the alternative made concrete: a structure of pending
+deadlines with an `adjust` that completes them in order, needed *only because*
+`Effect.sleep` is baked into the fiber runtime and reaches the clock through a
+fiber-local. Its documentation has to open with a footgun — fork the sleeping
+effect, or the test fiber blocks and can never call `adjust`. Khora's test for
+the same thing is four lines and does not change how the sleeping code is
+written. `Random::seeded` already made this argument about the other
+unrepeatable input.
+
+The runtime part was almost nothing, because `scheduler::sleep_until` already
+existed for the reactor's own deadlines and had no export. So a sleeping fiber
+gives its worker back for the whole wait — ten thousand sleeping fibers are ten
+thousand entries in a heap rather than ten thousand stacks — and off a
+scheduler the thread blocks, which is what `main` does before anything is
+spawned. `sleep_until` answers false to say which happened, so the distinction
+is read rather than guessed.
+
+This is 3.1's dependency, and the rest of 3.1 is still open.
 
 ### `Channel::dropping`, `Channel::sliding`, `Channel::poll`
 
@@ -132,14 +159,17 @@ in.
 
 Ordered by what should be built first. Nothing here is started.
 
-### 3.1 A fiber that returns a value, and `sleep`
+### 3.1 A fiber that returns a value
 
 **This is not a comparison finding; it is a hole.** `Fiber::spawn` takes
 `() -> ()` and `join` gives back `()`, so the only way a fiber can communicate a
-result is a `Channel` or a `Shared`. There is no `khora_sleep`, no
-`Clock.sleep`, no `timeout`, no `race`, and no bounded parallel map.
-`positioning.md` says Khora should be a candidate wherever a team considers Go;
-a language in which a database call cannot be timed out is not that.
+result is a `Channel` or a `Shared`. There is still no `timeout`, no `race`, and
+no bounded parallel map. `positioning.md` says Khora should be a candidate
+wherever a team considers Go; a language in which a database call cannot be
+timed out is not that.
+
+`sleep` — the other half of this item, and the half everything else waits on —
+is built; see section 1.
 
 Proposed: `Fiber<A>` with `join(self) -> A`, plus `race`, `par2`, `par_map` and
 `timeout`. The runtime is most of the way there — the join slot exists and is
@@ -168,15 +198,8 @@ be `Share`, the bound `spawn` already needs.
    *Recommendation: ship `Fiber::detach` — signal and do not await — with the
    rest. Without it, `timeout` over an uninterruptible body is a lie.*
 
-**`sleep` must be an operation on `Clock`, not an intrinsic.** Effect's
-`TestClock` is real machinery — a structure of pending deadlines with an
-`adjust` that completes them in order — and it exists *only because*
-`Effect.sleep` is baked into the fiber runtime and reaches the clock through a
-fiber-local. Its documentation has to lead with a footgun: fork the sleeping
-effect or the test fiber blocks and can never call `adjust`. If `sleep` is a
-`Clock` operation, **deterministic test time costs nothing** — a fake clock is
-`handler for Clock { sleep: fn ms => .. }` and no runtime support is needed. The
-capability *is* the seam, exactly as `Random::seeded` already establishes.
+`timeout` is `race` against `clock.sleep`, so all of this is one item once a
+fiber can carry a result.
 
 ### 3.2 `Schedule` as a widened ADT
 
@@ -206,10 +229,29 @@ Two semantics worth copying, both non-obvious:
 
 Jitter draws from `Random`, so it is seedable, and the row says so.
 
-Roughly 200 lines of `std`, no grammar and no type-system work — **once 3.1
-exists**. That `Micro` keeps `Schedule` while dropping `Layer`, `Ref`, `Queue`,
-`Deferred` and `Stream` is Effect's own ranking of what is irreducible, and it
-agrees with this list.
+**One question the survey did not answer, and it is the reason this was not
+built alongside `sleep`: where does the driver live?** A `retry` that waits
+needs a `Clock` in its row, `Clock` is declared in `std::env`, and `std::env`
+imports `std::core` — so the `retry` and `repeat` that sit in `std/core.kh`
+today *cannot* grow a delay where they are. Three ways out, and this is a
+std-surface decision rather than a detail:
+
+1. **Move the drivers to a new `std::retry`**, leaving the `Schedule` ADT in
+   `core` as the pure description it already argues for. Nothing imports
+   `std::core::retry` today, so the move costs nothing but the name.
+2. **Move `Clock` into `std::core`**, with the native handler staying in
+   `env_native.kh`. Puts the clock beside the nursery and the region, which is
+   arguably where a scheduling primitive belongs — and is a bigger move.
+3. **Keep both**: `core`'s attempt-counting `retry` unchanged, and a delaying
+   one elsewhere. Two spellings of one word, which is the worst of the three.
+
+*Recommendation: (1).* It keeps `core` free of the clock, which is the property
+its `Schedule` docstring is already built around.
+
+Roughly 200 lines of `std`, no grammar and no type-system work. That `Micro`
+keeps `Schedule` while dropping `Layer`, `Ref`, `Queue`, `Deferred` and
+`Stream` is Effect's own ranking of what is irreducible, and it agrees with
+this list.
 
 ### 3.3 Finalizers that know how the scope ended
 

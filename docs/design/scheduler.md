@@ -399,6 +399,15 @@ thing to reach for if measurement says the heap is the problem, and not before �
 and a hundred thousand timers sort correctly and fire in one pass, so it is not
 the problem yet.
 
+**A Khora program reaches this through `Clock.sleep`**, an operation on the
+capability rather than an intrinsic. `khora_sleep` calls `sleep_until` on a
+fiber and blocks the thread anywhere else, since off a scheduler there is no
+worker to give back — `sleep_until` answers false to say which happened. The
+reason it is on the clock rather than beside `khora_safepoint` is in
+`docs/design/effect-survey.md` §1: a fake clock is then a handler, and
+deterministic test time needs no support from anything here. A runtime that
+owns sleeping has to grow a test clock of its own, and then explain it.
+
 **11F found the shape of the eventual problem, and left it alone.** A fiber
 released before its deadline — woken by I/O, or cancelled — leaves the deadline
 in the heap, because taking it out means rebuilding the heap and doing that per

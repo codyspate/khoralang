@@ -374,6 +374,7 @@ pub fn main() -> () {
     unix_seconds: fn () => 1000,
     unix_millis: fn () => 1000000,
     monotonic_millis: fn () => Shared::update(ticks, fn t => t + 5),
+    sleep: fn _ms => (),
   } } {
     print(Int::to_string(how_long()));
     print(Int::to_string(how_long()));
