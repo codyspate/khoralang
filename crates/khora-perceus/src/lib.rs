@@ -159,7 +159,7 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
         ("Shared", "get" | "set" | "update" | "modify") => RECEIVER,
         // `send` hands over the *value* — the queue owns it — while the handle
         // stays the caller's. A serving fiber sends per reply.
-        ("Channel", "send" | "receive" | "close" | "depth") => RECEIVER,
+        ("Channel", "send" | "receive" | "poll" | "close" | "depth") => RECEIVER,
         // *Releasing* a handle is what joins; that is the binding's business.
         ("Fiber", "join" | "cancel") => RECEIVER,
         ("Fibers", "adopt" | "wait") => RECEIVER,

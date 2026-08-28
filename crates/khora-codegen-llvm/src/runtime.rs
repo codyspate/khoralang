@@ -184,7 +184,11 @@ pub struct Runtime<'ctx> {
     pub shared_modify: FunctionValue<'ctx>,
     /// `void khora_shared_release(void *cell)`, a `drop_fields` callback.
     pub shared_release: FunctionValue<'ctx>,
-    /// `void *khora_channel_open(int64_t capacity, bool boxed, void (*glue)(void *))`
+    /// `void *khora_channel_open(int64_t capacity, int64_t strategy, bool boxed, void (*glue)(void *))`
+    ///
+    /// `strategy` is what a send does when the queue is full: 0 waits, 1
+    /// refuses, 2 evicts the oldest. Recorded on the channel rather than
+    /// passed per send, because a queue is lossy or it is not.
     pub channel_open: FunctionValue<'ctx>,
     /// `bool khora_channel_send(void *channel, uint64_t value)`
     pub channel_send: FunctionValue<'ctx>,
@@ -192,6 +196,11 @@ pub struct Runtime<'ctx> {
     pub channel_receive: FunctionValue<'ctx>,
     /// `void khora_channel_close(void *channel)`
     pub channel_close: FunctionValue<'ctx>,
+    /// `bool khora_channel_poll(void *channel, uint64_t *out)`
+    ///
+    /// The same shape as `receive` and the same answer, minus the waiting.
+    pub channel_poll: FunctionValue<'ctx>,
+
     /// `int64_t khora_channel_depth(void *channel)`
     pub channel_depth: FunctionValue<'ctx>,
     /// `void khora_channel_release(void *channel)`, a `drop_fields` callback.
@@ -357,7 +366,10 @@ impl<'ctx> Runtime<'ctx> {
             shared_release: declare("khora_shared_release", void.fn_type(&[ptr.into()], false)),
             channel_open: declare(
                 "khora_channel_open",
-                ptr.fn_type(&[i64t.into(), ctx.bool_type().into(), ptr.into()], false),
+                ptr.fn_type(
+                    &[i64t.into(), i64t.into(), ctx.bool_type().into(), ptr.into()],
+                    false,
+                ),
             ),
             channel_send: declare(
                 "khora_channel_send",
@@ -365,6 +377,10 @@ impl<'ctx> Runtime<'ctx> {
             ),
             channel_receive: declare(
                 "khora_channel_receive",
+                ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            channel_poll: declare(
+                "khora_channel_poll",
                 ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),
             ),
             channel_close: declare("khora_channel_close", void.fn_type(&[ptr.into()], false)),

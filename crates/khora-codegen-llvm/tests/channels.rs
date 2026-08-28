@@ -63,8 +63,11 @@ pub type Channel<A>;
 impl<A> Share for Channel<A> {}
 impl<A: Share> Channel<A> {
   fn bounded(capacity: Int) -> Channel<A>;
+  fn dropping(capacity: Int) -> Channel<A>;
+  fn sliding(capacity: Int) -> Channel<A>;
   fn send(self, value: A) -> Bool;
   fn receive(self) -> Option<A>;
+  fn poll(self) -> Option<A>;
   fn close(self) -> ();
   fn depth(self) -> Int;
 }
@@ -361,5 +364,170 @@ fn main() -> Int {{
         ),
     );
     assert_eq!(ran.stdout, "0\n0\n", "refused, and the value was not leaked");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A dropping channel refuses, and says it refused.**
+///
+/// The whole reason to pick this one over `sliding` is that `send` answers
+/// `false`, so the producer that must not stall can still count what it lost.
+/// The values that survive are the *oldest* -- nothing already accepted is
+/// disturbed -- which is the other half of the difference.
+#[test]
+fn a_dropping_channel_refuses_the_newest_and_says_so() {
+    let ran = run(
+        "channel_dropping",
+        &format!(
+            "{PRELUDE}
+fn fill() -> () {{
+  let line = Channel::dropping(2);
+  let mut i = 1;
+  let mut refused = 0;
+  while i <= 5 {{
+    if Channel::send(line, i) {{ }} else {{ refused = refused + 1 }};
+    i = i + 1
+  }};
+  print(refused);
+  print(Channel::depth(line));
+  let mut going = true;
+  while going {{
+    match Channel::poll(line) {{
+      Option::Some(value) => print(value),
+      Option::None => going = false,
+    }}
+  }};
+  Channel::close(line);
+}}
+
+fn main() -> Int {{
+  fill();
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+
+    // Three refused, two kept, and the two kept are the first two.
+    assert_eq!(ran.stdout, "3\n2\n1\n2\n0\n", "{}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A sliding channel accepts, and drops the oldest to make room.**
+///
+/// `send` answers `true` every time, which is the point: nothing was refused,
+/// so there is nothing for a caller to handle. What is left is the newest
+/// values, which is what a gauge or a last-known-position wants.
+#[test]
+fn a_sliding_channel_keeps_the_newest_and_never_refuses() {
+    let ran = run(
+        "channel_sliding",
+        &format!(
+            "{PRELUDE}
+fn fill() -> () {{
+  let line = Channel::sliding(2);
+  let mut i = 1;
+  let mut refused = 0;
+  while i <= 5 {{
+    if Channel::send(line, i) {{ }} else {{ refused = refused + 1 }};
+    i = i + 1
+  }};
+  print(refused);
+  print(Channel::depth(line));
+  let mut going = true;
+  while going {{
+    match Channel::poll(line) {{
+      Option::Some(value) => print(value),
+      Option::None => going = false,
+    }}
+  }};
+  Channel::close(line);
+}}
+
+fn main() -> Int {{
+  fill();
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+
+    // Nothing refused, two kept, and the two kept are the last two.
+    assert_eq!(ran.stdout, "0\n2\n4\n5\n0\n", "{}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A slid-out value is released**, which is the part no output can show.
+///
+/// A sliding channel drops a reference on every send past its capacity, and
+/// getting that wrong is not a wrong answer -- it is a service that grows all
+/// day. `khora_live_count` is the only thing that can see it, which is why
+/// these values are strings rather than numbers.
+#[test]
+fn nothing_slid_out_of_a_channel_is_leaked() {
+    let ran = run(
+        "channel_sliding_release",
+        &format!(
+            "{PRELUDE}
+fn fill() -> () {{
+  let line = Channel::sliding(1);
+  let mut i = 0;
+  while i < 8 {{
+    Channel::send(line, \"a value long enough not to be a small string\");
+    i = i + 1
+  }};
+  print(Channel::depth(line));
+  Channel::close(line);
+}}
+
+fn main() -> Int {{
+  fill();
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+
+    // One left in the queue, and the close released it: nothing outlives `fill`.
+    assert_eq!(ran.stdout, "1\n0\n", "{}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **`poll` does not wait**, and an empty channel is `None` rather than a hang.
+///
+/// The test that would deadlock if it were `receive`, which is the only way to
+/// state the difference.
+#[test]
+fn polling_an_empty_channel_answers_at_once() {
+    let ran = run(
+        "channel_poll",
+        &format!(
+            "{PRELUDE}
+fn look() -> () {{
+  let line = Channel::bounded(4);
+  match Channel::poll(line) {{
+    Option::Some(_value) => print(1),
+    Option::None => print(0),
+  }};
+  Channel::send(line, 7);
+  match Channel::poll(line) {{
+    Option::Some(value) => print(value),
+    Option::None => print(0),
+  }};
+  Channel::close(line);
+}}
+
+fn main() -> Int {{
+  look();
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+
+    assert_eq!(ran.stdout, "0\n7\n0\n", "{}", ran.stdout);
     assert_eq!(ran.code, Some(0));
 }

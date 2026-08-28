@@ -56,6 +56,36 @@ use std::sync::{Condvar, Mutex};
 /// The tag every channel carries.
 const CHANNEL_TAG: u32 = 0;
 
+/// What a send does when the queue is full.
+///
+/// **A property of the channel, not of the send.** Which one is right is
+/// decided by what the queue is *for* -- a request path that must not stall, a
+/// metrics feed that would rather lose a sample -- and that is one answer per
+/// channel. Deciding it per call would let two senders disagree about whether
+/// the queue is lossy, which is not a thing a queue can be halfway.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WhenFull {
+    /// Wait for room. The default, and the only one with backpressure.
+    Block,
+    /// Refuse the value and say so.
+    Drop,
+    /// Evict the oldest and take the new one.
+    Slide,
+}
+
+impl WhenFull {
+    /// The word the compiler passes, which is the discriminant and nothing
+    /// cleverer -- an unknown value is `Block`, because the safe reading of a
+    /// number nobody recognises is the one that loses no data.
+    fn of(word: i64) -> WhenFull {
+        match word {
+            1 => WhenFull::Drop,
+            2 => WhenFull::Slide,
+            _ => WhenFull::Block,
+        }
+    }
+}
+
 /// What a `Channel<A>` holds.
 struct Queue {
     items: VecDeque<u64>,
@@ -72,6 +102,7 @@ struct Channel {
     /// For waiters that are threads rather than fibers.
     moved: Condvar,
     capacity: usize,
+    full: WhenFull,
     boxed: bool,
     glue: Option<extern "C" fn(*mut u8)>,
 }
@@ -120,10 +151,12 @@ unsafe fn channel_of<'a>(handle: *mut u8) -> Option<&'a Channel> {
 /// # Safety
 ///
 /// `glue` must be the drop routine for the values that will be sent, and
-/// `boxed` must say truthfully whether those values are pointers.
+/// `boxed` must say truthfully whether those values are pointers. `strategy`
+/// is a [`WhenFull`] discriminant.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_channel_open(
     capacity: i64,
+    strategy: i64,
     boxed: bool,
     glue: Option<extern "C" fn(*mut u8)>,
 ) -> *mut u8 {
@@ -137,6 +170,7 @@ pub unsafe extern "C" fn khora_channel_open(
         }),
         moved: Condvar::new(),
         capacity: if capacity < 1 { 1 } else { capacity as usize },
+        full: WhenFull::of(strategy),
         boxed,
         glue,
     });
@@ -182,8 +216,41 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
             return true;
         }
 
-        // Full. Enrol under the same lock that saw it full, or a receive
-        // between the two leaves this fiber parked on room that already exists.
+        // Full, and what that means was decided when the channel was opened.
+        //
+        // **`Drop` answers false and `Slide` answers true**, and the asymmetry
+        // is the point rather than an oversight: a dropping channel makes the
+        // loss visible at the send, so a caller can count it, and a sliding one
+        // hides it because the whole reason to slide is that the newest value
+        // is the one worth having and nobody is going to act on the loss. Pick
+        // per queue, knowing which of the two you are getting.
+        match channel.full {
+            WhenFull::Drop => {
+                drop(state);
+                channel.release(value);
+                return false;
+            }
+            WhenFull::Slide => {
+                let evicted = state.items.pop_front();
+                state.items.push_back(value);
+                let waiting = std::mem::take(&mut state.receivers);
+                drop(state);
+                // After the lock, for the reason `release` gives: a drop
+                // routine may reach a channel of its own.
+                if let Some(old) = evicted {
+                    channel.release(old);
+                }
+                channel.moved.notify_all();
+                for waker in waiting {
+                    waker.wake();
+                }
+                return true;
+            }
+            WhenFull::Block => {}
+        }
+
+        // Enrol under the same lock that saw it full, or a receive between the
+        // two leaves this fiber parked on room that already exists.
         match waker_for_current() {
             Some(waker) => {
                 state.senders.push(waker);
@@ -281,6 +348,41 @@ pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
 /// primitive: the answer is stale the moment it is given, which is true of
 /// every such count and is why nothing here branches on one.
 ///
+/// Takes a value if one is already there, and never waits.
+///
+/// **The answer is "nothing right now", which is not "nothing ever".** A false
+/// here means the queue was empty at the instant it was read, and says nothing
+/// about whether the channel is closed -- a caller polling a live channel and
+/// a caller polling a drained closed one get the same answer, and the way to
+/// tell them apart is `receive`, which waits and then says. This exists for the
+/// loop that has something else to do rather than for the loop that spins.
+///
+/// # Safety
+///
+/// `handle` must be live and `out` a writable word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_channel_poll(handle: *mut u8, out: *mut u64) -> bool {
+    let Some(channel) = (unsafe { channel_of(handle) }) else {
+        fatal("polling a channel that has already been released");
+    };
+
+    let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(value) = state.items.pop_front() else {
+        return false;
+    };
+    // Room appeared, so anybody waiting for it is woken -- exactly as a
+    // receive does, because to a blocked sender this *is* a receive.
+    let waiting = std::mem::take(&mut state.senders);
+    drop(state);
+    channel.moved.notify_all();
+    for waker in waiting {
+        waker.wake();
+    }
+    // SAFETY: the caller promised a writable word.
+    unsafe { out.write(value) };
+    true
+}
+
 /// # Safety
 ///
 /// `handle` must be a live object from [`khora_channel_open`].
@@ -336,7 +438,7 @@ mod tests {
 
     fn open(capacity: i64) -> *mut u8 {
         // Unboxed, so the word is a number and nothing is released.
-        unsafe { khora_channel_open(capacity, false, None) }
+        unsafe { khora_channel_open(capacity, 0, false, None) }
     }
 
     fn take(handle: *mut u8) -> Option<u64> {

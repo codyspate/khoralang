@@ -230,12 +230,21 @@ impl<'ctx> Lower<'_, 'ctx> {
         range: TextRange,
     ) -> Flow<'ctx> {
         match (name, args) {
-            ("bounded", [capacity]) => {
-                // The element type is not in the arguments -- `bounded` takes a
+            // The three constructors differ by one word: what a send does
+            // when the queue is full. Written as one arm rather than three
+            // near-copies, because the only thing that varies is the number.
+            ("bounded", [capacity]) | ("dropping", [capacity]) | ("sliding", [capacity]) => {
+                let strategy = match name {
+                    "dropping" => 1,
+                    "sliding" => 2,
+                    _ => 0,
+                };
+                // The element type is not in the arguments -- these take a
                 // number -- so it comes from what the call site was inferred
                 // to produce, which is where `Channel<A>` is known.
                 let held = self.channel_contents(site, &self.types.of(site).clone(), range)?;
                 let room = self.expr(*capacity)?;
+                let when_full = self.be.ctx.i64_type().const_int(strategy, false);
                 let boxed =
                     self.be.ctx.bool_type().const_int(u64::from(is_boxed(&held)), false);
                 let glue = self.be.drop_glue(&held);
@@ -245,7 +254,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                         .builder
                         .build_call(
                             open,
-                            &[room.into(), boxed.into(), glue.into()],
+                            &[room.into(), when_full.into(), boxed.into(), glue.into()],
                             "channel",
                         )
                         .expect("opening a channel")
@@ -274,7 +283,10 @@ impl<'ctx> Lower<'_, 'ctx> {
                 self.release_unless_lent(*channel, handle, &channel_ty);
                 Some(answered)
             }
-            ("receive", [channel]) => {
+            // `receive` waits and `poll` does not; everything else about the
+            // two is identical, down to the stack slot, so they share an arm
+            // and differ in which runtime function is called.
+            ("receive", [channel]) | ("poll", [channel]) => {
                 let channel_ty = self.types.of(*channel).clone();
                 let held = self.channel_contents(site, &channel_ty, range)?;
                 let handle = self.expr(*channel)?;
@@ -289,7 +301,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .builder
                     .build_alloca(self.be.ctx.i64_type(), "received")
                     .expect("a slot for the received word");
-                let receive = self.be.rt.channel_receive;
+                let receive = if name == "poll" {
+                    self.be.rt.channel_poll
+                } else {
+                    self.be.rt.channel_receive
+                };
                 let arrived = self
                     .be
                     .builder

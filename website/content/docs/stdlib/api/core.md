@@ -73,6 +73,95 @@ already *is* "an error or a value"; which of the two readings a function
 offers is a choice about its caller, and `attempt` is where one becomes the
 other. `docs/design/effect-runtime.md` §8.
 
+### Redacted
+
+```khora
+pub type Redacted<A> = | Secret(value: A);
+```
+
+A value that a log line cannot get at.
+
+A password, a token, an API key. The leak everybody actually has is not a
+clever one: it is a `Config` record in a structured log, or a `${}` in a
+message written while debugging something else, and no review catches it
+because nothing about the line looks wrong.
+
+**`Show` prints `<redacted>`, and there is no `ToJson`.** Those two
+sentences are the whole design, and each is deliberate in a different
+direction:
+
+- *With* `Show`, a record holding one still derives `Show`, so the config a
+  service prints at start-up stays printable and the secret in it does not
+  appear. A `Redacted` with no `Show` at all would look stricter and be
+  worse: it makes the containing record unprintable, and the way people
+  answer that is by not wrapping the secret.
+- *Without* `ToJson`, a record holding one does **not** derive `ToJson`,
+  and the build stops. That is the right place to stop: a type that
+  serialises a secret is a bug, and one that serialises `"<redacted>"` is a
+  payload that fails to round-trip somewhere further away.
+
+This is where a nominal type earns its keep. Elsewhere the same idea is a
+`toString` override, which any structured logger walks straight past
+because it reads fields rather than calling it. Here it is a missing impl,
+which is a compile error.
+
+```khora
+derive(Show)
+type Config = { host: String, password: Redacted<String> };
+
+let settings: Config = { host: "db.internal", password: Redacted::of(secret) };
+print(settings.show());   // Config { host: db.internal, password: <redacted> }
+connect(Redacted::expose(settings.password));
+```
+
+Interpolation is closed off separately and for free: `"${key}"` wants a
+`String` and does not call `Show`, so it does not compile at all. The
+remaining ways a value reaches a log are `show` and a derived `Show` on
+something holding it, and this covers both.
+
+**Deliberately no `Eq`.** Comparing two secrets is a real thing to want and
+a derived `Eq` would compare them byte by byte and stop at the first
+difference, which is how a timing side channel gets written by somebody who
+was not writing one. Anybody who needs the comparison writes `expose` and
+says so.
+
+### Validated
+
+```khora
+derive(Eq, Show)
+pub type Validated<A, E> =
+  | Valid(value: A)
+  | Invalid(errors: List<E>);
+```
+
+Every reason the input was wrong, rather than the first one.
+
+`Result` is the right shape when the next step depends on the last: it
+stops, because there is nothing sensible to do with a value that is not
+there. Validation is the other shape. The fields of a form, the keys of a
+config, the columns of a row -- these do not depend on each other, and
+reporting them one restart at a time is a person running the program five
+times to be told five things it knew the first time.
+
+`Applicative::map2` is the operation that distinguishes the two, and
+`std::core`'s own docstring on it has been pointing here since it was
+written: *"`Option` gives up if either is `None`, and a validation type
+would collect both failures."*
+
+```khora
+let settings = Validated::map2(
+  integer("PORT"),
+  string("HOST"),
+  fn (port, host) => Settings { port: port, host: host },
+);
+```
+
+**Not an `Applicative` instance**, though it is one in shape. The instance
+would need `Validated<_, E>` -- the error parameter fixed and the value
+parameter free -- and Khora has no partial application of a type
+constructor. The methods are the same functions under their own names, and
+the instance can arrive later without changing a call site.
+
 ### List
 
 ```khora
@@ -963,6 +1052,118 @@ What a function does at the edge of its own vocabulary: a caller should
 see the failure in terms of what *they* asked for, not in terms of
 whatever was reached to answer it.
 
+### Redacted<A>
+
+```khora
+impl<A> Redacted<A>
+```
+
+#### of
+
+```khora
+pub fn of(value: A) -> Redacted<A>
+```
+
+Wraps a value so that showing it shows nothing.
+
+#### expose
+
+```khora
+pub fn expose(self) -> A
+```
+
+The value back.
+
+**The only way out, and it is meant to be visible.** `expose` at a call
+site is a word a reviewer can search for; the leak this type exists to
+stop is the one nobody wrote on purpose.
+
+### Validated<A, E>
+
+```khora
+impl<A, E> Validated<A, E>
+```
+
+#### of
+
+```khora
+pub fn of(value: A) -> Validated<A, E>
+```
+
+A value that was fine.
+
+#### error
+
+```khora
+pub fn error(e: E) -> Validated<A, E>
+```
+
+One thing wrong.
+
+#### is_valid
+
+```khora
+pub fn is_valid(self) -> Bool
+```
+
+Whether nothing was wrong.
+
+#### map
+
+```khora
+pub fn map<B>(self, f: (A) -> B) -> Validated<B, E>
+```
+
+The same value, transformed. Failures pass through untouched.
+
+#### map2
+
+```khora
+pub fn map2<B, C>(self, other: Validated<B, E>, f: (A, B) -> C) -> Validated<C, E>
+```
+
+Two together, **keeping both sides' failures**.
+
+This is the whole type. `f` runs only when both succeeded; when either
+did not, the answer carries every error from both, left to right, and `f`
+is not called. Chained through a record's fields it reports the whole
+form in one pass.
+
+#### and_then
+
+```khora
+pub fn and_then<B>(self, f: (A) -> Validated<B, E>) -> Validated<B, E>
+```
+
+A second step that can fail, run only if the first did not.
+
+**Fails fast, and that is not a contradiction.** `map2` collects because
+its two sides are independent; this one's second step is written in terms
+of the first's value, so there is no second answer to collect when there
+is no first value to write it against. Parsing is the shape: `integer`
+reads the text and then parses it, and "not set" and "not a number" are
+never both true of one variable.
+
+#### to_result
+
+```khora
+pub fn to_result(self) -> Result<A, List<E>>
+```
+
+The failures collapsed into one `Result`, for joining a `raises` chain.
+
+`List<E>` rather than `E`, because the point of getting here was that
+there may be more than one and throwing the rest away at the boundary
+would undo the collecting.
+
+#### unwrap_or
+
+```khora
+pub fn unwrap_or(self, fallback: A) -> A
+```
+
+The value, or `fallback` if anything was wrong.
+
 ### List<A>
 
 ```khora
@@ -1813,6 +2014,41 @@ A channel that will hold at most `capacity` values.
 
 Below one is one — see the type's note on rendezvous.
 
+**A full one makes the sender wait**, which is backpressure and is the
+right default: a queue nobody is draining is a producer that should slow
+down. `dropping` and `sliding` are the two ways to say the opposite.
+
+#### dropping
+
+```khora
+pub fn dropping(capacity: Int) -> Channel<A>
+```
+
+Like `bounded`, but a send into a full one **fails instead of waiting**.
+
+For a queue whose producer must not stall: the request path writing an
+audit event, a handler emitting a metric. `send` answers `false`, so the
+loss is a value the caller can count and report — which is the whole
+difference from `sliding`, where it is not.
+
+The choice is the channel's rather than the send's, because a queue is
+lossy or it is not, and two senders disagreeing about which is not a
+state a queue can be in.
+
+#### sliding
+
+```khora
+pub fn sliding(capacity: Int) -> Channel<A>
+```
+
+Like `bounded`, but a send into a full one **evicts the oldest value**.
+
+For a feed where the newest value is the only one worth having: a gauge,
+a progress indicator, the last-known position of something. `send`
+answers `true` — nothing was refused — so the loss is invisible at the
+call site, and that is deliberate: nobody was going to act on it. Reach
+for `dropping` where somebody would.
+
 #### send
 
 ```khora
@@ -1834,6 +2070,20 @@ pub fn receive(self) -> Option<A>
 Takes a value out, waiting while the channel is empty.
 
 `None` only when the channel is closed *and* drained.
+
+#### poll
+
+```khora
+pub fn poll(self) -> Option<A>
+```
+
+Takes a value if one is already there, and never waits.
+
+**`None` means "not right now", not "not ever".** A closed and drained
+channel and a live empty one both answer `None`, and telling them apart
+is what `receive` is for. This exists for a loop with something else to
+do between looks; a loop that only polls is a loop that spins, and the
+answer to that is `receive`.
 
 #### close
 
@@ -2016,6 +2266,24 @@ impl Eq for Ordering
 fn eq(self, other: Ordering) -> Bool
 ```
 
+### Show for Redacted<A>
+
+```khora
+impl<A> Show for Redacted<A>
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+`<redacted>`, whatever is inside.
+
+No bound on `A`: this never looks at the value, which is the point, and
+requiring `A: Show` would mean a secret you cannot show is a secret you
+cannot wrap.
+
 ### Iterator for Range
 
 ```khora
@@ -2036,6 +2304,39 @@ type Item = Int;
 
 ```khora
 fn next(self) -> Step<Range, Int>
+```
+
+### Show for List<A>
+
+```khora
+impl<A: Show> Show for List<A>
+```
+
+`[a, b, c]`, which is how the literal is written.
+
+Added because `derive(Show)` walks fields, and a record holding a `List`
+could not derive one -- so the type people reach for by default was the
+type that made a struct unprintable. The bound is on the element, so a list
+of something unshowable is still unshowable, which is the honest answer.
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Eq for List<A>
+
+```khora
+impl<A: Eq> Eq for List<A>
+```
+
+Element by element, and length first where they differ in length.
+
+#### eq
+
+```khora
+fn eq(self, other: List<A>) -> Bool
 ```
 
 ### Iterator for List<A>
@@ -2167,19 +2468,21 @@ outlive this block, because leaving it — at the end, on a `return`, or with
 a raise passing through — releases the nursery, and releasing a nursery
 stops what is still running.
 
-**Pass a named function, not a lambda.** A named function receives what its
-`with` clause names as evidence parameters, so it can be handed here and
-called with the nursery this function installs:
+**A named function or a lambda; both work.** A named function receives what
+its `with` clause names as evidence parameters, so it can be handed here
+directly and called with the nursery this function installs:
 
 ```khora
 fn serve<'e>() -> () with { 'e | nursery: Nursery } { .. }
 nursery(serve)!
 ```
 
-A lambda cannot, and `nursery(fn () => serve()!)` is refused: a lambda's
-requirement row is always empty, because it *captures* the capabilities it
-uses rather than receiving them — and this thunk was written before the
-binding existed, so there is nothing to capture.
+`nursery(fn () => serve()!)` is the same thing. A lambda resolves a
+capability lexically where it can and *requires* it where it cannot, so
+this one's type becomes `() -> () with { nursery: Nursery }` and the
+`body()!` below supplies it from the handler just installed.
+`docs/design/capability-passing.md` is the rule and why it had to change:
+eta-expansion must not alter what a program means.
 
 Which makes eta-expansion change meaning, and it should not.
 `docs/design/capability-passing.md` decides what to do about that.
@@ -2218,7 +2521,7 @@ row and absent from the result's. The region is an ordinary binding of this
 function, so it ends when this function does — including when `body` raises
 and the error passes straight through.
 
-**Pass a named function, not a lambda**, for the reason on `nursery`.
+**A named function or a lambda**, for the reason on `nursery`.
 
 ### acquire
 

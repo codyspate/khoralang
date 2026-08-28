@@ -97,6 +97,42 @@ useful and different thing; building it out of these parts would mean a sender
 waiting for a receiver that is waiting for a sender, and getting that wrong is
 a hang rather than an error.
 
+## What a full one does, which is a property of the queue
+
+Blocking is the default and is right for most of what a channel is for: a queue
+nobody is draining is a producer that should slow down, and that is
+backpressure. It is wrong in exactly one place, and it is a place every service
+has -- the path that must not stall. A request handler emitting an audit event
+should not wait on the audit writer; a gauge should not wait on whoever reads
+gauges.
+
+So three constructors, differing in one word recorded on the channel:
+
+| | A send into a full one | `send` answers | What is left |
+| --- | --- | --- | --- |
+| `bounded` | waits | `true` | everything |
+| `dropping` | refuses the new value | **`false`** | the oldest |
+| `sliding` | evicts the oldest | `true` | the newest |
+
+**The asymmetry in the answer is the design, not an oversight.** `dropping`
+makes the loss visible at the send, so a caller can count it and report it;
+`sliding` hides it, because the whole reason to slide is that the newest value
+is the only one worth having and nobody was going to act on the loss. Choosing
+between them is choosing whether the loss is somebody's business.
+
+**It is the channel's property rather than the send's.** A queue is lossy or it
+is not, and two senders disagreeing about which is not a state a queue can be
+in. It is also the only place the decision can be made once and read by
+everyone: a caller who has been handed a `Channel<A>` cannot see how it was
+opened, which is the same reason `boxed` and `glue` are recorded there.
+
+`poll` belongs to the same argument from the other end. It takes a value if one
+is there and never waits, for a loop with something else to do between looks.
+Its `None` means *not right now* -- a live empty channel and a drained closed
+one give the same answer, and telling those apart is what `receive` is for. A
+loop that only polls is a loop that spins, and there is no version of that this
+should make comfortable.
+
 ## What crosses, and who owns it
 
 One word, as everywhere else in the runtime, plus — recorded once when the
@@ -120,7 +156,8 @@ program that slowly runs out of memory.
 | **Select** — waiting on the first of several | Wants a primitive of its own. Nothing has needed one |
 | **Rendezvous** (capacity zero) | See above. A separate type, when something wants it |
 | **A move-in spawn** | Still open, and `sharing.md` already lists it. It is why `postgres::db::serve` takes connection *settings* rather than a connection: a spawned fiber's captures are copied, so handing over a value that must not be copied is not expressible. Opening the resource inside the owning fiber turns out to be better anyway — the lifetime becomes exactly the fiber's |
-| **Priorities, or a deadline on a send** | 13.2 may want the second |
+| **Priorities, or a deadline on a send** | 13.2 may want the second. A deadline needs `sleep`, which does not exist |
+| **Fan-out** — one value to several readers | Wants a policy for a reader that stops reading. Every implementation elsewhere gives each branch a bounded queue and deadlocks the distributor when one is abandoned, silently. A nursery could make that an error instead, and that is the design worth having before the feature |
 
 ## The bug found underneath it
 
