@@ -6,7 +6,7 @@
 //! fiber cannot outlive the block that spawned it and nobody writes the cancel.
 
 use super::*;
-use crate::fiber::{fiber_state, khora_fiber_cancel, khora_fiber_join, khora_fiber_release, Handed};
+use crate::fiber::{fiber_state, khora_fiber_cancel, khora_fiber_release, wait_for, Handed};
 use crate::heap::{khora_alloc, khora_drop};
 use std::sync::Mutex;
 
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
         for Handed(spent) in done {
             // SAFETY: as above; this is the last reference to each.
             unsafe {
-                khora_fiber_join(spent);
+                wait_for(spent);
                 khora_drop(spent, Some(fiber_release_shim));
             }
         }
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
             Some(Handed(oldest)) => {
                 // SAFETY: as above.
                 unsafe {
-                    khora_fiber_join(oldest);
+                    wait_for(oldest);
                     khora_drop(oldest, Some(fiber_release_shim));
                 }
             }
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) {
             // SAFETY: each handle was live when adopted and this list has held
             // the only reference since.
             unsafe {
-                khora_fiber_join(fiber);
+                wait_for(fiber);
                 khora_drop(fiber, Some(fiber_release_shim));
             }
         }
@@ -284,7 +284,7 @@ pub unsafe extern "C" fn khora_fibers_release(fibers: *mut u8) {
                 khora_fiber_cancel(*fiber);
             }
             for Handed(fiber) in round {
-                khora_fiber_join(fiber);
+                wait_for(fiber);
                 khora_drop(fiber, Some(fiber_release_shim));
             }
             round = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);

@@ -646,8 +646,8 @@ mod tests {
     #[test]
     fn a_main_that_spawns_may_not() {
         let source = "module main;
-pub type Fiber;
-impl Fiber { fn spawn<'e>(body: () -> () raises 'e) -> Fiber; fn join(self) -> (); }
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> { fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>; fn join(self) -> A raises 'r; }
 fn work() -> () { }
 fn main() -> Int { Fiber::join(Fiber::spawn(fn () => work())); 0 }
 ";

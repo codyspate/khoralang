@@ -75,22 +75,23 @@ impl<A: Share> Channel<A> {
 // safe to hold twice -- and the orphan rule refuses an impl for them here
 // anyway, since neither is declared in this module.
 
-pub type Fiber;
-impl Fiber {
-  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  fn join(self) -> ();
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+  fn wait(self) -> ();
   fn cancel(self) -> ();
 }
-impl Share for Fiber {}
+impl<A, 'r> Share for Fiber<A, 'r> {}
 
 pub type Fibers;
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
-  fn adopt(self, child: Fiber) -> ();
+  fn adopt(self, child: Fiber<(), {}>) -> ();
   fn wait(self) -> ();
 }
-pub effect Nursery { adopt: (Fiber) -> (), }
+pub effect Nursery { adopt: (Fiber<(), {}>) -> (), }
 ";
 
 /// One fiber puts values in, another takes them out, and the order survives.

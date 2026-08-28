@@ -306,3 +306,12 @@ pub(crate) type Trampoline0 = extern "C" fn(*const u8, *mut u64) -> u32;
 /// The same, for a function taking one pointer — a closure taking itself.
 /// What a fiber body compiles to.
 pub(crate) type Trampoline1 = extern "C" fn(*const u8, *mut u8, *mut u64) -> u32;
+
+/// A closure taking itself and answering a value, for a body that cannot fail.
+///
+/// Separate from [`Trampoline1`] rather than a flag on it, because the two
+/// differ in their *signature* and a pointer called through the wrong one
+/// reads a register nobody wrote. An infallible body has no tag to give back,
+/// so what comes back is the answer itself, already narrowed to the one word
+/// everything in this runtime crosses as.
+pub(crate) type PlainTrampoline1 = extern "C" fn(*const u8, *mut u8) -> u64;

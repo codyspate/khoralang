@@ -161,7 +161,7 @@ pub fn borrowed_arguments(owner: &str, method: &str) -> &'static [usize] {
         // stays the caller's. A serving fiber sends per reply.
         ("Channel", "send" | "receive" | "poll" | "close" | "depth") => RECEIVER,
         // *Releasing* a handle is what joins; that is the binding's business.
-        ("Fiber", "join" | "cancel") => RECEIVER,
+        ("Fiber", "join" | "wait" | "cancel" | "detach") => RECEIVER,
         ("Fibers", "adopt" | "wait") => RECEIVER,
 
         // The ones that pay: a borrow applies inside a loop where a last use

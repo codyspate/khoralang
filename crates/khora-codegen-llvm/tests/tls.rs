@@ -388,7 +388,7 @@ pub fn main() -> () raises TlsError {
     let calling = Fiber::spawn(fn () => call(caller));
     let taken = accept_on(listener);
     if taken == invalid_handle() { } else { answer(settings, taken)! };
-    Fiber::join(calling)
+    Fiber::join(calling)!
   }
 }
 "#;
@@ -430,7 +430,7 @@ pub fn main() -> () raises TlsError {
     // The handshake fails on the client's side, so this one fails too and that
     // is fine — the point is what the caller was told.
     if taken == invalid_handle() { } else { let _ = attempt(fn () => secure(settings, taken)!); };
-    Fiber::join(calling)
+    Fiber::join(calling)!
   }
 }
 "#;

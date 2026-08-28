@@ -82,6 +82,76 @@ impl<'ctx> Backend<'ctx> {
         f
     }
 
+    /// A shim that calls an *infallible* function and hands back its answer as
+    /// a word.
+    ///
+    /// The sibling of [`Backend::tagged_trampoline`], and it exists for a
+    /// different reason. The tagged one is about an aggregate two compilers
+    /// disagree about; this one is about the return type being unknown to the
+    /// runtime at all. A fiber's thunk may answer an `Int`, a `String`, a
+    /// record or a `Float`, and those come back in different registers -- so
+    /// the call is made here, where the callee's type is known, and what
+    /// crosses is the one word everything in this runtime fits in.
+    ///
+    /// One shim per (arity, return type). `returns` is the callee's own type;
+    /// `None` is a function answering nothing, which still needs a shim
+    /// because the runtime's slot has to be filled with *some* word.
+    pub fn plain_trampoline(
+        &mut self,
+        arity: usize,
+        returns: Option<BasicTypeEnum<'ctx>>,
+    ) -> FunctionValue<'ctx> {
+        let key = (arity, returns.map_or_else(|| "void".to_string(), |t| t.to_string()));
+        if let Some(f) = self.plain_trampolines.get(&key) {
+            return *f;
+        }
+
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let i64_type = self.ctx.i64_type();
+        let params: Vec<BasicMetadataTypeEnum<'ctx>> =
+            std::iter::repeat_n(BasicMetadataTypeEnum::from(ptr), arity + 1).collect();
+
+        let f = self.module.add_function(
+            &format!("kh$plain_call{arity}${}", self.plain_trampolines.len()),
+            i64_type.fn_type(&params, false),
+            Some(Linkage::Internal),
+        );
+        self.plain_trampolines.insert(key, f);
+
+        let saved = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+
+        let code = f.get_nth_param(0).expect("a code pointer").into_pointer_value();
+        let args: Vec<BasicMetadataValueEnum<'ctx>> =
+            (0..arity).filter_map(|i| f.get_nth_param(i as u32 + 1)).map(|v| v.into()).collect();
+
+        let callee_params: Vec<BasicMetadataTypeEnum<'ctx>> =
+            std::iter::repeat_n(BasicMetadataTypeEnum::from(ptr), arity).collect();
+        let callee_type = match returns {
+            Some(ty) => ty.fn_type(&callee_params, false),
+            None => self.ctx.void_type().fn_type(&callee_params, false),
+        };
+        let answered = self
+            .builder
+            .build_indirect_call(callee_type, code, &args, "answer")
+            .expect("calling an infallible function")
+            .try_as_basic_value()
+            .basic();
+        // A function answering nothing still owes the runtime a word, and zero
+        // is the one `()` is represented by everywhere else.
+        let word = match answered {
+            Some(value) => self.to_word(value),
+            None => i64_type.const_zero(),
+        };
+        self.builder.build_return(Some(&word)).expect("handing back the answer");
+
+        if let Some(block) = saved {
+            self.builder.position_at_end(block);
+        }
+        f
+    }
+
     /// The adapter that lets `symbol` be used as a closure.
     ///
     /// A named function and a closure have different shapes: the closure is

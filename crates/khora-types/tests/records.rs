@@ -137,9 +137,9 @@ fn a_record_of_functions_is_callable_through_its_fields() {
 const MUT: &str = "module m;\n\
                    pub type Counter = { mut count: Int, name: String };\n\
                    pub type Frozen = { total: Int };\n\
-                   pub type Fiber;\n\
-                   impl Fiber {\n\
-                     fn spawn<'e>(body: () -> () raises 'e) -> Fiber;\n\
+                   pub type Fiber<A, 'r>;\n\
+                   impl<A, 'r> Fiber<A, 'r> {\n\
+                     fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;\n\
                    }\n\
                    pub fn nothing() -> () { }\n";
 
@@ -170,7 +170,7 @@ fn a_mutable_value_cannot_be_handed_to_a_fiber() {
         &format!(
             "{MUT}\
              pub fn bump(c: Counter) -> () {{ c.count = 1; }}\n\
-             pub fn f(c: Counter) -> Fiber {{ Fiber::spawn(fn () => bump(c)) }}\n"
+             pub fn f(c: Counter) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => bump(c)) }}\n"
         ),
         "cannot be handed to another fiber",
     );
@@ -182,14 +182,14 @@ fn an_immutable_value_can_be_handed_to_a_fiber() {
     assert_clean(&format!(
         "{MUT}\
          pub fn look(v: Frozen) -> () {{ }}\n\
-         pub fn f(v: Frozen) -> Fiber {{ Fiber::spawn(fn () => look(v)) }}\n"
+         pub fn f(v: Frozen) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => look(v)) }}\n"
     ));
 }
 
 /// A named function captures nothing, so there is nothing to check.
 #[test]
 fn a_named_function_can_be_handed_to_a_fiber() {
-    assert_clean(&format!("{MUT}pub fn f() -> Fiber {{ Fiber::spawn(nothing) }}\n"));
+    assert_clean(&format!("{MUT}pub fn f() -> Fiber<(), {{}}> {{ Fiber::spawn(nothing) }}\n"));
 }
 
 /// Transitive: holding a mutable value is as unshareable as being one.
@@ -200,7 +200,7 @@ fn holding_a_mutable_value_is_unshareable_too() {
             "{MUT}\
              pub type Holder = {{ inner: Counter }};\n\
              pub fn look(h: Holder) -> () {{ }}\n\
-             pub fn f(h: Holder) -> Fiber {{ Fiber::spawn(fn () => look(h)) }}\n"
+             pub fn f(h: Holder) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => look(h)) }}\n"
         ),
         "cannot be handed to another fiber",
     );
@@ -213,7 +213,7 @@ fn holding_a_mutable_value_is_unshareable_too() {
 fn a_forwarded_thunk_cannot_be_spawned() {
     assert_reports(
         &format!(
-            "{MUT}pub fn f(body: () -> ()) -> Fiber {{ Fiber::spawn(body) }}\n"
+            "{MUT}pub fn f(body: () -> ()) -> Fiber<(), {{}}> {{ Fiber::spawn(body) }}\n"
         ),
         "a closure written here or a named function",
     );
@@ -236,7 +236,7 @@ fn an_opaque_type_cannot_cross_without_saying_so() {
             "{MUT}\
              pub type Buffer;\n\
              pub fn look(b: Buffer) -> () {{ }}\n\
-             pub fn f(b: Buffer) -> Fiber {{ Fiber::spawn(fn () => look(b)) }}\n"
+             pub fn f(b: Buffer) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => look(b)) }}\n"
         ),
         "declared without a body",
     );
@@ -252,7 +252,7 @@ fn an_opaque_type_crosses_once_it_says_so() {
          pub trait Share {{}}\n\
          impl Share for Buffer {{}}\n\
          pub fn look(b: Buffer) -> () {{ }}\n\
-         pub fn f(b: Buffer) -> Fiber {{ Fiber::spawn(fn () => look(b)) }}\n"
+         pub fn f(b: Buffer) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => look(b)) }}\n"
     ));
 }
 
@@ -276,7 +276,7 @@ fn a_type_parameter_has_to_be_required_to_be_shareable() {
         &format!(
             "{MUT}\
              pub fn sink<A>(a: A) -> () {{ }}\n\
-             pub fn launder<A>(a: A) -> Fiber {{ Fiber::spawn(fn () => sink(a)) }}\n"
+             pub fn launder<A>(a: A) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => sink(a)) }}\n"
         ),
         "is a type the caller chooses",
     );
@@ -290,7 +290,7 @@ fn a_bounded_type_parameter_crosses() {
         "{MUT}\
          pub trait Share {{}}\n\
          pub fn sink<A>(a: A) -> () {{ }}\n\
-         pub fn launder<A: Share>(a: A) -> Fiber {{ Fiber::spawn(fn () => sink(a)) }}\n"
+         pub fn launder<A: Share>(a: A) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => sink(a)) }}\n"
     ));
 }
 
@@ -303,8 +303,8 @@ fn a_share_bound_is_satisfied_structurally() {
         "{MUT}\
          pub trait Share {{}}\n\
          pub fn sink<A>(a: A) -> () {{ }}\n\
-         pub fn launder<A: Share>(a: A) -> Fiber {{ Fiber::spawn(fn () => sink(a)) }}\n\
-         pub fn go(v: Frozen) -> Fiber {{ launder(v) }}\n"
+         pub fn launder<A: Share>(a: A) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => sink(a)) }}\n\
+         pub fn go(v: Frozen) -> Fiber<(), {{}}> {{ launder(v) }}\n"
     ));
 }
 
@@ -315,8 +315,8 @@ fn a_share_bound_is_not_satisfied_by_a_mutable_record() {
             "{MUT}\
              pub trait Share {{}}\n\
              pub fn sink<A>(a: A) -> () {{ }}\n\
-             pub fn launder<A: Share>(a: A) -> Fiber {{ Fiber::spawn(fn () => sink(a)) }}\n\
-             pub fn go(c: Counter) -> Fiber {{ launder(c) }}\n"
+             pub fn launder<A: Share>(a: A) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => sink(a)) }}\n\
+             pub fn go(c: Counter) -> Fiber<(), {{}}> {{ launder(c) }}\n"
         ),
         "`Counter` does not implement `Share`",
     );
@@ -331,7 +331,7 @@ fn a_generic_container_follows_its_argument() {
         "{MUT}\
          pub type Stack<A> = | Empty | Push(A, Stack<A>);\n\
          pub fn look(s: Stack<Frozen>) -> () {{ }}\n\
-         pub fn f(s: Stack<Frozen>) -> Fiber {{ Fiber::spawn(fn () => look(s)) }}\n"
+         pub fn f(s: Stack<Frozen>) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => look(s)) }}\n"
     ));
 }
 
@@ -342,7 +342,7 @@ fn a_generic_container_of_something_mutable_does_not() {
             "{MUT}\
              pub type Stack<A> = | Empty | Push(A, Stack<A>);\n\
              pub fn look(s: Stack<Counter>) -> () {{ }}\n\
-             pub fn f(s: Stack<Counter>) -> Fiber {{ Fiber::spawn(fn () => look(s)) }}\n"
+             pub fn f(s: Stack<Counter>) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => look(s)) }}\n"
         ),
         "cannot be handed to another fiber",
     );
@@ -353,9 +353,9 @@ fn a_generic_container_of_something_mutable_does_not() {
 const EFFECTS: &str = "module m;\n\
                        pub type Counter = { mut count: Int, name: String };\n\
                        pub type Frozen = { total: Int };\n\
-                       pub type Fiber;\n\
-                       impl Fiber {\n\
-                         fn spawn<'e>(body: () -> () raises 'e) -> Fiber;\n\
+                       pub type Fiber<A, 'r>;\n\
+                       impl<A, 'r> Fiber<A, 'r> {\n\
+                         fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;\n\
                        }\n\
                        pub effect Counting { tick: () -> (), }\n\
                        pub fn bump(c: Counter) -> () { c.count = 1; }\n\
@@ -415,7 +415,7 @@ fn a_capability_can_be_handed_to_a_fiber() {
     assert_clean(&format!(
         "{EFFECTS}\
          pub fn use_it(c: Counting) -> () {{ c.tick() }}\n\
-         pub fn f(c: Counting) -> Fiber {{ Fiber::spawn(fn () => use_it(c)) }}\n"
+         pub fn f(c: Counting) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => use_it(c)) }}\n"
     ));
 }
 
@@ -495,10 +495,10 @@ fn a_cell_cannot_hold_something_writable() {
 fn a_cell_can_be_handed_to_a_fiber() {
     assert_clean(&format!(
         "{CELLS}\
-         pub type Fiber;\n\
-         impl Fiber {{ fn spawn<'e>(body: () -> () raises 'e) -> Fiber; }}\n\
+         pub type Fiber<A, 'r>;\n\
+         impl<A, 'r> Fiber<A, 'r> {{ fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>; }}\n\
          pub fn look(c: Shared<Frozen>) -> () {{ }}\n\
-         pub fn go(c: Shared<Frozen>) -> Fiber {{ Fiber::spawn(fn () => look(c)) }}\n"
+         pub fn go(c: Shared<Frozen>) -> Fiber<(), {{}}> {{ Fiber::spawn(fn () => look(c)) }}\n"
     ));
 }
 

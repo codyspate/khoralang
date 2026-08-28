@@ -1782,10 +1782,11 @@ fn a_lambda_can_be_given_a_nursery() {
         "module t;
 fn print(value: Int);
 
-pub type Fiber;
-impl Fiber {
-  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  fn join(self) -> ();
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+  fn wait(self) -> ();
   fn cancel(self) -> ();
 }
 
@@ -1794,11 +1795,11 @@ pub trait Share {}
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
-  fn adopt(self, fiber: Fiber) -> ();
+  fn adopt(self, fiber: Fiber<(), {}>) -> ();
   fn wait(self) -> ();
 }
 
-pub effect Nursery { adopt: (Fiber) -> (), }
+pub effect Nursery { adopt: (Fiber<(), {}>) -> (), }
 
 pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
   with 'e

@@ -88,8 +88,8 @@ fn a_vouched_value_may_cross_into_a_fiber() {
     let found = errors(
         "module m;
 pub trait Share {}
-pub type Fiber;
-impl Fiber { fn spawn(body: () -> ()) -> Fiber; }
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> { fn spawn(body: () -> ()) -> Fiber; }
 
 pub type Settings = { inner: Ptr };
 impl Share for Settings {}
@@ -110,8 +110,8 @@ fn an_unvouched_pointer_may_not_cross_into_a_fiber() {
     let found = errors(
         "module m;
 pub trait Share {}
-pub type Fiber;
-impl Fiber { fn spawn(body: () -> ()) -> Fiber; }
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> { fn spawn(body: () -> ()) -> Fiber; }
 
 pub type Settings = { inner: Ptr };
 

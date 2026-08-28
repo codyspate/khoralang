@@ -80,7 +80,7 @@ fn a_user_array_no_longer_reaches_the_backend() {
 fn declaring_the_builtin_without_a_definition_is_fine() {
     for declaration in [
         "pub type Array<A>;",
-        "pub type Fiber;",
+        "pub type Fiber<A, 'r>;",
         "pub type Fibers;",
         "pub type Shared<A>;",
         "pub trait Share {}",

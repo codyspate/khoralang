@@ -321,6 +321,11 @@ pub(crate) struct Backend<'ctx> {
     /// Trampolines that take a tagged return apart, by how many arguments the
     /// callee takes. See [`Backend::tagged_trampoline`].
     trampolines: HashMap<usize, FunctionValue<'ctx>>,
+    /// Keyed by the *return* type as well as the arity, because unlike a
+    /// tagged return -- always `{ i32, i64 }` -- a plain one is whatever
+    /// the callee answers, and calling an `f64`-returning function through
+    /// an `i64`-returning pointer reads the wrong register.
+    plain_trampolines: HashMap<(usize, String), FunctionValue<'ctx>>,
     /// One change shim per value type, keyed by how the type prints.
     change_shims: HashMap<String, FunctionValue<'ctx>>,
     /// One `String` object per distinct literal, shared by every mention.
@@ -423,6 +428,7 @@ impl<'ctx> Backend<'ctx> {
             thunks: HashMap::new(),
             pending_thunks: Vec::new(),
             trampolines: HashMap::new(),
+            plain_trampolines: HashMap::new(),
             change_shims: HashMap::new(),
             static_strings: HashMap::new(),
             static_variants: HashMap::new(),

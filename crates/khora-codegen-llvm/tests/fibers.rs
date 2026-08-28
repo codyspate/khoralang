@@ -47,11 +47,13 @@ const FIBERS: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-pub type Fiber;
-impl Fiber {
-  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  fn join(self) -> ();
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+  fn wait(self) -> ();
   fn cancel(self) -> ();
+  fn detach(self) -> ();
 }
 
 pub type Region;
@@ -59,6 +61,12 @@ impl Region {
   fn open() -> Region;
   fn defer(self, finalizer: () -> ()) -> ();
 }
+
+// A boxed answer, so that a join can be counted rather than only read.
+pub type Answer = { n: Int };
+fn make(n: Int) -> Answer { { n: n } }
+fn first(a: Answer) -> Int { a.n }
+fn quiet() -> () { }
 ";
 
 /// A fiber runs the closure it was handed, and `join` waits for it.
@@ -251,11 +259,13 @@ fn print(value: Int);
 extern fn khora_cancel();
 extern fn khora_live_count() -> Int;
 
-pub type Fiber;
-impl Fiber {
-  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  fn join(self) -> ();
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+  fn wait(self) -> ();
   fn cancel(self) -> ();
+  fn detach(self) -> ();
 }
 
 pub type Region;
@@ -291,7 +301,10 @@ fn worker() -> () raises Oops {{
 
 fn run_it() -> () {{
   let f = Fiber::spawn(fn () => worker()!);
-  Fiber::join(f);
+  // `wait`, not `join`: this needs the ordering and not the answer, and a
+  // cancelled fiber has no answer to give -- a join would have nothing to
+  // hand back and would unwind this frame along with it.
+  Fiber::wait(f);
 }}
 
 fn main() -> Int {{
@@ -344,7 +357,10 @@ fn worker() -> () raises Oops {{
 fn main() -> Int {{
   let f = Fiber::spawn(fn () => worker()!);
   Fiber::cancel(f);
-  Fiber::join(f);
+  // `wait`, not `join`: this needs the ordering and not the answer, and a
+  // cancelled fiber has no answer to give -- a join would have nothing to
+  // hand back and would unwind this frame along with it.
+  Fiber::wait(f);
   print(3);
   0
 }}
@@ -393,11 +409,13 @@ const NURSERY: &str = "module t;
 fn print(value: Int);
 extern fn khora_live_count() -> Int;
 
-pub type Fiber;
-impl Fiber {
-  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  fn join(self) -> ();
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
+  fn wait(self) -> ();
   fn cancel(self) -> ();
+  fn detach(self) -> ();
 }
 
 pub type Fibers;
@@ -408,11 +426,11 @@ pub trait Share {}
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
-  fn adopt(self, fiber: Fiber) -> ();
+  fn adopt(self, fiber: Fiber<(), {}>) -> ();
   fn wait(self) -> ();
 }
 
-pub effect Nursery { adopt: (Fiber) -> (), }
+pub effect Nursery { adopt: (Fiber<(), {}>) -> (), }
 
 pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
@@ -569,7 +587,10 @@ fn worker() -> () raises Oops {{
 
 fn run_it() -> () {{
   let f = Fiber::spawn(fn () => worker()!);
-  Fiber::join(f);
+  // `wait`, not `join`: this needs the ordering and not the answer, and a
+  // cancelled fiber has no answer to give -- a join would have nothing to
+  // hand back and would unwind this frame along with it.
+  Fiber::wait(f);
 }}
 
 fn main() -> Int {{
@@ -684,7 +705,10 @@ fn worker() -> () raises Oops {{
 
 fn run_it() -> () {{
   let f = Fiber::spawn(fn () => worker()!);
-  Fiber::join(f);
+  // `wait`, not `join`: this needs the ordering and not the answer, and a
+  // cancelled fiber has no answer to give -- a join would have nothing to
+  // hand back and would unwind this frame along with it.
+  Fiber::wait(f);
 }}
 
 fn main() -> Int {{
@@ -723,5 +747,144 @@ fn main() -> Int {{
         ),
     );
     assert_eq!(ran.stdout, "-1\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A fiber answers, and the answer comes back through `join`.**
+///
+/// The thing that was missing: `join` gave back `()`, so the only way a fiber
+/// could say anything was a `Channel` or a `Shared`.
+#[test]
+fn a_fiber_answers_and_the_answer_crosses() {
+    let ran = run(
+        "fiber_answer",
+        &format!(
+            "{FIBERS}
+fn main() -> Int {{
+  let n = Fiber::spawn(fn () => 21 * 2);
+  print(Fiber::join(n));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "42\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A boxed answer joined twice leaks nothing.**
+///
+/// Joining twice is joining once, and each join takes a reference of its own —
+/// the half no output can show. The handle's release lets go of the one the
+/// runtime kept, so the counts are the joiners plus one, and getting that
+/// wrong is not a wrong answer but a service that grows all day.
+#[test]
+fn joining_twice_leaves_nothing_behind() {
+    let ran = run(
+        "fiber_answer_counts",
+        &format!(
+            "{FIBERS}
+fn take() -> () {{
+  let s = Fiber::spawn(fn () => make(1));
+  print(first(Fiber::join(s)));
+  print(first(Fiber::join(s)));
+  print(first(Fiber::join(s)));
+}}
+
+fn main() -> Int {{
+  take();
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n1\n1\n0\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A child's failure becomes the joiner's, with the error's own type.**
+///
+/// The row is on the handle, so the `catch` arm names the case rather than
+/// wildcarding it — which is the whole reason `Fiber` carries `'r`.
+#[test]
+fn a_joined_failure_keeps_its_type() {
+    let ran = run(
+        "fiber_answer_raises",
+        &format!(
+            "{FIBERS}
+pub type Oops = | Bad(code: Int);
+
+fn worker(n: Int) -> Int raises Oops {{
+  if n > 0 {{ raise Oops::Bad(n) }} else {{ 0 }}
+}}
+
+fn twice() -> () {{
+  let f = Fiber::spawn(fn () => worker(5)!);
+  print(Fiber::join(f)! catch {{ Oops::Bad(code) => 0 - code, }});
+  print(Fiber::join(f)! catch {{ Oops::Bad(code) => 0 - code, }});
+}}
+
+fn main() -> Int {{
+  twice();
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "-5\n-5\n0\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **An infallible fiber's join needs no `!`**, which is what the row on the
+/// type buys and what an erased handle could not have given.
+///
+/// A *compile* claim rather than an output one: `main` has no `raises` clause
+/// and no `catch`, so this program only exists if the join is infallible.
+#[test]
+fn joining_a_fiber_that_cannot_fail_needs_no_mark() {
+    let ran = run(
+        "fiber_answer_infallible",
+        &format!(
+            "{FIBERS}
+fn tally(n: Int) -> Int {{ n + n }}
+
+fn main() -> Int {{
+  print(Fiber::join(Fiber::spawn(fn () => tally(3))));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "6\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **`detach` lets go without waiting.**
+///
+/// The valve that keeps a hung finalizer from taking its parent with it, and
+/// what a `timeout` over an uninterruptible body would be a lie without.
+#[test]
+fn a_detached_fiber_is_not_waited_for() {
+    let ran = run(
+        "fiber_detach",
+        &format!(
+            "{FIBERS}
+fn go() -> () {{
+  let f = Fiber::spawn(fn () => quiet());
+  Fiber::detach(f);
+  print(1);
+}}
+
+fn main() -> Int {{
+  go();
+  print(2);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n2\n");
     assert_eq!(ran.code, Some(0));
 }

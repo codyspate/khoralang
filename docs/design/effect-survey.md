@@ -96,7 +96,7 @@ Two details worth keeping:
 Nothing here raises: reading configuration is the one place where "tell me
 everything that is wrong" is the whole job, and a `raises` stops at the first.
 
-### `Clock.sleep` — `std/env_native.kh`
+### `Clock.sleep` — `std/clock_native.kh`
 
 **An operation on the clock, not an intrinsic**, and that is the whole design.
 Waiting is the one thing a program does that a test cannot afford to actually
@@ -122,6 +122,79 @@ spawned. `sleep_until` answers false to say which happened, so the distinction
 is read rather than guessed.
 
 This is 3.1's dependency, and the rest of 3.1 is still open.
+
+### A fiber that answers — `std/core.kh`
+
+`Fiber::spawn` took `() -> ()` and `join` gave back `()`, so the only way a
+fiber could say anything was a `Channel` or a `Shared`. The runtime noticed:
+`fiber.rs` printed *"a fiber ended with an error nobody was waiting for"* to
+stderr and freed the object, with a comment saying this was a path that *"should
+not survive nurseries — there the error goes to a parent who knows exactly what
+it is."* That parent path was never built. This is it.
+
+`Fiber<A, 'er>`, `join(self) -> A raises 'er`, and the child's failure comes
+back out of the join with its type intact.
+
+**The row is on the handle, and that is the design.** An erased `Fiber<A>` was
+written first and it worked; it was also unpleasant in a way that only showed
+up when the first test was written against it. Every join needed a `!` and an
+enclosing `raises` — *including on a fiber that provably cannot fail* — and
+since the caller's row could not name the child's error type, `catch { _ => .. }`
+was the only arm that compiled.
+
+That a row can be a *type* parameter at all was the surprise. `Slot<A, 'er>`
+carries one and behaves: `take` on an infallible slot needs no `!`, and a
+fallible one raises by name. Nothing in `std` had used it.
+
+**What it costs is that a nursery adopts `Fiber<(), {}>`.** An effect operation
+cannot be generic in a row any more than in a type, so `Nursery::adopt` has to
+name one shape — verified, not assumed: `adopt: (Slot<(), 'er>) -> ()` is
+refused with *"`'er` is a type the caller chooses"*. The honest shape is the one
+with nothing left to say. A child that can still fail has nowhere to fail *to*,
+because nobody is going to join it, so requiring an empty row moves that
+decision to the `adopt` site where somebody can write what a failure means.
+
+Three things wait, and they are not the same wait:
+
+| | waits | takes the answer | on a cancelled child |
+| --- | --- | --- | --- |
+| letting the binding go | yes | no | nothing |
+| `Fiber::wait` | yes | no | nothing |
+| `Fiber::join` | yes | **yes** | **unwinds the joiner** |
+
+`Fiber::wait` was not in the plan. It arrived because four existing tests used
+`join` purely for ordering, and the last column is why they could not keep
+using it.
+
+**That last cell is the one rule this changed rather than added.** A
+cancellation stops a fiber and not its parent — `fibers.md` says so and four
+tests pin it, and that still holds. But a *joiner* has asked for an answer that
+will never exist, and there is no `A` to invent, so the ask fails the way the
+child did. A parent that did not ask is untouched.
+
+`Fiber::detach` is 3.1's third call, shipped as recommended: cancel, let go, do
+not wait. Without it a `timeout` over a body with an uninterruptible tail is a
+lie, and one finalizer that never returns holds its nursery, its parent, and
+`main`.
+
+### Two compiler gaps this turned up
+
+Neither is caused by the above; both were found by leaning on parts of the
+checker nothing in `std` had used before.
+
+**A row in a type-argument position is not checked against an annotation.**
+`Slot<Int, {Boom}>` is accepted where `Slot<Int, {Other}>` is declared, and
+`Fiber<(), {DbError}>` is accepted by `adopt`, whose parameter says
+`Fiber<(), {}>`. Rows unify *openly*, which is right in `raises` position —
+that is subsumption, and `demand_is_carried` depends on it — and wrong for an
+invariant argument, where the declared row should be rigid. Inference is
+correct, which is the path real code takes; it is annotations that are not
+enforced. So `adopt`'s empty row is documentation until this is fixed.
+
+**Tuple inference through a nested lambda gives up.** A `map2` whose inner
+lambda builds a tuple and whose outer one destructures it reports *"the type of
+this expression was never worked out, and nothing else was reported"* — the
+message that asks to be reported. Nesting records instead works.
 
 ### `Schedule`, `retry`, `repeat` — `std/resilience_native.kh`
 
@@ -238,45 +311,17 @@ body to section 1.
 
 ### 3.1 A fiber that returns a value
 
-**This is not a comparison finding; it is a hole.** `Fiber::spawn` takes
-`() -> ()` and `join` gives back `()`, so the only way a fiber can communicate a
-result is a `Channel` or a `Shared`. There is still no `timeout`, no `race`, and
-no bounded parallel map. `positioning.md` says Khora should be a candidate
-wherever a team considers Go; a language in which a database call cannot be
-timed out is not that.
+**Built** — see section 1. What is still open is the layer above it: `race`,
+`par2`, `par_map` and `timeout`. All four are ordinary Khora now that a fiber
+can carry a result and `Clock.sleep` exists, and `timeout` is `race` against a
+sleep, so it is one item rather than four.
 
-`sleep` — the other half of this item, and the half everything else waits on —
-is built; see section 1.
-
-Proposed: `Fiber<A>` with `join(self) -> A`, plus `race`, `par2`, `par_map` and
-`timeout`. The runtime is most of the way there — the join slot exists and is
-mutex-guarded, and needs to carry a word instead of nothing. A fiber result must
-be `Share`, the bound `spawn` already needs.
-
-**Three calls to make.**
-
-1. **What does `join` do with the body's error?** Re-raising matches
-   `Fiber.join`; reifying it as a `Result` matches `Fiber.await`. Effect ships
-   both because they are different — the second lets a supervisor inspect an
-   outcome. *Recommendation: `join` first, the reifying form when a supervisor
-   needs it.*
-2. **What does a nursery report when three children fail and two are
-   cancelled?** Khora's tagged return carries exactly one error and
-   `bounded_nursery` has no answer. Effect v3 modelled this as a
-   `Sequential`/`Parallel` tree; **v4 flattened it to a list of
-   `Fail | Die | Interrupt`**. *Recommendation: the flat list. Settle it
-   together with 3.3, since both are "what does the unwinding path know".*
-3. **The escape valve, which Khora lacks entirely.** The nursery always
-   cancels-then-waits and `Region::defer` runs finalizers with cancellation held
-   off. That is correct, and it is also how a program hangs: one finalizer that
-   never returns hangs the nursery, which hangs its parent, up to `main`.
-   `scheduler.md` promises both *"cancellation: bounded latency"* and *"nursery
-   exit: every child stopped or joined"*, and those are in tension.
-   *Recommendation: ship `Fiber::detach` — signal and do not await — with the
-   rest. Without it, `timeout` over an uninterruptible body is a lie.*
-
-`timeout` is `race` against `clock.sleep`, so all of this is one item once a
-fiber can carry a result.
+Also still open, and narrowed rather than solved: **what a nursery says when
+several children fail.** The flat list is the right shape, but it does not
+belong on `Fibers` — at that level every child's error type differs and the
+handles are bare, so there is nothing typed to put in a list. It belongs where
+the error type is a parameter, which is `par_map` answering
+`List<Result<A, E>>`.
 
 ### 3.2 `Schedule` as a widened ADT
 

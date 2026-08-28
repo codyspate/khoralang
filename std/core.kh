@@ -976,25 +976,88 @@ impl Scope {
 /// a region and the region waits; put it in a block and the block does. That
 /// is where structured concurrency comes from, and it needed nothing of its
 /// own. `docs/design/fibers.md`.
-pub type Fiber;
+pub type Fiber<A, 'er>;
 
 /// A handle to a running fiber, and every operation on one is a message to the
 /// runtime rather than a write to shared memory. Joining twice is joining once,
 /// from either side.
-impl Share for Fiber {}
+impl<A, 'er> Share for Fiber<A, 'er> {}
 
-impl Fiber {
+impl<A: Share, 'er> Fiber<A, 'er> {
   /// Runs `body` on a fiber of its own.
   ///
   /// The thunk may fail, and a thunk that can is also one that can be
   /// *stopped*: a cancellation travels out on the same tagged return an error
   /// does, so a fiber with no error row has no channel to be interrupted on
   /// and runs to its end.
-  pub fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  /// Waits for the fiber to finish. Joining twice is joining once.
-  pub fn join(self) -> ();
+  ///
+  /// `A` must be `Share` for the reason every value crossing a fiber must be:
+  /// it is computed on one and read on another, so a thing that cannot be held
+  /// twice cannot be an answer. `docs/design/sharing.md`.
+  pub fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>;
+
+  /// Waits for the fiber to finish, and answers what it answered.
+  ///
+  /// **A failure comes back out here, with its type.** If the fiber raised,
+  /// so does this — the whole point of a fiber that returns a value is that
+  /// the *caller* decides what a failure means, rather than the runtime
+  /// printing a line nobody reads. Joining twice is joining once, and gets the
+  /// answer twice.
+  ///
+  /// **`'r` is the row the body raised**, carried on the handle. That is what
+  /// makes this pleasant rather than merely possible:
+  ///
+  /// ```khora
+  /// let count = Fiber::join(Fiber::spawn(fn () => tally(rows)));
+  /// //                                                  no `!`, it cannot fail
+  ///
+  /// let row = Fiber::join(worker)! catch {
+  ///   DbError::Timeout => Row::empty(),      // by name, because the row is here
+  /// };
+  /// ```
+  ///
+  /// An erased handle would have needed a `!` on every join — including on a
+  /// fiber that provably cannot fail — and `catch { _ => .. }` as the only
+  /// arm. `docs/design/effect-survey.md` §3.1 records what that cost and why
+  /// the row is on the type instead.
+  pub fn join(self) -> A raises 'er;
+
+  /// Waits for the fiber, and does not take its answer.
+  ///
+  /// **`join` is for the answer; this is for the ordering.** They are not the
+  /// same wait, and the difference shows up on a fiber that was *cancelled*: a
+  /// cancelled fiber has no answer, so a `join` has nothing to hand back and
+  /// unwinds the joiner along with it. This one just waits. Reach for it when
+  /// what you needed was "not before that finishes", which is most of the time
+  /// a fiber is spawned for what it does rather than for what it computes.
+  ///
+  /// Letting the binding go waits too — that is where structured concurrency
+  /// comes from — so this is for the case where the waiting has to happen at a
+  /// particular line rather than at the end of a scope.
+  pub fn wait(self) -> ();
+
   /// Asks the fiber to stop at its next cancellation point. Returns at once.
   pub fn cancel(self) -> ();
+
+  /// Stops waiting for the fiber, and asks it to stop.
+  ///
+  /// **The valve, and there has to be one.** Every other way out of a handle
+  /// waits: `join` waits, and so does letting the binding go, which is where
+  /// structured concurrency comes from. That is right, and it is also how a
+  /// program hangs — one finalizer that never returns holds its nursery, which
+  /// holds its parent, up to `main`. `docs/design/scheduler.md` promises both
+  /// bounded cancellation latency and that a nursery exit leaves every child
+  /// stopped or joined, and those two are in tension exactly here.
+  ///
+  /// So: signal, and go. The fiber keeps running, its answer is dropped when
+  /// it arrives, and a failure it reports afterwards is silent — the program
+  /// said it was no longer listening. Without this, a `timeout` over a body
+  /// with an uninterruptible tail is a lie: it would promise to return in half
+  /// a second and then block on the tail.
+  ///
+  /// **It cancels as well as detaching**, because a detached fiber nobody asked
+  /// to stop is a leak with a nicer name.
+  pub fn detach(self) -> ();
 }
 
 /// A fixed number of elements, side by side.
@@ -1097,9 +1160,9 @@ impl<A> Array<A> {
   /// Only an array of numbers can be lent. An `Array<A>` of Khora objects
   /// holds reference-counted pointers, and handing those across is the mistake
   /// the whole boundary exists to prevent. `docs/design/ffi.md`.
-  pub fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
-    with 'c
-    raises 'e;
+  pub fn with_data<B, 'ef, 'er>(self, body: (Ptr, Int) -> B with 'ef raises 'er) -> B
+    with 'ef
+    raises 'er;
 }
 
 /// Arithmetic that does not trap, and the bits underneath it.
@@ -1471,15 +1534,15 @@ impl String {
   ///
   /// A string with a zero inside it is not refused: C will see a shorter
   /// string than Khora has, which is what C strings are.
-  pub fn with_c_string<B, 'c, 'e>(self, body: (Ptr) -> B with 'c raises 'e) -> B
-    with 'c
-    raises 'e;
+  pub fn with_c_string<B, 'ef, 'er>(self, body: (Ptr) -> B with 'ef raises 'er) -> B
+    with 'ef
+    raises 'er;
 
   /// See `Array::with_data`, which is the same thing and carries the argument
   /// for why the lifetime is a call rather than anything wider.
-  pub fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B
-    with 'c
-    raises 'e;
+  pub fn with_data<B, 'ef, 'er>(self, body: (Ptr, Int) -> B with 'ef raises 'er) -> B
+    with 'ef
+    raises 'er;
 }
 
 // --- The fixed-width integers ----------------------------------------------
@@ -2525,19 +2588,19 @@ impl<A> Vector<A> {
 /// The cost is the wrapper at the mount site, and that is the honest price: the
 /// alternative is a bit in every function type, which colours every container
 /// of a function all the way up. `docs/design/sharing.md`.
-pub type SharedFn<A, B, 'e>;
+pub type SharedFn<A, B, 'er>;
 
-impl<A, B, 'e> Share for SharedFn<A, B, 'e> {}
+impl<A, B, 'er> Share for SharedFn<A, B, 'er> {}
 
-impl<A, B, 'e> SharedFn<A, B, 'e> {
+impl<A, B, 'er> SharedFn<A, B, 'er> {
   /// Certifies a closure written here.
   ///
   /// The argument has to be a closure literal or a named function — anything
   /// else was written elsewhere and took its captures with it, which is the
   /// one thing this cannot check and so the one thing it refuses.
-  pub fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>;
+  pub fn of(f: (A) -> B raises 'er) -> SharedFn<A, B, 'er>;
   /// Calls it. A plain closure call; the wrapper costs nothing at runtime.
-  pub fn call(self, argument: A) -> B raises 'e;
+  pub fn call(self, argument: A) -> B raises 'er;
 }
 
 /// A new state, and something to hand back that is not the state.
@@ -2762,7 +2825,25 @@ impl Fibers {
   /// The nursery takes the handle, so nothing else can outlive it with one.
   /// Adopting past a `bounded` limit waits for the oldest child to finish,
   /// which is what turns a ceiling into a queue.
-  pub fn adopt(self, fiber: Fiber) -> ();
+  ///
+  /// `Fiber<(), {}>`, because **adopting is giving up the answer and settling
+  /// the failure**. A nursery holds its children as bare handles and waits for
+  /// them; it could not hand back what they computed even if it kept it, since
+  /// every child's answer has a type of its own — and an effect operation
+  /// cannot be generic in one, so `Nursery::adopt` has to name a single shape.
+  ///
+  /// The `{}` is the interesting half. A child that can still fail has nowhere
+  /// to fail *to*: nobody is going to join it, so its error would reach the
+  /// runtime and become a line on stderr that nobody reads. Requiring the row
+  /// to be empty moves that decision to the `adopt` site, where somebody can
+  /// write what a failure means:
+  ///
+  /// ```khora
+  /// nursery.adopt(Fiber::spawn(fn () => serve(connection)! catch {
+  ///   _ => log.warn("a connection ended badly"),
+  /// }));
+  /// ```
+  pub fn adopt(self, fiber: Fiber<(), {}>) -> ();
   /// Waits for every child, oldest first, and empties the nursery.
   pub fn wait(self) -> ();
 }
@@ -2776,13 +2857,25 @@ impl Fibers {
 /// so that what it closes over can be checked against the rule that a mutable
 /// value may not cross. `docs/design/memory.md` §5a.
 ///
+/// The same reason fixes the answer at `()` and the row at `{}`. An operation
+/// cannot be generic in either, and a nursery has nothing to do with an answer
+/// it cannot hand back — so adopting is giving one up, and settling what a
+/// failure means before letting go. A fiber whose result matters is one you
+/// keep the handle to.
+///
 /// So the idiom is one call inside another, and the body is on the screen:
 ///
 /// ```
-/// nursery.adopt(Fiber::spawn(fn () => analyze(id)!));
+/// nursery.adopt(Fiber::spawn(fn () => analyze(id)! catch {
+///   _ => log.warn("an analysis ended badly"),
+/// }));
 /// ```
+///
+/// The `catch` is not decoration. An adopted child's row must be empty, so a
+/// body that can fail has to say what its failure means before it is let go
+/// of -- there is nobody left to tell afterwards.
 pub effect Nursery {
-  adopt: (Fiber) -> (),
+  adopt: (Fiber<(), {}>) -> (),
 }
 
 /// Runs `body` with a nursery, and does not return until its children are done.
@@ -2797,7 +2890,7 @@ pub effect Nursery {
 /// directly and called with the nursery this function installs:
 ///
 /// ```khora
-/// fn serve<'e>() -> () with { 'e | nursery: Nursery } { .. }
+/// fn serve<'ef>() -> () with { 'ef | nursery: Nursery } { .. }
 /// nursery(serve)!
 /// ```
 ///
@@ -2810,9 +2903,9 @@ pub effect Nursery {
 ///
 /// Which makes eta-expansion change meaning, and it should not.
 /// `docs/design/capability-passing.md` decides what to do about that.
-pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
-  with 'e
-  raises 'r
+pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A
+  with 'ef
+  raises 'er
 {
   bounded_nursery(0, body)!
 }
@@ -2831,12 +2924,12 @@ pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r
 /// slowly, which for a server means accepting more slowly, which the listening
 /// socket's backlog is already built to absorb: overload becomes latency
 /// instead of collapse.
-pub fn bounded_nursery<A, 'e, 'r>(
+pub fn bounded_nursery<A, 'ef, 'er>(
   limit: Int,
-  body: () -> A with { 'e | nursery: Nursery } raises 'r
+  body: () -> A with { 'ef | nursery: Nursery } raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 {
   let crew = Fibers::bounded(limit);
   let value = with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
@@ -2856,9 +2949,9 @@ pub fn bounded_nursery<A, 'e, 'r>(
 /// and the error passes straight through.
 ///
 /// **A named function or a lambda**, for the reason on `nursery`.
-pub fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A
-  with 'e
-  raises 'r
+pub fn scoped<A, 'ef, 'er>(body: () -> A with { 'ef | scope: Scope } raises 'er) -> A
+  with 'ef
+  raises 'er
 {
   let region = Region::open();
   with { scope: handler for Scope { defer: fn f => Region::defer(region, f) } } {
@@ -2870,8 +2963,8 @@ pub fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> 
 ///
 /// The generic half of `Scope`, kept out of the effect so the operation can
 /// stay a plain closure. `release` is called with `value` when the region ends.
-pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
-  with { 'e | scope: Scope }
+pub fn acquire<A, 'ef>(value: A, release: (A) -> ()) -> A
+  with { 'ef | scope: Scope }
 {
   scope.defer(fn () => release(value));
   value
@@ -2887,8 +2980,8 @@ pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
 /// This is also what makes retrying possible: a policy that runs a computation
 /// a second time has to be able to see that the first time did not work,
 /// without knowing what it was doing.
-pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
-  with 'e;
+pub fn attempt<A, E, 'ef>(body: () -> A with 'ef raises E) -> Result<A, E>
+  with 'ef;
 
 // --- schedules -------------------------------------------------------------
 

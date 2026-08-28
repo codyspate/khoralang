@@ -65,6 +65,31 @@ impl<'ctx> Backend<'ctx> {
         self.ctx.struct_type(&[self.ctx.i32_type().into(), self.ctx.i64_type().into()], false)
     }
 
+    /// A tag and a word put back together into what a fallible call returns.
+    ///
+    /// The inverse of `read_tagged`, and it exists because some fallible things
+    /// are not calls. A `join` gets its two halves from the runtime through a
+    /// return value and a stack slot -- an aggregate is the thing that cannot
+    /// cross that boundary -- and then wants everything a fallible call gets:
+    /// the branch, the unwinding, the release of this frame's bindings. Making
+    /// the aggregate here is cheaper than a second copy of all of that.
+    pub fn tagged_of(
+        &self,
+        which: inkwell::values::IntValue<'ctx>,
+        word: inkwell::values::IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let empty = self.tagged_type().get_undef();
+        let with_tag = self
+            .builder
+            .build_insert_value(empty, which, 0, "tagged.which")
+            .expect("putting the tag in");
+        self.builder
+            .build_insert_value(with_tag, word, 1, "tagged")
+            .expect("putting the payload in")
+            .into_struct_value()
+            .into()
+    }
+
     /// Releases an error whose type is not known where it is caught.
     ///
     /// `catch { _ => .. }` handles the whole row, tail and all, so the arm has

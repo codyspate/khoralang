@@ -238,7 +238,7 @@ paths that release a binding are already the paths a region has to end on.
 ### Fiber
 
 ```khora
-pub type Fiber;
+pub type Fiber<A, 'er>;
 ```
 
 A running fiber, and the only way to wait for one or stop it.
@@ -470,7 +470,7 @@ How big the first allocation should be. Meaningless once there is one.
 ### SharedFn
 
 ```khora
-pub type SharedFn<A, B, 'e>;
+pub type SharedFn<A, B, 'er>;
 ```
 
 The fibers a block is responsible for.
@@ -860,7 +860,7 @@ over the value and the release, which is where the polymorphism belongs.
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber) -> (),
+  adopt: (Fiber<(), {}>) -> (),
 }
 ```
 
@@ -873,11 +873,23 @@ to `Fiber::spawn` at all: a fiber's body has to be written where it starts,
 so that what it closes over can be checked against the rule that a mutable
 value may not cross. `docs/design/memory.md` §5a.
 
+The same reason fixes the answer at `()` and the row at `{}`. An operation
+cannot be generic in either, and a nursery has nothing to do with an answer
+it cannot hand back — so adopting is giving one up, and settling what a
+failure means before letting go. A fiber whose result matters is one you
+keep the handle to.
+
 So the idiom is one call inside another, and the body is on the screen:
 
 ```
-nursery.adopt(Fiber::spawn(fn () => analyze(id)!));
+nursery.adopt(Fiber::spawn(fn () => analyze(id)! catch {
+  _ => log.warn("an analysis ended badly"),
+}));
 ```
+
+The `catch` is not decoration. An adopted child's row must be empty, so a
+body that can fail has to say what its failure means before it is let go
+of -- there is nobody left to tell afterwards.
 
 ## Methods
 
@@ -1327,16 +1339,16 @@ pub fn root() -> Region
 The region that ends when the program does, released by the entry point
 after `main` returns — on the failing path as well as the ordinary one.
 
-### Fiber
+### Fiber<A, 'er>
 
 ```khora
-impl Fiber
+impl<A: Share, 'er> Fiber<A, 'er>
 ```
 
 #### spawn
 
 ```khora
-pub fn spawn<'e>(body: () ->() raises 'e) -> Fiber
+pub fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>
 ```
 
 Runs `body` on a fiber of its own.
@@ -1346,13 +1358,59 @@ The thunk may fail, and a thunk that can is also one that can be
 does, so a fiber with no error row has no channel to be interrupted on
 and runs to its end.
 
+`A` must be `Share` for the reason every value crossing a fiber must be:
+it is computed on one and read on another, so a thing that cannot be held
+twice cannot be an answer. `docs/design/sharing.md`.
+
 #### join
 
 ```khora
-pub fn join(self) ->()
+pub fn join(self) -> A raises 'er
 ```
 
-Waits for the fiber to finish. Joining twice is joining once.
+Waits for the fiber to finish, and answers what it answered.
+
+**A failure comes back out here, with its type.** If the fiber raised,
+so does this — the whole point of a fiber that returns a value is that
+the *caller* decides what a failure means, rather than the runtime
+printing a line nobody reads. Joining twice is joining once, and gets the
+answer twice.
+
+**`'r` is the row the body raised**, carried on the handle. That is what
+makes this pleasant rather than merely possible:
+
+```khora
+let count = Fiber::join(Fiber::spawn(fn () => tally(rows)));
+//                                                  no `!`, it cannot fail
+
+let row = Fiber::join(worker)! catch {
+  DbError::Timeout => Row::empty(),      // by name, because the row is here
+};
+```
+
+An erased handle would have needed a `!` on every join — including on a
+fiber that provably cannot fail — and `catch { _ => .. }` as the only
+arm. `docs/design/effect-survey.md` §3.1 records what that cost and why
+the row is on the type instead.
+
+#### wait
+
+```khora
+pub fn wait(self) ->()
+```
+
+Waits for the fiber, and does not take its answer.
+
+**`join` is for the answer; this is for the ordering.** They are not the
+same wait, and the difference shows up on a fiber that was *cancelled*: a
+cancelled fiber has no answer, so a `join` has nothing to hand back and
+unwinds the joiner along with it. This one just waits. Reach for it when
+what you needed was "not before that finishes", which is most of the time
+a fiber is spawned for what it does rather than for what it computes.
+
+Letting the binding go waits too — that is where structured concurrency
+comes from — so this is for the case where the waiting has to happen at a
+particular line rather than at the end of a scope.
 
 #### cancel
 
@@ -1361,6 +1419,31 @@ pub fn cancel(self) ->()
 ```
 
 Asks the fiber to stop at its next cancellation point. Returns at once.
+
+#### detach
+
+```khora
+pub fn detach(self) ->()
+```
+
+Stops waiting for the fiber, and asks it to stop.
+
+**The valve, and there has to be one.** Every other way out of a handle
+waits: `join` waits, and so does letting the binding go, which is where
+structured concurrency comes from. That is right, and it is also how a
+program hangs — one finalizer that never returns holds its nursery, which
+holds its parent, up to `main`. `docs/design/scheduler.md` promises both
+bounded cancellation latency and that a nursery exit leaves every child
+stopped or joined, and those two are in tension exactly here.
+
+So: signal, and go. The fiber keeps running, its answer is dropped when
+it arrives, and a failure it reports afterwards is silent — the program
+said it was no longer listening. Without this, a `timeout` over a body
+with an uninterruptible tail is a lie: it would promise to return in half
+a second and then block on the tail.
+
+**It cancels as well as detaching**, because a detached fiber nobody asked
+to stop is a leak with a nicer name.
 
 ### Array<A>
 
@@ -1457,7 +1540,7 @@ the message.
 #### with_data
 
 ```khora
-pub fn with_data<B, 'c, 'e>(self, body: (Ptr, Int) -> B with 'c raises 'e) -> B with 'c raises 'e
+pub fn with_data<B, 'ef, 'er>(self, body: (Ptr, Int) -> B with 'ef raises 'er) -> B with 'ef raises 'er
 ```
 
 Lends the elements to `body` as a pointer and a count, for the duration
@@ -1950,16 +2033,16 @@ enough to be worth pre-sizing for is a list long enough to overflow the
 stack being measured. Doubling costs a handful of reallocations and no
 stack at all.
 
-### SharedFn<A, B, 'e>
+### SharedFn<A, B, 'er>
 
 ```khora
-impl<A, B, 'e> SharedFn<A, B, 'e>
+impl<A, B, 'er> SharedFn<A, B, 'er>
 ```
 
 #### of
 
 ```khora
-pub fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>
+pub fn of(f: (A) -> B raises 'er) -> SharedFn<A, B, 'er>
 ```
 
 Certifies a closure written here.
@@ -1971,7 +2054,7 @@ one thing this cannot check and so the one thing it refuses.
 #### call
 
 ```khora
-pub fn call(self, argument: A) -> B raises 'e
+pub fn call(self, argument: A) -> B raises 'er
 ```
 
 Calls it. A plain closure call; the wrapper costs nothing at runtime.
@@ -2191,7 +2274,7 @@ outside world.
 #### adopt
 
 ```khora
-pub fn adopt(self, fiber: Fiber) ->()
+pub fn adopt(self, fiber: Fiber<(), { }>) ->()
 ```
 
 Puts a running fiber under this nursery.
@@ -2199,6 +2282,24 @@ Puts a running fiber under this nursery.
 The nursery takes the handle, so nothing else can outlive it with one.
 Adopting past a `bounded` limit waits for the oldest child to finish,
 which is what turns a ceiling into a queue.
+
+`Fiber<(), {}>`, because **adopting is giving up the answer and settling
+the failure**. A nursery holds its children as bare handles and waits for
+them; it could not hand back what they computed even if it kept it, since
+every child's answer has a type of its own — and an effect operation
+cannot be generic in one, so `Nursery::adopt` has to name a single shape.
+
+The `{}` is the interesting half. A child that can still fail has nowhere
+to fail *to*: nobody is going to join it, so its error would reach the
+runtime and become a line on stderr that nobody reads. Requiring the row
+to be empty moves that decision to the `adopt` site, where somebody can
+write what a failure means:
+
+```khora
+nursery.adopt(Fiber::spawn(fn () => serve(connection)! catch {
+  _ => log.warn("a connection ended badly"),
+}));
+```
 
 #### wait
 
@@ -2414,7 +2515,7 @@ be — writing to a console is exactly the sort of thing a capability is for.
 ### nursery
 
 ```khora
-pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A with 'e raises 'r
+pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A with 'ef raises 'er
 ```
 
 Runs `body` with a nursery, and does not return until its children are done.
@@ -2429,7 +2530,7 @@ its `with` clause names as evidence parameters, so it can be handed here
 directly and called with the nursery this function installs:
 
 ```khora
-fn serve<'e>() -> () with { 'e | nursery: Nursery } { .. }
+fn serve<'ef>() -> () with { 'ef | nursery: Nursery } { .. }
 nursery(serve)!
 ```
 
@@ -2446,7 +2547,7 @@ Which makes eta-expansion change meaning, and it should not.
 ### bounded_nursery
 
 ```khora
-pub fn bounded_nursery<A, 'e, 'r>(limit: Int, body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A with 'e raises 'r
+pub fn bounded_nursery<A, 'ef, 'er>(limit: Int, body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A with 'ef raises 'er
 ```
 
 The same, holding at most `limit` children at once.
@@ -2467,7 +2568,7 @@ instead of collapse.
 ### scoped
 
 ```khora
-pub fn scoped<A, 'e, 'r>(body: () -> A with { 'e | scope: Scope } raises 'r) -> A with 'e raises 'r
+pub fn scoped<A, 'ef, 'er>(body: () -> A with { 'ef | scope: Scope } raises 'er) -> A with 'ef raises 'er
 ```
 
 Runs `body` in a fresh region, discharging its `scope` requirement.
@@ -2482,7 +2583,7 @@ and the error passes straight through.
 ### acquire
 
 ```khora
-pub fn acquire<A, 'e>(value: A, release: (A) ->()) -> A with { 'e | scope: Scope }
+pub fn acquire<A, 'ef>(value: A, release: (A) ->()) -> A with { 'ef | scope: Scope }
 ```
 
 Acquires a value and registers its release in one step.
@@ -2493,7 +2594,7 @@ stay a plain closure. `release` is called with `value` when the region ends.
 ### attempt
 
 ```khora
-pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E> with 'e
+pub fn attempt<A, E, 'ef>(body: () -> A with 'ef raises E) -> Result<A, E> with 'ef
 ```
 
 Runs `body` and makes its failure a value.

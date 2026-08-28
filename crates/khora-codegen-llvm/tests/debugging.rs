@@ -188,10 +188,10 @@ fn a_trap_on_a_fiber_says_which_fiber() {
         "module t;
 fn print(value: Int);
 
-pub type Fiber;
-impl Fiber {
-  fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  fn join(self) -> ();
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn join(self) -> A raises 'r;
 }
 
 fn work() -> () {

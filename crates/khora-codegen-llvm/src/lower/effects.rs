@@ -421,6 +421,35 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// What a `Channel<A>` carries, at this instantiation.
+    /// What a `Fiber<A, 'r>` answers, and what it can raise.
+    ///
+    /// From the handle's own type where it has one, and otherwise from what
+    /// the call site was inferred to produce -- the same two places
+    /// `channel_contents` looks, and for the same reason: `spawn` is given a
+    /// thunk rather than an `A`, so the argument does not always say.
+    ///
+    /// The row is the second argument, and it is why the row is on the type at
+    /// all: it is what lets a join of an infallible fiber compile to a load
+    /// rather than to a branch and a `raises` clause nobody wanted.
+    pub(super) fn fiber_parts(
+        &mut self,
+        site: ExprId,
+        fiber: &Type,
+        range: TextRange,
+    ) -> Option<(Type, Type)> {
+        for candidate in [fiber, &self.types.of(site).clone()] {
+            if let Type::Adt { name, args, .. } = candidate {
+                if name == runtime::FIBER_TYPE {
+                    if let [answers, raised, ..] = &args[..] {
+                        return Some((answers.clone(), raised.clone()));
+                    }
+                }
+            }
+        }
+        self.fail(format!("`{fiber}` is not a fiber, so it cannot be joined"), range);
+        None
+    }
+
     pub(super) fn channel_contents(
         &mut self,
         site: ExprId,
@@ -528,6 +557,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// which is where structured concurrency comes from.
     pub(super) fn fiber_intrinsic(
         &mut self,
+        site: ExprId,
         name: &str,
         args: &[ExprId],
         range: TextRange,
@@ -535,46 +565,86 @@ impl<'ctx> Lower<'_, 'ctx> {
         match (name, args) {
             ("spawn", [body]) => {
                 // Whether the thunk returns the tagged pair, which is how a
-                // fiber says it was cancelled or that it failed. Read from the
-                // thunk's own type: a closure carries its error row, so this
-                // is a fact about the value rather than a guess about it.
-                let fallible = match self.types.of(*body) {
-                    Type::Fn { raises, .. } => !matches!(
-                        &**raises,
-                        Type::Row { fields, tail } if fields.is_empty() && tail.is_none()
+                // fiber says it was cancelled or that it failed, and what it
+                // answers when it does not. Both read from the thunk's own
+                // type: a closure carries its rows, so these are facts about
+                // the value rather than guesses about it.
+                let (fallible, answers) = match self.types.of(*body) {
+                    Type::Fn { raises, ret, .. } => (
+                        !matches!(
+                            &**raises,
+                            Type::Row { fields, tail } if fields.is_empty() && tail.is_none()
+                        ),
+                        (**ret).clone(),
                     ),
-                    _ => false,
+                    _ => (false, Type::Unit),
                 };
                 // Handed over, not lent: the fiber releases the closure when
                 // it finishes, so this gives up the reference the plan gave it.
                 let closure = self.expr(*body)?;
                 let glue = self.be.drop_glue(&Type::func(Vec::new(), Type::Unit));
-                // Null for a thunk that cannot fail; otherwise the trampoline
-                // that takes its tagged return apart on this side of the
-                // boundary. See `Backend::tagged_trampoline`.
-                let call = if fallible {
-                    self.be.tagged_trampoline(1).as_global_value().as_pointer_value()
+                // **Exactly one of the two trampolines.** A fallible thunk
+                // hands back a tag and writes its word through a pointer; an
+                // infallible one hands back the word itself. They differ in
+                // signature, and a pointer called through the wrong one reads
+                // a register nobody wrote -- which is why this is two slots
+                // rather than one and a flag.
+                let (call, plain) = if fallible {
+                    (
+                        self.be.tagged_trampoline(1).as_global_value().as_pointer_value(),
+                        self.be.null_pointer(),
+                    )
                 } else {
-                    self.be.null_pointer()
+                    // `Unit` is `void` at the ABI even though it has a word
+                    // representation everywhere else, so the callee genuinely
+                    // returns nothing and the shim invents the word.
+                    let returns = match answers {
+                        Type::Unit => None,
+                        ref other => self.be.llvm_type(other),
+                    };
+                    (
+                        self.be.null_pointer(),
+                        self.be
+                            .plain_trampoline(1, returns)
+                            .as_global_value()
+                            .as_pointer_value(),
+                    )
                 };
+                // How to let go of an answer nobody joined. An *error* is
+                // always a boxed `Adt`, which the runtime knows; only the
+                // successful word needs describing.
+                let boxed =
+                    self.be.ctx.bool_type().const_int(u64::from(is_boxed(&answers)), false);
+                let value_glue = self.be.drop_glue(&answers);
                 let spawn = self.be.rt.fiber_spawn;
                 let fiber = self
                     .be
                     .builder
-                    .build_call(spawn, &[closure.into(), glue.into(), call.into()], "fiber")
+                    .build_call(
+                        spawn,
+                        &[
+                            closure.into(),
+                            glue.into(),
+                            call.into(),
+                            plain.into(),
+                            boxed.into(),
+                            value_glue.into(),
+                        ],
+                        "fiber",
+                    )
                     .expect("spawning a fiber")
                     .try_as_basic_value()
                     .basic()
                     .expect("a fiber handle is a value");
                 Some(fiber)
             }
-            ("join", [fiber]) | ("cancel", [fiber]) => {
+            ("cancel", [fiber]) | ("detach", [fiber]) | ("wait", [fiber]) => {
                 let ty = self.types.of(*fiber).clone();
                 let handle = self.expr(*fiber)?;
-                let call = if name == "join" {
-                    self.be.rt.fiber_join
-                } else {
-                    self.be.rt.fiber_cancel
+                let call = match name {
+                    "detach" => self.be.rt.fiber_detach,
+                    "wait" => self.be.rt.fiber_wait,
+                    _ => self.be.rt.fiber_cancel,
                 };
                 self.be
                     .builder
@@ -584,6 +654,56 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // and the plan handed this frame an owned reference.
                 self.release_unless_lent(*fiber, handle, &ty);
                 Some(self.be.unit_value())
+            }
+            ("join", [fiber]) => {
+                let ty = self.types.of(*fiber).clone();
+                let (answers, raised) = self.fiber_parts(site, &ty, range)?;
+                let handle = self.expr(*fiber)?;
+
+                // A stack slot rather than a return value, for the reason
+                // every other tagged call across this boundary uses one: two
+                // things come back and a 16-byte aggregate is a thing LLVM and
+                // rustc lay out separately.
+                let slot = self
+                    .be
+                    .builder
+                    .build_alloca(self.be.ctx.i64_type(), "answer")
+                    .expect("a slot for the joined word");
+                let join = self.be.rt.fiber_join;
+                let which = self
+                    .be
+                    .builder
+                    .build_call(join, &[handle.into(), slot.into()], "which")
+                    .expect("joining a fiber")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a join answers")
+                    .into_int_value();
+                let word = self
+                    .be
+                    .builder
+                    .build_load(self.be.ctx.i64_type(), slot, "word")
+                    .expect("reading the joined word")
+                    .into_int_value();
+                self.release_unless_lent(*fiber, handle, &ty);
+
+                // **The child's failure becomes this frame's**, which is
+                // what `join` re-raising means: the two halves are already in
+                // the shape `split_tagged` wants, so the branch and the
+                // unwinding are the ones every fallible call already emits.
+                //
+                // Unless the fiber's row is empty, in which case there is
+                // nothing to branch on. A body that cannot fail also cannot be
+                // *cancelled* -- a cancellation travels out on the same tagged
+                // return an error does, so a thunk with no error row has no
+                // channel to be stopped on -- so `which` is 0 here by
+                // construction, and emitting the branch would only make a join
+                // demand a `raises` clause its caller has no use for.
+                if row_is_empty(&raised) {
+                    return Some(self.be.word_to_value(word, &answers));
+                }
+                let tagged = self.be.tagged_of(which, word);
+                self.split_tagged(tagged, &answers, range)
             }
             _ => self.fail(
                 format!("`Fiber::{name}` is not a fiber operation the backend knows"),

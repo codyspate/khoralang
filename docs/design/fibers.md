@@ -109,9 +109,9 @@ pub effect Nursery {
   spawn: (() -> ()) -> Fiber,
 }
 
-pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
-  with 'e
-  raises 'r
+pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A
+  with 'ef
+  raises 'er
 ```
 
 `nursery` opens a region, installs a handler whose `spawn` registers each fiber
@@ -136,7 +136,7 @@ be needed. **The normal path waits explicitly, before the release**, so by the
 time the release runs there is only one case left:
 
 ```
-pub fn nursery<A, 'e, 'r>(body: ..) -> A with 'e raises 'r {
+pub fn nursery<A, 'ef, 'er>(body: ..) -> A with 'ef raises 'er {
   let crew = Fibers::open();
   let value = with { nursery: .. } { body()! };
   Fibers::wait(crew);      // only reached when `body` finished
@@ -184,7 +184,7 @@ per fiber, and three things follow:
 
 2. **A fiber root that absorbs a cancellation** — *built*.
 
-   The spawned thunk is `() -> () raises 'e`. A thunk that can fail returns the
+   The spawned thunk is `() -> A raises 'er`. A thunk that can fail returns the
    tagged pair, so the runtime reads how the fiber ended — done, cancelled, or
    failed — and a cancellation stops *that fiber* rather than the program.
 
@@ -197,19 +197,66 @@ per fiber, and three things follow:
    A child's error nobody is waiting for is reported on stderr rather than
    dropped in silence, which is what a panicking thread does everywhere else.
    The error object is freed but not its fields, because the runtime cannot
-   know a value's drop routine and the row said `'e` — a bounded leak on a path
-   that goes away with (3), where the error reaches a parent who knows exactly
-   what it is.
+   know a value's drop routine and the row said `'er` — a bounded leak on a path
+   that is now only taken by a fiber nobody joined.
 
 3. **The nursery** — *built*, and it is a value whose release stops what is
    still running. A fiber cannot outlive the block that spawned it, on every
    path out, and nobody writes the cancel.
 
-4. **Failure propagation**: a child that raises makes the nursery raise. The
-   tag already carries it and there is now a parent to give it to; what is
-   missing is somewhere on the parent to put it, which is a mutable cell and
-   therefore D11.
-5. **`khora test` across cores**, the exit criterion's second half.
+4. **A fiber that answers** — *built*. `Fiber<A, 'er>`, `join(self) -> A
+   raises 'er`, and the child's failure comes back out of the join with its
+   type intact.
+
+   **The row is on the handle, and that is the whole design.** An erased
+   `Fiber<A>` was written first and it worked; it was also unpleasant in a way
+   that only showed up when the first test was written against it. Every join
+   needed a `!` and an enclosing `raises` — *including on a fiber that provably
+   cannot fail* — and since the caller's row could not name the child's error
+   type, `catch { _ => .. }` was the only arm that compiled. Carrying `'er`
+   costs a second type parameter and buys back both.
+
+   What it costs elsewhere is that **a nursery adopts `Fiber<(), {}>`**. An
+   effect operation cannot be generic in a row any more than in a type, so
+   `Nursery::adopt` has to name one shape — and the honest shape is the one
+   with nothing left to say. A child that can still fail has nowhere to fail
+   *to*: nobody is going to join it. Requiring the row to be empty moves that
+   decision to the `adopt` site, where somebody can write what a failure means,
+   rather than leaving it to a line on stderr that nobody reads.
+
+   Three things share the waiting, and they are not the same wait:
+
+   | | waits | takes the answer | on a cancelled child |
+   | --- | --- | --- | --- |
+   | letting the binding go | yes | no | nothing |
+   | `Fiber::wait` | yes | no | nothing |
+   | `Fiber::join` | yes | **yes** | **unwinds the joiner** |
+
+   The last cell is the one rule this changed rather than added. A cancellation
+   stops a fiber and not its parent — §"Two ways to end" and four tests pin
+   that, and it still holds. But a *joiner* has asked for an answer that will
+   never exist, and there is no `A` to invent, so the ask fails the way the
+   child did. A parent that did not ask is untouched, which is what `wait` is
+   for and why it exists as more than a synonym.
+
+5. **`Fiber::detach`** — *built*, and it is the valve the design was missing.
+
+   Every other way out of a handle waits. That is right, and it is also how a
+   program hangs: one finalizer that never returns holds its nursery, which
+   holds its parent, up to `main`. `docs/design/scheduler.md` promises both
+   bounded cancellation latency and that a nursery exit leaves every child
+   stopped or joined, and those two are in tension exactly here. `detach`
+   cancels, lets go, and does not wait — the fiber's answer is dropped when it
+   arrives and a failure afterwards is silent, because the program said it was
+   no longer listening.
+
+6. **Failure propagation out of a *nursery***: a child that raises makes the
+   nursery raise. Still open, and (4) narrowed it rather than solving it. The
+   typed multi-failure shape wants to live where the error type is a parameter
+   — a `par_map` answering `List<Result<A, E>>` — because at the `Fibers` level
+   there is nothing typed to put in a list: every child's error type differs
+   and the handles are bare. `docs/design/effect-survey.md` §3.1.
+7. **`khora test` across cores**, the exit criterion's second half.
 
 **Phase 11 is designed in `docs/design/scheduler.md`**, which decides the parts
 this note only gestured at — and adds one it did not have. Cancellation is

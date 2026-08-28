@@ -208,8 +208,19 @@ pub struct Runtime<'ctx> {
     /// `void *khora_fiber_spawn(void *body, void (*glue)(void *),
     ///                            uint32_t (*call)(const void *, void *, uint64_t *))`
     pub fiber_spawn: FunctionValue<'ctx>,
-    /// `void khora_fiber_join(void *fiber)`
+    /// `uint32_t khora_fiber_join(void *fiber, uint64_t *out)`
+    ///
+    /// The same shape a fallible call has: 0 means `out` holds the answer, and
+    /// anything else means it holds an error to re-raise.
     pub fiber_join: FunctionValue<'ctx>,
+    /// `void khora_fiber_detach(void *fiber)`
+    pub fiber_detach: FunctionValue<'ctx>,
+    /// `void khora_fiber_wait(void *fiber)`
+    ///
+    /// A join that does not take the answer, for a caller who wanted the
+    /// ordering. It is also the only way to wait for a fiber that may have been
+    /// *cancelled* without the cancellation unwinding the waiter.
+    pub fiber_wait: FunctionValue<'ctx>,
     /// `void khora_fiber_cancel(void *fiber)`
     pub fiber_cancel: FunctionValue<'ctx>,
     /// `void khora_fiber_release(void *fiber)` — a `drop_fields` callback.
@@ -391,9 +402,24 @@ impl<'ctx> Runtime<'ctx> {
             ),
             fiber_spawn: declare(
                 "khora_fiber_spawn",
-                ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+                ptr.fn_type(
+                    &[
+                        ptr.into(),
+                        ptr.into(),
+                        ptr.into(),
+                        ptr.into(),
+                        ctx.bool_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                ),
             ),
-            fiber_join: declare("khora_fiber_join", void.fn_type(&[ptr.into()], false)),
+            fiber_join: declare(
+                "khora_fiber_join",
+                ctx.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+            ),
+            fiber_detach: declare("khora_fiber_detach", void.fn_type(&[ptr.into()], false)),
+            fiber_wait: declare("khora_fiber_wait", void.fn_type(&[ptr.into()], false)),
             fiber_cancel: declare("khora_fiber_cancel", void.fn_type(&[ptr.into()], false)),
             fiber_release: declare("khora_fiber_release", void.fn_type(&[ptr.into()], false)),
             fibers_open: declare("khora_fibers_open", ptr.fn_type(&[], false)),
