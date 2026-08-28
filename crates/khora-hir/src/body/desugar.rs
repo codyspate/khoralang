@@ -10,12 +10,22 @@
 //! `for` needs `Step` imported and `[..]` needs `List`. The alternative is a
 //! name the compiler knows and the program cannot see, which is what errata 46
 //! is about.
+//!
+//! **`for` needs `Iterator` too**, and used to say only `Step`. The expansion
+//! calls `it.next()`, which is a trait method and so needs its trait in scope
+//! like any other; importing `Step` alone left the loop's type unsolved and
+//! produced the compiler's own "this is a gap in the compiler" message in
+//! front of somebody writing their first loop. Both names are in the message
+//! now, and `unused-import` knows a `for` uses them -- it reported `Iterator`
+//! as unused, which told the reader to delete what made the program work.
+//! Errata 58.
 
 use super::*;
 
 /// Said by the desugaring when it reports, and carried by the `Resolution` for
 /// the backend to say if it ever gets one. Named once so the two cannot drift.
-const STEP_IS_MISSING: &str = "`for` needs the `Step` type in scope; import it from `std::core`";
+const STEP_IS_MISSING: &str = "`for` needs `Step` and `Iterator` in scope; import them from \
+                               `std::core`";
 
 impl<'a> Ctx<'a> {
     /// `for pat in iter { body }`, desugared here rather than carried further.
@@ -381,12 +391,29 @@ impl<'a> Ctx<'a> {
     ) -> (crate::Resolution, crate::Resolution) {
         let yield_case = self.step_case("Yield");
         let done_case = self.step_case("Done");
+        // **`Iterator` is as necessary as `Step` and was never checked for.**
+        // The expansion calls `it.next()`, a trait method, so the trait has to
+        // be in scope; without it the loop's type simply never solved and what
+        // the reader saw was the checker's own "this is a gap in the compiler"
+        // message. Reported here, where the requirement is, rather than left
+        // to be inferred from a failure three layers away. Errata 58.
         if matches!(yield_case, crate::Resolution::Unsupported(_))
             || matches!(done_case, crate::Resolution::Unsupported(_))
+            || !self.has_iterator()
         {
             self.error(STEP_IS_MISSING, range);
         }
         (yield_case, done_case)
+    }
+
+    /// Whether `Iterator` is reachable by name.
+    ///
+    /// Declared here or imported, the same two places `Step` is looked for.
+    /// Only the name matters: the trait's *methods* are found by the checker
+    /// once the trait is in scope, and a file that has shadowed `Iterator`
+    /// with something else has a different problem than this message.
+    fn has_iterator(&self) -> bool {
+        self.map.item("Iterator").is_some() || self.scope.get("Iterator").is_some()
     }
 
     /// One case of `Step`, resolved and not reported. See [`Self::step_cases`].

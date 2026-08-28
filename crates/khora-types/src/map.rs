@@ -648,6 +648,28 @@ pub(crate) fn import_types(
     let Some(root) = khora_db::source_root(db) else { return };
     let graph = khora_hir::module_graph(db, root);
 
+    // **A builtin's methods need no import, because the builtin does not.**
+    //
+    // `Int`, `String`, `Array` and the rest are spelled without importing
+    // anything, and their methods live in inherent impls in `std::core`. Those
+    // impls used to arrive only through [`import_inherent`], which runs once
+    // per *imported origin* -- so a file that imported nothing from
+    // `std::core` got none of them, and
+    //
+    //     fn describe(v: Int) -> String { Int::to_string(v) }
+    //
+    // was told "`Int` is not a trait with a function named `to_string`". Adding
+    // an unrelated `import std::core::{Show};` fixed it, which is the shape of
+    // the bug: the *presence* of an import mattered and its contents did not.
+    //
+    // A first program has no imports. Errata 58.
+    let core = khora_hir::ModulePath::new(vec!["std".to_string(), "core".to_string()]);
+    if let Some(source) = graph.file(&core) {
+        if source != file {
+            import_inherent(type_map(db, source), map);
+        }
+    }
+
     for origin in &scope.origins {
         let (local, module, name, kind) =
             (&origin.local, &origin.module, &origin.name, &origin.kind);

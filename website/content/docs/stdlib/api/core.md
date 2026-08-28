@@ -1091,6 +1091,23 @@ Combines every element into one value, left to right.
 `step` is called with what has been accumulated so far and the next
 element. Summing is `fold(0, fn (a, b) => a + b)`.
 
+#### filter
+
+```khora
+pub fn filter(self, keep: (A) -> Bool) -> List<A>
+```
+
+The elements `keep` accepts, in the order they were in.
+
+Inherent rather than a trait method, unlike `map`: `Functor` says how to
+change what is *in* a container, and dropping elements changes the
+container itself, which is why no lawful `Functor` has a `filter`. There
+is a class that does -- `Filterable` -- and one method is not a reason to
+introduce one.
+
+`filter` then `map` is two walks; `fold` is one, and is what to reach for
+when that matters.
+
 ### Region
 
 ```khora

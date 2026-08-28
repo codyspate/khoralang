@@ -128,16 +128,18 @@ fn structural_types_carry_no_name_to_resolve() {
 /// following it noise.
 #[test]
 fn a_for_loop_without_step_says_what_to_import() {
+    // Both names, because the expansion needs both: `Step` for the `match` and
+    // `Iterator` for the `next` it calls. Errata 58.
     const LOOP: &str = "module m;
 fn f() -> Int { let mut t = 0; for x in 1..3 { t = t + x }; t }
 ";
     let found = errors(LOOP);
     assert!(
-        found.iter().any(|e| e.contains("`for` needs the `Step` type in scope")),
+        found.iter().any(|e| e.contains("`for` needs `Step` and `Iterator` in scope")),
         "expected the import to be named, got {found:?}"
     );
     // Once for the pair. `Yield` and `Done` both missing is one mistake, and
     // saying it twice about one loop is worse than saying it once.
-    let said = found.iter().filter(|e| e.contains("needs the `Step` type")).count();
+    let said = found.iter().filter(|e| e.contains("`for` needs `Step` and `Iterator`")).count();
     assert_eq!(said, 1, "said once, got {found:?}");
 }
