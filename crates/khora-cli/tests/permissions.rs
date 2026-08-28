@@ -13,7 +13,7 @@
 //!   could not offer `Fs`;
 //! - an absent key still grants everything, like the rest of the table.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn write(path: &Path, text: &str) {
@@ -138,4 +138,118 @@ fn std_may_always_declare_extern() {
     let locked = Permissions { extern_: Some(Vec::new()), ..Permissions::default() };
     assert!(locked.may_declare_extern("std"));
     assert!(!locked.may_declare_extern("anything_else"));
+}
+
+// --- what the manifest actually stops --------------------------------------
+//
+// Until now `[permissions.fs]` was parsed, matched by a tested `granted_path`,
+// and consulted by nothing. These are the tests that say it reaches a running
+// program. `docs/design/permissions.md` promised exactly this: the paths are
+// "given to `Fs::real()` at build time -- as data compiled into the program --
+// and it refuses a read outside them, raising `IoError`".
+
+/// A project whose manifest grants only `data/**`.
+fn granted_project(name: &str) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("a src directory");
+    std::fs::create_dir_all(root.join("data")).expect("a data directory");
+    std::fs::write(
+        root.join("khora.toml"),
+        "[package]\nname = \"granted\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [permissions.fs]\nread = [\"data/**\"]\nwrite = [\"data/**\"]\n",
+    )
+    .expect("a manifest");
+    std::fs::write(
+        root.join("src").join("main.kh"),
+        "module main;\n\n\
+         import std::core::{print};\n\
+         import std::fs::{FsRead, FsWrite, IoError, read_text, write_text};\n\n\
+         fn attempt(path: String) -> () with { writes: FsWrite } {\n\
+         \x20 let outcome = {\n\
+         \x20   write_text(path, \"hello\")!;\n\
+         \x20   \"wrote ${path}\"\n\
+         \x20 } catch {\n\
+         \x20   IoError::Denied(p) => \"DENIED ${p}\",\n\
+         \x20   IoError::NotFound(p) => \"missing ${p}\",\n\
+         \x20   IoError::Failed(p) => \"failed ${p}\",\n\
+         \x20 };\n\
+         \x20 print(outcome);\n\
+         }\n\n\
+         fn look(path: String) -> () with { reads: FsRead } {\n\
+         \x20 print(read_text(path)! catch {\n\
+         \x20   IoError::Denied(p) => \"DENIED ${p}\",\n\
+         \x20   IoError::NotFound(p) => \"missing ${p}\",\n\
+         \x20   IoError::Failed(p) => \"failed ${p}\",\n\
+         \x20 });\n\
+         }\n\n\
+         fn main() -> Int {\n\
+         \x20 with { reads: FsRead::real(), writes: FsWrite::real() } {\n\
+         \x20   attempt(\"data/allowed.txt\");\n\
+         \x20   attempt(\"secrets/stolen.txt\");\n\
+         \x20   look(\"data/allowed.txt\");\n\
+         \x20   look(\"secrets/stolen.txt\");\n\
+         \x20 }\n\
+         \x20 0\n\
+         }\n",
+    )
+    .expect("a source file");
+    root
+}
+
+/// **The grant reaches the running program.** A path inside it is written and
+/// read back; a path outside it is refused, by the program itself, with the
+/// case that names the manifest rather than the disk.
+#[test]
+fn a_path_outside_the_grant_is_refused_at_run_time() {
+    let root = granted_project("perm_enforced");
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(["run", "."])
+        .current_dir(&root)
+        .output()
+        .expect("could not run `khora`");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(text.contains("wrote data/allowed.txt"), "{text}");
+    assert!(text.contains("DENIED secrets/stolen.txt"), "{text}");
+    assert!(text.contains("hello"), "the granted file has to read back: {text}");
+    // Twice: once for the write, once for the read.
+    assert_eq!(
+        text.matches("DENIED secrets/stolen.txt").count(),
+        2,
+        "both halves of the grant are enforced: {text}"
+    );
+}
+
+/// **A manifest with no `[permissions]` grants everything**, which is the rule
+/// that keeps this from being a tax on starting. The same program, with the
+/// table removed, writes wherever it likes.
+#[test]
+fn no_permissions_table_grants_everything() {
+    let root = granted_project("perm_absent");
+    std::fs::write(
+        root.join("khora.toml"),
+        "[package]\nname = \"granted\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .expect("a manifest without permissions");
+    std::fs::create_dir_all(root.join("secrets")).expect("a secrets directory");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(["run", "."])
+        .current_dir(&root)
+        .output()
+        .expect("could not run `khora`");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(text.contains("wrote data/allowed.txt"), "{text}");
+    assert!(text.contains("wrote secrets/stolen.txt"), "nothing is denied: {text}");
+    assert!(!text.contains("DENIED"), "no grant means no refusal: {text}");
 }

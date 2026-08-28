@@ -41,7 +41,8 @@ helper here that needs both, and it says so.
 ```khora
 pub type IoError =
   | NotFound(path: String)
-  | Failed(path: String);
+  | Failed(path: String)
+  | Denied(path: String);
 ```
 
 Why a file operation did not work.
@@ -52,6 +53,21 @@ branch on; promising more detail than can be delivered everywhere would be
 promising something. What a caller can act on is "it was not there" against
 "it did not work", and both carry the path so the message can say which
 file.
+
+#### Denied
+
+```khora
+| Denied(path: String)
+```
+
+The manifest does not grant this path.
+
+**A third case rather than `Failed`**, because the two want different
+things from whoever reads the message. `Failed` is a disk, a permission
+bit, a name that was there a moment ago; `Denied` is `khora.toml`, and
+the fix is a line in a file the reader owns. Folding it into `Failed`
+would send somebody to look at their file system for a decision their
+own manifest made. `docs/design/permissions.md`.
 
 ## Effects
 

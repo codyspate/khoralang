@@ -1571,6 +1571,53 @@ fn run_program(
 #[cfg(feature = "llvm")]
 type Loaded = (KhoraDatabase, Vec<(PathBuf, String, SourceFile)>, SourceRoot);
 
+/// Whether this is the file holding the compiled-in permission grants.
+#[cfg(feature = "llvm")]
+fn is_grants_module(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "grants.kh")
+}
+
+/// `std::permissions::grants`, written from `[permissions.fs]`.
+///
+/// `None` when the manifest says nothing, which leaves the file on disk in
+/// place -- and that file grants everything. **A missing `[permissions]` table
+/// grants everything** is a rule this keeps by doing nothing rather than by
+/// generating a permissive answer, so there is one place the default lives and
+/// it is a file somebody can read.
+///
+/// The patterns are written as Khora string literals with the quotes and
+/// backslashes escaped, because a Windows path in a manifest is full of both
+/// and a generated source file that does not parse is the worst of the
+/// failures available here -- it would blame `std`.
+#[cfg(feature = "llvm")]
+fn granted_source(target: &Path) -> Option<String> {
+    let manifest_path = nearest_manifest(target)?;
+    let parsed = khora_manifest::Manifest::load(&manifest_path).ok()?;
+    let fs = parsed.manifest.permissions.fs.clone()?;
+    Some(render_grants(&fs.read, &fs.write))
+}
+
+/// The generated module's text.
+#[cfg(feature = "llvm")]
+fn render_grants(read: &[String], write: &[String]) -> String {
+    format!(
+        "module std::permissions::grants;\n\n         import std::core::{{List}};\n\n         //! Written by `khora build` from `[permissions.fs]`. What is checked\n         //! into `std/grants.kh` is the default, which grants everything; this\n         //! is what the manifest asked for instead.\n\n         /// Paths this program may read.\n         pub fn fs_read() -> List<String> {{\n{}\n}}\n\n         /// Paths this program may write.\n         pub fn fs_write() -> List<String> {{\n{}\n}}\n",
+        render_list(read),
+        render_list(write),
+    )
+}
+
+/// A `List<String>` literal, innermost first.
+#[cfg(feature = "llvm")]
+fn render_list(patterns: &[String]) -> String {
+    let mut out = String::from("  List::Nil");
+    for pattern in patterns.iter().rev() {
+        let escaped = pattern.replace('\\', "\\\\").replace('"', "\\\"");
+        out = format!("  List::Cons(\"{escaped}\",\n  {})", out.trim_start());
+    }
+    out
+}
+
 /// The package directory a build argument refers to.
 ///
 /// `khora build .` names a directory and `khora build src/main.kh` names a
@@ -1596,9 +1643,16 @@ fn load(path: &Path) -> Result<Loaded> {
     }
 
     let db = KhoraDatabase::new();
+    let granted = granted_source(path);
     let mut inputs = Vec::with_capacity(files.len());
     for path in &files {
-        let text = read(path)?;
+        // `std::permissions::grants` is the one file whose *contents* come
+        // from the manifest rather than from disk. Everything else is read as
+        // written.
+        let text = match (&granted, is_grants_module(path)) {
+            (Some(generated), true) => generated.clone(),
+            _ => read(path)?,
+        };
         inputs.push((path.clone(), text.clone(), SourceFile::new(&db, path.clone(), text)));
     }
     let root = SourceRoot::new(&db, inputs.iter().map(|(_, _, f)| *f).collect());

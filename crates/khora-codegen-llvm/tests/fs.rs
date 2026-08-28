@@ -42,6 +42,8 @@ fn run(name: &str, main: &str) -> Ran {
     let db = KhoraDatabase::new();
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
+        SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
+        SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
         SourceFile::new(&db, dir.join("fs_native.kh"), std_source("fs_native.kh")),
         SourceFile::new(&db, dir.join("main.kh"), main.replace("@DIR@", &here)),
     ];
@@ -86,6 +88,7 @@ fn main() -> Int {{
     khora_print_int(work()! catch {{
       IoError::NotFound(p) => 0 - 1,
       IoError::Failed(p) => 0 - 2,
+      IoError::Denied(p) => 0 - 2,
     }});
   }}
   khora_print_int(khora_live_count());
@@ -109,6 +112,7 @@ pub fn work() -> Int with {{ reads: FsRead, writes: FsWrite }} {{
   String::byte_length(read_text(\"@DIR@/nothing-here.txt\")! catch {{
     IoError::NotFound(p) => \"1\",
     IoError::Failed(p) => \"22\",
+    IoError::Denied(p) => \"22\",
   }})
 }}
 
@@ -141,6 +145,7 @@ pub fn work() -> Int with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
   print(read_text(\"@DIR@/binary.dat\")! catch {{
     IoError::NotFound(p) => \"missing\",
     IoError::Failed(p) => \"not text\",
+    IoError::Denied(p) => \"not text\",
   }});
   0
 }}
@@ -150,6 +155,7 @@ fn main() -> Int {{
     khora_print_int(work()! catch {{
       IoError::NotFound(p) => 0 - 1,
       IoError::Failed(p) => 0 - 2,
+      IoError::Denied(p) => 0 - 2,
     }});
   }}
   khora_print_int(khora_live_count());
@@ -207,6 +213,7 @@ fn main() -> Int {{
     khora_print_int(work()! catch {{
       IoError::NotFound(p) => 0 - 1,
       IoError::Failed(p) => 0 - 2,
+      IoError::Denied(p) => 0 - 2,
     }});
   }}
   khora_print_int(khora_live_count());
@@ -229,6 +236,8 @@ fn nothing_reaches_a_file_without_the_capability() {
     let db = KhoraDatabase::new();
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
+        SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
+        SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
         SourceFile::new(&db, dir.join("fs_native.kh"), std_source("fs_native.kh")),
         SourceFile::new(
             &db,
@@ -285,6 +294,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -318,6 +328,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -354,6 +365,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -392,10 +404,12 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
     again()! catch {{
       IoError::NotFound(p) => print(\"refused\"),
       IoError::Failed(p) => print(\"refused\"),
+      IoError::Denied(p) => print(\"refused\"),
     }};
   }}
   0
@@ -443,6 +457,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -484,6 +499,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -520,6 +536,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -542,6 +559,8 @@ fn reading_does_not_grant_writing() {
     let db = KhoraDatabase::new();
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
+        SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
+        SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
         SourceFile::new(&db, dir.join("fs_native.kh"), std_source("fs_native.kh")),
         SourceFile::new(
             &db,
@@ -602,6 +621,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -640,6 +660,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -674,6 +695,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0
@@ -717,6 +739,7 @@ fn main() -> Int {{
     work()! catch {{
       IoError::NotFound(p) => print(\"missing\"),
       IoError::Failed(p) => print(\"failed\"),
+      IoError::Denied(p) => print(\"failed\"),
     }};
   }}
   0

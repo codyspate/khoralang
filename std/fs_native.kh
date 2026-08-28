@@ -1,6 +1,8 @@
 module std::fs;
 
 import std::core::{Array, List, Option, Ptr, Region, Scope, Split, acquire};
+import std::permissions::{granted};
+import std::permissions::grants::{fs_read, fs_write};
 
 //! The file system, over ISO C.
 //!
@@ -45,7 +47,16 @@ import std::core::{Array, List, Option, Ptr, Region, Scope, Split, acquire};
 /// file.
 pub type IoError =
   | NotFound(path: String)
-  | Failed(path: String);
+  | Failed(path: String)
+  /// The manifest does not grant this path.
+  ///
+  /// **A third case rather than `Failed`**, because the two want different
+  /// things from whoever reads the message. `Failed` is a disk, a permission
+  /// bit, a name that was there a moment ago; `Denied` is `khora.toml`, and
+  /// the fix is a line in a file the reader owns. Folding it into `Failed`
+  /// would send somebody to look at their file system for a decision their
+  /// own manifest made. `docs/design/permissions.md`.
+  | Denied(path: String);
 
 /// Reading the file system.
 ///
@@ -129,12 +140,15 @@ impl FsRead {
   /// The real file system, reading.
   pub fn real() -> FsRead {
     handler for FsRead {
-      read: fn path => read_whole(path)!,
-      exists: fn path => can_open(path),
-      size: fn path => size_of_path(path)!,
-      read_at: fn (path, offset, want) => read_part(path, offset, want)!,
-      read_dir: fn path => list_dir(path)!,
-      is_dir: fn path => is_directory(path),
+      read: fn path => { allow_read(path)!; read_whole(path)! },
+      exists: fn path => granted(fs_read(), path) && can_open(path),
+      size: fn path => { allow_read(path)!; size_of_path(path)! },
+      read_at: fn (path, offset, want) => {
+        allow_read(path)!;
+        read_part(path, offset, want)!
+      },
+      read_dir: fn path => { allow_read(path)!; list_dir(path)! },
+      is_dir: fn path => granted(fs_read(), path) && is_directory(path),
     }
   }
 }
@@ -143,12 +157,19 @@ impl FsWrite {
   /// The real file system, writing.
   pub fn real() -> FsWrite {
     handler for FsWrite {
-      write: fn (path, bytes) => write_whole(path, bytes)!,
-      append: fn (path, bytes) => append_whole(path, bytes)!,
-      remove: fn path => remove_file(path)!,
-      rename: fn (from, to) => rename_file(from, to)!,
-      create_dir: fn path => make_dir(path)!,
-      remove_dir: fn path => unmake_dir(path)!,
+      write: fn (path, bytes) => { allow_write(path)!; write_whole(path, bytes)! },
+      append: fn (path, bytes) => { allow_write(path)!; append_whole(path, bytes)! },
+      remove: fn path => { allow_write(path)!; remove_file(path)! },
+      // **Both ends.** A rename is a write to two places, and checking only
+      // the source would let a granted directory be emptied into an ungranted
+      // one -- which is the whole of what the grant was meant to stop.
+      rename: fn (from, to) => {
+        allow_write(from)!;
+        allow_write(to)!;
+        rename_file(from, to)!
+      },
+      create_dir: fn path => { allow_write(path)!; make_dir(path)! },
+      remove_dir: fn path => { allow_write(path)!; unmake_dir(path)! },
     }
   }
 }
@@ -185,6 +206,22 @@ pub fn append_text(path: String, text: String) -> ()
   raises IoError
 {
   writes.append(path, String::bytes(text))!
+}
+
+/// Refuses a path the manifest does not grant for reading.
+///
+/// **Only the real handlers call this.** A double installed by a test is not
+/// subject to the manifest, and should not be: the grant is about what this
+/// program may do to the machine it runs on, and a test double touches no
+/// machine. Putting the check in `real()` rather than in the callers is what
+/// makes that true without anybody having to remember it.
+fn allow_read(path: String) -> () raises IoError {
+  if granted(fs_read(), path) {} else { raise IoError::Denied(path) }
+}
+
+/// Refuses a path the manifest does not grant for writing.
+fn allow_write(path: String) -> () raises IoError {
+  if granted(fs_write(), path) {} else { raise IoError::Denied(path) }
 }
 
 /// How much of a file to read at a time.

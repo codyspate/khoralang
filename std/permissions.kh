@@ -1,0 +1,142 @@
+module std::permissions;
+
+import std::core::{List};
+import std::permissions::grants::{fs_read, fs_write};
+
+//! What the manifest allows, as data the program carries.
+//!
+//! `[permissions]` in `khora.toml` says which paths a package may read and
+//! write. The answer itself lives in `std::permissions::grants`, which
+//! `khora build` writes; this module is the part that decides what an answer
+//! means, and `std::fs`'s real handlers consult it before touching a file.
+//!
+//! **The grants are compiled in, not read at run time.** A file the program
+//! consults for its own permissions is a file an attacker edits; a list the
+//! compiler wrote into the binary is one nothing at run time can widen.
+//! `docs/design/permissions.md`.
+//!
+//! # Why this is a file you can read rather than a check inside the compiler
+//!
+//! The compiler contributes *data*. Everything that decides whether a path is
+//! allowed is here, in Khora, and can be read, tested and stepped through --
+//! which is the whole reason the enforcement is not a pass in `khora-types`
+//! that nobody outside the compiler can see. The design document is explicit
+//! about it: "ordinary Khora in a module you can read, not a second
+//! enforcement engine hidden in the compiler".
+//!
+//! # What it says when nothing is configured
+//!
+//! Everything. **A missing `[permissions]` table grants everything**, which is
+//! opt-in tightening rather than a tax on starting -- the same bargain Rust
+//! makes with `unsafe`. The default below is the one a program with no
+//! manifest, or no `[permissions.fs]`, compiles with, and `khora build`
+//! narrows it only when the manifest asks.
+
+/// Whether any grant covers `path`.
+///
+/// The glob dialect is `.gitignore`'s, because it is the one everybody already
+/// has in their fingers:
+///
+/// - `*` matches within one path segment and stops at a separator.
+/// - `**` matches across separators, so `data/**` covers `data/a/b.txt` --
+///   though not `data` itself, which is `.gitignore`'s reading too.
+/// - Everything else matches itself.
+///
+/// Separators are normalized first, so a grant written with `/` covers a
+/// Windows path spelled with `\\`. `granted_path` in `khora-manifest` answers
+/// the same question for the compiler and the two have to agree; the tests
+/// name the cases where agreement is not obvious.
+pub fn granted(grants: List<String>, path: String) -> Bool {
+  let wanted = normalized(path);
+  List::fold(grants, false, fn (found, grant) =>
+    found || matches(normalized(grant), wanted))
+}
+
+/// `\\` becomes `/`, so one spelling is compared against one spelling.
+pub fn normalized(path: String) -> String {
+  swap_byte(path, 0, "")
+}
+
+/// Rebuilds `text` with every `\\` written as `/`.
+fn swap_byte(text: String, at: Int, acc: String) -> String {
+  if at >= String::byte_length(text) {
+    acc
+  } else {
+    let here = String::slice(text, at, at + 1);
+    let next = if String::byte(text, at) == 92 { "/" } else { here };
+    swap_byte(text, at + 1, "${acc}${next}")
+  }
+}
+
+/// Whether one pattern covers one path.
+fn matches(pattern: String, path: String) -> Bool {
+  walk(pattern, 0, path, 0)
+}
+
+/// The matcher, as two cursors.
+///
+/// Written as explicit indices rather than by slicing, because slicing a
+/// string builds one: a pattern of `n` characters against a path of `m` would
+/// allocate on every step, and this is called on every file operation.
+fn walk(pattern: String, p: Int, path: String, s: Int) -> Bool {
+  let plen = String::byte_length(pattern);
+  let slen = String::byte_length(path);
+  if p >= plen {
+    // The pattern is spent: it matched exactly when the path is too.
+    s >= slen
+  } else if is_double_star(pattern, p) {
+    // `**` may consume anything, separators included. Try the shortest first
+    // and grow, which terminates because the path is finite.
+    let after = skip_double_star(pattern, p);
+    any_suffix(pattern, after, path, s)
+  } else if String::byte(pattern, p) == 42 {
+    // A single `*` stops at a separator, so it may only consume the rest of
+    // this segment.
+    any_within_segment(pattern, p + 1, path, s)
+  } else if s < slen && String::byte(pattern, p) == String::byte(path, s) {
+    walk(pattern, p + 1, path, s + 1)
+  } else {
+    false
+  }
+}
+
+/// Whether `**` can be made to work by consuming `path` from `s` onwards.
+fn any_suffix(pattern: String, after: Int, path: String, s: Int) -> Bool {
+  if walk(pattern, after, path, s) {
+    true
+  } else if s >= String::byte_length(path) {
+    false
+  } else {
+    any_suffix(pattern, after, path, s + 1)
+  }
+}
+
+/// The same for a single `*`, which may not cross a separator.
+fn any_within_segment(pattern: String, after: Int, path: String, s: Int) -> Bool {
+  if walk(pattern, after, path, s) {
+    true
+  } else if s >= String::byte_length(path) || String::byte(path, s) == 47 {
+    false
+  } else {
+    any_within_segment(pattern, after, path, s + 1)
+  }
+}
+
+/// Whether the pattern has `**` at `p`.
+fn is_double_star(pattern: String, p: Int) -> Bool {
+  String::byte(pattern, p) == 42
+  && p + 1 < String::byte_length(pattern)
+  && String::byte(pattern, p + 1) == 42
+}
+
+/// Just past a `**`.
+///
+/// **The separator after it is not eaten**, and that is a decision rather than
+/// an omission. Eating it would make `data/**` cover `data` itself; leaving it
+/// means `data/**` covers what is *inside* `data`, which is what the same
+/// pattern means in `.gitignore` and what `granted_path` in `khora-manifest`
+/// already does. Two matchers answering one question have to agree, and the
+/// compiler's is the one a manifest is checked against.
+fn skip_double_star(_pattern: String, p: Int) -> Int {
+  p + 2
+}

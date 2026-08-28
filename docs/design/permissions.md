@@ -86,17 +86,61 @@ nothing outside the program has an opinion about it.
 
 ## What is enforced at run time
 
-The grants for a category are handed to that capability's real implementation,
-which checks them where the access happens:
+**Built, for `fs`.** The grants for a category are handed to that capability's
+real implementation, which checks them where the access happens:
 
 ```khora
-with { fs: Fs::real() } { .. }
+with { reads: FsRead::real(), writes: FsWrite::real() } { .. }
 ```
 
-`Fs::real()` is given the manifest's paths at build time — as data compiled
-into the program — and refuses a read outside them, raising `IoError` like any
-other failure. It is ordinary Khora in a module you can read, not a second
-enforcement engine hidden in the compiler.
+The manifest's paths are compiled into the program as data, and a path outside
+them is refused, raising `IoError` like any other failure. It is ordinary Khora
+in a module you can read, not a second enforcement engine hidden in the
+compiler.
+
+### How the paths get there
+
+`khora build` writes `std::permissions::grants` — a module with two functions
+returning `List<String>` — from `[permissions.fs]`, replacing the copy in
+`std/grants.kh`. That checked-in copy grants `**`, which is what a program with
+no `[permissions]` table compiles with, so **the default lives in a file
+somebody can read** rather than in a branch of the compiler.
+
+A whole file is replaced rather than a function body edited, because the
+matcher beside it is real code and a compiler that rewrites part of a source
+file it does not otherwise understand breaks the next time somebody reformats
+it.
+
+`std::permissions::granted` is the matcher, in Khora. It answers the same
+question as `granted_path` in `khora-manifest`, which is what the compiler uses
+to check a manifest against `[workspace.policy]` — so the two have to agree,
+and both are tested against the same table of cases. Where they disagreed, the
+compiler's reading won: `data/**` covers what is inside `data` and not `data`
+itself, which is what the same pattern means in `.gitignore`.
+
+### `IoError::Denied`
+
+A refusal is its own case, not `Failed`. The two want different things from
+whoever reads the message: `Failed` is a disk, a permission bit, a name that
+was there a moment ago, and `Denied` is `khora.toml` — the fix is a line in a
+file the reader owns. Folding them together would send somebody to look at
+their file system for a decision their own manifest made.
+
+### What is not checked
+
+**A test double is not subject to the manifest**, and should not be: the grant
+is about what the program may do to the machine it runs on, and a double
+touches no machine. The check lives inside `FsRead::real` and `FsWrite::real`
+rather than in their callers, which is what makes that true without anybody
+having to remember it.
+
+`rename` is checked at **both** ends. Checking only the source would let a
+granted directory be emptied into an ungranted one, which is the whole of what
+the grant was meant to stop.
+
+The other four categories — `network`, `env`, `process`, `clock` — are parsed
+and matched and not yet consulted by their capabilities. `fs` is the pattern
+they should follow.
 
 This is Deno's model, and it is Deno's model for the same reason: the check has
 to be where the value is.
