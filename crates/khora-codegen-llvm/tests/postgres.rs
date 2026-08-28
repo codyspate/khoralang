@@ -615,7 +615,7 @@ fn the_db_capability_against_a_real_server() {
     }
 
     let main = "module demo::main;
-import std::core::{Channel, Fiber, Fibers, List, Option, Result, print};
+import std::core::{Channel, Fibers, List, Option, Result, Task, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import postgres::db::{Request, Settings, over, serve};
 
@@ -717,7 +717,7 @@ fn main() -> Int {
   let requests: Channel<Request> = Channel::bounded(4);
   let crew = Fibers::open();
   with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
-    nursery.adopt(Fiber::spawn(fn () => serve(settings, requests)));
+    nursery.adopt(Task::spawn(fn () => serve(settings, requests)));
   };
   work(requests);
   Channel::close(requests);

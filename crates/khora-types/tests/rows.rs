@@ -756,3 +756,86 @@ fn the_tail_sees_the_hint_past_a_statement() {
          pub fn go() -> Int { take({ let _n = 1; 5 }) }\n",
     );
 }
+
+// --- a row as a type argument ----------------------------------------------
+
+/// A type that takes a row, which is what `Fiber<A, 'er>` is.
+const CARRIER: &str = "module m;
+pub type Boom = | Bang;
+pub type Other = | Nope;
+
+pub type Slot<A, 'er>;
+impl<A, 'er> Slot<A, 'er> {
+  pub fn of(body: () -> A raises 'er) -> Slot<A, 'er>;
+  pub fn take(self) -> A raises 'er;
+}
+
+fn safe() -> Int { 7 }
+fn risky() -> Int raises Boom { raise Boom::Bang }
+";
+
+/// **The row survives on the type**, so a carrier built from an infallible
+/// thunk is one whose `take` needs no `!`.
+///
+/// This is the property `Fiber<A, 'er>` exists for: an erased handle would
+/// have demanded a `raises` clause from every caller, including one whose
+/// fiber provably cannot fail.
+#[test]
+fn a_carrier_of_an_infallible_thunk_takes_without_a_mark() {
+    assert_clean(&format!(
+        "{CARRIER}\
+         pub fn go() -> Int {{ Slot::take(Slot::of(fn () => safe())) }}\n"
+    ));
+}
+
+/// And a carrier built from a fallible one raises **by name**, which is the
+/// other half: the caller can `catch` the case rather than wildcarding it.
+#[test]
+fn a_carrier_of_a_fallible_thunk_raises_what_it_carried() {
+    assert_clean(&format!(
+        "{CARRIER}\
+         pub fn go() -> Int {{ Slot::take(Slot::of(fn () => risky()!))! catch {{ Boom::Bang => 0 }} }}\n"
+    ));
+    assert_reports(
+        &format!(
+            "{CARRIER}\
+             pub fn go() -> Int {{ Slot::take(Slot::of(fn () => risky()!)) }}\n"
+        ),
+        "needs `Boom`",
+    );
+}
+
+/// **A written row in a type-argument position is checked.** Errata 59: it fell
+/// through the type converter to `Unknown`, and `Unknown` agrees with
+/// everything — so an annotation naming a row was decoration, and
+/// `Fibers::adopt`'s `Fiber<(), {}>` promise held only by convention.
+#[test]
+fn an_empty_row_argument_refuses_a_carrier_that_can_fail() {
+    assert_clean(&format!(
+        "{CARRIER}\
+         pub fn keep(_s: Slot<Int, {{}}>) -> () {{ }}\n\
+         pub fn go() -> () {{ keep(Slot::of(fn () => safe())) }}\n"
+    ));
+    assert_reports(
+        &format!(
+            "{CARRIER}\
+             pub fn keep(_s: Slot<Int, {{}}>) -> () {{ }}\n\
+             pub fn go() -> () {{ keep(Slot::of(fn () => risky()!)) }}\n"
+        ),
+        "Boom",
+    );
+}
+
+/// The same, between two rows that are both non-empty and different. Neither
+/// is a subset of the other, so neither annotation should take the other.
+#[test]
+fn one_row_argument_does_not_pass_for_another() {
+    assert_reports(
+        &format!(
+            "{CARRIER}\
+             pub fn keep(_s: Slot<Int, Other>) -> () {{ }}\n\
+             pub fn go() -> () {{ keep(Slot::of(fn () => risky()!)) }}\n"
+        ),
+        "Boom",
+    );
+}

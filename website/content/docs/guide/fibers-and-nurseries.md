@@ -62,28 +62,37 @@ A fiber handle is itself a lifetime boundary. Releasing the final handle waits f
 
 ## Prefer a nursery for a group of children
 
-A nursery makes ownership explicit for fan-out work. The `Nursery` capability contains the operation that adopts a spawned fiber:
+A nursery makes ownership explicit for fan-out work. The `Nursery` capability contains the operation that adopts a running fiber:
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber<(), {}>) -> (),
+  adopt: (Task) -> (),
 }
 ```
 
-`Fiber<(), {}>` — no answer and no failures — because **adopting is giving up the answer and settling the failure**. A nursery holds its children as bare handles and waits for them; there is nobody left to hand a value to and nobody left to decide what a raise means. Decide before you adopt, and the type says so:
+A `Task`, not a `Fiber<A, 'er>`. Same running fiber underneath; the handle is what differs, and what it has given up is the answer and the error *type*:
+
+```khora
+pub type Task;
+
+impl Task {
+  pub fn spawn<'er>(body: () -> () raises 'er) -> Task;
+  pub fn cancel(self) -> ();
+}
+```
+
+So the idiom is one call inside another, with the body on the screen and no `catch` in sight:
 
 ```khora
 fn children() -> ()
   with { nursery: Nursery }
 {
-  nursery.adopt(Fiber::spawn(fn () => first_job()));
-  nursery.adopt(Fiber::spawn(fn () => second_job()! catch {
-    JobError::Failed(id) => log("job ${Int::to_string(id)} gave up"),
-  }));
+  nursery.adopt(Task::spawn(fn () => first_job()));
+  nursery.adopt(Task::spawn(fn () => second_job()!));
 }
 ```
 
-Keep the answer instead by holding the handle yourself and joining it.
+`Fiber::spawn` for a fiber you will `join`; `Task::spawn` for one you will `adopt`. Keep the answer by holding the handle yourself.
 
 Run it with `nursery`:
 
@@ -107,6 +116,16 @@ pub fn nursery<A, 'ef, 'er>(
 
 A named function or a lambda, whichever reads better. `nursery(children)` and `nursery(fn () => children())` are the same thing: a lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs.
 
+### Why `Task` is its own type
+
+Two reasons, and the second is the interesting one.
+
+An effect operation cannot be generic. `adopt` has to name one type, and `Fiber<A, 'er>` is two parameters it cannot bind — an operation taking `Fiber<(), 'er>` is refused with "`'er` is a type the caller chooses". So `adopt` needs a handle with no parameters at all.
+
+The obvious such handle is `Fiber<(), {}>`, and it reads better than `Task` does: an empty row says "settle your failure before you hand this over", which turns a line on stderr into a compile error. It shipped that way for about a day. It is also wrong. **A cancellation travels out on the same tagged return an error does**, so a fiber whose row is empty has no channel to be stopped on — every adopted child became uncancellable, and a nursery that cannot cancel its children is not a nursery.
+
+The row has to stay at the runtime, where cancellation reads it, and go from the type, where the operation needs one shape. That split is exactly what `Task` is. The cost is that a child's failure is a runtime report rather than a compile-time one, which is the price of children that can be stopped.
+
 ## Bound work that comes from outside
 
 Use an unbounded nursery when the amount of fan-out is already bounded by data you hold, such as a known handful of independent lookups.
@@ -119,7 +138,7 @@ fn serve() -> ()
 {
   loop {
     let connection = accept_next();
-    nursery.adopt(Fiber::spawn(fn () => handle(connection)));
+    nursery.adopt(Task::spawn(fn () => handle(connection)));
   }
 }
 

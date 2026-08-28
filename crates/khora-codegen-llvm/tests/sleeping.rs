@@ -37,7 +37,7 @@ fn std_source(name: &str) -> String {
 }
 
 const HEAD: &str = r#"module demo::main;
-import std::core::{Eq, Fiber, Fibers, Nursery, Ord, Shared, Show, print};
+import std::core::{Eq, Fiber, Fibers, Nursery, Ord, Shared, Show, Task, print};
 import std::clock::{Clock};
 
 /// How long the clock says a sleep of `millis` took.
@@ -147,7 +147,7 @@ fn main() -> () {
     with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
       let mut spawned = 0;
       while spawned < 64 {
-        nursery.adopt(Fiber::spawn(fn () => napper(done)));
+        nursery.adopt(Task::spawn(fn () => napper(done)));
         spawned = spawned + 1
       }
     };

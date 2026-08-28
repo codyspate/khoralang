@@ -31,7 +31,9 @@ fn program_can_spawn<'a>(
                 matches!(
                     expr,
                     khora_hir::body::Expr::Path(khora_hir::Resolution::TraitItem { owner, name })
-                        if owner == crate::runtime::FIBER_TYPE && name == "spawn"
+                        if (owner == crate::runtime::FIBER_TYPE
+                            || owner == crate::runtime::TASK_TYPE)
+                            && name == "spawn"
                 )
             })
         })

@@ -53,30 +53,52 @@ Releasing the final `Fiber` handle also waits for the child. This means a fiber 
 
 `Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. The fiber keeps running, its answer is discarded, and a later failure is silent. Without it, a bounded wait over a body with an uninterruptible tail could not be honored.
 
+## Tasks
+
+A `Task` is a running fiber under a handle that has given up its answer and its error type. It is what a nursery adopts:
+
+```khora
+pub type Task;
+
+impl Share for Task {}
+
+impl Task {
+  pub fn spawn<'er>(body: () -> () raises 'er) -> Task;
+  pub fn cancel(self) -> ();
+}
+```
+
+The thunk keeps its `raises` row; the handle does not. That split is deliberate and is the reason `Task` exists rather than `Fiber<(), {}>`:
+
+- An effect operation cannot be generic, so `adopt` must name one type with no parameters. `Fiber<(), 'er>` is refused — `'er` is a type the caller chooses.
+- A cancellation travels out on the same tagged return an error does. A fiber whose row is empty therefore has no channel to be stopped on, and a nursery whose children cannot be cancelled is not a nursery. The row stays at the runtime, where cancellation reads it, and leaves the type, where the operation needs one shape.
+
+The consequence is that a child's failure is a runtime report rather than a compile-time one. That is the price of children that can be stopped.
+
+`Task::cancel` is rarely called directly. Leaving the nursery's block cancels every child still running, which is what a nursery is.
+
 ## Nurseries
 
 A nursery owns a set of fibers. The capability installed in a nursery body is:
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber<(), {}>) -> (),
+  adopt: (Task) -> (),
 }
 ```
 
-`Fiber<(), {}>` is required, not incidental. A nursery holds children as bare handles and waits for them, so there is no caller left to receive an answer and none left to decide what a failure means. Both are settled before the handle is adopted.
-
-A body that starts children declares the requirement and adopts each handle:
+A body that starts children declares the requirement and adopts each handle. The body is written at the adoption site, and it may raise:
 
 ```khora
 fn fan_out() -> ()
   with { nursery: Nursery }
 {
-  nursery.adopt(Fiber::spawn(fn () => first()));
-  nursery.adopt(Fiber::spawn(fn () => second()! catch {
-    JobError::Failed(id) => log("job ${Int::to_string(id)} gave up"),
-  }));
+  nursery.adopt(Task::spawn(fn () => first()));
+  nursery.adopt(Task::spawn(fn () => second()!));
 }
 ```
+
+`adopt` takes a running fiber rather than a thunk. A handler's fields are closures and a closure cannot be generic, so an operation could not be generic in what a thunk raises; and a thunk cannot be forwarded to `spawn` at all, because a fiber's body must be written where it starts so its captures can be checked against the sharing rules.
 
 `nursery` installs that capability and waits for the children on the normal path:
 
@@ -119,7 +141,7 @@ fn serve() -> ()
 {
   loop {
     let request = next_request();
-    nursery.adopt(Fiber::spawn(fn () => handle(request)));
+    nursery.adopt(Task::spawn(fn () => handle(request)));
   }
 }
 

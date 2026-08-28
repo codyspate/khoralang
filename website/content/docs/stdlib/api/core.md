@@ -249,6 +249,38 @@ a region and the region waits; put it in a block and the block does. That
 is where structured concurrency comes from, and it needed nothing of its
 own. `docs/design/fibers.md`.
 
+### Task
+
+```khora
+pub type Task;
+```
+
+A fiber a nursery owns.
+
+The same running fiber a `Fiber<A, 'er>` is — the *handle* differs, and what
+it differs by is what it has given up. A `Task` has no answer to hand back
+and no error type to name, because nobody is going to join it: the nursery
+waits for it and then lets it go.
+
+**It exists because an effect operation cannot be generic.** `Nursery`'s
+`adopt` has to name one type, and `Fiber<A, 'er>` is two parameters it
+cannot bind — an operation taking `Fiber<(), 'er>` is refused with "`'er` is
+a type the caller chooses". So `adopt` needs a handle with no parameters at
+all, and this is it.
+
+**Why not `Fiber<(), {}>`.** That was tried, and it reads better than this
+does: an empty row says "settle your failure before you hand this over",
+which turns a line on stderr into a compile error. It is also wrong. A
+cancellation travels out on the same tagged return an error does, so a fiber
+whose row is empty **has no channel to be stopped on** — and a nursery whose
+children cannot be cancelled is not a nursery. The row has to stay at the
+runtime, where cancellation lives, and go from the type, where the operation
+needs one shape. `Task` is exactly that split.
+
+The cost is that a child's failure is still a runtime report rather than a
+compile-time one. That is where it was before, and it is the price of
+children that can be stopped.
+
 ### Array
 
 ```khora
@@ -860,7 +892,7 @@ over the value and the release, which is where the polymorphism belongs.
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber<(), {}>) -> (),
+  adopt: (Task) -> (),
 }
 ```
 
@@ -873,23 +905,16 @@ to `Fiber::spawn` at all: a fiber's body has to be written where it starts,
 so that what it closes over can be checked against the rule that a mutable
 value may not cross. `docs/design/memory.md` §5a.
 
-The same reason fixes the answer at `()` and the row at `{}`. An operation
-cannot be generic in either, and a nursery has nothing to do with an answer
-it cannot hand back — so adopting is giving one up, and settling what a
-failure means before letting go. A fiber whose result matters is one you
-keep the handle to.
+The same reason is why it takes a `Task` and not a `Fiber<A, 'er>`. An
+operation cannot be generic in the answer or in the row, and a nursery has
+nothing to do with an answer it cannot hand back — so adopting gives one up.
+A fiber whose result matters is one you keep the handle to and `join`.
 
 So the idiom is one call inside another, and the body is on the screen:
 
 ```
-nursery.adopt(Fiber::spawn(fn () => analyze(id)! catch {
-  _ => log.warn("an analysis ended badly"),
-}));
+nursery.adopt(Task::spawn(fn () => analyze(id)!));
 ```
-
-The `catch` is not decoration. An adopted child's row must be empty, so a
-body that can fail has to say what its failure means before it is let go
-of -- there is nobody left to tell afterwards.
 
 ## Methods
 
@@ -1444,6 +1469,40 @@ a second and then block on the tail.
 
 **It cancels as well as detaching**, because a detached fiber nobody asked
 to stop is a leak with a nicer name.
+
+### Task
+
+```khora
+impl Task
+```
+
+#### spawn
+
+```khora
+pub fn spawn<'er>(body: () ->() raises 'er) -> Task
+```
+
+Starts a fiber that will be handed to a nursery.
+
+`Fiber::spawn` for a fiber you intend to `join`; this one for a fiber you
+intend to `adopt`. The thunk keeps its `raises` row here even though the
+handle does not — that is the whole point, and it is what leaves the fiber
+cancellable.
+
+```khora
+nursery.adopt(Task::spawn(fn () => serve(connection)!));
+```
+
+#### cancel
+
+```khora
+pub fn cancel(self) ->()
+```
+
+Asks it to stop at its next cancellation point. Returns at once.
+
+Rarely needed directly: leaving the nursery's block cancels every child
+that is still running, which is what a nursery is.
 
 ### Array<A>
 
@@ -2274,7 +2333,7 @@ outside world.
 #### adopt
 
 ```khora
-pub fn adopt(self, fiber: Fiber<(), { }>) ->()
+pub fn adopt(self, fiber: Task) ->()
 ```
 
 Puts a running fiber under this nursery.
@@ -2283,23 +2342,11 @@ The nursery takes the handle, so nothing else can outlive it with one.
 Adopting past a `bounded` limit waits for the oldest child to finish,
 which is what turns a ceiling into a queue.
 
-`Fiber<(), {}>`, because **adopting is giving up the answer and settling
-the failure**. A nursery holds its children as bare handles and waits for
+A `Task` rather than a `Fiber<A, 'er>`, because **adopting is giving up
+the answer**. A nursery holds its children as bare handles and waits for
 them; it could not hand back what they computed even if it kept it, since
 every child's answer has a type of its own — and an effect operation
-cannot be generic in one, so `Nursery::adopt` has to name a single shape.
-
-The `{}` is the interesting half. A child that can still fail has nowhere
-to fail *to*: nobody is going to join it, so its error would reach the
-runtime and become a line on stderr that nobody reads. Requiring the row
-to be empty moves that decision to the `adopt` site, where somebody can
-write what a failure means:
-
-```khora
-nursery.adopt(Fiber::spawn(fn () => serve(connection)! catch {
-  _ => log.warn("a connection ended badly"),
-}));
-```
+cannot be generic in one. `Task` says so in the type.
 
 #### wait
 

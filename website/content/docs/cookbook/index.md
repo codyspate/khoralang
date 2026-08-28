@@ -11,7 +11,7 @@ Start with the recipe closest to the problem you are solving:
 - [Build an HTTP service](/docs/cookbook/http-service/) — route requests with `Router`, `Request`, `Response`, and `SharedFn`.
 - [Build a typed JSON API](/docs/cookbook/json-api/) — parse JSON, decode typed request bodies, derive encoders/decoders, and return JSON responses.
 - [Run a database transaction](/docs/cookbook/database-transactions/) — use the portable `Db` capability and `transaction` so failure and cancellation cannot leak an open transaction.
-- [Bound concurrent work](/docs/cookbook/bounded-concurrency/) — use `Fiber`, `Nursery`, and `bounded_nursery` to turn a concurrency limit into backpressure.
+- [Bound concurrent work](/docs/cookbook/bounded-concurrency/) — use `Task`, `Nursery`, and `bounded_nursery` to turn a concurrency limit into backpressure.
 - [Make resource cleanup cancellation-safe](/docs/cookbook/cancellation-safe-resources/) — pair `scoped` and `acquire` so cleanup runs on return, failure, and cancellation.
 - [Load application configuration](/docs/cookbook/configuration/) — read settings with `std::config`, report every bad key at once, and keep secrets out of the logs with `Redacted`.
 - [Retry a flaky call](/docs/cookbook/retrying/) — pick a `Schedule`, drive it with `retry_while`, and test the whole thing in under a millisecond.

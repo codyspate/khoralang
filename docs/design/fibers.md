@@ -216,13 +216,25 @@ per fiber, and three things follow:
    type, `catch { _ => .. }` was the only arm that compiled. Carrying `'er`
    costs a second type parameter and buys back both.
 
-   What it costs elsewhere is that **a nursery adopts `Fiber<(), {}>`**. An
-   effect operation cannot be generic in a row any more than in a type, so
-   `Nursery::adopt` has to name one shape — and the honest shape is the one
-   with nothing left to say. A child that can still fail has nowhere to fail
-   *to*: nobody is going to join it. Requiring the row to be empty moves that
-   decision to the `adopt` site, where somebody can write what a failure means,
-   rather than leaving it to a line on stderr that nobody reads.
+   What it costs elsewhere is that **a nursery adopts a `Task`**, not a
+   `Fiber`. An effect operation cannot be generic in a row any more than in a
+   type, so `Nursery::adopt` has to name one shape with no parameters at all.
+
+   `Fiber<(), {}>` was tried first, and it reads better: an empty row says
+   "settle your failure before you hand this over", which turns a line on
+   stderr into a compile error. It is also wrong, and the way it is wrong is
+   the most interesting thing in this section. **A cancellation travels out on
+   the same tagged return an error does** — §"What phase 5.3 builds" (2) — so a
+   fiber whose row is empty has no channel to be stopped on. Requiring an
+   adopted child to have settled its failures makes every adopted child
+   uncancellable, and a nursery that cannot cancel its children is not a
+   nursery. Three tests said so within a minute of the row being enforced.
+
+   `Task` splits the difference exactly where the difference is: the thunk
+   keeps its `raises` row, so the runtime still has the channel; the *handle*
+   drops it, so the operation has one shape. The child's failure stays a
+   runtime report, which is where it was, and is the price of children that can
+   be stopped.
 
    Three things share the waiting, and they are not the same wait:
 

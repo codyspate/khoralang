@@ -2036,7 +2036,7 @@ whether `Iterator` was used, and the reader who believed the lint got a broken
 build. When two parts of a toolchain answer one question, they need one answer
 -- the same lesson errata 54 gave about two type checks that never met.
 
-## 59. A row in a type-argument position is never checked
+## 59. A row in a type-argument position was never checked
 
 Found by putting a row on a type for the first time. `Fiber<A, 'er>` carries the
 row its body raises, which is what lets `join` on an infallible fiber compile to
@@ -2063,38 +2063,59 @@ fn main() -> Int {
 `Fibers::adopt`, whose parameter says `Fiber<(), {}>`, accepts a child that can
 still fail.
 
-### Why it is not simply a missing check
+### It was not unification, it was the converter
 
-`unify.rs` does compare ADT arguments pairwise; the arguments here are *rows*,
-and two rows unify by **opening** — each side grows a fresh tail and absorbs
-what the other has. That is not a bug. It is exactly what makes `raises`
-subsumption work, and `demand_is_carried` in `check/effects.rs` depends on it: a
-function that raises `Boom` is usable where `{Boom, Other}` is allowed, and a
-row-polymorphic library function could not add a capability of its own without
-it.
+The first guess was that rows unify by *opening* — each side grows a tail and
+absorbs the other's labels — and that opening is right for a `raises` demand and
+wrong for an invariant argument. That reasoning is sound and it was not the bug.
+`unify_rows` already refuses to grow a *closed* row, and says which label it
+could not account for.
 
-What is missing is the distinction between the two positions. A row in a
-`raises` clause is a *demand*, and opening it is subsumption. A row in a type
-argument is *invariant* — `Fiber<Int, {Boom}>` and `Fiber<Int, {Other}>` are
-two types — and the declared side should be rigid there, the way a declared type
-parameter already is.
+The row never reached it. `type_of_syntax` converts a written type, and `{ .. }`
+in a type-argument position is `ast::Type::Record`, which no arm matched — so it
+fell to `_ => Type::Unknown`. `Fiber<(), {}>` meant `Fiber<(), ?>`, and `?`
+agrees with everything.
 
-### What is safe about it meanwhile
+Three lines above that catch-all is a comment about errata 30:
 
-Inference is correct, and inference is the path real code takes: `let f =
-Fiber::spawn(..); Fiber::join(f)!` gets the row from the thunk and re-raises the
-right type. Only an *annotation* naming a row goes unchecked. So the cost today
-is that `adopt`'s empty row is documentation rather than a rule — a child that
-can fail is adopted and, if it does, prints the line it always printed instead
-of being refused at the `adopt`.
+> A bare `'r`. It has no `Path` of its own — it is one token — so without this it
+> read as the empty name and became `Unknown`, which then absorbed whatever it
+> was unified with and made every row-polymorphic signature pass by saying
+> nothing.
+
+The same failure, one case further along. Both are a type the converter did not
+recognise becoming the one type that agrees with everything.
+
+### The fix, and what it cost
+
+`ast::Type::Record` now routes to `row_of_syntax`, which is where `with` and
+`raises` clauses already go. `{}` is the closed empty row, and an annotation
+naming a row is checked.
+
+Turning it on immediately broke three nursery tests, and they were right to
+break. `Fibers::adopt` had been declared `Fiber<(), {}>` on the argument that
+adopting should mean settling your failure first — a compile error in place of a
+line on stderr. With the row actually checked, every adopted child had to be
+made infallible, and **a cancellation travels out on the same tagged return an
+error does**: a fiber whose row is empty has no channel to be stopped on. The
+nursery could no longer cancel its children, which is the one thing a nursery is
+for.
+
+So `adopt` takes a `Task` — the same runtime fiber under a handle with no
+parameters, which keeps its `raises` row where cancellation reads it and drops
+it from the type where an effect operation needs one shape. `docs/design/
+fibers.md`.
 
 ### What generalises
 
-**A checker that is deliberately permissive in one position has to be told about
-the others.** Row opening was designed for demands and applied everywhere a row
-appears, and the second position arrived years later — when a row became a thing
-a *type* could hold. Neither half is wrong on its own, and nothing connected
-them, because until now nothing wrote the second one down.
+**A permissive default is not a small bug, and it hides in the arm nobody
+wrote.** `_ => Type::Unknown` is a reasonable-looking line that turns every
+unhandled case into "agrees with everything", so the feature that was never
+implemented does not fail — it passes. Twice now.
+
+And: **a check that was never running is a design decision that was never
+tested.** `adopt`'s empty row read well for a day and was wrong the moment it
+had teeth.
 
 ## 60. Tuple inference gives up through a nested lambda
 

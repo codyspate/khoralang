@@ -146,13 +146,22 @@ That a row can be a *type* parameter at all was the surprise. `Slot<A, 'er>`
 carries one and behaves: `take` on an infallible slot needs no `!`, and a
 fallible one raises by name. Nothing in `std` had used it.
 
-**What it costs is that a nursery adopts `Fiber<(), {}>`.** An effect operation
-cannot be generic in a row any more than in a type, so `Nursery::adopt` has to
-name one shape — verified, not assumed: `adopt: (Slot<(), 'er>) -> ()` is
-refused with *"`'er` is a type the caller chooses"*. The honest shape is the one
-with nothing left to say. A child that can still fail has nowhere to fail *to*,
-because nobody is going to join it, so requiring an empty row moves that
-decision to the `adopt` site where somebody can write what a failure means.
+**What it costs is that a nursery adopts a `Task`.** An effect operation cannot
+be generic in a row any more than in a type, so `Nursery::adopt` has to name one
+shape — verified, not assumed: `adopt: (Slot<(), 'er>) -> ()` is refused with
+*"`'er` is a type the caller chooses"*.
+
+`Fiber<(), {}>` was the first answer and it lasted a day. An empty row says
+"settle your failure before you hand this over", which turns a line on stderr
+into a compile error — and it is wrong, because **a cancellation travels out on
+the same tagged return an error does**. A child whose row is empty cannot be
+stopped, and a nursery that cannot cancel its children is not a nursery. That
+only became visible once errata 59 made the written row actually mean something;
+until then the annotation was decoration and nothing had teeth.
+
+`Task` is the same running fiber under a handle with no parameters: the thunk
+keeps its row where the runtime reads it, the handle drops it where the
+operation needs one shape.
 
 Three things wait, and they are not the same wait:
 

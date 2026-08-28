@@ -54,6 +54,9 @@ pub const CANCELLED_EXIT: u64 = 130;
 /// — and like a region, releasing it is what makes the structure structured:
 /// the release *joins*, so a fiber cannot outlive the binding that holds it.
 pub const FIBER_TYPE: &str = khora_types::FIBER_TYPE;
+/// A fiber a nursery owns. The same runtime object as a `Fiber`, so it
+/// shares every intrinsic and its release.
+pub const TASK_TYPE: &str = khora_types::TASK_TYPE;
 
 /// The type name of a contiguous, fixed-length array.
 pub const ARRAY_TYPE: &str = "Array";

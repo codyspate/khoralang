@@ -15,7 +15,7 @@ This program has 1,000 jobs available but allows only 64 of them to be live chil
 ```khora
 module main;
 
-import std::core::{Fiber, Nursery, bounded_nursery, print};
+import std::core::{Nursery, Task, bounded_nursery, print};
 
 fn handle(job: Int) -> () {
   print("processing job ${Int::to_string(job)}");
@@ -30,7 +30,7 @@ fn launch_jobs() -> ()
     let job = next;
 
     nursery.adopt(
-      Fiber::spawn(fn () => handle(job))
+      Task::spawn(fn () => handle(job))
     );
 
     next = next + 1;
@@ -44,23 +44,25 @@ pub fn main() {
 
 `launch_jobs` requires a `Nursery` capability because it adopts children. `bounded_nursery(64, launch_jobs)` supplies that capability and does not return until all adopted children have finished.
 
-The important line is not the `Fiber::spawn`; it is the adoption:
+The important line is not the `Task::spawn`; it is the adoption:
 
 ```khora
-nursery.adopt(Fiber::spawn(fn () => handle(job)));
+nursery.adopt(Task::spawn(fn () => handle(job)));
 ```
 
 When 64 children are already live, the next adoption waits. The producer therefore slows down at the same boundary where it creates more work instead of filling an unbounded queue somewhere else.
 
-`adopt` takes a `Fiber<(), {}>`: no answer and no failures. `handle` already returns `()` and cannot fail, so nothing extra is needed here. A job that *can* fail has to say what a failure means before it is adopted, because after adoption there is nobody left to tell:
+`adopt` takes a `Task`, not a `Fiber<A, 'er>`. Same running fiber; the handle has given up the answer and the error type, because a nursery could not hand back what a child computed even if it kept it — every child's answer has a type of its own, and an effect operation cannot be generic in one.
+
+A job that fails needs no `catch` at the adoption site. The thunk keeps its `raises` row, so this is fine:
 
 ```khora
-nursery.adopt(Fiber::spawn(fn () => handle(job)! catch {
-  JobError::Failed(id) => log("job ${Int::to_string(id)} gave up"),
-}));
+nursery.adopt(Task::spawn(fn () => handle(job)!));
 ```
 
-Keep the answer instead by holding the handle and joining it — `Fiber::join` gives back what the body computed, and re-raises what it raised.
+That row is what leaves the child cancellable — a cancellation travels out the same way an error does — which is why the handle drops the error *type* and not the row. The cost is that a child's failure is reported at runtime rather than caught at compile time.
+
+Keep the answer by using `Fiber::spawn` instead and holding the handle: `Fiber::join` gives back what the body computed, and re-raises what it raised.
 
 ## Keep unrelated limits separate
 

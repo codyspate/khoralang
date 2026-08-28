@@ -401,7 +401,7 @@ fn main() -> Int {{
 // --- nurseries -------------------------------------------------------------
 
 /// `std::core` spells these the same way; they are here so the file stays one
-/// module. Note the idiom: `nursery.adopt(Fiber::spawn(fn () => ..))`, one call
+/// module. Note the idiom: `nursery.adopt(Task::spawn(fn () => ..))`, one call
 /// inside another. A thunk cannot be *forwarded* to `Fiber::spawn`, because a
 /// fiber's body has to be written where it starts for what it closes over to be
 /// checked against the rule that a mutable value may not cross.
@@ -418,6 +418,13 @@ impl<A, 'r> Fiber<A, 'r> {
   fn detach(self) -> ();
 }
 
+pub type Task;
+impl Share for Task {}
+impl Task {
+  fn spawn<'er>(body: () -> () raises 'er) -> Task;
+  fn cancel(self) -> ();
+}
+
 pub type Fibers;
 pub trait Share {}
 /// A nursery is adopted into from more than one fiber; that is what it is for,
@@ -426,11 +433,11 @@ pub trait Share {}
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
-  fn adopt(self, fiber: Fiber<(), {}>) -> ();
+  fn adopt(self, fiber: Task) -> ();
   fn wait(self) -> ();
 }
 
-pub effect Nursery { adopt: (Fiber<(), {}>) -> (), }
+pub effect Nursery { adopt: (Task) -> (), }
 
 pub type Oops = | Bad;
 fn ok(n: Int) -> Int raises Oops { n }
@@ -450,8 +457,8 @@ fn second() -> () raises Oops {{ print(2); }}
 fn work() -> () {{
   let crew = Fibers::open();
   with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => first()!));
-    nursery.adopt(Fiber::spawn(fn () => second()!));
+    nursery.adopt(Task::spawn(fn () => first()!));
+    nursery.adopt(Task::spawn(fn () => second()!));
   }}
   Fibers::wait(crew);
   print(3);
@@ -495,7 +502,7 @@ fn boom() -> Int raises Oops {{ raise Oops::Bad }}
 fn work() -> Int raises Oops {{
   let crew = Fibers::open();
   let value = with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => forever()!));
+    nursery.adopt(Task::spawn(fn () => forever()!));
     boom()!
   }};
   Fibers::wait(crew);
@@ -537,9 +544,9 @@ fn three() -> () raises Oops {{ print(3); }}
 fn work() -> () {{
   let crew = Fibers::open();
   with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Fiber::spawn(fn () => one()!));
-    nursery.adopt(Fiber::spawn(fn () => two()!));
-    nursery.adopt(Fiber::spawn(fn () => three()!));
+    nursery.adopt(Task::spawn(fn () => one()!));
+    nursery.adopt(Task::spawn(fn () => two()!));
+    nursery.adopt(Task::spawn(fn () => three()!));
   }}
   Fibers::wait(crew);
 }}
@@ -886,5 +893,58 @@ fn main() -> Int {{
         ),
     );
     assert_eq!(ran.stdout, "1\n2\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **An adopted child keeps the channel it is cancelled on**, which is the
+/// whole reason `Task` is a type of its own.
+///
+/// `Nursery::adopt` was `Fiber<(), {}>` for a day. An empty row reads as
+/// "settle your failure before you hand this over", and it turns a line on
+/// stderr into a compile error, which is better. It is also wrong: a
+/// cancellation travels out on the same tagged return an error does, so a
+/// child whose row is empty *cannot be stopped* — and a nursery that cannot
+/// cancel its children is not a nursery.
+///
+/// `Task::spawn` keeps the thunk's row while the handle drops it. This is the
+/// test that says so: the child loops forever with a cancellation point in it,
+/// the nursery's block ends, and the program finishes. Under the empty-row
+/// version it hung.
+#[test]
+fn an_adopted_child_can_still_be_cancelled() {
+    let ran = run(
+        "task_cancellable",
+        &format!(
+            "{NURSERY}
+fn forever() -> () raises Oops {{
+  print(1);
+  loop {{ ok(1)!; }}
+}}
+
+fn work() -> () {{
+  let crew = Fibers::open();
+  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
+    nursery.adopt(Task::spawn(fn () => forever()!));
+  }}
+  // No `Fibers::wait`: leaving the block releases the nursery, which cancels
+  // what is still running and then waits for it. If the child had no channel
+  // to be stopped on, this would never return.
+  print(2);
+}}
+
+fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
+"
+        ),
+    );
+
+    // **That it finished at all is the assertion.** Whether the child reached
+    // its `print` before the block ended is a race and not the point; under
+    // the empty-row version this hung, and a hang is what a nursery that
+    // cannot stop its children looks like.
+    assert!(
+        ran.stdout.ends_with("2\n0\n"),
+        "cancelled, waited for, and nothing left over: {}",
+        ran.stdout
+    );
     assert_eq!(ran.code, Some(0));
 }

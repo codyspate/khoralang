@@ -125,7 +125,7 @@ fn several_fibers_update_one_cell() {
     let out = run(
         "shared_fibers",
         "module main;
-import std::core::{Fiber, Fibers, Shared, print};
+import std::core::{Fibers, Shared, Task, print};
 
 fn bump(cell: Shared<Int>) -> () { Shared::update(cell, fn n => n + 1); }
 
@@ -134,7 +134,7 @@ pub fn main() -> () {
   let crew = Fibers::open();
   let mut i = 0;
   while i < 8 {
-    Fibers::adopt(crew, Fiber::spawn(fn () => bump(count)));
+    Fibers::adopt(crew, Task::spawn(fn () => bump(count)));
     i = i + 1;
   };
   Fibers::wait(crew);
@@ -319,7 +319,7 @@ fn fibers_share_a_dict_as_a_cache() {
     let out = run(
         "shared_dict",
         "module main;
-import std::core::{Dict, Fiber, Fibers, Option, Shared, print};
+import std::core::{Dict, Fibers, Option, Shared, Task, print};
 
 fn record(cache: Shared<Dict<Int, Int>>, key: Int) -> () {
   Shared::update(cache, fn table => Dict::insert(table, key, key * key));
@@ -330,7 +330,7 @@ pub fn main() -> () {
   let crew = Fibers::open();
   let mut i = 0;
   while i < 16 {
-    Fibers::adopt(crew, Fiber::spawn(fn () => record(cache, i)));
+    Fibers::adopt(crew, Task::spawn(fn () => record(cache, i)));
     i = i + 1;
   };
   Fibers::wait(crew);

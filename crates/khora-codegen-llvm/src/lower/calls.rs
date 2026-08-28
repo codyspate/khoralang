@@ -42,7 +42,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 if owner == runtime::REGION_TYPE {
                     return self.region_intrinsic(&name, args, range);
                 }
-                if owner == runtime::FIBER_TYPE {
+                if owner == runtime::FIBER_TYPE || owner == runtime::TASK_TYPE {
                     return self.fiber_intrinsic(site, &name, args, range);
                 }
                 if owner == runtime::FIBERS_TYPE {

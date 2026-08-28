@@ -137,9 +137,13 @@ fn a_record_of_functions_is_callable_through_its_fields() {
 const MUT: &str = "module m;\n\
                    pub type Counter = { mut count: Int, name: String };\n\
                    pub type Frozen = { total: Int };\n\
-                   pub type Fiber<A, 'r>;\n\
-                   impl<A, 'r> Fiber<A, 'r> {\n\
-                     fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;\n\
+                   pub type Fiber<A, 'er>;\n\
+                   impl<A, 'er> Fiber<A, 'er> {\n\
+                     fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>;\n\
+                   }\n\
+                   pub type Task;\n\
+                   impl Task {\n\
+                     fn spawn<'er>(body: () -> () raises 'er) -> Task;\n\
                    }\n\
                    pub fn nothing() -> () { }\n";
 
@@ -512,5 +516,33 @@ fn a_handler_may_capture_a_cell() {
          pub fn peek(c: Shared<Frozen>) -> () {{ }}\n\
          pub fn make(c: Shared<Frozen>) -> Counting {{ \
          handler for Counting {{ tick: fn () => peek(c) }} }}\n"
+    ));
+}
+
+/// **`Task::spawn` is checked the same way `Fiber::spawn` is.**
+///
+/// A `Task` is the handle a nursery adopts, and it starts a fiber — so the rule
+/// about what may cross into one has to apply, and it applies because the
+/// checker names both spellings. This is the test that catches somebody
+/// dropping one of the two.
+#[test]
+fn a_mutable_value_cannot_be_handed_to_a_task_either() {
+    assert_reports(
+        &format!(
+            "{MUT}\
+             pub fn bump(c: Counter) -> () {{ c.count = c.count + 1; }}\n\
+             pub fn f(c: Counter) -> Task {{ Task::spawn(fn () => bump(c)) }}\n"
+        ),
+        "cannot be handed to another fiber",
+    );
+}
+
+/// And something that cannot be written crosses, which is the other half.
+#[test]
+fn an_immutable_value_can_be_handed_to_a_task() {
+    assert_clean(&format!(
+        "{MUT}\
+         pub fn look(v: Frozen) -> () {{ let _ = v.total; }}\n\
+         pub fn f(v: Frozen) -> Task {{ Task::spawn(fn () => look(v)) }}\n"
     ));
 }

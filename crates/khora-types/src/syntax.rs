@@ -181,6 +181,20 @@ pub(crate) fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes:
                 .unwrap_or_default();
             named_type(&name, args, generics, homes)
         }
+        // `{}`, `{ db: Db }`, `{ 'ef | db: Db }` -- a **row**, in a position
+        // that is not a `with` or `raises` clause. The only place one can be
+        // written is as a type argument, because a type may take a row
+        // parameter: `Fiber<A, 'er>` carries the row its body raises, and
+        // `Fibers::adopt` names the empty one to say a child it adopts must
+        // have settled its failures already.
+        //
+        // **This fell through to `Unknown`, and `Unknown` absorbs whatever it
+        // meets.** So `Fiber<(), {}>` meant `Fiber<(), ?>` and accepted a fiber
+        // that could still fail; `adopt`'s promise was a comment. Errata 59,
+        // and the same shape as errata 30 three lines above -- a type the
+        // converter did not recognise became the one that agrees with
+        // everything, so the signature passed by saying nothing.
+        ast::Type::Record(_) => row_of_syntax(Some(ty), generics, homes),
         _ => Type::Unknown,
     }
 }

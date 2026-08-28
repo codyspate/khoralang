@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery, scoped};
+import std::core::{Array, List, Map, Never, Nursery, Option, Result, Scope, SharedFn, Show, Split, Task, attempt, bounded_nursery, scoped};
 import std::permissions::{granted_host};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
@@ -1236,7 +1236,7 @@ impl Router {
     if connection == invalid_handle() {
     } else {
       set_receive_timeout(connection, 10000);
-      nursery.adopt(Fiber::spawn(fn () => Router::secure_and_serve(router, connection, settings)));
+      nursery.adopt(Task::spawn(fn () => Router::secure_and_serve(router, connection, settings)));
     };
     Router::serve_secured(router, server, settings)!
   }
@@ -1298,7 +1298,7 @@ impl Router {
       // The deadline goes on the socket before anything wraps it, because a
       // handshake can hang exactly as a request can.
       set_receive_timeout(connection, 10000);
-      nursery.adopt(Fiber::spawn(fn () =>
+      nursery.adopt(Task::spawn(fn () =>
           Router::serve_connection(router, over_socket(connection))));
     }
   }
