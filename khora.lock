@@ -6,8 +6,4 @@
 # and a checksum you change yourself only makes the build refuse to start.
 
 version = 1
-
-[[package]]
-name = "postgres"
-source = "path"
-path = "packages/postgres"
+package = []

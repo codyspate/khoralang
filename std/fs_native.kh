@@ -1,6 +1,6 @@
 module std::fs;
 
-import std::core::{Array, List, Option, Ptr, Region, Scope, acquire};
+import std::core::{Array, List, Option, Ptr, Region, Scope, Split, acquire};
 
 //! The file system, over ISO C.
 //!
@@ -77,6 +77,17 @@ pub effect FsRead {
   exists: (String) -> Bool,
   /// How many bytes the file holds.
   size: (String) -> Int raises IoError,
+  /// At most `size` bytes, starting at `offset`.
+  ///
+  /// Fewer near the end, and none at or past it. This is how a file larger
+  /// than memory is read, and **the position is an argument rather than a
+  /// handle** on purpose: a handle would be an opaque type nothing but this
+  /// module could construct, and an effect whose operations only the real
+  /// implementation can satisfy is not a seam, it is a wrapper. An offset is
+  /// an `Int`, so a double needs arithmetic and nothing else.
+  ///
+  /// `fold_chunks` and `fold_lines` are what most callers want.
+  read_at: (String, Int, Int) -> Array<U8> raises IoError,
   /// The names in a directory, without the directory.
   ///
   /// Names, not paths: joining is the caller's, and `join` is right here. `.`
@@ -121,6 +132,7 @@ impl FsRead {
       read: fn path => read_whole(path)!,
       exists: fn path => can_open(path),
       size: fn path => size_of_path(path)!,
+      read_at: fn (path, offset, want) => read_part(path, offset, want)!,
       read_dir: fn path => list_dir(path)!,
       is_dir: fn path => is_directory(path),
     }
@@ -173,6 +185,103 @@ pub fn append_text(path: String, text: String) -> ()
   raises IoError
 {
   writes.append(path, String::bytes(text))!
+}
+
+/// How much of a file to read at a time.
+///
+/// 64 KiB: large enough that the per-call open is amortised, small enough that
+/// a file of any size costs the same memory. Not configurable, because a
+/// caller who needs a different number can call `read_at` and have exactly the
+/// loop they want.
+pub fn chunk_size() -> Int { 65536 }
+
+/// Folds over a file in chunks, without holding it in memory.
+///
+/// The whole point of `read_at`: a file larger than memory is read a piece at
+/// a time, and the accumulator is the only thing that grows.
+///
+/// ```khora
+/// let bytes = fold_chunks(path, 0, fn (n, chunk) => n + Array::length(chunk))!;
+/// ```
+pub fn fold_chunks<A>(path: String, start: A, step: (A, Array<U8>) -> A) -> A
+  with { reads: FsRead }
+  raises IoError
+{
+  fold_from(path, 0, start, step)!
+}
+
+/// The loop behind [`fold_chunks`], carrying the offset.
+fn fold_from<A>(path: String, offset: Int, acc: A, step: (A, Array<U8>) -> A) -> A
+  with { reads: FsRead }
+  raises IoError
+{
+  let chunk = reads.read_at(path, offset, chunk_size())!;
+  let got = Array::length(chunk);
+  if got == 0 {
+    acc
+  } else {
+    fold_from(path, offset + got, step(acc, chunk), step)!
+  }
+}
+
+/// What a fold over lines carries between chunks.
+///
+/// A line does not respect a chunk boundary, so the tail of one chunk is the
+/// head of the next line and has to survive until the rest of it arrives.
+type Lines<A> = {
+  done: A,
+  partial: String,
+};
+
+/// Folds over a file's lines, without holding it in memory.
+///
+/// Lines are split on `\n` and a trailing `\r` is dropped, so a file written
+/// on Windows reads the same as one written anywhere else. The last line is
+/// delivered whether or not the file ends with a newline -- a file ending
+/// mid-line has a last line, and silently dropping it is the bug this note
+/// exists to prevent.
+pub fn fold_lines<A>(path: String, start: A, step: (A, String) -> A) -> A
+  with { reads: FsRead }
+  raises IoError
+{
+  let carried = fold_chunks(
+    path,
+    { done: start, partial: "" },
+    fn (state, chunk) => absorb(state, String::from_bytes(chunk), step),
+  )!;
+  if String::byte_length(carried.partial) == 0 {
+    carried.done
+  } else {
+    step(carried.done, carried.partial)
+  }
+}
+
+/// Takes whole lines out of `text`, keeping the remainder.
+fn absorb<A>(state: Lines<A>, text: String, step: (A, String) -> A) -> Lines<A> {
+  let joined = "${state.partial}${text}";
+  split_lines({ done: state.done, partial: joined }, step)
+}
+
+/// Peels complete lines off the front of `partial`.
+fn split_lines<A>(state: Lines<A>, step: (A, String) -> A) -> Lines<A> {
+  match String::split_once(state.partial, "\n") {
+    Option::None => state,
+    Option::Some(split) =>
+    split_lines(
+      { done: step(state.done, without_return(split.head)), partial: split.rest },
+      step,
+    ),
+  }
+}
+
+/// Drops a trailing carriage return, so `\r\n` and `\n` read alike.
+fn without_return(line: String) -> String {
+  let length = String::byte_length(line);
+  if length > 0 && String::byte(line, length - 1) == 13 {
+    String::slice(line, 0, length - 1)
+  } else {
+    line
+  }
 }
 
 /// Copies a file, replacing the destination.
@@ -332,6 +441,7 @@ extern fn khora_fs_rename(from: Ptr, to: Ptr) -> I32;
 //
 // So the seam is in `crates/khora-rt/src/fs.rs`, where Rust has already made
 // the choice correctly, and this module stays one file instead of three.
+extern fn khora_fs_read_at(path: Ptr, offset: Int, size: Int, into: Ptr) -> Int;
 extern fn khora_fs_create_dir(path: Ptr) -> I32;
 extern fn khora_fs_remove_dir(path: Ptr) -> I32;
 extern fn khora_fs_is_dir(path: Ptr) -> I32;
@@ -470,6 +580,26 @@ fn append_whole(path: String, bytes: Array<U8>) -> () raises IoError {
       let written = Array::with_data(bytes, fn (from, n) => khora_fs_write(from, 1, n, file));
       if written == count {} else { raise IoError::Failed(path) }
     }
+  }
+}
+
+/// At most `want` bytes from `offset`.
+///
+/// The buffer is sized to what is actually there, because `Array` has no
+/// slice: asking `size_of_path` first costs one more open and means the array
+/// handed back is exactly the bytes read rather than a padded one the caller
+/// has to trim.
+fn read_part(path: String, offset: Int, want: Int) -> Array<U8> raises IoError {
+  let total = size_of_path(path)!;
+  if offset >= total {
+    Array::empty()
+  } else {
+    let left = total - offset;
+    let n = if want < left { want } else { left };
+    let bytes: Array<U8> = Array::new(n, 0);
+    let got = String::with_c_string(path, fn p =>
+      Array::with_data(bytes, fn (into, len) => khora_fs_read_at(p, offset, len, into)));
+    if got == n { bytes } else { raise IoError::Failed(path) }
   }
 }
 

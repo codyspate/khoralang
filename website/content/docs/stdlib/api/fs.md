@@ -62,6 +62,7 @@ pub effect FsRead {
   read: (String) -> Array<U8> raises IoError,
   exists: (String) -> Bool,
   size: (String) -> Int raises IoError,
+  read_at: (String, Int, Int) -> Array<U8> raises IoError,
   read_dir: (String) -> List<String> raises IoError,
   is_dir: (String) -> Bool,
 }
@@ -133,6 +134,48 @@ pub fn append_text(path: String, text: String) ->() with { writes: FsWrite } rai
 ```
 
 Adds text to the end of a file, creating it when it is not there.
+
+### chunk_size
+
+```khora
+pub fn chunk_size() -> Int
+```
+
+How much of a file to read at a time.
+
+64 KiB: large enough that the per-call open is amortised, small enough that
+a file of any size costs the same memory. Not configurable, because a
+caller who needs a different number can call `read_at` and have exactly the
+loop they want.
+
+### fold_chunks
+
+```khora
+pub fn fold_chunks<A>(path: String, start: A, step: (A, Array<U8>) -> A) -> A with { reads: FsRead } raises IoError
+```
+
+Folds over a file in chunks, without holding it in memory.
+
+The whole point of `read_at`: a file larger than memory is read a piece at
+a time, and the accumulator is the only thing that grows.
+
+```khora
+let bytes = fold_chunks(path, 0, fn (n, chunk) => n + Array::length(chunk))!;
+```
+
+### fold_lines
+
+```khora
+pub fn fold_lines<A>(path: String, start: A, step: (A, String) -> A) -> A with { reads: FsRead } raises IoError
+```
+
+Folds over a file's lines, without holding it in memory.
+
+Lines are split on `\n` and a trailing `\r` is dropped, so a file written
+on Windows reads the same as one written anywhere else. The last line is
+delivered whether or not the file ends with a newline -- a file ending
+mid-line has a last line, and silently dropping it is the bug this note
+exists to prevent.
 
 ### copy
 

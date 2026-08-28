@@ -307,9 +307,17 @@ impl<'a> Checker<'a> {
 
     /// Reports a binding that has the right name and the wrong type.
     ///
-    /// Silent for anything not yet solved: `Unknown` is downstream of an error
-    /// already reported, and a variable is a type nothing has decided, so
-    /// neither is a disagreement worth a second message.
+    /// **Only when both sides are settled all the way down.** Comparing for
+    /// equality is right for two concrete capabilities -- `Clock` is not
+    /// `Ledger`, whatever else is true -- and wrong the moment either side
+    /// still holds a variable, because equality is not the question then:
+    /// `Source<Int>` does satisfy a requirement for `Source<H>`, and a
+    /// generic effect is exactly where that arises.
+    ///
+    /// So anything undecided is left to unification, which knows how to answer
+    /// it. This check exists to catch the case unification never saw at all --
+    /// a label matched by name and never compared -- and that case is two
+    /// concrete types. Errata 54.
     fn check_capability_type(
         &mut self,
         label: &str,
@@ -320,10 +328,7 @@ impl<'a> Checker<'a> {
         let Some(have) = self.locals.get(&local).cloned() else { return };
         let have = self.unifier.zonk(&have);
         let wanted = self.unifier.zonk(wanted);
-        let undecided = |t: &Type| {
-            matches!(t, Type::Unknown | Type::Var(_) | Type::Never | Type::Param(_))
-        };
-        if undecided(&have) || undecided(&wanted) || have == wanted {
+        if !settled(&have) || !settled(&wanted) || have == wanted {
             return;
         }
         self.error(
@@ -333,6 +338,8 @@ impl<'a> Checker<'a> {
     }
 
     /// The binding installed by type at `site` whose type is `wanted`.
+    ///
+    /// See [`settled`] for why this compares rather than unifies.
     ///
     /// Innermost first, so an inner `with` shadows an outer one exactly as it
     /// does for a named binding.
@@ -492,5 +499,29 @@ impl<'a> Checker<'a> {
                 held_label == label && self.unifier.unify(held_ty, ty).is_ok()
             })
         })
+    }
+}
+
+/// Whether a type is decided all the way down.
+///
+/// A type with a variable anywhere inside it is one inference has not finished
+/// with, and comparing two of those for equality answers a question nobody
+/// asked. `Source<_>` against `Source<Int>` is the shape that matters: equal
+/// they are not, compatible they are, and only unification can say so.
+fn settled(ty: &Type) -> bool {
+    match ty {
+        Type::Var(_) | Type::Unknown | Type::Never | Type::Param(_) | Type::Assoc { .. } => false,
+        Type::Adt { args, .. } | Type::Applied { args, .. } => args.iter().all(settled),
+        Type::Tuple(items) => items.iter().all(settled),
+        Type::Fn { params, ret, requires, raises } => {
+            params.iter().all(settled)
+                && settled(ret)
+                && settled(requires)
+                && settled(raises)
+        }
+        Type::Row { fields, tail } => {
+            fields.iter().all(|(_, t)| settled(t)) && tail.is_none()
+        }
+        _ => true,
     }
 }

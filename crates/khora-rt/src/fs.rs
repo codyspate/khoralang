@@ -158,6 +158,63 @@ pub unsafe extern "C" fn khora_fs_rename(from: *const u8, to: *const u8) -> i32 
     blocking(move || unsafe { rename(from as *const u8, to as *const u8) })
 }
 
+/// Reads at most `size` bytes from `offset`, into `into`.
+///
+/// Returns the number written, `0` at or past the end, and `-1` on failure.
+///
+/// **Position is an argument, so there is no handle.** A streaming read needs
+/// somewhere to keep "how far have I got", and the two places to keep it are a
+/// handle the caller holds or an offset the caller passes. A handle would be
+/// opaque -- nothing but `std::fs` could make one -- and `std::fs`'s own
+/// argument against that is written down: an effect whose operations only the
+/// real implementation can satisfy is not a seam, it is a wrapper. An offset
+/// is an `Int`, so a test double needs arithmetic and nothing else.
+///
+/// The cost is a fresh open per call, which is what a held handle would have
+/// avoided. It is not paid where it cannot be repaid: nothing in the signature
+/// says the file is opened once per call, so a cache of open handles can go
+/// behind this later without any Khora changing.
+///
+/// # Safety
+///
+/// `path` must be NUL-terminated, `into` writable for `size` bytes, and both
+/// valid for the call -- which they are, their owner being suspended.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_fs_read_at(
+    path: *const u8,
+    offset: i64,
+    size: usize,
+    into: *mut u8,
+) -> isize {
+    if into.is_null() || offset < 0 {
+        return -1;
+    }
+    let (path, into) = (path as usize, into as usize);
+    blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
+        // SAFETY: the string belongs to a fiber suspended for the whole call.
+        let Some(path) = (unsafe { path_of(path as *const u8) }) else { return -1 };
+        let Ok(mut file) = std::fs::File::open(path) else { return -1 };
+        if file.seek(SeekFrom::Start(offset as u64)).is_err() {
+            return -1;
+        }
+        // SAFETY: the destination is writable for `size` bytes and belongs to
+        // the suspended fiber, so nothing else can touch it meanwhile.
+        let buffer = unsafe { std::slice::from_raw_parts_mut(into as *mut u8, size) };
+        // `read` is allowed to return fewer bytes than asked for without being
+        // at the end, so this loops until the buffer is full or the file is.
+        let mut filled = 0;
+        while filled < size {
+            match file.read(&mut buffer[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(_) => return -1,
+            }
+        }
+        filled as isize
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Directories
 // ---------------------------------------------------------------------------

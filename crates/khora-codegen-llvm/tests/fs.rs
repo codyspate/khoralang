@@ -60,7 +60,7 @@ fn run(name: &str, main: &str) -> Ran {
 
 const HEAD: &str = "module demo::main;
 import std::core::{Array, List, Option, Result, attempt};
-import std::fs::{FsRead, FsWrite, IoError, append_text, copy, join, read_text, write_text};
+import std::fs::{FsRead, FsWrite, IoError, append_text, chunk_size, copy, fold_chunks, fold_lines, join, read_text, write_text};
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -193,6 +193,7 @@ fn main() -> Int {{
       size: fn path => 7,
       read_dir: fn path => List::Nil,
       is_dir: fn path => false,
+      read_at: fn (path, offset, want) => Array::empty(),
     }},
     writes: handler for FsWrite {{
       write: fn (path, bytes) => (),
@@ -428,6 +429,7 @@ fn main() -> Int {{
       size: fn path => 0,
       read_dir: fn path => List::Nil,
       is_dir: fn path => false,
+      read_at: fn (path, offset, want) => Array::empty(),
     }},
     writes: handler for FsWrite {{
       write: fn (path, bytes) => print(String::from_bytes(bytes)),
@@ -564,4 +566,164 @@ fn main() -> Int { 0 }
         messages.iter().any(|m| m.contains("remove")),
         "expected the missing operation to be named, got {messages:?}"
     );
+}
+
+// --- streaming -------------------------------------------------------------
+//
+// The file under test is built by doubling a string until it is larger than
+// one chunk, so the interesting case -- a line straddling a chunk boundary --
+// is the ordinary case rather than one the test has to contrive.
+
+/// Every byte, once. `fold_chunks` against `size` is the whole claim: chunks
+/// that overlapped would count too many and chunks that skipped would count
+/// too few, and only the right answer is the right answer.
+#[test]
+fn fold_chunks_sees_every_byte_exactly_once() {
+    let ran = run(
+        "fs_fold_chunks",
+        &format!(
+            "{HEAD}
+fn doubled(text: String, times: Int) -> String {{
+  if times == 0 {{ text }} else {{ doubled(\"${{text}}${{text}}\", times - 1) }}
+}}
+
+fn work() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
+  let path = \"@DIR@/big.txt\";
+  write_text(path, doubled(\"a line of text that is long enough\\n\", 12))!;
+
+  let counted = fold_chunks(path, 0, fn (n, chunk) => n + Array::length(chunk))!;
+  print(Int::to_string(counted));
+  print(Int::to_string(reads.size(path)!));
+  print(if counted > chunk_size() {{ \"spans chunks\" }} else {{ \"one chunk only\" }});
+}}
+
+fn main() -> Int {{
+  with {{ reads: FsRead::real(), writes: FsWrite::real() }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    let lines: Vec<&str> = ran.stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 3, "{}", ran.stdout);
+    assert_eq!(lines[0], lines[1], "the folded byte count must equal `size`");
+    assert_eq!(lines[2], "spans chunks", "the fixture has to be bigger than one chunk");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Lines are counted across chunk boundaries, which is the case a naive
+/// implementation gets wrong by exactly the number of chunks.
+#[test]
+fn fold_lines_counts_across_chunk_boundaries() {
+    let ran = run(
+        "fs_fold_lines",
+        &format!(
+            "{HEAD}
+fn doubled(text: String, times: Int) -> String {{
+  if times == 0 {{ text }} else {{ doubled(\"${{text}}${{text}}\", times - 1) }}
+}}
+
+fn work() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
+  let path = \"@DIR@/lines.txt\";
+  // 2^12 copies of one line, so the count is known without counting.
+  write_text(path, doubled(\"a line of text that is long enough\\n\", 12))!;
+  print(Int::to_string(fold_lines(path, 0, fn (n, line) => n + 1)!));
+}}
+
+fn main() -> Int {{
+  with {{ reads: FsRead::real(), writes: FsWrite::real() }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "4096\n", "2^12 lines, none lost at a boundary");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// A file that ends mid-line still has a last line. Dropping it is the bug
+/// this asserts against, and it is the one every buffered reader has had.
+#[test]
+fn a_file_without_a_trailing_newline_keeps_its_last_line() {
+    let ran = run(
+        "fs_last_line",
+        &format!(
+            "{HEAD}
+fn work() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
+  write_text(\"@DIR@/tail.txt\", \"a\\nb\\nc\")!;
+  print(Int::to_string(fold_lines(\"@DIR@/tail.txt\", 0, fn (n, line) => n + 1)!));
+  print(fold_lines(\"@DIR@/tail.txt\", \"\", fn (acc, line) => line)!);
+
+  // And `\\r\\n` reads the same as `\\n`.
+  write_text(\"@DIR@/crlf.txt\", \"a\\r\\nb\\r\\n\")!;
+  print(fold_lines(\"@DIR@/crlf.txt\", \"\", fn (acc, line) => \"${{acc}}[${{line}}]\")!);
+}}
+
+fn main() -> Int {{
+  with {{ reads: FsRead::real(), writes: FsWrite::real() }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "3\nc\n[a][b]\n", "three lines, the last is `c`, and no stray `\\r`");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **The reason the position is an argument.** A double for `read_at` needs
+/// arithmetic and nothing else -- no handle, no opaque type, nothing only the
+/// real implementation could make. That is the property the whole shape was
+/// chosen for, so it gets a test.
+#[test]
+fn a_double_can_stream_without_a_handle() {
+    let ran = run(
+        "fs_stream_double",
+        &format!(
+            "{HEAD}
+fn work() -> () with {{ reads: FsRead }} raises IoError {{
+  print(Int::to_string(fold_chunks(\"anywhere\", 0, fn (n, chunk) => n + Array::length(chunk))!));
+}}
+
+fn main() -> Int {{
+  with {{ reads: handler for FsRead {{
+    read: fn path => String::bytes(\"\"),
+    exists: fn path => true,
+    size: fn path => 10,
+    read_dir: fn path => List::Nil,
+    is_dir: fn path => false,
+    // Ten bytes in total, handed over four at a time. All it needs is `if`.
+    read_at: fn (path, offset, want) => {{
+      let left = 10 - offset;
+      let n = if left < 4 {{ left }} else {{ 4 }};
+      let bytes: Array<U8> = Array::new(if n < 0 {{ 0 }} else {{ n }}, 65);
+      bytes
+    }},
+  }} }} {{
+    work()! catch {{
+      IoError::NotFound(p) => print(\"missing\"),
+      IoError::Failed(p) => print(\"failed\"),
+    }};
+  }}
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "10\n", "4 + 4 + 2, from a double that knows only arithmetic");
+    assert_eq!(ran.code, Some(0));
 }
