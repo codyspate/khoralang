@@ -1790,23 +1790,16 @@ impl<A, 'r> Fiber<A, 'r> {
   fn cancel(self) -> ();
 }
 
-pub type Task;
-impl Share for Task {}
-impl Task {
-  fn spawn<'er>(body: () -> () raises 'er) -> Task;
-  fn cancel(self) -> ();
-}
-
 pub type Fibers;
 pub trait Share {}
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
-  fn adopt(self, fiber: Task) -> ();
+  fn adopt<'er>(self, fiber: Fiber<(), 'er>) -> ();
   fn wait(self) -> ();
 }
 
-pub effect Nursery { adopt: (Task) -> (), }
+pub effect Nursery { adopt: (Fiber<(), 'er>) -> (), }
 
 pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r) -> A
   with 'e
@@ -1827,7 +1820,7 @@ fn child(tag: Int) -> () { print(tag) }
 /// because a bare name is resolved by ordinary lookup and there is nothing for
 /// it to find. See the note in `docs/design/capability-passing.md`.
 fn spawn_one<'e>() -> () with { 'e | nursery: Nursery } {
-  nursery.adopt(Task::spawn(fn () => child(1)));
+  nursery.adopt(Fiber::spawn(fn () => child(1)));
 }
 
 fn main() -> Int {

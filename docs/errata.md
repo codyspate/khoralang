@@ -2101,10 +2101,15 @@ error does**: a fiber whose row is empty has no channel to be stopped on. The
 nursery could no longer cancel its children, which is the one thing a nursery is
 for.
 
-So `adopt` takes a `Task` — the same runtime fiber under a handle with no
-parameters, which keeps its `raises` row where cancellation reads it and drops
-it from the type where an effect operation needs one shape. `docs/design/
-fibers.md`.
+The first fix was a `Task` — the same runtime fiber under a handle with no
+parameters. It worked, and it was a type whose only reason to exist was one
+signature. The second and better one was to make the signature expressible:
+**an effect operation can now quantify over a row**, so `adopt` takes
+`Fiber<(), 'er>` and the child keeps the channel it is cancelled on. Eight lines
+in `check/expr.rs`, because the substitution in `record_field` has already
+replaced every row the *effect* declares — so a `'x` still standing in an
+operation's type is the operation's own, and instantiating it is what
+`instantiate` already does for a generic function. `docs/design/fibers.md`.
 
 ### What generalises
 

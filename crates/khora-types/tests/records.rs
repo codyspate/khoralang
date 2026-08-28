@@ -141,10 +141,6 @@ const MUT: &str = "module m;\n\
                    impl<A, 'er> Fiber<A, 'er> {\n\
                      fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>;\n\
                    }\n\
-                   pub type Task;\n\
-                   impl Task {\n\
-                     fn spawn<'er>(body: () -> () raises 'er) -> Task;\n\
-                   }\n\
                    pub fn nothing() -> () { }\n";
 
 #[test]
@@ -516,33 +512,5 @@ fn a_handler_may_capture_a_cell() {
          pub fn peek(c: Shared<Frozen>) -> () {{ }}\n\
          pub fn make(c: Shared<Frozen>) -> Counting {{ \
          handler for Counting {{ tick: fn () => peek(c) }} }}\n"
-    ));
-}
-
-/// **`Task::spawn` is checked the same way `Fiber::spawn` is.**
-///
-/// A `Task` is the handle a nursery adopts, and it starts a fiber — so the rule
-/// about what may cross into one has to apply, and it applies because the
-/// checker names both spellings. This is the test that catches somebody
-/// dropping one of the two.
-#[test]
-fn a_mutable_value_cannot_be_handed_to_a_task_either() {
-    assert_reports(
-        &format!(
-            "{MUT}\
-             pub fn bump(c: Counter) -> () {{ c.count = c.count + 1; }}\n\
-             pub fn f(c: Counter) -> Task {{ Task::spawn(fn () => bump(c)) }}\n"
-        ),
-        "cannot be handed to another fiber",
-    );
-}
-
-/// And something that cannot be written crosses, which is the other half.
-#[test]
-fn an_immutable_value_can_be_handed_to_a_task() {
-    assert_clean(&format!(
-        "{MUT}\
-         pub fn look(v: Frozen) -> () {{ let _ = v.total; }}\n\
-         pub fn f(v: Frozen) -> Task {{ Task::spawn(fn () => look(v)) }}\n"
     ));
 }

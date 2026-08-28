@@ -66,33 +66,24 @@ A nursery makes ownership explicit for fan-out work. The `Nursery` capability co
 
 ```khora
 pub effect Nursery {
-  adopt: (Task) -> (),
+  adopt: (Fiber<(), 'er>) -> (),
 }
 ```
 
-A `Task`, not a `Fiber<A, 'er>`. Same running fiber underneath; the handle is what differs, and what it has given up is the answer and the error *type*:
+**The answer is fixed at `()`; the row is not.** The answer is fixed because a nursery has nothing to do with a result it cannot hand back — it holds children as bare handles and waits for them. The row stays because a cancellation travels out on the same tagged return an error does, so a child whose row is empty has no channel to be stopped on, and a nursery that cannot stop its children is not a nursery.
 
-```khora
-pub type Task;
-
-impl Task {
-  pub fn spawn<'er>(body: () -> () raises 'er) -> Task;
-  pub fn cancel(self) -> ();
-}
-```
-
-So the idiom is one call inside another, with the body on the screen and no `catch` in sight:
+That means no `catch` at the adoption site. Spawn the fiber, let it raise, hand it over:
 
 ```khora
 fn children() -> ()
   with { nursery: Nursery }
 {
-  nursery.adopt(Task::spawn(fn () => first_job()));
-  nursery.adopt(Task::spawn(fn () => second_job()!));
+  nursery.adopt(Fiber::spawn(fn () => first_job()));
+  nursery.adopt(Fiber::spawn(fn () => second_job()!));
 }
 ```
 
-`Fiber::spawn` for a fiber you will `join`; `Task::spawn` for one you will `adopt`. Keep the answer by holding the handle yourself.
+`'er` is quantified per call, not per handler, so two children raising two different things are adopted by the same nursery. Keep a child's answer by holding its handle yourself and joining it instead.
 
 Run it with `nursery`:
 
@@ -116,15 +107,11 @@ pub fn nursery<A, 'ef, 'er>(
 
 A named function or a lambda, whichever reads better. `nursery(children)` and `nursery(fn () => children())` are the same thing: a lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs.
 
-### Why `Task` is its own type
+### An operation can be generic in a row, but not in a type
 
-Two reasons, and the second is the interesting one.
+`adopt` binds `'er` and cannot bind an answer type, and that asymmetry is a real property of the design rather than a hole nobody got to. A capability crosses as evidence and an error as a tag, so a handler's closure is the same machine code for every row; a type parameter decides a layout and would have to be monomorphized, and a closure has nowhere to put that. [Effects and rows](/docs/reference/effects/#an-operation-may-be-generic-in-a-row-but-not-in-a-type) has the rule.
 
-An effect operation cannot be generic. `adopt` has to name one type, and `Fiber<A, 'er>` is two parameters it cannot bind — an operation taking `Fiber<(), 'er>` is refused with "`'er` is a type the caller chooses". So `adopt` needs a handle with no parameters at all.
-
-The obvious such handle is `Fiber<(), {}>`, and it reads better than `Task` does: an empty row says "settle your failure before you hand this over", which turns a line on stderr into a compile error. It shipped that way for about a day. It is also wrong. **A cancellation travels out on the same tagged return an error does**, so a fiber whose row is empty has no channel to be stopped on — every adopted child became uncancellable, and a nursery that cannot cancel its children is not a nursery.
-
-The row has to stay at the runtime, where cancellation reads it, and go from the type, where the operation needs one shape. That split is exactly what `Task` is. The cost is that a child's failure is a runtime report rather than a compile-time one, which is the price of children that can be stopped.
+So a nursery can hold children that fail in unrelated ways, and cannot hold children that answer in unrelated ways. Which is the shape a nursery wants anyway.
 
 ## Bound work that comes from outside
 
@@ -138,7 +125,7 @@ fn serve() -> ()
 {
   loop {
     let connection = accept_next();
-    nursery.adopt(Task::spawn(fn () => handle(connection)));
+    nursery.adopt(Fiber::spawn(fn () => handle(connection)!));
   }
 }
 

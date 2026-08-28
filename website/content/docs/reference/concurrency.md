@@ -53,52 +53,32 @@ Releasing the final `Fiber` handle also waits for the child. This means a fiber 
 
 `Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. The fiber keeps running, its answer is discarded, and a later failure is silent. Without it, a bounded wait over a body with an uninterruptible tail could not be honored.
 
-## Tasks
-
-A `Task` is a running fiber under a handle that has given up its answer and its error type. It is what a nursery adopts:
-
-```khora
-pub type Task;
-
-impl Share for Task {}
-
-impl Task {
-  pub fn spawn<'er>(body: () -> () raises 'er) -> Task;
-  pub fn cancel(self) -> ();
-}
-```
-
-The thunk keeps its `raises` row; the handle does not. That split is deliberate and is the reason `Task` exists rather than `Fiber<(), {}>`:
-
-- An effect operation cannot be generic, so `adopt` must name one type with no parameters. `Fiber<(), 'er>` is refused — `'er` is a type the caller chooses.
-- A cancellation travels out on the same tagged return an error does. A fiber whose row is empty therefore has no channel to be stopped on, and a nursery whose children cannot be cancelled is not a nursery. The row stays at the runtime, where cancellation reads it, and leaves the type, where the operation needs one shape.
-
-The consequence is that a child's failure is a runtime report rather than a compile-time one. That is the price of children that can be stopped.
-
-`Task::cancel` is rarely called directly. Leaving the nursery's block cancels every child still running, which is what a nursery is.
-
 ## Nurseries
 
 A nursery owns a set of fibers. The capability installed in a nursery body is:
 
 ```khora
 pub effect Nursery {
-  adopt: (Task) -> (),
+  adopt: (Fiber<(), 'er>) -> (),
 }
 ```
 
-A body that starts children declares the requirement and adopts each handle. The body is written at the adoption site, and it may raise:
+The answer is fixed at `()` and the row is not, and each half has its own reason.
+
+The answer is fixed because a nursery has nothing to do with a result it cannot hand back: it holds children as bare handles and waits for them. A fiber whose result matters is one whose handle you keep and `join`.
+
+The row stays because a cancellation travels out on the same tagged return an error does. A child whose row is empty has no channel to be stopped on, and a nursery whose children cannot be stopped is not a nursery.
+
+`'er` is quantified per call rather than per handler, so children raising unrelated failures are adopted by one nursery. A body that starts children declares the requirement and adopts each handle; the child's body may raise, and no `catch` is needed at the adoption site:
 
 ```khora
 fn fan_out() -> ()
   with { nursery: Nursery }
 {
-  nursery.adopt(Task::spawn(fn () => first()));
-  nursery.adopt(Task::spawn(fn () => second()!));
+  nursery.adopt(Fiber::spawn(fn () => first()));
+  nursery.adopt(Fiber::spawn(fn () => second()!));
 }
 ```
-
-`adopt` takes a running fiber rather than a thunk. A handler's fields are closures and a closure cannot be generic, so an operation could not be generic in what a thunk raises; and a thunk cannot be forwarded to `spawn` at all, because a fiber's body must be written where it starts so its captures can be checked against the sharing rules.
 
 `nursery` installs that capability and waits for the children on the normal path:
 
@@ -122,6 +102,16 @@ When the body completes normally, `nursery` waits until every adopted child is f
 
 The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
 
+### An operation can be generic in a row, but not in a type
+
+`adopt` binds `'er` and cannot bind an answer type. The asymmetry follows from how each one is represented.
+
+A capability crosses as evidence and an error as a tag, so a handler's closure is the same code for every row: nothing in it depends on which failures a child can raise. A type parameter decides a layout and must be monomorphized, and a handler's fields are closures, which have nowhere to put a per-layout instantiation.
+
+### Why `adopt` takes a fiber and not a thunk
+
+A fiber's body must be written where it starts, so that what it closes over can be checked against the sharing rules. A thunk built somewhere else and forwarded to `spawn` inside the handler would move that check away from the code it is about.
+
 ## Bounded nurseries
 
 The bounded form has the same row behavior plus a concurrency limit:
@@ -141,7 +131,7 @@ fn serve() -> ()
 {
   loop {
     let request = next_request();
-    nursery.adopt(Task::spawn(fn () => handle(request)));
+    nursery.adopt(Fiber::spawn(fn () => handle(request)!));
   }
 }
 

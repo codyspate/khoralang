@@ -648,6 +648,61 @@ impl Unifier {
     }
 }
 
+/// Every row parameter standing free in `ty`, in the order first met.
+///
+/// A row parameter is spelled `'ef`, `'er`, `'e` -- the leading quote is what
+/// tells one from an ordinary type parameter, and it is the only thing that
+/// does. Order matters because the caller hands the names to `instantiate`,
+/// which pairs them positionally with fresh variables.
+pub fn free_row_params(ty: &Type) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_row_params(ty, &mut found);
+    found
+}
+
+fn collect_row_params(ty: &Type, found: &mut Vec<String>) {
+    match ty {
+        Type::Param(name) => {
+            if name.starts_with('\'') && !found.iter().any(|seen| seen == name) {
+                found.push(name.clone());
+            }
+        }
+        Type::Fn { params, ret, requires, raises } => {
+            for p in params {
+                collect_row_params(p, found);
+            }
+            collect_row_params(ret, found);
+            collect_row_params(requires, found);
+            collect_row_params(raises, found);
+        }
+        Type::Adt { args, .. } => {
+            for a in args {
+                collect_row_params(a, found);
+            }
+        }
+        Type::Applied { head, args } => {
+            collect_row_params(head, found);
+            for a in args {
+                collect_row_params(a, found);
+            }
+        }
+        Type::Tuple(items) => {
+            for i in items {
+                collect_row_params(i, found);
+            }
+        }
+        Type::Row { fields, tail } => {
+            for (_, t) in fields {
+                collect_row_params(t, found);
+            }
+            if let Some(tail) = tail {
+                collect_row_params(tail, found);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Solves `params` by matching `pattern` against `concrete`.
 ///
 /// One-way: `concrete` is fixed and only `pattern`'s parameters are assigned.

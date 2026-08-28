@@ -249,38 +249,6 @@ a region and the region waits; put it in a block and the block does. That
 is where structured concurrency comes from, and it needed nothing of its
 own. `docs/design/fibers.md`.
 
-### Task
-
-```khora
-pub type Task;
-```
-
-A fiber a nursery owns.
-
-The same running fiber a `Fiber<A, 'er>` is — the *handle* differs, and what
-it differs by is what it has given up. A `Task` has no answer to hand back
-and no error type to name, because nobody is going to join it: the nursery
-waits for it and then lets it go.
-
-**It exists because an effect operation cannot be generic.** `Nursery`'s
-`adopt` has to name one type, and `Fiber<A, 'er>` is two parameters it
-cannot bind — an operation taking `Fiber<(), 'er>` is refused with "`'er` is
-a type the caller chooses". So `adopt` needs a handle with no parameters at
-all, and this is it.
-
-**Why not `Fiber<(), {}>`.** That was tried, and it reads better than this
-does: an empty row says "settle your failure before you hand this over",
-which turns a line on stderr into a compile error. It is also wrong. A
-cancellation travels out on the same tagged return an error does, so a fiber
-whose row is empty **has no channel to be stopped on** — and a nursery whose
-children cannot be cancelled is not a nursery. The row has to stay at the
-runtime, where cancellation lives, and go from the type, where the operation
-needs one shape. `Task` is exactly that split.
-
-The cost is that a child's failure is still a runtime report rather than a
-compile-time one. That is where it was before, and it is the price of
-children that can be stopped.
-
 ### Array
 
 ```khora
@@ -892,28 +860,42 @@ over the value and the release, which is where the polymorphism belongs.
 
 ```khora
 pub effect Nursery {
-  adopt: (Task) -> (),
+  adopt: (Fiber<(), 'er>) -> (),
 }
 ```
 
 Where a spawned fiber goes.
 
-The operation takes a fiber rather than a thunk for two reasons. A handler's
-fields are closures and a closure cannot be generic, so an operation could
-not be generic in what the thunk raises. And a thunk cannot be *forwarded*
-to `Fiber::spawn` at all: a fiber's body has to be written where it starts,
-so that what it closes over can be checked against the rule that a mutable
-value may not cross. `docs/design/memory.md` §5a.
+**The operation takes a fiber rather than a thunk**, and the reason is not
+the one that used to be written here. It said an operation could not be
+generic in what a thunk raises, and that stopped being true: a row can be
+quantified per call, so `adopt: (() -> () raises 'er) -> ()` would now be
+accepted.
 
-The same reason is why it takes a `Task` and not a `Fiber<A, 'er>`. An
-operation cannot be generic in the answer or in the row, and a nursery has
-nothing to do with an answer it cannot hand back — so adopting gives one up.
-A fiber whose result matters is one you keep the handle to and `join`.
+The reason that stands is that a thunk cannot be *forwarded* to
+`Fiber::spawn` at all. A fiber's body has to be written where it starts, so
+that what it closes over can be checked against the rule that a mutable
+value may not cross — a thunk that arrived from somewhere else took its
+captures with it, and that is the one thing the check cannot see.
+`docs/design/memory.md` §5a.
+
+The answer is fixed at `()` because an operation cannot be generic in a
+*type*, and because a nursery has nothing to do with an answer it cannot
+hand back. A fiber whose result matters is one you keep the handle to and
+`join`.
+
+The **row** is not fixed, and that is worth a sentence because it is the one
+place an operation is polymorphic. `'er` here is quantified per call rather
+than per handler: two children raising two different things are both
+adopted by one nursery. It costs nothing at run time — a capability crosses
+as evidence and an error as a tag, so the handler's closure is the same code
+for every row, which is exactly why a row can be generic where a type
+cannot.
 
 So the idiom is one call inside another, and the body is on the screen:
 
 ```
-nursery.adopt(Task::spawn(fn () => analyze(id)!));
+nursery.adopt(Fiber::spawn(fn () => analyze(id)!));
 ```
 
 ## Methods
@@ -1469,40 +1451,6 @@ a second and then block on the tail.
 
 **It cancels as well as detaching**, because a detached fiber nobody asked
 to stop is a leak with a nicer name.
-
-### Task
-
-```khora
-impl Task
-```
-
-#### spawn
-
-```khora
-pub fn spawn<'er>(body: () ->() raises 'er) -> Task
-```
-
-Starts a fiber that will be handed to a nursery.
-
-`Fiber::spawn` for a fiber you intend to `join`; this one for a fiber you
-intend to `adopt`. The thunk keeps its `raises` row here even though the
-handle does not — that is the whole point, and it is what leaves the fiber
-cancellable.
-
-```khora
-nursery.adopt(Task::spawn(fn () => serve(connection)!));
-```
-
-#### cancel
-
-```khora
-pub fn cancel(self) ->()
-```
-
-Asks it to stop at its next cancellation point. Returns at once.
-
-Rarely needed directly: leaving the nursery's block cancels every child
-that is still running, which is what a nursery is.
 
 ### Array<A>
 
@@ -2333,7 +2281,7 @@ outside world.
 #### adopt
 
 ```khora
-pub fn adopt(self, fiber: Task) ->()
+pub fn adopt<'er>(self, fiber: Fiber<(), 'er>) ->()
 ```
 
 Puts a running fiber under this nursery.
@@ -2342,11 +2290,13 @@ The nursery takes the handle, so nothing else can outlive it with one.
 Adopting past a `bounded` limit waits for the oldest child to finish,
 which is what turns a ceiling into a queue.
 
-A `Task` rather than a `Fiber<A, 'er>`, because **adopting is giving up
-the answer**. A nursery holds its children as bare handles and waits for
-them; it could not hand back what they computed even if it kept it, since
-every child's answer has a type of its own — and an effect operation
-cannot be generic in one. `Task` says so in the type.
+`Fiber<(), 'er>`: **adopting gives up the answer and keeps the failure.**
+A nursery holds its children as bare handles and waits for them; it could
+not hand back what they computed even if it kept it, so the answer is
+fixed at `()`. The *row* stays, because a cancellation travels out on the
+same tagged return an error does — a child whose row is empty has no
+channel to be stopped on, and a nursery that cannot stop its children is
+not a nursery.
 
 #### wait
 

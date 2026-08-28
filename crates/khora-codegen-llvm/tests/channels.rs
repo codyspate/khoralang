@@ -84,21 +84,14 @@ impl<A, 'r> Fiber<A, 'r> {
 }
 impl<A, 'r> Share for Fiber<A, 'r> {}
 
-pub type Task;
-impl Share for Task {}
-impl Task {
-  fn spawn<'er>(body: () -> () raises 'er) -> Task;
-  fn cancel(self) -> ();
-}
-
 pub type Fibers;
 impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
-  fn adopt(self, child: Task) -> ();
+  fn adopt<'er>(self, child: Fiber<(), 'er>) -> ();
   fn wait(self) -> ();
 }
-pub effect Nursery { adopt: (Task) -> (), }
+pub effect Nursery { adopt: (Fiber<(), 'er>) -> (), }
 ";
 
 /// One fiber puts values in, another takes them out, and the order survives.
@@ -123,7 +116,7 @@ fn drain() -> () {{
   let line = Channel::bounded(2);
   let crew = Fibers::open();
   with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Task::spawn(fn () => produce(line)));
+    nursery.adopt(Fiber::spawn(fn () => produce(line)));
   }};
   let mut going = true;
   while going {{
@@ -172,7 +165,7 @@ fn main() -> Int {{
   let line = Channel::bounded(1);
   let crew = Fibers::open();
   with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Task::spawn(fn () => produce(line)));
+    nursery.adopt(Fiber::spawn(fn () => produce(line)));
   }};
   let mut total = 0;
   let mut going = true;
@@ -231,7 +224,7 @@ fn converse() -> () {{
   let requests = Channel::bounded(4);
   let crew = Fibers::open();
   with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
-    nursery.adopt(Task::spawn(fn () => serve(requests)));
+    nursery.adopt(Fiber::spawn(fn () => serve(requests)));
   }};
   print(request(requests, 21));
   print(request(requests, 5));

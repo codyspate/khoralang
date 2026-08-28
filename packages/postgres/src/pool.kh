@@ -50,7 +50,7 @@ module postgres::pool;
 //! the server to notice when the connection is reused. The lease then comes
 //! back to a connection that is ready, which is why the two belong together.
 
-import std::core::{Channel, Fibers, Option, Result, Scope, Task, acquire, scoped};
+import std::core::{Channel, Fiber, Fibers, Option, Result, Scope, acquire, scoped};
 import std::db::{Db, DbError};
 import postgres::db::{Request, Settings, over, serve};
 
@@ -93,7 +93,7 @@ pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
     // itself. Depth belongs to `idle`, where it means "how many connections",
     // and not here, where it would mean nothing.
     let requests: Channel<Request> = Channel::bounded(1);
-    Fibers::adopt(crew, Task::spawn(fn () => serve(settings, requests)));
+    Fibers::adopt(crew, Fiber::spawn(fn () => serve(settings, requests)));
     Channel::send(idle, requests);
     made = made + 1
   };

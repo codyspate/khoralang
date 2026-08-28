@@ -54,7 +54,7 @@ fn call<A, 'ef, 'er>(body: () -> A with 'ef raises 'er) -> A
 | `Clock.sleep`, `TestClock` | `std::clock::Clock` — `sleep` is an operation on the capability, so a fake clock is a handler and needs no fork-or-deadlock caveat |
 | `Queue` with `dropping`/`sliding` | [`Channel::dropping` / `Channel::sliding`](/docs/reference/sharing/#what-a-full-channel-does) |
 | `Fiber.join` | `Fiber::join`, which re-raises the child's failure with its type |
-| `Effect.forkScoped` and friends | `nursery.adopt(Task::spawn(..))` — a `Task` is the handle a nursery owns |
+| `Effect.forkScoped` | `nursery.adopt(Fiber::spawn(..))` |
 | `Ref` | `Shared<A>` |
 | `Layer` | nothing — see below |
 

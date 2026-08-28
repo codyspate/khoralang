@@ -501,7 +501,7 @@ fn the_client_and_the_server_understand_each_other() {
 
     let main = format!(
         r#"module demo::main;
-import std::core::{{Eq, Fibers, List, Map, Option, Result, SharedFn, Show, Task, attempt, print}};
+import std::core::{{Eq, Fiber, Fibers, List, Map, Option, Result, SharedFn, Show, attempt, print}};
 import std::net::http::{{
   Answer, Call, CallError, HttpClient, HttpError, Params, Request, Response, Router
 }};
@@ -545,7 +545,7 @@ fn ask(client: HttpClient, call: Call) -> () {{
 
 fn main() -> () {{
   let crew = Fibers::open();
-  Fibers::adopt(crew, Task::spawn(fn () => serve()));
+  Fibers::adopt(crew, Fiber::spawn(fn () => serve()));
 
   // The server prints "listening on ..." before it accepts, and a call that
   // arrives first would be refused — so the first call is retried rather than

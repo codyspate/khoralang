@@ -839,3 +839,85 @@ fn one_row_argument_does_not_pass_for_another() {
         "Boom",
     );
 }
+
+// --- an operation that quantifies over a row -------------------------------
+
+/// An effect whose operation names a row the effect itself does not declare.
+const CARRIER_EFFECT: &str = "module m;
+pub type Boom = | Bang;
+pub type Other = | Nope;
+
+pub type Slot<A, 'er>;
+impl<A, 'er> Slot<A, 'er> {
+  pub fn of(body: () -> A raises 'er) -> Slot<A, 'er>;
+}
+
+pub effect Crew {
+  adopt: (Slot<(), 'er>) -> (),
+}
+
+fn quiet() -> () { }
+fn risky() -> () raises Boom { raise Boom::Bang }
+fn other() -> () raises Other { raise Other::Nope }
+";
+
+/// **An operation may be generic in a row**, and each call chooses its own.
+///
+/// This is what lets `Nursery::adopt` take the fiber you forked instead of a
+/// separate handle type. An operation cannot be generic in a *type* — a
+/// handler's fields are closures, and a closure is one piece of code — but a
+/// row costs nothing to quantify: a capability crosses as evidence and an
+/// error as a tag, so the closure is the same code whatever the row is. A type
+/// parameter decides a layout and has to be monomorphized; a row does not.
+///
+/// Three adoptions, three different rows, one handler.
+#[test]
+fn an_operation_may_quantify_over_a_row() {
+    assert_clean(&format!(
+        "{CARRIER_EFFECT}\
+         pub fn go() -> () {{\n\
+           with {{ crew: handler for Crew {{ adopt: fn _s => () }} }} {{\n\
+             crew.adopt(Slot::of(fn () => quiet()));\n\
+             crew.adopt(Slot::of(fn () => risky()!));\n\
+             crew.adopt(Slot::of(fn () => other()!));\n\
+           }}\n\
+         }}\n"
+    ));
+}
+
+/// **And the handler may not look at the row it is generic in**, which is what
+/// keeps the quantifier honest.
+///
+/// The instantiation happens at the *call*; the handler stays rigid. So an
+/// operation is row-generic exactly when its handler does not care what the
+/// row is — `adopt` waits for a child and never inspects how it can fail — and
+/// a handler that tries to use `'er` is refused the way any function assuming
+/// something about a caller's type parameter is refused.
+#[test]
+fn a_handler_may_not_use_the_row_it_is_generic_in() {
+    assert_reports(
+        "module m;
+         pub effect Weird {
+           run: (() -> () raises 'er) -> (),
+         }
+         pub fn go() -> () {
+           with { w: handler for Weird { run: fn f => f()! } } { }
+         }
+        ",
+        "is a type the caller chooses",
+    );
+}
+
+/// A row the effect *does* declare is still the effect's, and is fixed once
+/// for the whole handler rather than per call.
+#[test]
+fn a_row_the_effect_declares_is_not_requantified() {
+    assert_reports(
+        &format!(
+            "{CARRIER_EFFECT}\
+             pub fn keep(_s: Slot<(), {{Other}}>) -> () {{ }}\n\
+             pub fn go() -> () {{ keep(Slot::of(fn () => risky()!)) }}\n"
+        ),
+        "Boom",
+    );
+}

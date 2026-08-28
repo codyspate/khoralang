@@ -36,7 +36,7 @@ Every language construct should have concrete Khora code here. If you know the n
 
 - [Memory and resources](./memory-and-resources/) — `Region`, `Scope`, `scoped`, `acquire`, finalizer order, and cleanup on structured exits.
 - [Sharing](./sharing/) — `Share`, `Shared`, `Changed`, `Channel`, `SharedFn`, critical-section rules, and cross-fiber values.
-- [Concurrency](./concurrency/) — `Fiber`, `Task`, `Nursery`, `nursery`, `bounded_nursery`, cancellation, suspension, and structured ownership.
+- [Concurrency](./concurrency/) — `Fiber`, `Nursery`, `nursery`, `bounded_nursery`, cancellation, suspension, and structured ownership.
 - [Traps](./traps/) — checked overflow, bounds failures, process-fatal behavior, backtraces, and exported-call containment.
 - [FFI](./ffi/) — importing with `extern fn`, exporting with `pub extern fn`, `Ptr`, borrowed buffers, and the C ABI boundary.
 
@@ -44,4 +44,4 @@ Every language construct should have concrete Khora code here. If you know the n
 
 Language syntax tells you how to express a call or type. Concrete library signatures live in the [Standard Library API reference](/docs/stdlib/api/core/), generated from the declarations shipped with the toolchain.
 
-For example, the Reference explains the syntax and semantic rules of a capability, shared value, or fiber; the stdlib reference gives the complete operations of `Random`, `Clock`, `Shared`, `Channel`, `Fiber`, `Task`, `List`, HTTP types, and other shipped APIs.
+For example, the Reference explains the syntax and semantic rules of a capability, shared value, or fiber; the stdlib reference gives the complete operations of `Random`, `Clock`, `Shared`, `Channel`, `Fiber`, `List`, HTTP types, and other shipped APIs.

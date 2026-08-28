@@ -48,7 +48,7 @@ impl<'ctx> Backend<'ctx> {
         // A fiber handle's release joins the fiber. Same reasoning as a
         // region's, and the same payoff: the paths that already release a
         // binding are the paths a child has to be waited for on.
-        if name == runtime::FIBER_TYPE || name == runtime::TASK_TYPE {
+        if name == runtime::FIBER_TYPE {
             return self.rt.fiber_release.as_global_value().as_pointer_value();
         }
 

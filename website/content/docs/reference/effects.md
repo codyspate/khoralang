@@ -41,6 +41,20 @@ pub? effect Name<TypeParams>? {
 
 An effect name is the type of handlers implementing that effect.
 
+### An operation may be generic in a row, but not in a type
+
+An operation's `raises` row may mention a row variable the operation itself binds. It is quantified per call, not per handler, so one handler serves callers whose failures are unrelated:
+
+```khora
+pub effect Nursery {
+  adopt: (Fiber<(), 'er>) -> (),
+}
+```
+
+An operation cannot introduce a *type* parameter the same way. The asymmetry follows from representation. A capability crosses as evidence and an error as a tag, so the handler's closure is the same machine code for every row — nothing in it depends on which failures the caller can raise. A type parameter decides a layout and must be monomorphized, and a handler's fields are closures, which have nowhere to put a per-layout instantiation.
+
+An effect may still take type parameters of its own on the `effect` declaration, as the general form above shows. Those are fixed when the handler is written; a row variable on an operation is not.
+
 ## Capability requirement on a function
 
 ```khora

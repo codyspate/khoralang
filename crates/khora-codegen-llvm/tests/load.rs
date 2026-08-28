@@ -40,10 +40,7 @@ fn std_source(name: &str) -> String {
 fn run(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{
-  Changed, Channel, Eq, Fibers, List, Nursery, Option, Result, Share, Shared, Show, Task,
-  bounded_nursery, print
-}};
+import std::core::{{Changed, Channel, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, bounded_nursery, print}};
 
 extern fn khora_live_count() -> Int;
 
@@ -139,7 +136,7 @@ fn crowd<'e>(gauge: Shared<Gauge>, done: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 200 {
-    nursery.adopt(Task::spawn(fn () => worker(gauge, done)));
+    nursery.adopt(Fiber::spawn(fn () => worker(gauge, done)));
     i = i + 1
   };
 }
@@ -185,7 +182,7 @@ fn crowd<'e>(done: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 64 {
-    nursery.adopt(Task::spawn(fn () => worker(done)));
+    nursery.adopt(Fiber::spawn(fn () => worker(done)));
     i = i + 1
   };
 }
@@ -243,7 +240,7 @@ fn consume(work: Channel<Int>, deepest: Shared<Int>) -> Int {
         r#"  let work: Channel<Int> = Channel::bounded(4);
   let deepest = Shared::of(0);
   let crew = Fibers::open();
-  Fibers::adopt(crew, Task::spawn(fn () => produce(work)));
+  Fibers::adopt(crew, Fiber::spawn(fn () => produce(work)));
   let seen = consume(work, deepest);
   Fibers::wait(crew);
   print("received " + Int::to_string(seen));
@@ -336,7 +333,7 @@ fn hire<'e>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 4 {
-    nursery.adopt(Task::spawn(fn () => worker(work, gauge, total)));
+    nursery.adopt(Fiber::spawn(fn () => worker(work, gauge, total)));
     i = i + 1
   };
 }
@@ -347,7 +344,7 @@ fn hire<'e>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
   let deepest = Shared::of(0);
 
   let crew = Fibers::open();
-  Fibers::adopt(crew, Task::spawn(fn () => offer(work, deepest)));
+  Fibers::adopt(crew, Fiber::spawn(fn () => offer(work, deepest)));
   bounded_nursery(4, fn () => hire(work, gauge, total));
   Fibers::wait(crew);
 
@@ -397,7 +394,7 @@ fn serve<'e>(work: Channel<Int>, total: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 3 {
-    nursery.adopt(Task::spawn(fn () => worker(work, total)));
+    nursery.adopt(Fiber::spawn(fn () => worker(work, total)));
     i = i + 1
   };
 }
@@ -413,7 +410,7 @@ fn rounds() -> () {
 fn round(total: Shared<Int>, count: Int) -> Int {
   let work: Channel<Int> = Channel::bounded(4);
   let crew = Fibers::open();
-  Fibers::adopt(crew, Task::spawn(fn () => {
+  Fibers::adopt(crew, Fiber::spawn(fn () => {
     let mut i = 0;
     while i < count {
       Channel::send(work, 1);
@@ -467,7 +464,7 @@ fn hire<'e>(work: Channel<Int>, done: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 2 {
-    nursery.adopt(Task::spawn(fn () => worker(work, done)));
+    nursery.adopt(Fiber::spawn(fn () => worker(work, done)));
     i = i + 1
   };
 }
@@ -533,9 +530,7 @@ fn a_server_under_more_load_than_it_can_serve_answers_everybody() {
 
     let main = format!(
         r#"module demo::main;
-import std::core::{{
-  Nursery, Option, Result, Share, Shared, SharedFn, Show, Task, attempt, bounded_nursery, print
-}};
+import std::core::{{Nursery, Option, Result, Share, Shared, SharedFn, Show, attempt, bounded_nursery, print}};
 import std::net::http::{{HttpError, Request, Response, Router}};
 import std::net::socket::{{invalid_handle, listen_on, start}};
 

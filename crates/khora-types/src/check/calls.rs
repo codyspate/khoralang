@@ -20,7 +20,7 @@ impl<'a> Checker<'a> {
         // only known once it has been inferred.
         let certifying = match self.body.expr(callee) {
             Expr::Path(khora_hir::Resolution::TraitItem { owner, name }) => {
-                ((owner == FIBER_TYPE || owner == TASK_TYPE) && name == "spawn")
+                (owner == FIBER_TYPE && name == "spawn")
                     || (owner == SHARED_FN_TYPE && name == "of")
             }
             _ => false,

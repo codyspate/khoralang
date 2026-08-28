@@ -23,6 +23,8 @@ pub effect Store {
 
 An operation can be pure from the caller's point of view or declare its own typed failures with `raises`.
 
+That `raises` may also be a row variable the operation binds itself, quantified per call rather than per handler — `std::core`'s `Nursery` adopts children that fail in unrelated ways through one handler. An operation cannot introduce a *type* parameter the same way; [Effects and rows](/docs/reference/effects/#an-operation-may-be-generic-in-a-row-but-not-in-a-type) says why.
+
 `Clock` here is a stand-in cut down to one operation. The real one is [`std::clock::Clock`](/docs/stdlib/api/clock/) — it lives in its own module rather than in `std::env`, and it has four operations, including `sleep`. Waiting is an operation on the capability on purpose: a fake clock is `handler for Clock { sleep: fn _ms => (), .. }` and nothing else, so a test that exercises a retry loop finishes instantly.
 
 ## Require a capability with `with`

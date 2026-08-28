@@ -15,7 +15,7 @@ This program has 1,000 jobs available but allows only 64 of them to be live chil
 ```khora
 module main;
 
-import std::core::{Nursery, Task, bounded_nursery, print};
+import std::core::{Fiber, Nursery, bounded_nursery, print};
 
 fn handle(job: Int) -> () {
   print("processing job ${Int::to_string(job)}");
@@ -30,7 +30,7 @@ fn launch_jobs() -> ()
     let job = next;
 
     nursery.adopt(
-      Task::spawn(fn () => handle(job))
+      Fiber::spawn(fn () => handle(job))
     );
 
     next = next + 1;
@@ -44,25 +44,23 @@ pub fn main() {
 
 `launch_jobs` requires a `Nursery` capability because it adopts children. `bounded_nursery(64, launch_jobs)` supplies that capability and does not return until all adopted children have finished.
 
-The important line is not the `Task::spawn`; it is the adoption:
+The important line is not the `Fiber::spawn`; it is the adoption:
 
 ```khora
-nursery.adopt(Task::spawn(fn () => handle(job)));
+nursery.adopt(Fiber::spawn(fn () => handle(job)));
 ```
 
 When 64 children are already live, the next adoption waits. The producer therefore slows down at the same boundary where it creates more work instead of filling an unbounded queue somewhere else.
 
-`adopt` takes a `Task`, not a `Fiber<A, 'er>`. Same running fiber; the handle has given up the answer and the error type, because a nursery could not hand back what a child computed even if it kept it — every child's answer has a type of its own, and an effect operation cannot be generic in one.
-
-A job that fails needs no `catch` at the adoption site. The thunk keeps its `raises` row, so this is fine:
+`adopt` takes a `Fiber<(), 'er>`. The answer is fixed at `()` — a nursery has nothing to do with a result it cannot hand back — but the failure row is free, so a job that fails needs no `catch` at the adoption site:
 
 ```khora
-nursery.adopt(Task::spawn(fn () => handle(job)!));
+nursery.adopt(Fiber::spawn(fn () => handle(job)!));
 ```
 
-That row is what leaves the child cancellable — a cancellation travels out the same way an error does — which is why the handle drops the error *type* and not the row. The cost is that a child's failure is reported at runtime rather than caught at compile time.
+That row is what leaves the child cancellable: a cancellation travels out on the same tagged return an error does, so a child with an empty row would have no channel to be stopped on. The cost is that a child's failure is reported at runtime rather than caught at compile time, and that is the price of children that can be stopped.
 
-Keep the answer by using `Fiber::spawn` instead and holding the handle: `Fiber::join` gives back what the body computed, and re-raises what it raised.
+Keep a job's answer by holding its handle instead of adopting it. `Fiber::join` gives back what the body computed, and re-raises what it raised.
 
 ## Keep unrelated limits separate
 

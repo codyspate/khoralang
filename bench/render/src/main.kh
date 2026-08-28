@@ -1,6 +1,6 @@
 module main;
 
-import std::core::{Array, Nursery, Task, bounded_nursery, print};
+import std::core::{Array, Fiber, Nursery, bounded_nursery, print};
 import std::net::http::{Response};
 import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 
@@ -30,7 +30,7 @@ fn loop_forever(server: Int) -> ()
   let taken = accept_on(server);
   if taken == invalid_handle() {
   } else {
-    nursery.adopt(Task::spawn(fn () => serve(taken)));
+    nursery.adopt(Fiber::spawn(fn () => serve(taken)));
   };
   loop_forever(server)
 }

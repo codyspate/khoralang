@@ -216,25 +216,40 @@ per fiber, and three things follow:
    type, `catch { _ => .. }` was the only arm that compiled. Carrying `'er`
    costs a second type parameter and buys back both.
 
-   What it costs elsewhere is that **a nursery adopts a `Task`**, not a
-   `Fiber`. An effect operation cannot be generic in a row any more than in a
-   type, so `Nursery::adopt` has to name one shape with no parameters at all.
+   A nursery adopts `Fiber<(), 'er>`: **the answer is fixed and the row is
+   not.** The answer is fixed because an operation cannot be generic in a type
+   — a handler's fields are closures — and because a nursery has nothing to do
+   with a result it cannot hand back.
 
-   `Fiber<(), {}>` was tried first, and it reads better: an empty row says
-   "settle your failure before you hand this over", which turns a line on
-   stderr into a compile error. It is also wrong, and the way it is wrong is
-   the most interesting thing in this section. **A cancellation travels out on
-   the same tagged return an error does** — §"What phase 5.3 builds" (2) — so a
-   fiber whose row is empty has no channel to be stopped on. Requiring an
-   adopted child to have settled its failures makes every adopted child
-   uncancellable, and a nursery that cannot cancel its children is not a
+   The row is a different matter, and getting there took two wrong answers.
+   `Fiber<(), {}>` was the first, and it reads better than anything else here:
+   an empty row says "settle your failure before you hand this over", which
+   turns a line on stderr into a compile error. It is wrong. **A cancellation
+   travels out on the same tagged return an error does** — §"What phase 5.3
+   builds" (2) — so a fiber whose row is empty has no channel to be stopped on.
+   Requiring an adopted child to have settled its failures makes every adopted
+   child uncancellable, and a nursery that cannot cancel its children is not a
    nursery. Three tests said so within a minute of the row being enforced.
 
-   `Task` splits the difference exactly where the difference is: the thunk
-   keeps its `raises` row, so the runtime still has the channel; the *handle*
-   drops it, so the operation has one shape. The child's failure stays a
-   runtime report, which is where it was, and is the price of children that can
-   be stopped.
+   The second wrong answer was a `Task`: the same runtime fiber under a handle
+   with no parameters, keeping the row where cancellation reads it and dropping
+   it from the type where the operation needs one shape. It worked, and it was
+   a type whose entire reason for existing was a signature — every one of its
+   seven uses in the tree was `adopt(Task::spawn(..))`, it was never bound to a
+   name, and it could do strictly less than a `Fiber`.
+
+   The right answer is that **an operation can be generic in a row**, which it
+   turned out the checker was eight lines from allowing. A row costs nothing to
+   quantify: a capability crosses as evidence and an error as a tag, so a
+   handler's closure is the same code whatever the row is — while a type
+   parameter decides a layout and has to be monomorphized. That asymmetry is
+   the whole of it, and it is a real property of this design rather than an
+   accident of the implementation.
+
+   The quantifier is rank-1: the *call* instantiates, the handler stays rigid.
+   So an operation is row-generic exactly when its handler does not look at the
+   row — `adopt` waits for a child and never asks how it can fail — and a
+   handler that tries to use `'er` is refused, which `rows.rs` pins.
 
    Three things share the waiting, and they are not the same wait:
 

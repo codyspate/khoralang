@@ -517,19 +517,6 @@ fn is_a_type(kind: khora_hir::ItemKind) -> bool {
 /// code-generation one.
 pub const FIBER_TYPE: &str = "Fiber";
 
-/// A fiber handed to a nursery, which is the same runtime object under a
-/// Khora type that has given up its answer and its error row.
-///
-/// **It exists because an effect operation cannot be generic.** `Nursery`'s
-/// `adopt` has to name one type, and `Fiber<A, 'er>` is two parameters it
-/// cannot bind. Naming `Fiber<(), {}>` instead looked right and was worse:
-/// a cancellation travels out on the same tagged return an error does, so a
-/// child whose row is empty has no channel to be stopped on -- and a nursery
-/// that cannot cancel its children is not a nursery. `Task` keeps the row at
-/// the *runtime*, where cancellation lives, and drops it from the type, where
-/// the operation needs one shape.
-pub const TASK_TYPE: &str = "Task";
-
 /// The certified-closure wrapper. `SharedFn::of` is where the check happens.
 pub const SHARED_FN_TYPE: &str = "SharedFn";
 
@@ -552,10 +539,9 @@ pub const SHARED_FN_TYPE: &str = "SharedFn";
 /// `Share` is a trait, so no *definition* of it can conflict — a marker trait
 /// is empty, and two declarations of it are the same three characters. It is
 /// listed as compiler-known, not as something the check below acts on.
-pub const COMPILER_KNOWN: [&str; 14] = [
+pub const COMPILER_KNOWN: [&str; 13] = [
     SHARE,
     FIBER_TYPE,
-    TASK_TYPE,
     SHARED_FN_TYPE,
     "Fibers",
     "Shared",

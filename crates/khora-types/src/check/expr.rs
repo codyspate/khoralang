@@ -710,7 +710,41 @@ impl<'a> Checker<'a> {
         let mapping = self.substitution_for(name, owner);
         let borrowed: HashMap<&str, Type> =
             mapping.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-        Some((index, unify::substitute(&declared, &borrowed)))
+        let field = unify::substitute(&declared, &borrowed);
+
+        // **An operation may quantify over a row the effect does not declare.**
+        //
+        // `adopt: (Fiber<(), 'er>) -> ()` names a row that `Nursery` has no
+        // parameter for, and the substitution above has already replaced every
+        // row the effect *does* declare -- so a `'x` still standing here is the
+        // operation's own, and belongs to each call rather than to the handler.
+        // Instantiating it is what `instantiate` does for a generic function,
+        // and for the same reason: two call sites must not constrain each
+        // other.
+        //
+        // **A row costs nothing to quantify**, which is why this is a checker
+        // change and not a monomorphization one. A capability crosses as
+        // evidence and an error as a tag, so the handler's closure is the same
+        // code for every `'er` -- unlike a *type* parameter, which decides a
+        // layout and has to be monomorphized. That asymmetry is the whole
+        // reason an operation can be row-generic when it cannot be generic.
+        //
+        // **An effect and not every record**, which is a real distinction and
+        // not caution. A record's field holds a closure somebody built, and
+        // that closure has one row, decided where it was written -- reading the
+        // field twice must not pretend otherwise. An effect's operation is a
+        // *declaration* the handler has to satisfy, and it is satisfied
+        // rigidly: `rows.rs` pins that a handler using `'er` is refused with
+        // "a type the caller chooses". So the quantifier is rank-1 -- the call
+        // instantiates, the handler does not -- and an operation is row-generic
+        // exactly when its handler never looks at the row.
+        if self.types.effects.contains(name) {
+            let rows = unify::free_row_params(&field);
+            if !rows.is_empty() {
+                return Some((index, self.unifier.instantiate(&rows, &field)));
+            }
+        }
+        Some((index, field))
     }
 
     pub(super) fn infer_match(

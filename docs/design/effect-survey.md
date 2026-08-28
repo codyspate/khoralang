@@ -146,22 +146,35 @@ That a row can be a *type* parameter at all was the surprise. `Slot<A, 'er>`
 carries one and behaves: `take` on an infallible slot needs no `!`, and a
 fallible one raises by name. Nothing in `std` had used it.
 
-**What it costs is that a nursery adopts a `Task`.** An effect operation cannot
-be generic in a row any more than in a type, so `Nursery::adopt` has to name one
-shape — verified, not assumed: `adopt: (Slot<(), 'er>) -> ()` is refused with
-*"`'er` is a type the caller chooses"*.
+**A nursery adopts `Fiber<(), 'er>`**, and getting there cost two wrong
+answers worth recording, because each was refuted by something the tree already
+knew.
 
-`Fiber<(), {}>` was the first answer and it lasted a day. An empty row says
-"settle your failure before you hand this over", which turns a line on stderr
-into a compile error — and it is wrong, because **a cancellation travels out on
-the same tagged return an error does**. A child whose row is empty cannot be
-stopped, and a nursery that cannot cancel its children is not a nursery. That
-only became visible once errata 59 made the written row actually mean something;
-until then the annotation was decoration and nothing had teeth.
+`Fiber<(), {}>` was the first. An empty row says "settle your failure before you
+hand this over", which turns a line on stderr into a compile error — and it is
+wrong, because **a cancellation travels out on the same tagged return an error
+does**. A child whose row is empty cannot be stopped, and a nursery that cannot
+cancel its children is not a nursery. That only became visible once errata 59
+made a written row actually mean something; until then the annotation was
+decoration and nothing had teeth.
 
-`Task` is the same running fiber under a handle with no parameters: the thunk
-keeps its row where the runtime reads it, the handle drops it where the
-operation needs one shape.
+A `Task` was the second: the same running fiber under a handle with no
+parameters. It worked. It was also a type whose entire reason for existing was
+one signature — every use in the tree was `adopt(Task::spawn(..))`, never bound
+to a name, strictly less capable than a `Fiber`. A concept that pays rent
+nowhere else is a tax on every reader.
+
+The answer is that **an operation can be generic in a row**, which the checker
+was eight lines from allowing. A row costs nothing to quantify: a capability
+crosses as evidence and an error as a tag, so a handler's closure is the same
+code whatever the row is — while a type parameter decides a layout and has to
+be monomorphized. Rank-1, so the call instantiates and the handler stays rigid;
+an operation is row-generic exactly when its handler does not look at the row.
+
+This is the one place the survey changed Khora rather than adding to it, and it
+is worth saying why it matters beyond the nursery: it is what keeps
+`Fiber<A, 'er>` ≈ `Fiber<A, E>` and `adopt` ≈ `forkScoped`, with no invented
+concept in between.
 
 Three things wait, and they are not the same wait:
 
