@@ -1,0 +1,358 @@
+module std::resilience;
+
+import std::core::{Eq, Option, Result, Show, attempt};
+import std::clock::{Clock};
+import std::random::{Random};
+
+//! Running something again when the first time did not work.
+//!
+//! `Schedule` says *when* and *how many times*; `retry` and `repeat` are the
+//! two ways to drive one. `docs/vision.md` names retry policies as a
+//! non-negotiable, and until `Clock.sleep` existed the checked-in version was
+//! `{ attempts: Int }` -- a counter with no clock, used by nothing.
+//!
+//! **Named for the family rather than for `retry`.** A circuit breaker, a rate
+//! limiter, a bulkhead and a hedged request are all the same subject and none
+//! of them is a retry; a module called `std::retry` could not hold them and
+//! this one can. `docs/design/effect-survey.md` §3.2.
+//!
+//! ## The two things worth knowing before reading further
+//!
+//! **A `Schedule` is a description, not a stream of instants.** It holds no
+//! clock, so it can be compared, printed, sent to another fiber, and written
+//! down in a test with no runtime at all. Elsewhere this type is a closure
+//! `(attempt, elapsed) -> Option<delay>`, which is smaller and cannot do any
+//! of that: `sharing.md` refuses a record of closures across a fiber, and a
+//! log line saying `Exponential { base: 100, .. }` is worth more than one
+//! saying nothing. Khora's constraints produce the better design here rather
+//! than a compromise.
+//!
+//! **The schedule never sleeps; the driver does.** `next_after` answers *when*
+//! the next attempt should start, as an offset from the moment the whole thing
+//! began, and the driver compares that to the clock and waits only for the
+//! difference. That is what makes a schedule pure, and it is what lets
+//! `Union`, `Intersect` and `UpTo` be real comparisons: the sooner of two
+//! delays is not the sooner of two instants once the sides have been running
+//! for different lengths of time.
+//!
+//! It also lets the two honest readings of "again later" coexist without
+//! either being a special case. `Spaced` is a **grid** -- the third attempt
+//! begins at `3 * millis` whatever the body cost, so a run that falls behind
+//! does not pile up delays. `Exponential` and `Fibonacci` are **backoffs**,
+//! measured from the failure that just happened, because "wait twice as long
+//! as last time" is a statement about the other end rather than about the
+//! calendar. Both are instants by the time the driver sees them.
+
+// ---------------------------------------------------------------------------
+// The description
+// ---------------------------------------------------------------------------
+
+/// When to run something again, and when to stop.
+///
+/// Built up from small pieces rather than offered as a list of named policies,
+/// so that the combination somebody needs and nobody anticipated is spellable:
+/// `AndThen(Times(3), Spaced(60000))` retries hard three times and then keeps
+/// trying once a minute, and no library had to think of that.
+///
+/// The two `Int`s in `Exponential` and `Jittered` are percentages rather than
+/// floats. A policy is a thing people read in a review and a config file, and
+/// `factor_pct: 200` is unambiguous where `2.0` invites the question of what
+/// it multiplies -- and `Float` in a value that derives `Eq` is a trap of its
+/// own.
+derive(Eq, Show)
+pub type Schedule =
+  /// At most `n` attempts in total, with no delay between them. `1` is "do not
+  /// retry", and is what you get from `once`.
+  | Times(n: Int)
+  /// Every `millis`, without end.
+  ///
+  /// **Anchored to the start, so it does not drift.** The third attempt begins
+  /// at `3 * millis` from the beginning whether or not the second one ran
+  /// long, which is what a caller who wrote "every thirty seconds" meant.
+  | Spaced(millis: Int)
+  /// Wait `base`, then `base * factor_pct / 100`, and so on, never past `cap`.
+  ///
+  /// The one almost every remote call wants. `Exponential(100, 200, 30000)`
+  /// waits 100ms, then 200, then 400, then 800 … capped at thirty seconds.
+  ///
+  /// **Measured from the last failure, not from the beginning** — the opposite
+  /// of `Spaced`, and the two are the two honest readings of "again later". A
+  /// grid says *when* attempts happen and a backoff says *how long to leave
+  /// the other end alone*, which is a statement about the failure rather than
+  /// about the calendar. A backoff anchored to the start would shorten every
+  /// wait by however long the failing call took, which is exactly backwards:
+  /// the call that took thirty seconds to time out is the one to be most
+  /// patient after.
+  | Exponential(base: Int, factor_pct: Int, cap: Int)
+  /// Waits of `base`, `base`, `2 * base`, `3 * base`, `5 * base` …
+  ///
+  /// Grows more gently than doubling, which suits a dependency that is briefly
+  /// busy rather than actually down. Measured from the last failure, as
+  /// `Exponential` is.
+  | Fibonacci(base: Int)
+  /// `inner`, with each delay multiplied by a percentage drawn from
+  /// `[low_pct, high_pct)`.
+  ///
+  /// **The one that stops a thundering herd.** A thousand clients that all
+  /// failed at the same instant and all back off by exactly 100ms retry at the
+  /// same instant, which is the outage again. The draw comes from `Random`, so
+  /// it is seedable and the row says so.
+  | Jittered(inner: Schedule, low_pct: Int, high_pct: Int)
+  /// Runs while *either* side would: the sooner of the two next instants, and
+  /// it stops only when both have.
+  | Union(left: Schedule, right: Schedule)
+  /// Runs while *both* sides would: the later of the two next instants, and it
+  /// stops as soon as either has.
+  ///
+  /// How a bound is written. `Intersect(Exponential(..), Times(5))` is "back
+  /// off, but no more than five attempts", and it is a real interval
+  /// intersection rather than a maximum of delays because the instants are
+  /// absolute.
+  | Intersect(left: Schedule, right: Schedule)
+  /// `first` until it stops, then `then` from there on.
+  | AndThen(first: Schedule, then: Schedule)
+  /// `inner`, but nothing after `millis` from the very beginning.
+  ///
+  /// A wall-clock budget rather than an attempt count, which is usually what a
+  /// person means by "give up after a minute".
+  | UpTo(inner: Schedule, millis: Int);
+
+impl Schedule {
+  /// Run once, and do not retry. The identity, and what you get by not asking.
+  pub fn once() -> Schedule { Schedule::Times(1) }
+
+  /// Up to `n` attempts, as fast as they can be made.
+  pub fn times(n: Int) -> Schedule { Schedule::Times(if n < 1 { 1 } else { n }) }
+
+  /// Doubling from `base`, capped at `cap`, with the usual jitter.
+  ///
+  /// **The one to reach for**, spelled out here so that the common case is not
+  /// four constructors deep. 50%–100% of the computed delay is what most
+  /// published guidance settles on: enough spread to break up a herd, not so
+  /// much that a retry arrives before the thing it is retrying could have
+  /// recovered.
+  pub fn backoff(base: Int, cap: Int) -> Schedule {
+    Schedule::Jittered(Schedule::Exponential(base, 200, cap), 50, 100)
+  }
+
+  /// When the attempt after `attempt` should start, as milliseconds from the
+  /// beginning, or `None` to stop.
+  ///
+  /// `attempt` counts the ones already made, so the first call is with `1`.
+  /// `elapsed` is what the clock says has passed since the beginning, which
+  /// only `UpTo` looks at -- a budget is the one policy that cannot be decided
+  /// from the count alone.
+  ///
+  /// **An absolute instant, not a delay.** Every combinator below depends on
+  /// it: the sooner of two delays is not the sooner of two instants once the
+  /// two sides have been running for different lengths of time, and `Spaced`
+  /// only stays drift-free because it answers `attempt * millis` rather than
+  /// `millis`.
+  pub fn next_after(self, attempt: Int, elapsed: Int) -> Option<Int>
+    with { random: Random }
+  {
+    match self {
+      Schedule::Times(n) =>
+      if attempt < n { Option::Some(elapsed) } else { Option::None },
+
+      Schedule::Spaced(millis) => Option::Some(attempt * millis),
+
+      // **`elapsed +`, and that is the difference from `Spaced`.** A grid is
+      // anchored to the beginning; a backoff is anchored to the failure that
+      // just happened -- "wait twice as long as last time" means twice as long
+      // as the last *wait*, not "start at twice the offset". Answering the
+      // delay as though it were an instant makes the second attempt land
+      // before the first one finished, and the sequence collapses.
+      Schedule::Exponential(base, factor_pct, cap) =>
+      Option::Some(elapsed + grown(base, factor_pct, cap, attempt)),
+
+      Schedule::Fibonacci(base) => Option::Some(elapsed + base * fib(attempt)),
+
+      Schedule::Jittered(inner, low_pct, high_pct) =>
+      match Schedule::next_after(inner, attempt, elapsed) {
+        Option::None => Option::None,
+        // The *delay* is jittered, not the instant: scaling an instant would
+        // scale everything that already happened.
+        Option::Some(at) => {
+          let delay = if at > elapsed { at - elapsed } else { 0 };
+          let low = if low_pct < 0 { 0 } else { low_pct };
+          let high = if high_pct <= low { low + 1 } else { high_pct };
+          Option::Some(elapsed + delay * random.in_range(low, high) / 100)
+        }
+      },
+
+      Schedule::Union(left, right) =>
+      match Schedule::next_after(left, attempt, elapsed) {
+        Option::None => Schedule::next_after(right, attempt, elapsed),
+        Option::Some(a) => match Schedule::next_after(right, attempt, elapsed) {
+          Option::None => Option::Some(a),
+          Option::Some(b) => Option::Some(if a < b { a } else { b }),
+        },
+      },
+
+      Schedule::Intersect(left, right) =>
+      match Schedule::next_after(left, attempt, elapsed) {
+        Option::None => Option::None,
+        Option::Some(a) => match Schedule::next_after(right, attempt, elapsed) {
+          Option::None => Option::None,
+          Option::Some(b) => Option::Some(if a > b { a } else { b }),
+        },
+      },
+
+      Schedule::AndThen(first, then) =>
+      match Schedule::next_after(first, attempt, elapsed) {
+        Option::Some(at) => Option::Some(at),
+        Option::None => Schedule::next_after(then, attempt, elapsed),
+      },
+
+      Schedule::UpTo(inner, millis) =>
+      match Schedule::next_after(inner, attempt, elapsed) {
+        Option::None => Option::None,
+        // The budget is checked against the instant the next attempt would
+        // *start*, not against now: an attempt that would begin after the
+        // deadline is one nobody wanted, even if there is time on the clock
+        // at the moment of asking.
+        Option::Some(at) => if at < millis { Option::Some(at) } else { Option::None },
+      },
+    }
+  }
+}
+
+/// `base * (factor_pct/100)^(attempt-1)`, capped, without leaving `Int`.
+///
+/// Multiplied out step by step rather than with a power, because `*` traps on
+/// overflow in this language and a schedule that stops the program on its
+/// twentieth attempt would be a denial of service written as a retry policy.
+/// The cap is applied every step, so the running value can never grow past it.
+fn grown(base: Int, factor_pct: Int, cap: Int, attempt: Int) -> Int {
+  let ceiling = if cap < base { base } else { cap };
+  let factor = if factor_pct < 100 { 100 } else { factor_pct };
+  let mut value = if base < 0 { 0 } else { base };
+  let mut step = 1;
+  while step < attempt {
+    value = if value > ceiling / factor * 100 { ceiling } else { value * factor / 100 };
+    if value > ceiling { value = ceiling };
+    step = step + 1
+  };
+  value
+}
+
+/// The `n`th Fibonacci number, from `fib(1) = 1`.
+fn fib(n: Int) -> Int {
+  let mut a = 1;
+  let mut b = 1;
+  let mut left = n;
+  while left > 1 {
+    let next = a + b;
+    a = b;
+    b = next;
+    left = left - 1
+  };
+  a
+}
+
+// ---------------------------------------------------------------------------
+// The drivers
+// ---------------------------------------------------------------------------
+
+/// Runs `body` until it succeeds or the schedule runs out.
+///
+/// The **last** failure is the one that comes back, because it is the one that
+/// stopped the retrying — an earlier error is a thing that was already
+/// recovered from, and reporting it would say the wrong thing about what
+/// happened.
+///
+/// The row is where the cost is written down: this needs a clock because it
+/// waits, and a source of randomness because a schedule may be jittered. A
+/// caller who wanted neither reaches for `Schedule::times`, and still declares
+/// both — which is honest, since the policy is a value and could have been a
+/// jittered one.
+pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
+  with { 'e | clock: Clock, random: Random }
+  raises E
+{
+  retry_while(schedule, fn _e => true, body)!
+}
+
+/// `retry`, for a caller that can tell a retryable failure from a permanent one.
+///
+/// **A predicate rather than a `Schedule` case**, which is why `Schedule` can
+/// stay a plain ADT: "retry while the error looks like this" is a closure over
+/// the caller's own error type, and putting one inside the description would
+/// make the description a record of closures. The two questions are separate
+/// anyway — *when to try again* is a policy somebody configures, *whether this
+/// failure is worth trying again* is knowledge about the error.
+///
+/// Retrying a 404 is the failure this exists to prevent, and it costs the
+/// caller one `fn`.
+pub fn retry_while<A, E, 'e>(
+  schedule: Schedule,
+  again: (E) -> Bool,
+  body: () -> A with 'e raises E,
+) -> A
+  with { 'e | clock: Clock, random: Random }
+  raises E
+{
+  let began = clock.monotonic_millis();
+  // The first attempt is outside the loop, so there is always an outcome to
+  // report and no fourth case to invent a value for.
+  let mut outcome = attempt(body);
+  let mut made = 1;
+  let mut going = true;
+  while going {
+    match outcome {
+      Result::Ok(_value) => going = false,
+      Result::Err(error) =>
+      if again(error) {
+        match Schedule::next_after(schedule, made, clock.monotonic_millis() - began) {
+          Option::None => going = false,
+          Option::Some(at) => {
+            // Only the difference is waited for. The schedule answered an
+            // instant, and some of it has already gone by.
+            let now = clock.monotonic_millis() - began;
+            if at > now { clock.sleep(at - now) };
+            outcome = attempt(body);
+            made = made + 1;
+          }
+        }
+      } else {
+        going = false
+      },
+    }
+  };
+  match outcome {
+    Result::Ok(value) => value,
+    Result::Err(error) => raise error,
+  }
+}
+
+/// Runs `body` on the schedule until it fails or the schedule runs out, and
+/// answers how many runs succeeded.
+///
+/// The other half of `retry`, and the one a poller is written with:
+/// `repeat(Schedule::Spaced(30000), fn () => reconcile()!)` is "every thirty
+/// seconds until something breaks". The count comes back so a caller can tell
+/// "the schedule ended" from "it never ran".
+pub fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int
+  with { 'e | clock: Clock, random: Random }
+{
+  let began = clock.monotonic_millis();
+  let mut done = 0;
+  let mut going = true;
+  while going {
+    match attempt(body) {
+      Result::Err(_error) => going = false,
+      Result::Ok(_value) => {
+        done = done + 1;
+        match Schedule::next_after(schedule, done, clock.monotonic_millis() - began) {
+          Option::None => going = false,
+          Option::Some(at) => {
+            let now = clock.monotonic_millis() - began;
+            if at > now { clock.sleep(at - now) };
+          }
+        }
+      }
+    }
+  };
+  done
+}

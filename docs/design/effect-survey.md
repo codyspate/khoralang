@@ -123,6 +123,80 @@ is read rather than guessed.
 
 This is 3.1's dependency, and the rest of 3.1 is still open.
 
+### `Schedule`, `retry`, `repeat` — `std/resilience_native.kh`
+
+`vision.md` names retry policies as a non-negotiable. What was checked in was
+`Schedule = { attempts: Int }` with a `retry` that counted and never waited,
+used by nothing — a loop, not a policy.
+
+The existing decision was right and its docstring said why: *"a plain
+description rather than a stream of instants: a schedule with no clock in it
+can be read, compared and tested."* Kept, and widened to `Times`, `Spaced`,
+`Exponential`, `Fibonacci`, `Jittered`, `Union`, `Intersect`, `AndThen`,
+`UpTo`, built up from pieces so that the combination nobody anticipated is
+spellable.
+
+**Not a closure.** Effect's `Micro` — the 5 kB subset that drops `Layer`,
+`Ref`, `Queue`, `Deferred` and `Stream`, and keeps `Schedule` — represents one
+as `(attempt, elapsed) => Option<number>`. In Khora that is a record of
+closures, which `sharing.md` refuses across a fiber and which would need
+`SharedFn` the way `Router` does. An ADT is structurally `Share`, derives `Eq`
+and `Show`, and prints in a log line. Khora's constraints produce the better
+design here rather than a compromise. The price is arbitrary predicates, which
+is why `retry_while` takes one as a separate parameter instead.
+
+**Instants, not delays**, which is what makes `Union`, `Intersect` and `UpTo`
+real comparisons — the sooner of two delays is not the sooner of two instants
+once the sides have been running for different lengths of time. It also lets
+the two honest readings of "again later" coexist as ordinary cases rather than
+special ones:
+
+- `Spaced` is a **grid**. The third attempt begins at `3 * millis` whatever the
+  body cost, so a run that falls behind does not pile up delays.
+- `Exponential` and `Fibonacci` are **backoffs**, measured from the failure
+  that just happened. "Wait twice as long as last time" is a statement about
+  the other end, not about the calendar — and a backoff anchored to the start
+  would shorten every wait by however long the failing call took, which is
+  exactly backwards: the call that took thirty seconds to time out is the one
+  to be most patient after.
+
+That distinction was a real bug on the way through, caught by a test asserting
+on the *sequence of waits* rather than on elapsed time. Which is the other
+thing worth recording: **every test in `resilience.rs` runs in microseconds and
+none of them waits**, because the fake clock records what it was asked for and
+returns. A timing assertion could not have told 100+200+400 from 300+400. That
+is `Clock.sleep`-as-a-capability paying for itself the first time it was used.
+
+### Where they went, and where `Clock` went
+
+Two moves, and the second is the one that made the first possible.
+
+**`Clock` is now `std::clock`.** It lived in `std::env` because both answer
+"what did the outside world hand this process", and that grouping cost
+something the moment anything else wanted a clock: `env_native.kh` is
+native-only for `getenv` and `argv`, so the clock was native-only too — not
+because clocks are unportable, but because of the file it was in. A Worker has
+`Date.now`. One small file with one reason to carry `_native` makes a
+`clock_wasm.kh` an afternoon rather than an untangling, and it stops
+`import std::env` being the line you write to get a clock.
+
+**`Schedule` and its drivers are `std::resilience`.** A `retry` that waits
+needs a `Clock` in its row, and `std::clock` imports `std::core`, so there is
+no version of the delaying driver that can live where the old one did.
+
+Moving the *description* along with the drivers rather than leaving it in
+`core` is the part I got wrong first time. The argument for keeping it was
+"vocabulary belongs in core" — but `Decimal`, `DateTime`, `Json` and `Row` are
+all vocabulary that crosses package boundaries and none of them is in `core`
+either. `packages/postgres` imports `std::decimal::{Decimal}` and thinks
+nothing of it. What `core` actually holds is what the *language* leans on: the
+traits `derive` writes, the types codegen has intrinsics for. Nothing in the
+compiler knows what a schedule is.
+
+**Named `resilience` rather than `retry`** because a circuit breaker, a rate
+limiter, a bulkhead and a hedged request are all the same subject and none of
+them is a retry. A module called `std::retry` could not hold them.
+
 ### `Channel::dropping`, `Channel::sliding`, `Channel::poll`
 
 Blocking is the right default — a queue nobody drains is a producer that should
@@ -157,7 +231,10 @@ in.
 
 ## 3. Proposed, and open
 
-Ordered by what should be built first. Nothing here is started.
+Ordered by what should be built first. **The numbering is not renumbered when
+an item is built** -- it is cited from commit messages, and a §3.4 that quietly
+becomes a §3.3 makes those wrong. A built item leaves a pointer and moves its
+body to section 1.
 
 ### 3.1 A fiber that returns a value
 
@@ -203,55 +280,9 @@ fiber can carry a result.
 
 ### 3.2 `Schedule` as a widened ADT
 
-`std/core.kh`'s `Schedule` is `{ attempts: Int }` and is used by nothing.
-`vision.md` names retry policies as a non-negotiable.
-
-The existing decision is right and its docstring says why: *"a plain description
-rather than a stream of instants: a schedule with no clock in it can be read,
-compared and tested."* Keep it; widen the description to `Times`, `Spaced`,
-`Exponential`, `Fibonacci`, `Jittered`, `Union`, `Intersect`, `AndThen`, `UpTo`.
-
-**Do not copy the representation.** Effect's `Micro` — the 5 kB subset that
-drops `Layer`, `Ref`, `Queue`, `Deferred` and `Stream` — keeps schedules as a
-closure. In Khora a closure-based schedule is a record of closures, which
-`sharing.md` refuses across a fiber and which would need `SharedFn` the way
-`Router` does. An ADT is structurally `Share`, derives `Eq` and `Show`, and
-prints in a log line. Khora's constraints produce the better design here.
-
-Two semantics worth copying, both non-obvious:
-
-- **A decision is an absolute interval, not a relative delay** — anchored to the
-  original start. That is what makes a fixed schedule drift-free and
-  non-piling when it falls behind, and what makes `Intersect` a real interval
-  intersection rather than a max of delays.
-- **The schedule never sleeps; the driver does.** The driver reads the clock,
-  steps the schedule, and sleeps only if the next instant is still ahead.
-
-Jitter draws from `Random`, so it is seedable, and the row says so.
-
-**One question the survey did not answer, and it is the reason this was not
-built alongside `sleep`: where does the driver live?** A `retry` that waits
-needs a `Clock` in its row, `Clock` is declared in `std::env`, and `std::env`
-imports `std::core` — so the `retry` and `repeat` that sit in `std/core.kh`
-today *cannot* grow a delay where they are. Three ways out, and this is a
-std-surface decision rather than a detail:
-
-1. **Move the drivers to a new `std::retry`**, leaving the `Schedule` ADT in
-   `core` as the pure description it already argues for. Nothing imports
-   `std::core::retry` today, so the move costs nothing but the name.
-2. **Move `Clock` into `std::core`**, with the native handler staying in
-   `env_native.kh`. Puts the clock beside the nursery and the region, which is
-   arguably where a scheduling primitive belongs — and is a bigger move.
-3. **Keep both**: `core`'s attempt-counting `retry` unchanged, and a delaying
-   one elsewhere. Two spellings of one word, which is the worst of the three.
-
-*Recommendation: (1).* It keeps `core` free of the clock, which is the property
-its `Schedule` docstring is already built around.
-
-Roughly 200 lines of `std`, no grammar and no type-system work. That `Micro`
-keeps `Schedule` while dropping `Layer`, `Ref`, `Queue`, `Deferred` and
-`Stream` is Effect's own ranking of what is irreducible, and it agrees with
-this list.
+**Built** -- see section 1. It needed one decision this section did not
+anticipate (where the driver lives, given that `core` must not import a clock),
+which is recorded there.
 
 ### 3.3 Finalizers that know how the scope ended
 

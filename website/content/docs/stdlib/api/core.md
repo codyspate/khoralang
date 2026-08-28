@@ -607,28 +607,6 @@ structured concurrency comes from — a fiber cannot escape the block that
 started it, because the binding holding the nursery ends on every path out.
 `nursery` is the ordinary way to get one. `docs/design/fibers.md`.
 
-### Schedule
-
-```khora
-pub type Schedule = {
-  attempts: Int,
-};
-```
-
-How many times to run something, and when to stop.
-
-Deliberately a plain description rather than a stream of instants: a
-schedule with no clock in it can be read, compared and tested, and the
-clock arrives later without changing what a policy *means*.
-
-#### attempts
-
-```khora
-attempts: Int
-```
-
-Attempts in total, including the first. `1` is "do not retry".
-
 ## Traits
 
 ### Eq
@@ -2230,28 +2208,6 @@ pub fn wait(self) ->()
 
 Waits for every child, oldest first, and empties the nursery.
 
-### Schedule
-
-```khora
-impl Schedule
-```
-
-#### once
-
-```khora
-pub fn once() -> Schedule
-```
-
-Run once. The identity, and the one you get by not asking.
-
-#### times
-
-```khora
-pub fn times(n: Int) -> Schedule
-```
-
-Run up to `n` times, stopping at the first success.
-
 ## Trait implementations
 
 ### Eq for Ordering
@@ -2550,26 +2506,4 @@ comes back cannot fail again.
 This is also what makes retrying possible: a policy that runs a computation
 a second time has to be able to see that the first time did not work,
 without knowing what it was doing.
-
-### retry
-
-```khora
-pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A with 'e raises E
-```
-
-Runs `body` until it succeeds or the schedule runs out.
-
-The last failure is the one that comes back, because it is the one that
-stopped the retrying — an earlier error is a thing that was already
-recovered from, and reporting it would say the wrong thing about what
-happened.
-
-### repeat
-
-```khora
-pub fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int with 'e
-```
-
-Runs `body` until it fails, or the schedule runs out. The count of runs
-that succeeded comes back.
 

@@ -2892,67 +2892,18 @@ pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
 
 // --- schedules -------------------------------------------------------------
 
-/// How many times to run something, and when to stop.
-///
-/// Deliberately a plain description rather than a stream of instants: a
-/// schedule with no clock in it can be read, compared and tested, and the
-/// clock arrives later without changing what a policy *means*.
-pub type Schedule = {
-  /// Attempts in total, including the first. `1` is "do not retry".
-  attempts: Int,
-};
-
-impl Schedule {
-  /// Run once. The identity, and the one you get by not asking.
-  pub fn once() -> Schedule { { attempts: 1 } }
-  /// Run up to `n` times, stopping at the first success.
-  pub fn times(n: Int) -> Schedule { { attempts: if n < 1 { 1 } else { n } } }
-}
-
-/// Runs `body` until it succeeds or the schedule runs out.
-///
-/// The last failure is the one that comes back, because it is the one that
-/// stopped the retrying — an earlier error is a thing that was already
-/// recovered from, and reporting it would say the wrong thing about what
-/// happened.
-pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
-  with 'e
-  raises E
-{
-  // The first attempt happens outside the loop, so there is always an outcome
-  // to report and no fourth case to invent a value for.
-  let mut left = schedule.attempts - 1;
-  let mut outcome = attempt(body);
-  while left > 0 {
-    match outcome {
-      Result::Ok(_value) => left = 0,
-      Result::Err(_error) => {
-        outcome = attempt(body);
-        left = left - 1;
-      }
-    };
-  }
-  match outcome {
-    Result::Ok(value) => value,
-    Result::Err(error) => raise error,
-  }
-}
-
-/// Runs `body` until it fails, or the schedule runs out. The count of runs
-/// that succeeded comes back.
-pub fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int
-  with 'e
-{
-  let mut left = schedule.attempts;
-  let mut done = 0;
-  while left > 0 {
-    match attempt(body) {
-      Result::Ok(_value) => {
-        done = done + 1;
-        left = left - 1;
-      }
-      Result::Err(_error) => left = 0,
-    };
-  }
-  done
-}
+// `Schedule`, `retry` and `repeat` used to be here, and are now
+// `std::resilience`.
+//
+// **Because a retry that waits needs a clock, and `core` must not have one.**
+// The versions that lived here counted attempts and slept for nothing, which
+// is not a retry policy -- it is a loop. Giving them a delay means a `Clock`
+// in the row, `Clock` is `std::clock`, and `std::clock` imports this file, so
+// there is no version of the delaying driver that can live here.
+//
+// Moving the description along with them rather than leaving it behind is the
+// other half. `Decimal`, `DateTime`, `Json` and `Row` are all vocabulary that
+// crosses package boundaries and none of them is in `core` either: what is
+// here is what the *language* leans on -- the traits `derive` writes, the
+// types codegen has intrinsics for -- and nothing in the compiler knows what a
+// schedule is. `docs/design/effect-survey.md` §3.2.

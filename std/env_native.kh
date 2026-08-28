@@ -4,34 +4,28 @@ import std::core::{Array, List, Option, Ptr};
 import std::permissions::{granted_name};
 import std::permissions::grants::{env as env_grants};
 
-//! What a program was told, and what time it is.
+//! What a program was told: its arguments and its environment.
 //!
-//! The smallest thing that separates a program from a demo: until this existed,
-//! nothing a Khora program did could depend on anything outside its own source.
-//! Every path, every port, every setting was compiled in.
+//! The smallest thing that separates a program from a demo. Until this
+//! existed, nothing a Khora program did could depend on anything outside its
+//! own source — every path, every port, every setting was compiled in.
 //!
-//! Two capabilities, and the split is the one `docs/design/permissions.md`
-//! draws. `Env` is what the process was handed — its arguments and its
-//! variables — and `Clock` is the time, which is a different kind of access and
-//! a different thing to want to deny a dependency.
+//! **`Clock` used to live here and now does not.** The two were together
+//! because both answer "what did the outside world hand this process", and
+//! that grouping cost something: this file is native-only for `getenv` and
+//! `argv`, so the clock was native-only too, for a reason that had nothing to
+//! do with clocks. `std::clock` has it, and says why.
 //!
-//! The C side is almost all ISO C: `getenv`, `strlen`, `memcpy`. There are two
-//! exceptions, and both are things C has no portable answer for. The argument
-//! vector is not returned by any C function, because it arrives through `main`
-//! and is gone — so the generated `main` hands it to the runtime, and
-//! `khora_arg` gives it back. And the clock is milliseconds, which is
-//! `GetSystemTimeAsFileTime` on Windows and `clock_gettime` on Unix; ISO C's
-//! `time` is whole seconds and there is nothing finer that is spelled the same
-//! everywhere. The runtime already knows which target it was built for.
+//! The C side is almost all ISO C: `getenv`, `strlen`, `memcpy`. The one
+//! exception is the argument vector, which no C function returns — it arrives
+//! through `main` and is gone, so the generated `main` hands it to the runtime
+//! and `khora_arg` gives it back.
 
 extern fn getenv(name: Ptr) -> Ptr;
 extern fn strlen(text: Ptr) -> Int;
 extern fn memcpy(into: Ptr, from: Ptr, count: Int) -> Ptr;
 extern fn khora_arg_count() -> Int;
 extern fn khora_arg(index: Int) -> Ptr;
-extern fn khora_unix_millis() -> Int;
-extern fn khora_monotonic_millis() -> Int;
-extern fn khora_sleep(millis: Int) -> ();
 
 // ---------------------------------------------------------------------------
 // The interface
@@ -65,59 +59,6 @@ pub effect Env {
   arguments: () -> List<String>,
 }
 
-/// What time it is.
-///
-/// Separate from `Env` because it is a different thing to deny: a library that
-/// may read a configuration variable is not thereby a library that may know
-/// how long something took, and a test that pins one usually wants to pin the
-/// other differently.
-///
-/// **Two clocks, not one, and the split is not a detail.** A wall clock says
-/// what time it is and can jump: NTP steps it, an administrator sets it, a
-/// virtual machine resumes with a stale one — and it can jump *backwards*, so
-/// subtracting two readings of it is not a duration, it is a guess. A monotonic
-/// clock cannot go backwards and is what "how long did this take" actually
-/// wants; its zero is arbitrary, so it can never be a timestamp.
-///
-/// One `millis` would therefore have been the wrong one about half the time,
-/// and the half it was wrong for would be the half that only fails in
-/// production, at 2am, when the clock is stepped an hour. Naming both makes the
-/// caller say which they meant.
-pub effect Clock {
-  /// Seconds since 1970, on the wall clock.
-  ///
-  /// Kept, because it is what a caller who wants a date wants, and it is
-  /// derived from the same source as `unix_millis` so the two can never
-  /// disagree about what second it is.
-  unix_seconds: () -> Int,
-  /// Milliseconds since 1970, on the wall clock. A timestamp, not a duration.
-  unix_millis: () -> Int,
-  /// Milliseconds on a clock that only goes forwards, counted from the first
-  /// time anything in the process asked.
-  ///
-  /// The one to subtract. Two readings are always ordered and their difference
-  /// is always a real elapsed time — which is exactly what `unix_millis`
-  /// cannot promise.
-  monotonic_millis: () -> Int,
-  /// Waits this many milliseconds before going on.
-  ///
-  /// **An operation on the clock, and that is the whole design.** Waiting is
-  /// the one thing a program does that a test cannot afford to actually do, and
-  /// putting it here means a fake clock is `handler for Clock { sleep: fn ms
-  /// => .. }` and nothing else -- no test runtime, no special mode, no rule
-  /// about which fiber may advance time. The alternative is what every
-  /// language with an ambient sleep ends up building: a parallel clock the
-  /// runtime knows about, and documentation that has to open by warning you to
-  /// fork the sleeping code or deadlock.
-  ///
-  /// The capability *is* the seam, which is the argument `Random::seeded`
-  /// already makes about the other unrepeatable input.
-  ///
-  /// Zero or less returns at once. A caller who meant "let somebody else run"
-  /// wants a safepoint, and every loop back-edge already has one.
-  sleep: (Int) -> (),
-}
-
 impl Env {
   /// The real environment.
   pub fn real() -> Env {
@@ -129,25 +70,6 @@ impl Env {
         raise EnvError::Denied(name)
       },
       arguments: fn () => collect_arguments(khora_arg_count() - 1, List::Nil),
-    }
-  }
-}
-
-impl Clock {
-  /// The real clock.
-  ///
-  /// Seconds are milliseconds divided down rather than a second call to ISO C's
-  /// `time`, so that a program reading both never sees them straddle a tick.
-  pub fn real() -> Clock {
-    handler for Clock {
-      unix_seconds: fn () => khora_unix_millis() / 1000,
-      unix_millis: fn () => khora_unix_millis(),
-      monotonic_millis: fn () => khora_monotonic_millis(),
-      // A *fiber's* sleep gives its worker back for the whole wait, so ten
-      // thousand sleeping fibers cost ten thousand entries in a heap rather
-      // than ten thousand stacks. Off a scheduler the thread blocks, which is
-      // what `main` does before anything is spawned.
-      sleep: fn millis => khora_sleep(millis),
     }
   }
 }

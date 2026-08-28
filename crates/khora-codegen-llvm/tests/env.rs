@@ -52,7 +52,8 @@ fn build(name: &str, main: &str) -> PathBuf {
 
 const HEAD: &str = "module demo::main;
 import std::core::{List, Option};
-import std::env::{Clock, Env, EnvError, variable_or};
+import std::clock::{Clock};
+import std::env::{Env, EnvError, variable_or};
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);

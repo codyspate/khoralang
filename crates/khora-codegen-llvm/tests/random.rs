@@ -1,6 +1,6 @@
 #![cfg(feature = "llvm")]
 
-//! `std::random` and the millisecond half of `std::env::Clock`, against the
+//! `std::random` and the millisecond half of `std::clock::Clock`, against the
 //! real `std`.
 //!
 //! The two landed together because they are the same shape: a thing only the
@@ -303,7 +303,7 @@ fn the_monotonic_clock_does_not_go_backwards() {
         "clock_monotonic",
         "module main;
 import std::core::{print};
-import std::env::{Clock};
+import std::clock::{Clock};
 
 fn burn(rounds: Int) -> Int {
   let mut mixed = 1;
@@ -358,7 +358,7 @@ fn a_clock_can_be_replaced_wholesale() {
         "clock_pinned",
         "module main;
 import std::core::{Shared, print};
-import std::env::{Clock};
+import std::clock::{Clock};
 
 /// Ordinary code. It has no idea whether real time exists.
 fn how_long() -> Int with { clock: Clock } {

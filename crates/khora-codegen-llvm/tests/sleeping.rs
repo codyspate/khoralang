@@ -38,7 +38,7 @@ fn std_source(name: &str) -> String {
 
 const HEAD: &str = r#"module demo::main;
 import std::core::{Eq, Fiber, Fibers, Nursery, Ord, Shared, Show, print};
-import std::env::{Clock};
+import std::clock::{Clock};
 
 /// How long the clock says a sleep of `millis` took.
 fn measured(millis: Int) -> Int with { clock: Clock } {
@@ -58,9 +58,10 @@ fn run(name: &str, body: &str) -> String {
     let db = KhoraDatabase::new();
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
-        SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
-        SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
-        SourceFile::new(&db, dir.join("env_native.kh"), std_source("env_native.kh")),
+        // The clock and nothing else. Before `Clock` had a module of its own
+        // this needed `env_native.kh`, and `permissions.kh` and `grants.kh`
+        // behind it, to compile a program that only wanted to sleep.
+        SourceFile::new(&db, dir.join("clock_native.kh"), std_source("clock_native.kh")),
         SourceFile::new(&db, dir.join("main.kh"), format!("{HEAD}\n{body}\n")),
     ];
     let root = SourceRoot::new(&db, files);

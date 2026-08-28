@@ -14,7 +14,7 @@ This session function depends on the current clock. The production program can i
 module session_test;
 
 import std::core::{assert};
-import std::env::{Clock};
+import std::clock::{Clock};
 
 pub type Session = {
   user_id: Int,

@@ -2,7 +2,8 @@ module main;
 
 import std::core::{Fibers, List, Map, Option, Result, SharedFn, Show, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
-import std::env::{Clock, Env, EnvError, variable_or};
+import std::clock::{Clock};
+import std::env::{Env, EnvError, variable_or};
 import std::json::{Json, JsonError, parse};
 import std::net::http::{HttpError, Params, Request, Response, Router};
 import std::trace::{Tracer, around_result, text};

@@ -1,7 +1,8 @@
 module main;
 
 import std::core::{Changed, Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
-import std::env::{Clock, Env, EnvError, variable_or};
+import std::clock::{Clock};
+import std::env::{Env, EnvError, variable_or};
 import std::fs::{FsRead, FsWrite, IoError, read_text, write_text};
 import std::json::{Json, parse};
 import std::net::http::{HttpError, Params, Request, Response, Router};
