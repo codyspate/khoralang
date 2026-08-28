@@ -139,3 +139,85 @@ fn a_root_with_no_members_is_not_a_workspace_to_fan_out_over() {
     let (_, output) = run(&root, &["check", "."]);
     assert!(!output.contains("member(s)"), "an empty workspace fanned out:\n{output}");
 }
+
+// --- the one lockfile ------------------------------------------------------
+
+/// A member that depends on another by path, so a resolution has something to
+/// record and a lockfile exists at all.
+fn member_needing(root: &Path, name: &str, needs: &str) {
+    let directory = root.join("packages").join(name);
+    std::fs::create_dir_all(directory.join("src")).expect("a member directory");
+    std::fs::write(
+        directory.join("khora.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [dependencies]\n{needs} = {{ path = \"../{needs}\" }}\n"
+        ),
+    )
+    .expect("writing a member manifest");
+    std::fs::write(directory.join("src").join("lib.kh"), good(name))
+        .expect("writing a member source file");
+}
+
+/// **A command aimed at a directory that is not a member must not empty the
+/// workspace's lockfile.**
+///
+/// `resolve` took `manifest_path.parent()` as the workspace directory, and for
+/// a manifest named without a directory that is `Some("")` rather than `None`
+/// -- so the `unwrap_or(".")` beside it never ran. `""` does not canonicalize,
+/// `same` fell back to comparing text, the manifest was judged not to be its
+/// own workspace root, and the member seeding was skipped. What got written
+/// was one manifest's dependencies, which for a workspace root is none.
+///
+/// In this repository `khora check std` discarded `postgres`. Against a git
+/// dependency it would have discarded a pinned revision. Errata 57.
+#[test]
+fn a_command_outside_the_members_keeps_the_lockfile() {
+    let root = workspace("lock_kept");
+    member(&root, "beta", &good("beta"));
+    member_needing(&root, "alpha", "beta");
+
+    // A directory inside the workspace root that is *not* a member: it has no
+    // manifest of its own, so the nearest one is the root's.
+    let outside = root.join("notes");
+    std::fs::create_dir_all(&outside).expect("a directory");
+    std::fs::write(outside.join("stray.kh"), good("notes")).expect("a stray source");
+
+    let (ok, output) = run(&root, &["check", "."]);
+    assert!(ok, "{output}");
+    let after_root = std::fs::read_to_string(root.join("khora.lock")).expect("a lockfile");
+    assert!(after_root.contains("beta"), "the fixture has to lock something: {after_root}");
+
+    let (ok, output) = run(&root, &["check", "notes"]);
+    assert!(ok, "{output}");
+    let after_stray = std::fs::read_to_string(root.join("khora.lock")).expect("a lockfile");
+
+    assert_eq!(
+        after_root, after_stray,
+        "checking a directory that is not a member rewrote the workspace lockfile"
+    );
+}
+
+/// And the lockfile a member's build writes is the one at the root -- which is
+/// what "one lock, one version" means when two commands disagree about which
+/// directory they were pointed at.
+#[test]
+fn a_member_and_the_root_agree_about_the_lockfile() {
+    let root = workspace("lock_agree");
+    member(&root, "beta", &good("beta"));
+    member_needing(&root, "alpha", "beta");
+
+    let (ok, output) = run(&root, &["check", "."]);
+    assert!(ok, "{output}");
+    let from_root = std::fs::read_to_string(root.join("khora.lock")).expect("a lockfile");
+
+    let (ok, output) = run(&root, &["check", "packages/alpha"]);
+    assert!(ok, "{output}");
+    let from_member = std::fs::read_to_string(root.join("khora.lock")).expect("a lockfile");
+
+    assert_eq!(from_root, from_member, "one workspace, one lockfile");
+    assert!(
+        !root.join("packages").join("alpha").join("khora.lock").is_file(),
+        "a member must not grow a lockfile of its own"
+    );
+}

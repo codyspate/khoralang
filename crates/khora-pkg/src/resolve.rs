@@ -96,7 +96,26 @@ impl Resolution {
 /// `locked` refuses to change the lockfile, which is what CI wants: a build
 /// that would need a new resolution is a build whose lockfile was not committed.
 pub fn resolve(manifest_path: &Path, store: &Store, locked: bool) -> Result<Resolution> {
-    let root_dir = manifest_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    // **An empty parent is the working directory, not nowhere.**
+    // `Path::new("khora.toml").parent()` is `Some("")` rather than `None`, so
+    // the `unwrap_or` below it never fired and `root_dir` became `""`. That is
+    // not a directory: `"".canonicalize()` fails, `same` falls back to
+    // comparing the text, the workspace filter decides this manifest is not
+    // its own workspace root -- and the member seeding below is skipped.
+    //
+    // The resolution is then whatever this one manifest needs, which for a
+    // workspace root is nothing, and it is written over the lockfile that had
+    // the whole workspace in it. `khora check std` emptied this repository's
+    // `khora.lock`, discarding `postgres`; against a git dependency it would
+    // have discarded a pinned revision. Errata 57.
+    //
+    // `workspace.rs`'s `absolute` has a long comment about the same trap one
+    // file over, which is the argument for fixing it here rather than adding a
+    // third place that has to remember.
+    let root_dir = match manifest_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
 
     // The workspace this manifest belongs to, if it belongs to one. Being
     // *under* a root is not being *in* it, which is the same rule inheritance

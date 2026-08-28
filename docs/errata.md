@@ -1844,3 +1844,90 @@ expensive kind of bug to own. It cannot be reproduced by re-running, it looks
 like a platform difference in the compiler, and the platform it fails on is the
 one nobody develops on. The fix for that class is not more testing on Linux;
 it is not choosing anything by sort order that has a meaning available.
+
+## 57. `khora check std` emptied the lockfile
+
+Noticed as a dirty working tree that would not stay clean, and traced to a
+command that has nothing to do with dependencies:
+
+```
+$ tail -4 khora.lock
+[[package]]
+name = "postgres"
+source = "path"
+path = "packages/postgres"
+
+$ khora check std
+$ tail -4 khora.lock
+version = 1
+package = []
+```
+
+`packages/postgres` is a path dependency of `examples/ledger_service`. It was
+discarded by a command aimed at a directory that neither declares it nor
+depends on anything at all.
+
+### `Some("")` is not `None`
+
+```rust
+let root_dir = manifest_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+```
+
+`Path::new("khora.toml").parent()` is **`Some("")`**, not `None`. The
+`unwrap_or` never ran, and `root_dir` became the empty path.
+
+Everything downstream then behaved correctly on a value that means nothing.
+`"".canonicalize()` fails, so `same` falls back to comparing the text, so
+`""` is not the workspace root, so the workspace is `None` -- and the member
+seeding guarded by it is skipped:
+
+```rust
+// Every member seeds the queue, so the lock describes the workspace rather
+// than whichever member happened to be built.
+if let Some(found) = &workspace { .. }
+```
+
+What is left is one manifest's own dependencies, and a workspace root has
+none. That empty resolution is then written over the lockfile, because the
+code that writes it is asking the right question -- has the resolution changed
+-- about an answer computed from nothing.
+
+`khora check .` was unaffected, because a workspace root fans out over its
+members and each member *is* a member, so the filter accepts and the seeding
+runs. Only a path that is inside the workspace directory without being a
+member of it -- `std`, `docs`, anything -- took the broken route.
+
+### Why it mattered more than a dirty file
+
+`postgres` is a path dependency and re-resolving it costs a directory read. A
+git dependency is pinned in the lockfile by revision and checksum, and that is
+the whole point of the file: discarding the entry discards the pin, and the
+next resolution is free to take a different commit. The failure would have
+been a build that silently used a different dependency, discovered later and
+somewhere else.
+
+It also reached `main`: the commit before this one shipped
+`package = []`, because `git add -A` ran between a `khora check std` and the
+baseline that put it back.
+
+### What generalises
+
+**`parent()` has three answers, not two**, and the third one is shaped like
+success. `Some("")` passes every check that asks whether a value is present
+and fails every check that asks whether it is a directory, which is why it
+survived to the far end of the function before doing damage.
+
+`workspace.rs` already carries a long comment about the same trap, one file
+over:
+
+> `examples/ledger_service` has two parents as a relative path -- `examples`,
+> then `""` -- and the walk stops there.
+
+Two places have now been bitten by the empty path, which is the argument for
+fixing it at the point where a path is turned into a directory rather than
+adding a third place that has to remember.
+
+The regression test asserts what a lockfile is *for*: that two commands
+pointed at different directories in one workspace leave the same file behind.
+It fails against the old code with "checking a directory that is not a member
+rewrote the workspace lockfile", which is checked rather than assumed.
