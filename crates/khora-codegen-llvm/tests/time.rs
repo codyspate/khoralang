@@ -28,6 +28,34 @@ fn run(name: &str, body: &str) -> String {
 import std::core::{{Eq, Option, Ord, Show, print}};
 import std::time::{{Date, DateTime, Offset, Time, days_in_month, is_leap}};
 
+fn shown_time(value: Option<Time>) -> String {{
+  match value {{
+    Option::Some(t) => t.show(),
+    Option::None => "None",
+  }}
+}}
+
+fn shown_when(value: Option<DateTime>) -> String {{
+  match value {{
+    Option::Some(w) => w.show(),
+    Option::None => "None",
+  }}
+}}
+
+fn shown_offset(value: Option<Offset>) -> String {{
+  match value {{
+    Option::Some(o) => o.show(),
+    Option::None => "None",
+  }}
+}}
+
+fn shown_int(value: Option<Int>) -> String {{
+  match value {{
+    Option::Some(n) => Int::to_string(n),
+    Option::None => "None",
+  }}
+}}
+
 fn shown_date(value: Option<Date>) -> String {{
   match value {{
     Option::Some(date) => date.show(),
@@ -200,4 +228,118 @@ fn dates_order_by_the_calendar() {
   }"#,
     );
     assert_eq!(out, "before\nequal\n1\n");
+}
+
+// --- reading a date back in ------------------------------------------------
+
+/// **What `Show` prints, read back.** A type that can be written and not read
+/// is one-way in the direction that matters least: a timestamp comes *from*
+/// somewhere else far more often than it goes to one.
+#[test]
+fn what_show_prints_parses() {
+    let out = run(
+        "time_roundtrip",
+        r#"  print(shown_date(Date::of_string("2026-08-25")));
+  print(shown_time(Time::of_string("09:05:00.123")));
+  print(shown_when(DateTime::of_string("2026-08-25T09:05:00.123")));
+  print(shown_offset(Offset::of_string("+05:30")));
+  print(shown_offset(Offset::of_string("-05:00")));"#,
+    );
+    assert_eq!(
+        out,
+        "2026-08-25\n09:05:00.123\n2026-08-25T09:05:00.123\n+05:30\n-05:00\n"
+    );
+}
+
+/// **Strict about the format, and the day still has to exist.**
+///
+/// The line is ISO 8601's extended form: fixed widths, hyphens and colons.
+/// Everything else — a space where the `T` goes, unpadded fields, a US-style
+/// date — is `None`, and a package can be lenient later. Drawn tight on
+/// purpose: accepting more is a compatible change and accepting less never is.
+#[test]
+fn anything_that_is_not_iso_is_refused() {
+    let out = run(
+        "time_strict",
+        r#"  print(shown_date(Date::of_string("2026-02-30")));
+  print(shown_date(Date::of_string("2026-8-25")));
+  print(shown_date(Date::of_string("08/25/2026")));
+  print(shown_date(Date::of_string("2026-08-25 ")));
+  print(shown_when(DateTime::of_string("2026-08-25 09:05:00")));
+  print(shown_time(Time::of_string("9:05:00")));
+  print(shown_time(Time::of_string("25:00:00")));
+  print(shown_offset(Offset::of_string("+0530")));"#,
+    );
+    assert_eq!(out, "None\nNone\nNone\nNone\nNone\nNone\nNone\nNone\n");
+}
+
+/// **The fraction is optional, and it is a fraction.**
+///
+/// `.1` is a hundred milliseconds, not one — which is what a decimal point
+/// means and the mistake a right-to-left reader makes. Four digits is refused
+/// rather than rounded, because this type holds milliseconds and silently
+/// dropping the microseconds off somebody's timestamp is a loss nothing later
+/// could notice.
+#[test]
+fn a_fractional_second_is_read_as_a_fraction() {
+    let out = run(
+        "time_fraction",
+        r#"  print(shown_time(Time::of_string("09:05:00")));
+  print(shown_time(Time::of_string("09:05:00.1")));
+  print(shown_time(Time::of_string("09:05:00.12")));
+  print(shown_time(Time::of_string("09:05:00.123")));
+  print(shown_time(Time::of_string("09:05:00.1234")));"#,
+    );
+    assert_eq!(
+        out,
+        "09:05:00.000\n09:05:00.100\n09:05:00.120\n09:05:00.123\nNone\n"
+    );
+}
+
+/// **A zone on a zoneless type is refused, not ignored.**
+///
+/// `DateTime` has no zone and says so. Dropping a trailing `Z` would turn a
+/// moment into a different moment, which is the one mistake a date library
+/// must not make quietly — so the zoned form goes to `instant_of_string`,
+/// which answers with the instant rather than a wall clock.
+#[test]
+fn a_zone_goes_to_the_function_that_has_somewhere_to_put_it() {
+    let out = run(
+        "time_zoned",
+        r#"  print(shown_when(DateTime::of_string("2026-08-25T09:05:00Z")));
+  print(shown_int(DateTime::instant_of_string("1970-01-01T00:00:00Z")));
+  print(shown_int(DateTime::instant_of_string("2026-08-25T09:05:00.123Z")));
+  // Five and a half hours east, so the same wall clock is an earlier instant.
+  print(shown_int(DateTime::instant_of_string("2026-08-25T09:05:00+05:30")));
+  print(shown_int(DateTime::instant_of_string("2026-08-25T09:05:00-05:00")));
+  // No zone names no instant.
+  print(shown_int(DateTime::instant_of_string("2026-08-25T09:05:00")));"#,
+    );
+    assert_eq!(
+        out,
+        "None\n0\n1787648700123\n1787628900000\n1787666700000\nNone\n"
+    );
+}
+
+/// **Seconds beside milliseconds, because a Unix timestamp is usually
+/// seconds** — `extract(epoch)`, a JSON field, a log line.
+///
+/// And floored, so a moment before 1970 rounds towards the past: `-1`
+/// millisecond is second `-1`, the second that contains it. Truncating
+/// division answers `0`, which is a whole second on the wrong side of the
+/// epoch — the same bug `of_unix_millis` already exists to not have.
+#[test]
+fn epoch_seconds_floor_the_way_epoch_millis_do() {
+    let out = run(
+        "time_epoch_seconds",
+        r#"  print(Int::to_string(DateTime::to_unix_seconds(DateTime::of_unix_seconds(1756112700))));
+  print(DateTime::of_unix_seconds(0).show());
+  print(Int::to_string(DateTime::to_unix_seconds(DateTime::of_unix_millis(0 - 1))));
+  print(Int::to_string(DateTime::to_unix_seconds(DateTime::of_unix_millis(0 - 1000))));
+  print(Int::to_string(DateTime::to_unix_seconds(DateTime::of_unix_millis(999))));"#,
+    );
+    assert_eq!(
+        out,
+        "1756112700\n1970-01-01T00:00:00.000\n-1\n-1\n0\n"
+    );
 }

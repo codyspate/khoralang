@@ -120,6 +120,28 @@ impl Date {
     }
   }
 
+  /// A date written `2026-08-25`, or `None`.
+  ///
+  /// Exactly four digits, two, two, hyphen-separated, and the day has to exist
+  /// -- `2026-02-30` is `None` for the same reason `Date::of` refuses it. What
+  /// `Show` prints, read back.
+  pub fn of_string(text: String) -> Option<Date> {
+    if String::byte_length(text) != 10 || !separated(text, 4, 45) || !separated(text, 7, 45) {
+      Option::None
+    } else {
+      match digits(text, 0, 4) {
+        Option::None => Option::None,
+        Option::Some(year) => match digits(text, 5, 2) {
+          Option::None => Option::None,
+          Option::Some(month) => match digits(text, 8, 2) {
+            Option::None => Option::None,
+            Option::Some(day) => Date::of(year, month, day),
+          },
+        },
+      }
+    }
+  }
+
   /// Days since the first of January 1970, which may be negative.
   ///
   /// Howard Hinnant's `days_from_civil`, which is the algorithm every modern
@@ -188,6 +210,42 @@ impl Time {
     }
   }
 
+  /// A time written `09:05:00` or `09:05:00.123`, or `None`.
+  ///
+  /// **The fraction is optional and everything else is not**, which is ISO
+  /// 8601's own rule rather than a leniency: `HH:MM:SS` is a complete time and
+  /// the fraction is an extension of it. `Show` always prints three digits, so
+  /// what it writes reads back; what arrives from somewhere else usually has
+  /// no fraction at all.
+  ///
+  /// More than three fractional digits are refused rather than rounded. This
+  /// type holds milliseconds, and a library that silently dropped the
+  /// microseconds off a timestamp would be losing data in a way nothing later
+  /// could notice.
+  pub fn of_string(text: String) -> Option<Time> {
+    let length = String::byte_length(text);
+    let fractional = if length == 8 { 0 } else { length - 9 };
+    if (length != 8 && (length < 10 || length > 12))
+    || !separated(text, 2, 58) || !separated(text, 5, 58)
+    || (length != 8 && !separated(text, 8, 46)) {
+      Option::None
+    } else {
+      match digits(text, 0, 2) {
+        Option::None => Option::None,
+        Option::Some(hour) => match digits(text, 3, 2) {
+          Option::None => Option::None,
+          Option::Some(minute) => match digits(text, 6, 2) {
+            Option::None => Option::None,
+            Option::Some(second) => match milliseconds(text, fractional) {
+              Option::None => Option::None,
+              Option::Some(milli) => Time::of(hour, minute, second, milli),
+            },
+          },
+        },
+      }
+    }
+  }
+
   /// Midnight.
   pub fn midnight() -> Time { { hour: 0, minute: 0, second: 0, milli: 0 } }
 
@@ -213,6 +271,38 @@ impl Offset {
 
   /// `minutes` east of UTC. Positive is ahead, negative is behind.
   pub fn of_minutes(minutes: Int) -> Offset { { minutes: minutes } }
+
+  /// An offset written `+05:30`, `-05:00` or `Z`, or `None`.
+  ///
+  /// **`Z` is accepted although `Show` prints `+00:00`.** It is not a second
+  /// format -- it is ISO 8601's own spelling of this exact value, and it is
+  /// what every wire format in the world writes. Refusing it would mean a
+  /// parser that cannot read the timestamps it is for.
+  pub fn of_string(text: String) -> Option<Offset> {
+    if text.eq("Z") {
+      Option::Some(Offset::utc())
+    } else {
+      let sign = if String::starts_with(text, "-") { 0 - 1 } else { 1 };
+      if String::byte_length(text) != 6
+      || (!String::starts_with(text, "+") && !String::starts_with(text, "-"))
+      || !separated(text, 3, 58) {
+        Option::None
+      } else {
+        match digits(text, 1, 2) {
+          Option::None => Option::None,
+          Option::Some(hours) => match digits(text, 4, 2) {
+            Option::None => Option::None,
+            Option::Some(minutes) =>
+            if hours > 23 || minutes > 59 {
+              Option::None
+            } else {
+              Option::Some(Offset::of_minutes(sign * (hours * 60 + minutes)))
+            },
+          },
+        }
+      }
+    }
+  }
 }
 
 impl DateTime {
@@ -232,6 +322,92 @@ impl DateTime {
   /// Milliseconds since 1970, reading `self` as UTC.
   pub fn to_unix_millis(self) -> Int {
     Date::to_days(self.date) * 86400000 + Time::to_millis(self.time)
+  }
+
+  /// A timestamp written `2026-08-25T09:05:00` or `...T09:05:00.123`, or
+  /// `None`.
+  ///
+  /// **No zone, because this type has none.** A trailing `Z` or `+05:30` is
+  /// refused here rather than ignored -- silently dropping it would turn a
+  /// moment into a different moment, which is the one mistake a date library
+  /// must not make quietly. `DateTime::instant_of_string` reads the zoned form
+  /// and gives back the instant it names.
+  pub fn of_string(text: String) -> Option<DateTime> {
+    match String::index_of(text, "T") {
+      Option::None => Option::None,
+      Option::Some(at) =>
+      match Date::of_string(String::slice(text, 0, at)) {
+        Option::None => Option::None,
+        Option::Some(date) =>
+        match Time::of_string(String::slice(text, at + 1, String::byte_length(text))) {
+          Option::None => Option::None,
+          Option::Some(time) => Option::Some({ date: date, time: time }),
+        },
+      },
+    }
+  }
+
+  /// The instant a *zoned* timestamp names, as milliseconds since 1970.
+  ///
+  /// `2026-08-25T09:05:00Z`, `2026-08-25T09:05:00.123+05:30`. The zone is
+  /// required: this is the function for reading what somebody else wrote, and
+  /// a timestamp with no zone does not name an instant. Use `of_string` for
+  /// that, which gives back the wall clock it actually is.
+  ///
+  /// An `Int` rather than a `DateTime` because that is what the moment *is* --
+  /// converting it back to a wall clock needs a zone, and the caller has one
+  /// in mind or they would not be asking.
+  pub fn instant_of_string(text: String) -> Option<Int> {
+    let length = String::byte_length(text);
+    let split =
+    if String::ends_with(text, "Z") {
+      Option::Some(length - 1)
+    } else {
+      // The sign of an offset, which is the only `+` or `-` that can appear
+      // after the date -- and the date's own hyphens are all before the `T`.
+      match String::index_of(text, "T") {
+        Option::None => Option::None,
+        Option::Some(t) => {
+          let plus = String::find(text, "+", t);
+          let minus = String::find(text, "-", t);
+          let at = if plus >= 0 { plus } else { minus };
+          if at < 0 { Option::None } else { Option::Some(at) }
+        }
+      }
+    };
+    match split {
+      Option::None => Option::None,
+      Option::Some(at) =>
+      match DateTime::of_string(String::slice(text, 0, at)) {
+        Option::None => Option::None,
+        Option::Some(when) =>
+        match Offset::of_string(String::slice(text, at, length)) {
+          Option::None => Option::None,
+          Option::Some(offset) => Option::Some(DateTime::from_offset(when, offset)),
+        },
+      },
+    }
+  }
+
+  /// The moment `seconds` after 1970, as UTC says it.
+  ///
+  /// Beside the millisecond pair because **a Unix timestamp is usually
+  /// seconds**: that is what `extract(epoch)` gives, what a JSON API sends,
+  /// and what a log line carries. Multiplying by a thousand at every call site
+  /// is the kind of thing that is right until once it is not.
+  pub fn of_unix_seconds(seconds: Int) -> DateTime {
+    DateTime::of_unix_millis(seconds * 1000)
+  }
+
+  /// Seconds since 1970, reading `self` as UTC.
+  ///
+  /// **Floored, so a moment before 1970 rounds towards the past** and not
+  /// towards zero. `-1` millisecond is second `-1`, which is the second that
+  /// contains it, and truncating division would answer `0` -- a whole second
+  /// on the wrong side of the epoch.
+  pub fn to_unix_seconds(self) -> Int {
+    let millis = DateTime::to_unix_millis(self);
+    if millis >= 0 { millis / 1000 } else { (millis - 999) / 1000 }
   }
 
   /// The same moment, seen from `offset`.
@@ -312,6 +488,53 @@ impl Show for Offset {
     let sign = if self.minutes < 0 { "-" } else { "+" };
     let magnitude = if self.minutes < 0 { 0 - self.minutes } else { self.minutes };
     sign + padded(magnitude / 60, 2) + ":" + padded(magnitude % 60, 2)
+  }
+}
+
+/// The `width` digits at `at`, or `None` if any of them is not a digit.
+///
+/// Written here rather than reached for through `Int::of_string`, which
+/// accepts a leading `-` and a string of any length: a fixed-width field that
+/// silently took `-1` or `7` where two digits belong is how a parser stops
+/// being strict without anybody deciding it should.
+fn digits(text: String, at: Int, width: Int) -> Option<Int> {
+  let mut i = 0;
+  let mut total = 0;
+  let mut ok = true;
+  while i < width {
+    let byte = U8::to_int(String::byte(text, at + i));
+    if byte < 48 || byte > 57 {
+      ok = false;
+      i = width;
+    } else {
+      total = total * 10 + (byte - 48);
+      i = i + 1;
+    }
+  };
+  if ok { Option::Some(total) } else { Option::None }
+}
+
+/// Whether the byte at `at` is `expected`.
+fn separated(text: String, at: Int, expected: Int) -> Bool {
+  at < String::byte_length(text) && U8::to_int(String::byte(text, at)) == expected
+}
+
+/// The fraction after the `.`, as whole milliseconds.
+///
+/// One, two or three digits: `.1` is a hundred milliseconds and not one, which
+/// is what a decimal fraction means and the mistake a right-to-left reader
+/// makes. More than three is refused rather than rounded -- see `of_string`.
+fn milliseconds(text: String, width: Int) -> Option<Int> {
+  if width == 0 {
+    Option::Some(0)
+  } else if width > 3 {
+    Option::None
+  } else {
+    match digits(text, 9, width) {
+      Option::None => Option::None,
+      Option::Some(value) =>
+      Option::Some(if width == 1 { value * 100 } else { if width == 2 { value * 10 } else { value } }),
+    }
   }
 }
 

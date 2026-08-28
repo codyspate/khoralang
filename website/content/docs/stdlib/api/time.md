@@ -129,6 +129,18 @@ March. Rolling is a policy — some systems clamp, some wrap, some raise —
 and a library that picked silently would be picking for a caller who
 nearly always has bad input rather than an interesting question.
 
+#### of_string
+
+```khora
+pub fn of_string(text: String) -> Option<Date>
+```
+
+A date written `2026-08-25`, or `None`.
+
+Exactly four digits, two, two, hyphen-separated, and the day has to exist
+-- `2026-02-30` is `None` for the same reason `Date::of` refuses it. What
+`Show` prints, read back.
+
 #### to_days
 
 ```khora
@@ -195,6 +207,25 @@ pub fn of(hour: Int, minute: Int, second: Int, milli: Int) -> Option<Time>
 
 A time of day, or `None` if there is no such moment.
 
+#### of_string
+
+```khora
+pub fn of_string(text: String) -> Option<Time>
+```
+
+A time written `09:05:00` or `09:05:00.123`, or `None`.
+
+**The fraction is optional and everything else is not**, which is ISO
+8601's own rule rather than a leniency: `HH:MM:SS` is a complete time and
+the fraction is an extension of it. `Show` always prints three digits, so
+what it writes reads back; what arrives from somewhere else usually has
+no fraction at all.
+
+More than three fractional digits are refused rather than rounded. This
+type holds milliseconds, and a library that silently dropped the
+microseconds off a timestamp would be losing data in a way nothing later
+could notice.
+
 #### midnight
 
 ```khora
@@ -241,6 +272,19 @@ pub fn of_minutes(minutes: Int) -> Offset
 
 `minutes` east of UTC. Positive is ahead, negative is behind.
 
+#### of_string
+
+```khora
+pub fn of_string(text: String) -> Option<Offset>
+```
+
+An offset written `+05:30`, `-05:00` or `Z`, or `None`.
+
+**`Z` is accepted although `Show` prints `+00:00`.** It is not a second
+format -- it is ISO 8601's own spelling of this exact value, and it is
+what every wire format in the world writes. Refusing it would mean a
+parser that cannot read the timestamps it is for.
+
 ### DateTime
 
 ```khora
@@ -267,6 +311,64 @@ pub fn to_unix_millis(self) -> Int
 ```
 
 Milliseconds since 1970, reading `self` as UTC.
+
+#### of_string
+
+```khora
+pub fn of_string(text: String) -> Option<DateTime>
+```
+
+A timestamp written `2026-08-25T09:05:00` or `...T09:05:00.123`, or
+`None`.
+
+**No zone, because this type has none.** A trailing `Z` or `+05:30` is
+refused here rather than ignored -- silently dropping it would turn a
+moment into a different moment, which is the one mistake a date library
+must not make quietly. `DateTime::instant_of_string` reads the zoned form
+and gives back the instant it names.
+
+#### instant_of_string
+
+```khora
+pub fn instant_of_string(text: String) -> Option<Int>
+```
+
+The instant a *zoned* timestamp names, as milliseconds since 1970.
+
+`2026-08-25T09:05:00Z`, `2026-08-25T09:05:00.123+05:30`. The zone is
+required: this is the function for reading what somebody else wrote, and
+a timestamp with no zone does not name an instant. Use `of_string` for
+that, which gives back the wall clock it actually is.
+
+An `Int` rather than a `DateTime` because that is what the moment *is* --
+converting it back to a wall clock needs a zone, and the caller has one
+in mind or they would not be asking.
+
+#### of_unix_seconds
+
+```khora
+pub fn of_unix_seconds(seconds: Int) -> DateTime
+```
+
+The moment `seconds` after 1970, as UTC says it.
+
+Beside the millisecond pair because **a Unix timestamp is usually
+seconds**: that is what `extract(epoch)` gives, what a JSON API sends,
+and what a log line carries. Multiplying by a thousand at every call site
+is the kind of thing that is right until once it is not.
+
+#### to_unix_seconds
+
+```khora
+pub fn to_unix_seconds(self) -> Int
+```
+
+Seconds since 1970, reading `self` as UTC.
+
+**Floored, so a moment before 1970 rounds towards the past** and not
+towards zero. `-1` millisecond is second `-1`, which is the second that
+contains it, and truncating division would answer `0` -- a whole second
+on the wrong side of the epoch.
 
 #### at_offset
 
