@@ -9,9 +9,33 @@ use super::*;
 
 /// expand nested patterns to the right column types.
 pub(crate) fn ctor_for(_types: &TypeMap, variant: &VariantInfo) -> Ctor {
+    ctor_for_instance(variant, &std::collections::HashMap::new())
+}
+
+/// The same, with the owning type's parameters filled in.
+///
+/// **A variant's field types are written in terms of its type's parameters**,
+/// and until this they were read as written. `Result<A, E>`'s `Err` carries an
+/// `E`, which is a `Type::Param` -- and [`field_type`] answers `Opaque` for
+/// one, meaning "never reported on". So the column inside `Err` could not be
+/// expanded, `Result::Err(UserError::NotFound(id))` was not seen to cover it,
+/// and a `match` with an arm for every case of `UserError` was told
+/// "pattern `Err(_)` not covered". Errata 58.
+///
+/// The scrutinee knows what `E` is -- it is `Result<Int, UserError>` and
+/// carries its arguments -- so substituting them before asking is the whole
+/// fix.
+pub(crate) fn ctor_for_instance(
+    variant: &VariantInfo,
+    mapping: &std::collections::HashMap<&str, Type>,
+) -> Ctor {
     Ctor::Variant {
         name: variant.name.clone(),
-        fields: variant.fields.iter().map(field_type).collect(),
+        fields: variant
+            .fields
+            .iter()
+            .map(|f| field_type(&crate::unify::substitute(f, mapping)))
+            .collect(),
     }
 }
 
@@ -28,13 +52,19 @@ pub(crate) fn column_type(types: &TypeMap, ty: &Type) -> ColumnType {
     match ty {
         Type::Bool => ColumnType::Finite(vec![Ctor::Bool(true), Ctor::Bool(false)]),
         Type::Int | Type::Str => ColumnType::Unbounded,
-        Type::Adt { name, home, .. } => {
+        Type::Adt { name, home, args } => {
             let variants = types.variants_of(home.as_ref(), name);
             if variants.is_empty() {
                 ColumnType::Unknown
             } else {
+                // The declared parameters, paired with what this scrutinee
+                // supplied for them. Absent for a type with none, which is the
+                // ordinary case and costs an empty map.
+                let params = types.adts.get(name.as_str()).cloned().unwrap_or_default();
+                let mapping: std::collections::HashMap<&str, Type> =
+                    params.iter().map(String::as_str).zip(args.iter().cloned()).collect();
                 ColumnType::Finite(
-                    variants.iter().map(|v| ctor_for(types, v)).collect(),
+                    variants.iter().map(|v| ctor_for_instance(v, &mapping)).collect(),
                 )
             }
         }

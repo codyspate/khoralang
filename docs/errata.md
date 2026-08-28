@@ -1931,3 +1931,107 @@ The regression test asserts what a lockfile is *for*: that two commands
 pointed at different directories in one workspace leave the same file behind.
 It fails against the old code with "checking a directory that is not a member
 rewrote the workspace lockfile", which is checked rather than assumed.
+
+## 58. Three things a first program falls into
+
+All three were found by compiling the documentation rather than by anybody
+writing Khora, which is the note worth keeping: a language's first ten minutes
+are the part its authors never experience again.
+
+### An inherent method needed an unrelated import
+
+```khora
+module main;
+
+fn describe(v: Int) -> String { Int::to_string(v) }
+```
+
+```
+error: `Int` is not a trait with a function named `to_string`
+```
+
+Adding `import std::core::{Show};` -- naming something the file does not use --
+fixed it. The *presence* of an import mattered and its contents did not.
+
+`Int`, `String` and `Array` are spelled without importing anything, and their
+methods live in inherent impls in `std::core`. Those arrived through
+`import_inherent`, which runs once per **imported origin** -- so a file with no
+imports got none of them. Its own doc comment had already named the intent:
+methods should arrive "whether or not the file imported `Params`".
+
+`std::core`'s inherent impls are now always in scope. A type you can write
+without an import has methods you can call without one.
+
+### `for` needed a name it never mentions, and the lint said to delete it
+
+```khora
+import std::core::{List, Step, print};
+for name in names { print(name); }
+```
+
+```
+error: the type of this expression was never worked out, and nothing else was
+reported -- so either it needs an annotation, or this is a gap in the compiler
+worth reporting
+```
+
+The expansion calls `it.next()`, a trait method, so `Iterator` has to be in
+scope as much as `Step`. Only `Step` was checked for, so the failure arrived
+three layers later as the checker's own self-accusation -- correct, and in
+front of somebody writing their first loop.
+
+Importing both compiles. **`unused-import` then reported `Iterator`**, because
+a `for` writes neither name: the lint told the reader to delete what made the
+program work.
+
+Three fixes, one per way of finding out: the desugaring checks for `Iterator`
+where it already checked for `Step`; the message names both; and the lint
+counts a `for` as using them, asked of the tree rather than the token stream,
+because `for` is a contextual keyword and `handler for Ledger` is not a loop.
+
+**Requiring the imports stays.** `desugar.rs` gives the reason and it is a good
+one -- the alternative is a name the compiler knows and the program cannot see,
+which is errata 46. The bug was never the requirement.
+
+### A nested constructor under a generic defeated exhaustiveness
+
+```khora
+match lookup(id) {
+  Result::Ok(n) => ..,
+  Result::Err(UserError::NotFound(m)) => ..,
+}
+```
+
+```
+error: this `match` is not exhaustive: pattern `Err(_)` not covered
+```
+
+`UserError` has exactly one constructor, and every one of them is named.
+
+A variant's field types are written in terms of *its own type's* parameters:
+`Result<A, E>`'s `Err` carries an `E`, which is a `Type::Param`. `field_type`
+answers `Opaque` for one -- "not known, never reported on" -- so the column
+inside `Err` could not be expanded and nothing inside it could complete
+anything.
+
+The scrutinee knew what `E` was. It is `Result<Int, UserError>` and carries its
+arguments; they were dropped by `column_type`, which matched
+`Type::Adt { name, home, .. }` and ignored the rest. Substituting them before
+reading the field types is the whole fix.
+
+It also made the diagnostic sharper. A missing nested case is now named --
+`Err(Forbidden(_))` rather than `Err(_)` -- because the checker can finally see
+inside.
+
+### What generalises
+
+Two of the three are the same bug: **a fact that was available at the point of
+use, and thrown away on the way there.** The scrutinee knew its type
+arguments; the file knew `Int` needed no import. Neither was hidden, and both
+were dropped by a `..` in a pattern or by a loop keyed on the wrong thing.
+
+The third is worth a rule of its own: **a lint that contradicts the compiler is
+worse than no lint.** `unused-import` and the `for` desugaring disagreed about
+whether `Iterator` was used, and the reader who believed the lint got a broken
+build. When two parts of a toolchain answer one question, they need one answer
+-- the same lesson errata 54 gave about two type checks that never met.

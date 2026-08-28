@@ -527,3 +527,56 @@ fn a_loop_with_no_value_produces_unit() {
     );
 }
 
+// --- nested constructors under a generic ----------------------------------
+
+/// A generic type whose parameter is filled in by the scrutinee, which is the
+/// shape `Result<_, MyError>` has and the one that was broken.
+const NESTED: &str = "module m;\n\
+                      pub type Holder<A> = | Full(value: A) | Empty;\n\
+                      pub type Reason = | Late(by: Int) | Lost;\n\
+                      fn held() -> Holder<Reason>;\n";
+
+/// **A `match` naming every nested case is exhaustive.** It was not: a
+/// variant's field types are written in terms of its own type's parameters, so
+/// `Full`'s payload is `A` -- a `Param`, which the column builder answered
+/// `Opaque` for -- and the column inside `Full` could not be expanded. A match
+/// with an arm for every `Reason` was told `Full(_)` was not covered.
+/// Errata 58.
+#[test]
+fn a_nested_constructor_under_a_generic_completes_a_match() {
+    assert_clean(&format!(
+        "{NESTED}fn f() -> Int {{\n  match held() {{\n    \
+         Holder::Full(Reason::Late(n)) => n,\n    \
+         Holder::Full(Reason::Lost) => 0,\n    \
+         Holder::Empty => 0 - 1,\n  }}\n}}\n"
+    ));
+}
+
+/// And one that misses a nested case is still refused -- **naming the case**,
+/// which it could not do before: the old message could only say `Full(_)`,
+/// because it had no idea what was inside.
+#[test]
+fn a_missing_nested_constructor_is_named() {
+    assert_reports(
+        &format!(
+            "{NESTED}fn f() -> Int {{\n  match held() {{\n    \
+             Holder::Full(Reason::Late(n)) => n,\n    \
+             Holder::Empty => 0 - 1,\n  }}\n}}\n"
+        ),
+        "Full(Lost)",
+    );
+}
+
+/// Missing the outer case is still caught, which is the half a fix to the
+/// inner one could quietly take away.
+#[test]
+fn a_missing_outer_constructor_is_still_caught() {
+    assert_reports(
+        &format!(
+            "{NESTED}fn f() -> Int {{\n  match held() {{\n    \
+             Holder::Full(Reason::Late(n)) => n,\n    \
+             Holder::Full(Reason::Lost) => 0,\n  }}\n}}\n"
+        ),
+        "Empty",
+    );
+}
