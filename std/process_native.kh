@@ -1,6 +1,6 @@
 module std::process;
 
-import std::core::{Array, Ptr};
+import std::core::{Array, List, Ptr};
 import std::process::shell::{close_pipe, open_pipe, run};
 
 //! Running another program.
@@ -11,32 +11,40 @@ import std::process::shell::{close_pipe, open_pipe, run};
 //! the clock and talk to a socket, and the one thing it could not do was ask
 //! the machine it was already running on to do something.
 //!
-//! **It goes through a shell, and that is the honest headline rather than a
-//! footnote.** ISO C offers `system` and `popen`, and both of them hand a
-//! *command line* to `cmd.exe` or `/bin/sh` and let it decide what the words
-//! mean. So the caller is not naming a program and its arguments; the caller is
-//! writing a line of shell, and everything true of a line of shell is true
-//! here — a path with a space in it needs quoting, a `&&` chains, a `>`
-//! redirects, and a file name that came from somewhere untrusted can end the
-//! command and start another one. That is a real difference from an
-//! argv-based spawn and a reader deserves to be told rather than find out.
+//! **A program and a list of arguments, and a shell only if you ask.**
 //!
-//! What would fix it: `spawn(program, arguments)`, where the arguments are a
-//! list Khora holds and no shell ever parses. That needs `CreateProcess` on
-//! Windows and `posix_spawn` on Unix, neither of which can be reached from
-//! here — `CreateProcess` takes a `STARTUPINFO` and returns a
-//! `PROCESS_INFORMATION`, and errata 35 says no struct crosses the C ABI. It is
-//! a runtime function, and it is the follow-up. When it arrives it joins this
-//! effect as a third operation rather than replacing it, because the permission
-//! a caller is granting — "may start another program" — is the same one either
-//! way.
+//! `run` and `output` name a program and hand it a `List<String>`. No shell
+//! sees them, so a space, a quote, a `;` or a `&&` inside an argument is one
+//! argument with punctuation in it — there is nothing left to reinterpret it.
+//! An argument that came from a request, a file name or a database is safe to
+//! pass, which is the whole reason this shape exists.
 //!
-//! **No quoting helper, deliberately.** An `escaped(argument)` would be the
-//! obvious kindness and it would be a lie: `cmd.exe` and `sh` disagree about
-//! backslashes, about carets, about what a quote inside a quote means, and a
-//! helper that is subtly wrong on one host is worse than no helper at all
-//! because it reads as though the problem has been handled. A caller building a
-//! command line out of untrusted text should wait for `spawn`.
+//! `shell` is the other one, and it is spelled that way so nobody reaches for
+//! it by accident. It hands a *command line* to `cmd.exe` or `/bin/sh` and
+//! everything true of a line of shell is true of it — a pipeline works, a glob
+//! expands, a redirect redirects, and a file name that came from somewhere
+//! untrusted can end the command and start another one. Sometimes that is
+//! exactly what a caller wants, and hiding it behind a name that does not say
+//! so would be worse than not having it.
+//!
+//! The rule: **if any part of the command came from outside the program, it is
+//! `run` or `output`.** If the whole line is a literal and wants a pipeline, it
+//! is `shell`.
+//!
+//! This is what the earlier version of this module said was missing and could
+//! not have: `system` and `popen` are all ISO C offers, and `CreateProcess`
+//! takes a `STARTUPINFO` while `posix_spawn` wants a `posix_spawn_file_actions_t`
+//! — neither reachable from Khora, because errata 35 says no struct crosses the
+//! C ABI. They are reachable from the *runtime*, where Rust's
+//! `std::process::Command` is one interface over both, so `khora_spawn_status`
+//! and `khora_spawn_capture` are what the two safe operations call.
+//!
+//! **Still no quoting helper.** An `escaped(argument)` for the `shell` form
+//! would be the obvious kindness and it would be a lie: `cmd.exe` and `sh`
+//! disagree about backslashes, about carets, about what a quote inside a quote
+//! means, and a helper that is subtly wrong on one host is worse than none
+//! because it reads as though the problem is handled. A caller with untrusted
+//! text has `run`.
 
 // ---------------------------------------------------------------------------
 // The interface
@@ -104,19 +112,30 @@ pub type Completed = {
 /// built the command line it was supposed to, which is the assertion that
 /// matters and the one a real subprocess makes impossible to write.
 pub effect Process {
-  /// Runs `command` and waits for it, giving what it exited with. Whatever it
-  /// prints goes to this process's own output, unredirected.
-  status: (String) -> Int raises ProcessError,
-  /// Runs `command` and waits for it, keeping what it wrote.
-  capture: (String) -> Completed raises ProcessError,
+  /// Runs `program` with `arguments` and waits, giving what it exited with.
+  ///
+  /// **No shell.** Each argument crosses whole, so one containing a space, a
+  /// quote or a `;` is one argument with punctuation in it. Whatever the
+  /// program prints goes to this process's own output, unredirected.
+  run: (String, List<String>) -> Int raises ProcessError,
+  /// The same, keeping what the program wrote to its standard output.
+  output: (String, List<String>) -> Completed raises ProcessError,
+  /// Runs a line of *shell*, and everything true of a line of shell is true
+  /// of it.
+  ///
+  /// Named for what it does rather than for what it is used for, because a
+  /// caller reaching for it should have to write the word. `run` is the one
+  /// for a command built out of anything that came from outside the program.
+  shell: (String) -> Completed raises ProcessError,
 }
 
 impl Process {
-  /// A real shell.
+  /// The real machine.
   pub fn real() -> Process {
     handler for Process {
-      status: fn command => started(command, run(command))!,
-      capture: fn command => capture_output(command)!,
+      run: fn (program, arguments) => spawn_status(program, arguments)!,
+      output: fn (program, arguments) => spawn_output(program, arguments)!,
+      shell: fn command => capture_output(command)!,
     }
   }
 }
@@ -128,12 +147,16 @@ impl Process {
 /// worked and there is text, or it did not and there is nothing useful to do
 /// with whatever came out. Written once here rather than as the same three
 /// lines at every call site, the way `std::env`'s `variable_or` is.
-pub fn checked_output(command: String) -> String
+pub fn checked_output(program: String, arguments: List<String>) -> String
   with { process: Process }
   raises ProcessError
 {
-  let done = process.capture(command)!;
-  if done.status == 0 { done.text } else { raise ProcessError::Failed(command, done.status) }
+  let done = process.output(program, arguments)!;
+  if done.status == 0 {
+    done.text
+  } else {
+    raise ProcessError::Failed(program, done.status)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,12 +170,115 @@ pub fn checked_output(command: String) -> String
 
 extern fn fread(into: Ptr, size: Int, count: Int, file: Ptr) -> Int;
 
+// The runtime's spawn, which is `CreateProcess` or `posix_spawn` behind Rust's
+// `std::process::Command`. Not ISO C, and that is why it is a runtime export
+// rather than an `extern` binding: neither call can be made from here.
+extern fn khora_spawn_status(buffer: Ptr, len: Int, count: Int) -> Int;
+extern fn khora_spawn_capture(buffer: Ptr, len: Int, count: Int, out_status: Ptr) -> Int;
+extern fn khora_spawn_take(into: Ptr, len: Int) -> ();
+
 /// How much to ask the pipe for at a time.
 ///
 /// A page. The number matters less than it looks: a short read is normal on a
 /// pipe and the loop below is written for it, so this is the size of a buffer
 /// rather than a promise about how output arrives.
 fn chunk() -> Int { 4096 }
+
+/// The program and its arguments as one NUL-separated buffer, program first.
+///
+/// What the runtime wants, and the shape is the platform's own: `execve` takes
+/// NUL-terminated strings, so an argument containing a NUL is not expressible
+/// on any target this runs on and splitting on one loses nothing that could
+/// have been passed.
+fn packed(program: String, arguments: List<String>) -> Array<U8> {
+  let parts = List::Cons(program, arguments);
+  // `Array::new` fills with zero, so every separator is already there and
+  // only the argument bytes have to be written.
+  let out: Array<U8> = Array::new(packed_size(parts, 0), 0);
+  let _end = fill(out, parts, 0);
+  out
+}
+
+/// The bytes `packed` needs: every argument and a separator after each.
+fn packed_size(parts: List<String>, so_far: Int) -> Int {
+  match parts {
+    List::Nil => so_far,
+    List::Cons(head, tail) => packed_size(tail, so_far + String::byte_length(head) + 1),
+  }
+}
+
+/// Writes each argument at `at`, leaving the zero between them alone.
+///
+/// **Byte by byte rather than through a joined string**, because Khora has no
+/// escape for a NUL: `"\u{0}"` is five characters beginning with a backslash,
+/// and the first version of this built a buffer with that in it between every
+/// argument. It type-checked, it ran, and every command failed to start.
+fn fill(out: Array<U8>, parts: List<String>, at: Int) -> Int {
+  match parts {
+    List::Nil => at,
+    List::Cons(head, tail) => {
+      let length = String::byte_length(head);
+      let mut i = 0;
+      while i < length {
+        Array::set(out, at + i, String::byte(head, i));
+        i = i + 1;
+      };
+      fill(out, tail, at + length + 1)
+    }
+  }
+}
+
+/// How many arguments `packed` will describe.
+fn packed_count(arguments: List<String>) -> Int { 1 + List::length(arguments) }
+
+/// Runs a program with no shell, and gives its exit status.
+fn spawn_status(program: String, arguments: List<String>) -> Int raises ProcessError {
+  let buffer = packed(program, arguments);
+  let status = Array::with_data(buffer, fn (at, size) =>
+    khora_spawn_status(at, size, packed_count(arguments)));
+  started(program, status)!
+}
+
+/// The same, keeping what the program printed.
+///
+/// Three calls to the runtime rather than one: the output's length is not
+/// known until the child has finished, and generated code cannot allocate
+/// against a length it has not been told. So the run answers the size, this
+/// makes somewhere to put it, and `khora_spawn_take` fills it in.
+fn spawn_output(program: String, arguments: List<String>) -> Completed raises ProcessError {
+  let buffer = packed(program, arguments);
+  let status: Array<U8> = Array::new(8, 0);
+  let size = Array::with_data(buffer, fn (at, len) =>
+    Array::with_data(status, fn (out, _n) =>
+      khora_spawn_capture(at, len, packed_count(arguments), out)));
+  if size < 0 {
+    raise ProcessError::NotStarted(program)
+  } else {
+    let bytes: Array<U8> = Array::new(size, 0);
+    Array::with_data(bytes, fn (into, _n) => khora_spawn_take(into, size));
+    if Array::is_utf8(bytes) {
+      { status: read_status(status), text: String::from_bytes(bytes) }
+    } else {
+      raise ProcessError::NotText(program)
+    }
+  }
+}
+
+/// The eight bytes `khora_spawn_capture` wrote, as the number they are.
+///
+/// Little-endian, which is every target this compiles for -- `docs/design/
+/// targets.md` lists x86-64 and aarch64 and nothing else. A big-endian port
+/// would find this and the assertion that says so.
+fn read_status(bytes: Array<U8>) -> Int {
+  let mut value = 0;
+  let mut i = 7;
+  while i >= 0 {
+    value = Int::or(Int::shl(value, 8), U8::to_int(Array::get(bytes, i)));
+    i = i - 1;
+  };
+  // Eight bytes of a signed status, read back as one.
+  if value > 9223372036854775807 { 0 - 1 } else { value }
+}
 
 /// Turns "the shell would not start" into the error, and anything else into
 /// the status it is.

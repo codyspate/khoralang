@@ -60,6 +60,17 @@ fn run(name: &str, main: &str) -> String {
     String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
 }
 
+/// A shell run *as a program*, which is how a test gets a chosen exit status
+/// without one shell builtin being spelled two ways.
+///
+/// It also exercises the thing under test rather than working around it: the
+/// flag and the command cross as a list of arguments, and nothing parses them
+/// on the way.
+fn failing(code: &str) -> String {
+    let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+    format!("\"{program}\", [\"{flag}\", \"exit {code}\"]")
+}
+
 /// The head every program below shares.
 ///
 /// `attempt` rather than `catch` throughout: `catch` has to name constructors
@@ -68,7 +79,7 @@ fn run(name: &str, main: &str) -> String {
 /// reach the end and print a live-object count whatever happened, so a `main`
 /// with a `raises` row would turn a wrong answer into a crash.
 const HEAD: &str = "module demo::main;
-import std::core::{Result, attempt, print};
+import std::core::{List, Result, attempt, print};
 import std::process::{Completed, Process, ProcessError, checked_output};
 
 extern fn khora_live_count() -> Int;
@@ -95,7 +106,7 @@ fn a_command_that_prints_has_its_output_captured() {
         &format!(
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
-  match attempt(fn () => process.capture(\"echo hello\")!) {{
+  match attempt(fn () => process.shell(\"echo hello\")!) {{
     Result::Err(error) => reason(error),
     Result::Ok(done) => \"[\" + done.text + \"] status \" + Int::to_string(done.status),
   }}
@@ -122,9 +133,9 @@ fn a_non_zero_exit_is_reported_as_a_status() {
         &format!(
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
-  match attempt(fn () => process.status(\"exit 3\")!) {{
+  match attempt(fn () => process.shell(\"exit 3\")!) {{
     Result::Err(error) => reason(error),
-    Result::Ok(code) => Int::to_string(code),
+    Result::Ok(done) => Int::to_string(done.status),
   }}
 }}
 
@@ -141,12 +152,13 @@ pub fn main() -> () {{
 /// only wanted the text of something that was supposed to work.
 #[test]
 fn checked_output_turns_a_failing_command_into_an_error() {
+    let failing_seven = failing("7");
     let out = run(
         "process_checked",
         &format!(
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
-  match attempt(fn () => checked_output(\"exit 7\")!) {{
+  match attempt(fn () => checked_output({failing_seven})!) {{
     Result::Err(error) => reason(error),
     Result::Ok(text) => \"unexpectedly fine: \" + text,
   }}
@@ -180,7 +192,7 @@ fn a_large_amount_of_output_neither_truncates_nor_overflows() {
         &format!(
             "{HEAD}
 fn work() -> String with {{ process: Process }} {{
-  match attempt(fn () => process.capture(\"{loop_command}\")!) {{
+  match attempt(fn () => process.shell(\"{loop_command}\")!) {{
     Result::Err(error) => reason(error),
     Result::Ok(done) => Int::to_string(String::byte_length(done.text)),
   }}
@@ -204,16 +216,17 @@ pub fn main() -> () {{
 /// there — a mistake this repository has made before.
 #[test]
 fn running_commands_leaks_nothing() {
+    let failing_nine = failing("9");
     let out = run(
         "process_leaks",
         &format!(
             "{HEAD}
 fn work() -> Int with {{ process: Process }} {{
-  let captured = match attempt(fn () => process.capture(\"echo one\")!) {{
+  let captured = match attempt(fn () => process.shell(\"echo one\")!) {{
     Result::Err(error) => reason(error),
     Result::Ok(done) => done.text,
   }};
-  let refused = match attempt(fn () => checked_output(\"exit 9\")!) {{
+  let refused = match attempt(fn () => checked_output({failing_nine})!) {{
     Result::Err(error) => reason(error),
     Result::Ok(text) => text,
   }};
@@ -247,7 +260,7 @@ fn a_test_can_substitute_a_handler_and_start_nothing() {
             "{HEAD}
 /// Ordinary code. It has no idea whether a shell exists.
 fn version() -> String with {{ process: Process }} {{
-  match attempt(fn () => checked_output(\"git describe --tags\")!) {{
+  match attempt(fn () => checked_output(\"git\", [\"describe\", \"--tags\"])!) {{
     Result::Err(error) => reason(error),
     Result::Ok(text) => text,
   }}
@@ -255,8 +268,13 @@ fn version() -> String with {{ process: Process }} {{
 
 pub fn main() -> () {{
   with {{ process: handler for Process {{
-    status: fn command => 0,
-    capture: fn command => {{ status: 0, text: \"asked: \" + command }},
+    run: fn (program, arguments) => 0,
+    // The arguments are a *value* the handler can look at, which is the
+    // assertion a real subprocess makes impossible to write: not that
+    // something plausible came back, but that this is what was asked for.
+    output: fn (program, arguments) =>
+      {{ status: 0, text: \"asked: \" + program + \" \" + String::join(arguments, \" \") }},
+    shell: fn command => {{ status: 0, text: \"asked a shell: \" + command }},
   }} }} {{
     print(version())
   }}
@@ -287,7 +305,7 @@ import std::process::{checked_output};
 extern fn khora_print_int(value: Int);
 
 fn main() -> Int {
-  match attempt(fn () => checked_output(\"echo hi\")!) {
+  match attempt(fn () => checked_output(\"echo\", [\"hi\"])!) {
     Result::Err(error) => khora_print_int(0 - 1),
     Result::Ok(text) => khora_print_int(String::byte_length(text)),
   };
@@ -302,4 +320,106 @@ fn main() -> Int {
         messages.iter().any(|m| m.contains("process")),
         "expected the missing capability to be named, got {messages:?}"
     );
+}
+
+/// **The reason the argument list exists**: punctuation in an argument stays
+/// in the argument.
+///
+/// `a & b ; c` through a shell is three commands. Through `output` it is one
+/// argument that happens to have an ampersand in it, because there is no shell
+/// left to reinterpret it — which is what makes a file name, a search term or
+/// anything else from outside the program safe to pass.
+///
+/// The two halves of this test are the same string down two paths, which is
+/// the only way to say the difference is the path.
+#[test]
+fn punctuation_in_an_argument_is_not_a_second_command() {
+    let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+    let out = run(
+        "process_injection",
+        &format!(
+            "{HEAD}
+fn work() -> String with {{ process: Process }} {{
+  // One argument, whatever is in it.
+  let safe = match attempt(fn () =>
+    process.output(\"{program}\", [\"{flag}\", \"echo\", \"a & b ; c\"])!) {{
+    Result::Err(error) => reason(error),
+    Result::Ok(done) => String::trim(done.text),
+  }};
+
+  // The same text as part of a *line*, where the shell does read it.
+  let through_a_shell = match attempt(fn () => process.shell(\"echo a & echo b\")!) {{
+    Result::Err(error) => reason(error),
+    Result::Ok(done) => String::trim(done.text),
+  }};
+
+  safe + \" | \" + String::replace(through_a_shell, \"\\n\", \"+\")
+}}
+
+pub fn main() -> () {{
+  with {{ process: Process::real() }} {{ print(work()) }}
+}}
+"
+        ),
+    );
+
+    // The first half kept the ampersand and the semicolon; the second ran two
+    // commands, which is the shell doing its job and the reason not to hand it
+    // anything that came from outside.
+    let (safe, shelled) = out.trim_end().split_once(" | ").expect("both halves");
+    assert!(safe.contains('&') && safe.contains(';'), "one argument, punctuation and all: {safe}");
+    assert!(!safe.contains('+'), "and one command, so no second line: {safe}");
+    assert!(shelled.contains('+'), "the shell really does split on `&`: {shelled}");
+}
+
+/// A program that is not there is `NotStarted`, which is a different thing
+/// from a program that ran and exited non-zero.
+///
+/// The distinction the whole module rests on, now that there is no shell in
+/// between to blur it: `system` reported both as a number, and a shell that
+/// cannot find a command starts perfectly well and exits 127.
+#[test]
+fn a_program_that_does_not_exist_never_started() {
+    let out = run(
+        "process_missing",
+        &format!(
+            "{HEAD}
+fn work() -> String with {{ process: Process }} {{
+  match attempt(fn () => process.run(\"khora-no-such-program-exists\", [])!) {{
+    Result::Err(error) => reason(error),
+    Result::Ok(code) => \"unexpectedly ran: \" + Int::to_string(code),
+  }}
+}}
+
+pub fn main() -> () {{
+  with {{ process: Process::real() }} {{ print(work()) }}
+}}
+"
+        ),
+    );
+    assert_eq!(out, "not started: khora-no-such-program-exists\n");
+}
+
+/// An exit status comes back as itself, through the argv path.
+#[test]
+fn an_exit_status_survives_the_argument_list() {
+    let seven = failing("7");
+    let out = run(
+        "process_argv_status",
+        &format!(
+            "{HEAD}
+fn work() -> String with {{ process: Process }} {{
+  match attempt(fn () => process.run({seven})!) {{
+    Result::Err(error) => reason(error),
+    Result::Ok(code) => Int::to_string(code),
+  }}
+}}
+
+pub fn main() -> () {{
+  with {{ process: Process::real() }} {{ print(work()) }}
+}}
+"
+        ),
+    );
+    assert_eq!(out, "7\n");
 }

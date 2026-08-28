@@ -161,6 +161,7 @@ mod scheduler;
 mod shared;
 #[cfg(not(target_family = "wasm"))]
 mod soak;
+mod spawn;
 #[cfg(not(target_family = "wasm"))]
 mod benching;
 #[cfg(not(target_family = "wasm"))]

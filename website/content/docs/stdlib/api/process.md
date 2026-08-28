@@ -13,32 +13,40 @@ deployment step. Until this existed a Khora program could read a file, read
 the clock and talk to a socket, and the one thing it could not do was ask
 the machine it was already running on to do something.
 
-**It goes through a shell, and that is the honest headline rather than a
-footnote.** ISO C offers `system` and `popen`, and both of them hand a
-*command line* to `cmd.exe` or `/bin/sh` and let it decide what the words
-mean. So the caller is not naming a program and its arguments; the caller is
-writing a line of shell, and everything true of a line of shell is true
-here — a path with a space in it needs quoting, a `&&` chains, a `>`
-redirects, and a file name that came from somewhere untrusted can end the
-command and start another one. That is a real difference from an
-argv-based spawn and a reader deserves to be told rather than find out.
+**A program and a list of arguments, and a shell only if you ask.**
 
-What would fix it: `spawn(program, arguments)`, where the arguments are a
-list Khora holds and no shell ever parses. That needs `CreateProcess` on
-Windows and `posix_spawn` on Unix, neither of which can be reached from
-here — `CreateProcess` takes a `STARTUPINFO` and returns a
-`PROCESS_INFORMATION`, and errata 35 says no struct crosses the C ABI. It is
-a runtime function, and it is the follow-up. When it arrives it joins this
-effect as a third operation rather than replacing it, because the permission
-a caller is granting — "may start another program" — is the same one either
-way.
+`run` and `output` name a program and hand it a `List<String>`. No shell
+sees them, so a space, a quote, a `;` or a `&&` inside an argument is one
+argument with punctuation in it — there is nothing left to reinterpret it.
+An argument that came from a request, a file name or a database is safe to
+pass, which is the whole reason this shape exists.
 
-**No quoting helper, deliberately.** An `escaped(argument)` would be the
-obvious kindness and it would be a lie: `cmd.exe` and `sh` disagree about
-backslashes, about carets, about what a quote inside a quote means, and a
-helper that is subtly wrong on one host is worse than no helper at all
-because it reads as though the problem has been handled. A caller building a
-command line out of untrusted text should wait for `spawn`.
+`shell` is the other one, and it is spelled that way so nobody reaches for
+it by accident. It hands a *command line* to `cmd.exe` or `/bin/sh` and
+everything true of a line of shell is true of it — a pipeline works, a glob
+expands, a redirect redirects, and a file name that came from somewhere
+untrusted can end the command and start another one. Sometimes that is
+exactly what a caller wants, and hiding it behind a name that does not say
+so would be worse than not having it.
+
+The rule: **if any part of the command came from outside the program, it is
+`run` or `output`.** If the whole line is a literal and wants a pipeline, it
+is `shell`.
+
+This is what the earlier version of this module said was missing and could
+not have: `system` and `popen` are all ISO C offers, and `CreateProcess`
+takes a `STARTUPINFO` while `posix_spawn` wants a `posix_spawn_file_actions_t`
+— neither reachable from Khora, because errata 35 says no struct crosses the
+C ABI. They are reachable from the *runtime*, where Rust's
+`std::process::Command` is one interface over both, so `khora_spawn_status`
+and `khora_spawn_capture` are what the two safe operations call.
+
+**Still no quoting helper.** An `escaped(argument)` for the `shell` form
+would be the obvious kindness and it would be a lie: `cmd.exe` and `sh`
+disagree about backslashes, about carets, about what a quote inside a quote
+means, and a helper that is subtly wrong on one host is worse than none
+because it reads as though the problem is handled. A caller with untrusted
+text has `run`.
 
 ## Types
 
@@ -106,8 +114,9 @@ folded in writes `2>&1` on the end of the command themselves.
 
 ```khora
 pub effect Process {
-  status: (String) -> Int raises ProcessError,
-  capture: (String) -> Completed raises ProcessError,
+  run: (String, List<String>) -> Int raises ProcessError,
+  output: (String, List<String>) -> Completed raises ProcessError,
+  shell: (String) -> Completed raises ProcessError,
 }
 ```
 
@@ -144,7 +153,7 @@ matters and the one a real subprocess makes impossible to write.
 ### checked_output
 
 ```khora
-pub fn checked_output(command: String) -> String with { process: Process } raises ProcessError
+pub fn checked_output(program: String, arguments: List<String>) -> String with { process: Process } raises ProcessError
 ```
 
 What `command` printed, provided it succeeded.
