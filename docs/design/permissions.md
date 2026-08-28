@@ -63,13 +63,24 @@ The mapping from a manifest key to a capability type is a short, fixed table —
 short because the manifest names *kinds of access to the outside world*, and
 there are not many:
 
-| Manifest key | Capability type |
-| --- | --- |
-| `fs` | `std::fs::FsRead`, `std::fs::FsWrite` |
-| `network` | `std::net::Net` |
-| `env` | `std::env::Env` |
-| `process` | `std::process::Process` |
-| `clock` | `std::time::Clock` |
+| Manifest key | Capability type | State |
+| --- | --- | --- |
+| `fs` | `std::fs::FsRead`, `std::fs::FsWrite` | **enforced** |
+| `network` | `std::net::HttpClient` | parsed, not consulted |
+| `env` | `std::env::Env` | parsed, not consulted |
+| `extern` | — | **enforced**, at build time |
+
+**`process` and `clock` are not keys.** This table listed them for a long time
+and the manifest has never had them: writing `[permissions] process = [".."]`
+gets *unrecognized key `permissions.process`* and is otherwise ignored, which
+is the worst of both -- a reader believes a restriction is in place and
+nothing is. Named here as absent rather than quietly dropped, because the
+table having claimed them is the reason somebody would look.
+
+Whether they should exist is a separate question. `process` has an obvious
+shape, `granted_name` over command names. `clock` has none: a grant is a list
+of things, and there is nothing to list about knowing the time -- it would be
+a boolean, which is a different feature than the rest of this table.
 
 **`fs` maps to two types, and the pair is the point.** `[permissions.fs]`
 already had `read` and `write` as separate grants, and a single `Fs`
@@ -138,9 +149,11 @@ having to remember it.
 granted directory be emptied into an ungranted one, which is the whole of what
 the grant was meant to stop.
 
-The other four categories — `network`, `env`, `process`, `clock` — are parsed
-and matched and not yet consulted by their capabilities. `fs` is the pattern
-they should follow.
+`network` and `env` are parsed and matched and not yet consulted by their
+capabilities. `fs` is the pattern they should follow, with one thing to settle
+first for `env`: `Env::variable` returns `Option<String>` and has no error
+channel, so a denial has nowhere to go that is not `None` -- which would mean
+"not set", the exact conflation `IoError::Denied` exists to avoid.
 
 This is Deno's model, and it is Deno's model for the same reason: the check has
 to be where the value is.
