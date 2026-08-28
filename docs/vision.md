@@ -57,7 +57,7 @@ model's** — and that the model is exactly what Rust cannot reach.
 | --- | --- | --- |
 | Abstraction | No HKT; GATs are a partial workaround | Native HKT and typeclasses |
 | Effects | Untracked | Typed effect and capability rows |
-| Dependency injection | Ad hoc, per-framework | `Layer` and capability rows in the type system |
+| Dependency injection | Ad hoc, per-framework | Capability rows in the type system |
 | Errors as data | `Result` plus the `?` operator | Typed, open, composable error channels |
 
 Rust's developer experience — cargo, diagnostics, rust-analyzer, clippy — is not

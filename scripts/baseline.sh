@@ -154,7 +154,13 @@ sh "$root/scripts/http_conformance.sh"
 # one of those runs on this machine. WSL2 is a real kernel with real sockets, so
 # it answers the question for Linux at no cost. Skipped rather than failed when
 # there is no WSL: this is a Windows developer's extra check, not a requirement.
-if command -v wsl >/dev/null 2>&1; then
+#
+# **`wsl -l -q`, not `command -v wsl`.** A GitHub `windows-latest` runner has
+# `wsl.exe` on PATH and no distribution behind it, so the command exists and
+# every use of it fails -- which turned "an extra check a laptop can do" into a
+# CI failure on the one platform that cannot fix it. Asking for the list asks
+# the question that matters, which is whether there is a Linux here.
+if wsl -l -q >/dev/null 2>&1; then
     step 'the runtime on Linux, through WSL'
     # **Kept, not discarded.** This was `> /dev/null`, and when the Linux check
     # exited 101 the baseline log ended mid-sentence with no error anywhere in
