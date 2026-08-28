@@ -825,6 +825,12 @@ first parameter of each. They are the type's own functions rather than free
 ones so that the pipeline reads as a chain against `Router` and cannot
 collide with another module's `get`.
 
+One per method, over a general `on` that takes the method as a value. Both
+are worth having: the named five are what a pipeline reads best with, and
+`on` is what stops the set being closed — a router with only the verbs
+somebody thought to write helpers for is the shape this had before, and it
+made a REST service unwritable.
+
 #### new
 
 ```khora
@@ -833,13 +839,21 @@ pub fn new<'er>() -> Router<'er>
 
 A router with no routes. The start of the pipeline.
 
-#### post
+#### on
 
 ```khora
-pub fn post<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
+pub fn on<'er>(router: Router<'er>, method: Method, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
 ```
 
-Mounts `handler` at `route` for POST.
+Mounts `handler` at `route` for `method`.
+
+**The general one, and the five below are it with a name.** A router that
+could only mount the methods somebody had written a helper for is a
+router that stops at whatever its first caller needed — which is what
+this one did, for months, with `get` and `post` and no way to say `PUT`
+at all. The named five exist because `Router::get(..)` reads better in a
+pipeline than `Router::on(Method::Get, ..)`, not because they are the
+only ones allowed.
 
 Later mounts are tried first, because each prepends. Mounting the same
 route twice is allowed and the second one wins, which is worth knowing
@@ -852,6 +866,41 @@ pub fn get<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, R
 ```
 
 Mounts `handler` at `route` for GET.
+
+#### post
+
+```khora
+pub fn post<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
+```
+
+Mounts `handler` at `route` for POST.
+
+#### put
+
+```khora
+pub fn put<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
+```
+
+Mounts `handler` at `route` for PUT.
+
+#### patch
+
+```khora
+pub fn patch<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
+```
+
+Mounts `handler` at `route` for PATCH.
+
+#### delete
+
+```khora
+pub fn delete<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
+```
+
+Mounts `handler` at `route` for DELETE.
+
+`delete` rather than `remove`, because the method is spelled `DELETE` and
+a router's job is to say what the wire says.
 
 #### listen
 

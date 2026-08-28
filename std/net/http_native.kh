@@ -1130,21 +1130,36 @@ pub type Router<'er> = {
 /// first parameter of each. They are the type's own functions rather than free
 /// ones so that the pipeline reads as a chain against `Router` and cannot
 /// collide with another module's `get`.
+///
+/// One per method, over a general `on` that takes the method as a value. Both
+/// are worth having: the named five are what a pipeline reads best with, and
+/// `on` is what stops the set being closed — a router with only the verbs
+/// somebody thought to write helpers for is the shape this had before, and it
+/// made a REST service unwritable.
 impl Router {
   /// A router with no routes. The start of the pipeline.
   pub fn new<'er>() -> Router<'er> { { routes: List::Nil } }
 
-  /// Mounts `handler` at `route` for POST.
+  /// Mounts `handler` at `route` for `method`.
+  ///
+  /// **The general one, and the five below are it with a name.** A router that
+  /// could only mount the methods somebody had written a helper for is a
+  /// router that stops at whatever its first caller needed — which is what
+  /// this one did, for months, with `get` and `post` and no way to say `PUT`
+  /// at all. The named five exist because `Router::get(..)` reads better in a
+  /// pipeline than `Router::on(Method::Get, ..)`, not because they are the
+  /// only ones allowed.
   ///
   /// Later mounts are tried first, because each prepends. Mounting the same
   /// route twice is allowed and the second one wins, which is worth knowing
   /// rather than an invariant anything enforces.
-  pub fn post<'er>(
+  pub fn on<'er>(
     router: Router<'er>,
+    method: Method,
     route: String,
     handler: SharedFn<Request, Response, 'er>
   ) -> Router<'er> {
-    { routes: List::Cons({ method: Method::Post, pattern: route, handler: handler }, router.routes) }
+    { routes: List::Cons({ method: method, pattern: route, handler: handler }, router.routes) }
   }
 
   /// Mounts `handler` at `route` for GET.
@@ -1153,7 +1168,98 @@ impl Router {
     route: String,
     handler: SharedFn<Request, Response, 'er>
   ) -> Router<'er> {
-    { routes: List::Cons({ method: Method::Get, pattern: route, handler: handler }, router.routes) }
+    Router::on(router, Method::Get, route, handler)
+  }
+
+  /// Mounts `handler` at `route` for POST.
+  pub fn post<'er>(
+    router: Router<'er>,
+    route: String,
+    handler: SharedFn<Request, Response, 'er>
+  ) -> Router<'er> {
+    Router::on(router, Method::Post, route, handler)
+  }
+
+  /// Mounts `handler` at `route` for PUT.
+  pub fn put<'er>(
+    router: Router<'er>,
+    route: String,
+    handler: SharedFn<Request, Response, 'er>
+  ) -> Router<'er> {
+    Router::on(router, Method::Put, route, handler)
+  }
+
+  /// Mounts `handler` at `route` for PATCH.
+  pub fn patch<'er>(
+    router: Router<'er>,
+    route: String,
+    handler: SharedFn<Request, Response, 'er>
+  ) -> Router<'er> {
+    Router::on(router, Method::Patch, route, handler)
+  }
+
+  /// Mounts `handler` at `route` for DELETE.
+  ///
+  /// `delete` rather than `remove`, because the method is spelled `DELETE` and
+  /// a router's job is to say what the wire says.
+  pub fn delete<'er>(
+    router: Router<'er>,
+    route: String,
+    handler: SharedFn<Request, Response, 'er>
+  ) -> Router<'er> {
+    Router::on(router, Method::Delete, route, handler)
+  }
+
+  /// **405 when the path exists under another method, 404 when it does not.**
+  ///
+  /// A router with one verb per path can answer 404 to everything and nobody
+  /// notices. With five it becomes a real distinction: a client that sends
+  /// `POST` to a path mounted `GET` has found the route and used it wrongly,
+  /// and telling it "no such path" sends whoever is debugging to look at their
+  /// URL rather than at their verb.
+  ///
+  /// The `Allow` header is required by HTTP for a 405 — a bare 405 is a
+  /// refusal that does not say what would have worked.
+  fn unmatched<'er>(all: List<Route<'er>>, request: Request) -> Response {
+    let allowed = Router::allowing(all, request.path, "");
+    if String::byte_length(allowed) == 0 {
+      Response::text(404, "no route for " + request.path)
+    } else {
+      Response::with_header(
+        Response::text(405, method_name(request.method) + " is not allowed for " + request.path),
+        "Allow",
+        allowed,
+      )
+    }
+  }
+
+  /// Every method mounted at a path that matches, comma-separated.
+  ///
+  /// Deduplicated by substring, which is safe for exactly these five names:
+  /// none of `GET`, `POST`, `PUT`, `PATCH` and `DELETE` contains another. A
+  /// sixth verb would have to check that again, so the check is written here
+  /// rather than assumed anywhere else.
+  fn allowing<'er>(routes: List<Route<'er>>, path: String, so_far: String) -> String {
+    match routes {
+      List::Nil => so_far,
+      List::Cons(route, rest) =>
+      match matches(route.pattern, path) {
+        Option::None => Router::allowing(rest, path, so_far),
+        Option::Some(_params) => {
+          let name = method_name(route.method);
+          let next =
+          if String::byte_length(so_far) == 0 {
+            name
+          } else {
+            match String::index_of(so_far, name) {
+              Option::Some(_at) => so_far,
+              Option::None => so_far + ", " + name,
+            }
+          };
+          Router::allowing(rest, path, next)
+        }
+      },
+    }
   }
 
   /// Serves until the process stops, on a fiber per connection.
@@ -1358,8 +1464,24 @@ impl Router {
   fn dispatch<'er>(routes: List<Route<'er>>, request: Request) -> Response
     raises 'er
   {
-    match routes {
-      List::Nil => Response::text(404, "no route for " + request.path),
+    Router::taking(routes, routes, request)!
+  }
+
+  /// `left` is what is still to try; `all` is the whole table.
+  ///
+  /// The second one is kept for the sake of the answer when nothing matches:
+  /// a path that exists under a *different* method is a different failure from
+  /// a path that does not exist, and telling them apart needs the table again
+  /// once the walk has run out.
+  fn taking<'er>(
+    left: List<Route<'er>>,
+    all: List<Route<'er>>,
+    request: Request,
+  ) -> Response
+    raises 'er
+  {
+    match left {
+      List::Nil => Router::unmatched(all, request),
       List::Cons(route, rest) =>
       if Method::same(route.method, request.method) {
         match matches(route.pattern, request.path) {
@@ -1372,10 +1494,10 @@ impl Router {
               headers: request.headers,
               body: request.body,
             })!,
-          Option::None => Router::dispatch(rest, request)!,
+          Option::None => Router::taking(rest, all, request)!,
         }
       } else {
-        Router::dispatch(rest, request)!
+        Router::taking(rest, all, request)!
       },
     }
   }

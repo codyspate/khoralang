@@ -4382,6 +4382,100 @@ which is one implementation and every editor. The one exception argued for
 elsewhere is a tree-sitter grammar, and `editors/vscode/README.md` explains why
 it is a second parser and therefore a cost, not a feature.
 
+## The `std` surface audit, which found five holes and one hole-shaped absence
+
+Read after the Effect survey, and looking for a different thing: not *what
+another language has that we do not*, but **what a developer reaches for in the
+first hour and does not find**. Those are different lists, and this one is more
+embarrassing, because every item is something the module already half does.
+
+Ordered by when somebody hits it.
+
+### 1. `Router` mounts `get` and `post` and nothing else
+
+`Method` is `Get | Post | Put | Patch | Delete`. `Router` has two of the five.
+There is no `put`, no `patch`, no `delete`, and no general
+`Router::on(method, path, handler)`.
+
+**So a REST API is unwritable**, which is not a missing convenience in a corner
+— it is a hole in a shipped, documented, tested feature. `answer_on` already
+dispatches on the method; only the mounting surface stops short. Whoever wrote
+`get` and `post` wrote exactly enough to make the example in the guide work.
+
+That is the pattern worth naming, because the rest of this list is the same
+shape: **an API finished to the depth of its first caller.**
+
+### 2. `String` is missing its everyday half
+
+Present: `byte`, `byte_length`, `bytes`, `find`, `from_bytes`, `index_of`,
+`is_space`, `lower`, `matches_at`, `slice`, `split_once`, `starts_with`,
+`trim`.
+
+Absent: `split`, `replace`, `ends_with`, `upper`, `is_empty`, `contains`,
+`repeat`, `trim_start`, `trim_end`, `join`.
+
+The asymmetries are the diagnosis. `starts_with` without `ends_with` and
+`lower` without `upper` are not judgement calls about scope — they are what a
+surface looks like when each function was added by the one caller that needed
+it. `split` and `replace` are minutes into writing anything.
+
+### 3. A time can be printed and not read
+
+`std::time` implements `Show` for `Date`, `Time`, `DateTime` and `Offset`, and
+has no parse of any kind. A timestamp goes out and cannot come back: not from
+JSON, not from a config value, not from a `text` column, not from a header.
+
+One-way, in the direction that matters least. `positioning.md` opens on
+financial reconciliation, which is mostly reading timestamps somebody else
+wrote.
+
+**One call before building it**: strict ISO-8601 only, or lenient about
+separators and precision. Strict is the house style — `Method::of` is
+case-sensitive on the same argument — but a reconciliation tool reads what it
+is given rather than what it would like.
+
+### 4. `List` has `map`, `filter`, `fold`, and then stops
+
+`map` and `traverse` arrive from the `Functor` and `Traversable` instances, so
+those are fine. Missing: `any`, `all`, `contains`, `find`, `zip`, `take`,
+`drop`, `flat_map`, `last`, `nth`, `sum`.
+
+Every one is a `fold`. That is exactly why their absence is felt — nobody is
+blocked, everybody writes the same six lines.
+
+### 5. `Process` takes a shell string
+
+`status(String)` and `capture(String)`, each given a whole command as one
+string. No argument *list*, so quoting is the caller's problem — and that is a
+command-injection footgun in the one `std` module where the stakes are that
+shape. Also no stdin, no working directory, no child environment, no kill and
+no timeout.
+
+**This one needs a design decision**, not just functions: an argument list
+changes what the capability *is*, and it is the security-relevant fix in the
+set.
+
+### 6. `Dict` has `entries`, `Map` has `entries`, `keys` and `values`
+
+Cheap, and listed because a reader who finds one and not the other has to go
+and check whether the difference means something.
+
+### What is deliberately absent, and stays that way
+
+`std::net::http`'s own header names multipart bodies, compression, content
+negotiation and redirect-following as out of scope, and gives a reason for each.
+That is the opposite failure from the five above and needs no fixing: somebody
+decided, wrote it down, and stopped.
+
+Streaming bodies are the one to revisit — `Request.body` is a `String` — and
+that is `docs/design/effect-survey.md` §3.4 rather than this list.
+
+### What this audit did not do
+
+It read the surfaces. It did not build anything against them, and "what is
+missing from an API" and "what is painful to use" are not the same list. The
+second one needs somebody writing a real program, which is what 13.24 was for.
+
 ## Phase 15 — The Torvalds test
 
 **A named standard the codebase has to pass**, after which it should be

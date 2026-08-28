@@ -50,7 +50,7 @@ fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceF
 /// a single response can be read for several separate claims.
 const SERVER: &str = "module demo::main;
 import std::core::{Option, SharedFn};
-import std::net::http::{HttpError, Request, Response, Router};
+import std::net::http::{HttpError, Method, Params, Request, Response, Router};
 
 fn print(value: String);
 
@@ -72,6 +72,19 @@ fn body_size(req: Request) -> Response {
   Response::text(200, Int::to_string(String::byte_length(req.body)))
 }
 
+/// One handler for the three verbs that had no way to be mounted, so that what
+/// a request reaches is decided by the method alone.
+fn thing(req: Request) -> Response {
+  Response::text(200, method_of(req) + \" \" + Params::get(req.params, \"id\").unwrap_or(\"?\"))
+}
+
+fn method_of(req: Request) -> String {
+  if Method::same(req.method, Method::Put) { \"put\" }
+  else { if Method::same(req.method, Method::Patch) { \"patch\" }
+  else { if Method::same(req.method, Method::Delete) { \"delete\" }
+  else { \"other\" } } }
+}
+
 pub fn main() raises HttpError {
   // No `with` block: `listen` opens the nursery it needs itself, and these
   // handlers want no capabilities. `SharedFn::of` is what each mount says
@@ -81,6 +94,10 @@ pub fn main() raises HttpError {
     |> Router::get(\"/echo/:who\", SharedFn::of(echo))
     |> Router::get(\"/tagged\", SharedFn::of(tagged))
     |> Router::post(\"/size\", SharedFn::of(body_size))
+    |> Router::put(\"/thing/:id\", SharedFn::of(thing))
+    |> Router::patch(\"/thing/:id\", SharedFn::of(thing))
+    // The general one, so that the five named verbs are not the only way in.
+    |> Router::on(Method::Delete, \"/thing/:id\", SharedFn::of(thing))
     |> Router::listen(@PORT@)!
 }
 ";
@@ -366,10 +383,15 @@ fn the_server_reads_what_a_client_actually_sends() {
     assert!(answer.starts_with("HTTP/1.1 404 Not Found\r\n"), "{answer}");
     assert!(body_of(&answer).contains("/nowhere"), "the message names the path: {answer}");
 
-    // --- the right path with the wrong method is also a 404
+    // --- the right path with the wrong method is a 405, not a 404
+    //
+    // This asserted 404 for as long as the router could only mount two verbs,
+    // which was true of the code and wrong about HTTP. A route is a method and
+    // a path together, and when the path is there and the method is not, the
+    // honest answer says so and names what would have worked.
     let answer = ask(b"POST /tagged HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
     assert!(
-        answer.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        answer.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
         "a route is a method and a path together: {answer}"
     );
 
@@ -459,4 +481,46 @@ fn the_server_reads_what_a_client_actually_sends() {
 
     let answer = ask(b"GET /tagged HTTP/1.1\r\n\r\n");
     assert_eq!(body_of(&answer), "tagged", "the server outlived the silent client");
+
+    // --- the three verbs that had no way to be mounted
+    //
+    // `Method` has known `Put`, `Patch` and `Delete` since it was written, and
+    // `dispatch` has always compared them; the router could only *mount* `get`
+    // and `post`, so a REST service was unwritable for a reason nothing said
+    // out loud. The `Delete` route is mounted through the general `on`, which
+    // is what stops the set of verbs being closed again.
+    for (verb, expected) in [("PUT", "put 7"), ("PATCH", "patch 7"), ("DELETE", "delete 7")] {
+        let request = format!("{verb} /thing/7 HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
+        let answer = ask(request.as_bytes());
+        assert_eq!(body_of(&answer), expected, "{verb} should have reached the handler");
+    }
+
+    // --- a path that exists under a different verb is 405, not 404
+    //
+    // With one verb per path nobody notices; with five it is the difference
+    // between "your URL is wrong" and "your method is wrong", and sending a
+    // client to check the first when it is the second is an afternoon.
+    let answer = ask(b"POST /tagged HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 405 "), "{answer}");
+    assert!(
+        answer.contains("Allow: GET"),
+        "a 405 has to say what would have worked: {answer}"
+    );
+
+    // Every verb mounted at the path, and each named once however many routes
+    // matched.
+    let answer = ask(b"GET /thing/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 405 "), "{answer}");
+    let allow = answer
+        .lines()
+        .find(|line| line.starts_with("Allow: "))
+        .expect("an Allow header");
+    for verb in ["PUT", "PATCH", "DELETE"] {
+        assert!(allow.contains(verb), "{allow}");
+    }
+    assert_eq!(allow.matches("PUT").count(), 1, "named once: {allow}");
+
+    // --- and a path nothing mounted is still 404
+    let answer = ask(b"GET /nothing-here HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(answer.starts_with("HTTP/1.1 404 "), "{answer}");
 }

@@ -274,3 +274,145 @@ fn main() -> Int {{
     );
     assert_eq!(out, "b\nd\na\nc\n", "the two 1s keep b-before-d, and the two 2s a-before-c");
 }
+
+// --- the everyday half, which was missing ----------------------------------
+
+/// A `main` around a body, so a test reads as the Khora it is checking.
+///
+/// `format!` inserts `body` at run time, so the braces inside it need no
+/// doubling -- which is the difference between a readable test and one that
+/// is mostly backslashes.
+fn program(body: &str) -> String {
+    format!("{HEAD}fn main() -> Int {{
+{body}
+  0
+}}
+")
+}
+
+/// **`ends_with` beside `starts_with`, `upper` beside `lower`.**
+///
+/// The asymmetries were the diagnosis rather than a judgement call: a surface
+/// with one of each pair is what it looks like when every function was added
+/// by the one caller that needed it.
+#[test]
+fn the_pairs_that_were_missing_a_half() {
+    let out = run(
+        "text_pairs",
+        &program(r#"  print(if String::ends_with("khora.toml", ".toml") { "yes" } else { "no" });
+  print(if String::ends_with("khora.toml", ".kh") { "yes" } else { "no" });
+  // Shorter than the suffix, which is the index that would go negative.
+  print(if String::ends_with("a", "aaa") { "yes" } else { "no" });
+  print(String::upper("Khora 1"));
+  print(if String::contains("khora", "hor") { "yes" } else { "no" });
+  print(if String::contains("khora", "zz") { "yes" } else { "no" });
+  print(if String::is_empty("") { "yes" } else { "no" });
+  print("[" + String::trim_start("  x  ") + "]");
+  print("[" + String::trim_end("  x  ") + "]");
+  print(String::repeat("ab", 3));
+  print("[" + String::repeat("ab", 0) + "]");"#),
+    );
+
+    assert_eq!(
+        out,
+        "yes\nno\nno\nKHORA 1\nyes\nno\nyes\n[x  ]\n[  x]\nababab\n[]\n"
+    );
+}
+
+/// **`n` separators give `n + 1` pieces, always.**
+///
+/// The rule that makes `split` and `join` inverses, and the one every library
+/// that quietly drops empty pieces gives up. `"a,,b"` has three fields and the
+/// middle one is empty; a caller who wants them dropped writes a filter, which
+/// they could not do if the split had already decided.
+#[test]
+fn splitting_keeps_every_piece() {
+    let out = run(
+        "text_split_all",
+        &program(r#"  print(String::join(String::split("a,b,c", ","), "|"));
+  print(String::join(String::split("a,,b", ","), "|"));
+  print(String::join(String::split(",a", ","), "|"));
+  print(String::join(String::split("a,", ","), "|"));
+  print(String::join(String::split("", ","), "|"));
+  print(String::join(String::split("nothing", ","), "|"));
+  // A multi-byte separator, so the step is the separator's length and not one.
+  print(String::join(String::split("a<>b<>c", "<>"), "|"));
+  // An empty separator matches everywhere and so splits nothing.
+  print(String::join(String::split("abc", ""), "|"));"#),
+    );
+
+    assert_eq!(
+        out,
+        "a|b|c\na||b\n|a\na|\n\nnothing\na|b|c\nabc\n"
+    );
+}
+
+/// **`join(split(s, x), x)` is `s`**, which is the property both were written
+/// to satisfy and the reason `split` keeps its empty pieces.
+#[test]
+fn splitting_and_joining_are_inverses() {
+    let out = run(
+        "text_roundtrip",
+        &program(r#"  print(String::join(String::split("a,b,,c,", ","), ","));
+  print(String::join(String::split("", ","), ","));
+  print(String::join(String::split(",,,", ","), ","));"#),
+    );
+
+    assert_eq!(out, "a,b,,c,\n\n,,,\n");
+}
+
+/// **Replacement does not re-read what it wrote.**
+///
+/// `"a"` to `"aa"` doubles each `a` once. A loop that searched the output
+/// instead would not terminate, which is the bug this shape avoids by
+/// construction rather than by a guard.
+#[test]
+fn replacing_reads_the_original_only() {
+    let out = run(
+        "text_replace",
+        &program(r#"  print(String::replace("banana", "a", "aa"));
+  print(String::replace("banana", "na", "-"));
+  print(String::replace("aaa", "aa", "b"));
+  print(String::replace("khora", "zz", "!"));
+  print(String::replace("khora", "", "!"));
+  print(String::replace("a,b", ",", ""));"#),
+    );
+
+    // Two things the counting has to get right, and the first draft of this
+    // test got both wrong. `"banana"` has three `a`s and so *four* pieces --
+    // the last one empty -- which is why doubling them gives `baanaanaa` and
+    // not `baanaana`. And `"na"` occurs twice with nothing after the second,
+    // so `ba--` and not `ba-`.
+    //
+    // `aaa` with `aa` -> `b` is `ba`: the trailing `a` is what the first match
+    // left, and nothing rescans.
+    assert_eq!(out, "baanaanaa\nba--\nba\nkhora\nkhora\nab\n");
+}
+
+/// Splitting a long line is linear, not quadratic.
+///
+/// `split` builds its list backwards and reverses once, because prepending is
+/// the cheap end and appending walks the list per piece — which turns a
+/// thousand fields into a million steps. A timing assertion would be flaky;
+/// the count is what says the work happened.
+#[test]
+fn splitting_a_long_line_stays_linear() {
+    let out = run(
+        "text_split_long",
+        &program(r#"  let mut line = "";
+  let mut i = 0;
+  while i < 500 {
+    line = line + "f,";
+    i = i + 1
+  };
+  let pieces = String::split(line, ",");
+  print(Int::to_string(List::length(pieces)));
+  print(String::join(pieces, ""));"#),
+    );
+
+    // 500 separators, 501 pieces, the last one empty.
+    let mut expected = String::from("501\n");
+    expected.push_str(&"f".repeat(500));
+    expected.push('\n');
+    assert_eq!(out, expected);
+}
