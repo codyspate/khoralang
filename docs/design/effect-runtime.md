@@ -69,7 +69,7 @@ Performing an operation is then a field read and a closure call — the same cos
 as calling any function value, which closures already pay for and which
 `docs/design/memory.md` already accounts for.
 
-Row polymorphism (`'e`) specializes the same way generics do. Khora already
+Row polymorphism (`'ef`) specializes the same way generics do. Khora already
 monomorphizes whole-program, and a row variable is concrete at every call site
 reachable from `main` for exactly the reason a type variable is. No new
 mechanism, and the same code-size trade already accepted for generics.
@@ -109,7 +109,7 @@ know at runtime which of the two arrived, and the heap object cannot say: a
 and `ModelError::RateLimited` are both tag 0.
 
 Two alternatives were rejected. Indexing into the callee's row is smaller but
-does not survive an open row `'r`, where the index is not known at the raise
+does not survive an open row `'er`, where the index is not known at the raise
 and would have to be renumbered at every frame the error crosses. Stealing
 high bits of the header `tag` costs nothing at the call but makes every
 ordinary `match` mask, taxing code that never raises. A whole-program compiler
@@ -371,8 +371,8 @@ pub effect Scope {
 and the polymorphism moves to an ordinary generic function:
 
 ```
-pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
-  with { 'e | scope: Scope }
+pub fn acquire<A, 'ef>(value: A, release: (A) -> ()) -> A
+  with { 'ef | scope: Scope }
 {
   scope.defer(fn () => release(value));
   value

@@ -145,8 +145,8 @@ closure was written somewhere else. The handler cannot borrow the `handler for`
 trick, and the whole router was stuck on one fiber.
 
 ```khora
-pub type SharedFn<A, B, 'e>;
-impl<A, B, 'e> Share for SharedFn<A, B, 'e> {}
+pub type SharedFn<A, B, 'er>;
+impl<A, B, 'er> Share for SharedFn<A, B, 'er> {}
 ```
 
 `SharedFn::of` takes a closure written at the call — checked exactly as a

@@ -23,6 +23,8 @@ pub effect Store {
 
 An operation can be pure from the caller's point of view or declare its own typed failures with `raises`.
 
+`Clock` here is a stand-in cut down to one operation. The real one is [`std::clock::Clock`](/docs/stdlib/api/clock/) — it lives in its own module rather than in `std::env`, and it has four operations, including `sleep`. Waiting is an operation on the capability on purpose: a fake clock is `handler for Clock { sleep: fn _ms => (), .. }` and nothing else, so a test that exercises a retry loop finishes instantly.
+
 ## Require a capability with `with`
 
 A function's capability row names the capabilities available in its body:
@@ -165,8 +167,8 @@ let user = load_user(id)! with Production {
 Reusable higher-order APIs can be polymorphic over additional capabilities with a row variable:
 
 ```khora
-fn run<A, 'e>(body: () -> A with 'e) -> A
-  with 'e
+fn run<A, 'ef>(body: () -> A with 'ef) -> A
+  with 'ef
 {
   body()
 }
@@ -175,7 +177,7 @@ fn run<A, 'e>(body: () -> A with 'e) -> A
 A record row can also keep named entries while accepting an open tail:
 
 ```khora
-{ clock: Clock | 'e }
+{ clock: Clock | 'ef }
 ```
 
 See [Generics and traits](./generics-and-traits/#failure-and-capability-row-variables) for row variables in higher-order function types.

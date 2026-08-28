@@ -112,12 +112,12 @@ pub fn open(crew: Fibers, settings: Settings, count: Int) -> Pool {
 /// The `db` requirement is handled here and removed from the caller's row. Any
 /// other requirements and raised failures on `body` pass straight through.
 /// The `Result` is only about obtaining the lease.
-pub fn with_db<A, 'e, 'r>(
+pub fn with_db<A, 'ef, 'er>(
   pool: Pool,
-  body: () -> A with { 'e | db: Db } raises 'r,
+  body: () -> A with { 'ef | db: Db } raises 'er,
 ) -> Result<A, DbError>
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 {
   match Channel::receive(pool.idle) {
     Option::None => Result::Err(DbError::Disconnected("the pool is closed")),
@@ -131,13 +131,13 @@ pub fn with_db<A, 'e, 'r>(
 ///
 /// Separate from `with_db` because `acquire` needs a `Scope` and `with_db`'s
 /// whole point is that its caller does not have to have one.
-fn held<A, 'e, 'r>(
+fn held<A, 'ef, 'er>(
   idle: Channel<Channel<Request>>,
   requests: Channel<Request>,
-  body: () -> A with { 'e | db: Db } raises 'r,
+  body: () -> A with { 'ef | db: Db } raises 'er,
 ) -> Result<A, DbError>
-  with { 'e | scope: Scope }
-  raises 'r
+  with { 'ef | scope: Scope }
+  raises 'er
 {
   let leased = acquire(requests, fn back => give_back(idle, back));
   Result::Ok(body()! with { db: over(leased) })

@@ -13,7 +13,8 @@ Start with the recipe closest to the problem you are solving:
 - [Run a database transaction](/docs/cookbook/database-transactions/) — use the portable `Db` capability and `transaction` so failure and cancellation cannot leak an open transaction.
 - [Bound concurrent work](/docs/cookbook/bounded-concurrency/) — use `Fiber`, `Nursery`, and `bounded_nursery` to turn a concurrency limit into backpressure.
 - [Make resource cleanup cancellation-safe](/docs/cookbook/cancellation-safe-resources/) — pair `scoped` and `acquire` so cleanup runs on return, failure, and cancellation.
-- [Load application configuration](/docs/cookbook/configuration/) — read process configuration through the `Env` capability and turn invalid startup state into typed failure.
+- [Load application configuration](/docs/cookbook/configuration/) — read settings with `std::config`, report every bad key at once, and keep secrets out of the logs with `Redacted`.
+- [Retry a flaky call](/docs/cookbook/retrying/) — pick a `Schedule`, drive it with `retry_while`, and test the whole thing in under a millisecond.
 - [Test code that uses capabilities](/docs/cookbook/testing-capabilities/) — supply deterministic handlers without global mutation or test-only branches in application code.
 - [Trace an operation](/docs/cookbook/tracing/) — implement a `Tracer`, wrap work with `around`, and keep span lifetime structured.
 

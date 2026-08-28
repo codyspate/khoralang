@@ -1107,17 +1107,17 @@ fn segment(text: String) -> Split {
 ///
 /// It also takes the capabilities out of the router's type. A handler closes
 /// over what it needs at the mount site, so there is no `'r` left for a `Route`
-/// to carry — `Router<'e>` says only how its handlers can fail.
-pub type Route<'e> = {
+/// to carry — `Router<'er>` says only how its handlers can fail.
+pub type Route<'er> = {
   method: Method,
   pattern: String,
-  handler: SharedFn<Request, Response, 'e>,
+  handler: SharedFn<Request, Response, 'er>,
 };
 
 /// A router carries its handlers' failures, so mounting a route that can fail
 /// against the database widens the router's own error row.
-pub type Router<'e> = {
-  routes: List<Route<'e>>,
+pub type Router<'er> = {
+  routes: List<Route<'er>>,
 };
 
 /// A response, and whether the connection that asked for it is staying open.
@@ -1132,33 +1132,33 @@ pub type Router<'e> = {
 /// collide with another module's `get`.
 impl Router {
   /// A router with no routes. The start of the pipeline.
-  pub fn new<'e>() -> Router<'e> { { routes: List::Nil } }
+  pub fn new<'er>() -> Router<'er> { { routes: List::Nil } }
 
   /// Mounts `handler` at `route` for POST.
   ///
   /// Later mounts are tried first, because each prepends. Mounting the same
   /// route twice is allowed and the second one wins, which is worth knowing
   /// rather than an invariant anything enforces.
-  pub fn post<'e>(
-    router: Router<'e>,
+  pub fn post<'er>(
+    router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'e>
-  ) -> Router<'e> {
+    handler: SharedFn<Request, Response, 'er>
+  ) -> Router<'er> {
     { routes: List::Cons({ method: Method::Post, pattern: route, handler: handler }, router.routes) }
   }
 
   /// Mounts `handler` at `route` for GET.
-  pub fn get<'e>(
-    router: Router<'e>,
+  pub fn get<'er>(
+    router: Router<'er>,
     route: String,
-    handler: SharedFn<Request, Response, 'e>
-  ) -> Router<'e> {
+    handler: SharedFn<Request, Response, 'er>
+  ) -> Router<'er> {
     { routes: List::Cons({ method: Method::Get, pattern: route, handler: handler }, router.routes) }
   }
 
   /// Serves until the process stops, on a fiber per connection.
-  pub fn listen<'e>(router: Router<'e>, port: Int) -> ()
-    raises 'e + HttpError
+  pub fn listen<'er>(router: Router<'er>, port: Int) -> ()
+    raises 'er + HttpError
   {
     if start() {
     } else {
@@ -1203,9 +1203,9 @@ impl Router {
   ///
   /// The configuration is released when the caller's scope ends, which for a
   /// server is usually the program's.
-  pub fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) -> ()
+  pub fn listen_tls<'er>(router: Router<'er>, port: Int, certificate: String, key: String) -> ()
     with { scope: Scope }
-    raises 'e + HttpError + TlsError
+    raises 'er + HttpError + TlsError
   {
     let settings = tls_server(certificate, key)!;
     let server = Router::bound(port)!;
@@ -1214,7 +1214,7 @@ impl Router {
   }
 
   /// A listening socket on `port`, announced by the caller.
-  pub fn bound<'e>(port: Int) -> Int raises HttpError {
+  pub fn bound<'ef>(port: Int) -> Int raises HttpError {
     if start() {
     } else {
       raise HttpError::BindFailed(port)
@@ -1228,9 +1228,9 @@ impl Router {
   ///
   /// A failed handshake ends that fiber quietly rather than the loop — on a
   /// public port it is the ordinary case, not an incident.
-  pub fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) -> ()
+  pub fn serve_secured<'er>(router: Router<'er>, server: Int, settings: TlsServer) -> ()
     with { nursery: Nursery }
-    raises 'e + HttpError
+    raises 'er + HttpError
   {
     let connection = accept_on(server);
     if connection == invalid_handle() {
@@ -1246,7 +1246,7 @@ impl Router {
   /// A failed handshake is the ordinary case on a public port — a scanner, a
   /// browser sent to `http://` — so it ends this fiber quietly. `secure` has
   /// already closed the socket.
-  fn secure_and_serve<'e>(router: Router<'e>, connection: Int, settings: TlsServer) -> () {
+  fn secure_and_serve<'er>(router: Router<'er>, connection: Int, settings: TlsServer) -> () {
     match attempt(fn () => secure(settings, connection)!) {
       Result::Err(_) => (),
       Result::Ok(secured) => Router::serve_connection(router, over_tls(secured)),
@@ -1258,9 +1258,9 @@ impl Router {
   /// `listen` is the one to call: it binds the port and then this. Taking an
   /// already-bound socket is for a caller that wants to bind it themselves —
   /// a test on port zero, a socket inherited from a supervisor.
-  pub fn serve_forever<'e>(router: Router<'e>, server: Int) -> ()
+  pub fn serve_forever<'er>(router: Router<'er>, server: Int) -> ()
     with { nursery: Nursery }
-    raises 'e + HttpError
+    raises 'er + HttpError
   {
     Router::serve_once(router, server)!;
     Router::serve_forever(router, server)!
@@ -1288,9 +1288,9 @@ impl Router {
   /// it has — so the ceiling is the runtime's to raise and not this module's.
   /// Until it does, the honest position is a bounded number of connections
   /// rather than an event loop that happens not to be written yet.
-  fn serve_once<'e>(router: Router<'e>, server: Int) -> ()
+  fn serve_once<'er>(router: Router<'er>, server: Int) -> ()
     with { nursery: Nursery }
-    raises 'e + HttpError
+    raises 'er + HttpError
   {
     let connection = accept_on(server);
     if connection == invalid_handle() {
@@ -1314,7 +1314,7 @@ impl Router {
   /// this function cannot name a constructor of it. Catching *whatever* is the
   /// one thing naming constructors cannot express, and the reason a total
   /// wildcard arm exists at all.
-  fn serve_connection<'e>(router: Router<'e>, transport: Transport) -> () {
+  fn serve_connection<'er>(router: Router<'er>, transport: Transport) -> () {
     // Before anything is read. `read_request` keeps reading until the request
     // is complete, which is the only correct thing to do and is also how a
     // fiber gets parked forever by a client that stops talking. Ten seconds is
@@ -1333,8 +1333,8 @@ impl Router {
   /// **Written against the public [`Connection`], with nothing reserved.** A
   /// framework of a different shape writes this loop itself and is not missing
   /// anything: the reading, the framing and the refusals are all above.
-  pub fn answer_on<'e>(router: Router<'e>, transport: Transport) -> ()
-    raises 'e
+  pub fn answer_on<'er>(router: Router<'er>, transport: Transport) -> ()
+    raises 'er
   {
     let connection = Connection::over(transport);
     let mut going = true;
@@ -1355,8 +1355,8 @@ impl Router {
   }
 
   /// What to send back for this request text.
-  fn dispatch<'e>(routes: List<Route<'e>>, request: Request) -> Response
-    raises 'e
+  fn dispatch<'er>(routes: List<Route<'er>>, request: Request) -> Response
+    raises 'er
   {
     match routes {
       List::Nil => Response::text(404, "no route for " + request.path),

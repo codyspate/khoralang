@@ -38,14 +38,14 @@ pub effect Scope {
   defer: (() -> ()) -> (),
 }
 
-pub fn scoped<A, 'e, 'r>(
-  body: () -> A with { 'e | scope: Scope } raises 'r
+pub fn scoped<A, 'ef, 'er>(
+  body: () -> A with { 'ef | scope: Scope } raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 
-pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
-  with { 'e | scope: Scope }
+pub fn acquire<A, 'ef>(value: A, release: (A) -> ()) -> A
+  with { 'ef | scope: Scope }
 ```
 
 Pass a named function to `scoped` when the function receives the `scope` capability. That keeps capability passing explicit and lets row subtraction remove `scope` from the caller.
@@ -125,11 +125,11 @@ Put that policy in the transaction abstraction rather than asking every caller t
 When designing a package, prefer this shape:
 
 ```khora
-fn with_connection<A, 'e, 'r>(
-  body: (Connection) -> A with 'e raises 'r
+fn with_connection<A, 'ef, 'er>(
+  body: (Connection) -> A with 'ef raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 ```
 
 over returning a raw handle whose caller must remember to close it on every exit path.

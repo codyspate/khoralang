@@ -137,7 +137,7 @@ Request -> Response with { db: Db }
 Open capability row:
 
 ```khora
-A -> B with 'e
+A -> B with 'ef
 ```
 
 A function type can carry both requirements and failures:
@@ -183,17 +183,17 @@ Type arguments can include integer literal types for const-generic parameters.
 A row variable starts with `'`:
 
 ```khora
-'e
-'r
+'ef
+'er
 ```
 
 They are used where an API is polymorphic over capabilities or failures:
 
 ```khora
-A -> B with 'e raises 'r
+A -> B with 'ef raises 'er
 ```
 
-The letter after `'` has no built-in meaning; `'e` and `'r` are conventions only.
+The name after `'` has no built-in meaning. `'ef` for capabilities and `'er` for errors are conventions, spelled with two letters so they cannot be read backwards: `'e` alone looks like "errors" to anybody arriving from a library that calls them that.
 
 ## Record rows and open tails
 
@@ -206,7 +206,7 @@ A closed capability-shaped row:
 A row with an open tail:
 
 ```khora
-{ db: Db | 'e }
+{ db: Db | 'ef }
 ```
 
 Rows may merge additional row values in the tail position:

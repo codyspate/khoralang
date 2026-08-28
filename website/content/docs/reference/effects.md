@@ -68,8 +68,8 @@ fn build_report(id: Id) -> Report
 ## Open capability row
 
 ```khora
-fn use_clock<A, 'e>(body: () -> A with { clock: Clock | 'e }) -> A
-  with { clock: Clock | 'e }
+fn use_clock<A, 'ef>(body: () -> A with { clock: Clock | 'ef }) -> A
+  with { clock: Clock | 'ef }
 {
   body()
 }
@@ -94,7 +94,7 @@ raises StoreError + ValidationError + HttpError
 Open failure row:
 
 ```khora
-raises 'r
+raises 'er
 ```
 
 ## Effects on function types
@@ -160,12 +160,12 @@ Named contexts and overrides are specified in [Capabilities](./capabilities/).
 ## Effect-polymorphic higher-order functions
 
 ```khora
-fn map<A, B, 'e, 'r>(
+fn map<A, B, 'ef, 'er>(
   values: List<A>,
-  f: A -> B with 'e raises 'r,
+  f: A -> B with 'ef raises 'er,
 ) -> List<B>
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 {
   // ...
 }

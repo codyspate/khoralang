@@ -59,11 +59,11 @@ pub effect Scope {
 `scoped` creates a fresh region, installs a `Scope` handler over the body, and removes that capability from the caller's required row:
 
 ```khora
-pub fn scoped<A, 'e, 'r>(
-  body: () -> A with { 'e | scope: Scope } raises 'r
+pub fn scoped<A, 'ef, 'er>(
+  body: () -> A with { 'ef | scope: Scope } raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 ```
 
 Example:
@@ -88,8 +88,8 @@ A named function is the normal argument to `scoped` when that function requires 
 `acquire` registers a release operation and returns the acquired value:
 
 ```khora
-pub fn acquire<A, 'e>(value: A, release: (A) -> ()) -> A
-  with { 'e | scope: Scope }
+pub fn acquire<A, 'ef>(value: A, release: (A) -> ()) -> A
+  with { 'ef | scope: Scope }
 ```
 
 Typical form:
@@ -135,11 +135,11 @@ A `catch` handles failures in a `raises` row. Cancellation is not a failure vari
 A resource-owning API should generally keep the lifetime inside one call:
 
 ```khora
-fn with_resource<A, 'e, 'r>(
-  body: (Resource) -> A with 'e raises 'r
+fn with_resource<A, 'ef, 'er>(
+  body: (Resource) -> A with 'ef raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 ```
 
 rather than returning an unmanaged handle that callers must remember to close on every path.

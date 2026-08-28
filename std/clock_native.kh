@@ -1,9 +1,5 @@
 module std::clock;
 
-extern fn khora_unix_millis() -> Int;
-extern fn khora_monotonic_millis() -> Int;
-extern fn khora_sleep(millis: Int) -> ();
-
 //! What time it is, and waiting for it to be later.
 //!
 //! **Its own module, and it did not start as one.** `Clock` lived in
@@ -26,6 +22,10 @@ extern fn khora_sleep(millis: Int) -> ();
 //! calls, two epochs, two headers -- and ISO C's `time` is whole seconds with
 //! nothing finer spelled the same everywhere. The runtime already knows which
 //! target it was built for.
+
+extern fn khora_unix_millis() -> Int;
+extern fn khora_monotonic_millis() -> Int;
+extern fn khora_sleep(millis: Int) -> ();
 
 /// What time it is.
 ///

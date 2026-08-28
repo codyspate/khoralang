@@ -158,18 +158,18 @@ This `const` is a generic parameter declaration. Module-level constants use the 
 Generic higher-order functions can be polymorphic over the capabilities and failures of a function they receive. Row variables begin with `'`:
 
 ```khora
-fn map<A, B, 'e, 'r>(
+fn map<A, B, 'ef, 'er>(
   values: List<A>,
-  transform: A -> B with 'e raises 'r,
+  transform: A -> B with 'ef raises 'er,
 ) -> List<B>
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 {
   // ...
 }
 ```
 
-`'e` and `'r` are ordinary row-variable names; their meaning comes from where they are used. This is why an effectful function can be passed to ordinary higher-order operations without introducing a separate `traverse` API.
+`'ef` and `'er` are ordinary row-variable names; their meaning comes from where they are used. This is why an effectful function can be passed to ordinary higher-order operations without introducing a separate `traverse` API.
 
 ## Explicitly polymorphic function types
 

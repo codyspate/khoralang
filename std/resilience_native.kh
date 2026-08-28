@@ -267,8 +267,8 @@ fn fib(n: Int) -> Int {
 /// caller who wanted neither reaches for `Schedule::times`, and still declares
 /// both — which is honest, since the policy is a value and could have been a
 /// jittered one.
-pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
-  with { 'e | clock: Clock, random: Random }
+pub fn retry<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> A
+  with { 'ef | clock: Clock, random: Random }
   raises E
 {
   retry_while(schedule, fn _e => true, body)!
@@ -285,12 +285,12 @@ pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A
 ///
 /// Retrying a 404 is the failure this exists to prevent, and it costs the
 /// caller one `fn`.
-pub fn retry_while<A, E, 'e>(
+pub fn retry_while<A, E, 'ef>(
   schedule: Schedule,
   again: (E) -> Bool,
-  body: () -> A with 'e raises E,
+  body: () -> A with 'ef raises E,
 ) -> A
-  with { 'e | clock: Clock, random: Random }
+  with { 'ef | clock: Clock, random: Random }
   raises E
 {
   let began = clock.monotonic_millis();
@@ -333,8 +333,8 @@ pub fn retry_while<A, E, 'e>(
 /// `repeat(Schedule::Spaced(30000), fn () => reconcile()!)` is "every thirty
 /// seconds until something breaks". The count comes back so a caller can tell
 /// "the schedule ended" from "it never ran".
-pub fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int
-  with { 'e | clock: Clock, random: Random }
+pub fn repeat<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> Int
+  with { 'ef | clock: Clock, random: Random }
 {
   let began = clock.monotonic_millis();
   let mut done = 0;

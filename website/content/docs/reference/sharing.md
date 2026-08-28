@@ -107,8 +107,11 @@ impl<A> Share for Channel<A> {}
 
 impl<A: Share> Channel<A> {
   pub fn bounded(capacity: Int) -> Channel<A>;
+  pub fn dropping(capacity: Int) -> Channel<A>;
+  pub fn sliding(capacity: Int) -> Channel<A>;
   pub fn send(self, value: A) -> Bool;
   pub fn receive(self) -> Option<A>;
+  pub fn poll(self) -> Option<A>;
   pub fn close(self) -> ();
   pub fn depth(self) -> Int;
 }
@@ -137,6 +140,35 @@ A send to a full channel suspends until space becomes available. A receive from 
 
 A capacity less than one is treated as one. `Channel::bounded(0)` is therefore **not** a zero-capacity rendezvous channel.
 
+### What a full channel does
+
+The behavior belongs to the channel, not to the send. A queue is lossy or it is not, and two senders disagreeing about which is not a state a queue can be in.
+
+| Constructor | A send into a full one | `send` answers | What is left |
+| --- | --- | --- | --- |
+| `bounded` | waits | `true` | everything |
+| `dropping` | refuses the new value | `false` | the oldest |
+| `sliding` | evicts the oldest | `true` | the newest |
+
+`bounded` is the default because backpressure is: a queue nobody is draining is a producer that should slow down.
+
+`dropping` is for a producer that must not stall — the request path writing an audit event, a handler emitting a metric. The `false` makes the loss a value the caller can count and report.
+
+`sliding` is for a feed where only the newest value matters: a gauge, a progress indicator, a last-known position. It answers `true` because nothing was refused, so the loss is invisible at the call site. That is deliberate — nobody was going to act on it. Use `dropping` where somebody would.
+
+### `poll`
+
+`poll` takes a value if one is already there and never waits:
+
+```khora
+match Channel::poll(jobs) {
+  Option::Some(next) => process(next),
+  Option::None => do_something_else(),
+}
+```
+
+`None` means "not right now", not "not ever": a closed and drained channel and a live empty one both answer `None`, and telling them apart is what `receive` is for. Use `poll` in a loop that has other work between looks. A loop that only polls is a loop that spins.
+
 `depth` is observational: concurrent activity can make the returned count stale immediately, so it is appropriate for metrics and tests rather than synchronization decisions.
 
 ## `SharedFn`
@@ -144,13 +176,13 @@ A capacity less than one is treated as one. `Channel::bounded(0)` is therefore *
 A closure's function type does not reveal what the closure captured. `SharedFn` records the fact that a closure was checked for safe sharing at the point where its captures were visible:
 
 ```khora
-pub type SharedFn<A, B, 'e>;
+pub type SharedFn<A, B, 'er>;
 
-impl<A, B, 'e> Share for SharedFn<A, B, 'e> {}
+impl<A, B, 'er> Share for SharedFn<A, B, 'er> {}
 
-impl<A, B, 'e> SharedFn<A, B, 'e> {
-  pub fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>;
-  pub fn call(self, argument: A) -> B raises 'e;
+impl<A, B, 'er> SharedFn<A, B, 'er> {
+  pub fn of(f: (A) -> B raises 'er) -> SharedFn<A, B, 'er>;
+  pub fn call(self, argument: A) -> B raises 'er;
 }
 ```
 

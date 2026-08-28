@@ -39,6 +39,12 @@ See the [Standard library](/docs/stdlib/) entry point for the generated referenc
 
 The reference HTTP implementation is intentionally not presented as every protocol feature a mature web framework might provide. The shipping documentation should be treated as the supported surface; unlisted body encodings, upgrades, protocol versions, or framework conveniences should not be assumed merely because the core server/client path exists.
 
+## Concurrency combinators
+
+A fiber carries its answer and its failure row — `Fiber<A, 'er>`, with `join` re-raising what the child raised — and `Clock` can `sleep`. The combinators built on top of those do not exist yet: there is no `timeout`, no `race`, and no bounded parallel map. Write them by hand out of `Fiber`, `Channel` and a nursery in the meantime.
+
+`Channel` also has no `select` (waiting on the first of several) and no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
+
 ## Cross-compilation and WebAssembly
 
 LLVM object/module emission is further along than the complete runtime/link/sysroot/deployment path for every target. Only targets tested end to end are labeled supported.

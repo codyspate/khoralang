@@ -82,7 +82,7 @@ badly missed before Phase 3.
 - Is `for` sugar over an `Iterator` typeclass, or a language primitive with a
   desugaring to `next`?
 - Are `break`/`continue` labeled? Rust's `'label: loop` conflicts with row
-  variable syntax (`'r`), so labels need a different spelling.
+  variable syntax (`'er`), so labels need a different spelling.
 - Does `loop { }` with `break value` earn its place, or does `while` plus
   recursion cover enough?
 - Compound assignment (`+=`, `-=`) — worth the extra grammar, or not?

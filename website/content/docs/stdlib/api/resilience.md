@@ -247,7 +247,7 @@ only stays drift-free because it answers `attempt * millis` rather than
 ### retry
 
 ```khora
-pub fn retry<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> A with { 'e | clock: Clock, random: Random } raises E
+pub fn retry<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> A with { 'ef | clock: Clock, random: Random } raises E
 ```
 
 Runs `body` until it succeeds or the schedule runs out.
@@ -266,7 +266,7 @@ jittered one.
 ### retry_while
 
 ```khora
-pub fn retry_while<A, E, 'e>(schedule: Schedule, again: (E) -> Bool, body: () -> A with 'e raises E) -> A with { 'e | clock: Clock, random: Random } raises E
+pub fn retry_while<A, E, 'ef>(schedule: Schedule, again: (E) -> Bool, body: () -> A with 'ef raises E) -> A with { 'ef | clock: Clock, random: Random } raises E
 ```
 
 `retry`, for a caller that can tell a retryable failure from a permanent one.
@@ -284,7 +284,7 @@ caller one `fn`.
 ### repeat
 
 ```khora
-pub fn repeat<A, E, 'e>(schedule: Schedule, body: () -> A with 'e raises E) -> Int with { 'e | clock: Clock, random: Random }
+pub fn repeat<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> Int with { 'ef | clock: Clock, random: Random }
 ```
 
 Runs `body` on the schedule until it fails or the schedule runs out, and

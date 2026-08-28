@@ -349,10 +349,10 @@ next request begins, so the connection cannot be reused whatever the
 ### Route
 
 ```khora
-pub type Route<'e> = {
+pub type Route<'er> = {
   method: Method,
   pattern: String,
-  handler: SharedFn<Request, Response, 'e>,
+  handler: SharedFn<Request, Response, 'er>,
 };
 ```
 
@@ -366,13 +366,13 @@ hands back something that has forgotten it was ever a closure.
 
 It also takes the capabilities out of the router's type. A handler closes
 over what it needs at the mount site, so there is no `'r` left for a `Route`
-to carry — `Router<'e>` says only how its handlers can fail.
+to carry — `Router<'er>` says only how its handlers can fail.
 
 ### Router
 
 ```khora
-pub type Router<'e> = {
-  routes: List<Route<'e>>,
+pub type Router<'er> = {
+  routes: List<Route<'er>>,
 };
 ```
 
@@ -828,7 +828,7 @@ collide with another module's `get`.
 #### new
 
 ```khora
-pub fn new<'e>() -> Router<'e>
+pub fn new<'er>() -> Router<'er>
 ```
 
 A router with no routes. The start of the pipeline.
@@ -836,7 +836,7 @@ A router with no routes. The start of the pipeline.
 #### post
 
 ```khora
-pub fn post<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
+pub fn post<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
 ```
 
 Mounts `handler` at `route` for POST.
@@ -848,7 +848,7 @@ rather than an invariant anything enforces.
 #### get
 
 ```khora
-pub fn get<'e>(router: Router<'e>, route: String, handler: SharedFn<Request, Response, 'e>) -> Router<'e>
+pub fn get<'er>(router: Router<'er>, route: String, handler: SharedFn<Request, Response, 'er>) -> Router<'er>
 ```
 
 Mounts `handler` at `route` for GET.
@@ -856,7 +856,7 @@ Mounts `handler` at `route` for GET.
 #### listen
 
 ```khora
-pub fn listen<'e>(router: Router<'e>, port: Int) ->() raises 'e + HttpError
+pub fn listen<'er>(router: Router<'er>, port: Int) ->() raises 'er + HttpError
 ```
 
 Serves until the process stops, on a fiber per connection.
@@ -864,7 +864,7 @@ Serves until the process stops, on a fiber per connection.
 #### listen_tls
 
 ```khora
-pub fn listen_tls<'e>(router: Router<'e>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'e + HttpError + TlsError
+pub fn listen_tls<'er>(router: Router<'er>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'er + HttpError + TlsError
 ```
 
 Accepts for as long as the process lives.
@@ -881,7 +881,7 @@ server is usually the program's.
 #### bound
 
 ```khora
-pub fn bound<'e>(port: Int) -> Int raises HttpError
+pub fn bound<'ef>(port: Int) -> Int raises HttpError
 ```
 
 A listening socket on `port`, announced by the caller.
@@ -889,7 +889,7 @@ A listening socket on `port`, announced by the caller.
 #### serve_secured
 
 ```khora
-pub fn serve_secured<'e>(router: Router<'e>, server: Int, settings: TlsServer) ->() with { nursery: Nursery } raises 'e + HttpError
+pub fn serve_secured<'er>(router: Router<'er>, server: Int, settings: TlsServer) ->() with { nursery: Nursery } raises 'er + HttpError
 ```
 
 `serve_forever` over TLS: accepts, handshakes, and serves on a fiber
@@ -901,7 +901,7 @@ public port it is the ordinary case, not an incident.
 #### serve_forever
 
 ```khora
-pub fn serve_forever<'e>(router: Router<'e>, server: Int) ->() with { nursery: Nursery } raises 'e + HttpError
+pub fn serve_forever<'er>(router: Router<'er>, server: Int) ->() with { nursery: Nursery } raises 'er + HttpError
 ```
 
 Accepts connections on `server` until the process stops.
@@ -913,7 +913,7 @@ a test on port zero, a socket inherited from a supervisor.
 #### answer_on
 
 ```khora
-pub fn answer_on<'e>(router: Router<'e>, transport: Transport) ->() raises 'e
+pub fn answer_on<'er>(router: Router<'er>, transport: Transport) ->() raises 'er
 ```
 
 Answers every request on one connection, until the client stops.

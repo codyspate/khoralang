@@ -34,6 +34,7 @@ const fixed_clock = handler for Clock {
   unix_seconds: fn () => 1700000000,
   unix_millis: fn () => 1700000000000,
   monotonic_millis: fn () => 5000,
+  sleep: fn _millis => (),
 };
 
 test "session uses the supplied clock" {
@@ -71,6 +72,18 @@ with { clock: Clock::real() } {
 ```
 
 There is no global clock singleton and no `if testing` branch inside `create_session`.
+
+## Waiting costs nothing in a test
+
+`sleep` is an operation on `Clock`, not an ambient function. That one decision is why the handler above makes a retry loop or a poller run instantly:
+
+```khora
+sleep: fn _millis => (),
+```
+
+Nothing else is involved — no test runtime, no special mode, no rule about which fiber may advance time. Every language with an ambient `sleep` ends up building a parallel clock the runtime knows about, and documentation that opens by warning you to fork the sleeping code or deadlock. Here the capability *is* the seam, which is the same argument `Random::seeded` makes about the other unrepeatable input.
+
+The real clock is `Clock::real()`, and it gives a sleeping fiber's worker back for the whole wait — ten thousand sleeping fibers cost ten thousand entries in a heap rather than ten thousand stacks.
 
 ## Test only the operations you need
 

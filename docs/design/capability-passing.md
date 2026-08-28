@@ -111,7 +111,7 @@ of this. HIR needed nothing either — see the limit below.
 
 2. **Codegen.** `declare_closure` appends a parameter per label after the
    written ones, and `emit_closure` puts them in `incoming`, which is where
-   `evidence_from_row` already looks for a capability that a `with 'r` clause
+   `evidence_from_row` already looks for a capability that a `with 'ef` clause
    forwarded and no binding names. They are passed owned like every other
    argument, and released by the closure's outermost scope, because there is no
    local for the reference-counting plan to hang them on.

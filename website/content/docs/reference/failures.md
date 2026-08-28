@@ -45,7 +45,7 @@ Id -> User raises UserError
 Open generic row:
 
 ```khora
-A -> B raises 'r
+A -> B raises 'er
 ```
 
 ## Explicit `raise`
@@ -187,8 +187,8 @@ let result = attempt(fn () => load_user(id)!);
 Conceptual type:
 
 ```khora
-fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
-  with 'e;
+fn attempt<A, E, 'ef>(body: () -> A with 'ef raises E) -> Result<A, E>
+  with 'ef;
 ```
 
 The returned `Result` is ordinary data:

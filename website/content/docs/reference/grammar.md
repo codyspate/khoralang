@@ -73,7 +73,7 @@ Record:
 Open row:
 
 ```khora
-{ db: Db | 'e }
+{ db: Db | 'ef }
 ```
 
 Function type:
@@ -120,7 +120,7 @@ Const parameter:
 Row parameter:
 
 ```khora
-<'e>
+<'ef>
 ```
 
 Variance:

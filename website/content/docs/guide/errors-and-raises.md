@@ -176,6 +176,26 @@ let results = items
 
 The result is a `List<Result<Output, ProcessError>>` rather than a `List<Output>` that aborts at the first `ProcessError`.
 
+## When you want every reason, not the first
+
+`raises` stops at the first failure, which is right when the next step needs the last one's value. Validation is the other shape: the fields of a form, the keys of a config, the columns of a row do not depend on each other, and reporting them one restart at a time makes somebody run the program five times to be told five things it knew the first time.
+
+`Validated<A, E>` from `std::core` is that shape. `map2` runs its combiner only when both sides succeeded, and otherwise carries every error from both:
+
+```khora
+let settings = Validated::map2(
+  integer("PORT"),
+  string("HOST"),
+  fn (port, host) => { port: port, host: host },
+);
+```
+
+`and_then` is the fail-fast one, for a second step written in terms of the first's value — there is no second answer to collect when there is no first value to write it against.
+
+`to_result` collapses the whole thing back into a `Result<A, List<E>>` when it is time to join a `raises` chain. It keeps the list rather than the first error, because throwing the rest away at the boundary would undo the collecting.
+
+[Configuration](/docs/cookbook/configuration/) is the recipe built on this.
+
 ## Failure is part of the API
 
 A function's `raises` row is documentation the compiler checks. It answers a question that many languages leave to prose: what normal failure conditions must a caller be prepared to handle?

@@ -100,12 +100,12 @@ A const generic is part of a type's compile-time identity; it is distinct from a
 ## Row-variable parameters
 
 ```khora
-fn call<A, B, 'e, 'r>(
+fn call<A, B, 'ef, 'er>(
   value: A,
-  f: A -> B with 'e raises 'r,
+  f: A -> B with 'ef raises 'er,
 ) -> B
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 {
   f(value)!
 }
@@ -114,8 +114,8 @@ fn call<A, B, 'e, 'r>(
 A row variable is introduced directly in the generic parameter list:
 
 ```text
-'e
-'r
+'ef
+'er
 ```
 
 Its spelling is arbitrary; the position where it is used determines whether it represents capability requirements, failures, or another row-shaped type.
@@ -123,7 +123,7 @@ Its spelling is arbitrary; the position where it is used determines whether it r
 ## Open record/capability rows
 
 ```khora
-{ db: Db | 'e }
+{ db: Db | 'ef }
 ```
 
 The named entries are required and the row variable represents any additional entries.

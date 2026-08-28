@@ -138,7 +138,7 @@ pub effect Db {
 ///
 /// # Why the body carries a row it does not seem to need
 ///
-/// `raises 'r` is the other half, and without it the paragraph above is
+/// `raises 'er` is the other half, and without it the paragraph above is
 /// theatre. `docs/design/effect-runtime.md` §6: **a cancellation point is a
 /// `!` in a function that can raise**, and it travels out on the tagged return
 /// an error uses. A body typed `() -> Result<A, DbError>` with no row has no
@@ -157,11 +157,11 @@ pub effect Db {
 /// The row is the *caller's*, deliberately. A transaction over a body that can
 /// fail its own way keeps that failure's type — folding it into `DbError`
 /// would be the loss `Result<A, DbError>` already declines to take.
-pub fn transaction<A, 'c, 'r>(
-  body: () -> Result<A, DbError> with 'c raises 'r
+pub fn transaction<A, 'ef, 'er>(
+  body: () -> Result<A, DbError> with 'ef raises 'er
 ) -> Result<A, DbError>
-  with { 'c | db: Db }
-  raises 'r
+  with { 'ef | db: Db }
+  raises 'er
 {
   match db.begin() {
     Result::Err(problem) => Result::Err(problem),
@@ -181,11 +181,11 @@ type Settled = { mut done: Bool };
 /// Separate from `transaction` for the reason `postgres::pool`'s `held` is
 /// separate from `with_db`: `acquire` needs a `Scope`, and `transaction`'s
 /// whole point is that its caller does not have to have one.
-fn guarded<A, 'c, 'r>(
-  body: () -> Result<A, DbError> with 'c raises 'r
+fn guarded<A, 'ef, 'er>(
+  body: () -> Result<A, DbError> with 'ef raises 'er
 ) -> Result<A, DbError>
-  with { 'c | db: Db, scope: Scope }
-  raises 'r
+  with { 'ef | db: Db, scope: Scope }
+  raises 'er
 {
   let settled = { done: false };
   acquire(settled, fn state => undo(state));

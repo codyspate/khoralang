@@ -10,37 +10,48 @@ Source functions are not colored `async`; suspension-capable operations remain o
 
 ## Fibers
 
-A fiber handle has three core operations:
+A fiber handle carries both the answer type and the failure row:
 
 ```khora
-pub type Fiber;
+pub type Fiber<A, 'er>;
 
-impl Fiber {
-  pub fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  pub fn join(self) -> ();
+impl<A: Share, 'er> Fiber<A, 'er> {
+  pub fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>;
+  pub fn join(self) -> A raises 'er;
   pub fn cancel(self) -> ();
+  pub fn detach(self) -> ();
 }
 ```
 
-Spawn and wait explicitly:
+`A` must be `Share`: the value is computed on one fiber and read on another.
+
+`join` waits and answers what the body answered. If the body raised, `join` re-raises with the same type, so the caller catches by name:
 
 ```khora
-fn run() -> () {
-  let child = Fiber::spawn(fn () => work());
-  Fiber::join(child);
+fn run(id: Int) -> () {
+  let child = Fiber::spawn(fn () => load(id)!);
+  let row = Fiber::join(child)! catch {
+    DbError::Timeout => Row::empty(),
+    DbError::Missing(_id) => Row::empty(),
+  };
+  print(Int::to_string(row.total))
 }
 ```
+
+A body with an empty failure row needs no `!` on the join. Joining twice is joining once, from either side, and answers twice.
 
 A spawned closure may capture values that satisfy the sharing rules:
 
 ```khora
 fn print_later(value: Int) -> () {
   let child = Fiber::spawn(fn () => print(Int::to_string(value)));
-  Fiber::join(child);
+  Fiber::join(child)
 }
 ```
 
 Releasing the final `Fiber` handle also waits for the child. This means a fiber cannot silently outlive the scope that still owns its handle.
+
+`Fiber::detach` is the exception, and the only one: it stops waiting and asks the fiber to stop. The fiber keeps running, its answer is discarded, and a later failure is silent. Without it, a bounded wait over a body with an uninterruptible tail could not be honored.
 
 ## Nurseries
 
@@ -48,9 +59,11 @@ A nursery owns a set of fibers. The capability installed in a nursery body is:
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber) -> (),
+  adopt: (Fiber<(), {}>) -> (),
 }
 ```
+
+`Fiber<(), {}>` is required, not incidental. A nursery holds children as bare handles and waits for them, so there is no caller left to receive an answer and none left to decide what a failure means. Both are settled before the handle is adopted.
 
 A body that starts children declares the requirement and adopts each handle:
 
@@ -59,18 +72,20 @@ fn fan_out() -> ()
   with { nursery: Nursery }
 {
   nursery.adopt(Fiber::spawn(fn () => first()));
-  nursery.adopt(Fiber::spawn(fn () => second()));
+  nursery.adopt(Fiber::spawn(fn () => second()! catch {
+    JobError::Failed(id) => log("job ${Int::to_string(id)} gave up"),
+  }));
 }
 ```
 
 `nursery` installs that capability and waits for the children on the normal path:
 
 ```khora
-pub fn nursery<A, 'e, 'r>(
-  body: () -> A with { 'e | nursery: Nursery } raises 'r
+pub fn nursery<A, 'ef, 'er>(
+  body: () -> A with { 'ef | nursery: Nursery } raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 ```
 
 Example:
@@ -83,19 +98,19 @@ fn run() -> () {
 
 When the body completes normally, `nursery` waits until every adopted child is finished. If the body leaves by failure or cancellation, releasing the nursery cancels children that are still running and waits for them before the scope is gone.
 
-Pass the named function that requires `nursery`. Named functions receive capability rows when called; a lambda captures the capabilities available where the lambda is created and does not become a receiver for a capability installed later.
+The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
 
 ## Bounded nurseries
 
 The bounded form has the same row behavior plus a concurrency limit:
 
 ```khora
-pub fn bounded_nursery<A, 'e, 'r>(
+pub fn bounded_nursery<A, 'ef, 'er>(
   limit: Int,
-  body: () -> A with { 'e | nursery: Nursery } raises 'r
+  body: () -> A with { 'ef | nursery: Nursery } raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 ```
 
 ```khora

@@ -4,105 +4,151 @@ sidebar:
   order: 7
 ---
 
-Read process configuration at the application boundary, validate it once, and turn it into a typed value. Khora's `Env` capability makes the dependency visible and lets tests supply a different environment without mutating process-global state.
+Read every setting at start-up, report every bad one in a single message, and keep the password out of the logs. `std::config` does all three.
+
+The alternative is what most services do: stop at the first missing variable, print it, and wait for somebody to redeploy so it can tell them the next one. Five restarts to learn five things it knew the first time.
 
 ## Complete example
-
-This program accepts an optional `PORT`, requires `DATABASE_URL`, and reports invalid startup configuration before doing application work:
 
 ```khora
 module main;
 
-import std::core::{Option, print};
-import std::env::{Env, variable_or};
+import std::config::{ConfigError, integer, or_default, report, secret, string};
+import std::core::{Redacted, Show, Validated, print};
+import std::env::{Env};
 
-pub type Config = {
+derive(Show)
+type Listen = {
+  host: String,
   port: Int,
-  database_url: String,
 };
 
-pub type ConfigError =
-  | InvalidPort(value: String)
-  | MissingDatabaseUrl;
+derive(Show)
+type Settings = {
+  listen: Listen,
+  password: Redacted<String>,
+};
 
-fn load_config() -> Config
-  with { env: Env }
-  raises ConfigError
-{
-  let raw_port = variable_or("PORT", "8080");
-
-  let port = match Int::of_string(raw_port) {
-    Option::Some(value) => value,
-    Option::None => raise ConfigError::InvalidPort(raw_port),
-  };
-
-  let database_url = match env.variable("DATABASE_URL") {
-    Option::Some(value) => value,
-    Option::None => raise ConfigError::MissingDatabaseUrl,
-  };
-
-  {
-    port: port,
-    database_url: database_url,
-  }
+fn listen() -> Validated<Listen, ConfigError> with { env: Env } {
+  Validated::map2(
+    or_default(string("HOST"), "0.0.0.0"),
+    integer("PORT"),
+    fn (host, port) => { host: host, port: port },
+  )
 }
 
-fn run() -> ()
-  with { env: Env }
-{
-  let config = load_config()! catch {
-    ConfigError::InvalidPort(value) => {
-      print("PORT must be an integer; got ${value}");
-      return;
-    },
-    ConfigError::MissingDatabaseUrl => {
-      print("DATABASE_URL is required");
-      return;
-    },
-  };
-
-  print("configuration accepted");
-  print("port = ${Int::to_string(config.port)}");
+fn settings() -> Validated<Settings, ConfigError> with { env: Env } {
+  Validated::map2(
+    listen(),
+    secret("DB_PASSWORD"),
+    fn (at, password) => { listen: at, password: password },
+  )
 }
 
 pub fn main() {
   with { env: Env::real() } {
-    run()
+    match settings() {
+      Validated::Invalid(problems) => print(report(problems)),
+      Validated::Valid(config) => {
+        print(config.show());
+        serve(config)
+      }
+    }
   }
 }
-```
 
-`load_config` is explicit about both parts of its contract:
-
-```khora
-fn load_config() -> Config
-  with { env: Env }
-  raises ConfigError
-```
-
-It needs environment authority, and it may reject invalid configuration. Once it returns a `Config`, the rest of the program can work with validated fields instead of repeatedly parsing strings.
-
-## Defaults and required values
-
-Use `variable_or` for a real default:
-
-```khora
-let raw_port = variable_or("PORT", "8080");
-```
-
-Use `env.variable` when absence is an error or has domain meaning:
-
-```khora
-match env.variable("DATABASE_URL") {
-  Option::Some(value) => value,
-  Option::None => raise ConfigError::MissingDatabaseUrl,
+fn serve(config: Settings) -> () {
+  print("listening on ${config.listen.host}:${Int::to_string(config.listen.port)}")
 }
 ```
 
-Keep secrets out of logs, trace attributes, and error messages. The example deliberately reports that `DATABASE_URL` is missing without printing a database URL value.
+Start it with nothing set and it says everything at once:
 
-## Testing the loader
+```text
+PORT is not set
+DB_PASSWORD is not set
+```
 
-Because `Env` is a capability, a test can provide a small handler instead of changing the machine environment. The [Testing capabilities](/docs/cookbook/testing-capabilities/) recipe shows that pattern in full.
+Start it properly and the printed settings still have no password in them:
 
-For the shipped `Env` operations, see the [environment API reference](/docs/stdlib/api/env/).
+```text
+Settings { listen: Listen { host: 0.0.0.0, port: 8080 }, password: <redacted> }
+listening on 0.0.0.0:8080
+```
+
+If your `khora.toml` names an `env` list, the variables have to be in it, or you get a third kind of message that points at the manifest instead of at your deployment script:
+
+```toml
+[permissions]
+env = ["HOST", "PORT", "DB_PASSWORD"]
+```
+
+A manifest with no `env` list grants every variable. Tightening is opt-in and each category is independent — naming `network` says nothing about `env`.
+
+## Why nothing here raises
+
+A `raises` stops at the first failure. That is right for a chain where the next step needs the last one's value, and wrong for configuration, where the keys have nothing to do with each other and you want the whole list.
+
+So every reader answers `Validated<A, ConfigError>` instead, and `Validated::map2` keeps both sides' failures:
+
+```khora
+Validated::map2(a, b, fn (x, y) => combine(x, y))
+```
+
+If `a` and `b` both failed, the answer carries both errors and `combine` never runs. For a third field, split the record the way `listen` is split above: the halves compose, so a subsystem can own its own reader and you never nest `map2` more than one deep.
+
+`Validated::and_then` is the fail-fast one, for a second step written in terms of the first's value. `integer` is `string` plus `and_then`: "not set" and "not a number" are never both true of one variable.
+
+## The readers
+
+`string`, `integer`, `boolean` and `secret` each read one variable and say what went wrong. `boolean` takes `true`, `false`, `1` and `0`, and nothing else — `yes`, `on` and `Y` all mean true somewhere, and a reader that accepts all of them accepts a typo as a `false`.
+
+`or_default` fires on *missing* and on nothing else:
+
+```khora
+or_default(string("HOST"), "0.0.0.0")
+```
+
+`HOST` unset gives `0.0.0.0`. `PORT=eigthy` does not quietly become `8080` — a value that is present and wrong is still an error, which is the bug this module exists to catch.
+
+## Three ways a key can be wrong
+
+`ConfigError` keeps them apart because they send you to three different files:
+
+| | What it means | Where the fix is |
+| --- | --- | --- |
+| `Missing` | nobody set it | the deployment script |
+| `Malformed` | it is set to nonsense | the value |
+| `Denied` | the manifest does not grant it | `khora.toml` |
+
+`report` turns a list of them into one line each, in the order they were read. That is the string a service prints just before it stops.
+
+## Secrets
+
+`secret` gives back a `Redacted<String>`, and that is a compile-time thing rather than a convention:
+
+- `Show` prints `<redacted>`, so a record holding one still derives `Show` and the start-up log stays useful.
+- There is no `ToJson`, so a record holding one does **not** derive `ToJson`. The build stops, which is the right place to stop.
+- `"${password}"` does not compile at all — interpolation wants a `String` and does not call `Show`.
+
+The only way out is `Redacted::expose`, which is a word a reviewer can search for. There is deliberately no `Eq`: comparing two secrets byte by byte is how a timing side channel gets written by somebody who was not writing one.
+
+## Testing it
+
+`Env` is a capability, so a test hands the readers a different environment instead of setting one on the machine:
+
+```khora
+const fake_env = handler for Env {
+  variable: fn name => if name.eq("PORT") { Option::Some("8080") } else { Option::None },
+  arguments: fn () => [],
+};
+
+test "a missing password is reported, not guessed" {
+  let answer = settings() with { env: fake_env };
+  assert(!Validated::is_valid(answer));
+}
+```
+
+That is the whole reason `std::config` has no `Config<A>` description type. Elsewhere this idea needs a value denoting "read `PORT` as an integer", interpreted later by a swappable provider — the description layer exists to defer the read so a test can intercept it. Khora's provider is the `Env` handler and it was already swappable.
+
+See [Testing capabilities](/docs/cookbook/testing-capabilities/) for the pattern in full, and the [`std::config` reference](/docs/stdlib/api/config/) for exact signatures.

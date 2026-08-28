@@ -148,6 +148,13 @@ pub type User = {
 
 Khora can derive `Eq`, `Ord`, `Show`, `Hash`, `ToJson`, and `FromJson` when the fields support the requested trait. Use a handwritten `impl` when the behavior is a domain decision rather than a structural consequence of the data.
 
+The trait has to be in scope, so `derive(Show)` needs `Show` imported from `std::core`.
+
+A field's type decides whether the derive is available, and a missing impl is sometimes the point:
+
+- `List<A>` has `Show` and `Eq` when `A` does, so a record holding a list derives both. It has `ToJson` and `FromJson` from `std::json` on the same terms.
+- `Redacted<A>` has `Show` — it prints `<redacted>` — and deliberately no `ToJson`. A record holding a secret stays printable and refuses to serialize, and the build stops rather than the payload leaking. It has no `Eq` either, because comparing two secrets byte by byte is how a timing side channel gets written by somebody who was not writing one.
+
 ## Exact decimals
 
 `Decimal` is intentionally distinct from `Float`. Use `Float` for approximate numerical computation and `Decimal` when base-10 representation is part of correctness, such as money or externally specified decimal values:

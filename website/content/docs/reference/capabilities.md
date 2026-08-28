@@ -40,16 +40,16 @@ fn create_session(id: Id) -> Session
 ## Open capability row
 
 ```khora
-{ clock: Clock | 'e }
+{ clock: Clock | 'ef }
 ```
 
-The named capability is required and `'e` represents any additional row entries.
+The named capability is required and `'ef` represents any additional row entries.
 
 A function can preserve the open row:
 
 ```khora
-fn run<A, 'e>(body: () -> A with 'e) -> A
-  with 'e
+fn run<A, 'ef>(body: () -> A with 'ef) -> A
+  with 'ef
 {
   body()
 }
@@ -187,7 +187,7 @@ Request -> Response with { db: Db, clock: Clock }
 Generic row:
 
 ```khora
-A -> B with 'e
+A -> B with 'ef
 ```
 
 Capability rows are part of function types, so higher-order functions can preserve requirements without a runtime service locator.
@@ -203,5 +203,39 @@ fn choose_bucket() -> Int
 ```
 
 A capability may be required by an operation that does not raise a recoverable failure. Conversely, a pure computation may use `raises` without any `with` requirement.
+
+## Manifest permissions
+
+A capability row says a function reaches outside the program. `[permissions]` in `khora.toml` says how far it may reach, and the standard library's real handlers enforce it:
+
+```toml
+[permissions]
+network = ["api.example.com:443", "*.internal"]
+env = ["PORT", "DATABASE_*"]
+
+[permissions.fs]
+read = ["./data/**"]
+write = ["./data/out.txt"]
+```
+
+The grants are compiled into the binary rather than read at run time. A file the program consults for its own permissions is a file an attacker edits.
+
+**A missing table grants everything, and each category is independent.** Naming `network` says nothing about `env`. Tightening is opt-in.
+
+A denial is its own error case, separate from the ordinary failure, because the two send a reader to different files:
+
+| Reaching for | Denied as | Where the fix is |
+| --- | --- | --- |
+| an environment variable | `EnvError::Denied(name)` | `[permissions] env` |
+| a host over HTTP | `CallError::Denied(host)` | `[permissions] network` |
+| a path on disk | `IoError::Denied(path)` | `[permissions.fs]` |
+
+`Unreachable` is DNS or a firewall; `Denied` is a line you can copy out of the message into the manifest. `Env::variable` and `std::env::variable_or` therefore `raise EnvError`, so both need a `!` at the call site:
+
+```khora
+let port = variable_or("PORT", "8080")!;
+```
+
+Globbing differs by category, and each one is the reading that costs the least surprise. For a path, `*` stops at a separator and `**` crosses one. For a name — a variable, a command — there are no segments, so `*` spans everything. For a host, `*` spans dots, so `*.internal` covers `db.eu.internal`, and a grant with no port covers every port.
 
 See [Effects and rows](./effects/) for effect declarations and [Failures](./failures/) for typed failure.

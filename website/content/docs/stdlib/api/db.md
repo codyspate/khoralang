@@ -246,7 +246,7 @@ fn show(self) -> String
 ### transaction
 
 ```khora
-pub fn transaction<A, 'c, 'r>(body: () -> Result<A, DbError> with 'c raises 'r) -> Result<A, DbError> with { 'c | db: Db } raises 'r
+pub fn transaction<A, 'ef, 'er>(body: () -> Result<A, DbError> with 'ef raises 'er) -> Result<A, DbError> with { 'ef | db: Db } raises 'er
 ```
 
 Runs `body` in a transaction, committing on success and rolling back
@@ -292,7 +292,7 @@ when the caller did, which is not what a transaction is.
 
 #### Why the body carries a row it does not seem to need
 
-`raises 'r` is the other half, and without it the paragraph above is
+`raises 'er` is the other half, and without it the paragraph above is
 theatre. `docs/design/effect-runtime.md` §6: **a cancellation point is a
 `!` in a function that can raise**, and it travels out on the tagged return
 an error uses. A body typed `() -> Result<A, DbError>` with no row has no

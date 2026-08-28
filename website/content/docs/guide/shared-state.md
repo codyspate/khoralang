@@ -10,7 +10,7 @@ Sharing and hand-off are different problems:
 
 - `Shared<A>` is one value several fibers may read or replace;
 - `Channel<A>` is a queue where each value is handed to one receiver;
-- `SharedFn<A, B, 'e>` certifies a closure that may safely live in shareable data.
+- `SharedFn<A, B, 'er>` certifies a closure that may safely live in shareable data.
 
 ## Shareability is checked
 
@@ -122,8 +122,11 @@ pub type Channel<A>;
 
 impl<A: Share> Channel<A> {
   pub fn bounded(capacity: Int) -> Channel<A>;
+  pub fn dropping(capacity: Int) -> Channel<A>;
+  pub fn sliding(capacity: Int) -> Channel<A>;
   pub fn send(self, value: A) -> Bool;
   pub fn receive(self) -> Option<A>;
+  pub fn poll(self) -> Option<A>;
   pub fn close(self) -> ();
   pub fn depth(self) -> Int;
 }
@@ -134,6 +137,22 @@ A full channel suspends the sender until space is available; an empty channel su
 `send` returns `false` when the channel has been closed. `receive` drains already queued values before returning `None` once the channel is both closed and empty. A requested capacity below one becomes one; Khora's channel is not a zero-capacity rendezvous channel.
 
 Channels are the right primitive for work queues, ownership of a non-shareable resource by one fiber, and pools whose idle members can be handed out and returned.
+
+### When waiting is the wrong answer
+
+Blocking is the default, and usually right. Two constructors say otherwise, and the choice belongs to the channel rather than to each send — a queue is lossy or it is not.
+
+| | A send into a full one | `send` answers | What is left |
+| --- | --- | --- | --- |
+| `bounded` | waits | `true` | everything |
+| `dropping` | refuses the new value | `false` | the oldest |
+| `sliding` | evicts the oldest | `true` | the newest |
+
+Use `dropping` when the producer must not stall and you want to know what you lost — an audit event on the request path, a metric from a handler. Counting the `false`s is how the loss gets reported.
+
+Use `sliding` when only the newest value matters: a gauge, a progress bar, a last-known position. It answers `true` because nothing was refused, so the loss is invisible. That is on purpose; if somebody would have acted on it, you wanted `dropping`.
+
+`poll` takes a value if one is already there and never waits. It is for a loop with something else to do between looks — a loop that only polls is a loop that spins. `None` from `poll` means "not right now" and not "not ever"; a live empty channel and a closed drained one both answer it, and `receive` is what tells them apart.
 
 ## Use `SharedFn` for shareable callbacks
 
@@ -147,11 +166,11 @@ let response = SharedFn::call(callback, request);
 Its surface is:
 
 ```khora
-pub type SharedFn<A, B, 'e>;
+pub type SharedFn<A, B, 'er>;
 
-impl<A, B, 'e> SharedFn<A, B, 'e> {
-  pub fn of(f: (A) -> B raises 'e) -> SharedFn<A, B, 'e>;
-  pub fn call(self, argument: A) -> B raises 'e;
+impl<A, B, 'er> SharedFn<A, B, 'er> {
+  pub fn of(f: (A) -> B raises 'er) -> SharedFn<A, B, 'er>;
+  pub fn call(self, argument: A) -> B raises 'er;
 }
 ```
 

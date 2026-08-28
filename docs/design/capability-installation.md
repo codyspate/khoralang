@@ -250,7 +250,7 @@ second, because subtracting it is what `with` does.
 The order matters for the checker: the body is inferred first — it must be,
 because its requirements are the input — and the installation discharges them
 afterwards. That is what `with` already does, so nothing new is being asked of
-inference. An open row variable (`{ 'e | .. }`) contributes only its concrete
+inference. An open row variable (`{ 'ef | .. }`) contributes only its concrete
 part, which is the same limit every other row operation has.
 
 ## What is not decided here

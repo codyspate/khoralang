@@ -24,7 +24,7 @@ Hard keywords cannot be used as identifiers.
 A row variable begins with `'` followed by an identifier:
 
 ```khora
-'e
+'ef
 'raises
 'capabilities
 ```

@@ -69,7 +69,7 @@ them on the public surface stops a `print` buried three calls deep from silently
 changing an API; inferring them privately keeps the ceremony off everyday code.
 §6.5's capability inlay hints show the inferred row without anyone typing it.
 
-Rows may be open: `with { ledger: Ledger | 'r }` accepts any additional
+Rows may be open: `with { ledger: Ledger | 'ef }` accepts any additional
 capabilities the caller has.
 
 ## Raising
@@ -175,8 +175,8 @@ called.
 ### Turning the channel into a value
 
 ```
-pub fn attempt<A, E, 'e>(body: () -> A with 'e raises E) -> Result<A, E>
-  with 'e;
+pub fn attempt<A, E, 'ef>(body: () -> A with 'ef raises E) -> Result<A, E>
+  with 'ef;
 ```
 
 A tagged return already *is* "an error or a value"; `attempt` is where a caller
@@ -199,7 +199,7 @@ type rather than by variant:
   and a signature cannot say both. So the arms for a named type have to be
   exhaustive over it, checked the same way a `match` is.
 - **There is no wildcard arm.** `_` names no type, so it cannot say what the
-  row loses. With an open row `'r` it could not even mean "everything" — there
+  row loses. With an open row `'er` it could not even mean "everything" — there
   is no everything to enumerate.
 
 The `!` is still required. A `catch` changes where control goes, not whether it
@@ -211,9 +211,9 @@ Function types carry effect rows, so higher-order functions are polymorphic in
 their argument's effects:
 
 ```
-pub fn map<A, B, 'e, 'r>(xs: List<A>, f: A -> B with 'e raises 'r) -> List<B>
-  with 'e
-  raises 'r;
+pub fn map<A, B, 'ef, 'er>(xs: List<A>, f: A -> B with 'ef raises 'er) -> List<B>
+  with 'ef
+  raises 'er;
 ```
 
 This is the single largest ergonomic difference from the monadic design.

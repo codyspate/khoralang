@@ -91,7 +91,7 @@ When C needs temporary access to bytes owned by Khora, lend them for the duratio
 For strings, the standard forms are:
 
 ```khora
-String::with_c_string<B, 'c, 'e>(
+String::with_c_string<B, 'ef, 'er>(
   text,
   body
 )
@@ -100,7 +100,7 @@ String::with_c_string<B, 'c, 'e>(
 where `body` receives a temporary `Ptr` to NUL-terminated bytes, and:
 
 ```khora
-String::with_data<B, 'c, 'e>(
+String::with_data<B, 'ef, 'er>(
   text,
   body
 )
@@ -111,19 +111,19 @@ where `body` receives `(Ptr, Int)` for the bytes and their length.
 The corresponding function types preserve the callback's effects and failures while keeping the pointer lifetime inside the call:
 
 ```khora
-fn with_c_string<B, 'c, 'e>(
+fn with_c_string<B, 'ef, 'er>(
   self,
-  body: (Ptr) -> B with 'c raises 'e
+  body: (Ptr) -> B with 'ef raises 'er
 ) -> B
-  with 'c
-  raises 'e
+  with 'ef
+  raises 'er
 
-fn with_data<B, 'c, 'e>(
+fn with_data<B, 'ef, 'er>(
   self,
-  body: (Ptr, Int) -> B with 'c raises 'e
+  body: (Ptr, Int) -> B with 'ef raises 'er
 ) -> B
-  with 'c
-  raises 'e
+  with 'ef
+  raises 'er
 ```
 
 Do not retain those borrowed pointers after `body` returns.

@@ -70,8 +70,13 @@ See [Typed failure with raises](./errors-and-raises/) for the failure model.
 Effectful code can receive controlled handlers instead of reaching real external services:
 
 ```khora
+import std::clock::{Clock};
+
 const fixed_clock = handler for Clock {
-  now: fn () => fixed_instant,
+  unix_seconds: fn () => 1700000000,
+  unix_millis: fn () => 1700000000000,
+  monotonic_millis: fn () => 5000,
+  sleep: fn _millis => (),
 };
 
 test "session uses the supplied clock" {
@@ -79,11 +84,13 @@ test "session uses the supplied clock" {
     clock: fixed_clock,
   };
 
-  assert(session.created_at == fixed_instant);
+  assert(session.created_at == 1700000000000);
 }
 ```
 
 The function's `with` row tells the test exactly which outside authority must be supplied. Named contexts can provide a normal application environment with one binding overridden for the test.
+
+`sleep` is one of the clock's operations, so that four-line handler is also how a test runs a retry loop or a poller without waiting for it. There is no test runtime and no special mode.
 
 ## Write a benchmark
 

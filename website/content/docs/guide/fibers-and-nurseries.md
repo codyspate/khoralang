@@ -10,37 +10,55 @@ There is no `async`/`await` version of the language. A fiber may suspend on I/O,
 
 ## Spawn and join a fiber
 
-`Fiber::spawn` starts a child from a closure and returns a handle. `Fiber::join` waits for it:
+`Fiber::spawn` starts a child from a closure and returns a handle. `Fiber::join` waits for it and gives back what it computed:
 
 ```khora
 fn run_one() -> () {
-  let worker = Fiber::spawn(fn () => do_work());
-  Fiber::join(worker);
+  let count = Fiber::join(Fiber::spawn(fn () => tally(rows)));
+  print(Int::to_string(count))
 }
 ```
+
+No `!` there, because `tally` cannot fail. When the body *can* fail, `join` re-raises — with the failure's own type, so you can catch it by name:
+
+```khora
+fn run_query(id: Int) -> () {
+  let worker = Fiber::spawn(fn () => load(id)!);
+  let row = Fiber::join(worker)! catch {
+    DbError::Timeout => Row::empty(),
+    DbError::Missing(_id) => Row::empty(),
+  };
+  print(Int::to_string(row.total))
+}
+```
+
+The failure row rides on the handle, which is what makes this pleasant rather than merely possible. A handle that erased it would need a `!` on every join, including on a fiber that provably cannot fail, and `catch { _ => .. }` as the only arm.
 
 A spawned closure may capture ordinary shareable values from its environment:
 
 ```khora
 fn print_double(value: Int) -> () {
   let worker = Fiber::spawn(fn () => print(Int::to_string(value * 2)));
-  Fiber::join(worker);
+  Fiber::join(worker)
 }
 ```
 
 The core handle API is:
 
 ```khora
-pub type Fiber;
+pub type Fiber<A, 'er>;
 
-impl Fiber {
-  pub fn spawn<'e>(body: () -> () raises 'e) -> Fiber;
-  pub fn join(self) -> ();
+impl<A: Share, 'er> Fiber<A, 'er> {
+  pub fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>;
+  pub fn join(self) -> A raises 'er;
   pub fn cancel(self) -> ();
+  pub fn detach(self) -> ();
 }
 ```
 
-A fiber handle is itself a lifetime boundary. Releasing the final handle waits for the fiber, so a child cannot silently outlive the scope that still owns its handle.
+`A` must be `Share` for the reason every value crossing a fiber must be: it is computed on one fiber and read on another, so a thing that cannot be held twice cannot be an answer.
+
+A fiber handle is itself a lifetime boundary. Releasing the final handle waits for the fiber, so a child cannot silently outlive the scope that still owns its handle. Joining twice is joining once, from either side, and gets the answer twice.
 
 ## Prefer a nursery for a group of children
 
@@ -48,20 +66,24 @@ A nursery makes ownership explicit for fan-out work. The `Nursery` capability co
 
 ```khora
 pub effect Nursery {
-  adopt: (Fiber) -> (),
+  adopt: (Fiber<(), {}>) -> (),
 }
 ```
 
-A function that starts children asks for that capability:
+`Fiber<(), {}>` — no answer and no failures — because **adopting is giving up the answer and settling the failure**. A nursery holds its children as bare handles and waits for them; there is nobody left to hand a value to and nobody left to decide what a raise means. Decide before you adopt, and the type says so:
 
 ```khora
 fn children() -> ()
   with { nursery: Nursery }
 {
   nursery.adopt(Fiber::spawn(fn () => first_job()));
-  nursery.adopt(Fiber::spawn(fn () => second_job()));
+  nursery.adopt(Fiber::spawn(fn () => second_job()! catch {
+    JobError::Failed(id) => log("job ${Int::to_string(id)} gave up"),
+  }));
 }
 ```
+
+Keep the answer instead by holding the handle yourself and joining it.
 
 Run it with `nursery`:
 
@@ -76,14 +98,14 @@ fn run() -> () {
 The generic helper is effect-polymorphic:
 
 ```khora
-pub fn nursery<A, 'e, 'r>(
-  body: () -> A with { 'e | nursery: Nursery } raises 'r
+pub fn nursery<A, 'ef, 'er>(
+  body: () -> A with { 'ef | nursery: Nursery } raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 ```
 
-Pass the named function that requires `nursery`; do not wrap it in an unnecessary lambda. Named functions receive capability rows as parameters, while lambdas capture the capabilities available where the lambda is created.
+A named function or a lambda, whichever reads better. `nursery(children)` and `nursery(fn () => children())` are the same thing: a lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs.
 
 ## Bound work that comes from outside
 
@@ -110,12 +132,12 @@ fn main() -> Int {
 Its signature is:
 
 ```khora
-pub fn bounded_nursery<A, 'e, 'r>(
+pub fn bounded_nursery<A, 'ef, 'er>(
   limit: Int,
-  body: () -> A with { 'e | nursery: Nursery } raises 'r
+  body: () -> A with { 'ef | nursery: Nursery } raises 'er
 ) -> A
-  with 'e
-  raises 'r
+  with 'ef
+  raises 'er
 ```
 
 Adopting beyond the limit waits for older work to finish. That turns an external concurrency ceiling into backpressure instead of allowing a service to grow until it exhausts memory.
@@ -134,6 +156,20 @@ continue_parent_work();
 Cancellation is observed at cancellation points rather than arriving between arbitrary source statements. When a cancelled fiber unwinds, its regions and finalizers run before the fiber finishes.
 
 A `catch` handles failures declared in a `raises` row. Cancellation is separate and cannot be accidentally swallowed by matching every declared failure.
+
+## `detach` is the valve
+
+Every other way out of a handle waits. `join` waits, and so does letting the binding go — that is where structured concurrency comes from, and it is also how a program hangs: one finalizer that never returns holds its nursery, which holds its parent, up to `main`.
+
+`Fiber::detach` signals and goes:
+
+```khora
+Fiber::detach(worker);
+```
+
+The fiber keeps running, its answer is dropped when it arrives, and a failure it reports afterwards is silent — the program said it was no longer listening. It cancels as well as detaching, because a detached fiber nobody asked to stop is a leak with a nicer name.
+
+Reach for it when a bounded wait matters more than a clean one, and not otherwise.
 
 ## Values crossing into a fiber must be shareable
 

@@ -52,6 +52,16 @@ nursery.adopt(Fiber::spawn(fn () => handle(job)));
 
 When 64 children are already live, the next adoption waits. The producer therefore slows down at the same boundary where it creates more work instead of filling an unbounded queue somewhere else.
 
+`adopt` takes a `Fiber<(), {}>`: no answer and no failures. `handle` already returns `()` and cannot fail, so nothing extra is needed here. A job that *can* fail has to say what a failure means before it is adopted, because after adoption there is nobody left to tell:
+
+```khora
+nursery.adopt(Fiber::spawn(fn () => handle(job)! catch {
+  JobError::Failed(id) => log("job ${Int::to_string(id)} gave up"),
+}));
+```
+
+Keep the answer instead by holding the handle and joining it — `Fiber::join` gives back what the body computed, and re-raises what it raised.
+
 ## Keep unrelated limits separate
 
 A service can legitimately have different limits for different resources. For example, it might accept many mostly-idle HTTP connections while allowing only a smaller number of database operations to compete at once. Put the bounded nursery around the work controlled by the constrained resource rather than inventing one global fiber limit.

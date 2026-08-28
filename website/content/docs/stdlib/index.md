@@ -13,7 +13,10 @@ The current standard library includes APIs for:
 - strings and collections;
 - JSON encoding and decoding;
 - files and processes;
-- randomness and clocks;
+- randomness;
+- clocks and sleeping, in [`std::clock`](/docs/stdlib/api/clock/);
+- typed configuration, in [`std::config`](/docs/stdlib/api/config/);
+- retries and backoff schedules, in [`std::resilience`](/docs/stdlib/api/resilience/);
 - civil dates and offsets;
 - exact `Decimal` arithmetic;
 - HTTP client/server building blocks;
@@ -21,6 +24,14 @@ The current standard library includes APIs for:
 - structured concurrency and shared state;
 - database capability and row/cell vocabulary;
 - tracing context and W3C propagation vocabulary.
+
+Three of those are new and easy to miss:
+
+`std::clock` holds the `Clock` capability, which used to live in `std::env`. `import std::env::{Clock}` no longer resolves. The split also gave `Clock` a `sleep`, which is an operation on the capability so that a fake clock is one line in a test.
+
+`std::config` reads settings out of the environment, types them, and reports *every* bad key in one pass rather than one restart per key. See [the cookbook recipe](/docs/cookbook/configuration/).
+
+`std::resilience` holds `Schedule`, `retry`, `retry_while` and `repeat`, which used to be a bare attempt counter in `std::core`. See [Retrying a flaky call](/docs/cookbook/retrying/).
 
 ## What belongs in `std`
 

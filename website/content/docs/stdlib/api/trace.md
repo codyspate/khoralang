@@ -263,7 +263,7 @@ fn show(self) -> String
 ### around
 
 ```khora
-pub fn around<A, 'c, 'r>(tracer: Tracer, name: String, body: () -> A with 'c raises 'r) -> A with 'c raises 'r
+pub fn around<A, 'ef, 'er>(tracer: Tracer, name: String, body: () -> A with 'ef raises 'er) -> A with 'ef raises 'er
 ```
 
 Runs `body` inside a span, and ends the span whichever way it leaves.
@@ -288,7 +288,7 @@ releases the binding holding the region. A body that returns marks the span
 finalizer to close it, and it closes as `Failed` because that is what
 happened.
 
-`raises 'r` is the other half. `docs/design/effect-runtime.md` §6: a
+`raises 'er` is the other half. `docs/design/effect-runtime.md` §6: a
 cancellation point is a `!` in a function that can raise, so a body with no
 row has none, nothing inside the span can be interrupted, and no frame here
 could carry the interruption if it were. A body that does no fallible work
@@ -297,7 +297,7 @@ instantiates the row empty and needs no `!` at the call.
 ### around_result
 
 ```khora
-pub fn around_result<A, E: Show, 'c, 'r>(tracer: Tracer, name: String, body: () -> Result<A, E> with 'c raises 'r) -> Result<A, E> with 'c raises 'r
+pub fn around_result<A, E: Show, 'ef, 'er>(tracer: Tracer, name: String, body: () -> Result<A, E> with 'ef raises 'er) -> Result<A, E> with 'ef raises 'er
 ```
 
 The same, for a body that reports its failure as a value.
