@@ -2035,3 +2035,90 @@ worse than no lint.** `unused-import` and the `for` desugaring disagreed about
 whether `Iterator` was used, and the reader who believed the lint got a broken
 build. When two parts of a toolchain answer one question, they need one answer
 -- the same lesson errata 54 gave about two type checks that never met.
+
+## 59. A row in a type-argument position is never checked
+
+Found by putting a row on a type for the first time. `Fiber<A, 'er>` carries the
+row its body raises, which is what lets `join` on an infallible fiber compile to
+a load rather than to a branch and a `raises` clause nobody wanted — and nothing
+in `std` had used a row as a type argument before, so nothing had noticed that
+one is not checked against an annotation.
+
+```khora
+pub type Slot<A, 'er>;
+impl<A, 'er> Slot<A, 'er> {
+  pub fn of(body: () -> A raises 'er) -> Slot<A, 'er>;
+}
+
+fn wants_other(_s: Slot<Int, {Other}>) -> () { }
+
+fn main() -> Int {
+  let bad = Slot::of(fn () => risky()!);   // `Slot<Int, {Boom}>`
+  wants_other(bad);                        // accepted, and should not be
+  0
+}
+```
+
+`{Boom}` where `{Other}` is declared, and no error. The same hole is why
+`Fibers::adopt`, whose parameter says `Fiber<(), {}>`, accepts a child that can
+still fail.
+
+### Why it is not simply a missing check
+
+`unify.rs` does compare ADT arguments pairwise; the arguments here are *rows*,
+and two rows unify by **opening** — each side grows a fresh tail and absorbs
+what the other has. That is not a bug. It is exactly what makes `raises`
+subsumption work, and `demand_is_carried` in `check/effects.rs` depends on it: a
+function that raises `Boom` is usable where `{Boom, Other}` is allowed, and a
+row-polymorphic library function could not add a capability of its own without
+it.
+
+What is missing is the distinction between the two positions. A row in a
+`raises` clause is a *demand*, and opening it is subsumption. A row in a type
+argument is *invariant* — `Fiber<Int, {Boom}>` and `Fiber<Int, {Other}>` are
+two types — and the declared side should be rigid there, the way a declared type
+parameter already is.
+
+### What is safe about it meanwhile
+
+Inference is correct, and inference is the path real code takes: `let f =
+Fiber::spawn(..); Fiber::join(f)!` gets the row from the thunk and re-raises the
+right type. Only an *annotation* naming a row goes unchecked. So the cost today
+is that `adopt`'s empty row is documentation rather than a rule — a child that
+can fail is adopted and, if it does, prints the line it always printed instead
+of being refused at the `adopt`.
+
+### What generalises
+
+**A checker that is deliberately permissive in one position has to be told about
+the others.** Row opening was designed for demands and applied everywhere a row
+appears, and the second position arrived years later — when a row became a thing
+a *type* could hold. Neither half is wrong on its own, and nothing connected
+them, because until now nothing wrote the second one down.
+
+## 60. Tuple inference gives up through a nested lambda
+
+Reported by the message that asks to be reported:
+
+```
+the type of this expression was never worked out, and nothing else was
+reported — so either it needs an annotation, or this is a gap in the compiler
+worth reporting
+```
+
+The shape is a `map2` whose inner lambda builds a tuple and whose outer one
+destructures it:
+
+```khora
+Validated::map2(
+  a,
+  Validated::map2(b, c, fn (p, s) => (p, s)),
+  fn (x, rest) => match rest { (y, z) => .. },
+)
+```
+
+Nesting records instead of tuples works, and that is the workaround in
+`website/content/docs/cookbook/configuration.md`. The message did its job — it
+distinguishes "you need an annotation" from "this should have worked" and asks
+for the second to be reported, which is the only reason this is written down
+rather than worked around in silence.
