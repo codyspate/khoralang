@@ -399,3 +399,44 @@ fn a_recursive_type_derives() {
          fn same(a: Chain, b: Chain) -> Bool {{ a.eq(b) }}\n"
     ));
 }
+
+/// **A `derive` whose trait is not in scope says so.**
+///
+/// It said one of two other things, both wrong. With any other name imported
+/// from `std::core` it named the *field's* type as the one that does not
+/// implement `Eq` -- `Int`, which has implemented it since `std::core` was
+/// written -- so a reader counted their fields looking for the one that
+/// genuinely lacked it, and there was not one. With nothing else imported it
+/// gave the `Unknown` audit's confession, pointed at the `derive` line: "the
+/// type of this expression was never worked out ... this is a gap in the
+/// compiler worth reporting". The gap was a missing import.
+///
+/// The `for` loop has said this properly for a long time -- "`for` needs
+/// `Step` and `Iterator` in scope; import them from `std::core`" -- and this
+/// is measured against it: the problem, the fix, and where the fix comes from.
+#[test]
+fn a_derive_whose_trait_is_not_imported_says_which_import_is_missing() {
+    let found = errors(
+        "module m;\n\
+         derive(Eq)\n\
+         pub type Point = { x: Int };\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("`derive(Eq)` needs `Eq` in scope")),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|e| e.contains("import it from `std::core`")),
+        "and says where it comes from: {found:?}"
+    );
+    // And does not blame a field whose type is perfectly capable.
+    assert!(
+        !found.iter().any(|e| e.contains("the field `x`")),
+        "the field is not the problem: {found:?}"
+    );
+    // Nor the compiler.
+    assert!(
+        !found.iter().any(|e| e.contains("gap in the compiler")),
+        "nor is the compiler: {found:?}"
+    );
+}

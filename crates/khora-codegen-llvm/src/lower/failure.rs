@@ -143,6 +143,11 @@ impl<'ctx> Lower<'_, 'ctx> {
             );
         }
 
+        // Counted before the condition is lowered, so a nested `assert` in a
+        // closure cannot renumber the one it is inside.
+        self.asserts += 1;
+        let ordinal = self.asserts;
+
         let held = self.expr(condition)?.into_int_value();
         let failed = self.block("assert.failed");
         let held_ok = self.block("assert.ok");
@@ -152,6 +157,15 @@ impl<'ctx> Lower<'_, 'ctx> {
             .expect("branching on an assertion");
 
         self.at(failed);
+        // **Which one.** A failing test used to say only that it had failed,
+        // so finding out which of six assertions it was meant deleting them
+        // one at a time.
+        let say = self.be.rt.assert_failed;
+        let ordinal = self.be.ctx.i32_type().const_int(u64::from(ordinal), false);
+        self.be
+            .builder
+            .build_call(say, &[ordinal.into()], "")
+            .expect("reporting which assertion failed");
         let which = self.be.ctx.i32_type().const_int(runtime::FAILED_WHICH, false);
         let none = self.be.ctx.i64_type().const_zero();
         self.leave_with(which, none);

@@ -252,6 +252,9 @@ pub struct Runtime<'ctx> {
     /// error left `main`. Returns, unlike its neighbours here: the program is
     /// ending correctly and this only says why.
     pub unhandled: FunctionValue<'ctx>,
+    /// `void khora_assert_failed(uint32_t ordinal)` — says which `assert` in
+    /// the running test did not hold.
+    pub assert_failed: FunctionValue<'ctx>,
     /// `void khora_begin(void)` — the first call every entry point makes.
     /// Installs the stack guard, which has to be in place before anything can
     /// exhaust the stack.
@@ -467,6 +470,10 @@ impl<'ctx> Runtime<'ctx> {
             unhandled: declare(
                 "khora_unhandled",
                 void.fn_type(&[ptr.into(), i64t.into()], false),
+            ),
+            assert_failed: declare(
+                "khora_assert_failed",
+                void.fn_type(&[i32t.into()], false),
             ),
             begin: declare("khora_begin", void.fn_type(&[], false)),
             test_register: declare(

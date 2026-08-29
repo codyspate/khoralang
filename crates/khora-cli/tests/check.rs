@@ -446,3 +446,126 @@ fn a_nested_package_still_checks_on_its_own() {
     assert!(out.status.success(), "{text}");
     assert!(text.contains("no errors"), "{text}");
 }
+
+/// Runs one of `khora`'s commands over a package written under the scratch
+/// directory, and hands back everything it said.
+fn command_on_package(name: &str, verb: &str, files: &[(&str, &str)]) -> (bool, String) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    for (relative, contents) in files {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("could not make the fixture directory");
+        }
+        std::fs::write(&path, contents).expect("could not write the fixture");
+    }
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg(verb)
+        .arg(&dir)
+        .output()
+        .expect("could not run `khora`");
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// A file with enough text in it to have something at the offsets the *other*
+/// file's error lands on. That is the whole fixture: the bug was invisible
+/// unless the wrong file happened to be long enough to render.
+const PADDING: &str = "module fixture::first;
+
+/// A long doc comment, so this file has text at the byte offsets the error in
+/// `main.kh` will be rendered at if anything renders it here by mistake.
+/// Another line, to be sure of it.
+/// And another.
+pub fn helper() -> Int { 1 }
+";
+
+const BROKEN_MAIN: &str = "module main;
+import std::core::{print};
+import fixture::first::{helper};
+
+pub fn main() -> Int {
+  print(Int::to_string(helper()));
+  let wrong: Int = \"not an int\";
+  0
+}
+";
+
+/// **An error is reported against the file it is in.**
+///
+/// A `HirError` carries a `TextRange` and no file, and `report_build_errors`
+/// rendered every one of them against `inputs[0]` -- so a build or a test run
+/// showed the right message at the right byte offsets *in the wrong file*,
+/// with the caret under a line that had nothing to do with it. One report of
+/// this had `khora test` pointing at line 155 of a 154-line file, at doc
+/// comments in a module the error was not in.
+///
+/// `khora check` has always been right, because it asks each file for its own
+/// diagnostics. These pin that the other two agree with it.
+#[test]
+fn a_build_error_names_the_file_it_is_in() {
+    let files = &[("khora.toml", MANIFEST), ("src/first.kh", PADDING), ("src/main.kh", BROKEN_MAIN)];
+    let (ok, output) = command_on_package("wrong_file_build", "build", files);
+
+    assert!(!ok, "the program is broken:\n{output}");
+    assert!(output.contains("expected `Int`, found `String`"), "{output}");
+    assert!(output.contains("main.kh:7"), "the error is in main.kh, line 7:\n{output}");
+    assert!(!output.contains("first.kh"), "and not in first.kh:\n{output}");
+}
+
+/// The same for `khora test`, which is where it was found.
+#[test]
+fn a_test_error_names_the_file_it_is_in() {
+    let files = &[("khora.toml", MANIFEST), ("src/first.kh", PADDING), ("src/main.kh", BROKEN_MAIN)];
+    let (ok, output) = command_on_package("wrong_file_test", "test", files);
+
+    assert!(!ok, "the program is broken:\n{output}");
+    assert!(output.contains("main.kh:7"), "{output}");
+    assert!(!output.contains("first.kh"), "{output}");
+}
+
+/// And `khora check` still says exactly the same thing, which is the point of
+/// comparison the other two were measured against.
+#[test]
+fn check_build_and_test_agree_about_where_an_error_is() {
+    let files = &[("khora.toml", MANIFEST), ("src/first.kh", PADDING), ("src/main.kh", BROKEN_MAIN)];
+    let (_, checked) = command_on_package("wrong_file_check", "check", files);
+    assert!(checked.contains("main.kh:7"), "{checked}");
+    assert!(!checked.contains("first.kh"), "{checked}");
+}
+
+/// **A failing test says which assertion failed.**
+///
+/// It said only that the test had failed -- no line, no values, no ordinal --
+/// so finding out which of six assertions it was meant deleting them one at a
+/// time until it passed. Somebody did exactly that.
+#[test]
+fn a_failing_assertion_says_which_one_it_was() {
+    let (ok, output) = command_on_package(
+        "which_assert",
+        "test",
+        &[
+            ("khora.toml", MANIFEST),
+            (
+                "src/main.kh",
+                "module main;\n\
+                 import std::core::{assert, print};\n\
+                 \n\
+                 pub fn main() -> Int { print(\"hi\"); 0 }\n\
+                 \n\
+                 test \"four assertions, the third of which does not hold\" {\n  \
+                 assert(1 + 1 == 2);\n  \
+                 assert(2 + 2 == 4);\n  \
+                 assert(3 + 3 == 7);\n  \
+                 assert(4 + 4 == 8);\n\
+                 }\n",
+            ),
+        ],
+    );
+
+    assert!(!ok, "the third assertion does not hold:\n{output}");
+    assert!(output.contains("assertion 3 failed"), "and it says which:\n{output}");
+}

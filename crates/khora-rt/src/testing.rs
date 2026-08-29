@@ -68,6 +68,24 @@ pub(crate) fn name_filter() -> Option<String> {
     None
 }
 
+/// Says which assertion in the current test failed.
+///
+/// **A failing test said only that it had failed.** `test a well formed line
+/// becomes an entry ... FAILED`, with no line, no values, and no indication
+/// which of six assertions it was -- so the way to find out was to delete
+/// assertions one at a time until it passed. Somebody did.
+///
+/// The ordinal rather than the line, because a line needs the debug info that
+/// only a debug profile emits, and a test that reports where it failed in one
+/// profile and not the other is worse than one that always reports the same
+/// thing. Counting is exact in both: the third `assert` written in the block
+/// is the third one, whatever the optimiser did to it.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_assert_failed(ordinal: u32) {
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "khora: assertion {ordinal} failed");
+}
+
 /// Runs every registered test, one fiber each, and reports.
 ///
 /// Returns the process's exit status: 0 when every test passed.

@@ -1267,7 +1267,7 @@ fn harness(
         .with_extension(std::env::consts::EXE_EXTENSION);
 
     if let Err(errors) = compile(&db as &dyn khora_db::Db, root, &target) {
-        report_build_errors(&inputs, &errors);
+        report_build_errors(&db, &inputs, &errors);
         return Ok(false);
     }
 
@@ -1446,7 +1446,7 @@ fn build(
             Ok(true)
         }
         Err(errors) => {
-            report_build_errors(&inputs, &errors);
+            report_build_errors(&db, &inputs, &errors);
             Ok(false)
         }
     }
@@ -1732,14 +1732,48 @@ fn load(path: &Path) -> Result<Loaded> {
 /// do not carry one — so the first source is used and the count is printed
 /// either way.
 #[cfg(feature = "llvm")]
+/// Prints what stopped a build, against the file each error is actually in.
+///
+/// **It used to print all of them against `inputs[0]`.** A `HirError` carries
+/// a `TextRange` and no file, so every error a build reported was rendered at
+/// its own byte offsets *in whichever file happened to be first* — which for a
+/// package of any size is a different file, with different text at those
+/// offsets, and the caret under a line that has nothing to do with it. One
+/// report of this had `khora test` pointing at line 155 of a 154-line file, at
+/// doc comments in a module the error was not in.
+///
+/// `khora check` has always been right, because it asks each file for its own
+/// diagnostics and prints them there. This now does the same, which is also
+/// why it takes the database: re-deriving is exact rather than approximate.
+/// The compiler returns early with precisely the union of the per-file
+/// diagnostics when any exist, so nothing is lost and nothing is invented.
+///
+/// The fallback is for the errors that belong to no file — "this program has
+/// no `main` function", a module the backend could not lower — which arise
+/// only once the per-file set has come back empty.
 fn report_build_errors(
+    db: &KhoraDatabase,
     inputs: &[(PathBuf, String, SourceFile)],
     errors: &[khora_hir::HirError],
 ) {
-    let (path, text, _) = &inputs[0];
-    eprintln!("{}", render_hir_errors(path, text, errors));
-    eprintln!();
-    eprintln!("{} error(s)", errors.len());
+    let mut shown = 0usize;
+    for (path, text, file) in inputs {
+        let mine = khora_types::diagnostics(db, *file);
+        if mine.is_empty() {
+            continue;
+        }
+        eprintln!("{}", render_hir_errors(path, text, mine));
+        eprintln!();
+        shown += mine.len();
+    }
+
+    if shown == 0 {
+        let (path, text, _) = &inputs[0];
+        eprintln!("{}", render_hir_errors(path, text, errors));
+        eprintln!();
+        shown = errors.len();
+    }
+    eprintln!("{shown} error(s)");
 }
 
 #[cfg(not(feature = "llvm"))]

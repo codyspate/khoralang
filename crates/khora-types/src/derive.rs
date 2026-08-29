@@ -45,18 +45,82 @@ pub struct DeriveReport {
 #[salsa::tracked(returns(ref))]
 pub fn derive_report(db: &dyn Db, file: SourceFile) -> DeriveReport {
     let types = type_map(db, file);
+    let scope = khora_hir::file_scope(db, file);
     let mut out = DeriveReport::default();
 
     for derived in &khora_hir::derive::derived(db, file).impls {
-        // Not a trait in scope. `traits::check` already says so about the impl
-        // this expanded to, and says it at the `derive`, so there is nothing to
-        // add — but there is plenty to suppress: without the trait, every field
-        // fails the test below and the reader gets one error per field for a
-        // missing import.
-        let Some(def) = types.traits.traits.get(&derived.trait_name) else {
+        // **Not a trait in scope, and this is where that is said.**
+        //
+        // It used to say nothing, on the grounds that `traits::check` already
+        // reported it against the impl the `derive` expanded to. That stopped
+        // being true, and what a reader got instead was the `Unknown` audit's
+        // confession, pointed at the `derive` line:
+        //
+        // ```text
+        // error: the type of this expression was never worked out, and nothing
+        // else was reported — so either it needs an annotation, or this is a
+        // gap in the compiler worth reporting
+        // ```
+        //
+        // The gap was a missing import. Before that it was worse: with any
+        // other name imported from `std::core` it said the *field's* type does
+        // not implement `Eq` — naming `Int`, which has implemented it since
+        // `std::core` was written — so a reader counted their fields looking
+        // for the one that genuinely lacked it, and there was not one.
+        //
+        // The `for` loop has said this properly for a long time: "`for` needs
+        // `Step` and `Iterator` in scope; import them from `std::core`". It
+        // names the problem, the fix, and where the fix comes from, and it is
+        // the message this file was measured against.
+        //
+        // `refused` still suppresses the per-field errors below, which without
+        // the trait would all fail and bury this one.
+        // **Two different questions, and conflating them is what made this
+        // message wrong.** Whether the checker *knows* a trait -- which is what
+        // `types.traits.traits` answers -- is not whether this file may write
+        // its name. A builtin's impls arrive from `std::core` without an
+        // import so that `String` satisfies `Ord`, and that brings the trait
+        // definitions with them; but `derive(Eq)` expands to `impl Eq for
+        // Point`, which is a use of the *name* and needs it in scope like any
+        // other.
+        //
+        // Asking the wrong one produced the `Unknown` audit's confession,
+        // pointed at the `derive` line: "the type of this expression was never
+        // worked out ... this is a gap in the compiler worth reporting". The
+        // gap was a missing import. Before that it was worse -- with any other
+        // name imported from `std::core` it named the *field's* type, `Int`,
+        // as the one that does not implement `Eq`, so a reader counted their
+        // fields looking for one that genuinely lacked it and there was not
+        // one.
+        //
+        // `for` has said this properly for a long time -- "`for` needs `Step`
+        // and `Iterator` in scope; import them from `std::core`" -- and it is
+        // the message this one is measured against: the problem, the fix, and
+        // where the fix comes from.
+        let name = &derived.trait_name;
+        // Imported under that spelling, or declared right here.
+        let in_scope = scope.names.iter().any(|(spelled, _)| spelled == name)
+            || khora_hir::item_map(db, file)
+                .items
+                .iter()
+                .any(|i| &i.name == name && i.kind == khora_hir::ItemKind::Trait);
+        let known = types.traits.traits.get(name);
+        if !in_scope || known.is_none() {
+            let where_from = if khora_hir::derive::DERIVABLE.contains(&name.as_str()) {
+                "; import it from `std::core`"
+            } else {
+                ""
+            };
+            out.errors.push(HirError {
+                message: format!("`derive({name})` needs `{name}` in scope{where_from}"),
+                range: derived.at,
+            });
+            // Suppresses the per-field errors below, which without the trait
+            // would all fail and bury this one.
             out.refused.push(derived.body_key());
             continue;
-        };
+        }
+        let def = known.expect("checked just above");
 
         // `trait Ord: Eq` and `trait Hash: Eq` are not decoration. A `Map`
         // finds a key by hashing it and then comparing, so a type that hashes

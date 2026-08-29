@@ -82,6 +82,7 @@ pub(crate) fn emit_function<'ctx>(
         catches: Vec::new(),
         incoming: HashMap::new(),
         aborted: false,
+        asserts: 0,
     };
 
     lower.allocate_slots();
@@ -143,6 +144,7 @@ pub(crate) fn emit_closure<'ctx>(
         catches: Vec::new(),
         incoming: HashMap::new(),
         aborted: false,
+        asserts: 0,
     };
 
     lower.allocate_slots();
@@ -333,6 +335,11 @@ struct Lower<'a, 'ctx> {
     /// — and reading the enclosing signature made it emit its enclosing
     /// function's calling convention over its own.
     raises: bool,
+    /// How many `assert`s have been lowered in this body so far.
+    ///
+    /// Written order, which is the order a reader counts them in. Nothing
+    /// about the emitted code preserves that, so it is counted here.
+    asserts: u32,
     slots: HashMap<LocalId, PointerValue<'ctx>>,
     scopes: Vec<Vec<Cleanup<'ctx>>>,
     /// A cell a `match` arm was handed back, and the constructor it is for.
