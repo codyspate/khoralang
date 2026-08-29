@@ -239,3 +239,48 @@ let subtotal: Decimal = 19.99d;
 ```
 
 The distinction is visible in source so callers can tell whether an API is doing approximate binary floating-point or exact decimal arithmetic.
+
+### Arithmetic is by method, comparison is by operator
+
+`Decimal` compares with the ordinary operators, because `Eq` and `Ord` are
+traits and `Decimal` implements them — and it does so **by value**, so `1.50d`
+and `1.5d` are the same number:
+
+```khora
+if paid == owed { .. }
+if amount < limit { .. }
+```
+
+Arithmetic is by name. `+`, `-` and `*` are the primitive numeric types', and
+adding a trait per operator is a language change this has not taken:
+
+```khora
+let total = subtotal.add(shipping).sub(discount);
+let tax   = 19.99d |> Decimal::mul(0.0825d) |> Decimal::rounded(2, Rounding::HalfEven);
+```
+
+Both forms read well and both are the same call. The pipeline is worth knowing
+about: it is the shape a chain of money operations takes, and it is what
+Effect's `BigDecimal` uses for the same reason.
+
+### Scale is part of the number
+
+`mul` **adds** the scales — two numbers with four decimal places give one with
+eight — and `add` brings both operands to the larger scale. That is what makes
+the arithmetic exact, and it is also what makes a long chain overflow sooner
+than people expect. `rounded` is the way back:
+
+```khora
+let charge = total.rounded(2, Rounding::HalfEven);
+```
+
+`divide` is the one operation that cannot be exact, so it takes the scale and
+the rounding mode and returns `Option<Decimal>` — `None` when the divisor is
+zero. Everything else stops the program rather than returning a number that is
+not the answer; see [Traps](/docs/reference/traps/).
+
+`Show` prints every place the scale says, so `Decimal::scaled(150, 2)` is
+`1.50` and not `1.5`. A price to two places stays a price to two places, which
+is what makes a column of them line up.
+
+Full API: [`std::decimal`](/docs/stdlib/api/decimal/).

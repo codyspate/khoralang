@@ -4938,9 +4938,52 @@ one is open:
 - **An intermittent `khora-rt` failure** in the Linux repeat loop — the section
   that exists to catch races — at roughly one baseline in three.
 
-Tiers 4, 5 and 6 are untouched: where the language stops short, what `std` does
-not have, and what the docs promise. Two of tier 6's entries were fixed in
-passing because the code they described changed underneath them.
+**Tier 4 is done as well**, and needed four decisions rather than repairs.
+
+- **Record update.** `{ ..old, field: value }`, which three people reached for
+  unprompted before it existed. A new `..` token, a base on `Expr::Record`, and
+  the four reference-counting passes taught to see it — every field the literal
+  does not name is loaded out of the base and retained.
+- **Interpolation shows.** `${n}` calls `Show` unless the hole already holds a
+  `String`, through a compiler-written node rather than a method call, so
+  interpolating something does not require importing the trait that prints it.
+- **`type X = Y` is a wrapper you can build.** It was already distinct and had
+  no constructor, no pattern and no field, so nothing could convert in either
+  direction — a type nothing could inhabit. Rust's tuple struct now: `UserId(1)`
+  in, `UserId(v)` out, `derive` working, `Show` printing `UserId(1)`.
+  The cost is that Khora has **no transparent alias**, and `std::ai`'s
+  `Embedding` — the tree's only use of the form — was one. Its doc comment said
+  so and now says the truth; the wrapper is the better shape there anyway.
+- **`Decimal` arithmetic stays by method**, with comparison by operator, and the
+  guide now says so instead of showing eight lines of literals. Checked against
+  Effect's `BigDecimal`, which does *everything* by function including
+  comparison, because TypeScript has no operator overloading: Khora is ahead
+  here rather than behind, and the inconsistency is it having more than the
+  reference.
+
+Also fixed: negative decimal literals (`-99.95d` was `negation: expected Int,
+found Decimal`), the row-in-type-argument message (`Fiber<(), Oops>` now says
+to write `{ Oops }`), and closure-parameter tuple inference, which the tier 2
+work had already repaired.
+
+Two tier 4 items are **open and each needs a decision**:
+
+- **A nursery or scope body cannot be an inline lambda.** Narrower than the
+  report read — a capability from an *enclosing* function does reach inside a
+  lambda, checked directly. What fails is a lambda that must *introduce* one,
+  because only its expected type says it should: nothing binds `nursery` in the
+  lambda's scope, and names are resolved before types. Fixing it means a `with`
+  clause on a lambda, or an inference rule crossing that boundary.
+- **A record literal is not resolved by its expected type**, so writing a
+  `Changed<A, B>` for `Shared::modify` needs `Changed` imported although the
+  source never names it. The field types are genuinely not available without the
+  import; making them so means carrying the variants of record types reached
+  through imported *signatures*, which is a real extension to what a module
+  sees.
+
+Tiers 5 and 6 are untouched: what `std` does not have, and what the docs
+promise. Several tier 6 entries were fixed in passing, because the code they
+described changed underneath them.
 
 **And the method should be kept.** Four agents, four days of nothing, four
 programs that work and eleven defects nobody on this side had found — including

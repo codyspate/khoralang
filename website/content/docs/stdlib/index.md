@@ -10,20 +10,31 @@ The Khora standard library is written primarily in Khora and ships with the comp
 
 The current standard library includes APIs for:
 
-- strings and collections;
-- JSON encoding and decoding;
-- files and processes;
-- randomness;
+- strings and collections, in [`std::core`](/docs/stdlib/api/core/);
+- JSON encoding and decoding, in [`std::json`](/docs/stdlib/api/json/);
+- files, in [`std::fs`](/docs/stdlib/api/fs/), and processes, in
+  [`std::process`](/docs/stdlib/api/process/) and
+  [`std::process::shell`](/docs/stdlib/api/process/shell/);
+- the environment, in [`std::env`](/docs/stdlib/api/env/);
+- randomness, in [`std::random`](/docs/stdlib/api/random/);
 - clocks and sleeping, in [`std::clock`](/docs/stdlib/api/clock/);
 - typed configuration, in [`std::config`](/docs/stdlib/api/config/);
 - retries and backoff schedules, in [`std::resilience`](/docs/stdlib/api/resilience/);
-- civil dates and offsets;
-- exact `Decimal` arithmetic;
-- HTTP client/server building blocks;
-- TLS;
-- structured concurrency and shared state;
-- database capability and row/cell vocabulary;
-- tracing context and W3C propagation vocabulary.
+- civil dates and offsets, in [`std::time`](/docs/stdlib/api/time/);
+- exact `Decimal` arithmetic, in [`std::decimal`](/docs/stdlib/api/decimal/);
+- HTTP client/server building blocks, in [`std::net::http`](/docs/stdlib/api/net/http/),
+  over [`std::net::socket`](/docs/stdlib/api/net/socket/);
+- TLS, in [`std::net::tls`](/docs/stdlib/api/net/tls/);
+- structured concurrency and shared state, in [`std::core`](/docs/stdlib/api/core/);
+- database capability and row/cell vocabulary, in [`std::db`](/docs/stdlib/api/db/);
+- tracing context and W3C propagation vocabulary, in
+  [`std::trace`](/docs/stdlib/api/trace/);
+- capability permissions, in [`std::permissions`](/docs/stdlib/api/permissions/).
+
+Every entry links, which they did not all do: `civil dates and offsets` and
+`exact Decimal arithmetic` were bare prose beside neighbours that linked, so
+the two modules a financial program reaches for first had to be guessed at by
+URL.
 
 Three of those are new and easy to miss:
 
