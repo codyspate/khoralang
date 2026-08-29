@@ -24,9 +24,11 @@ on standard error and exits with the platform's stack-overflow status.
 
 Every traversal in `std::core`'s `List` is written as a loop rather than as recursion — `length`, `fold`, `reverse`, `filter`, `take`, `drop`, `any`, `all`, `find`, `contains`, `zip`, `flat_map`, `sum`, and the `merge` inside `sort` — so walking a list of any size is safe. `List::sort` recurses only to divide, which is about `log2(n)` deep.
 
-**The remaining limit is releasing a long list, not walking one.** Reference counting frees a value's children through a generated callback that recurses, so dropping a list of more than roughly a hundred thousand elements can exhaust the stack. A list that a traversal consumes is freed as it goes and is not affected; one that is merely released — an intermediate inside `sort`, a field of a record that goes out of scope — is. In practice `List::sort` tops out in the tens of thousands of elements for that reason.
+Releasing a value costs no stack either: reference counting frees a value's children through a queue rather than by recursing, so letting go of a long list is a loop like walking one. A million-element `List` sorts.
 
-Use `Array<A>` or `Vector<A>` for collections beyond that size. A list is the right shape for building front-to-back and walking once; it is not the right shape for a hundred thousand durations you want sorted.
+What is left is ordinary recursion that somebody writes. A function that calls itself once per element of its input will use a frame per element, and no analysis in the compiler turns that into a loop.
+
+`Array<A>` and `Vector<A>` remain the better shape for a large indexed collection — a list is for building front-to-back and walking once — but the choice is now about cost rather than about a cliff.
 
 ## Package ecosystem
 

@@ -46,7 +46,7 @@ fn run(name: &str, main: &str) -> String {
 }
 
 const HEAD: &str = "module demo::main;
-import std::core::{Array, Dict, Eq, List, Option, Ord, Ordering, Pair, Shared, Show, Split};
+import std::core::{Array, Dict, Eq, Halves, List, Option, Ord, Ordering, Pair, Shared, Show, Split};
 
 /// The two helpers every list test below wants: an empty `List<Int>` that
 /// inference can name, and an `Option<Int>` written out.
@@ -746,4 +746,63 @@ fn a_large_list_can_be_sorted() {
     );
 
     assert_eq!(out, "12000\n0\n11999\n6000\nordered\n");
+}
+
+/// **Releasing a long list costs no stack.**
+///
+/// Walking one stopped being deep when every `List` traversal became a loop.
+/// Freeing one did not: `drop_fields` releases an object's children by calling
+/// back into the runtime, so letting go of a hundred thousand cons cells was a
+/// hundred thousand nested frames. It was the last thing in the language whose
+/// cost was proportional to the *depth* of a value, and it is why `List::sort`
+/// still gave out in the tens of thousands after everything else stopped --
+/// a sort releases its intermediate lists rather than walking them.
+///
+/// The distinguishing case is a list nothing walks. A traversal frees as it
+/// goes, one node at a time, and hid this for every operation except the ones
+/// that simply drop.
+#[test]
+fn releasing_a_large_list_costs_no_stack() {
+    let out = run(
+        "list_large_release",
+        &program(
+            r#"  let n = 100000;
+  let mut xs = empty();
+  let mut i = 0;
+  while i < n { xs = List::Cons(i, xs); i = i + 1; };
+  // Split it and let both halves go without walking either. Before this, the
+  // release at the end of the block ran out of stack.
+  let halves = xs.split();
+  print(Int::to_string(halves.left.length()));
+  print("released");"#,
+        ),
+    );
+
+    assert_eq!(out, "50000\nreleased\n");
+}
+
+/// And the sort that was capped by it is not capped by anything now.
+///
+/// Twelve thousand was as far as the debug profile went while freeing was
+/// recursive. This is ten times that and finishes; the ceiling that remains is
+/// memory.
+#[test]
+fn a_much_larger_list_can_be_sorted() {
+    let out = run(
+        "list_huge_sort",
+        &program(
+            r#"  let n = 120000;
+  let mut xs = empty();
+  let mut i = 0;
+  while i < n { xs = List::Cons((i * 7919) % n, xs); i = i + 1; };
+  let sorted = xs.sort();
+  print(Int::to_string(sorted.length()));
+  print(shown(sorted.head()));
+  print(shown(sorted.last()));
+  let pairs = sorted.zip(sorted.drop(1));
+  print(if pairs.all(fn p => p.key <= p.value) { "ordered" } else { "not ordered" });"#,
+        ),
+    );
+
+    assert_eq!(out, "120000\n0\n119999\nordered\n");
 }

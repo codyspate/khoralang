@@ -14,7 +14,117 @@
 use super::*;
 use crate::counters::{ALLOC_COUNT, COUNTER_ORDER, LIVE_COUNT};
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// An object waiting to be released, and the callback that releases its
+/// fields.
+///
+/// The pointer is kept as a `usize` because this lives in a `thread_local` and
+/// a raw pointer there buys nothing: it is turned back the moment it is used,
+/// under the same guarantee the queueing caller gave.
+type Deferred = (usize, Option<extern "C" fn(*mut u8)>);
+
+thread_local! {
+    /// Objects whose last reference is gone and whose fields are not released yet.
+    ///
+    /// **Freeing used to be as deep as the value being freed.** A `drop_fields`
+    /// callback releases the object's children by calling back in here, so
+    /// releasing a cons list of a hundred thousand elements was a hundred thousand
+    /// nested frames and the process died with no stack left. That was the last
+    /// thing in the language whose cost was proportional to the *depth* of a
+    /// value: every traversal in `std`'s `List` is a loop, and a list a traversal
+    /// consumes is freed one node at a time as it walks — but one that is merely
+    /// released, an intermediate inside `sort` or a field of a record going out of
+    /// scope, went the deep way. It is why `List::sort` still gave out in the tens
+    /// of thousands after everything else stopped.
+    ///
+    /// So the recursion becomes a queue. `None` means nothing is draining and the
+    /// next free owns the drain; `Some` means one is in progress, and a nested
+    /// free hands its object over rather than descending into it. The order frees
+    /// happen in is not observable — nothing runs at destruction but the release
+    /// of children — so a queue is as correct as the stack was.
+    ///
+    /// Per thread, because reference counts are per object and two threads may be
+    /// freeing different graphs at once. The cost is one thread-local access on
+    /// the path that *actually frees*, which already pays for `dealloc`; the
+    /// common case, a decrement that does not reach zero, never gets here.
+    static PENDING: RefCell<Option<Vec<Deferred>>> = const { RefCell::new(None) };
+}
+
+/// Hands an object to whoever is draining, or claims the drain.
+///
+/// `true` when the object was queued and this call is done with it. `false`
+/// when there was no drain in progress — the caller now owns one, and must
+/// release the object itself and then call [`drain`].
+fn queued(ptr: *mut u8, glue: Option<extern "C" fn(*mut u8)>) -> bool {
+    PENDING.with(|pending| {
+        let mut slot = pending.borrow_mut();
+        match slot.as_mut() {
+            Some(queue) => {
+                queue.push((ptr as usize, glue));
+                true
+            }
+            None => {
+                *slot = Some(Vec::new());
+                false
+            }
+        }
+    })
+}
+
+/// Releases everything queued, then ends the drain.
+///
+/// The borrow is taken to pop and released before the object is freed, because
+/// freeing it queues its children and that borrows again. Overlapping the two
+/// would panic.
+fn drain() {
+    loop {
+        let next = PENDING.with(|pending| {
+            pending.borrow_mut().as_mut().and_then(|queue| queue.pop())
+        });
+        let Some((ptr, glue)) = next else { break };
+        // SAFETY: the pointer was queued by a caller that had taken its
+        // refcount to zero and had not freed it, so it is still allocated and
+        // nothing else refers to it.
+        unsafe { release_now(ptr as *mut u8, glue) };
+    }
+    PENDING.with(|pending| *pending.borrow_mut() = None);
+}
+
+/// Runs an object's field-releasing callback and frees it.
+///
+/// The tail every drop path shares, with no decrement of its own: the caller
+/// has already taken the refcount to zero.
+///
+/// # Safety
+///
+/// `ptr` must be a live object whose refcount has reached zero, and
+/// `drop_fields` must be the callback for its layout.
+unsafe fn release_now(ptr: *mut u8, drop_fields: Option<extern "C" fn(*mut u8)>) {
+    // Read the layout out of the header *before* running the callback, so a
+    // callback that scribbles on the header cannot make the deallocation use a
+    // layout that differs from the allocation's.
+    //
+    // SAFETY: the object is still allocated at this point.
+    let layout = object_layout(unsafe { (*ptr.cast::<KhoraHeader>()).field_bytes });
+
+    if let Some(drop_fields) = drop_fields {
+        // Releases the children this object owns. They come back through
+        // `khora_drop`, see a drain in progress, and queue themselves rather
+        // than descending.
+        drop_fields(ptr);
+    }
+
+    // SAFETY: `ptr` came from `alloc_zeroed` with exactly `layout`, which was
+    // rebuilt from the same `field_bytes` the allocation used and the constant
+    // alignment; the refcount is zero, so no other reference exists; and the
+    // callback has already released everything the object owned.
+    unsafe { dealloc(ptr, layout) };
+
+    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
+    crate::contain::forget(ptr);
+}
 
 /// Allocates a heap object with `size` bytes of fields and the given `tag`,
 /// with a refcount of 1.
@@ -143,28 +253,14 @@ pub unsafe extern "C" fn khora_drop(ptr: *mut u8, drop_fields: Option<extern "C"
     // visible before the fields are read and the memory is freed.
     std::sync::atomic::fence(Ordering::Acquire);
 
-    // Read the layout out of the header *before* running the callback, so a
-    // callback that scribbles on the header cannot make the deallocation use a
-    // layout that differs from the allocation's.
-    //
-    // SAFETY: as above; the object is still allocated at this point.
-    let layout = object_layout(unsafe { (*header).field_bytes });
-
-    if let Some(drop_fields) = drop_fields {
-        // The callback recursively drops the children this object owns. It is
-        // called with the header pointer, matching every other pointer in this
-        // API; it offsets to the fields itself.
-        drop_fields(ptr);
+    // Queued if something above is already freeing, so a graph is released
+    // iteratively rather than as deep as it is. See [`PENDING`].
+    if queued(ptr, drop_fields) {
+        return;
     }
-
-    // SAFETY: `ptr` came from `alloc_zeroed` with exactly `layout`, which was
-    // rebuilt from the same `field_bytes` the allocation used and the constant
-    // alignment; the refcount is zero, so no other reference exists; and the
-    // callback has already released everything the object owned.
-    unsafe { dealloc(ptr, layout) };
-
-    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
-    crate::contain::forget(ptr);
+    // SAFETY: this thread took the count to zero and holds the only claim.
+    unsafe { release_now(ptr, drop_fields) };
+    drain();
 }
 
 /// Releases a reference and, if it was the last, keeps the memory.
@@ -212,9 +308,22 @@ pub unsafe extern "C" fn khora_drop_reuse(
     }
 
     std::sync::atomic::fence(Ordering::Acquire);
+
+    // **The object is kept, so it is not queued — but its children are.**
+    // Claiming the drain around the callback is what makes a reused cell's
+    // subtree release iteratively; without it, rebuilding a long list in place
+    // frees the old tails as deep as they are.
+    let owns_drain = !PENDING.with(|pending| pending.borrow().is_some());
+    if owns_drain {
+        PENDING.with(|pending| *pending.borrow_mut() = Some(Vec::new()));
+    }
     if let Some(drop_fields) = drop_fields {
         drop_fields(ptr);
     }
+    if owns_drain {
+        drain();
+    }
+
     LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
     ptr
 }
@@ -323,17 +432,15 @@ pub unsafe extern "C" fn khora_drop_last(
     // release is the caller's decrement.
     std::sync::atomic::fence(Ordering::Acquire);
 
+    // As `khora_drop`, and this is the one generated code calls: a graph is
+    // released iteratively, so freeing costs no stack. See [`PENDING`].
+    if queued(ptr, drop_fields) {
+        return;
+    }
     // SAFETY: still allocated — this thread took the count to zero and holds
     // the only claim on it.
-    let layout = object_layout(unsafe { (*ptr.cast::<KhoraHeader>()).field_bytes });
-    if let Some(drop_fields) = drop_fields {
-        drop_fields(ptr);
-    }
-    // SAFETY: as `khora_drop`. The count is zero, nothing else refers to it,
-    // and the callback has released everything the object owned.
-    unsafe { dealloc(ptr, layout) };
-    LIVE_COUNT.fetch_sub(1, COUNTER_ORDER);
-    crate::contain::forget(ptr);
+    unsafe { release_now(ptr, drop_fields) };
+    drain();
 }
 
 /// Frees a token nothing spent.
