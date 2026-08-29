@@ -39,49 +39,8 @@ impl<'ctx> Lower<'_, 'ctx> {
                         return self.call_named(&symbol, site, args, range);
                     }
                 }
-                if owner == runtime::REGION_TYPE {
-                    return self.region_intrinsic(&name, args, range);
-                }
-                if owner == runtime::FIBER_TYPE {
-                    return self.fiber_intrinsic(site, &name, args, range);
-                }
-                if owner == runtime::FIBERS_TYPE {
-                    return self.nursery_intrinsic(&name, args, range);
-                }
-                if owner == runtime::SHARED_FN_TYPE {
-                    return self.shared_fn_intrinsic(site, &name, args, range);
-                }
-                if owner == runtime::SHARED_TYPE {
-                    return self.shared_intrinsic(site, &name, args, range);
-                }
-                if owner == runtime::CHANNEL_TYPE {
-                    return self.channel_intrinsic(site, &name, args, range);
-                }
-                if owner == runtime::ARRAY_TYPE {
-                    return self.array_intrinsic(site, &name, args, range);
-                }
-                if let Some(shape) = int_owner(&owner) {
-                    return self.int_intrinsic(shape, &owner, &name, args, range);
-                }
-                if owner == "String" && name == "with_data" {
-                    return self.with_data(site, args, range);
-                }
-                if owner == "String" && name == "with_c_string" {
-                    return self.with_c_string(site, args, range);
-                }
-                if owner == "String" && name == "from_bytes" {
-                    return self.string_from_bytes(args, range);
-                }
-                if owner == "Float" && name == "to_int" {
-                    return self.float_to_int(args, range);
-                }
-                if owner == "String"
-                    && matches!(name.as_str(), "bytes" | "byte" | "byte_length" | "slice" | "find")
-                {
-                    return self.string_intrinsic(&name, args, range);
-                }
-                if owner == "Ptr" && matches!(name.as_str(), "null" | "is_null") {
-                    return self.ptr_intrinsic(&name, args, range);
+                if let Some(flow) = self.intrinsic(&owner, &name, site, args, range) {
+                    return flow;
                 }
                 match self.mono.callee(&self.owner.clone(), callee) {
                     Some(symbol) => self.call_named(&symbol, site, args, range),
@@ -121,22 +80,48 @@ impl<'ctx> Lower<'_, 'ctx> {
             // over a method of the same name (D2). The checker decided that
             // already, and recorded it by typing the field access as a
             // function; monomorphization has nothing for such a site.
-            Expr::Field { base, .. } => match self.mono.callee(&self.owner.clone(), callee) {
-                Some(symbol) => {
-                    let mut all = vec![base];
-                    all.extend_from_slice(args);
-                    self.call_named(&symbol, site, &all, range)
+            Expr::Field { base, name } => {
+                let resolved = self.mono.callee(&self.owner.clone(), callee);
+
+                // **`cell.get()` has to reach the same place `Shared::get(cell)`
+                // does.** An intrinsic is a declaration the backend fills in,
+                // and only the namespaced spelling used to look for one -- so
+                // the method spelling resolved to a symbol with no body and
+                // said so, telling the caller to give a `std` function a body
+                // they do not own. The checker was happy either way, which is
+                // the part that made it bad: `khora check` was green and
+                // `khora build` was not.
+                //
+                // The receiver becomes the first argument, which is what every
+                // intrinsic already expects of the namespaced form.
+                let has_body = resolved.as_ref().is_some_and(|s| self.be.is_defined(s));
+                if !has_body {
+                    if let Some(owner) = intrinsic_owner(self.types.of(base)) {
+                        let mut all = vec![base];
+                        all.extend_from_slice(args);
+                        if let Some(flow) = self.intrinsic(&owner, &name, site, &all, range) {
+                            return flow;
+                        }
+                    }
                 }
-                None if matches!(self.types.of(callee), Type::Fn { .. }) => {
-                    let shape = FnShape::of(self.types.of(callee))
-                        .expect("guarded by the match arm");
-                    self.call_closure(site, callee, &shape, args, range)
+
+                match resolved {
+                    Some(symbol) => {
+                        let mut all = vec![base];
+                        all.extend_from_slice(args);
+                        self.call_named(&symbol, site, &all, range)
+                    }
+                    None if matches!(self.types.of(callee), Type::Fn { .. }) => {
+                        let shape = FnShape::of(self.types.of(callee))
+                            .expect("guarded by the match arm");
+                        self.call_closure(site, callee, &shape, args, range)
+                    }
+                    None => self.fail(
+                        "this method call was not resolved to an impl; that is a compiler bug",
+                        range,
+                    ),
                 }
-                None => self.fail(
-                    "this method call was not resolved to an impl; that is a compiler bug",
-                    range,
-                ),
-            },
+            }
             // A value of function type: a closure, called indirectly.
             _ if matches!(self.types.of(callee), Type::Fn { .. }) => {
                 let shape =
@@ -149,6 +134,75 @@ impl<'ctx> Lower<'_, 'ctx> {
                 range,
             ),
         }
+    }
+
+    /// The backend's own implementation of `owner::name`, if it has one.
+    ///
+    /// **Reached from both spellings of a call.** `Shared::get(cell)` arrives
+    /// as a path and `cell.get()` as a field, and before this only the first
+    /// looked here -- so the second resolved to a declaration with no body and
+    /// failed at code generation, after `khora check` had said the program was
+    /// fine.
+    ///
+    /// A ladder rather than a table because the arms do not have one shape:
+    /// some need the call site to know what type to build, some take the
+    /// owner's name as well as the method's, and two of them are one method of
+    /// a type whose others are ordinary Khora.
+    ///
+    /// `None` means nothing here implements it, and the caller should look for
+    /// a body.
+    fn intrinsic(
+        &mut self,
+        owner: &str,
+        name: &str,
+        site: ExprId,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Option<Flow<'ctx>> {
+        if owner == runtime::REGION_TYPE {
+            return Some(self.region_intrinsic(name, args, range));
+        }
+        if owner == runtime::FIBER_TYPE {
+            return Some(self.fiber_intrinsic(site, name, args, range));
+        }
+        if owner == runtime::FIBERS_TYPE {
+            return Some(self.nursery_intrinsic(name, args, range));
+        }
+        if owner == runtime::SHARED_FN_TYPE {
+            return Some(self.shared_fn_intrinsic(site, name, args, range));
+        }
+        if owner == runtime::SHARED_TYPE {
+            return Some(self.shared_intrinsic(site, name, args, range));
+        }
+        if owner == runtime::CHANNEL_TYPE {
+            return Some(self.channel_intrinsic(site, name, args, range));
+        }
+        if owner == runtime::ARRAY_TYPE {
+            return Some(self.array_intrinsic(site, name, args, range));
+        }
+        if let Some(shape) = int_owner(owner) {
+            return Some(self.int_intrinsic(shape, owner, name, args, range));
+        }
+        if owner == "String" && name == "with_data" {
+            return Some(self.with_data(site, args, range));
+        }
+        if owner == "String" && name == "with_c_string" {
+            return Some(self.with_c_string(site, args, range));
+        }
+        if owner == "String" && name == "from_bytes" {
+            return Some(self.string_from_bytes(args, range));
+        }
+        if owner == "Float" && name == "to_int" {
+            return Some(self.float_to_int(args, range));
+        }
+        if owner == "String" && matches!(name, "bytes" | "byte" | "byte_length" | "slice" | "find")
+        {
+            return Some(self.string_intrinsic(name, args, range));
+        }
+        if owner == "Ptr" && matches!(name, "null" | "is_null") {
+            return Some(self.ptr_intrinsic(name, args, range));
+        }
+        None
     }
 
     /// Releases an argument, unless the plan passed it as a borrow.
@@ -307,3 +361,18 @@ impl<'ctx> Lower<'_, 'ctx> {
         })
     }
 }
+
+/// The name [`Lower::intrinsic`] is keyed on, for a receiver of this type.
+///
+/// Only the shapes a method call can have a backend implementation for: a
+/// named type, and `String`, which is the one primitive with intrinsics whose
+/// other methods are ordinary Khora. An `Int` method is written in `std::core`
+/// and has a body, so it never reaches here.
+fn intrinsic_owner(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Str => Some("String".to_string()),
+        Type::Adt { name, .. } => Some(name.clone()),
+        _ => None,
+    }
+}
+

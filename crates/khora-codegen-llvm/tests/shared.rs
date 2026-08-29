@@ -378,3 +378,50 @@ pub fn main() -> () {
     );
     assert_eq!(out, "begin;execute;commit;done\n");
 }
+
+/// **A method call reaches an intrinsic, the same as the namespaced call.**
+///
+/// `Shared::get(cell)` worked and `cell.get()` did not: only the namespaced
+/// spelling looked for a backend implementation, so the method spelling
+/// resolved to a declaration with no body and failed at code generation --
+/// telling the caller to give a `std` function a body they do not own.
+///
+/// The part that made it bad is that `khora check` passed. The checker
+/// resolves both spellings to the same method, so the fast loop -- and the LSP
+/// that shares it -- was green while the build was red, which is the one thing
+/// a toolchain must not do.
+///
+/// Found by somebody meeting the language for the first time, on their fourth
+/// program.
+#[test]
+fn a_method_call_reaches_the_same_intrinsic_the_path_call_does() {
+    let out = run(
+        "shared_method_syntax",
+        "module main;
+import std::core::{Array, Channel, Region, Shared, print};
+
+pub fn main() {
+  let cell = Shared::of(1);
+  Shared::set(cell, 7);
+  print(Int::to_string(Shared::get(cell)) + \" \" + Int::to_string(cell.get()));
+
+  // The same for every other type whose methods the backend fills in.
+  let text = \"khora\";
+  print(Int::to_string(String::byte_length(text)) + \" \" + Int::to_string(text.byte_length()));
+  print(String::slice(text, 0, 2) + \" \" + text.slice(0, 2));
+
+  let room: Array<Int> = Array::new(3, 0);
+  Array::set(room, 1, 9);
+  print(Int::to_string(Array::length(room)) + \" \" + Int::to_string(room.length()));
+  print(Int::to_string(Array::get(room, 1)) + \" \" + Int::to_string(room.get(1)));
+
+  let line: Channel<Int> = Channel::bounded(2);
+  Channel::send(line, 4);
+  print(Int::to_string(Channel::depth(line)) + \" \" + Int::to_string(line.depth()));
+  Channel::close(line);
+}
+",
+    );
+
+    assert_eq!(out, "7 7\n5 5\nkh kh\n3 3\n9 9\n1 1\n");
+}
