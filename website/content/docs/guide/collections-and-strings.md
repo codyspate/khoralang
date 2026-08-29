@@ -84,7 +84,7 @@ let quoted = "say \"hello\"";
 
 ```khora
 let count = 3;
-let message = "processed ${Int::to_string(count)} item(s)";
+let message = "processed ${count} item(s)";
 ```
 
 Interpolation works in both quoted and backtick strings.

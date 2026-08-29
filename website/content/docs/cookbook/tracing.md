@@ -52,7 +52,7 @@ pub fn main() {
   let tracer = console_tracer();
   let result = around(tracer, "calculate", calculate);
 
-  print("result = ${Int::to_string(result)}");
+  print("result = ${result}");
 }
 ```
 

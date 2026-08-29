@@ -137,8 +137,20 @@ fn main() -> Int {{
 /// expression inside the hole rather than at the string, which is what
 /// `Ctx::range_shift` is for: the hole is parsed as a little source file of its
 /// own, so its ranges start again at zero and have to be moved back.
+/// **A hole holds any value that can be shown**, which it did not.
+///
+/// `"there are ${count} of them"` where `count: Int` was `string
+/// concatenation: expected String, found Int`, so every number in a message
+/// needed an explicit `Int::to_string`. Three examples in the guide quietly
+/// left that out, and the first person to print a table called it the single
+/// biggest tax in the language.
+///
+/// This fixture declares its own tiny prelude and no `Show` at all, so a hole
+/// holding an `Int` here has nothing to call — which is the *other* half of
+/// the rule and the one this test pins: the requirement is real, and it is
+/// reported at the hole rather than as a confusing complaint about `+`.
 #[test]
-fn a_hole_must_hold_a_string() {
+fn a_hole_needs_a_show_for_what_it_holds() {
     let found = refused(
         "interp_wrong_type",
         &format!(
@@ -152,9 +164,39 @@ fn main() -> Int {{
         ),
     );
     assert!(
-        found.iter().any(|e| e.contains("string concatenation") && e.contains("found `Int`")),
-        "the error should be the one `+` gives: {found:?}"
+        found.iter().any(|e| e.contains("`Int` has no `Show`")),
+        "the error should name the type and the trait: {found:?}"
     );
+    // And say what to do about it, since "no Show" is not an instruction.
+    assert!(
+        found.iter().any(|e| e.contains("derive(Show)")),
+        "and how to get one: {found:?}"
+    );
+}
+
+/// **A hole that already holds a `String` needs nothing at all** — no call,
+/// and no `Show` in the program.
+///
+/// `impl Show for String` is the identity, so requiring it would cost a call
+/// that gives back its argument and, worse, would mean a message made of text
+/// did not work in a file that has never heard of the trait. Most files have
+/// not. This one has no `Show` anywhere in it.
+#[test]
+fn a_string_hole_needs_no_show() {
+    let ran = run(
+        "interp_string_hole",
+        &format!(
+            "{PRELUDE}
+fn main() -> Int {{
+  let who = \"world\";
+  print(\"hello ${{who}}\");
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "hello world\n");
+    assert_eq!(ran.code, Some(0));
 }
 
 /// `${}` holds no expression, which is a mistake rather than an empty string —

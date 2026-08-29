@@ -108,7 +108,7 @@ pairs yields a `Pair`, and the loop binds it by name:
 
 ```khora
 for entry in Dict::entries(table) {
-  print("${entry.key}: ${Int::to_string(entry.value)}");
+  print("${entry.key}: ${entry.value}");
 }
 ```
 

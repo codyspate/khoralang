@@ -40,6 +40,21 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Loop { body } => self.lower_loop(id, body),
             Expr::Break(value) => self.lower_break(value, range),
             Expr::Continue => self.lower_continue(range),
+            // **A `${..}` hole.** An ordinary one-argument call to whichever
+            // `Show` impl the checker resolved for the value's type, recorded
+            // as an instantiation like every other trait call — so
+            // monomorphization picked the symbol by the route it already has,
+            // and there is nothing special left to do here.
+            //
+            // Without a recorded callee the value is lowered on its own. That
+            // happens when inference never settled its type, which is a
+            // failure something else has already reported; emitting the value
+            // keeps the block well formed rather than adding a second message
+            // about the same line.
+            Expr::Shown(value) => match self.mono.callee(&self.owner.clone(), id) {
+                Some(symbol) => self.call_named(&symbol, id, &[value], range),
+                None => self.expr(value),
+            },
             Expr::Return(value) => self.lower_return(value),
             Expr::Record { fields, .. } => self.build_record(id, &fields, range),
             Expr::Raise(error) => self.lower_raise(error, range),

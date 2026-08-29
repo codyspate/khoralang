@@ -18,7 +18,7 @@ module main;
 import std::core::{Fiber, Nursery, bounded_nursery, print};
 
 fn handle(job: Int) -> () {
-  print("processing job ${Int::to_string(job)}");
+  print("processing job ${job}");
 }
 
 fn launch_jobs() -> ()

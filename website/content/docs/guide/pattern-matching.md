@@ -73,7 +73,7 @@ let (width, height) = dimensions;
 
 let description = match point {
   (0, 0) => "origin",
-  (x, 0) => "x axis at ${Int::to_string(x)}",
+  (x, 0) => "x axis at ${x}",
   (x, y) => "point",
 };
 ```
@@ -141,7 +141,7 @@ The binding side of `for` is also a pattern, and the same rules apply to it as t
 
 ```khora
 for entry in Dict::entries(table) {
-  print("${entry.key}: ${Int::to_string(entry.value)}");
+  print("${entry.key}: ${entry.value}");
 }
 ```
 

@@ -139,7 +139,7 @@ A pattern used directly by `let` must be valid for the value's type without requ
 
 ```khora
 for entry in Dict::entries(table) {
-  use_entry(entry.key, entry.value);
+  print("${entry.key}: ${entry.value}");
 }
 ```
 

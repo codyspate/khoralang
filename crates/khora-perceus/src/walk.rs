@@ -253,7 +253,11 @@ impl<'a> Planner<'a> {
                     visit(*item);
                 }
             }
-            Expr::Raise(inner) | Expr::Try(inner) => visit(*inner),
+            // `Shown` holds the value a `${..}` hole was written around, and
+            // that value is an argument to `Show::show` like any other. Left
+            // out of this walk it was invisible to the reference-count plan,
+            // which is not a compile error and is a crash.
+            Expr::Raise(inner) | Expr::Try(inner) | Expr::Shown(inner) => visit(*inner),
             Expr::Break(Some(v)) | Expr::Return(Some(v)) => visit(*v),
             _ => {}
         }

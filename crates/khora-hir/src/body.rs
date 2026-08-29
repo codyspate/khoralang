@@ -188,6 +188,28 @@ pub enum Expr {
     Continue,
     Return(Option<ExprId>),
     Tuple(Vec<ExprId>),
+    /// The value of a `${..}` hole, as text.
+    ///
+    /// **Written by the interpolation desugaring and by nothing else.** It is
+    /// a call to `Show::show` that the compiler makes on the author's behalf,
+    /// which is why it is a node rather than an ordinary method call: a method
+    /// call resolves through the names in scope, and interpolating a value
+    /// should not require importing the trait that prints it. The hole is the
+    /// use; `Show` is not named in the source and asking for it to be would
+    /// reintroduce exactly the import trap that trait bounds just came out of
+    /// — a lint calling the import unused, and removing it breaking the build.
+    ///
+    /// Every hole is wrapped, including one that is already a `String`:
+    /// `impl Show for String` is the identity, so uniformity costs a call the
+    /// optimizer removes rather than a check the desugaring cannot make. It
+    /// runs before types exist and has no way to know.
+    ///
+    /// `"n = ${n}"` where `n: Int` used to be `string concatenation: expected
+    /// String, found Int`, so every number in a message needed an explicit
+    /// `Int::to_string` — which three documented examples in the guide quietly
+    /// left out, and which the first person to print a table called the single
+    /// biggest tax in the language.
+    Shown(ExprId),
     /// `raise DbError::Timeout` — leaves the function with an error.
     ///
     /// Type `Never`, so it stands wherever an expression can.

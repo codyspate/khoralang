@@ -165,7 +165,7 @@ A lambda can have a block body:
 ```khora
 let describe = fn value => {
   let doubled = value * 2;
-  "${Int::to_string(value)} -> ${Int::to_string(doubled)}"
+  "${value} -> ${doubled}"
 };
 ```
 

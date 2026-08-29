@@ -440,6 +440,12 @@ impl VariantInfo {
 /// `docs/design/sharing.md`.
 pub const SHARE: &str = "Share";
 
+/// The trait a `${..}` hole calls.
+///
+/// Named here rather than spelled at the two places that want it, because a
+/// string literal in a checker is a rename waiting to go wrong quietly.
+pub const SHOW: &str = "Show";
+
 /// What each type name written in one file actually refers to.
 ///
 /// A name is a spelling and a type is a declaration; this is the map between

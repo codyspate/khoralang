@@ -136,6 +136,12 @@ impl<'a> Checker<'a> {
                 Type::Never
             }
             Expr::Continue => Type::Never,
+            // **A `${..}` hole, shown.** The desugaring wrote this; nobody
+            // spells it. `Show` is resolved against the value's type rather
+            // than through the names in scope, because interpolating something
+            // should not require importing the trait that prints it -- see
+            // `khora_hir::body::Expr::Shown`.
+            Expr::Shown(value) => self.shown(id, value, range),
             Expr::Return(value) => {
                 let expected = self.signature.ret.clone();
                 match value {
@@ -949,3 +955,63 @@ impl<'a> Checker<'a> {
         value
     }
 }
+
+impl<'a> Checker<'a> {
+    /// The type of a `${..}` hole: `String`, if the value can be shown.
+    ///
+    /// **Resolved against the value's type, not the module's imports.** The
+    /// hole is the use; `Show` is never written, so requiring it in scope would
+    /// mean a lint calling the import unused and removing it breaking the
+    /// build — the trap trait bounds were just taken out of.
+    ///
+    /// Recorded as an instantiation of `Show::show` with the value's type as
+    /// its `Self`, which is exactly the shape an ordinary trait call takes, so
+    /// monomorphization picks the impl by the route it already has and code
+    /// generation finds the symbol where it finds every other one.
+    fn shown(&mut self, site: ExprId, value: ExprId, range: TextRange) -> Type {
+        let ty = self.infer(value);
+        let settled = self.unifier.zonk(&ty);
+
+        // Nothing to say about a type inference has not worked out. The
+        // `Unknown` audit reports the ones that never do, and complaining here
+        // as well would blame the message for the expression inside it.
+        if matches!(settled, Type::Unknown | Type::Var(_) | Type::Never) {
+            return Type::Str;
+        }
+
+        // **A hole that already holds a `String` needs nothing.** Not the
+        // call, which `impl Show for String` would answer with the string
+        // itself, and not the requirement either: a message made of text
+        // should work in a file that has never heard of `Show`, which is most
+        // files. Recording no instantiation is what tells code generation to
+        // use the value where it stands.
+        if matches!(settled, Type::Str) {
+            return Type::Str;
+        }
+
+        if !self.satisfies(SHOW, &settled) {
+            self.error(
+                format!(
+                    "`{settled}` has no `Show`, so it cannot go in a `${{..}}` hole. \
+                     Write `derive(Show)` on it, or `impl Show for {settled}`"
+                ),
+                range,
+            );
+            return Type::Str;
+        }
+
+        let key = format!("{SHOW}::show");
+        if let Some(signature) = self.types.signatures.get(key.as_str()).cloned() {
+            let (_, type_args) =
+                self.unifier.instantiate_with(&signature.generics, &signature.as_fn());
+            // `Self` first, as every trait call carries it.
+            if let Some(first) = type_args.first() {
+                let _ = self.unifier.unify(first, &settled);
+            }
+            self.instantiations.insert(site, (key, type_args));
+        }
+
+        Type::Str
+    }
+}
+

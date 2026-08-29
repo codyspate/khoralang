@@ -806,3 +806,41 @@ fn a_much_larger_list_can_be_sorted() {
 
     assert_eq!(out, "120000\n0\n119999\nordered\n");
 }
+
+/// **A `${..}` hole shows whatever it holds**, against the real `std::core`.
+///
+/// The tiny prelude in `tests/interpolation.rs` pins the rule; this pins that
+/// the rule reaches every `Show` the standard library actually has, including
+/// a derived one and a `List`. It is the table the log analyser was trying to
+/// print:
+///
+///     print("    ${pad_right(row.name, 26)}${Int::to_string(row.count)}...");
+///
+/// which is why "the single biggest tax" was the phrase used for it.
+///
+/// **No `Show` in the import list.** That is deliberate and is half the point:
+/// the hole is the use, the trait is never named in the source, and requiring
+/// it would put a lint on the import and a build failure on removing it.
+#[test]
+fn a_hole_shows_whatever_it_holds() {
+    let out = run(
+        "interp_shows_std",
+        &program(
+            r#"  let n = 42;
+  let name = "khora";
+  let flag = true;
+  print("n = ${n}");
+  print("name = ${name}");
+  print("flag = ${flag}");
+  print("list = ${[1, 2, 3]}");
+  // Several holes and some arithmetic in one, which is the shape a table row
+  // takes and the reason the explicit conversions were unreadable.
+  print("${n} and ${name} and ${n * 2}");"#,
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "n = 42\nname = khora\nflag = true\nlist = [1, 2, 3]\n42 and khora and 84\n"
+    );
+}

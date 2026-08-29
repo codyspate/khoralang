@@ -91,7 +91,7 @@ The left side is a pattern, so destructuring is allowed when the iterator's item
 
 ```khora
 for entry in Dict::entries(table) {
-  print("${entry.key}: ${Int::to_string(entry.value)}");
+  print("${entry.key}: ${entry.value}");
 }
 ```
 

@@ -88,10 +88,23 @@ Strings contain Unicode text. Backslash introduces escapes.
 
 ```khora
 "user ${user.id}"
-"count = ${Int::to_string(count)}"
+"count = ${count}"
+"the point is ${point} and the list is ${items}"
 ```
 
 Interpolation is expression syntax, not a separate formatting language.
+
+A hole that already holds a `String` is used as it stands. Anything else is
+shown through [`Show`](/docs/reference/traits/), so a value whose type has no
+`Show` impl is a compile error naming the type:
+
+```
+error: `Colour` has no `Show`, so it cannot go in a `${..}` hole. Write
+       `derive(Show)` on it, or `impl Show for Colour`
+```
+
+`Show` does not have to be imported to interpolate. The hole is the use, and
+the trait is never named in the source.
 
 ## Backtick strings
 

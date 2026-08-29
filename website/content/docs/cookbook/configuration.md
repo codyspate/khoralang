@@ -58,7 +58,7 @@ pub fn main() {
 }
 
 fn serve(config: Settings) -> () {
-  print("listening on ${config.listen.host}:${Int::to_string(config.listen.port)}")
+  print("listening on ${config.listen.host}:${config.listen.port}")
 }
 ```
 

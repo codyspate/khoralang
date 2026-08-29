@@ -569,6 +569,8 @@ fn leaves(expr: &Expr) -> Option<&'static str> {
         Expr::Raise(_) => Some("raise"),
         Expr::Break(_) => Some("break"),
         Expr::Continue => Some("continue"),
+        // Not written by anybody, so there is no source construct to name.
+        Expr::Shown(_) => None,
         _ => None,
     }
 }

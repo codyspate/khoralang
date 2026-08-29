@@ -83,7 +83,7 @@ A `catch` arm may destructure the failure just like a `match` arm:
 ```khora
 let allowed = determine_random()! catch {
   RandomFailure::BelowThreshold(value) => {
-    print("random value was ${Int::to_string(value)}");
+    print("random value was ${value}");
     false
   },
 };
@@ -107,7 +107,7 @@ fn determine_for_api() -> Bool
   determine_random()! catch {
     RandomFailure::BelowThreshold(value) =>
       raise ApiError::ServiceUnavailable(
-        "random value ${Int::to_string(value)} was below the threshold"
+        "random value ${value} was below the threshold"
       ),
   }
 }
@@ -161,7 +161,7 @@ let result = attempt(fn () => determine_random()!);
 match result {
   Result::Ok(value) => print("success"),
   Result::Err(RandomFailure::BelowThreshold(value)) =>
-    print("failed at ${Int::to_string(value)}"),
+    print("failed at ${value}"),
 }
 ```
 

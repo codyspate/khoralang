@@ -47,7 +47,7 @@ pub fn main() {
     UseError::Failed => -1,
   };
 
-  print("result = ${Int::to_string(result)}");
+  print("result = ${result}");
 }
 ```
 

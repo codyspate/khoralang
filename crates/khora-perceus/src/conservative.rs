@@ -123,6 +123,9 @@ impl<'a> Planner<'a> {
                 self.unwinds = true;
                 self.walk(inner);
             }
+            // The value goes to `Show::show` as an argument and comes back as
+            // a `String`, so it is counted the way any other argument is.
+            Expr::Shown(value) => self.walk(value),
             Expr::Record { fields, .. } => {
                 for (_, value) in &fields {
                     self.walk(*value);

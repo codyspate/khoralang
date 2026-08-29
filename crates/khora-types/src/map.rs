@@ -672,12 +672,28 @@ pub(crate) fn import_builtin_impls(exported: &TypeMap, map: &mut TypeMap) {
     // the impl and `check_bounds` skips the whole question, because a trait it
     // does not know is one it declines to report on -- so a *missing* impl
     // would go unreported instead. Both halves of the bug were the same gap.
+    //
+    // And so do the signatures, which is what makes the impl *callable* rather
+    // than merely known. `Expr::Shown` -- the `${..}` hole the interpolation
+    // desugaring writes -- resolves `Show::show` without the module having
+    // named `Show`, and needs the trait's own signature to instantiate against
+    // and the impl's to emit. Nothing here is reachable by writing a name, so
+    // this cannot put a method within reach of a file that could not already
+    // call it.
     for imp in &map.traits.impls {
         if let Some(def) = exported.traits.traits.get(&imp.trait_name) {
             map.traits
                 .traits
                 .entry(imp.trait_name.clone())
                 .or_insert_with(|| def.clone());
+        }
+        let Some(head) = imp.head() else { continue };
+        let trait_prefix = format!("{}::", imp.trait_name);
+        let impl_prefix = format!("{}#{head}::", imp.trait_name);
+        for (key, signature) in &exported.signatures {
+            if key.starts_with(&trait_prefix) || key.starts_with(&impl_prefix) {
+                map.signatures.entry(key.clone()).or_insert_with(|| signature.clone());
+            }
         }
     }
 }

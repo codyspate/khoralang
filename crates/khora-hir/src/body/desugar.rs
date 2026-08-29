@@ -195,7 +195,15 @@ impl<'a> Ctx<'a> {
                     };
                     self.add_expr(Expr::Literal(Literal::Str(unescape_body(&text))), span)
                 }
-                Part::Hole(raw) => self.lower_fragment(&raw.text, body_at + raw.at),
+                Part::Hole(raw) => {
+                    // Shown rather than concatenated raw: a hole holds a value
+                    // and a message wants its text. See `Expr::Shown`.
+                    let value = self.lower_fragment(&raw.text, body_at + raw.at);
+                    let at = body_at + raw.at;
+                    let span =
+                        TextRange::at(TextSize::from(at), TextSize::from(raw.text.len() as u32));
+                    self.add_expr(Expr::Shown(value), span)
+                }
             };
             joined = Some(match joined {
                 None => piece,
