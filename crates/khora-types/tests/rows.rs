@@ -921,3 +921,29 @@ fn a_row_the_effect_declares_is_not_requantified() {
         "Boom",
     );
 }
+
+/// **A type written where a row belongs is told which it is.**
+///
+/// `Fiber<(), Oops>` and `Fiber<(), { Oops }>` print almost the same, and the
+/// answer — one pair of braces — appears nowhere in `std` or the reference,
+/// both of which only ever show a row *variable*, which needs none. It cost
+/// somebody a quarter of an hour, and the declaration
+/// `Shared<Option<Fiber<(), NotifyError>>>` had type-checked happily on the
+/// way: a field type nothing can inhabit, accepted in silence.
+#[test]
+fn a_type_where_a_row_belongs_is_told_to_use_braces() {
+    let found = errors(
+        "module m;\n\
+         pub type Oops = | Bad;\n\
+         pub type Holder<A, 'er> = { value: A };\n\
+         fn f(h: Holder<Int, { Oops }>) -> Holder<Int, Oops> { h }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("is a type and a row belongs here")),
+        "the mismatch must say which is which: {found:?}"
+    );
+    assert!(
+        found.iter().any(|e| e.contains("write it `{ Oops }`")),
+        "and show the spelling: {found:?}"
+    );
+}

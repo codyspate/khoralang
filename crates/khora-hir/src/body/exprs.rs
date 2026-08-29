@@ -129,6 +129,40 @@ impl<'a> Ctx<'a> {
                     Some("-") => UnOp::Neg,
                     _ => UnOp::Not,
                 };
+
+                // **`-99.95d` is a decimal literal, minus and all.**
+                //
+                // A decimal literal is not a value of its own — it desugars to
+                // `Decimal::scaled(units, scale)` — so a minus in front of one
+                // was an ordinary negation applied to a call, and negation is
+                // `Int`, `Float` and the fixed widths. The result was
+                //
+                //     error: negation: expected `Int`, found `Decimal`
+                //     error: this argument: expected `Decimal`, found `Int`
+                //
+                // for `-99.95d`, while `-99.95` and `-5` compiled in the same
+                // program: the one type where a negative number cannot be
+                // written is the one for money. Every refund and every credit
+                // in somebody's test data was `neg(99.95d)`.
+                //
+                // Folded into the literal here, which is exactly what the
+                // checker already does for a fixed-width integer — `-128` is
+                // an `I8` because the minus belongs to the number, not to an
+                // operation on it. `Decimal::negate` remains the way to negate
+                // a decimal that is not a literal.
+                if op == UnOp::Neg {
+                    if let Some(operand) = e.operand() {
+                        let is_decimal = operand
+                            .syntax()
+                            .first_token()
+                            .is_some_and(|t| t.kind() == khora_syntax::SyntaxKind::DECIMAL_LIT);
+                        if is_decimal {
+                            let text = operand.syntax().text().to_string();
+                            return self.lower_decimal(&format!("-{text}"), range);
+                        }
+                    }
+                }
+
                 let operand = match e.operand() {
                     Some(o) => self.lower_expr(&o),
                     None => self.add_expr(Expr::Missing, range),

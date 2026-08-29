@@ -948,6 +948,25 @@ pub(crate) fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> Stri
         (Type::Const(_), Type::Const(_)) => {
             format!("; dimension `{}` does not match `{}`", inner.0, inner.1)
         }
+        // **An error type written where a row belongs**, which is one missing
+        // pair of braces and reads as neither side saying so.
+        //
+        //     let g: Fiber<(), Oops> = f;
+        //     expected `Fiber<(), Oops>`, found `Fiber<(), { Oops: Oops }>`
+        //
+        // Two types that print almost the same, and the answer -- `Fiber<(),
+        // { Oops }>` -- appears nowhere in `std` or the reference, both of
+        // which only ever show a row *variable*, which needs no braces. It
+        // cost somebody a quarter of an hour, and the declaration
+        // `Shared<Option<Fiber<(), NotifyError>>>` had type-checked happily on
+        // the way: a field nothing can inhabit, accepted in silence.
+        (written, Type::Row { .. }) if !matches!(written, Type::Row { .. }) => {
+            format!(
+                "; `{written}` is a type and a row belongs here — write it \
+                 `{{ {written} }}`, the way an error row is written everywhere \
+                 else",
+            )
+        }
         _ => format!("; `{}` does not match `{}`", inner.0, inner.1),
     }
 }

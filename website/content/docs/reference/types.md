@@ -215,6 +215,37 @@ Rows may merge additional row values in the tail position:
 { 'left | 'right | clock: Clock }
 ```
 
+An **error row** names failure types rather than capabilities, and its entries
+are bare:
+
+```khora
+{ Oops }
+{ Timeout | Refused }
+```
+
+That spelling matters in type-argument position, which is the one place a row
+has to be written down rather than inferred. A `Fiber`'s second parameter is a
+row, so:
+
+```khora
+let f: Fiber<(), { Oops }> = Fiber::spawn(work);   // correct
+let g: Fiber<(), Oops> = Fiber::spawn(work);       // refused
+```
+
+`Fiber<(), Oops>` is a type where a row belongs. It is a declaration nothing
+can inhabit, and the compiler says so at the assignment:
+
+```
+error: expected `Fiber<(), Oops>`, found `Fiber<(), { Oops: Oops }>`; `Oops` is
+       a type and a row belongs here — write it `{ Oops }`
+```
+
+Most code never writes one, because a signature's `raises` clause takes the
+types directly (`raises Oops`) and everything else infers. `Fiber<A, 'er>` in
+the standard library and `Fiber<(), 'er>` in the concurrency reference are row
+*variables*, which need no braces — which is why the concrete form is easy to
+miss.
+
 Rows are structural; ordinary declared ADTs remain nominal.
 
 ## Explicit polymorphic types with `forall`

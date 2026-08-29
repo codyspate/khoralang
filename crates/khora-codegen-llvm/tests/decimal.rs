@@ -509,3 +509,49 @@ fn the_most_negative_significand_prints() {
 
     assert_eq!(out, "-92233720368547758.08\n-9223372036854775808\n");
 }
+
+/// **A negative decimal literal is a decimal.**
+///
+/// `-99.95d` was `negation: expected `Int`, found `Decimal``, with a second
+/// error calling a `Decimal` literal an `Int` — while `-99.95` and `-5`
+/// compiled in the same program. The one type where a negative number could
+/// not be written was the one for money, so every refund and every credit in
+/// somebody's test data was `neg(99.95d)`.
+///
+/// A decimal literal is not a value of its own: it desugars to
+/// `Decimal::scaled(units, scale)`, so a minus in front of one was an ordinary
+/// negation applied to a *call*. The minus belongs to the number, and is
+/// folded into it — which is what the checker already did for a fixed-width
+/// integer, where `-128` is an `I8`.
+#[test]
+fn a_negative_decimal_literal_is_a_decimal() {
+    let out = run(
+        "decimal_negative_literal",
+        r#"  print(Decimal::show(-99.95d));
+  print(Decimal::show(-0.5d));
+  print(Decimal::show(-1250.00d));
+  // Negative zero is not a thing a scaled integer has.
+  print(Decimal::show(-0.0d));
+  // The positive ones are unchanged.
+  print(Decimal::show(99.95d));
+  // And it agrees with the function that was the workaround.
+  print(if -99.95d == Decimal::negate(99.95d) { "same" } else { "different" });"#,
+    );
+
+    assert_eq!(out, "-99.95\n-0.5\n-1250.00\n0.0\n99.95\nsame\n");
+}
+
+/// The exponent form too, since it takes a different path through the parts.
+///
+/// A *positive* exponent only. `25e-2d` is not lexed as a decimal literal at
+/// all, although `decimal_parts` handles a negative exponent perfectly well —
+/// a gap older than this test and unrelated to the sign in front of it.
+#[test]
+fn a_negative_decimal_literal_may_carry_an_exponent() {
+    let out = run(
+        "decimal_negative_exponent",
+        r#"  print(Decimal::show(-1.5e3d));"#,
+    );
+
+    assert_eq!(out, "-1500\n");
+}
