@@ -4725,10 +4725,33 @@ which needs none. The declaration `Shared<Option<Fiber<(), NotifyError>>>`
 type-checked fine; a field type nothing can inhabit was accepted silently, and
 the error came at the assignment reading as though the two sides were the same.
 
-### Tier 5 — what `std` still does not have
+### Tier 5 — what `std` still does not have — **done**
 
 The surface audit closed five holes. These are the ones only writing a program
-finds. Grouped, not ordered:
+finds. Every one below is now built, except where a line says otherwise.
+
+**Two of them were already there.** `derive(ToJson)` and `derive(FromJson)`
+have been in `DERIVABLE` all along and expand correctly; the report was
+written against a program that hand-wrote `as_json` without trying the derive.
+And `Map::entries` existed, which `std::json` had a comment asking for.
+
+**Two things came out of the work rather than the reports**, both recorded as
+tasks rather than fixed here:
+
+- **A trait method cannot be called type-qualified on a builtin.**
+  `Int::show(x)` and `Bool::show(x)` do not resolve, while `Decimal::show(x)`
+  does and is used fifty-three times across the tree. The diagnostic says
+  `Int` "is not a trait", which is not what the caller claimed.
+  `Ord::cmp(a, b)` also fails from a module that imports `Ord`, though
+  `std::core` uses that form internally. Every call site here writes
+  `x.show()` instead, which works everywhere.
+- **`List::map` recurses once per element**, so it dies on a long list — every
+  other walk in `std::core` is an explicit loop with an accumulator for that
+  reason, and `#107` made `khora_drop` iterative on the same grounds.
+  `Traversable`'s `traverse` has the same shape. `std::json` was rewritten to
+  fold rather than map because of it.
+
+The original list:
 
 - **Formatting**: `String::pad_left` / `pad_right` — every one of the three
   programs wrote its own, and `std::time` has a private `padded` already. A
@@ -4770,6 +4793,50 @@ finds. Grouped, not ordered:
   for CSV and wrong for a column-aligned log.
 - **Something to wait on several fibers for their answers.** `Fibers::wait`
   discards them.
+
+**What was decided rather than merely added**, in the order it came up:
+
+- **`Parts { kept, rest }` for `partition`**, rather than reusing `Halves`,
+  whose `left`/`right` say where a piece came from and not what is true of it.
+- **A `Dict` prints in key order and a `Map` does not.** A `Dict` is a search
+  tree, so two holding the same entries print the same way and a golden test
+  over one is worth writing. A `Map`'s order is bucket order. Sorting a `Map`
+  instead would need `K: Ord`, which would stop a map whose keys hash but do
+  not order from printing at all — and the reason `Show for Map` exists is that
+  a record holding one could not `derive(Show)`.
+- **`Json::Object` encodes sorted by key.** Bucket order is not merely
+  arbitrary but *unstable*: it moves when the map grows, so two runs over one
+  document could print differently. Sorted rather than insertion order, because
+  insertion order is the one thing a hash genuinely cannot recover — keeping it
+  would mean `Object` carrying a `List<Field>` beside the map and paying for
+  the order on every document whether or not anybody looks.
+- **`retry_counting` does not raise.** It answers
+  `Tried { outcome, attempts }`, and `retry`/`retry_while` became wrappers over
+  it. A counted variant that still raised would report the count only when it
+  was least interesting: "it failed after six goes over ninety seconds" is
+  exactly the line somebody wants.
+- **`join_all` is a free function, not a nursery operation.** `Fibers::wait`
+  discards answers because a nursery holds `Fiber<(), 'er>` — an *operation*
+  cannot be generic in a type, only in a row. A plain function can be, which is
+  the whole reason this can exist. The first failure raises and the rest are
+  still waited for, because letting a handle go waits.
+- **`Float::to_fixed` is bound rather than written.** The obvious Khora version
+  multiplies by `10^places`, rounds and divides back — doing the rounding in
+  binary floating point, which is the exact error `std::decimal` exists to
+  avoid, reintroduced by the formatter. `0.125` at two places is `0.12` and
+  `-2.675` is `-2.67`; every other language agrees and an arithmetic version
+  would not.
+- **`Validated` still stops at five, and is still not an `Applicative`.**
+  `map3`, `map4` and `map5` are written out. `List::traverse` would do the
+  unbounded version, and the reason it cannot is the one the type already
+  records.
+- **413 stays "Payload Too Large"** although RFC 9110 renames it "Content Too
+  Large". That is a wire string somebody may be matching on, and changing it is
+  a decision of its own.
+- **No `percent(part, whole)` in `std`.** Three programs wrote one, but what to
+  do at `whole == 0` and how many places are presentation choices, and
+  `to_fixed` makes it one line. `ecosystem.md`'s rule is what a package would
+  otherwise re-derive *subtly wrong*, and this is not that.
 
 ### Tier 6 — what the docs promise and the compiler does not
 
@@ -4998,8 +5065,9 @@ inside the lambda.**
   a type the file cannot name. Taking the type from an expectation is not
   inferring — the expected type already decided which record it is.
 
-Tier 6 is untouched: what the docs promise. Several tier 6 entries were fixed
-in passing, because the code they described changed underneath them.
+Tier 5 is done as well — `std`'s gaps, in five commits. Tier 6 is untouched:
+what the docs promise. Several tier 6 entries were fixed in passing, because
+the code they described changed underneath them.
 
 **And the method should be kept.** Four agents, four days of nothing, four
 programs that work and eleven defects nobody on this side had found — including

@@ -2245,6 +2245,13 @@ impl String {
 /// this kind of thing as something to bind rather than write twice.
 extern fn khora_float_text(value: Float, into: Ptr, capacity: Int) -> Int;
 
+/// The number to exactly `places` decimal places.
+///
+/// Bound rather than written for a different reason than the one above: the
+/// obvious Khora version rounds in binary floating point, which is the exact
+/// error `std::decimal` exists to avoid.
+extern fn khora_float_fixed(value: Float, places: Int, into: Ptr, capacity: Int) -> Int;
+
 impl Float {
   /// The number, written out — `1.5`, `0.1`, `inf`.
   ///
@@ -2256,6 +2263,41 @@ impl Float {
     let out: Array<U8> = Array::new(32, 0);
     let written = Array::with_data(out, fn (into, n) => khora_float_text(self, into, n));
     if written > 32 { "?" } else { String::from_bytes(Array::prefix(out, written)) }
+  }
+
+  /// The number to exactly `places` decimal places.
+  ///
+  /// **For a column and for a percentage**, which is what everybody wanted it
+  /// for: `to_string` gives the shortest form that reads back, so `0.5` and
+  /// `0.125` are three characters apart and a table of them does not line up.
+  /// Two of the review programs wrote the same `percent(part, whole)` helper
+  /// and `examples/risk_analyzer` had a third copy, and the rounding was the
+  /// half none of them wanted to write.
+  ///
+  /// **Not written in Khora**, and the reason is the point of the whole
+  /// numeric design. Multiplying by `10^places`, rounding and dividing back
+  /// does the rounding in binary floating point — so a percentage renders as
+  /// `33.33` on one machine and `33.34` on another, which is the bug
+  /// `std::decimal` exists to prevent, reintroduced by the formatter. The
+  /// runtime rounds the decimal expansion of the double instead, the way C's
+  /// `printf` and Go's `strconv` do, so this and its neighbours agree.
+  ///
+  /// **Still a `Float`, so it is still a rounding of an approximation.**
+  /// `0.1 + 0.2` to two places is `0.30`, and it is `0.30` because the sum was
+  /// near enough, not because it was right. Money is `Decimal` and
+  /// `Decimal::rounded` is the exact version of this; the type that cannot
+  /// have an `Eq` cannot have an exact one of these either.
+  ///
+  /// `places` is clamped to nought through thirty: a double carries about
+  /// seventeen significant digits, so past that the characters are an artefact
+  /// of the binary value rather than information.
+  pub fn to_fixed(self, places: Int) -> String {
+    // Thirty places, a sign, a point and the widest whole part a double
+    // reaches: 350 is comfortably past all of it, and the call says how many
+    // it needed, so a longer answer would be caught rather than truncated.
+    let out: Array<U8> = Array::new(350, 0);
+    let written = Array::with_data(out, fn (into, n) => khora_float_fixed(self, places, into, n));
+    if written > 350 { "?" } else { String::from_bytes(Array::prefix(out, written)) }
   }
 
   /// The whole part, with nothing rounded.
@@ -3861,6 +3903,48 @@ impl Fibers {
   pub fn adopt<'er>(self, fiber: Fiber<(), 'er>) -> ();
   /// Waits for every child, oldest first, and empties the nursery.
   pub fn wait(self) -> ();
+}
+
+/// Every fiber's answer, in the order the handles were given.
+///
+/// **The gap a nursery cannot close.** `Fibers::wait` waits for its children
+/// and discards what they computed, and it has to: a nursery holds
+/// `Fiber<(), 'er>`, because an *operation* cannot be generic in a type -- only
+/// in a row -- so the answer is fixed at `()` where the handles are held. That
+/// is written down at `Nursery` and it is not going to change.
+///
+/// This is a plain function rather than an operation, so it can be generic in
+/// `A`, which is the whole reason it can exist. Fan out with `Fiber::spawn`,
+/// keep the handles, and ask for the answers:
+///
+/// ```khora
+/// let prices = join_all(List::map(symbols, fn s => Fiber::spawn(fn () => quote(s)!)))!;
+/// ```
+///
+/// **The first failure comes out, and the rest are still waited for.** The
+/// raise unwinds past the handles that have not been joined yet, and letting a
+/// handle go waits for its fiber -- which is where structured concurrency
+/// comes from and is why this needs no cleanup of its own. So a fan-out where
+/// one branch fails is a raise, not a leak, and not a fiber still running
+/// after the caller has moved on.
+///
+/// In handle order rather than completion order. A caller who wanted the
+/// fastest first wanted a channel, and one who wanted the answers lined up
+/// against the requests -- which is nearly everybody -- wanted this.
+///
+/// `A: Share` is `Fiber::join`'s own bound and not a new one: the answer was
+/// computed on another fiber and has to be safe to hold from this one.
+pub fn join_all<A: Share, 'er>(fibers: List<Fiber<A, 'er>>) -> List<A> raises 'er {
+  match fibers {
+    List::Nil => List::Nil,
+    List::Cons(first, rest) => {
+      // The join is written before the recursion so the order is the handles'
+      // rather than the reverse, and so a failure comes out at the fiber that
+      // failed rather than after every later one has been waited for.
+      let answer = Fiber::join(first)!;
+      List::Cons(answer, join_all(rest)!)
+    },
+  }
 }
 
 /// Where a spawned fiber goes.

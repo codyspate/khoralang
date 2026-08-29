@@ -72,7 +72,7 @@ fn run(name: &str, main: &str) -> String {
 
 const HEAD: &str = "module demo::main;
 import std::core::{List, Map, Option, Result};
-import std::json::{DecodeError, FromJson, Json, JsonError, ToJson, decode, encode, parse};
+import std::json::{DecodeError, Field, FromJson, Json, JsonError, ToJson, decode, encode, parse};
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -490,5 +490,71 @@ fn main() -> Int {{
     assert_eq!(
         out,
         "entry.amount\nwhole number in the range of Int\nstring\n0\n"
+    );
+}
+
+
+/// **The same document encodes the same way every time.**
+///
+/// `Json::Object` is a `Map`, so it forgets the order its keys arrived in —
+/// that is the trade every language whose JSON object is a hash makes, and it
+/// buys constant-time `field`. What it must not also do is print them in an
+/// order that *changes*: bucket order depends on how many keys there are and
+/// moves when the map grows, so two runs over the same document could produce
+/// different text. That makes a golden test over an encoded document
+/// impossible to write and a diff between two API responses unreadable.
+///
+/// Sorted rather than insertion order. Insertion order is the one thing a hash
+/// genuinely cannot recover — keeping it would mean `Object` carrying a
+/// `List<Field>` beside the map and paying for the order on every document
+/// whether or not anybody looks at it.
+///
+/// The fields here are declared in an order that is neither sorted nor the
+/// bucket order, so the assertion would fail if either the sort or the
+/// determinism went away.
+#[test]
+fn an_encoded_object_is_in_a_stable_order() {
+    let out = run(
+        "json_stable_order",
+        &format!(
+            "{HEAD}
+derive(ToJson)
+type Money = {{ currency: String, amount: Int, note: String }};
+
+fn main() -> Int {{
+  let m: Money = {{ currency: \"GBP\", amount: 1250, note: \"fee\" }};
+  print(encode(m.to_json()));
+  // Twice, which is the half of the promise a single call cannot make.
+  print(encode(m.to_json()));
+  // And through a parse, where the keys arrive in the document's order and
+  // leave in this one.
+  match parse(\"{{\\\"zebra\\\":1,\\\"apple\\\":2,\\\"mango\\\":3}}\") {{
+    Result::Ok(document) => print(encode(document)),
+    Result::Err(_e) => print(\"unparsed\"),
+  }};
+  // `entries` reports the same order `encode` writes.
+  match parse(\"{{\\\"zebra\\\":1,\\\"apple\\\":2,\\\"mango\\\":3}}\") {{
+    Result::Ok(document) => print(names(Json::entries(document))),
+    Result::Err(_e) => print(\"unparsed\"),
+  }};
+  0
+}}
+
+fn names(fields: List<Field>) -> String {{
+  match fields {{
+    List::Nil => \"\",
+    List::Cons(one, rest) => one.name + \" \" + names(rest),
+  }}
+}}
+"
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "{\"amount\":1250,\"currency\":\"GBP\",\"note\":\"fee\"}\n\
+         {\"amount\":1250,\"currency\":\"GBP\",\"note\":\"fee\"}\n\
+         {\"apple\":2,\"mango\":3,\"zebra\":1}\n\
+         apple mango zebra \n"
     );
 }

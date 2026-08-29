@@ -202,13 +202,24 @@ pub fn entries(self) -> List<Field>
 
 Every field of an object, or the empty list.
 
-**The order is the map's, not the document's.** A `Map` is a hash table
-and forgets the order its keys arrived in, so a parsed document does not
-round-trip field-for-field. That is the same trade every language whose
-JSON object is a hash makes — Go's `map[string]any`, Python before 3.7 —
-and it buys `field` in constant time, which is what consumers actually
-do with a document. A `List<Field>` would keep the order and make every
-lookup a scan.
+**By name, not by the order the document wrote them.** A `Map` is a
+hash table and forgets the order its keys arrived in, so a parsed
+document cannot round-trip field-for-field whatever this does. That is
+the same trade every language whose JSON object is a hash makes — Go's
+`map[string]any`, Python before 3.7 — and it buys `field` in constant
+time, which is what consumers actually do with a document.
+
+What it *can* promise, and now does, is that the order is the **same
+every time**. Bucket order is not: it depends on how many keys there are
+and changes when the map grows, so two runs over the same document could
+print its fields differently. That makes a golden test over an encoded
+document impossible to write and a diff between two API responses
+unreadable, which is what this was reported for.
+
+Sorted rather than insertion order, because insertion order is the one
+thing a hash map genuinely cannot recover — keeping it would mean
+`Object` carrying a `List<Field>` beside the map, and paying for the
+order on every document whether or not anybody looks at it.
 
 ## Trait implementations
 

@@ -40,7 +40,7 @@ fn std_source(name: &str) -> String {
 fn run(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Changed, Channel, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, bounded_nursery, print}};
+import std::core::{{Changed, Channel, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, bounded_nursery, join_all, print}};
 
 extern fn khora_live_count() -> Int;
 
@@ -675,4 +675,76 @@ fn ask_together(port: u16, count: usize) -> Vec<String> {
         })
         .collect();
     asking.into_iter().filter_map(|t| t.join().ok().flatten()).collect()
+}
+
+
+/// **The gap a nursery cannot close.**
+///
+/// `Fibers::wait` waits for its children and discards what they computed, and
+/// it has to: a nursery holds `Fiber<(), 'er>`, because an *operation* cannot
+/// be generic in a type — only in a row — so the answer is fixed at `()` where
+/// the handles are held. `Nursery`'s own doc comment records that, and it is
+/// not going to change.
+///
+/// `join_all` is a plain function rather than an operation, which is the whole
+/// reason it can be generic in `A`. Fan out, keep the handles, ask for the
+/// answers — in handle order, so they line up against the requests.
+#[test]
+fn several_fibers_can_be_asked_for_their_answers() {
+    let out = run(
+        "load_join_all",
+        "pub type Oops = | Bad(which: Int);
+
+fn none() -> List<Fiber<Int, {}>> { List::Nil }",
+        r#"  let answers = join_all([
+    Fiber::spawn(fn () => spin(200)),
+    Fiber::spawn(fn () => spin(300)),
+    Fiber::spawn(fn () => spin(400)),
+  ]);
+  print(String::join(List::map(answers, fn n => Int::to_string(n)), ","));
+
+  // Nothing to wait for, which is the case a walk over an empty list has to
+  // answer rather than hang on.
+  print("[" + String::join(List::map(join_all(none())!, fn n => Int::to_string(n)), ",") + "]");
+
+  // One handle, which is where an off-by-one in the recursion would show.
+  print(String::join(
+    List::map(join_all([Fiber::spawn(fn () => 9)]), fn n => Int::to_string(n)), ","));"#,
+    );
+
+    // spin(n) totals 0..n-1: 19900, 44850, 79800.
+    assert_eq!(out, "19900,44850,79800\n[]\n9\n");
+}
+
+/// **The first failure comes out, and the rest are still waited for.**
+///
+/// The raise unwinds past the handles that have not been joined yet, and
+/// letting a handle go waits for its fiber — which is where structured
+/// concurrency comes from, and why this needs no cleanup of its own. So a
+/// fan-out where one branch fails is a raise rather than a leak, and not a
+/// fiber still running after the caller has moved on.
+///
+/// `khora_live_count` at the end is what proves the second half: nothing the
+/// fan-out allocated is still held once the failure has been caught.
+#[test]
+fn a_failing_branch_of_a_fan_out_raises_and_leaves_nothing_running() {
+    let out = run(
+        "load_join_all_raises",
+        "pub type Oops = | Bad(which: Int);
+
+/// The fan-out in its own scope, so the count below is about what it left
+/// behind rather than what is still in scope.
+fn fanned() -> () {
+  let outcome = join_all([
+    Fiber::spawn(fn () => 1),
+    Fiber::spawn(fn () => raise Oops::Bad(7)),
+    Fiber::spawn(fn () => 3),
+  ])! catch { Oops::Bad(n) => [0 - n] };
+  print(String::join(List::map(outcome, fn n => Int::to_string(n)), \",\"))
+}",
+        r#"  fanned();
+  print(Int::to_string(khora_live_count()));"#,
+    );
+
+    assert_eq!(out, "-7\n0\n");
 }

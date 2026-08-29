@@ -177,3 +177,48 @@ pub unsafe extern "C" fn khora_float_text(value: f64, into: *mut u8, capacity: i
     unsafe { into.copy_from_nonoverlapping(bytes.as_ptr(), bytes.len()) };
     bytes.len() as i64
 }
+
+/// The number to exactly `places` decimal places.
+///
+/// **Here rather than in Khora, and not for the reason `khora_float_text` is.**
+/// That one is bound because shortest-round-trip formatting is Ryū and a
+/// thousand lines. This one is bound because the obvious Khora version --
+/// multiply by `10^places`, round, divide back -- does its rounding in binary
+/// floating point, which is the exact error `std::decimal` exists to avoid.
+/// A percentage that renders as `33.33` on one machine and `33.34` on another
+/// is the bug, and it is introduced by the arithmetic rather than by the
+/// formatting.
+///
+/// Rust's `{:.*}` rounds the *decimal expansion of the double*, which is what
+/// C's `printf`, Go's `strconv` and every other language's fixed formatter do,
+/// so a Khora program and its neighbours agree about `0.125` at two places.
+///
+/// `places` is clamped to nought through thirty. A double carries about
+/// seventeen significant digits, so beyond that the extra characters are an
+/// artefact of the binary value rather than information -- and an unclamped
+/// count is an allocation a caller can ask for by accident.
+///
+/// Same contract as the shortest form: answers the length needed and writes
+/// nothing when `capacity` is too small.
+///
+/// # Safety
+///
+/// `into` must address `capacity` writable bytes, or be null with a zero
+/// `capacity`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_float_fixed(
+    value: f64,
+    places: i64,
+    into: *mut u8,
+    capacity: i64,
+) -> i64 {
+    let places = places.clamp(0, 30) as usize;
+    let text = format!("{value:.places$}");
+    let bytes = text.as_bytes();
+    if capacity < bytes.len() as i64 || into.is_null() {
+        return bytes.len() as i64;
+    }
+    // SAFETY: the contract above, and the length was just checked against it.
+    unsafe { into.copy_from_nonoverlapping(bytes.as_ptr(), bytes.len()) };
+    bytes.len() as i64
+}

@@ -1164,3 +1164,51 @@ fn no_entries() -> Dict<String, Int> {{ Dict::new() }}
         "{a: 1, b: 2}\n{}\nk: 3\n{only: 1}\nReport { counts: {a: 1, b: 2}, seen: {only: 1} }\n"
     );
 }
+
+
+/// **For a column and for a percentage.**
+///
+/// `to_string` gives the shortest form that reads back, so `0.5` and `0.125`
+/// are three characters apart and a table of them does not line up. Two of the
+/// review programs wrote the same `percent(part, whole)` helper and
+/// `examples/risk_analyzer` had a third copy — the rounding was the half none
+/// of them wanted to write.
+///
+/// **Not written in Khora.** Multiplying by `10^places`, rounding and dividing
+/// back does the rounding in binary floating point, so a percentage renders as
+/// `33.33` on one machine and `33.34` on another — the bug `std::decimal`
+/// exists to prevent, reintroduced by the formatter. The runtime rounds the
+/// decimal expansion of the double instead, the way C's `printf` and Go's
+/// `strconv` do.
+///
+/// The two odd-looking answers are the right ones and are why this is bound:
+/// `0.125` at two places is `0.12` because the tie goes to even, and `-2.675`
+/// is `-2.67` because the nearest double to `-2.675` is a little above it.
+/// Every other language agrees, and a Khora version doing its own arithmetic
+/// would not.
+#[test]
+fn a_float_can_be_written_to_a_fixed_width() {
+    let out = run(
+        "text_to_fixed",
+        &program(
+            r#"  print(Float::to_fixed(0.5, 2));
+  print(Float::to_fixed(2.0, 0));
+  print(Float::to_fixed(1.0 / 3.0, 4));
+  print(Float::to_fixed(0.125, 2));
+  print(Float::to_fixed(-2.675, 2));
+  // Still a rounding of an approximation, and it says so: `0.30` here is
+  // `0.30` because the sum was near enough, not because it was right.
+  print(Float::to_fixed(0.1 + 0.2, 2));
+  // A column that lines up, which is the point.
+  print("[" + String::pad_left(Float::to_fixed(5.0, 2), 8, " ") + "]");
+  print("[" + String::pad_left(Float::to_fixed(1234.5, 2), 8, " ") + "]");
+  // Negative and zero place counts clamp rather than misbehaving.
+  print(Float::to_fixed(1.5, 0 - 3));"#,
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "0.50\n2\n0.3333\n0.12\n-2.67\n0.30\n[    5.00]\n[ 1234.50]\n2\n"
+    );
+}

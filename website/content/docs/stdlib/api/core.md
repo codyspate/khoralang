@@ -2989,6 +2989,42 @@ the argument's type, because there is no prelude yet to declare three
 differently-typed printers. It is not an effect, which it eventually should
 be — writing to a console is exactly the sort of thing a capability is for.
 
+### join_all
+
+```khora
+pub fn join_all<A: Share, 'er>(fibers: List<Fiber<A, 'er>>) -> List<A> raises 'er
+```
+
+Every fiber's answer, in the order the handles were given.
+
+**The gap a nursery cannot close.** `Fibers::wait` waits for its children
+and discards what they computed, and it has to: a nursery holds
+`Fiber<(), 'er>`, because an *operation* cannot be generic in a type -- only
+in a row -- so the answer is fixed at `()` where the handles are held. That
+is written down at `Nursery` and it is not going to change.
+
+This is a plain function rather than an operation, so it can be generic in
+`A`, which is the whole reason it can exist. Fan out with `Fiber::spawn`,
+keep the handles, and ask for the answers:
+
+```khora
+let prices = join_all(List::map(symbols, fn s => Fiber::spawn(fn () => quote(s)!)))!;
+```
+
+**The first failure comes out, and the rest are still waited for.** The
+raise unwinds past the handles that have not been joined yet, and letting a
+handle go waits for its fiber -- which is where structured concurrency
+comes from and is why this needs no cleanup of its own. So a fan-out where
+one branch fails is a raise, not a leak, and not a fiber still running
+after the caller has moved on.
+
+In handle order rather than completion order. A caller who wanted the
+fastest first wanted a channel, and one who wanted the answers lined up
+against the requests -- which is nearly everybody -- wanted this.
+
+`A: Share` is `Fiber::join`'s own bound and not a new one: the answer was
+computed on another fiber and has to be safe to hold from this one.
+
 ### nursery
 
 ```khora

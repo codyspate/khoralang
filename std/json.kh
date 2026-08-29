@@ -1,6 +1,6 @@
 module std::json;
 
-import std::core::{Array, Chain, List, Map, Option, Result, Show};
+import std::core::{Array, List, Map, Option, Pair, Result, Show};
 
 //! JSON, written in Khora.
 //!
@@ -378,40 +378,46 @@ impl Json {
 
   /// Every field of an object, or the empty list.
   ///
-  /// **The order is the map's, not the document's.** A `Map` is a hash table
-  /// and forgets the order its keys arrived in, so a parsed document does not
-  /// round-trip field-for-field. That is the same trade every language whose
-  /// JSON object is a hash makes — Go's `map[string]any`, Python before 3.7 —
-  /// and it buys `field` in constant time, which is what consumers actually
-  /// do with a document. A `List<Field>` would keep the order and make every
-  /// lookup a scan.
+  /// **By name, not by the order the document wrote them.** A `Map` is a
+  /// hash table and forgets the order its keys arrived in, so a parsed
+  /// document cannot round-trip field-for-field whatever this does. That is
+  /// the same trade every language whose JSON object is a hash makes — Go's
+  /// `map[string]any`, Python before 3.7 — and it buys `field` in constant
+  /// time, which is what consumers actually do with a document.
+  ///
+  /// What it *can* promise, and now does, is that the order is the **same
+  /// every time**. Bucket order is not: it depends on how many keys there are
+  /// and changes when the map grows, so two runs over the same document could
+  /// print its fields differently. That makes a golden test over an encoded
+  /// document impossible to write and a diff between two API responses
+  /// unreadable, which is what this was reported for.
+  ///
+  /// Sorted rather than insertion order, because insertion order is the one
+  /// thing a hash map genuinely cannot recover — keeping it would mean
+  /// `Object` carrying a `List<Field>` beside the map, and paying for the
+  /// order on every document whether or not anybody looks at it.
   pub fn entries(self) -> List<Field> {
     match self {
-      Json::Object(fields) => gather(fields, 0, List::Nil),
+      Json::Object(fields) => sorted_fields(fields),
       _ => List::Nil,
     }
   }
 }
 
-/// Walks the map's buckets, because `Map` has no iterator of its own.
+/// Every field of an object, by name.
 ///
-/// Reaching into `buckets` couples this module to the map's representation,
-/// which is worth a note: the fix is a `Map::entries` in `std::core`, and this
-/// is the caller that justifies adding one.
-fn gather(fields: Map<String, Json>, at: Int, into: List<Field>) -> List<Field> {
-  if at >= Array::length(fields.buckets) {
-    into
-  } else {
-    gather(fields, at + 1, from_chain(Array::get(fields.buckets, at), into))
-  }
-}
-
-fn from_chain(chain: Chain<String, Json>, into: List<Field>) -> List<Field> {
-  match chain {
-    Chain::Empty => into,
-    Chain::Node(key, value, rest) =>
-    from_chain(rest, List::Cons({ name: key, value: value }, into)),
-  }
+/// **Through `Map::entries` rather than the map's buckets.** This module used
+/// to walk `fields.buckets` itself, with a note saying the fix was a
+/// `Map::entries` in `std::core` and that this was the caller justifying one.
+/// It exists now, so the coupling is gone.
+///
+/// `fold` rather than `map` to build the list, because `List::map` recurses
+/// once per element and a document is whatever size it arrived as. The fold
+/// reverses, which the sort settles anyway.
+fn sorted_fields(fields: Map<String, Json>) -> List<Field> {
+  let named = List::fold(Map::entries(fields), List::Nil, fn (out, pair) =>
+    List::Cons({ name: pair.key, value: pair.value }, out));
+  List::sort_by(named, fn (l, r) => l.name.cmp(r.name))
 }
 
 // ---------------------------------------------------------------------------
@@ -430,7 +436,7 @@ pub fn encode(value: Json) -> String {
     Json::Number(number) => Float::to_string(number),
     Json::Text(text) => quote(text),
     Json::Array(items) => "[" + encoded_items(items, "") + "]",
-    Json::Object(fields) => "{" + encoded_fields(gather(fields, 0, List::Nil), "") + "}",
+    Json::Object(fields) => "{" + encoded_fields(sorted_fields(fields), "") + "}",
   }
 }
 
