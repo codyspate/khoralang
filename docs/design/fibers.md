@@ -194,6 +194,13 @@ per fiber, and three things follow:
    away, it is the same sentence as "a cancellation point is a `!` in something
    that can raise".
 
+   **The rule now has a second clause: a loop back-edge, in something that can
+   raise.** Which functions have a cancellation point is unchanged -- the error
+   row is still the channel -- but `loop { sleep; work }` is how every periodic
+   job is written and it had no `!` in it, so a fiber shaped that way could not
+   be stopped and a nursery that had to unwind past one waited for ever. The
+   back-edge already emitted a safepoint; it emits the cancellation check too.
+
    A child's error nobody is waiting for is reported on stderr rather than
    dropped in silence, which is what a panicking thread does everywhere else.
    The error object is freed but not its fields, because the runtime cannot

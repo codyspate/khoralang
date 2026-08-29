@@ -155,7 +155,42 @@ continue_parent();
 
 Cancelling a child does not cancel its parent.
 
-Cancellation is observed at cancellation points rather than between arbitrary source instructions. The same `!` sites that mark propagation/suspension boundaries are where a pending cancellation can cause control to leave. A blocked or suspended operation is made runnable so that the fiber can unwind its structured scopes.
+Cancellation is observed at cancellation points rather than between arbitrary source instructions. There are two:
+
+- a `!` site, which is also where propagation and suspension are marked; and
+- a **loop back-edge** — the point where `loop` or `while` goes round again.
+
+Both only exist in a function that can raise, because a `raises` row is the channel a cancellation travels on.
+
+The back-edge is why an ordinary background worker can be stopped:
+
+```khora
+fn reaper() -> () with { clock: Clock } raises Stop {
+  loop {
+    clock.sleep(1000);
+    sweep();
+  }
+}
+```
+
+There is no `!` in that body. Without the back-edge it could not be cancelled, and a nursery that had to unwind past it would wait for ever.
+
+A blocked or suspended operation is made runnable so that the fiber can unwind its structured scopes. A *straight-line* blocking call is not itself a cancellation point: the fiber wakes, finishes the call, and stops at the next `!` or back-edge after it.
+
+### A fiber with no error row runs to its end
+
+A cancellation leaves a function the same way an error does, on the same tagged return. A function declared without `raises` has no such return, so it has nothing to travel on — it has no cancellation points, and neither `!` nor a loop back-edge puts one there.
+
+That is a language rule rather than a gap. It also means a background worker that genuinely cannot fail still needs an error row to be stoppable:
+
+```khora
+// Cannot be cancelled: nothing to carry the cancellation out.
+fn reporter() -> () with { clock: Clock } {
+  loop { clock.sleep(5000); report(); }
+}
+```
+
+Give it a `raises` row — even one whose error it never raises — and the loop becomes cancellable.
 
 Cancellation is **not** a member of a `raises` row. A `catch` that handles every declared failure does not consume cancellation.
 

@@ -567,14 +567,45 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.be.builder.build_unconditional_branch(target).expect("an unconditional branch");
     }
 
+    /// What a loop back-edge does: offer the worker back, then look for a
+    /// cancellation.
+    ///
+    /// **A loop back-edge is a cancellation point**, in a function that can
+    /// raise. It was only a safepoint, and the difference hung a nursery.
+    ///
+    ///     fn ticker() with { clock: Clock } raises Stop {
+    ///       loop { clock.sleep(200); }
+    ///     }
+    ///
+    /// is how every periodic job in every language is written, and that fiber
+    /// could not be stopped: the runtime woke it out of the sleep, correctly,
+    /// and it went round again without ever asking why it had woken. A nursery
+    /// that had to unwind past one waited for ever, and a service whose
+    /// listener failed to bind printed statistics until somebody killed it.
+    ///
+    /// The check goes *after* the safepoint, so a cancellation that arrives
+    /// while the worker is away is seen on the way back rather than a whole
+    /// iteration later.
+    ///
+    /// This widens the rule `docs/design/fibers.md` states — "a cancellation
+    /// point is a `!` in something that can raise" — to include a back-edge.
+    /// What it does not widen is *which functions* have one: an error row is
+    /// still the channel a cancellation travels on, and
+    /// [`Self::check_cancellation`] emits nothing without one. So "a fiber with
+    /// no error row runs to its end" is untouched, and the shapes that were
+    /// wrong are the ones that had a channel and no place to look at it.
+    fn back_edge(&mut self) {
+        self.safepoint();
+        // The range is unused by the check and there is no expression here to
+        // take one from: a back-edge is a place in the control flow rather
+        // than something somebody wrote.
+        self.check_cancellation(TextRange::empty(0.into()));
+    }
+
     /// Gives the scheduler a chance to take the worker back.
     ///
     /// Emitted at loop back-edges, which is the only place a Khora program can
-    /// run forever without doing anything the runtime already sees. A
-    /// cancellation is observed at `!` in something that can raise, so a
-    /// function with no error row has no cancellation point — correct as a
-    /// language rule, and on M:N it means an infallible loop would own a
-    /// worker until the process ended. `docs/design/scheduler.md` §1.
+    /// run forever without doing anything the runtime already sees.
     ///
     /// **Nothing is emitted for a program that cannot spawn.** The compiler
     /// already proves that to decide whether reference counting is atomic, and

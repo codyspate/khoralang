@@ -931,10 +931,147 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
     // its `print` before the block ended is a race and not the point; under
     // the empty-row version this hung, and a hang is what a nursery that
     // cannot stop its children looks like.
-    assert!(
-        ran.stdout.ends_with("2\n0\n"),
-        "cancelled, waited for, and nothing left over: {}",
-        ran.stdout
+    //
+    // Which is why the check is on the lines present and not on their order.
+    // It used to be `ends_with("2\n0\n")` -- an assertion about exactly the
+    // ordering the paragraph above calls a race -- and it failed about one run
+    // in four with `2\n1\n0\n`: two threads writing to one stream, not a
+    // nursery that let a child outlive it. A test that contradicts its own
+    // comment is the comment being right.
+    let lines: Vec<&str> = ran.stdout.lines().collect();
+    assert!(lines.contains(&"2"), "the block finished: {}", ran.stdout);
+    assert!(lines.contains(&"0"), "and nothing was left over: {}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **A loop back-edge is a cancellation point**, in something that can raise.
+///
+/// It was only a safepoint, and the difference hung a nursery. `loop { sleep;
+/// work }` is how every periodic job in every language is written, and that
+/// fiber could not be stopped: the runtime woke it out of the sleep, and it
+/// went round again without ever asking why it had woken. A nursery that had
+/// to unwind past one waited for ever.
+///
+/// No sleep here, because none is needed and a test that waits is a test that
+/// is sometimes wrong: an ordinary counting loop with no `!` in it has exactly
+/// the same shape and exactly the same problem. It ran for ever.
+///
+/// The fiber cancels itself so the ordering is fixed rather than raced.
+#[test]
+fn a_loop_stops_at_its_back_edge_when_cancelled() {
+    let ran = run(
+        "fiber_cancel_loop",
+        &format!(
+            "{CANCELLABLE}
+fn spinner() -> () raises Oops {{
+  let region = Region::open();
+  Region::defer(region, fn () => print(99));
+  let mut n = 0;
+  loop {{
+    n = n + 1;
+    print(n);
+    if n == 2 {{ khora_cancel(); }}
+  }}
+}}
+
+fn run_it() -> () {{
+  let f = Fiber::spawn(fn () => spinner()!);
+  Fiber::wait(f);
+}}
+
+fn main() -> Int {{
+  run_it();
+  print(3);
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        ran.stdout, "1\n2\n99\n3\n0\n",
+        "the loop must stop at the first back-edge after the cancellation, \
+         run its finalizer, and leave the parent alone"
+    );
+    assert_eq!(ran.code, Some(0), "the parent is not cancelled with it");
+}
+
+/// The same for `while`, which is a different lowering and had the same gap.
+#[test]
+fn a_while_loop_stops_at_its_back_edge_when_cancelled() {
+    let ran = run(
+        "fiber_cancel_while",
+        &format!(
+            "{CANCELLABLE}
+fn counter() -> () raises Oops {{
+  let mut n = 0;
+  let mut going = true;
+  while going {{
+    n = n + 1;
+    print(n);
+    if n == 2 {{ khora_cancel(); }}
+    going = true;
+  }}
+}}
+
+fn run_it() -> () {{
+  let f = Fiber::spawn(fn () => counter()!);
+  Fiber::wait(f);
+}}
+
+fn main() -> Int {{ run_it(); print(3); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n2\n3\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **And a function with no error row still runs to its end**, which is the
+/// half that keeps the language rule the one it was.
+///
+/// Widening a back-edge into a cancellation point does not widen *which*
+/// functions have one: an error row is still the only channel a cancellation
+/// travels on. "A fiber with no error row has no channel to be interrupted on"
+/// is `docs/design/fibers.md`'s sentence and it is still true — so this loop
+/// counts all the way to five with a cancellation pending throughout.
+#[test]
+fn a_loop_in_an_infallible_function_is_not_a_cancellation_point() {
+    let ran = run(
+        "fiber_cancel_infallible",
+        &format!(
+            "{CANCELLABLE}
+fn counting() -> () {{
+  let mut n = 0;
+  while n < 5 {{
+    n = n + 1;
+    print(n);
+    if n == 2 {{ khora_cancel(); }}
+  }}
+}}
+
+fn worker() -> () raises Oops {{
+  counting();
+  print(50);
+}}
+
+fn run_it() -> () {{
+  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::wait(f);
+}}
+
+fn main() -> Int {{ run_it(); print(3); 0 }}
+"
+        ),
+    );
+    // Every iteration runs, and so does `print(50)`: calling an infallible
+    // function is not a `!` and `worker`'s body has no loop of its own, so
+    // there is no cancellation point anywhere between the flag being set and
+    // `worker` returning. That is the rule working, not a gap in it -- the
+    // fiber stops at its root, having done what it was written to do.
+    assert_eq!(
+        ran.stdout, "1\n2\n3\n4\n5\n50\n3\n",
+        "an infallible loop has no channel to be interrupted on"
     );
     assert_eq!(ran.code, Some(0));
 }

@@ -76,7 +76,9 @@ pub effect Clock {
   /// already makes about the other unrepeatable input.
   ///
   /// Zero or less returns at once. A caller who meant "let somebody else run"
-  /// wants a safepoint, and every loop back-edge already has one.
+  /// wants a safepoint, and every loop back-edge already has one — and a
+  /// back-edge in a function that can raise is a cancellation point too, so a
+  /// `loop { sleep }` worker stops when it is asked to.
   sleep: (Int) -> (),
 }
 
