@@ -28,15 +28,56 @@ let exact = 0.1d;
 
 See [Collections and strings](/docs/guide/collections-and-strings/) for interpolation and multiline string syntax.
 
-## Type aliases
+## Wrapper types
 
-Give an existing type a domain name with a type declaration:
+A type declaration over an existing type gives a domain name to a value, and
+gives it a type of its own:
 
 ```khora
 pub type UserId = Int;
+pub type OrderId = Int;
 ```
 
-Aliases are useful when the name improves the API, but they do not create a new runtime representation by themselves.
+**These are distinct types, not other names for `Int`.** A `UserId` is not
+accepted where an `Int` is wanted, an `Int` is not accepted where a `UserId`
+is, and a `UserId` is not an `OrderId` — which is the reason to write one:
+
+```
+error: this argument: expected `UserId`, found `OrderId`
+```
+
+Build one by calling the type's name, and take it apart by matching on it —
+the shape a Rust tuple struct has:
+
+```khora
+let id = UserId(1);
+
+fn number(id: UserId) -> Int {
+  match id { UserId(value) => value }
+}
+```
+
+`derive` works on a wrapper as it does on anything else, and is usually what
+you want — without `Eq` and `Ord` a `UserId` cannot be a `Dict` key, and
+without `Show` it cannot go in a `${..}` hole:
+
+```khora
+derive(Eq, Ord, Show)
+pub type UserId = Int;
+```
+
+`Show` prints `UserId(1)`, not `UserId::UserId(1)`: the one case is the type.
+
+The underlying type may be anything, including a generic one, which is how a
+long type gets a short name:
+
+```khora
+pub type Books = Dict<Currency, Bucket>;
+```
+
+Khora has **no transparent alias** — no form that means "another spelling of
+the same type". If that is what you want, write the type out, or accept the
+wrapper and the one `match` it costs.
 
 ## Tuples and unit
 

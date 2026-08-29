@@ -387,6 +387,29 @@ fn collect_decl(decl: &ast::Decl, map: &mut ItemMap) {
                     }
                 }
             }
+            // **`type UserId = Int;` has one constructor, named after itself.**
+            //
+            // It is a type of its own — nothing accepts a `UserId` where an
+            // `Int` was wanted, which is the point of writing it — and it used
+            // to have no way in or out at all, so nothing could convert either
+            // direction and the type was uninhabitable.
+            //
+            // `UserId(7)` makes one and `match id { UserId(v) => v }` takes it
+            // apart, which is what a reader of Rust's tuple struct expects.
+            // Recorded here so the *pattern* resolves; the constructor already
+            // followed from the type's one positional field.
+            //
+            // A record or a variant declares its own cases, and a declaration
+            // with no definition — `pub type Ptr;` — is opaque and has none.
+            if let (Some(name), Some(definition)) = (t.name(), t.definition()) {
+                let wraps = !matches!(definition, ast::Type::Record(_) | ast::Type::Variant(_));
+                if let (true, Some(type_name)) = (wraps, name.ident()) {
+                    map.variants.push(Variant {
+                        type_name: type_name.clone(),
+                        name: type_name,
+                    });
+                }
+            }
             (t.name(), ItemKind::Type, t.is_exported(), t.syntax().text_range())
         }
         ast::Decl::Trait(t) => {
@@ -1000,6 +1023,22 @@ pub fn resolve_path(
 
     // A name declared in this file, or brought in by an import.
     if rest.is_empty() {
+        // **A constructor named after its own type**, which is what
+        // `type UserId = Int;` has. `UserId(7)` is one segment, because there
+        // is no case to name apart from the type itself, and `UserId::UserId`
+        // would be true and unwritable.
+        //
+        // Before the item lookup, because the item is the *type* and a type is
+        // not a value: a bare `UserId` in expression position can only be the
+        // constructor. Only a newtype has one of these — a record declares no
+        // case, and a variant's cases have names of their own.
+        if let Some(variant) = map.variants_of(first).find(|v| v.name == *first) {
+            return Ok(Resolution::Variant {
+                module: map.module.clone().unwrap_or_else(|| ModulePath::new(vec![])),
+                type_name: variant.type_name.clone(),
+                name: variant.name.clone(),
+            });
+        }
         if let Some(item) = map.item(first) {
             return Ok(Resolution::Item {
                 module: map.module.clone().unwrap_or_else(|| ModulePath::new(vec![])),

@@ -360,7 +360,19 @@ fn shape_of(
             Some(Shape::Variant(cases))
         }
         None => refuse(errors, "it is declared with no body"),
-        Some(_) => refuse(errors, "it is not a record or a variant type"),
+        // **A newtype is a variant with one case, named after itself**, so
+        // everything a derive knows how to write for a variant it can write
+        // here: `match self { UserId(a) => match other { UserId(b) => a == b } }`.
+        //
+        // Without this a `derive` on `type UserId = Int;` was refused, and
+        // hand-writing `Eq`, `Ord` and `Show` for every wrapper is enough work
+        // that nobody would wrap anything — which would leave the distinctness
+        // the type exists for costing more than it is worth.
+        Some(wrapped) => Some(Shape::Variant(vec![Case {
+            name: type_name.to_string(),
+            arity: 1,
+            field_types: vec![wrapped.syntax().text().to_string()],
+        }])),
     }
 }
 
@@ -690,7 +702,16 @@ fn variant_show(type_name: &str, cases: &[Case]) -> String {
         .iter()
         .map(|case| {
             let pattern = case_pattern(type_name, case, "a");
-            let label = format!("{type_name}::{}", case.name);
+            // **A newtype's one case is named after its type**, so qualifying
+            // it says the name twice: `UserId::UserId(1)` where Rust's derived
+            // `Debug` for the same shape prints `UserId(1)`. A real variant
+            // keeps the qualification, which is what makes `Level::Warn`
+            // unambiguous in a log line.
+            let label = if case.name == type_name {
+                type_name.to_string()
+            } else {
+                format!("{type_name}::{}", case.name)
+            };
             if case.arity == 0 {
                 return format!("{pattern} => \"{label}\"");
             }

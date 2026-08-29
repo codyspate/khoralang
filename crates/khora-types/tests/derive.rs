@@ -440,3 +440,46 @@ fn a_derive_whose_trait_is_not_imported_says_which_import_is_missing() {
         "nor is the compiler: {found:?}"
     );
 }
+
+/// **`derive` works on a wrapper type**, which it has to for one to be worth
+/// writing.
+///
+/// `type UserId = Int;` is a type of its own, so it inherits nothing: without
+/// `Eq` and `Ord` it cannot be a `Dict` key, and without `Show` it cannot go
+/// in a `${..}` hole. Hand-writing those for every wrapper is enough work that
+/// nobody would wrap anything, and the distinctness the type exists for would
+/// cost more than it is worth.
+///
+/// A wrapper is a variant with one case named after the type, so everything a
+/// derive knows how to write for a variant it writes here.
+#[test]
+fn a_wrapper_type_can_be_derived_on() {
+    let found = errors(
+        "module m;\n\
+         pub trait Eq { fn eq(self, other: Self) -> Bool; }\n\
+         pub type Ordering = | Less | Equal | Greater;\n\
+         pub trait Ord: Eq { fn cmp(self, other: Self) -> Ordering; }\n\
+         pub trait Show { fn show(self) -> String; }\n\
+         impl Eq for Int { fn eq(self, other: Int) -> Bool { self == other } }\n\
+         impl Ord for Int { fn cmp(self, other: Int) -> Ordering { Ordering::Equal } }\n\
+         impl Show for Int { fn show(self) -> String { \"n\" } }\n\
+         derive(Eq, Ord, Show)\n\
+         pub type UserId = Int;\n",
+    );
+    assert!(found.is_empty(), "a wrapper is derivable: {found:?}");
+}
+
+/// A declaration with no body is opaque and has nothing to read.
+#[test]
+fn an_opaque_declaration_is_still_refused() {
+    let found = errors(
+        "module m;\n\
+         pub trait Show { fn show(self) -> String; }\n\
+         derive(Show)\n\
+         pub type Handle;\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("it is declared with no body")),
+        "{found:?}"
+    );
+}

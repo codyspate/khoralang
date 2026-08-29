@@ -362,6 +362,30 @@ impl<'a> Ctx<'a> {
             if let Some(expanded) = self.expand_constant(only, range) {
                 return expanded;
             }
+            // **A constructor named after its own type**, which is what
+            // `type UserId = Int;` has: `UserId(7)` is one segment, because
+            // there is no case to name apart from the type itself.
+            //
+            // Before the item table, because the item is the *type* and a type
+            // is not a value — a bare `UserId` in expression position can only
+            // be the constructor. Only a newtype has one of these: a record
+            // declares no case, and a variant's cases have names of their own.
+            if let Some(variant) =
+                self.map.variants_of(only).find(|v| v.name == *only).cloned()
+            {
+                return self.add_expr(
+                    Expr::Path(crate::Resolution::Variant {
+                        module: self
+                            .map
+                            .module
+                            .clone()
+                            .unwrap_or_else(|| crate::ModulePath::new(vec![])),
+                        type_name: variant.type_name,
+                        name: variant.name,
+                    }),
+                    range,
+                );
+            }
             if let Some(item) = self.map.item(only) {
                 return self.add_expr(
                     Expr::Path(crate::Resolution::Item {

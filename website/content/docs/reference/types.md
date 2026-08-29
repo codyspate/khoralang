@@ -272,9 +272,11 @@ pub type Handle;
 
 The representation is not available to ordinary source using the type.
 
-## Type aliases and named data
+## Wrappers and named data
 
-Alias:
+Wrapper — a type of its own over an existing one, built with `UserId(1)` and
+opened with `match id { UserId(v) => v }`. Khora has no transparent alias; see
+[Wrapper types](/docs/guide/data-types/#wrapper-types):
 
 ```khora
 pub type UserId = Int;

@@ -526,6 +526,40 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
                         mutable,
                     });
                 }
+                // **`type UserId = Int;` is a type of its own, and now has a
+                // way in and out.**
+                //
+                // It was already distinct — nothing would accept a `UserId`
+                // where an `Int` was wanted, which is the point — but it had
+                // no constructor, no pattern and no field, so nothing could
+                // convert either way and the type was uninhabitable. Somebody
+                // reached for `type Books = Dict<Currency, Bucket>;`, got nine
+                // errors, and wrote the two-parameter type out longhand at
+                // eight call sites.
+                //
+                // One positional field, which is the shape a tuple-carrying
+                // variant case already has — so `UserId(7)` to make one and
+                // `match id { UserId(v) => v }` to take it apart both come
+                // from machinery that was already there, and so do drop glue
+                // and code generation.
+                //
+                // A declaration with *no* definition — `pub type Ptr;` — is
+                // opaque and gets none of this, which is why the definition is
+                // matched rather than assumed.
+                match t.definition() {
+                    Some(ast::Type::Record(_)) | Some(ast::Type::Variant(_)) | None => {}
+                    Some(underlying) => {
+                        let inner = type_of_syntax(Some(&underlying), &generics, homes);
+                        map.variants.push(VariantInfo {
+                            type_name: type_name.clone(),
+                            home: here.clone(),
+                            name: type_name.clone(),
+                            fields: vec![inner],
+                            labels: Vec::new(),
+                            mutable: vec![false],
+                        });
+                    }
+                }
                 if let Some(ast::Type::Variant(v)) = t.definition() {
                     for case in v.cases() {
                         let Some(name) = case.name().and_then(|n| n.ident()) else { continue };

@@ -104,6 +104,14 @@ A one-dimensional CPU tensor of a known width.
 The shape a vector database and an embedding model have to agree on, spelled
 once: `Embedding<1536, F32>`.
 
+**A type of its own, not another name for the tensor inside it.** Khora has
+no transparent alias: `type X = Y` wraps, so an `Embedding` is built with
+`Embedding(t)` and opened with `match e { Embedding(t) => t }`. That is the
+right way round here — a tensor of the correct shape is not automatically
+an embedding, and handing a model's output straight to a distance function
+without saying which is which is the mistake this module is meant to make
+hard.
+
 ### Message
 
 ```khora
@@ -256,9 +264,10 @@ pub fn zeros(shape: Shape) -> Tensor<D, Shape, T>
 
 A tensor of the given shape, every element zero.
 
-The shape is passed as a value and read back as a type, which is what
-makes `Embedding<1536, F32>` and `Tensor::zeros((1536))` the same thing
-said twice. Provisional along with the rest of this module.
+The shape is passed as a value and read back as a type, so
+`Tensor::zeros((1536))` has the shape `Embedding<1536, F32>` wraps —
+`Embedding(Tensor::zeros((1536)))` is the embedding. Provisional along
+with the rest of this module.
 
 ### Prompt
 

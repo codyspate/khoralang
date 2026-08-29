@@ -70,6 +70,30 @@ impl<'a> Ctx<'a> {
             }
         }
 
+        // **A constructor named after its own type**, which is what
+        // `type UserId = Int;` has: `match id { UserId(v) => v }` is one
+        // segment, not two, because there is no case to name apart from the
+        // type. Spelling it `UserId::UserId(v)` would be true and nobody would
+        // write it.
+        //
+        // Only where the type really has a constructor of that name, so this
+        // cannot turn a mistyped binding into a constructor: a bare name is an
+        // `Ident` pattern and never reaches here.
+        if let [only] = segments.as_slice() {
+            if let Some(v) = self
+                .map
+                .variants_of(only)
+                .chain(self.scope.variants_of(only))
+                .find(|v| &v.name == only)
+            {
+                return crate::Resolution::Variant {
+                    module: self.home_of_type(only),
+                    type_name: v.type_name.clone(),
+                    name: v.name.clone(),
+                };
+            }
+        }
+
         self.error(format!("cannot find constructor `{}`", segments.join("::")), range);
         crate::Resolution::Unsupported("unresolved constructor")
     }
