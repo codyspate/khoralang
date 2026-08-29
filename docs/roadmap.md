@@ -4884,6 +4884,37 @@ are its best feature and a lying one spends that credit. Tiers 4 and 5 are
 ordinary work. Tier 6 is cheap and should be done alongside whatever it
 documents, not batched.
 
+### Where that got to
+
+**Tiers 1, 2 and 3 are done**, in that order, each on a green baseline. The
+test count went from 1,898 to 1,943.
+
+Several of them were worse than reported once opened. `Decimal::divide`'s
+saturation had four siblings — comparison, reading, printing and `truncated` —
+and two more in `Int`'s own text conversions, found by testing the first. The
+wrong-file attribution was reported against `khora test` and `khora build` had
+it too. The duplicate-module check *existed*, with a passing test asserting it
+produced an error, and nothing had ever read the field it produced it into.
+Making the loop back-edge a cancellation point fixed two shapes the report had
+listed as separate problems and one it had not found.
+
+Three things came out of the work rather than the reports, and are open:
+
+- **`khora_drop` recurses per node**, so *releasing* a long list is
+  depth-proportional even though walking one is no longer. This is what still
+  caps `List::sort` in the tens of thousands. The fix puts a thread-local check
+  on every free in the language, which is a decision about the hottest path in
+  the runtime and not one to take while fixing something else.
+- **`Fiber::wait` returns while its fiber is still running** when the cancel
+  lands before the child's first cancellation point. Reported, diagnosed as far
+  as `Completion`, not fixed.
+- **An intermittent `khora-rt` failure** in the Linux repeat loop — the section
+  that exists to catch races — at roughly one baseline in three.
+
+Tiers 4, 5 and 6 are untouched: where the language stops short, what `std` does
+not have, and what the docs promise. Two of tier 6's entries were fixed in
+passing because the code they described changed underneath them.
+
 **And the method should be kept.** Four agents, four days of nothing, four
 programs that work and eleven defects nobody on this side had found — including
 one that has been silently corrupting money since `std::decimal` was written.
