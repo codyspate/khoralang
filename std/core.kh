@@ -552,6 +552,11 @@ impl<A: Ord> List<A> {
   /// `A: Ord` rather than a comparison function, so that `<` on the elements
   /// and `sort` on the list cannot disagree. Sorting by something else is
   /// `sort_by`, which does not exist yet and wants a closure.
+  ///
+  /// **Its own recursion is the divide, so it goes about `log2(n)` deep** —
+  /// twenty frames for a million elements. The `merge` underneath it used to
+  /// go one frame per element, which is what made this the first `std`
+  /// function a real workload could kill.
   pub fn sort(self) -> List<A> {
     match self {
       List::Nil => List::Nil,
@@ -587,14 +592,22 @@ impl<A: Ord> List<A> {
   /// `split`'s worker, and public only because `split` is. The accumulator is
   /// what keeps it a single pass.
   fn take_first(self, count: Int, taken: List<A>) -> Halves<A> {
-    if count <= 0 {
-      { left: taken.reverse(), right: self }
-    } else {
-      match self {
-        List::Nil => { left: taken.reverse(), right: List::Nil },
-        List::Cons(head, rest) => List::take_first(rest, count - 1, List::Cons(head, taken)),
+    let mut got = taken;
+    let mut rest = self;
+    let mut remaining = count;
+    let mut walking = count > 0;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => {
+          got = List::Cons(head, got);
+          rest = tail;
+          remaining = remaining - 1;
+          walking = remaining > 0;
+        },
       }
-    }
+    };
+    { left: got.reverse(), right: rest }
   }
 
   /// Two sorted lists, as one.
@@ -602,19 +615,43 @@ impl<A: Ord> List<A> {
   /// `<=` rather than `<` on the tie, which is exactly what makes the sort
   /// stable: an element from the left half goes first when they are equal, and
   /// the left half is the earlier one.
+  /// **Written as a loop, because this is where the depth was.** It recursed
+  /// once per element -- `Cons(mine, merge(..))` is not a tail call -- so
+  /// merging the two halves at the top of the sort took one stack frame for
+  /// every element in the list, and a sort of twenty-seven thousand durations
+  /// killed the process with nothing on either stream.
+  ///
+  /// The algorithm is unchanged and so is the stability. What was wrong was
+  /// never the merge sort; it was that every walk of a `List` in this library
+  /// was as deep as the list was long.
   fn merge(self, other: List<A>) -> List<A> {
-    match self {
-      List::Nil => other,
-      List::Cons(mine, my_rest) => match other {
-        List::Nil => List::Cons(mine, my_rest),
-        List::Cons(theirs, their_rest) =>
-        if mine <= theirs {
-          List::Cons(mine, List::merge(my_rest, List::Cons(theirs, their_rest)))
-        } else {
-          List::Cons(theirs, List::merge(List::Cons(mine, my_rest), their_rest))
+    let mut out = List::Nil;
+    let mut mine = self;
+    let mut theirs = other;
+    let mut walking = true;
+    while walking {
+      match mine {
+        // One side is spent, so the other goes on the end whole. `out` is
+        // back to front until the last line, so "on the end" is reversed onto
+        // the front of it.
+        List::Nil => { out = List::reverse_onto(theirs, out); walking = false; },
+        List::Cons(head, tail) => match theirs {
+          List::Nil => {
+            out = List::reverse_onto(List::Cons(head, tail), out);
+            walking = false;
+          },
+          List::Cons(other_head, other_tail) =>
+          if head <= other_head {
+            out = List::Cons(head, out);
+            mine = tail;
+          } else {
+            out = List::Cons(other_head, out);
+            theirs = other_tail;
+          },
         },
-      },
-    }
+      }
+    };
+    out.reverse()
   }
 }
 
@@ -629,7 +666,16 @@ impl<A> List<A> {
   /// **Walks the list.** Nothing here caches it, so a loop that asks each time
   /// round is quadratic — take it once.
   pub fn length(self) -> Int {
-    match self { List::Nil => 0, List::Cons(_h, t) => 1 + t.length() }
+    let mut count = 0;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(_h, tail) => { count = count + 1; rest = tail; },
+      }
+    };
+    count
   }
 
   /// The first element, or `None` for an empty list.
@@ -647,10 +693,7 @@ impl<A> List<A> {
   /// argument. Building a list by repeatedly concatenating onto the end is the
   /// quadratic way to do it; push and `reverse` once.
   pub fn concat(self, other: List<A>) -> List<A> {
-    match self {
-      List::Nil => other,
-      List::Cons(h, t) => List::Cons(h, t.concat(other)),
-    }
+    List::reverse_onto(self.reverse(), other)
   }
 
   /// The same elements, back to front.
@@ -662,10 +705,16 @@ impl<A> List<A> {
   /// list front-to-back and reversing it at the end is the linear way to do
   /// what `concat` in a loop does quadratically. This is the "at the end".
   pub fn reverse_onto(self, acc: List<A>) -> List<A> {
-    match self {
-      List::Nil => acc,
-      List::Cons(h, t) => t.reverse_onto(List::Cons(h, acc)),
-    }
+    let mut out = acc;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => { out = List::Cons(head, out); rest = tail; },
+      }
+    };
+    out
   }
 
   /// Combines every element into one value, left to right.
@@ -673,10 +722,16 @@ impl<A> List<A> {
   /// `step` is called with what has been accumulated so far and the next
   /// element. Summing is `fold(0, fn (a, b) => a + b)`.
   pub fn fold<B>(self, start: B, step: (B, A) -> B) -> B {
-    match self {
-      List::Nil => start,
-      List::Cons(h, t) => t.fold(step(start, h), step),
-    }
+    let mut carried = start;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => { carried = step(carried, head); rest = tail; },
+      }
+    };
+    carried
   }
 
   /// Whether any element satisfies `wanted`.
@@ -685,10 +740,17 @@ impl<A> List<A> {
   /// `fold`: a fold visits everything, and the whole point of asking whether
   /// *any* element matches is that the answer often arrives early.
   pub fn any(self, wanted: (A) -> Bool) -> Bool {
-    match self {
-      List::Nil => false,
-      List::Cons(head, tail) => if wanted(head) { true } else { List::any(tail, wanted) },
-    }
+    let mut found = false;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) =>
+        if wanted(head) { found = true; walking = false; } else { rest = tail; },
+      }
+    };
+    found
   }
 
   /// Whether every element satisfies `wanted`. Stops at the first that does not.
@@ -697,19 +759,32 @@ impl<A> List<A> {
   /// splitting a list in two and asking each half gives the same answer as
   /// asking the whole, and that fails at the empty case under any other rule.
   pub fn all(self, wanted: (A) -> Bool) -> Bool {
-    match self {
-      List::Nil => true,
-      List::Cons(head, tail) => if wanted(head) { List::all(tail, wanted) } else { false },
-    }
+    let mut holds = true;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) =>
+        if wanted(head) { rest = tail; } else { holds = false; walking = false; },
+      }
+    };
+    holds
   }
 
   /// The first element satisfying `wanted`, or nothing.
   pub fn find(self, wanted: (A) -> Bool) -> Option<A> {
-    match self {
-      List::Nil => Option::None,
-      List::Cons(head, tail) =>
-      if wanted(head) { Option::Some(head) } else { List::find(tail, wanted) },
-    }
+    let mut answer = Option::None;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) =>
+        if wanted(head) { answer = Option::Some(head); walking = false; } else { rest = tail; },
+      }
+    };
+    answer
   }
 
   /// The first `count` elements, or all of them if there are fewer.
@@ -718,49 +793,59 @@ impl<A> List<A> {
   /// for when the count came from somewhere else, and refusing zero would make
   /// every such caller check it first.
   pub fn take(self, count: Int) -> List<A> {
-    if count < 1 {
-      List::Nil
-    } else {
-      match self {
-        List::Nil => List::Nil,
-        List::Cons(head, tail) => List::Cons(head, List::take(tail, count - 1)),
+    let mut taken = List::Nil;
+    let mut left = count;
+    let mut rest = self;
+    let mut walking = count > 0;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => {
+          taken = List::Cons(head, taken);
+          rest = tail;
+          left = left - 1;
+          walking = left > 0;
+        },
       }
-    }
+    };
+    taken.reverse()
   }
 
   /// Everything after the first `count` elements.
   pub fn drop(self, count: Int) -> List<A> {
-    if count < 1 {
-      self
-    } else {
-      match self {
-        List::Nil => List::Nil,
-        List::Cons(_head, tail) => List::drop(tail, count - 1),
+    let mut rest = self;
+    let mut left = count;
+    let mut walking = count > 0;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(_head, tail) => {
+          rest = tail;
+          left = left - 1;
+          walking = left > 0;
+        },
       }
-    }
+    };
+    rest
   }
 
   /// The element at `index`, counting from zero, or nothing.
   pub fn nth(self, index: Int) -> Option<A> {
-    if index < 0 {
-      Option::None
-    } else {
-      match self {
-        List::Nil => Option::None,
-        List::Cons(head, tail) => if index == 0 { Option::Some(head) } else { List::nth(tail, index - 1) },
-      }
-    }
+    if index < 0 { Option::None } else { List::head(self.drop(index)) }
   }
 
   /// The last element, or nothing.
   pub fn last(self) -> Option<A> {
-    match self {
-      List::Nil => Option::None,
-      List::Cons(head, tail) => match tail {
-        List::Nil => Option::Some(head),
-        List::Cons(_h, _t) => List::last(tail),
-      },
-    }
+    let mut answer = Option::None;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => { answer = Option::Some(head); rest = tail; },
+      }
+    };
+    answer
   }
 
   /// The elements `keep` accepts, in the order they were in.
@@ -774,10 +859,19 @@ impl<A> List<A> {
   /// `filter` then `map` is two walks; `fold` is one, and is what to reach for
   /// when that matters.
   pub fn filter(self, keep: (A) -> Bool) -> List<A> {
-    match self {
-      List::Nil => List::Nil,
-      List::Cons(h, t) => if keep(h) { List::Cons(h, t.filter(keep)) } else { t.filter(keep) },
-    }
+    let mut kept = List::Nil;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => {
+          if keep(head) { kept = List::Cons(head, kept); };
+          rest = tail;
+        },
+      }
+    };
+    kept.reverse()
   }
 }
 
@@ -840,27 +934,52 @@ impl<A: Show> List<A> {
   /// `first` rather than checking the tail, because a list does not know where
   /// it ends until it gets there and looking ahead would walk it twice.
   fn show_rest(self, first: Bool) -> String {
-    match self {
-      List::Nil => "",
-      List::Cons(head, tail) => {
-        let lead = if first { "" } else { ", " };
-        lead + Show::show(head) + List::show_rest(tail, false)
+    let mut out = "";
+    let mut leading = first;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => {
+          let lead = if leading { "" } else { ", " };
+          out = out + lead + Show::show(head);
+          leading = false;
+          rest = tail;
+        },
       }
-    }
+    };
+    out
   }
 }
 
 /// Element by element, and length first where they differ in length.
 impl<A: Eq> Eq for List<A> {
   fn eq(self, other: List<A>) -> Bool {
-    match self {
-      List::Nil => match other { List::Nil => true, List::Cons(_h, _t) => false },
-      List::Cons(head, tail) => match other {
-        List::Nil => false,
-        List::Cons(other_head, other_tail) =>
-        Eq::eq(head, other_head) && List::eq(tail, other_tail),
-      },
-    }
+    let mut same = true;
+    let mut mine = self;
+    let mut theirs = other;
+    let mut walking = true;
+    while walking {
+      match mine {
+        // Mine ran out, so they are equal only if theirs did too. An empty
+        // block would read as a record literal here, and `is_empty` is
+        // constant time and says the same thing.
+        List::Nil => { same = List::is_empty(theirs); walking = false; },
+        List::Cons(head, tail) => match theirs {
+          List::Nil => { same = false; walking = false; },
+          List::Cons(other_head, other_tail) =>
+          if Eq::eq(head, other_head) {
+            mine = tail;
+            theirs = other_tail;
+          } else {
+            same = false;
+            walking = false;
+          },
+        },
+      }
+    };
+    same
   }
 }
 
@@ -871,11 +990,17 @@ impl<A: Eq> List<A> {
   /// somebody asks about a value they are holding -- `List::any` is already
   /// there for the predicate.
   pub fn contains(self, wanted: A) -> Bool {
-    match self {
-      List::Nil => false,
-      List::Cons(head, tail) =>
-      if Eq::eq(head, wanted) { true } else { List::contains(tail, wanted) },
-    }
+    let mut found = false;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) =>
+        if Eq::eq(head, wanted) { found = true; walking = false; } else { rest = tail; },
+      }
+    };
+    found
   }
 }
 
@@ -886,10 +1011,21 @@ impl<A> List<A> {
   /// list of lists is the only thing the two-step version allocates that
   /// nobody wants.
   pub fn flat_map<B>(self, step: (A) -> List<B>) -> List<B> {
-    match self {
-      List::Nil => List::Nil,
-      List::Cons(head, tail) => List::concat(step(head), List::flat_map(tail, step)),
-    }
+    let mut out = List::Nil;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => {
+          // Reversed onto the accumulator, so the whole thing is reversed once
+          // at the end rather than concatenated at every step.
+          out = List::reverse_onto(step(head), out);
+          rest = tail;
+        },
+      }
+    };
+    out.reverse()
   }
 
   /// Pairs, one from each, stopping at the shorter.
@@ -898,14 +1034,24 @@ impl<A> List<A> {
   /// `List<A>` with: `A` is any type and this library has no notion of a
   /// default. A caller who wants the tail of the longer one still has it.
   pub fn zip<B>(self, other: List<B>) -> List<Pair<A, B>> {
-    match self {
-      List::Nil => List::Nil,
-      List::Cons(head, tail) => match other {
-        List::Nil => List::Nil,
-        List::Cons(other_head, other_tail) =>
-        List::Cons({ key: head, value: other_head }, List::zip(tail, other_tail)),
-      },
-    }
+    let mut out = List::Nil;
+    let mut mine = self;
+    let mut theirs = other;
+    let mut walking = true;
+    while walking {
+      match mine {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => match theirs {
+          List::Nil => { walking = false; },
+          List::Cons(other_head, other_tail) => {
+            out = List::Cons({ key: head, value: other_head }, out);
+            mine = tail;
+            theirs = other_tail;
+          },
+        },
+      }
+    };
+    out.reverse()
   }
 }
 
@@ -917,10 +1063,16 @@ impl List<Int> {
   /// one yet. Naming the concrete case is honest; a half-general one would
   /// have to be taken back.
   pub fn sum(self) -> Int {
-    match self {
-      List::Nil => 0,
-      List::Cons(head, tail) => head + List::sum(tail),
-    }
+    let mut total = 0;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => { total = total + head; rest = tail; },
+      }
+    };
+    total
   }
 }
 

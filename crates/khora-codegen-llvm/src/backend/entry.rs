@@ -95,6 +95,19 @@ impl<'ctx> Backend<'ctx> {
         )
     }
 
+    /// Starts the runtime, before anything a program does.
+    ///
+    /// One call, and today it installs the handler that makes running out of
+    /// stack say so — which needs to be in place before there is any stack to
+    /// run out of, and which a Khora executable does not get for free the way
+    /// a Rust one does. Emitted by all three entry shapes, because a program
+    /// that exhausts its stack under `khora test` is as entitled to a message
+    /// as one that does it on its own.
+    pub(super) fn begin(&mut self) {
+        let begin = self.rt.begin;
+        self.builder.build_call(begin, &[], "").expect("starting the runtime");
+    }
+
     /// Hands `argc` and `argv` to the runtime before anything else runs.
     pub(super) fn remember_arguments(&mut self, main: FunctionValue<'ctx>) {
         let (Some(argc), Some(argv)) = (main.get_nth_param(0), main.get_nth_param(1)) else {
@@ -134,6 +147,7 @@ impl<'ctx> Backend<'ctx> {
         let main = self.entry_point();
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
+        self.begin();
         self.remember_arguments(main);
 
         for (symbol, name) in blocks {
@@ -240,6 +254,7 @@ impl<'ctx> Backend<'ctx> {
         let main = self.entry_point();
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
+        self.begin();
         self.remember_arguments(main);
 
         // Before anything else, and only when it is true. Generated code has

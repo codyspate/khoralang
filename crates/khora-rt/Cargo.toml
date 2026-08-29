@@ -45,7 +45,18 @@ corosensei = "0.3"
 # through `rustls-native-certs`, so naming them here costs no build time and
 # buys not hand-declaring a struct whose width differs per platform.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock", "Win32_Foundation"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Networking_WinSock",
+    "Win32_Foundation",
+    # `crates/khora-rt/src/stack.rs`: the vectored exception handler that
+    # reports a stack overflow, and the two calls it needs to say so without
+    # allocating.
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    # `WriteFile`'s signature names `OVERLAPPED`, which lives here.
+    "Win32_System_IO",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -656,3 +656,94 @@ fn a_number_survives_the_round_trip_at_both_ends() {
         "-9223372036854775808\n9223372036854775807\n0\n-1\n"
     );
 }
+
+/// **A list of a hundred thousand elements can be walked.**
+///
+/// It could not. Every traversal in `List` recursed once per element, so a log
+/// analyser that read a hundred and twenty-two thousand lines died while
+/// *reporting* on them -- exit 253, nothing on stdout, nothing on stderr, and
+/// stack exhaustion in neither `docs/reference/traps.md` nor the output.
+/// Thresholds measured at the time: about eight thousand in debug, twelve in
+/// release, with `List::sort` going first because it stacked the deepest.
+///
+/// The algorithms were never the problem. `sort` was already a merge sort;
+/// what killed it was that its `merge` built `Cons(x, merge(..))`, which is
+/// not a tail call, so merging the two halves at the top took a frame per
+/// element. All of these are loops now.
+///
+/// A hundred thousand rather than a million because this runs in the ordinary
+/// test suite and the point is the shape, not the ceiling.
+#[test]
+fn a_large_list_can_be_walked_without_running_out_of_stack() {
+    let out = run(
+        "list_large_walk",
+        &program(
+            r#"  let n = 100000;
+  let mut xs = empty();
+  let mut i = 0;
+  while i < n { xs = List::Cons(i, xs); i = i + 1; };
+  print(Int::to_string(xs.length()));
+  print(Int::to_string(xs.sum()));
+  print(Int::to_string(xs.fold(0, fn (a, b) => a + b)));
+  print(Int::to_string(xs.filter(fn v => v % 2 == 0).length()));
+  print(Int::to_string(xs.reverse().length()));
+  print(Int::to_string(xs.take(60000).length()));
+  print(Int::to_string(xs.drop(60000).length()));
+  print(Int::to_string(xs.zip(xs).length()));
+  print(Int::to_string(xs.flat_map(fn v => [v]).length()));
+  print(if xs.any(fn v => v == 99999) { "yes" } else { "no" });
+  print(if xs.all(fn v => v >= 0) { "yes" } else { "no" });
+  print(if xs.contains(50000) { "yes" } else { "no" });
+  print(shown(xs.find(fn v => v == 7)));
+  print(shown(xs.nth(1)));
+  print(shown(xs.last()));"#,
+        ),
+    );
+
+    // 0 + 1 + .. + 99999
+    let total = (99_999i64 * 100_000 / 2).to_string();
+    assert_eq!(
+        out,
+        format!(
+            "100000\n{total}\n{total}\n50000\n100000\n60000\n40000\n100000\n100000\n\
+             yes\nyes\nyes\n7\n99998\n0\n"
+        )
+    );
+}
+
+/// **And sorted**, which is the one that a real workload hit first.
+///
+/// Twelve thousand rather than a hundred: `sort` releases its intermediate
+/// lists rather than walking them, and freeing a long list is still
+/// depth-proportional -- reference counting frees a value's children through a
+/// callback that recurses. That is the remaining limit and it is written down
+/// in `docs/limitations`.
+///
+/// Twelve thousand is chosen against the *debug* build, which this suite is,
+/// and where the old ceiling for `sort` was about eight. In release the same
+/// code sorts twenty-five thousand where it used to manage twelve.
+#[test]
+fn a_large_list_can_be_sorted() {
+    let out = run(
+        "list_large_sort",
+        &program(
+            r#"  let n = 12000;
+  let mut xs = empty();
+  let mut i = 0;
+  // Multiplied by a coprime so the input is shuffled rather than already in
+  // order, which is the case a merge sort could otherwise walk straight past.
+  while i < n { xs = List::Cons((i * 7919) % n, xs); i = i + 1; };
+  let sorted = xs.sort();
+  print(Int::to_string(sorted.length()));
+  print(shown(sorted.head()));
+  print(shown(sorted.last()));
+  print(shown(sorted.nth(6000)));
+  // Each element against the next, with `zip` and `drop` -- both loops, so
+  // the check does not reintroduce the recursion the test is about.
+  let pairs = sorted.zip(sorted.drop(1));
+  print(if pairs.all(fn p => p.key <= p.value) { "ordered" } else { "not ordered" });"#,
+        ),
+    );
+
+    assert_eq!(out, "12000\n0\n11999\n6000\nordered\n");
+}

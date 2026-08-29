@@ -333,3 +333,61 @@ fn main() -> Int {
         "a `String` is a pointer that knows what it points at"
     );
 }
+
+/// **Running out of stack says so.**
+///
+/// It said nothing at all: the process ended, both streams empty, and the only
+/// evidence was an exit status. Every other way a Khora program stops names
+/// itself -- `Decimal division overflowed`, `index 9 is outside an array of 3`
+/// -- and `docs/reference/traps.md` lists them with the status they exit.
+/// Stack exhaustion was in neither the list nor the output, so the first
+/// person to hit it, on a hundred and twenty-two thousand log lines, had
+/// nothing to go on.
+///
+/// A Rust binary gets a handler installed before `main` and prints `thread
+/// 'main' has overflowed its stack`. A Khora executable has no Rust prologue,
+/// so nothing installed one; `khora_begin` does, and every entry point shape
+/// calls it first.
+///
+/// Its own harness, because `trap_of` asserts a status of 134 and this is not
+/// a trap -- the operating system ends the process, and there is nothing to
+/// unwind onto.
+#[test]
+fn running_out_of_stack_says_so() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("stack_overflow");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    // Recursion with a live frame under it, so no tail call can flatten it and
+    // no optimiser can prove it finite.
+    let source = "module t;
+fn print(value: Int);
+
+fn down(n: Int) -> Int {
+  if n <= 0 { 0 } else { 1 + down(n - 1) }
+}
+
+fn main() -> Int { print(down(100000000)); 0 }
+";
+
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
+    let root = SourceRoot::new(&db, vec![file]);
+    if let Err(errors) = khora_codegen_llvm::compile_with(&db, root, &exe, Profile::Debug) {
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        panic!("compiling failed:\n  {}", messages.join("\n  "));
+    }
+
+    let output = Command::new(&exe).output().expect("the program should run");
+    let said = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+
+    assert!(said.contains("khora: the stack ran out"), "said nothing: {said:?}");
+    // And says what kind of mistake it usually is, since "out of stack" alone
+    // does not tell somebody which of their functions to look at.
+    assert!(said.contains("recurses as deep as its input"), "{said:?}");
+    // Still dies, and dies of this. Not 0, and not the 134 a trap exits with.
+    assert_ne!(output.status.code(), Some(0), "it must still fail");
+    assert_ne!(output.status.code(), Some(134), "a trap it is not");
+}

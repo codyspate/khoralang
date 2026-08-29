@@ -252,6 +252,10 @@ pub struct Runtime<'ctx> {
     /// error left `main`. Returns, unlike its neighbours here: the program is
     /// ending correctly and this only says why.
     pub unhandled: FunctionValue<'ctx>,
+    /// `void khora_begin(void)` — the first call every entry point makes.
+    /// Installs the stack guard, which has to be in place before anything can
+    /// exhaust the stack.
+    pub begin: FunctionValue<'ctx>,
     /// `void khora_test_register(const uint8_t *name, size_t len, const void *code,
     ///                             uint32_t (*call)(const void *, uint64_t *))`
     pub test_register: FunctionValue<'ctx>,
@@ -464,6 +468,7 @@ impl<'ctx> Runtime<'ctx> {
                 "khora_unhandled",
                 void.fn_type(&[ptr.into(), i64t.into()], false),
             ),
+            begin: declare("khora_begin", void.fn_type(&[], false)),
             test_register: declare(
                 "khora_test_register",
                 void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),

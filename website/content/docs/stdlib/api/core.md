@@ -1185,6 +1185,11 @@ previous sort to survive.
 and `sort` on the list cannot disagree. Sorting by something else is
 `sort_by`, which does not exist yet and wants a closure.
 
+**Its own recursion is the divide, so it goes about `log2(n)` deep** —
+twenty frames for a million elements. The `merge` underneath it used to
+go one frame per element, which is what made this the first `std`
+function a real workload could kill.
+
 #### split
 
 ```khora

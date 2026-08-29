@@ -12,6 +12,22 @@ Khora has versioned toolchain artifacts and installers for the platforms release
 
 The remaining limitation is **target coverage**, not the absence of distribution. A target is only labeled supported when the compiler, runtime, linker/sysroot, packaging, CI, and deployment/conformance path work end to end. See [Supported targets](/docs/deployment/supported-targets/) for that distinction.
 
+## Recursion depth and very large lists
+
+Khora does not guarantee tail-call optimisation, so a function that recurses once per element uses one stack frame per element. Running out of stack ends the program; it reports
+
+```
+khora: the stack ran out
+```
+
+on standard error and exits with the platform's stack-overflow status.
+
+Every traversal in `std::core`'s `List` is written as a loop rather than as recursion — `length`, `fold`, `reverse`, `filter`, `take`, `drop`, `any`, `all`, `find`, `contains`, `zip`, `flat_map`, `sum`, and the `merge` inside `sort` — so walking a list of any size is safe. `List::sort` recurses only to divide, which is about `log2(n)` deep.
+
+**The remaining limit is releasing a long list, not walking one.** Reference counting frees a value's children through a generated callback that recurses, so dropping a list of more than roughly a hundred thousand elements can exhaust the stack. A list that a traversal consumes is freed as it goes and is not affected; one that is merely released — an intermediate inside `sort`, a field of a record that goes out of scope — is. In practice `List::sort` tops out in the tens of thousands of elements for that reason.
+
+Use `Array<A>` or `Vector<A>` for collections beyond that size. A list is the right shape for building front-to-back and walking once; it is not the right shape for a hundred thousand durations you want sorted.
+
 ## Package ecosystem
 
 Dependencies can be pinned reproducibly to git revisions, but there is not yet a public package registry or broad third-party ecosystem.

@@ -25,6 +25,18 @@ Other APIs may document a trap when the caller violates an invariant—for examp
 
 A trap is appropriate when continuing would mean the program itself is wrong. It is not appropriate for ordinary external input that a caller is expected to reject.
 
+## Running out of stack
+
+Not a trap — the operating system ends the process and there is nothing to unwind onto — but it is reported the same way, because a program that stops without saying why is the worst of both:
+
+```
+khora: the stack ran out
+```
+
+on standard error, followed by the platform's stack-overflow exit status rather than 134.
+
+Khora does not guarantee tail-call optimisation, so a function that recurses once per element of its input uses a frame per element. See [Known limitations](/docs/limitations/) for what that means for `List` in practice, and which operations are unaffected.
+
 ## Traps are not `raises`
 
 A function does not declare arithmetic overflow in its `raises` row:
