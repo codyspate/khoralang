@@ -191,6 +191,22 @@ pub type Halves<A> = {
 
 A list split down the middle, for `sort`.
 
+### Parts
+
+```khora
+pub type Parts<A> = {
+  kept: List<A>,
+  rest: List<A>,
+};
+```
+
+A list split by a question, for `partition`.
+
+Named rather than reusing `Halves`, whose `left` and `right` say where a
+piece came from and not what is true of it. A caller of `partition` reads
+`.kept` and knows which side answered yes; reading `.left` they would have
+to go and look.
+
 ### Step
 
 ```khora
@@ -995,6 +1011,35 @@ pub fn ok_or<E>(self, error: E) -> Result<A, E>
 Turns absence into a failure, which is how an `Option` joins a `raises`
 chain.
 
+#### and_then
+
+```khora
+pub fn and_then<B>(self, f: (A) -> Option<B>) -> Option<B>
+```
+
+The next step, when it can also come to nothing.
+
+`map` with a function that returns an `Option` gives an
+`Option<Option<B>>`, which nobody wants and everybody writes once. This
+flattens as it goes.
+
+**What its absence costs is a shape, not a keystroke.** Reading a record
+out of positional fields is one lookup that may fail per field, and
+without this each is a `match` inside the previous one --
+`examples/link_shortener` nested six deep before this existed.
+
+#### filter
+
+```khora
+pub fn filter(self, wanted: (A) -> Bool) -> Option<A>
+```
+
+The value if it is there *and* `wanted` says so, and nothing otherwise.
+
+The bridge from a predicate back into the chain: `find` gives an
+`Option`, and asking a second question about what it found should not
+mean leaving the chain to ask it.
+
 ### Result<A, E>
 
 ```khora
@@ -1048,6 +1093,34 @@ Rewrites the error and leaves the value alone.
 What a function does at the edge of its own vocabulary: a caller should
 see the failure in terms of what *they* asked for, not in terms of
 whatever was reached to answer it.
+
+#### map
+
+```khora
+pub fn map<B>(self, f: (A) -> B) -> Result<B, E>
+```
+
+Rewrites the value and leaves the error alone.
+
+The other half of `map_err`, and having only that half was the odd part:
+a reader who has met one goes looking for this and finds a `match`.
+
+**Not `Functor`**, which takes one type parameter and `Result` has two.
+An `impl Functor for Result<_, E>` needs partial application of a type
+constructor, which this language does not have and does not need for one
+method.
+
+#### and_then
+
+```khora
+pub fn and_then<B>(self, f: (A) -> Result<B, E>) -> Result<B, E>
+```
+
+The next step, when it can fail the same way.
+
+The error type is shared, which is what makes this a chain rather than a
+pair of unrelated failures: a step that fails differently says so with
+`map_err` first, and the conversion is visible at the place it happens.
 
 ### Redacted<A>
 
@@ -1208,6 +1281,45 @@ breaks its tie towards the left then puts them back the wrong way round.
 
 The cost is a length and a reversal, both linear, against a sort that is
 already linearithmic.
+
+#### min
+
+```khora
+pub fn min(self) -> Option<A>
+```
+
+Two sorted lists, as one.
+
+`<=` rather than `<` on the tie, which is exactly what makes the sort
+stable: an element from the left half goes first when they are equal, and
+the left half is the earlier one.
+**Written as a loop, because this is where the depth was.** It recursed
+once per element -- `Cons(mine, merge(..))` is not a tail call -- so
+merging the two halves at the top of the sort took one stack frame for
+every element in the list, and a sort of twenty-seven thousand durations
+killed the process with nothing on either stream.
+
+The algorithm is unchanged and so is the stability. What was wrong was
+never the merge sort; it was that every walk of a `List` in this library
+was as deep as the list was long.
+The smallest element, or nothing if there are none.
+
+`Option` rather than a fallback, because the smallest of nothing is not a
+number a caller can be handed -- and a library that picked one would be
+picking for whoever forgot the list could be empty.
+
+Ties go to the *first*, which matches `sort` being stable: `min` and
+`head(sort(xs))` name the same element.
+
+#### max
+
+```khora
+pub fn max(self) -> Option<A>
+```
+
+The largest element, or nothing if there are none.
+
+Ties go to the first as well, for the same reason.
 
 ### List<A>
 
@@ -1380,6 +1492,41 @@ introduce one.
 
 `filter` then `map` is two walks; `fold` is one, and is what to reach for
 when that matters.
+
+#### sort_by
+
+```khora
+pub fn sort_by(self, order: (A, A) -> Ordering) -> List<A>
+```
+
+The same elements, in the order `order` asks for.
+
+**What `sort` cannot do**, and its doc comment already said so: `sort`
+takes `A: Ord` on purpose, so that `<` on the elements and `sort` on the
+list cannot disagree. Sorting a record by one of its fields is a
+different question, and this is where it is asked.
+
+The same merge sort and the same guarantees: stable, so equal elements
+keep the order they were given -- which is what makes sorting twice, by
+one key and then another, do what everybody expects -- and about
+`log2(n)` frames deep rather than one per element.
+
+`order` must be consistent: if it says `a` is less than `b` it must not
+also say `b` is less than `a`. One that is not produces some order and no
+crash, which is the most any sort can promise about a broken comparison.
+
+#### partition
+
+```khora
+pub fn partition(self, wanted: (A) -> Bool) -> Parts<A>
+```
+
+The elements `wanted` accepts and the ones it does not, in one walk.
+
+**Two `filter`s with opposite predicates is the alternative**, and it
+walks twice and calls the question twice per element -- which is wrong
+when the question is expensive and wrong in a different way when it is
+not pure. Both sides keep the order they were given.
 
 ### List<A>
 
@@ -2482,6 +2629,20 @@ impl Eq for Ordering
 fn eq(self, other: Ordering) -> Bool
 ```
 
+### Show for Ordering
+
+```khora
+impl Show for Ordering
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+The variant's own name, which is what a comparison in a log wants to say.
+
 ### Show for Redacted<A>
 
 ```khora
@@ -2554,6 +2715,29 @@ Element by element, and length first where they differ in length.
 ```khora
 fn eq(self, other: List<A>) -> Bool
 ```
+
+### Ord for List<A>
+
+```khora
+impl<A: Ord> Ord for List<A>
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: List<A>) -> Ordering
+```
+
+Element by element, and a list that runs out first is smaller.
+
+**Lexicographic**, which is what every other language means by comparing
+two sequences and what a sorted list of paths, version segments or
+keys needs. Length is the tie-break rather than the first question:
+`[1, 2]` is less than `[1, 2, 0]`, and `[2]` is greater than `[1, 9, 9]`.
+
+Consistent with the derived `Eq` above -- two lists compare `Equal`
+exactly when `eq` says they are equal -- which is the property that lets
+`sort` on a `List<List<A>>` mean anything.
 
 ### Iterator for List<A>
 

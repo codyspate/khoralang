@@ -46,7 +46,7 @@ fn run(name: &str, main: &str) -> String {
 }
 
 const HEAD: &str = "module demo::main;
-import std::core::{Array, Dict, Eq, Halves, List, Option, Ord, Ordering, Pair, Shared, Show, Split};
+import std::core::{Array, Dict, Eq, Halves, List, Option, Ord, Ordering, Pair, Parts, Result, Shared, Show, Split};
 
 /// The two helpers every list test below wants: an empty `List<Int>` that
 /// inference can name, and an `Option<Int>` written out.
@@ -55,6 +55,13 @@ fn empty() -> List<Int> { List::Nil }
 fn shown(value: Option<Int>) -> String {
   match value { Option::Some(n) => Int::to_string(n), Option::None => \"none\" }
 }
+
+/// An `Option<Int>` and two `Result<Int, String>`s that inference can name,
+/// for the same reason `empty` is here.
+fn empty_option() -> Option<Int> { Option::None }
+fn good() -> Result<Int, String> { Result::Ok(2) }
+fn bad() -> Result<Int, String> { Result::Err(\"no\") }
+fn no_rows() -> List<Pair<Int, String>> { List::Nil }
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -843,4 +850,243 @@ fn a_hole_shows_whatever_it_holds() {
         out,
         "n = 42\nname = khora\nflag = true\nlist = [1, 2, 3]\n42 and khora and 84\n"
     );
+}
+
+
+/// **`pad_left` and `pad_right`, which four separate people wrote first.**
+///
+/// Every one of the three programs written against this library grew its own,
+/// and `std::time` had a third copy under the name `padded`. A function four
+/// people write is one the library should have.
+///
+/// Bytes rather than characters, because `byte_length` is what everything else
+/// here counts in — and lining text up by *display* width is a font question a
+/// `String` cannot answer. Already at or past the width is returned unchanged:
+/// a pad that truncates is a different function, and one that silently drops a
+/// digit from a total is not one this library offers by accident.
+#[test]
+fn text_can_be_padded_into_a_column() {
+    let out = run(
+        "text_pad",
+        &program(
+            r#"  print("[" + String::pad_left("7", 3, "0") + "]");
+  print("[" + String::pad_right("ab", 5, ".") + "]");
+  print("[" + String::pad_left("", 3, " ") + "]");
+  // Already wide enough, and wider than asked for: both unchanged.
+  print("[" + String::pad_left("abc", 3, "0") + "]");
+  print("[" + String::pad_right("toolong", 3, "0") + "]");
+  // A fill that is not one byte could not land on the width exactly.
+  print("[" + String::pad_left("7", 4, "ab") + "]");
+  print("[" + String::pad_left("7", 4, "") + "]");"#,
+        ),
+    );
+
+    assert_eq!(out, "[007]\n[ab...]\n[   ]\n[abc]\n[toolong]\n[7]\n[7]\n");
+}
+
+/// **`split_whitespace` keeps no empty pieces, and `split` keeps them all.**
+///
+/// That difference is the whole reason for the second function. `split` is
+/// right for a CSV, where two commas in a row mean a field that is there and
+/// blank; it is wrong for anything column-aligned, where two spaces in a row
+/// mean the writer was lining something up. A log line split the first way has
+/// empty strings in it that nobody put there.
+#[test]
+fn whitespace_splits_into_words_and_not_into_gaps() {
+    let out = run(
+        "text_words",
+        &program(
+            r#"  print(String::join(String::split_whitespace("  a  bb  c "), "|"));
+  print(String::join(String::split("  a  bb  c ", " "), "|"));
+  // A string of nothing but spaces, and one with none at all.
+  print("[" + String::join(String::split_whitespace("   "), "|") + "]");
+  print("[" + String::join(String::split_whitespace(""), "|") + "]");
+  print(String::join(String::split_whitespace("one"), "|"));"#,
+        ),
+    );
+
+    assert_eq!(out, "a|bb|c\n||a||bb||c|\n[]\n[]\none\n");
+}
+
+/// **`and_then` is the one whose absence changes the shape of the code.**
+///
+/// `map` with a function that returns an `Option` gives an `Option<Option<B>>`.
+/// Without the flattening version, reading a record out of positional fields
+/// is a `match` inside a `match` inside a `match` — `examples/link_shortener`
+/// nested six deep before this existed.
+#[test]
+fn an_option_chains_without_nesting() {
+    let out = run(
+        "option_chain",
+        &program(
+            r#"  let halve = fn (n: Int) => if n % 2 == 0 { Option::Some(n / 2) } else { Option::None };
+  print(shown(Option::and_then(Option::Some(8), halve)));
+  print(shown(Option::and_then(Option::Some(7), halve)));
+  print(shown(Option::and_then(empty_option(), halve)));
+  // Three deep, which is the shape that used to be a pyramid.
+  print(shown(Option::and_then(Option::and_then(Option::and_then(
+    Option::Some(8), halve), halve), halve)));
+  print(shown(Option::filter(Option::Some(4), fn n => n > 3)));
+  print(shown(Option::filter(Option::Some(2), fn n => n > 3)));
+  print(shown(Option::filter(empty_option(), fn n => n > 3)));"#,
+        ),
+    );
+
+    assert_eq!(out, "4\nnone\nnone\n1\n4\nnone\nnone\n");
+}
+
+/// **`map` beside `map_err`**, which is the asymmetry that made its absence
+/// odd: a reader who has met one goes looking for the other and finds a
+/// `match`.
+///
+/// Not a `Functor` impl — that trait takes one type parameter and `Result` has
+/// two, so it would need partial application of a type constructor for the
+/// sake of one method.
+#[test]
+fn a_result_maps_and_chains() {
+    let out = run(
+        "result_chain",
+        &program(
+            r#"  print(shown(Result::ok(Result::map(good(), fn n => n + 1))));
+  print(shown(Result::ok(Result::map(bad(), fn n => n + 1))));
+  print(shown(Result::ok(Result::and_then(good(), fn n => Result::Ok(n * 5)))));
+  print(shown(Result::ok(Result::and_then(good(), fn _n => bad()))));
+  print(shown(Result::ok(Result::and_then(bad(), fn n => Result::Ok(n * 5)))));
+  // The error survives a `map`, which is the half `map_err` does not do.
+  match Result::map(bad(), fn n => n + 1) {
+    Result::Ok(_n) => print("ok"),
+    Result::Err(e) => print(e),
+  };"#,
+        ),
+    );
+
+    assert_eq!(out, "3\nnone\n10\nnone\nnone\nno\n");
+}
+
+/// **`Bool::to_string` under the name the other scalars use.**
+///
+/// `Int::to_string` and `Float::to_string` are both here, so a reader who has
+/// met those goes looking for this one. `Show for Bool` is written in terms of
+/// it rather than the other way round, so the two words are spelled once.
+///
+/// `Show for Ordering` is the same kind of gap: a comparison in a log had
+/// nothing to say for itself.
+#[test]
+fn a_bool_and_an_ordering_can_say_what_they_are() {
+    let out = run(
+        "show_bool_ordering",
+        &program(
+            r#"  print(Bool::to_string(true) + " " + Bool::to_string(false));
+  print(true.show() + " " + false.show());
+  print(Ordering::Less.show() + " " + Ordering::Equal.show() + " " + Ordering::Greater.show());
+  print("a bool in a hole: ${false}");"#,
+        ),
+    );
+
+    assert_eq!(out, "true false\ntrue false\nLess Equal Greater\na bool in a hole: false\n");
+}
+
+/// **The smallest of nothing is not a number**, so both answer `Option`.
+///
+/// Ties go to the first element, which is what makes `min` and
+/// `head(sort(xs))` name the same one.
+#[test]
+fn a_list_has_a_smallest_and_a_largest() {
+    let out = run(
+        "list_extremes",
+        &program(
+            r#"  print(shown(List::min([3, 1, 2])));
+  print(shown(List::max([3, 1, 2])));
+  print(shown(List::min(empty())));
+  print(shown(List::max(empty())));
+  print(shown(List::min([5])));
+  print(shown(List::min([0 - 4, 0 - 9, 2])));"#,
+        ),
+    );
+
+    assert_eq!(out, "1\n3\nnone\nnone\n5\n-9\n");
+}
+
+/// **One walk and one question per element**, which two `filter`s with
+/// opposite predicates is not — and which matters twice over when the question
+/// is expensive or is not pure.
+#[test]
+fn a_list_partitions_in_one_walk() {
+    let out = run(
+        "list_partition",
+        &program(
+            r#"  let split = List::partition([1, 2, 3, 4, 5], fn n => n % 2 == 1);
+  print(String::join(List::map(split.kept, fn n => Int::to_string(n)), ""));
+  print(String::join(List::map(split.rest, fn n => Int::to_string(n)), ""));
+  // Everything on one side, and nothing at all.
+  let all = List::partition([2, 4], fn n => n % 2 == 0);
+  print("[" + String::join(List::map(all.rest, fn n => Int::to_string(n)), "") + "]");
+  let none = List::partition(empty(), fn n => n > 0);
+  print("[" + String::join(List::map(none.kept, fn n => Int::to_string(n)), "") + "]");"#,
+        ),
+    );
+
+    assert_eq!(out, "135\n24\n[]\n[]\n");
+}
+
+/// **`sort_by` is what `sort` deliberately cannot do**, and `sort`'s own doc
+/// comment admitted the gap before this closed it.
+///
+/// `sort` takes `A: Ord` on purpose, so that `<` on the elements and `sort` on
+/// the list cannot disagree; sorting a record by one of its fields is a
+/// different question and this is where it is asked.
+///
+/// Stable, like `sort`: the two pairs keyed `2` come back in the order they
+/// went in, which is what makes sorting by one key and then another do what
+/// everybody expects. Descending is the same comparison `reverse`d rather than
+/// a second one written out.
+#[test]
+fn sorting_by_a_key_is_stable() {
+    let out = run(
+        "list_sort_by",
+        &program(
+            r#"  let rows: List<Pair<Int, String>> = [
+    { key: 2, value: "b" },
+    { key: 2, value: "a" },
+    { key: 1, value: "c" },
+  ];
+  let named = fn (xs: List<Pair<Int, String>>) =>
+    String::join(List::map(xs, fn r => r.value), "");
+  print(named(List::sort_by(rows, fn (l, r) => l.key.cmp(r.key))));
+  print(named(List::sort_by(rows, fn (l, r) => l.key.cmp(r.key).reverse())));
+  // Nothing to sort, and one thing, which are the two the split must not
+  // recurse forever on.
+  print("[" + named(List::sort_by(no_rows(), fn (l, r) => l.key.cmp(r.key))) + "]");
+  print(named(List::sort_by([{ key: 9, value: "z" }], fn (l, r) => l.key.cmp(r.key))));"#,
+        ),
+    );
+
+    assert_eq!(out, "cba\nbac\n[]\nz\n");
+}
+
+/// **Lexicographic, with length as the tie-break rather than the first
+/// question.**
+///
+/// What every other language means by comparing two sequences, and what a
+/// sorted list of paths or version segments needs. Consistent with the derived
+/// `Eq`: two lists compare `Equal` exactly when `eq` says they are equal,
+/// which is what lets `sort` on a `List<List<A>>` mean anything.
+#[test]
+fn lists_compare_element_by_element() {
+    let out = run(
+        "list_ord",
+        &program(
+            r#"  print(List::cmp([1, 2], [1, 2, 0]).show());
+  print(List::cmp([1, 2, 0], [1, 2]).show());
+  print(List::cmp([2], [1, 9, 9]).show());
+  print(List::cmp([1, 2], [1, 2]).show());
+  print(List::cmp(empty(), empty()).show());
+  print(List::cmp(empty(), [0]).show());
+  // And a sort that uses it, which is the reason it exists.
+  print(String::join(List::map(List::sort([[2], [1, 9], [1]]),
+    fn xs => "(" + String::join(List::map(xs, fn n => Int::to_string(n)), ",") + ")"), ""));"#,
+        ),
+    );
+
+    assert_eq!(out, "Less\nGreater\nGreater\nEqual\nEqual\nLess\n(1)(1,9)(2)\n");
 }

@@ -110,7 +110,18 @@ impl Show for Float {
 }
 
 impl Show for Bool {
-  fn show(self) -> String { if self { "true" } else { "false" } }
+  fn show(self) -> String { Bool::to_string(self) }
+}
+
+impl Bool {
+  /// `"true"` or `"false"`.
+  ///
+  /// The same text `show` gives, under the name the other scalars use --
+  /// `Int::to_string` and `Float::to_string` are both here, and a reader who
+  /// has met those goes looking for this one. `Show for Bool` is written in
+  /// terms of it rather than the other way round, so there is one place the
+  /// two words are spelled.
+  pub fn to_string(self) -> String { if self { "true" } else { "false" } }
 }
 
 impl Show for String {
@@ -239,6 +250,17 @@ impl Eq for Ordering {
   }
 }
 
+impl Show for Ordering {
+  /// The variant's own name, which is what a comparison in a log wants to say.
+  fn show(self) -> String {
+    match self {
+      Ordering::Less => "Less",
+      Ordering::Equal => "Equal",
+      Ordering::Greater => "Greater",
+    }
+  }
+}
+
 impl Ordering {
   /// Whether the comparison came out `Less`.
   pub fn is_less(self) -> Bool { self.eq(Ordering::Less) }
@@ -312,6 +334,32 @@ impl<A> Option<A> {
   pub fn ok_or<E>(self, error: E) -> Result<A, E> {
     match self { Option::Some(v) => Result::Ok(v), Option::None => Result::Err(error) }
   }
+
+  /// The next step, when it can also come to nothing.
+  ///
+  /// `map` with a function that returns an `Option` gives an
+  /// `Option<Option<B>>`, which nobody wants and everybody writes once. This
+  /// flattens as it goes.
+  ///
+  /// **What its absence costs is a shape, not a keystroke.** Reading a record
+  /// out of positional fields is one lookup that may fail per field, and
+  /// without this each is a `match` inside the previous one --
+  /// `examples/link_shortener` nested six deep before this existed.
+  pub fn and_then<B>(self, f: (A) -> Option<B>) -> Option<B> {
+    match self { Option::Some(v) => f(v), Option::None => Option::None }
+  }
+
+  /// The value if it is there *and* `wanted` says so, and nothing otherwise.
+  ///
+  /// The bridge from a predicate back into the chain: `find` gives an
+  /// `Option`, and asking a second question about what it found should not
+  /// mean leaving the chain to ask it.
+  pub fn filter(self, wanted: (A) -> Bool) -> Option<A> {
+    match self {
+      Option::Some(v) => if wanted(v) { Option::Some(v) } else { Option::None },
+      Option::None => Option::None,
+    }
+  }
 }
 
 impl<A, E> Result<A, E> {
@@ -342,6 +390,28 @@ impl<A, E> Result<A, E> {
   /// whatever was reached to answer it.
   pub fn map_err<F>(self, f: (E) -> F) -> Result<A, F> {
     match self { Result::Ok(v) => Result::Ok(v), Result::Err(e) => Result::Err(f(e)) }
+  }
+
+  /// Rewrites the value and leaves the error alone.
+  ///
+  /// The other half of `map_err`, and having only that half was the odd part:
+  /// a reader who has met one goes looking for this and finds a `match`.
+  ///
+  /// **Not `Functor`**, which takes one type parameter and `Result` has two.
+  /// An `impl Functor for Result<_, E>` needs partial application of a type
+  /// constructor, which this language does not have and does not need for one
+  /// method.
+  pub fn map<B>(self, f: (A) -> B) -> Result<B, E> {
+    match self { Result::Ok(v) => Result::Ok(f(v)), Result::Err(e) => Result::Err(e) }
+  }
+
+  /// The next step, when it can fail the same way.
+  ///
+  /// The error type is shared, which is what makes this a chain rather than a
+  /// pair of unrelated failures: a step that fails differently says so with
+  /// `map_err` first, and the conversion is visible at the place it happens.
+  pub fn and_then<B>(self, f: (A) -> Result<B, E>) -> Result<B, E> {
+    match self { Result::Ok(v) => f(v), Result::Err(e) => Result::Err(e) }
   }
 }
 
@@ -540,6 +610,17 @@ pub type Halves<A> = {
   right: List<A>,
 };
 
+/// A list split by a question, for `partition`.
+///
+/// Named rather than reusing `Halves`, whose `left` and `right` say where a
+/// piece came from and not what is true of it. A caller of `partition` reads
+/// `.kept` and knows which side answered yes; reading `.left` they would have
+/// to go and look.
+pub type Parts<A> = {
+  kept: List<A>,
+  rest: List<A>,
+};
+
 impl<A: Ord> List<A> {
   /// The same elements, in order.
   ///
@@ -626,6 +707,50 @@ impl<A: Ord> List<A> {
   /// The algorithm is unchanged and so is the stability. What was wrong was
   /// never the merge sort; it was that every walk of a `List` in this library
   /// was as deep as the list was long.
+  /// The smallest element, or nothing if there are none.
+  ///
+  /// `Option` rather than a fallback, because the smallest of nothing is not a
+  /// number a caller can be handed -- and a library that picked one would be
+  /// picking for whoever forgot the list could be empty.
+  ///
+  /// Ties go to the *first*, which matches `sort` being stable: `min` and
+  /// `head(sort(xs))` name the same element.
+  pub fn min(self) -> Option<A> {
+    List::extreme(self, fn (a, b) => b < a)
+  }
+
+  /// The largest element, or nothing if there are none.
+  ///
+  /// Ties go to the first as well, for the same reason.
+  pub fn max(self) -> Option<A> {
+    List::extreme(self, fn (a, b) => a < b)
+  }
+
+  /// The element no other one displaces, where `better` says what displacing
+  /// is.
+  ///
+  /// One walk with one comparison, shared so that `min` and `max` cannot drift
+  /// apart on the empty list or on a tie.
+  fn extreme(self, better: (A, A) -> Bool) -> Option<A> {
+    let mut best = Option::None;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => {
+          best = match best {
+            Option::None => Option::Some(head),
+            Option::Some(sofar) =>
+            if better(sofar, head) { Option::Some(head) } else { Option::Some(sofar) },
+          };
+          rest = tail;
+        },
+      }
+    };
+    best
+  }
+
   fn merge(self, other: List<A>) -> List<A> {
     let mut out = List::Nil;
     let mut mine = self;
@@ -875,6 +1000,109 @@ impl<A> List<A> {
     };
     kept.reverse()
   }
+
+  /// The same elements, in the order `order` asks for.
+  ///
+  /// **What `sort` cannot do**, and its doc comment already said so: `sort`
+  /// takes `A: Ord` on purpose, so that `<` on the elements and `sort` on the
+  /// list cannot disagree. Sorting a record by one of its fields is a
+  /// different question, and this is where it is asked.
+  ///
+  /// The same merge sort and the same guarantees: stable, so equal elements
+  /// keep the order they were given -- which is what makes sorting twice, by
+  /// one key and then another, do what everybody expects -- and about
+  /// `log2(n)` frames deep rather than one per element.
+  ///
+  /// `order` must be consistent: if it says `a` is less than `b` it must not
+  /// also say `b` is less than `a`. One that is not produces some order and no
+  /// crash, which is the most any sort can promise about a broken comparison.
+  pub fn sort_by(self, order: (A, A) -> Ordering) -> List<A> {
+    match self {
+      List::Nil => List::Nil,
+      List::Cons(only, rest) => match rest {
+        // One element is sorted, and stopping here is what keeps the split
+        // from recursing forever on a list it cannot make smaller.
+        List::Nil => List::Cons(only, List::Nil),
+        List::Cons(second, more) => {
+          let halves = List::split_evenly(List::Cons(only, List::Cons(second, more)));
+          List::merge_by(halves.left.sort_by(order), halves.right.sort_by(order), order)
+        }
+      },
+    }
+  }
+
+  /// The first half and the second, by count.
+  ///
+  /// `sort`'s own `split` wants `A: Ord` because of the block it sits in;
+  /// this is the same walk without the bound.
+  fn split_evenly(self) -> Halves<A> {
+    List::take_evenly(self, self.length() / 2, List::Nil)
+  }
+
+  fn take_evenly(self, count: Int, taken: List<A>) -> Halves<A> {
+    if count <= 0 {
+      { left: List::reverse(taken), right: self }
+    } else {
+      match self {
+        List::Nil => { left: List::reverse(taken), right: List::Nil },
+        List::Cons(head, tail) => List::take_evenly(tail, count - 1, List::Cons(head, taken)),
+      }
+    }
+  }
+
+  /// Two sorted lists as one, taking from the left on a tie.
+  ///
+  /// Taking from the left is what makes `sort_by` stable, and it is the only
+  /// line in here that decides it.
+  fn merge_by(self, other: List<A>, order: (A, A) -> Ordering) -> List<A> {
+    let mut out = List::Nil;
+    let mut mine = self;
+    let mut theirs = other;
+    let mut walking = true;
+    while walking {
+      match mine {
+        List::Nil => { out = List::reverse_onto(theirs, out); walking = false; },
+        List::Cons(head, tail) => match theirs {
+          List::Nil => {
+            out = List::reverse_onto(List::Cons(head, tail), out);
+            walking = false;
+          },
+          List::Cons(other_head, other_tail) =>
+          if order(head, other_head).is_greater() {
+            out = List::Cons(other_head, out);
+            theirs = other_tail;
+          } else {
+            out = List::Cons(head, out);
+            mine = tail;
+          },
+        },
+      }
+    };
+    out.reverse()
+  }
+
+  /// The elements `wanted` accepts and the ones it does not, in one walk.
+  ///
+  /// **Two `filter`s with opposite predicates is the alternative**, and it
+  /// walks twice and calls the question twice per element -- which is wrong
+  /// when the question is expensive and wrong in a different way when it is
+  /// not pure. Both sides keep the order they were given.
+  pub fn partition(self, wanted: (A) -> Bool) -> Parts<A> {
+    let mut kept = List::Nil;
+    let mut rest = List::Nil;
+    let mut walking = true;
+    let mut left = self;
+    while walking {
+      match left {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => {
+          if wanted(head) { kept = List::Cons(head, kept); } else { rest = List::Cons(head, rest); };
+          left = tail;
+        },
+      }
+    };
+    { kept: List::reverse(kept), rest: List::reverse(rest) }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -982,6 +1210,48 @@ impl<A: Eq> Eq for List<A> {
       }
     };
     same
+  }
+}
+
+impl<A: Ord> Ord for List<A> {
+  /// Element by element, and a list that runs out first is smaller.
+  ///
+  /// **Lexicographic**, which is what every other language means by comparing
+  /// two sequences and what a sorted list of paths, version segments or
+  /// keys needs. Length is the tie-break rather than the first question:
+  /// `[1, 2]` is less than `[1, 2, 0]`, and `[2]` is greater than `[1, 9, 9]`.
+  ///
+  /// Consistent with the derived `Eq` above -- two lists compare `Equal`
+  /// exactly when `eq` says they are equal -- which is the property that lets
+  /// `sort` on a `List<List<A>>` mean anything.
+  fn cmp(self, other: List<A>) -> Ordering {
+    let mut answer = Ordering::Equal;
+    let mut mine = self;
+    let mut theirs = other;
+    let mut walking = true;
+    while walking {
+      match mine {
+        // Mine ran out: shorter is less, and equally spent is equal.
+        List::Nil => {
+          answer = if List::is_empty(theirs) { Ordering::Equal } else { Ordering::Less };
+          walking = false;
+        },
+        List::Cons(head, tail) => match theirs {
+          List::Nil => { answer = Ordering::Greater; walking = false; },
+          List::Cons(other_head, other_tail) => {
+            let step = Ord::cmp(head, other_head);
+            if step.is_equal() {
+              mine = tail;
+              theirs = other_tail;
+            } else {
+              answer = step;
+              walking = false;
+            }
+          },
+        },
+      }
+    };
+    answer
   }
 }
 
@@ -1780,6 +2050,83 @@ impl String {
           head: String::slice(self, 0, at),
           rest: String::slice(self, at + String::byte_length(separator), String::byte_length(self)),
         }),
+    }
+  }
+
+  /// `self` with `fill` in front of it until it is `width` bytes long.
+  ///
+  /// **For a column, which is the only reason anybody wants it.** Every one of
+  /// the three programs written against this library grew its own, and
+  /// `std::time` has a third copy under the name `padded` -- a function four
+  /// people write is a function the library should have.
+  ///
+  /// Bytes rather than characters, which matters the moment the text is not
+  /// ASCII: a column of names in Greek will not line up, and lining up text by
+  /// display width is a font question this type cannot answer. `byte_length`
+  /// is the length everything else here counts in, so this counts in it too.
+  ///
+  /// Already at or past `width` is returned unchanged: a truncating pad is a
+  /// different function, and one that silently loses a digit from a total is
+  /// not one this library is going to offer by accident. A `fill` that is not
+  /// one byte long is refused the same way, since the loop could not land on
+  /// `width` exactly.
+  pub fn pad_left(self, width: Int, fill: String) -> String {
+    if String::byte_length(fill) != 1 {
+      self
+    } else {
+      String::padding(fill, width - String::byte_length(self)) + self
+    }
+  }
+
+  /// `self` with `fill` after it until it is `width` bytes long.
+  ///
+  /// The other side of `pad_left`, and the one a left-aligned label wants.
+  pub fn pad_right(self, width: Int, fill: String) -> String {
+    if String::byte_length(fill) != 1 {
+      self
+    } else {
+      self + String::padding(fill, width - String::byte_length(self))
+    }
+  }
+
+  /// `count` copies of a one-byte `fill`, or nothing if `count` is not
+  /// positive.
+  fn padding(fill: String, count: Int) -> String {
+    if count < 1 { "" } else { String::repeat(fill, count) }
+  }
+
+  /// The pieces between runs of whitespace, with no empty ones.
+  ///
+  /// **Not `split(" ")`**, and the difference is the whole point: `split`
+  /// keeps every empty piece, which is right for a CSV -- where two commas in
+  /// a row mean a field that is there and blank -- and wrong for anything
+  /// column-aligned, where two spaces in a row mean the writer was lining
+  /// something up. A log line split the first way has empty strings in it that
+  /// no reader of the log put there.
+  ///
+  /// Whitespace is what `is_space` says: space, tab, carriage return and
+  /// newline.
+  pub fn split_whitespace(self) -> List<String> {
+    List::reverse(String::words_onto(self, 0, 0, List::Nil))
+  }
+
+  /// Walks the bytes, carrying where the current word started.
+  ///
+  /// `start == at` means no word is open, which is how a run of several spaces
+  /// produces one gap rather than several empty pieces.
+  fn words_onto(self, start: Int, at: Int, so_far: List<String>) -> List<String> {
+    let length = String::byte_length(self);
+    if at == length {
+      if start == at { so_far } else { List::Cons(String::slice(self, start, at), so_far) }
+    } else if String::is_space(String::byte(self, at)) {
+      let closed = if start == at {
+        so_far
+      } else {
+        List::Cons(String::slice(self, start, at), so_far)
+      };
+      String::words_onto(self, at + 1, at + 1, closed)
+    } else {
+      String::words_onto(self, start, at + 1, so_far)
     }
   }
 }
