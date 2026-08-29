@@ -4905,9 +4905,27 @@ Three things came out of the work rather than the reports, and are open:
   caps `List::sort` in the tens of thousands. The fix puts a thread-local check
   on every free in the language, which is a decision about the hottest path in
   the runtime and not one to take while fixing something else.
-- **`Fiber::wait` returns while its fiber is still running** when the cancel
-  lands before the child's first cancellation point. Reported, diagnosed as far
-  as `Completion`, not fixed.
+- **`Fiber::wait` returning early does not reproduce**, and on inspection was
+  never happening. Both lines of the report's own reproducer are correct
+  behaviour, which is worth writing down because the reading that made them
+  look wrong is a natural one.
+
+  `cancel after 0ms: wait returned in 0ms, child finished=0` — the child's
+  thunk is `fn () => sleeper(done)!`, and a `!` is a cancellation point
+  *before* the call it marks. A cancel that lands before the child gets going
+  stops it there, so the child really has finished, and `finished=0` means
+  "stopped before doing the work" rather than "still running". `wait` returning
+  at once is then right.
+
+  `cancel after 200ms: wait returned in 3001ms, child finished=1` — by then the
+  child is inside a straight-line `clock.sleep(3000)`, which is not a
+  cancellation point, so it runs to its end and `wait` correctly waits for it.
+
+  The one piece of evidence that would have settled it either way was the claim
+  that the process takes another three seconds to exit after `main` is done.
+  Timed: 3,060 ms total against 3,001 ms accounted for, three runs. Nothing
+  outlives the wait. Checked separately by reading the child's state three
+  seconds *after* `wait` returned, where it does not move.
 - **An intermittent `khora-rt` failure** in the Linux repeat loop — the section
   that exists to catch races — at roughly one baseline in three.
 
