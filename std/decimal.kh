@@ -11,18 +11,28 @@ module std::decimal;
 //!
 //! # What a `Decimal` is
 //!
-//! A scaled integer: `units` counted in steps of `10^-scale`. `Decimal::scaled(
-//! 1, 2)` is one hundredth. That is the representation SQL `NUMERIC`, Java's
-//! `BigDecimal` and .NET's `decimal` all approximate, and it is exact for
-//! anything written in decimal — which is what money is.
+//! A scaled integer: a significand counted in steps of `10^-scale`.
+//! `Decimal::scaled(1, 2)` is one hundredth. That is the representation SQL
+//! `NUMERIC`, Java's `BigDecimal` and .NET's `decimal` all approximate, and it
+//! is exact for anything written in decimal — which is what money is.
 //!
-//! **Sixty-four bits of significand rather than a hundred and twenty-eight**,
-//! which `numbers.md` names as the ideal. Khora has no 128-bit integer, and
-//! adding one to carry a money type would be a large language change for a
-//! small gain: eighteen significant digits is every currency amount anybody
-//! transacts, to the cent, up to ninety-nine thousand trillion. The intermediate
-//! of a division is done in 128 bits inside the runtime, where it is a Rust
-//! `i128` and nobody has to see it.
+//! **A hundred and twenty-eight bits of significand**, carried as two `Int`
+//! fields because Khora has no 128-bit integer and adding one to hold a library
+//! type would be a large language change for a small gain. The halves are never
+//! arithmetic here: every operation on them happens in the runtime, where the
+//! significand is one number.
+//!
+//! Sixty-four was tried first, on the argument that eighteen significant digits
+//! is every currency amount anybody transacts. **True about amounts and false
+//! about arithmetic on them.** `add` brings both operands to the larger scale
+//! before adding, so a hundred million against a rate to twelve places needed
+//! `1e10 × 10^10` against a ceiling of `9.22e18` and stopped the program. That
+//! is unremarkable finance. `mul` is worse, because it adds the scales, which
+//! is what makes it exact.
+//!
+//! A hundred and twenty-eight covers that, `NUMERIC` as real schemas declare
+//! it, and an eighteen-decimal token balance — where sixty-four bits ran out at
+//! 9.2 whole units.
 //!
 //! # What it does when it cannot answer
 //!
@@ -31,42 +41,40 @@ module std::decimal;
 //! changes here: a total that silently wrapped is worse than one that never
 //! arrived. That covers `add`, `sub`, `mul`, `at_scale` and `divide` alike.
 //!
-//! Division is not an exception to it. Division takes a scale and a rounding
-//! because a quotient usually has no exact decimal form, and answers `None`
-//! when the divisor is zero because that is a thing data does — but an answer
-//! too large for the significand stops the program, the same as anywhere else.
-//! It used to saturate, which meant `Decimal::divide(10d, 1d, 18, HalfEven)`
-//! answered `9.223372036854775807`: in range, printed to the right number of
-//! places, and wrong. Somebody writing a reconciler found it in the first ten
-//! minutes.
+//! Division is not an exception to it. It takes a scale and a rounding because
+//! a quotient usually has no exact decimal form, and answers `None` when the
+//! divisor is zero because that is a thing data does — but an answer too large
+//! for the significand stops the program, the same as anywhere else. It used to
+//! saturate, which meant `Decimal::divide(10d, 1d, 18, HalfEven)` answered
+//! `9.223372036854775807`: in range, printed to the right number of places, and
+//! wrong. Somebody writing a reconciler found it in the first ten minutes.
 //!
 //! **The three that cannot stop the program are comparing, reading and
-//! printing**, and each was made not to. Comparing two numbers is a question
-//! about order and needs no common scale to exist. Reading text that is not a
-//! number — including a number too long to hold — is what `of_string`'s
-//! `Option` is for. And `show` is string work, so it prints every scale a
-//! `Decimal` can carry rather than the first eighteen.
+//! printing**, and each was made not to. Comparing is a question about order
+//! and needs no common scale to exist. Reading text that is not a number —
+//! including a numeral too long to hold — is what `of_string`'s `Option` is
+//! for. And `show` is string work, so it prints every scale a `Decimal` can
+//! carry rather than the first eighteen.
 
-import std::core::{Eq, Option, Ord, Ordering, Show};
+import std::core::{Array, Eq, Option, Ord, Ordering, Ptr, Show};
 
 /// A number counted in steps of `10^-scale`.
 ///
+/// **`hi` and `lo` are one number in two halves**, the upper and lower
+/// sixty-four bits of a signed hundred-and-twenty-eight bit significand. They
+/// are two fields because only scalars cross into the runtime — see
+/// `docs/design/ffi.md` — and they are never taken apart anywhere else.
+///
 /// The fields are public because a decimal is its representation and hiding it
-/// would only mean writing accessors for both. `scale` is never negative:
-/// `Decimal::scaled` refuses one, because a negative scale is a large number
-/// spelled confusingly and every caller who wants one means a larger `units`.
+/// would only mean writing accessors for all three. `scale` is never negative:
+/// the constructors clamp it, because a negative scale is a large number
+/// spelled confusingly and every caller who wants one means a larger
+/// significand.
 pub type Decimal = {
-  units: Int,
+  hi: Int,
+  lo: Int,
   scale: Int,
 };
-
-/// Ten to the `power`, or a stopped program if it does not fit an `Int`.
-///
-/// Eighteen is as far as this goes and the nineteenth would overflow, which is
-/// the same limit as the significand and not a coincidence.
-fn ten_to(power: Int) -> Int {
-  if power <= 0 { 1 } else { 10 * ten_to(power - 1) }
-}
 
 /// How `divide` breaks a tie.
 pub type Rounding =
@@ -83,53 +91,66 @@ pub type Rounding =
   | Towards;
 
 impl Decimal {
+  /// A significand given as its two halves, counted in steps of `10^-scale`.
+  ///
+  /// **The total constructor**, and the widest one: it is the only way to build
+  /// a `Decimal` whose significand does not fit an `Int`, which is why a `0.01d`
+  /// literal desugars to this and why a decoder reading a 128-bit `NUMERIC`
+  /// column wants it. Both halves are already numbers, so it cannot fail.
+  ///
+  /// A negative scale is refused by clamping to zero rather than by raising,
+  /// since it can only arise from a caller that computed it.
+  pub fn of_parts(hi: Int, lo: Int, scale: Int) -> Decimal {
+    { hi: hi, lo: lo, scale: if scale < 0 { 0 } else { scale } }
+  }
+
   /// A whole number.
   pub fn of_int(units: Int) -> Decimal {
-    { units: units, scale: 0 }
+    Decimal::of_parts(sign_of(units), units, 0)
   }
 
   /// `units` counted in steps of `10^-scale`.
   ///
-  /// The total constructor, and the one a decoder reading a database column or
-  /// a wire format wants: it cannot fail, because both halves are already
-  /// numbers. A negative scale is refused by clamping to zero rather than by
-  /// raising, since it can only arise from a caller that computed it.
+  /// The constructor for a significand that fits an `Int`, which is nearly all
+  /// of them; `of_parts` is the one for the rest.
   pub fn scaled(units: Int, scale: Int) -> Decimal {
-    { units: units, scale: if scale < 0 { 0 } else { scale } }
+    Decimal::of_parts(sign_of(units), units, scale)
   }
 
   /// Zero.
-  pub fn zero() -> Decimal { { units: 0, scale: 0 } }
+  pub fn zero() -> Decimal { { hi: 0, lo: 0, scale: 0 } }
 
   /// The same number at a larger scale.
   ///
   /// Exact, and stops the program if the significand cannot hold it — going
-  /// from two decimal places to eighteen is a multiplication by ten thousand
-  /// million million, and most numbers do not survive it.
+  /// from two decimal places to thirty-eight is a multiplication by ten to the
+  /// thirty-sixth, and most numbers do not survive it. A smaller scale is
+  /// answered unchanged, because dropping places is rounding and `rounded` is
+  /// where a caller says how.
   pub fn at_scale(self, scale: Int) -> Decimal {
-    if scale <= self.scale {
-      self
-    } else {
-      { units: self.units * ten_to(scale - self.scale), scale: scale }
-    }
-  }
-
-  /// Both numbers at the larger of their two scales.
-  fn align(self, other: Decimal) -> Split2 {
-    let scale = if self.scale > other.scale { self.scale } else { other.scale };
-    { left: Decimal::at_scale(self, scale), right: Decimal::at_scale(other, scale) }
+    let lo = khora_decimal_rescale(self.hi, self.lo, self.scale, scale);
+    let hi = khora_decimal_high();
+    { hi: hi, lo: lo, scale: if scale <= self.scale { self.scale } else { scale } }
   }
 
   /// The sum. Exact, and stops the program if it does not fit.
+  ///
+  /// Both operands come to the larger of their two scales first, which is the
+  /// step that made sixty-four bits too narrow: the operands fit and their
+  /// aligned forms did not.
   pub fn add(self, other: Decimal) -> Decimal {
-    let pair = Decimal::align(self, other);
-    { units: pair.left.units + pair.right.units, scale: pair.left.scale }
+    let lo = khora_decimal_add(
+      self.hi, self.lo, self.scale, other.hi, other.lo, other.scale);
+    let hi = khora_decimal_high();
+    { hi: hi, lo: lo, scale: larger(self.scale, other.scale) }
   }
 
   /// The difference. Exact, and stops the program if it does not fit.
   pub fn sub(self, other: Decimal) -> Decimal {
-    let pair = Decimal::align(self, other);
-    { units: pair.left.units - pair.right.units, scale: pair.left.scale }
+    let lo = khora_decimal_sub(
+      self.hi, self.lo, self.scale, other.hi, other.lo, other.scale);
+    let hi = khora_decimal_high();
+    { hi: hi, lo: lo, scale: larger(self.scale, other.scale) }
   }
 
   /// The product, exactly.
@@ -139,7 +160,9 @@ impl Decimal {
   /// each give one with eight, and the significand has to hold all of them.
   /// `rounded` afterwards is how a caller comes back to a sensible scale.
   pub fn mul(self, other: Decimal) -> Decimal {
-    { units: self.units * other.units, scale: self.scale + other.scale }
+    let lo = khora_decimal_mul(self.hi, self.lo, other.hi, other.lo);
+    let hi = khora_decimal_high();
+    { hi: hi, lo: lo, scale: self.scale + other.scale }
   }
 
   /// The quotient, to `scale` decimal places, rounded as asked.
@@ -154,13 +177,12 @@ impl Decimal {
   /// `numbers.md` reserves stopping the program for a bug.
   ///
   /// **Stops the program when the answer does not fit**, which is a different
-  /// thing and gets the different treatment. Asking for a hundred divided by
-  /// four at eighteen places is asking for twenty digits, and there is no
-  /// honest sixty-four bit answer to give: the nearest one is a different
-  /// number, and handing back a different number is the failure this whole
-  /// type exists to prevent. `rounded` goes through here, so it stops too.
+  /// thing and gets the different treatment. There is no honest answer to give:
+  /// the nearest one is a different number, and handing back a different number
+  /// is the failure this whole type exists to prevent. `rounded` goes through
+  /// here, so it stops too.
   pub fn divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal> {
-    if other.units == 0 {
+    if Decimal::is_zero(other) {
       Option::None
     } else {
       let mode = match how {
@@ -169,11 +191,10 @@ impl Decimal {
         Rounding::Towards => 2,
       };
       let scale = if scale < 0 { 0 } else { scale };
-      Option::Some({
-          units: khora_decimal_divide(
-            self.units, self.scale, other.units, other.scale, scale, mode),
-          scale: scale,
-        })
+      let lo = khora_decimal_divide(
+        self.hi, self.lo, self.scale, other.hi, other.lo, other.scale, scale, mode);
+      let hi = khora_decimal_high();
+      Option::Some({ hi: hi, lo: lo, scale: scale })
     }
   }
 
@@ -190,24 +211,33 @@ impl Decimal {
   }
 
   /// The number with the opposite sign.
+  ///
+  /// Subtraction from zero rather than a negation of its own, because the two
+  /// halves are not a number this language can negate — and because the one
+  /// significand with no positive twin should stop the program rather than
+  /// answer itself.
   pub fn negate(self) -> Decimal {
-    { units: 0 - self.units, scale: self.scale }
+    Decimal::sub({ hi: 0, lo: 0, scale: self.scale }, self)
   }
 
   /// Whether it is less than zero.
-  pub fn is_negative(self) -> Bool { self.units < 0 }
+  pub fn is_negative(self) -> Bool {
+    khora_decimal_is_negative(self.hi, self.lo) == 1
+  }
 
   /// Whether it is exactly zero.
-  pub fn is_zero(self) -> Bool { self.units == 0 }
+  ///
+  /// At any scale: zero has both halves clear however many places it was
+  /// written to.
+  pub fn is_zero(self) -> Bool { self.hi == 0 && self.lo == 0 }
 
   /// The whole part, towards zero.
   ///
-  /// Past eighteen places there is no whole part to find: the significand
-  /// holds nineteen digits and they are all behind the point, so the answer is
-  /// zero and asking `ten_to` for the step would only stop the program on the
-  /// way to it.
+  /// **Stops the program if the whole part is wider than an `Int`**, which is
+  /// the one place a `Decimal` has to become one and may not fit. Past
+  /// thirty-eight places there is no whole part to find and the answer is zero.
   pub fn truncated(self) -> Int {
-    if self.scale >= 19 { 0 } else { self.units / ten_to(self.scale) }
+    khora_decimal_truncated(self.hi, self.lo, self.scale)
   }
 
   /// A decimal written out, or `None` if the text is not one.
@@ -216,75 +246,30 @@ impl Decimal {
   /// everything else on purpose**, including the exponent notation `Float`
   /// takes: a number arriving as `1e-3` is a measurement that has been through
   /// a float somewhere, and taking it here would launder that history.
+  ///
+  /// A numeral too long for the significand is a rejection too, which is what
+  /// the `Option` is already there for. This is the function that reads numbers
+  /// out of files somebody else wrote, and one long cell must not kill the
+  /// process.
   pub fn of_string(text: String) -> Option<Decimal> {
-    let length = String::byte_length(text);
-    if length == 0 { Option::None } else {
-      let first = U8::to_int(String::byte(text, 0));
-      let negative = first == 45;
-      let start = if negative || first == 43 { 1 } else { 0 };
-      if start == length { Option::None } else {
-        read_digits(text, start, length, 0, 0 - 1, negative)
-      }
-    }
-  }
-}
-
-/// The largest `Int`, which is where reading a numeral has to stop.
-///
-/// A constant rather than something asked of the language, because `Int` has
-/// no `max` and this is the one place in `std::decimal` that wants it.
-fn largest_int() -> Int { 9223372036854775807 }
-
-/// Both operands brought to one scale.
-type Split2 = {
-  left: Decimal,
-  right: Decimal,
-};
-
-/// Walks the digits, carrying the value so far and where the point was.
-///
-/// `point` is `-1` until one is seen, so that a second one is a rejection
-/// rather than a silently different number.
-///
-/// **A numeral too long for the significand is a rejection too**, which is
-/// what the `Option` is already there for. This used to stop the program: one
-/// long cell in one CSV somebody else wrote killed the process, in the
-/// function whose entire job is reading numbers out of files somebody else
-/// wrote. The guard is `value > (largest - digit) / 10`, asked before the
-/// multiply rather than after it, because after it there is nothing left to
-/// ask.
-fn read_digits(
-  text: String, at: Int, length: Int, value: Int, point: Int, negative: Bool
-) -> Option<Decimal> {
-  if at == length {
-    if point == 0 - 1 {
-      Option::Some({ units: if negative { 0 - value } else { value }, scale: 0 })
-    } else {
+    let read = String::with_data(text, fn (at, length) => khora_decimal_parse(at, length));
+    if read == 1 {
       Option::Some({
-          units: if negative { 0 - value } else { value },
-          scale: length - point - 1,
+          hi: khora_decimal_high(),
+          lo: khora_decimal_low(),
+          scale: khora_decimal_scale(),
         })
-    }
-  } else {
-    let byte = U8::to_int(String::byte(text, at));
-    if byte == 46 {
-      if point == 0 - 1 {
-        read_digits(text, at + 1, length, value, at, negative)
-      } else {
-        Option::None
-      }
-    } else if byte >= 48 && byte <= 57 {
-      let digit = byte - 48;
-      if value > (largest_int() - digit) / 10 {
-        Option::None
-      } else {
-        read_digits(text, at + 1, length, value * 10 + digit, point, negative)
-      }
     } else {
       Option::None
     }
   }
 }
+
+/// The upper half of an `Int` widened to the significand: all ones, or none.
+fn sign_of(units: Int) -> Int { if units < 0 { 0 - 1 } else { 0 } }
+
+/// The larger of two scales, which is where a sum or a difference lands.
+fn larger(left: Int, right: Int) -> Int { if left > right { left } else { right } }
 
 impl Eq for Decimal {
   /// **By value, not by representation.** `1.0` and `1.00` are the same number
@@ -295,19 +280,21 @@ impl Eq for Decimal {
   /// **And it cannot stop the program**, which took a second attempt. It used
   /// to bring both operands to a common scale, the same way `add` does — so
   /// comparing a hundred million against a rate to twelve places asked for a
-  /// multiplication by `10^12` that no `Int` survives, and two perfectly legal
-  /// numbers halted a reconciler. An equality that traps is a worse trap than
-  /// one that surprises, and this one is sold as the reason to prefer
+  /// multiplication by `10^12` that no significand survives, and two perfectly
+  /// legal numbers halted a reconciler. An equality that traps is a worse trap
+  /// than one that surprises, and this one is sold as the reason to prefer
   /// `Decimal` at all.
   fn eq(self, other: Decimal) -> Bool {
-    khora_decimal_cmp(self.units, self.scale, other.units, other.scale) == 0
+    khora_decimal_cmp(self.hi, self.lo, self.scale, other.hi, other.lo, other.scale) == 0
   }
 }
 
 impl Ord for Decimal {
-  /// The same comparison, and the same reason it does not go through `align`.
+  /// The same comparison, and the same reason it does not go through `add`'s
+  /// alignment.
   fn cmp(self, other: Decimal) -> Ordering {
-    let answer = khora_decimal_cmp(self.units, self.scale, other.units, other.scale);
+    let answer = khora_decimal_cmp(
+      self.hi, self.lo, self.scale, other.hi, other.lo, other.scale);
     if answer < 0 { Ordering::Less }
     else if answer == 0 { Ordering::Equal }
     else { Ordering::Greater }
@@ -321,31 +308,37 @@ impl Show for Decimal {
   /// scale is part of what was meant: a price to two places stays a price to
   /// two places, and dropping the zero is how a total stops lining up in a
   /// column.
+  ///
   /// **Done as text rather than as arithmetic**, which is what lets it print
   /// every number a `Decimal` can hold. Splitting the significand with
-  /// `units / 10^scale` needs `10^scale` to be a number, and past eighteen
-  /// places it is not — so `mul` on two numbers with ten places each produced
+  /// `units / 10^scale` needs `10^scale` to be a number, and past the widest
+  /// power it is not — so `mul` on two numbers with twenty places each produced
   /// a value that was perfectly legal and stopped the program when printed.
   /// Cutting a string at a position needs nothing to fit.
   ///
-  /// It also means the most negative `Int` prints. Negating it to take a
-  /// magnitude would overflow, and the sign is a character here.
+  /// It also means the most negative significand prints. Negating it to take a
+  /// magnitude would overflow, so the runtime writes the magnitude and the sign
+  /// is a character here.
   fn show(self) -> String {
-    if self.scale <= 0 {
-      Int::to_string(self.units)
+    // Thirty-nine digits is the widest magnitude a signed significand has; the
+    // call says how many it needed, so a longer answer would be caught rather
+    // than truncated.
+    let out: Array<U8> = Array::new(40, 0);
+    let written = Array::with_data(
+      out, fn (into, n) => khora_decimal_digits(self.hi, self.lo, into, n));
+    let digits = if written > 40 {
+      "?"
     } else {
-      let text = Int::to_string(self.units);
-      let negative = self.units < 0;
-      let digits = if negative {
-        String::slice(text, 1, String::byte_length(text))
-      } else {
-        text
-      };
+      String::from_bytes(Array::prefix(out, written))
+    };
+    let sign = if Decimal::is_negative(self) { "-" } else { "" };
+    if self.scale <= 0 {
+      sign + digits
+    } else {
       // One more than the scale, so there is always a digit before the point.
       let filled = padded(digits, self.scale + 1);
       let width = String::byte_length(filled);
       let cut = width - self.scale;
-      let sign = if negative { "-" } else { "" };
       sign + String::slice(filled, 0, cut) + "." + String::slice(filled, cut, width)
     }
   }
@@ -360,26 +353,90 @@ fn padded(text: String, width: Int) -> String {
   }
 }
 
-// The one operation that needs more than sixty-four bits in the middle.
+// --- The significand, which lives in the runtime ----------------------------
 //
-// `(a / b)` at a given scale is `a * 10^scale / b` with the operands first
-// brought to a common scale, and that numerator overflows an `Int` for
-// perfectly ordinary inputs — a hundred pounds divided to eight places needs
-// twenty-six digits on the way. The runtime does it in a Rust `i128`, which is
-// wide enough for anything an `Int` significand can produce, and hands back the
-// one number that fits.
+// Every one of these takes a significand as `hi, lo` and, where it answers with
+// one, **returns the low half and leaves the high one in
+// `khora_decimal_high()`**. Two calls rather than one, because
+// `docs/design/ffi.md` allows only scalars and pointers across this boundary:
+// how a sixteen-byte aggregate returns is a decision LLVM makes for a struct
+// type and rustc makes for a `repr(C)` one, and on x86-64 Windows they disagree
+// silently. That is errata 35 and it cost a day.
+//
+// The state is per thread, so the condition is exact: between the two calls
+// there must be no other decimal operation and no chance for the scheduler to
+// take the worker back. Both hold structurally -- every wrapper above reads the
+// high half on the very next line, and the only safepoint generated code emits
+// is a loop back-edge, which cannot fall between two adjacent lets.
+
+// The sum, at the larger of the two scales. Stops the program if it does not
+// fit — including in the alignment, which is where sixty-four bits ran out.
+extern fn khora_decimal_add(
+  left_hi: Int, left_lo: Int, left_scale: Int,
+  right_hi: Int, right_lo: Int, right_scale: Int
+) -> Int;
+
+// The difference, at the larger of the two scales.
+extern fn khora_decimal_sub(
+  left_hi: Int, left_lo: Int, left_scale: Int,
+  right_hi: Int, right_lo: Int, right_scale: Int
+) -> Int;
+
+// The product. The scales add, which the caller works out for itself.
+extern fn khora_decimal_mul(
+  left_hi: Int, left_lo: Int, right_hi: Int, right_lo: Int
+) -> Int;
+
+// The same number at a larger scale, exactly.
+extern fn khora_decimal_rescale(hi: Int, lo: Int, from: Int, to: Int) -> Int;
+
+// The quotient at a scale, rounded by mode: 0 half-to-even, 1 half-away, 2
+// towards zero. `Rounding` is the enumeration and this is its encoding, an
+// integer because an aggregate must not cross.
+//
+// The intermediate is the reason this cannot be written in Khora: dividing to a
+// scale computes `left * 10^n / right`, and with a 128-bit significand that
+// numerator wants two hundred and fifty-six bits on the way to an answer that
+// needs a hundred and twenty-eight.
 extern fn khora_decimal_divide(
-  left: Int, left_scale: Int, right: Int, right_scale: Int, scale: Int, mode: Int
+  left_hi: Int, left_lo: Int, left_scale: Int,
+  right_hi: Int, right_lo: Int, right_scale: Int,
+  scale: Int, mode: Int
 ) -> Int;
 
 // Where the left sits relative to the right: -1, 0 or 1.
 //
 // Comparing is not arithmetic and must not be able to stop the program, but it
-// still needs to line two scales up somewhere. In 128 bits it fits, and where
-// it does not — an operand enormous enough that scaling it runs past even that
-// — running out is itself the answer, because a number that will not fit is
-// larger than one that does. `Eq` and `Ord` used to do this in Khora, by
-// multiplying, and trapped on two legal numbers.
+// still has to line two scales up somewhere. Only the operand at the smaller
+// scale is raised, so at most one side can run out — and a side that does is
+// larger in magnitude than one that fits, which is the answer rather than a
+// failure. `Eq` and `Ord` used to do this in Khora, by multiplying, and trapped
+// on two legal numbers.
 extern fn khora_decimal_cmp(
-  left: Int, left_scale: Int, right: Int, right_scale: Int
+  left_hi: Int, left_lo: Int, left_scale: Int,
+  right_hi: Int, right_lo: Int, right_scale: Int
 ) -> Int;
+
+// The whole part, towards zero. Stops the program if it is wider than an `Int`.
+extern fn khora_decimal_truncated(hi: Int, lo: Int, scale: Int) -> Int;
+
+// Whether the significand is negative, which its digits do not say.
+extern fn khora_decimal_is_negative(hi: Int, lo: Int) -> Int;
+
+// The significand's digits, without a sign or a point, and how many there are.
+// The same contract `khora_float_text` has, so `Array::with_data` drives both.
+extern fn khora_decimal_digits(hi: Int, lo: Int, into: Ptr, capacity: Int) -> Int;
+
+// Reads a numeral: 1 if the text is one, 0 if it is not. The significand and
+// the scale come back through the three calls below, because this one's return
+// value has to say whether it parsed at all.
+extern fn khora_decimal_parse(text: Ptr, length: Int) -> Int;
+
+// The high half of the last answer.
+extern fn khora_decimal_high() -> Int;
+
+// The low half of the last parse.
+extern fn khora_decimal_low() -> Int;
+
+// The scale of the last parse, the one scale a caller cannot work out itself.
+extern fn khora_decimal_scale() -> Int;

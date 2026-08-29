@@ -2444,13 +2444,20 @@ below should widen `std`.
 
 ### 12.0 `Decimal` — the positioning's own claim — **done, without the literal**
 
-`std/decimal.kh` and `crates/khora-rt/src/decimal.rs`. A scaled integer:
-`units` counted in steps of `10^-scale`, exact for anything written in decimal,
-which is what money is. Almost all of it is Khora — add, subtract, multiply,
-compare and rescale are `Int` arithmetic with the scales lined up, trapping on
-overflow like every other number. Only division needed the runtime, because its
-intermediate overflows sixty-four bits for ordinary money and is done in a Rust
-`i128` nobody above has to see.
+`std/decimal.kh` and `crates/khora-rt/src/decimal.rs`. A scaled integer: a
+significand counted in steps of `10^-scale`, exact for anything written in
+decimal, which is what money is.
+
+*Written when the significand was sixty-four bits and almost all of the module
+was Khora. It is a hundred and twenty-eight now and the arithmetic is all in
+the runtime — see §"Unboxed records" below for why, and `numbers.md`
+§"Sixty-four bits, and why it had to be a hundred and twenty-eight" for what
+changed. What follows is the original entry.*
+
+Add, subtract, multiply, compare and rescale were `Int` arithmetic with the
+scales lined up, trapping on overflow like every other number. Only division
+needed the runtime, because its intermediate overflows sixty-four bits for
+ordinary money and is done in a Rust `i128` nobody above has to see.
 
 Seven tests compile and run, and the first is the one that matters:
 `0.1 + 0.2 == 0.3` is `exact`. Also that `1.0` and `1.00` are equal, that `1.50`
@@ -3293,7 +3300,7 @@ tree so far has any opinion about those, which is itself the finding.
 | 13.2 | Concurrency under real load | **Covered, and it found one.** Eight tests in `tests/load.rs` hold the claims `std/core.kh` had only asserted in prose: a bounded nursery bounds, a full channel stops its sender, overload is latency rather than loss, a closed channel drains, a service recovers, and a server serving four answers twenty-four at once. The listening backlog was **16** against a concurrency bound of 256 — the backlog *is* the overload buffer, and it is 511 now |
 | 13.3 | DB cancellation safety | **Done.** `transaction` registers the rollback with a region of its own before the body runs, so it fires on every way out — and the body carries a `raises` row, without which no cancellation could reach it. Finalizers are shielded from the cancellation running them. Proved against a real server: the cancelled insert is gone, the committed one is there |
 | 13.4 | Trace propagation | **Designed, not built — but a span now closes.** `observability.md` §Propagation says a span's parent must survive spawn, steal, suspension, wake and cancellation, and that the fiber carries it; the fiber does not carry it yet. What 13.3's region work made possible was the smaller half: `around` and `around_result` register the finish before the body runs, so a span closes on a raise and on a cancellation instead of being left open and read as still running |
-| 13.5 | `Decimal` | **Done.** `0.01d` is built — the language's only literal suffix, desugared to `Decimal::scaled` during lowering — with the scale-alignment and overflow tests 13.5 asked for. `docs/design/numbers.md` |
+| 13.5 | `Decimal` | **Done.** `0.01d` is built — the language's only literal suffix, desugared to `Decimal::of_parts` during lowering — with the scale-alignment and overflow tests 13.5 asked for. `docs/design/numbers.md` |
 | 13.6 | Runtime soundness audit | **Done, with one gap the tool cannot close.** Three defects found and fixed, one reachable; the FFI boundary and the atomicity decision are enforced by tests; ThreadSanitizer is clean over thirty-eight tests in six modules (`sh scripts/tsan.sh`). It cannot see through a stack switch, so the scheduler is unsanitised — `docs/design/soundness.md` |
 | 13.7 | Deployable cross-compilation | **One target of several.** `targets.md` steps 2 and 3 are done for wasm; aarch64 and musl need a sysroot, and step 4 — fetching a runtime — is untouched |
 | 13.8 | WebAssembly product path | **A module exists and runs.** 1.9 MB, hand-built runtime, no deployment example, no host integration |
@@ -4966,24 +4973,33 @@ found Decimal`), the row-in-type-argument message (`Fiber<(), Oops>` now says
 to write `{ Oops }`), and closure-parameter tuple inference, which the tier 2
 work had already repaired.
 
-Two tier 4 items are **open and each needs a decision**:
+Two tier 4 items each needed a decision rather than a repair, and both are
+now built. The decision was the same one twice: **let the expected type reach
+inside the lambda.**
 
-- **A nursery or scope body cannot be an inline lambda.** Narrower than the
-  report read — a capability from an *enclosing* function does reach inside a
-  lambda, checked directly. What fails is a lambda that must *introduce* one,
-  because only its expected type says it should: nothing binds `nursery` in the
-  lambda's scope, and names are resolved before types. Fixing it means a `with`
-  clause on a lambda, or an inference rule crossing that boundary.
-- **A record literal is not resolved by its expected type**, so writing a
-  `Changed<A, B>` for `Shared::modify` needs `Changed` imported although the
-  source never names it. The field types are genuinely not available without the
-  import; making them so means carrying the variants of record types reached
-  through imported *signatures*, which is a real extension to what a module
-  sees.
+- **A nursery or scope body can be an inline lambda.** Narrower than the report
+  read — a capability from an *enclosing* function did reach inside a lambda.
+  What failed was a lambda that must *introduce* one, because only its expected
+  type says it should: nothing bound `nursery` in the lambda's scope, and names
+  are resolved before types. An unresolved bare name inside a lambda now
+  declares a local and records the evidence, which the checker binds from the
+  hint's `requires` row.
+- **A record literal takes its type from what expects it.**
+  `Shared::modify(cell, fn n => { state: n * 2, result: n })` needed `Changed`
+  imported although the source never names it. Two things were in the way: what
+  travels with an import is walked through a type's *fields*, and `Shared` is
+  opaque, so the walk reached nothing — it now also walks the signatures of the
+  type's methods. And the walker declined to descend into a function type, on a
+  reason that is right for "what does this value contain" and wrong for "what
+  must a caller be able to produce". Two walkers now, one per question.
 
-Tiers 5 and 6 are untouched: what `std` does not have, and what the docs
-promise. Several tier 6 entries were fixed in passing, because the code they
-described changed underneath them.
+  A literal with nothing expecting it is still found by its labels alone, which
+  `TypeMap::reachable`'s own note requires: a record literal must not *infer* as
+  a type the file cannot name. Taking the type from an expectation is not
+  inferring — the expected type already decided which record it is.
+
+Tier 6 is untouched: what the docs promise. Several tier 6 entries were fixed
+in passing, because the code they described changed underneath them.
 
 **And the method should be kept.** Four agents, four days of nothing, four
 programs that work and eleven defects nobody on this side had found — including
@@ -5025,6 +5041,31 @@ language type, so `numbers.md`'s objection — Khora has no 128-bit integer —
 stops applying. `Float32` and `I128`/`U128` remain separate, narrower questions:
 the latter on the *existing* rationale for fixed widths, which is representation
 at a boundary rather than choice of precision.
+
+**Built.** `Decimal` is `{ hi, lo, scale }` and every operation on the
+significand is a runtime call. Three things came out of doing it:
+
+- **A 128-bit answer cannot come back whole.** `ffi.md` allows only scalars and
+  pointers across the boundary, because how a sixteen-byte aggregate returns is
+  a decision LLVM makes for a struct type and rustc makes for a `repr(C)` one,
+  and on x86-64 Windows they disagree silently — errata 35, which cost a day.
+  So each operation **returns the low half and leaves the high one in a
+  thread-local that `khora_decimal_high()` reads on the next line**: the shape
+  `khora_spawn_capture` and `khora_spawn_take` already use, and safe for the
+  same reason, since a fiber moves between threads only at a suspension point
+  and a foreign call is not one.
+- **Division needs two hundred and fifty-six bits.** A 128-bit significand
+  times up to `10^38` is wider than any integer Rust has, so the runtime does a
+  widening multiply into a pair of `u128`s and a shift-and-subtract division
+  back out.
+- **A clamp is not a limit.** Clamping a requested scale to thirty-eight made
+  `divide(x, y, 100, HalfEven)` compute to thirty-eight places and label the
+  answer as having a hundred — a wrong number wearing the right hat, which is
+  the precise failure this type exists to prevent. It traps, and there is a
+  test at both layers.
+
+`0.01d` now desugars to `Decimal::of_parts(high, low, scale)` rather than
+`Decimal::scaled`, because a literal significand can be wider than an `Int`.
 
 ### The question the width was standing in front of
 

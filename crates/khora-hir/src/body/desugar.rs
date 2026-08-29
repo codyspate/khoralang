@@ -299,7 +299,7 @@ impl<'a> Ctx<'a> {
         chain
     }
 
-    /// `0.01d` is `Decimal::scaled(1, 2)`.
+    /// `0.01d` is `Decimal::of_parts(0, 1, 2)`.
     ///
     /// **The language's only literal suffix**, and `docs/design/numbers.md`
     /// says why it earns the exception: without it there is no way to write an
@@ -319,7 +319,14 @@ impl<'a> Ctx<'a> {
     /// reasoning `Show for Decimal` gives. An exponent shifts the point:
     /// `1.5e3d` is `1500` at scale zero rather than `15` at scale minus two,
     /// because a negative scale is a large number spelled confusingly and
-    /// `Decimal::scaled` refuses one.
+    /// `Decimal::of_parts` refuses one.
+    ///
+    /// **The significand crosses as two `Int` literals**, its upper and lower
+    /// sixty-four bits, because a `Decimal` holds a hundred and twenty-eight
+    /// and this language's widest integer is half of that. `of_parts` is the
+    /// constructor that takes them; `scaled` is the narrower one for a
+    /// significand that fits an `Int`, and a literal cannot use it because
+    /// `9_000_000_000_000_000_000_000.00d` is a legal price.
     ///
     /// `Decimal` has to be in scope, exactly as `List` does for `[a, b]`.
     pub(super) fn lower_decimal(&mut self, text: &str, range: TextRange) -> ExprId {
@@ -331,7 +338,7 @@ impl<'a> Ctx<'a> {
             return self.add_expr(Expr::Missing, range);
         };
 
-        let Some(scaled) = self.decimal_scaled() else {
+        let Some(constructor) = self.decimal_of_parts() else {
             self.error(
                 "a `0.01d` literal builds a `Decimal`; import it from `std::decimal`"
                     .to_string(),
@@ -340,17 +347,25 @@ impl<'a> Ctx<'a> {
             return self.add_expr(Expr::Missing, range);
         };
 
-        let callee = self.add_expr(Expr::Path(scaled), range);
-        let units = self.add_expr(Expr::Literal(Literal::Int(units.to_string())), range);
+        // Written as the two halves the runtime wants, so that nothing
+        // downstream has to know the significand is wider than an `Int`. The
+        // low half is a bit pattern rather than a magnitude, so it is often
+        // negative on its own; `i64::from_str_radix` reads the minus back.
+        let high = (units >> 64) as i64;
+        let low = units as u64 as i64;
+
+        let callee = self.add_expr(Expr::Path(constructor), range);
+        let high = self.add_expr(Expr::Literal(Literal::Int(high.to_string())), range);
+        let low = self.add_expr(Expr::Literal(Literal::Int(low.to_string())), range);
         let scale = self.add_expr(Expr::Literal(Literal::Int(scale.to_string())), range);
-        self.add_expr(Expr::Call { callee, args: vec![units, scale] }, range)
+        self.add_expr(Expr::Call { callee, args: vec![high, low, scale] }, range)
     }
 
-    /// `Decimal::scaled`, if a `Decimal` is in scope.
+    /// `Decimal::of_parts`, if a `Decimal` is in scope.
     ///
     /// Looked for as a type rather than as a function: the constructor is an
     /// inherent method, and what a program imports is the type it hangs off.
-    fn decimal_scaled(&self) -> Option<crate::Resolution> {
+    fn decimal_of_parts(&self) -> Option<crate::Resolution> {
         // By *name in scope*, not through `variants_of`: a `Decimal` is a
         // record, and an `ItemMap` records constructors only for variant
         // types — so the check that works for `List` finds nothing here.
@@ -361,7 +376,7 @@ impl<'a> Ctx<'a> {
         }
         Some(crate::Resolution::TraitItem {
             owner: "Decimal".to_string(),
-            name: "scaled".to_string(),
+            name: "of_parts".to_string(),
         })
     }
 
@@ -451,7 +466,7 @@ impl<'a> Ctx<'a> {
 /// `1d` is `(1, 0)`, `0.01d` is `(1, 2)`, `1.50d` is `(150, 2)` — the trailing
 /// zero is written down, so it is part of what was meant. `1.5e3d` is
 /// `(1500, 0)`: the exponent moves the point rather than becoming a negative
-/// scale, because `Decimal::scaled` has none and a negative one is a large
+/// scale, because `Decimal::of_parts` has none and a negative one is a large
 /// number spelled confusingly.
 ///
 /// Underscores are separators, as they are in every other numeral here.

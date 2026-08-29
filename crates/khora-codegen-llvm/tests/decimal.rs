@@ -333,23 +333,65 @@ fn the_same_number_at_two_scales_compares_equal() {
     assert_eq!(out, "equal\nequal\nNOT equal\n");
 }
 
-/// **The significand is sixty-four bits and the limit is real.** Eighteen
-/// digits is every currency amount anybody transacts, and `numbers.md` says
-/// so; what matters is that going past it stops rather than wrapping. A wrong
-/// number in a ledger is worse than no number.
+/// **The significand is a hundred and twenty-eight bits and the limit is
+/// still real**, just much further out.
+///
+/// It was sixty-four, on the argument that eighteen digits is every currency
+/// amount anybody transacts — true about amounts and false about arithmetic on
+/// them, since `at_scale` is a multiplication and `add` goes through it. What
+/// has not changed is what happens at the edge: going past stops rather than
+/// wrapping, because a wrong number in a ledger is worse than no number.
 #[test]
 fn a_scale_that_cannot_be_reached_stops_the_program() {
     let (printed, stopped) = run_until_it_stops(
         "decimal_overflow_scale",
         r#"  print(Decimal::show(Decimal::at_scale(1d, 3)));
-  print(Decimal::show(Decimal::at_scale(9300000000000000d, 3)));
+  print(Decimal::show(Decimal::at_scale(100000000000000000000000000000000000000d, 3)));
   print("reached the end");"#,
     );
-    // Nine point three quintillion does not fit sixty-four bits. The first
-    // line succeeds; the second cannot, and the program ends there rather than
-    // printing something plausible.
+    // Ten to the thirty-eighth, times a thousand, is past a hundred and
+    // twenty-eight bits. The first line succeeds; the second cannot, and the
+    // program ends there rather than printing something plausible.
     assert_eq!(printed, "1.000\n", "nothing after the overflow should print");
     assert!(stopped, "an unrepresentable scale must stop rather than wrap");
+}
+
+/// **And the addition that made the width change now works.**
+///
+/// A hundred million against a rate to twelve places. `add` brings both to the
+/// larger scale first, so this needed `1e10 * 10^10` against a sixty-four bit
+/// ceiling of `9.22e18` and stopped the program — on two numbers a rates desk
+/// writes down every day.
+#[test]
+fn a_notional_plus_a_twelve_place_rate_is_a_number() {
+    let out = run(
+        "decimal_wide_add",
+        r#"  let notional = 100000000.00d;
+  let rate = 0.000000000001d;
+  print(Decimal::show(Decimal::add(notional, rate)));
+  print(Decimal::show(Decimal::sub(notional, rate)));
+  // And the multiplication, whose scales add to fourteen places.
+  print(Decimal::show(Decimal::mul(notional, rate)));"#,
+    );
+
+    assert_eq!(
+        out,
+        "100000000.000000000001\n99999999.999999999999\n0.00010000000000\n"
+    );
+}
+
+/// **An eighteen-decimal token balance, which sixty-four bits could not hold
+/// past 9.2 whole units.**
+#[test]
+fn an_eighteen_decimal_balance_is_a_number() {
+    let out = run(
+        "decimal_token_balance",
+        r#"  let balance = 1000000.000000000000000000d;
+  let fee = 0.000000000000000001d;
+  print(Decimal::show(Decimal::sub(balance, fee)));"#,
+    );
+
+    assert_eq!(out, "999999.999999999999999999\n");
 }
 
 /// **Ten divided by one is ten.**
@@ -361,14 +403,15 @@ fn a_scale_that_cannot_be_reached_stops_the_program() {
 /// balances against itself, and wrong.
 ///
 /// The whole module exists so that money is exact. Found by somebody writing a
-/// reconciler, eight minutes in.
+/// reconciler, eight minutes in. Ten at eighteen places is an ordinary number
+/// now, so the edge has moved to thirty-nine digits — and it is still an edge.
 #[test]
 fn a_quotient_that_does_not_fit_stops_rather_than_saturating() {
     let (printed, stopped) = run_until_it_stops(
         "decimal_divide_overflow",
-        r#"  // Eighteen places of a two digit number is twenty digits, and the
-  // significand holds nineteen.
-  match Decimal::divide(10d, 1d, 18, Rounding::HalfEven) {
+        r#"  // Thirty-eight places of a two digit number is forty digits, and the
+  // significand holds thirty-nine.
+  match Decimal::divide(10d, 1d, 38, Rounding::HalfEven) {
     Option::Some(answer) => print(Decimal::show(answer)),
     Option::None => print("None"),
   };
@@ -376,7 +419,29 @@ fn a_quotient_that_does_not_fit_stops_rather_than_saturating() {
     );
 
     assert_eq!(printed, "", "a quotient that does not fit must print nothing");
-    assert!(stopped, "it must stop rather than answer i64::MAX");
+    assert!(stopped, "it must stop rather than answer the largest significand");
+}
+
+/// **A scale no significand reaches is refused, not quietly met.**
+///
+/// Asking for a hundred places has no representable answer. The runtime
+/// clamped the scale to thirty-eight for a few minutes during the widening,
+/// which computed to thirty-eight places and labelled the result as having a
+/// hundred: a wrong number wearing the right hat, which is precisely the thing
+/// this module exists to make impossible.
+#[test]
+fn a_scale_past_every_power_is_refused() {
+    let (printed, stopped) = run_until_it_stops(
+        "decimal_divide_absurd_scale",
+        r#"  match Decimal::divide(1d, 3d, 100, Rounding::HalfEven) {
+    Option::Some(answer) => print(Decimal::show(answer)),
+    Option::None => print("None"),
+  };
+  print("reached the end");"#,
+    );
+
+    assert_eq!(printed, "");
+    assert!(stopped, "a hundred places must stop rather than answer thirty-eight");
 }
 
 /// The same, through `rounded`, which is `divide` by one and inherited the bug.
@@ -384,7 +449,7 @@ fn a_quotient_that_does_not_fit_stops_rather_than_saturating() {
 fn rounding_to_a_scale_that_does_not_fit_stops_too() {
     let (printed, stopped) = run_until_it_stops(
         "decimal_rounded_overflow",
-        r#"  print(Decimal::show(Decimal::rounded(10d, 18, Rounding::HalfEven)));
+        r#"  print(Decimal::show(Decimal::rounded(10d, 38, Rounding::HalfEven)));
   print("reached the end");"#,
     );
 
@@ -449,17 +514,28 @@ fn comparing_two_far_apart_scales_does_not_stop_the_program() {
 fn a_numeral_too_long_to_hold_is_none_and_not_a_trap() {
     let out = run(
         "decimal_of_string_long",
-        r#"  print(shown(Decimal::of_string("1234567890123456789012345.00")));
+        r#"  // Twenty-seven digits, which sixty-four bits refused and this reads.
+  print(shown(Decimal::of_string("1234567890123456789012345.00")));
   print(shown(Decimal::of_string("-1234567890123456789012345.00")));
   // The largest one that does fit still reads.
-  print(shown(Decimal::of_string("9223372036854775807")));
+  print(shown(Decimal::of_string("170141183460469231731687303715884105727")));
   // And one past it does not.
-  print(shown(Decimal::of_string("9223372036854775808")));
+  print(shown(Decimal::of_string("170141183460469231731687303715884105728")));
+  // Nor does a cell that is simply long.
+  print(shown(Decimal::of_string("999999999999999999999999999999999999999999")));
   // An ordinary amount is unaffected.
   print(shown(Decimal::of_string("1250.00")));"#,
     );
 
-    assert_eq!(out, "None\nNone\n9223372036854775807\nNone\n1250.00\n");
+    assert_eq!(
+        out,
+        "1234567890123456789012345.00\n\
+         -1234567890123456789012345.00\n\
+         170141183460469231731687303715884105727\n\
+         None\n\
+         None\n\
+         1250.00\n"
+    );
 }
 
 /// **Every scale a `Decimal` can carry can be printed.**

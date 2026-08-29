@@ -239,12 +239,14 @@ to two places, and dropping the zero is how a total stops lining up in a
 column.
 
 **An exponent moves the point rather than producing a negative scale.**
-`Decimal::scaled` refuses a negative scale — it is a large number spelled
+`Decimal::of_parts` refuses a negative scale — it is a large number spelled
 confusingly — so `1.5e3d` is fifteen hundred at scale zero, not fifteen at
 scale minus two.
 
-It desugars to `Decimal::scaled(units, scale)` during HIR lowering, so nothing
-downstream has a case for it, and `Decimal` must be in scope exactly as `List`
+It desugars to `Decimal::of_parts(high, low, scale)` during HIR lowering, so
+nothing downstream has a case for it — two halves rather than one significand,
+because the significand is a hundred and twenty-eight bits and `Int` is
+sixty-four; `9_000_000_000_000_000_000_000.00d` is a legal price, and `Decimal` must be in scope exactly as `List`
 must be for `[a, b]` — `desugar.rs`'s note explains why that is the rule rather
 than a name the compiler knows and the program cannot see.
 
@@ -260,7 +262,8 @@ the entire reason the type exists.
 A total constructor is worth having beside the fallible one:
 `Decimal::scaled(110, 2)` for a significand and an exponent, which cannot fail
 and is what a decoder reading a database column or a wire format actually
-wants.
+wants. `Decimal::of_parts(high, low, 2)` is the same thing for a significand
+too wide for an `Int`, which is what a 128-bit `NUMERIC` column is.
 
 What is *not* in `std`: currency codes, exchange rates, allocation and rounding
 policies for splitting a payment, and anything that knows what a fiscal quarter
@@ -268,9 +271,11 @@ is. Those are a package, by the same rule that keeps the type here.
 
 ### What was built
 
-`std/decimal.kh`, and it is almost all Khora. `add`, `sub`, `mul` and the
-rescaling are `Int` arithmetic with the scales lined up, and they trap on
-overflow like every other number here. `Show` prints every place the scale
+`std/decimal.kh`, and it is a hundred and twenty-eight bits of significand
+after all — see §"Sixty-four bits, and why it had to be a hundred and
+twenty-eight" below for what that cost and why it was not optional. `add`,
+`sub`, `mul` and the rescaling are thin wrappers over runtime calls that trap
+on overflow like every other number here. `Show` prints every place the scale
 says, so `1.50` stays `1.50` — a price to two places is a price to two places,
 and dropping the zero is how a total stops lining up in a column.
 
@@ -282,13 +287,14 @@ question about two numbers rather than a third number that has to exist, so it
 is answered in the runtime's wider arithmetic, where running out of room is
 itself the answer: a value too large to scale is larger than one that fits.
 
-**One operation needed the runtime.** Division has no exact answer in general,
-so it takes a scale and a rounding mode; and reaching that scale means
-computing `left * 10^n / right`, whose numerator overflows sixty-four bits for
-perfectly ordinary money — a hundred pounds to eight places wants twenty-six
-digits on the way to an answer needing ten. `khora_decimal_divide` does that
-intermediate in a Rust `i128` and hands back the one number that fits. Khora
-never sees the hundred and twenty-eight bits and needs no type for them.
+**Every operation on the significand is in the runtime**, because the
+significand is wider than any integer this language has. Khora holds it as two
+`Int` fields and never does arithmetic on them; `khora_decimal_add` and the
+rest take `hi, lo` and work in a Rust `i128`. Division needs more even than
+that: reaching a scale means computing `left * 10^n / right`, and with a
+128-bit significand that numerator wants two hundred and fifty-six bits, so the
+runtime carries it as a pair of `u128`s with a widening multiply and a
+shift-and-subtract division.
 
 **And when none of them fits, it stops the program.** It used to saturate, on
 a written-down argument that a total which quietly became a different total is
@@ -300,17 +306,59 @@ every build" above is the argument, and division was never outside it: `None`
 is for a divisor that turned out to be zero, which is a thing data does, and
 not for an answer that does not exist.
 
-**The significand is sixty-four bits, not the hundred and twenty-eight this
-document asked for.** Khora has no 128-bit integer and adding one to carry a
-money type would be a large language change for a small gain: eighteen
-significant digits is every currency amount anybody transacts, to the cent, up
-to ninety-nine thousand trillion.
+### Sixty-four bits, and why it had to be a hundred and twenty-eight
 
-**The literal is not built.** `Decimal::scaled(1, 2)` and
-`Decimal::of_string("0.01")` are how one is written today. `0.01d` is decided
-and specified above and remains worth doing — an exact *constant* is most of
-the point of the type — but the type without the literal is useful and the
-literal without the type is not, so this is the half that shipped first.
+The significand shipped at sixty-four, against what this document asked for, on
+an argument that reads well and is wrong: Khora has no 128-bit integer, adding
+one to carry a money type would be a large language change for a small gain,
+and eighteen significant digits is every currency amount anybody transacts.
+
+**True about amounts and false about arithmetic on them.** `add` brings both
+operands to the larger scale before adding, so
+
+```khora
+let notional = 100000000.00d;   // significand 10_000_000_000, scale 2
+let rate     = 0.000000000001d; // scale 12
+```
+
+needs the notional at scale twelve — `1e10 x 10^10 = 1e20` against a ceiling of
+`9.22e18`. It stopped the program. A hundred million against a twelve-decimal
+rate is unremarkable finance, not an exotic case, and `mul` is worse because it
+adds the scales, which is what makes it exact. An eighteen-decimal token
+balance ran out at 9.2 whole units.
+
+So the significand is a hundred and twenty-eight bits, which covers that case,
+`NUMERIC` as real schemas declare it, and the token balance.
+
+**The language did not change.** `IntKind` still stops at sixty-four and
+`Type::Int` is still `i64`. A `Decimal` holds `{ hi, lo, scale }` — the
+significand's two halves — and Khora never takes them apart. That is what makes
+this a library change rather than a language one, and it is why the objection
+this document recorded ("Khora has no 128-bit integer") does not apply to a
+significand the runtime holds.
+
+**A 128-bit answer comes back in two calls.** `docs/design/ffi.md` §1 allows
+only scalars and pointers across the boundary, because how a sixteen-byte
+aggregate returns is a decision LLVM makes for a struct type and rustc makes
+for a `repr(C)` one, and on x86-64 Windows they disagree silently — errata 35,
+which cost a day. So each operation returns the low half and leaves the high
+one where `khora_decimal_high()` finds it, and every wrapper in `std::decimal`
+takes it on the very next line. The same shape `khora_spawn_capture` and
+`khora_spawn_take` already use.
+
+**What it costs.** Three `Int` fields rather than two: twenty-four bytes,
+unboxed, no allocation and no pointer chase. TypeScript's Effect `BigDecimal`
+is a `BigInt` plus a number, which is at least two objects and a heap
+allocation per arithmetic result. The point of the width was never to match an
+arbitrary-precision library; it was to stop trapping on ordinary finance while
+staying a value that fits in registers.
+
+**And the limit is still a limit.** Thirty-eight digits, and going past stops
+the program rather than wrapping or saturating. During the widening the runtime
+briefly clamped a requested scale to thirty-eight, so `divide(x, y, 100,
+HalfEven)` computed to thirty-eight places and labelled the answer as having a
+hundred — a wrong number wearing the right hat, which is the exact failure this
+type exists to prevent. It is a trap now, and there is a test.
 
 ## Not yet
 

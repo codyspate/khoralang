@@ -16,18 +16,28 @@ A ledger cannot be built on a type whose equality is a trap.
 
 ## What a `Decimal` is
 
-A scaled integer: `units` counted in steps of `10^-scale`. `Decimal::scaled(
-1, 2)` is one hundredth. That is the representation SQL `NUMERIC`, Java's
-`BigDecimal` and .NET's `decimal` all approximate, and it is exact for
-anything written in decimal — which is what money is.
+A scaled integer: a significand counted in steps of `10^-scale`.
+`Decimal::scaled(1, 2)` is one hundredth. That is the representation SQL
+`NUMERIC`, Java's `BigDecimal` and .NET's `decimal` all approximate, and it
+is exact for anything written in decimal — which is what money is.
 
-**Sixty-four bits of significand rather than a hundred and twenty-eight**,
-which `numbers.md` names as the ideal. Khora has no 128-bit integer, and
-adding one to carry a money type would be a large language change for a
-small gain: eighteen significant digits is every currency amount anybody
-transacts, to the cent, up to ninety-nine thousand trillion. The intermediate
-of a division is done in 128 bits inside the runtime, where it is a Rust
-`i128` and nobody has to see it.
+**A hundred and twenty-eight bits of significand**, carried as two `Int`
+fields because Khora has no 128-bit integer and adding one to hold a library
+type would be a large language change for a small gain. The halves are never
+arithmetic here: every operation on them happens in the runtime, where the
+significand is one number.
+
+Sixty-four was tried first, on the argument that eighteen significant digits
+is every currency amount anybody transacts. **True about amounts and false
+about arithmetic on them.** `add` brings both operands to the larger scale
+before adding, so a hundred million against a rate to twelve places needed
+`1e10 × 10^10` against a ceiling of `9.22e18` and stopped the program. That
+is unremarkable finance. `mul` is worse, because it adds the scales, which
+is what makes it exact.
+
+A hundred and twenty-eight covers that, `NUMERIC` as real schemas declare
+it, and an eighteen-decimal token balance — where sixty-four bits ran out at
+9.2 whole units.
 
 ## What it does when it cannot answer
 
@@ -36,21 +46,20 @@ It stops the program, like every other number in Khora. `numbers.md`
 changes here: a total that silently wrapped is worse than one that never
 arrived. That covers `add`, `sub`, `mul`, `at_scale` and `divide` alike.
 
-Division is not an exception to it. Division takes a scale and a rounding
-because a quotient usually has no exact decimal form, and answers `None`
-when the divisor is zero because that is a thing data does — but an answer
-too large for the significand stops the program, the same as anywhere else.
-It used to saturate, which meant `Decimal::divide(10d, 1d, 18, HalfEven)`
-answered `9.223372036854775807`: in range, printed to the right number of
-places, and wrong. Somebody writing a reconciler found it in the first ten
-minutes.
+Division is not an exception to it. It takes a scale and a rounding because
+a quotient usually has no exact decimal form, and answers `None` when the
+divisor is zero because that is a thing data does — but an answer too large
+for the significand stops the program, the same as anywhere else. It used to
+saturate, which meant `Decimal::divide(10d, 1d, 18, HalfEven)` answered
+`9.223372036854775807`: in range, printed to the right number of places, and
+wrong. Somebody writing a reconciler found it in the first ten minutes.
 
 **The three that cannot stop the program are comparing, reading and
-printing**, and each was made not to. Comparing two numbers is a question
-about order and needs no common scale to exist. Reading text that is not a
-number — including a number too long to hold — is what `of_string`'s
-`Option` is for. And `show` is string work, so it prints every scale a
-`Decimal` can carry rather than the first eighteen.
+printing**, and each was made not to. Comparing is a question about order
+and needs no common scale to exist. Reading text that is not a number —
+including a numeral too long to hold — is what `of_string`'s `Option` is
+for. And `show` is string work, so it prints every scale a `Decimal` can
+carry rather than the first eighteen.
 
 ## Types
 
@@ -58,17 +67,24 @@ number — including a number too long to hold — is what `of_string`'s
 
 ```khora
 pub type Decimal = {
-  units: Int,
+  hi: Int,
+  lo: Int,
   scale: Int,
 };
 ```
 
 A number counted in steps of `10^-scale`.
 
+**`hi` and `lo` are one number in two halves**, the upper and lower
+sixty-four bits of a signed hundred-and-twenty-eight bit significand. They
+are two fields because only scalars cross into the runtime — see
+`docs/design/ffi.md` — and they are never taken apart anywhere else.
+
 The fields are public because a decimal is its representation and hiding it
-would only mean writing accessors for both. `scale` is never negative:
-`Decimal::scaled` refuses one, because a negative scale is a large number
-spelled confusingly and every caller who wants one means a larger `units`.
+would only mean writing accessors for all three. `scale` is never negative:
+the constructors clamp it, because a negative scale is a large number
+spelled confusingly and every caller who wants one means a larger
+significand.
 
 ### Rounding
 
@@ -118,6 +134,22 @@ Towards zero, always. What a truncation is.
 impl Decimal
 ```
 
+#### of_parts
+
+```khora
+pub fn of_parts(hi: Int, lo: Int, scale: Int) -> Decimal
+```
+
+A significand given as its two halves, counted in steps of `10^-scale`.
+
+**The total constructor**, and the widest one: it is the only way to build
+a `Decimal` whose significand does not fit an `Int`, which is why a `0.01d`
+literal desugars to this and why a decoder reading a 128-bit `NUMERIC`
+column wants it. Both halves are already numbers, so it cannot fail.
+
+A negative scale is refused by clamping to zero rather than by raising,
+since it can only arise from a caller that computed it.
+
 #### of_int
 
 ```khora
@@ -134,10 +166,8 @@ pub fn scaled(units: Int, scale: Int) -> Decimal
 
 `units` counted in steps of `10^-scale`.
 
-The total constructor, and the one a decoder reading a database column or
-a wire format wants: it cannot fail, because both halves are already
-numbers. A negative scale is refused by clamping to zero rather than by
-raising, since it can only arise from a caller that computed it.
+The constructor for a significand that fits an `Int`, which is nearly all
+of them; `of_parts` is the one for the rest.
 
 #### zero
 
@@ -156,8 +186,10 @@ pub fn at_scale(self, scale: Int) -> Decimal
 The same number at a larger scale.
 
 Exact, and stops the program if the significand cannot hold it — going
-from two decimal places to eighteen is a multiplication by ten thousand
-million million, and most numbers do not survive it.
+from two decimal places to thirty-eight is a multiplication by ten to the
+thirty-sixth, and most numbers do not survive it. A smaller scale is
+answered unchanged, because dropping places is rounding and `rounded` is
+where a caller says how.
 
 #### add
 
@@ -166,6 +198,10 @@ pub fn add(self, other: Decimal) -> Decimal
 ```
 
 The sum. Exact, and stops the program if it does not fit.
+
+Both operands come to the larger of their two scales first, which is the
+step that made sixty-four bits too narrow: the operands fit and their
+aligned forms did not.
 
 #### sub
 
@@ -206,11 +242,10 @@ that turned out to be zero is an ordinary thing for data to do, and
 `numbers.md` reserves stopping the program for a bug.
 
 **Stops the program when the answer does not fit**, which is a different
-thing and gets the different treatment. Asking for a hundred divided by
-four at eighteen places is asking for twenty digits, and there is no
-honest sixty-four bit answer to give: the nearest one is a different
-number, and handing back a different number is the failure this whole
-type exists to prevent. `rounded` goes through here, so it stops too.
+thing and gets the different treatment. There is no honest answer to give:
+the nearest one is a different number, and handing back a different number
+is the failure this whole type exists to prevent. `rounded` goes through
+here, so it stops too.
 
 #### rounded
 
@@ -231,6 +266,11 @@ pub fn negate(self) -> Decimal
 
 The number with the opposite sign.
 
+Subtraction from zero rather than a negation of its own, because the two
+halves are not a number this language can negate — and because the one
+significand with no positive twin should stop the program rather than
+answer itself.
+
 #### is_negative
 
 ```khora
@@ -247,6 +287,9 @@ pub fn is_zero(self) -> Bool
 
 Whether it is exactly zero.
 
+At any scale: zero has both halves clear however many places it was
+written to.
+
 #### truncated
 
 ```khora
@@ -255,10 +298,9 @@ pub fn truncated(self) -> Int
 
 The whole part, towards zero.
 
-Past eighteen places there is no whole part to find: the significand
-holds nineteen digits and they are all behind the point, so the answer is
-zero and asking `ten_to` for the step would only stop the program on the
-way to it.
+**Stops the program if the whole part is wider than an `Int`**, which is
+the one place a `Decimal` has to become one and may not fit. Past
+thirty-eight places there is no whole part to find and the answer is zero.
 
 #### of_string
 
@@ -272,6 +314,11 @@ Accepts a leading sign, digits, and at most one point. **Rejects
 everything else on purpose**, including the exponent notation `Float`
 takes: a number arriving as `1e-3` is a measurement that has been through
 a float somewhere, and taking it here would launder that history.
+
+A numeral too long for the significand is a rejection too, which is what
+the `Option` is already there for. This is the function that reads numbers
+out of files somebody else wrote, and one long cell must not kill the
+process.
 
 ## Trait implementations
 
@@ -295,9 +342,9 @@ have an `Eq` and this can.
 **And it cannot stop the program**, which took a second attempt. It used
 to bring both operands to a common scale, the same way `add` does — so
 comparing a hundred million against a rate to twelve places asked for a
-multiplication by `10^12` that no `Int` survives, and two perfectly legal
-numbers halted a reconciler. An equality that traps is a worse trap than
-one that surprises, and this one is sold as the reason to prefer
+multiplication by `10^12` that no significand survives, and two perfectly
+legal numbers halted a reconciler. An equality that traps is a worse trap
+than one that surprises, and this one is sold as the reason to prefer
 `Decimal` at all.
 
 ### Ord for Decimal
@@ -312,7 +359,8 @@ impl Ord for Decimal
 fn cmp(self, other: Decimal) -> Ordering
 ```
 
-The same comparison, and the same reason it does not go through `align`.
+The same comparison, and the same reason it does not go through `add`'s
+alignment.
 
 ### Show for Decimal
 
@@ -332,13 +380,15 @@ Every place the scale says, including trailing zeros.
 scale is part of what was meant: a price to two places stays a price to
 two places, and dropping the zero is how a total stops lining up in a
 column.
+
 **Done as text rather than as arithmetic**, which is what lets it print
 every number a `Decimal` can hold. Splitting the significand with
-`units / 10^scale` needs `10^scale` to be a number, and past eighteen
-places it is not — so `mul` on two numbers with ten places each produced
+`units / 10^scale` needs `10^scale` to be a number, and past the widest
+power it is not — so `mul` on two numbers with twenty places each produced
 a value that was perfectly legal and stopped the program when printed.
 Cutting a string at a position needs nothing to fit.
 
-It also means the most negative `Int` prints. Negating it to take a
-magnitude would overflow, and the sign is a character here.
+It also means the most negative significand prints. Negating it to take a
+magnitude would overflow, so the runtime writes the magnitude and the sign
+is a character here.
 

@@ -156,6 +156,38 @@ Where a library genuinely has no other channel, the error must be read **inside
 the shim**, on the same side of the boundary as the call that set it, and
 returned as a value.
 
+### The one thread-local that is read from Khora, and why it is allowed
+
+`khora_decimal_high()` returns the upper half of the last 128-bit answer, out of
+a thread-local this runtime sets. That is the shape the section above rules out,
+so the exception needs its condition stated rather than assumed.
+
+The reason it exists is rule 1: a `Decimal`'s significand is a hundred and
+twenty-eight bits, and an aggregate must not cross, so an operation can only
+return half of it. The rest has to be fetched.
+
+What makes it safe is not that it is our own runtime — `errno` would be no
+worse if it were. It is that **the read is the next instruction**. Every wrapper
+in `std/decimal.kh` is
+
+```khora
+let lo = khora_decimal_add(...);
+let hi = khora_decimal_high();
+```
+
+and the argument above turns on suspension: a fiber moves between workers at a
+safepoint, and the only safepoint generated code emits is a loop back-edge
+(`lower.rs`'s `back_edge`). There is no back-edge between two adjacent `let`s,
+so there is no point at which the fiber can change workers, so the thread-local
+is the same one.
+
+That is a real proof and a narrow one. It does **not** license reading a
+foreign library's thread-local after a call, because that argument needs the
+value to be set and read on the two sides of a single statement boundary that
+the compiler is known not to interrupt — which is a property of this runtime's
+own paired entry points and of nothing else. `khora_spawn_capture` and
+`khora_spawn_take` are the other pair, and the same condition holds for them.
+
 ## 3. Capabilities: required, not passed
 
 **A `with` clause on a foreign function is a permission, and nothing is
