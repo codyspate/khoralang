@@ -120,6 +120,30 @@ pub fn integer(name: String) -> Validated<Int, ConfigError> with { env: Env }
 
 The variable as a whole number.
 
+### decimal
+
+```khora
+pub fn decimal(name: String) -> Validated<Decimal, ConfigError> with { env: Env }
+```
+
+The variable as an exact decimal.
+
+**This is the language for money and the config reader could not read
+any.** A rate, a threshold, a fee cap and a currency amount are all
+settings, and the three readers above are `Int`, `Bool` and `String` --
+so the only way to configure a rate was to read it as text and parse it
+again at the call site, or worse, to read it as an `Int` of basis points
+and hope everybody downstream remembered the scale.
+
+Exponent notation is refused, the way `Decimal::of_string` refuses it: a
+number arriving as `1e-3` has been through a float somewhere, and a
+configuration file is exactly where that would go unnoticed.
+
+**The scale is whatever was written.** `0.10` reads at two places and
+`0.1` at one, and they are the same number -- `Decimal`'s `Eq` says so --
+but a rate written to four places stays written to four, which is what
+makes a total built from it print the way the person who set it expected.
+
 ### boolean
 
 ```khora

@@ -554,6 +554,100 @@ impl<A, E> Validated<A, E> {
     }
   }
 
+  /// Three together, keeping every side's failures.
+  ///
+  /// **`map2` stopped at two and a CSV row has five columns.** Building a
+  /// record out of four validated fields meant nesting `map2` and carrying a
+  /// tuple through it, or hand-rolling the accumulation -- which two of the
+  /// four review programs did, separately.
+  ///
+  /// Errors come back left to right, whichever sides failed, and `f` runs only
+  /// when every side succeeded. Written out rather than built from `map2`
+  /// through a chain of pairs: that version works and reads `p.key.key.value`
+  /// by the time it reaches five.
+  pub fn map3<B, C, D>(
+    self, b: Validated<B, E>, c: Validated<C, E>, f: (A, B, C) -> D
+  ) -> Validated<D, E> {
+    match self {
+      Validated::Valid(x) => match b {
+        Validated::Valid(y) => match c {
+          Validated::Valid(z) => Validated::Valid(f(x, y, z)),
+          Validated::Invalid(errors) => Validated::Invalid(errors),
+        },
+        Validated::Invalid(errors) => Validated::Invalid(List::concat(errors, faults_of(c))),
+      },
+      Validated::Invalid(errors) =>
+      Validated::Invalid(List::concat(errors, List::concat(faults_of(b), faults_of(c)))),
+    }
+  }
+
+  /// Four together, keeping every side's failures.
+  pub fn map4<B, C, D, F>(
+    self, b: Validated<B, E>, c: Validated<C, E>, d: Validated<D, E>, f: (A, B, C, D) -> F
+  ) -> Validated<F, E> {
+    match self {
+      Validated::Valid(w) => match b {
+        Validated::Valid(x) => match c {
+          Validated::Valid(y) => match d {
+            Validated::Valid(z) => Validated::Valid(f(w, x, y, z)),
+            Validated::Invalid(errors) => Validated::Invalid(errors),
+          },
+          Validated::Invalid(errors) => Validated::Invalid(List::concat(errors, faults_of(d))),
+        },
+        Validated::Invalid(errors) =>
+        Validated::Invalid(List::concat(errors, List::concat(faults_of(c), faults_of(d)))),
+      },
+      Validated::Invalid(errors) => Validated::Invalid(List::concat(
+          errors,
+          List::concat(faults_of(b), List::concat(faults_of(c), faults_of(d))),
+        )),
+    }
+  }
+
+  /// Five together, keeping every side's failures.
+  ///
+  /// Five is where this stops, because a CSV row is what asked for it and a
+  /// sixth field is a record built out of two of these. `List::traverse` does
+  /// the unbounded version and would have done the whole job -- except that
+  /// `Validated` is deliberately not an `Applicative`, for the reason the type
+  /// gives above, so the one type in `std` built for accumulating errors
+  /// cannot use it.
+  pub fn map5<B, C, D, F, G>(
+    self,
+    b: Validated<B, E>,
+    c: Validated<C, E>,
+    d: Validated<D, E>,
+    e: Validated<F, E>,
+    f: (A, B, C, D, F) -> G,
+  ) -> Validated<G, E> {
+    match self {
+      Validated::Valid(v) => match b {
+        Validated::Valid(w) => match c {
+          Validated::Valid(x) => match d {
+            Validated::Valid(y) => match e {
+              Validated::Valid(z) => Validated::Valid(f(v, w, x, y, z)),
+              Validated::Invalid(errors) => Validated::Invalid(errors),
+            },
+            Validated::Invalid(errors) => Validated::Invalid(List::concat(errors, faults_of(e))),
+          },
+          Validated::Invalid(errors) =>
+          Validated::Invalid(List::concat(errors, List::concat(faults_of(d), faults_of(e)))),
+        },
+        Validated::Invalid(errors) => Validated::Invalid(List::concat(
+            errors,
+            List::concat(faults_of(c), List::concat(faults_of(d), faults_of(e))),
+          )),
+      },
+      Validated::Invalid(errors) => Validated::Invalid(List::concat(
+          errors,
+          List::concat(
+            faults_of(b),
+            List::concat(faults_of(c), List::concat(faults_of(d), faults_of(e))),
+          ),
+        )),
+    }
+  }
+
   /// A second step that can fail, run only if the first did not.
   ///
   /// **Fails fast, and that is not a contradiction.** `map2` collects because
@@ -584,6 +678,19 @@ impl<A, E> Validated<A, E> {
   /// The value, or `fallback` if anything was wrong.
   pub fn unwrap_or(self, fallback: A) -> A {
     match self { Validated::Valid(v) => v, Validated::Invalid(_e) => fallback }
+  }
+}
+
+/// What went wrong inside, or nothing.
+///
+/// A free function rather than a method because `map3` and its neighbours ask
+/// it of sides whose *value* types differ from their own -- `Validated<B, E>`
+/// where the impl block is fixed at `A`. The error type is the one thing they
+/// share, and it is the only one this looks at.
+fn faults_of<X, E>(value: Validated<X, E>) -> List<E> {
+  match value {
+    Validated::Valid(_v) => List::Nil,
+    Validated::Invalid(errors) => errors,
   }
 }
 

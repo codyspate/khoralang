@@ -1199,6 +1199,47 @@ did not, the answer carries every error from both, left to right, and `f`
 is not called. Chained through a record's fields it reports the whole
 form in one pass.
 
+#### map3
+
+```khora
+pub fn map3<B, C, D>(self, b: Validated<B, E>, c: Validated<C, E>, f: (A, B, C) -> D) -> Validated<D, E>
+```
+
+Three together, keeping every side's failures.
+
+**`map2` stopped at two and a CSV row has five columns.** Building a
+record out of four validated fields meant nesting `map2` and carrying a
+tuple through it, or hand-rolling the accumulation -- which two of the
+four review programs did, separately.
+
+Errors come back left to right, whichever sides failed, and `f` runs only
+when every side succeeded. Written out rather than built from `map2`
+through a chain of pairs: that version works and reads `p.key.key.value`
+by the time it reaches five.
+
+#### map4
+
+```khora
+pub fn map4<B, C, D, F>(self, b: Validated<B, E>, c: Validated<C, E>, d: Validated<D, E>, f: (A, B, C, D) -> F) -> Validated<F, E>
+```
+
+Four together, keeping every side's failures.
+
+#### map5
+
+```khora
+pub fn map5<B, C, D, F, G>(self, b: Validated<B, E>, c: Validated<C, E>, d: Validated<D, E>, e: Validated<F, E>, f: (A, B, C, D, F) -> G) -> Validated<G, E>
+```
+
+Five together, keeping every side's failures.
+
+Five is where this stops, because a CSV row is what asked for it and a
+sixth field is a record built out of two of these. `List::traverse` does
+the unbounded version and would have done the whole job -- except that
+`Validated` is deliberately not an `Applicative`, for the reason the type
+gives above, so the one type in `std` built for accumulating errors
+cannot use it.
+
 #### and_then
 
 ```khora
