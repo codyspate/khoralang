@@ -87,13 +87,15 @@ for user in users {
 }
 ```
 
-The left side is a pattern, so destructuring is allowed when the iterator's item shape is known:
+The left side is a pattern, so destructuring is allowed when the iterator's item shape is known. `Dict::entries` yields a `Pair`, which is a record, so its halves are reached by name:
 
 ```khora
-for (key, value) in entries {
-  print("${key}: ${value}");
+for entry in Dict::entries(table) {
+  print("${entry.key}: ${Int::to_string(entry.value)}");
 }
 ```
+
+Khora has no tuple literal, so `for (key, value) in ...` only works where the item's type genuinely is a tuple. Against anything else it is refused, naming the type it found.
 
 `for` is desugared to the `Iterator` trait's `next`, which hands back the next item and the iterator that follows it. Both `Iterator` and `Step` have to be in scope where the loop is written:
 

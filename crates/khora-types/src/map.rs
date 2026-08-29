@@ -615,6 +615,73 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
 /// `InherentImpl::visible` answers for another module and only exported methods
 /// bring a signature across: a hidden method is not merely unreachable, its
 /// type is not here to be read.
+/// Whether `head` names a type a program can write without importing it.
+///
+/// The list is short and closed: these are the types the language spells and
+/// no module declares, so no `import` line could ever bring one in.
+fn is_builtin_head(head: &str) -> bool {
+    matches!(head, "Int" | "Float" | "Bool" | "String" | "Ptr" | "()")
+        || head.starts_with('I')
+            && head[1..].parse::<u32>().is_ok()
+        || head.starts_with('U')
+            && head[1..].parse::<u32>().is_ok()
+}
+
+/// Copies `std::core`'s trait impls **on builtin types** into `map`.
+///
+/// **The same argument as [`import_inherent`], one level up.** An impl arrives
+/// in a module with its trait or with its type, and both routes miss
+/// `impl Ord for String`: `String` is a builtin, so no `import` line mentions
+/// it, and that leaves importing `Ord` as the only way. So
+///
+/// ```khora
+/// import std::core::{Dict};          // no `Ord`
+/// fn lookup(t: Dict<String, Thing>, k: String) -> Bool { Dict::contains(t, k) }
+/// ```
+///
+/// was told ``String` does not implement `Ord`` — about a type that has
+/// implemented it since `std::core` was written, in a message a reader has no
+/// way to act on except by guessing.
+///
+/// It was worse than a wrong message. Adding `Ord` to the import fixes it, and
+/// then `unused-import` reports `Ord` as unused, because satisfying a bound is
+/// not a *use* the lint counts — so following the compiler's own advice puts
+/// the error back. Two people hit that loop independently.
+///
+/// Only builtin heads, and only from `std::core`. Bringing every impl across
+/// would put methods within reach of a file that cannot name the type, which
+/// is what the import rule is for everywhere else.
+pub(crate) fn import_builtin_impls(exported: &TypeMap, map: &mut TypeMap) {
+    for imp in exported.traits.impls.iter().filter(|i| {
+        i.head().is_some_and(|head| is_builtin_head(&head))
+    }) {
+        let known = map
+            .traits
+            .impls
+            .iter()
+            .any(|i| i.trait_name == imp.trait_name && i.head() == imp.head());
+        if known {
+            continue;
+        }
+        let mut imp = imp.clone();
+        imp.local = false;
+        map.traits.impls.push(imp);
+    }
+
+    // The trait definition travels with the impl. Without it `satisfies` finds
+    // the impl and `check_bounds` skips the whole question, because a trait it
+    // does not know is one it declines to report on -- so a *missing* impl
+    // would go unreported instead. Both halves of the bug were the same gap.
+    for imp in &map.traits.impls {
+        if let Some(def) = exported.traits.traits.get(&imp.trait_name) {
+            map.traits
+                .traits
+                .entry(imp.trait_name.clone())
+                .or_insert_with(|| def.clone());
+        }
+    }
+}
+
 pub(crate) fn import_inherent(exported: &TypeMap, map: &mut TypeMap) {
     for imp in &exported.traits.inherent {
         // Marked before the duplicate check, or the same impl arrives once per
@@ -666,7 +733,12 @@ pub(crate) fn import_types(
     let core = khora_hir::ModulePath::new(vec!["std".to_string(), "core".to_string()]);
     if let Some(source) = graph.file(&core) {
         if source != file {
-            import_inherent(type_map(db, source), map);
+            let core = type_map(db, source);
+            import_inherent(core, map);
+            // And the *trait* impls on those same builtins, for the reason
+            // written on the function: `impl Ord for String` has no import
+            // line that could bring it, because `String` has none.
+            import_builtin_impls(core, map);
         }
     }
 

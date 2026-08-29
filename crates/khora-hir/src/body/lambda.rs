@@ -46,9 +46,9 @@ impl<'a> Ctx<'a> {
                 match p.name().and_then(|n| n.ident()) {
                     Some(name) => {
                         let local = self.declare(name, false, range);
-                        self.add_pat(Pat::Bind(local))
+                        self.add_pat(Pat::Bind(local), range)
                     }
-                    None => self.add_pat(Pat::Wildcard),
+                    None => self.add_pat(Pat::Wildcard, range),
                 }
             })
             .collect();
@@ -109,7 +109,7 @@ impl<'a> Ctx<'a> {
         self.lambda_names.push(None);
 
         let local = self.declare("flow value".to_string(), false, range);
-        let params = vec![self.add_pat(Pat::Bind(local))];
+        let params = vec![self.add_pat(Pat::Bind(local), range)];
 
         let outer_loops = std::mem::take(&mut self.loop_depth);
         let mut value = self.add_expr(Expr::Local(local), range);

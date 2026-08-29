@@ -85,8 +85,12 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     if !self.satisfies(wanted, &arg) {
+                        let called = traits::readable_key(&name);
                         self.error(
-                            format!("`{arg}` does not implement `{wanted}`, which `{name}` requires"),
+                            format!(
+                                "`{arg}` does not implement `{wanted}`, which `{called}` \
+                                 requires"
+                            ),
                             range,
                         );
                     }

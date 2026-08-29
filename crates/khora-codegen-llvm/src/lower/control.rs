@@ -296,6 +296,9 @@ impl<'ctx> Lower<'_, 'ctx> {
             break_to: exit,
             scope_depth: self.scopes.len(),
             breaks: 0,
+            // A `while` is `()`: it may end because its condition went false,
+            // and there would be nothing to have put in a slot.
+            result: None,
         });
         self.at(body_block);
         let body_ty = self.types.of(body).clone();
@@ -313,16 +316,32 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(self.be.unit_value())
     }
 
-    pub(super) fn lower_loop(&mut self, body: ExprId) -> Flow<'ctx> {
+    /// **A `loop` is an expression, and `break` may carry its value.**
+    ///
+    /// It could not, and the refusal said "a `loop`'s type is not inferred in
+    /// phase 2, so there is nothing for the value to flow into". That stopped
+    /// being true: the checker gives a `loop` a fresh variable, unifies every
+    /// `break` value with it, and settles on `()` when nothing carries one.
+    /// So the type was there and only the lowering had not caught up — which
+    /// made this a program `khora check` accepted and `khora build` refused,
+    /// with a worked example in `reference/control-flow.md`.
+    ///
+    /// The value travels in the same kind of slot an `if` or a `match` uses,
+    /// for the same reason: several blocks write it and one reads it.
+    pub(super) fn lower_loop(&mut self, site: ExprId, body: ExprId) -> Flow<'ctx> {
         let body_block = self.block("loop.body");
         let exit = self.block("loop.end");
         self.br(body_block);
+
+        let answer = self.types.of(site).clone();
+        let result = self.result_slot(&answer);
 
         self.loops.push(LoopFrame {
             continue_to: body_block,
             break_to: exit,
             scope_depth: self.scopes.len(),
             breaks: 0,
+            result,
         });
         self.at(body_block);
         let body_ty = self.types.of(body).clone();
@@ -340,22 +359,24 @@ impl<'ctx> Lower<'_, 'ctx> {
             self.be.builder.build_unreachable().expect("sealing an endless loop");
             return None;
         }
-        Some(self.be.unit_value())
+        Some(self.load_result(frame.result, &answer))
     }
 
     pub(super) fn lower_break(&mut self, value: Option<ExprId>, range: TextRange) -> Flow<'ctx> {
-        if value.is_some() {
-            return self.fail(
-                "`break` with a value is not supported yet: a `loop`'s type is not inferred in \
-                 phase 2, so there is nothing for the value to flow into",
-                range,
-            );
-        }
+        // Evaluated before the scopes are left, because it may name something
+        // they hold — the same order `lower_return` uses, and for the reason.
+        let carried = match value {
+            Some(expr) => Some(self.expr(expr)?),
+            None => None,
+        };
         let Some(frame) = self.loops.last() else {
             return self.fail("`break` outside a loop", range);
         };
-        let (target, depth) = (frame.break_to, frame.scope_depth);
+        let (target, depth, slot) = (frame.break_to, frame.scope_depth, frame.result);
         self.unwind_to(depth);
+        if let Some(carried) = carried {
+            self.store_result(slot, carried);
+        }
         self.loops.last_mut().expect("checked above").breaks += 1;
         self.br(target);
         None

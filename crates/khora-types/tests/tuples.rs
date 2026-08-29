@@ -121,3 +121,67 @@ fn a_tuple_in_a_type_argument_is_compared_componentwise() {
         "returns `Tensor<(2, 4)>`, but its body has type `Tensor<(2, 3)>`",
     );
 }
+
+/// **A tuple pattern against something that is not a tuple is refused.**
+///
+/// `let (a, b) = 5;` checked clean, with two unused-binding warnings and
+/// nothing else. The bindings took `Unknown`, so touching one produced the
+/// compiler's own confession -- "the type of this expression was never worked
+/// out, and nothing else was reported ... this is a gap in the compiler worth
+/// reporting" -- and leaving them alone produced no complaint at all.
+///
+/// The comment that used to sit in `bind_pattern` said a mismatch is "reported
+/// where the two are unified". Nothing unifies a `let`'s pattern with its
+/// initializer's type, so nothing ever reported it.
+#[test]
+fn a_tuple_pattern_needs_a_tuple() {
+    assert_reports(
+        "module m;\nfn f() -> Int { let (a, b) = 5; a }\n",
+        "takes a value apart into 2 pieces, but `Int` is not a tuple",
+    );
+}
+
+/// The width has to match too, and the message says both numbers.
+#[test]
+fn a_tuple_pattern_of_the_wrong_width_is_refused() {
+    assert_reports(
+        "module m;\nfn f() -> Int { let (a, b, c) = (1, 2); a }\n",
+        "takes a value apart into 3 pieces, but `(Int, Int)` has 2",
+    );
+}
+
+/// One piece reads as one piece.
+#[test]
+fn the_message_counts_in_english() {
+    assert_reports(
+        "module m;\nfn f() -> Int { let (a) = 5; a }\n",
+        "takes a value apart into 1 piece",
+    );
+}
+
+/// **And a tuple pattern against a real tuple still binds**, which is the half
+/// the check had to leave alone.
+#[test]
+fn a_tuple_pattern_against_a_tuple_is_fine() {
+    assert_clean("module m;\nfn f() -> Int { let (a, b) = (1, 2); a + b }\n");
+    assert_clean(
+        "module m;\nfn f(p: (Int, Bool)) -> Int { match p { (n, _b) => n } }\n",
+    );
+}
+
+/// An unsolved type is not a mismatch, it is inference that has not finished.
+/// Reporting one here would blame a line for a question asked too early; the
+/// `Unknown` audit at the end of checking is what catches the ones that never
+/// settle.
+#[test]
+fn an_unsolved_scrutinee_is_not_reported_as_a_mismatch() {
+    let db = KhoraDatabase::new();
+    let found = errors(
+        &db,
+        "module m;\nfn f<A>(v: A) -> A { v }\nfn g() -> Int { let (a, b) = f((1, 2)); a + b }\n",
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("is not a tuple")),
+        "inference settles this one: {found:?}"
+    );
+}

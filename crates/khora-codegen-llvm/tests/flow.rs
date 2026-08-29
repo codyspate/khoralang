@@ -223,3 +223,55 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "2\n2\n");
     assert_eq!(ran.code, Some(0));
 }
+
+/// **`break` carries a value.**
+///
+/// The checker has always been able to type this: a `loop` gets a fresh
+/// variable, every `break` value unifies with it, and a loop nobody breaks out
+/// of with something settles on `()`. Only the lowering had not caught up, and
+/// it refused with "a `loop`'s type is not inferred in phase 2, so there is
+/// nothing for the value to flow into" -- which had stopped being true.
+///
+/// So `khora check` accepted a program `khora build` refused, for a form with
+/// a worked example in `reference/control-flow.md`. That is the worst thing a
+/// toolchain can do, because `check` is the fast loop and the language server
+/// shares it.
+#[test]
+fn a_loop_can_break_with_a_value() {
+    let out = run(
+        "break_value",
+        "module t;
+fn print(value: Int);
+extern fn khora_print_int(value: Int);
+
+fn main() -> Int {
+  let mut n = 0;
+  let found = loop {
+    n = n + 1;
+    if n > 3 { break n; }
+  };
+  print(found);
+
+  // Several breaks, which is what the slot is for: more than one block
+  // writes it and one reads it.
+  let mut k = 0;
+  let pick = loop {
+    k = k + 1;
+    if k == 1 { break 10; };
+    if k == 2 { break 20; };
+  };
+  print(pick);
+
+  // And a `loop` nobody breaks with a value is still `()`, so the block
+  // after it is reached with nothing to load.
+  let mut m = 0;
+  loop { m = m + 1; if m > 2 { break; } };
+  print(m);
+  0
+}
+",
+    );
+
+    assert_eq!(out.stdout, "4\n10\n3\n");
+    assert_eq!(out.code, Some(0));
+}

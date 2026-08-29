@@ -103,12 +103,21 @@ for pattern in iterable {
 }
 ```
 
-The left side is a pattern:
+The left side is a pattern. Khora has no tuple *literal*, so an iterator over
+pairs yields a `Pair`, and the loop binds it by name:
 
 ```khora
-for (key, value) in entries {
-  print(key);
+for entry in Dict::entries(table) {
+  print("${entry.key}: ${Int::to_string(entry.value)}");
 }
+```
+
+A tuple pattern — `for (key, value) in ...` — is only valid against a value
+whose type really is a tuple, and is refused otherwise:
+
+```
+error: this pattern takes a value apart into 2 pieces, but `Pair<String, Int>`
+       is not a tuple
 ```
 
 `for` desugars to `Iterator::next`, so both `Iterator` and `Step` must be in scope in the module that writes the loop:

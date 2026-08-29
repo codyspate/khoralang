@@ -137,13 +137,15 @@ A refutable shape belongs in `match` instead, where all possible alternatives ca
 
 ## Patterns in `for`
 
-The binding side of `for` is also a pattern:
+The binding side of `for` is also a pattern, and the same rules apply to it as to `let`: it has to be valid for the item's type, and it may not be refutable.
 
 ```khora
-for (key, value) in entries {
-  print("${key}: ${value}");
+for entry in Dict::entries(table) {
+  print("${entry.key}: ${Int::to_string(entry.value)}");
 }
 ```
+
+A `Pair` is a record, so its halves come off it by name. A tuple pattern is for a value whose type really is a tuple.
 
 ## Patterns in `catch`
 

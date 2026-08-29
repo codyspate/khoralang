@@ -144,7 +144,7 @@ impl<'a> Ctx<'a> {
             let local = self.declare(name.clone(), false, path.syntax().text_range());
             self.in_scope.push((name, local));
             self.body.by_type.push(local);
-            let pat = self.add_pat(Pat::Bind(local));
+            let pat = self.add_pat(Pat::Bind(local), path.syntax().text_range());
             stmts.push(Stmt::Let { pat, ty: None, init: Some(value) });
         }
         for field in row {
@@ -159,9 +159,9 @@ impl<'a> Ctx<'a> {
                     labels.push(label.clone());
                     let local = self.declare(label.clone(), false, field.syntax().text_range());
                     self.in_scope.push((label, local));
-                    self.add_pat(Pat::Bind(local))
+                    self.add_pat(Pat::Bind(local), field.syntax().text_range())
                 }
-                None => self.add_pat(Pat::Wildcard),
+                None => self.add_pat(Pat::Wildcard, field.syntax().text_range()),
             };
             stmts.push(Stmt::Let { pat, ty: None, init: Some(value) });
         }

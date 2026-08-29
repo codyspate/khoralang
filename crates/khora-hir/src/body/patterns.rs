@@ -12,34 +12,34 @@ impl<'a> Ctx<'a> {
     pub(super) fn lower_pat(&mut self, pat: &ast::Pat, is_mut: bool) -> PatId {
         let range = pat.syntax().text_range();
         match pat {
-            ast::Pat::Wildcard(_) => self.add_pat(Pat::Wildcard),
+            ast::Pat::Wildcard(_) => self.add_pat(Pat::Wildcard, range),
             ast::Pat::Ident(p) => match p.name().and_then(|n| n.ident()) {
                 Some(name) => {
                     let local = self.declare(name, is_mut, range);
-                    self.add_pat(Pat::Bind(local))
+                    self.add_pat(Pat::Bind(local), range)
                 }
-                None => self.add_pat(Pat::Missing),
+                None => self.add_pat(Pat::Missing, range),
             },
             ast::Pat::Literal(p) => match literal_of(p.syntax()) {
-                Some(lit) => self.add_pat(Pat::Literal(lit)),
-                None => self.add_pat(Pat::Missing),
+                Some(lit) => self.add_pat(Pat::Literal(lit), range),
+                None => self.add_pat(Pat::Missing, range),
             },
             ast::Pat::Path(p) => {
                 let resolution = self.resolve_pattern_path(p.path().as_ref(), range);
-                self.add_pat(Pat::Path(resolution))
+                self.add_pat(Pat::Path(resolution), range)
             }
             ast::Pat::TupleStruct(p) => {
                 let resolution = self.resolve_pattern_path(p.path().as_ref(), range);
                 let fields = p.fields().map(|f| self.lower_pat(&f, is_mut)).collect();
-                self.add_pat(Pat::TupleStruct { resolution, fields })
+                self.add_pat(Pat::TupleStruct { resolution, fields }, range)
             }
             ast::Pat::Tuple(p) => {
                 let fields = p.fields().map(|f| self.lower_pat(&f, is_mut)).collect();
-                self.add_pat(Pat::Tuple(fields))
+                self.add_pat(Pat::Tuple(fields), range)
             }
             ast::Pat::Record(_) => {
                 self.error("record patterns are not supported yet", range);
-                self.add_pat(Pat::Missing)
+                self.add_pat(Pat::Missing, range)
             }
         }
     }
@@ -96,7 +96,7 @@ impl<'a> Ctx<'a> {
             self.scopes.push(Vec::new());
             let pat = match arm.pat() {
                 Some(p) => self.lower_pat(&p, false),
-                None => self.add_pat(Pat::Missing),
+                None => self.add_pat(Pat::Missing, arm.syntax().text_range()),
             };
             let guard = arm.guard().and_then(|g| g.condition()).map(|c| self.lower_expr(&c));
             let body = match arm.body() {

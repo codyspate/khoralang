@@ -344,6 +344,13 @@ pub struct Body {
     locals: Vec<Local>,
     /// Source range of each expression, for diagnostics.
     expr_ranges: Vec<TextRange>,
+    /// The same for patterns, so a diagnostic about one can point at it.
+    ///
+    /// Added because a tuple pattern against a value that is not a tuple was
+    /// accepted in silence -- the bindings got `Unknown` and the program was
+    /// refused later, by the code generator, against a line with nothing wrong
+    /// with it. Saying so needs somewhere to say it.
+    pat_ranges: Vec<TextRange>,
     pub params: Vec<PatId>,
     /// The capabilities this function requires, by the label the body calls
     /// them and the binding that holds them.
@@ -398,6 +405,7 @@ impl Body {
     /// and mean nothing in the file the reader has open.
     fn blame(&mut self, at: TextRange) {
         self.expr_ranges.iter_mut().for_each(|range| *range = at);
+        self.pat_ranges.iter_mut().for_each(|range| *range = at);
         self.locals.iter_mut().for_each(|local| local.range = at);
         self.errors.iter_mut().for_each(|error| error.range = at);
     }
@@ -446,6 +454,11 @@ impl Body {
 
     pub fn range(&self, id: ExprId) -> TextRange {
         self.expr_ranges[id.index()]
+    }
+
+    /// Where a pattern was written.
+    pub fn pat_range(&self, id: PatId) -> TextRange {
+        self.pat_ranges[id.index()]
     }
 
     pub fn exprs(&self) -> impl Iterator<Item = (ExprId, &Expr)> {
@@ -678,9 +691,9 @@ fn lower_function(
             let pat = match param.name().and_then(|n| n.ident()) {
                 Some(name) => {
                     let local = ctx.declare(name, false, range);
-                    ctx.add_pat(Pat::Bind(local))
+                    ctx.add_pat(Pat::Bind(local), range)
                 }
-                None => ctx.add_pat(Pat::Wildcard),
+                None => ctx.add_pat(Pat::Wildcard, range),
             };
             ctx.body.params.push(pat);
         }
@@ -698,7 +711,7 @@ fn lower_function(
     labels.dedup();
     for label in labels {
         let local = ctx.declare(label.clone(), false, decl.syntax().text_range());
-        let pat = ctx.add_pat(Pat::Bind(local));
+        let pat = ctx.add_pat(Pat::Bind(local), decl.syntax().text_range());
         ctx.in_scope.push((label.clone(), local));
         ctx.body.evidence.push((label, pat));
     }
@@ -823,8 +836,9 @@ impl<'a> Ctx<'a> {
         id
     }
 
-    fn add_pat(&mut self, pat: Pat) -> PatId {
+    fn add_pat(&mut self, pat: Pat, range: TextRange) -> PatId {
         self.body.pats.push(pat);
+        self.body.pat_ranges.push(self.shifted(range));
         PatId((self.body.pats.len() - 1) as u32)
     }
 

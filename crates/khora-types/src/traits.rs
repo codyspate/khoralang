@@ -471,6 +471,29 @@ pub fn method_key(trait_name: &str, head: &str, method: &str) -> String {
     format!("{trait_name}#{head}::{method}")
 }
 
+/// A signature key as somebody should read it.
+///
+/// [`method_key`] separates the trait from the type with a `#`, and an
+/// inherent impl has no trait -- so the key of `Dict::insert` is
+/// `#Dict::insert`, and that is what a reader was shown:
+///
+/// ```text
+/// error: `Colour` does not implement `Ord`, which `#Dict::insert` requires
+/// ```
+///
+/// The `#` is this module's punctuation and means nothing outside it. A
+/// message that shows it is asking somebody to know how the compiler stores
+/// things in order to read a sentence about their own program.
+pub fn readable_key(key: &str) -> &str {
+    match key.split_once('#') {
+        // `Trait#Head::method` -- the trait is the interesting half and is
+        // already named elsewhere in every message that gets here, so the
+        // qualified method is what to show.
+        Some((_, rest)) => rest,
+        None => key,
+    }
+}
+
 /// The signature of each impl method, keyed by [`method_key`].
 ///
 /// Read from the impl's own written signature rather than derived from the

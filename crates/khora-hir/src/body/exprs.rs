@@ -41,7 +41,7 @@ impl<'a> Ctx<'a> {
                     });
                     let pat = match let_decl.pat() {
                         Some(p) => self.lower_pat(&p, let_decl.is_mut()),
-                        None => self.add_pat(Pat::Missing),
+                        None => self.add_pat(Pat::Missing, let_decl.syntax().text_range()),
                     };
                     let ty = let_decl.ty().as_ref().map(TypeRef::of_syntax);
                     stmts.push(Stmt::Let { pat, ty, init });

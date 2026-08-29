@@ -138,12 +138,12 @@ A pattern used directly by `let` must be valid for the value's type without requ
 ## Patterns in `for`
 
 ```khora
-for (key, value) in entries {
-  use_entry(key, value);
+for entry in Dict::entries(table) {
+  use_entry(entry.key, entry.value);
 }
 ```
 
-The pattern binds each yielded item.
+The pattern binds each yielded item, under the same rules as `let`: valid for the item's type, and irrefutable. `Dict::entries` yields a `Pair`, which is a record — a tuple pattern such as `(key, value)` is only valid where the item's type is a tuple, and is refused otherwise.
 
 ## Patterns in `catch`
 

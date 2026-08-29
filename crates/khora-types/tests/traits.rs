@@ -881,3 +881,105 @@ fn two_supertraits_are_both_kept() {
          pub fn use_it<T: Both>(v: T) -> Int {{ v.tag() }}\n"
     ));
 }
+
+/// A tiny `std::core`: a trait, an impl on a builtin, and a bounded function.
+///
+/// Named `std::core` because that is what the rule keys on -- a builtin's
+/// impls arrive from there without an import, the same way its inherent
+/// methods do.
+const CORE: &str = "module std::core;
+
+pub trait Ord {
+  fn cmp(self, other: Self) -> Int;
+}
+
+impl Ord for String {
+  fn cmp(self, other: String) -> Int { 0 }
+}
+
+pub fn ranked<A: Ord>(left: A, right: A) -> Int { Ord::cmp(left, right) }
+";
+
+/// The diagnostics of `user`, with the little `std::core` above beside it.
+fn errors_beside_core(user: &str) -> Vec<String> {
+    let db = khora_db::KhoraDatabase::new();
+    let core = SourceFile::new(&db, "core.kh".into(), CORE.to_string());
+    let user = SourceFile::new(&db, "user.kh".into(), user.to_string());
+    khora_db::SourceRoot::new(&db, vec![core, user]);
+    diagnostics(&db, user).iter().map(|e| e.message.clone()).collect()
+}
+
+/// **`String` implements `Ord` whether or not the file imported `Ord`.**
+///
+/// An impl reaches a module with its trait or with its type, and both routes
+/// miss this one: `String` is a builtin, so no `import` line mentions it, and
+/// that left importing `Ord` as the only way. A file that used a bounded
+/// function on a `String` without naming `Ord` was told
+///
+///     `String` does not implement `Ord`, which `ranked` requires
+///
+/// about a type that has implemented it since `std::core` was written.
+///
+/// Worse than a wrong message: adding the import fixes it, and then
+/// `unused-import` reports `Ord` as unused -- satisfying a bound is not a use
+/// the lint counts -- so following the compiler's own advice puts the error
+/// back. Two people hit that loop independently. Errata 58 made the same
+/// argument for a builtin's *inherent* methods; this is the trait half.
+#[test]
+fn a_builtins_impls_arrive_without_an_import() {
+    let found = errors_beside_core(
+        "module app;\nimport std::core::{ranked};\nfn f() -> Int { ranked(\"a\", \"b\") }\n",
+    );
+    assert!(found.is_empty(), "expected no errors, got {found:?}");
+}
+
+/// The same, with the trait imported, which always worked and must keep to.
+#[test]
+fn importing_the_trait_as_well_changes_nothing() {
+    let found = errors_beside_core(
+        "module app;\nimport std::core::{Ord, ranked};\nfn f() -> Int { ranked(\"a\", \"b\") }\n",
+    );
+    assert!(found.is_empty(), "expected no errors, got {found:?}");
+}
+
+/// **And a type that really has no impl is still caught** -- which is the
+/// other half of the same gap, and the one that reached code generation.
+///
+/// The trait definition travels with the impls now. Without it `check_bounds`
+/// skipped the question entirely, because a trait it does not know is one it
+/// declines to report on -- so a missing impl went unreported until lowering
+/// said "`Ord::cmp` has no body", pointing past the end of the file.
+#[test]
+fn a_type_with_no_impl_is_still_refused() {
+    let found = errors_beside_core(
+        "module app;\n\
+         import std::core::{ranked};\n\
+         pub type Colour = | Red | Green;\n\
+         fn f() -> Int { ranked(Colour::Red, Colour::Green) }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("`Colour` does not implement `Ord`")),
+        "a missing impl must be caught here, not at lowering: {found:?}"
+    );
+}
+
+/// **And the message does not show the compiler's own punctuation.**
+///
+/// A signature key separates the trait from the type with a `#`, and an
+/// inherent impl has no trait -- so `Dict::insert` was rendered
+/// `#Dict::insert`. The `#` means nothing outside the compiler, and a message
+/// that shows it asks somebody to know how declarations are stored in order to
+/// read a sentence about their own program.
+#[test]
+fn a_bound_message_names_the_function_the_way_it_is_written() {
+    let found = errors_beside_core(
+        "module app;\n\
+         import std::core::{ranked};\n\
+         pub type Colour = | Red | Green;\n\
+         fn f() -> Int { ranked(Colour::Red, Colour::Green) }\n",
+    );
+    assert!(
+        found.iter().all(|e| !e.contains('#')),
+        "no message may carry a `#`-prefixed key: {found:?}"
+    );
+}

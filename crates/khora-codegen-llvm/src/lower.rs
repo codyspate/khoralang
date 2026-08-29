@@ -305,6 +305,12 @@ struct LoopFrame<'ctx> {
     /// Whether anything actually branches to `break_to`, which decides whether
     /// the block after the loop is reachable at all.
     breaks: usize,
+    /// Where a `break` with a value puts it, and where the block after the
+    /// loop reads it from.
+    ///
+    /// `None` for a `while`, which has no value, and for a `loop` whose type
+    /// is `()` — which is every loop nobody breaks out of with something.
+    result: Option<PointerValue<'ctx>>,
 }
 
 struct Lower<'a, 'ctx> {

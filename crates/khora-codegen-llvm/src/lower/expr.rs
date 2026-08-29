@@ -37,7 +37,7 @@ impl<'ctx> Lower<'_, 'ctx> {
             Expr::Match { scrutinee, arms } => self.lower_match(id, scrutinee, &arms, range),
             Expr::Catch { inner, arms } => self.lower_catch(id, inner, &arms, range),
             Expr::While { condition, body } => self.lower_while(condition, body),
-            Expr::Loop { body } => self.lower_loop(body),
+            Expr::Loop { body } => self.lower_loop(id, body),
             Expr::Break(value) => self.lower_break(value, range),
             Expr::Continue => self.lower_continue(range),
             Expr::Return(value) => self.lower_return(value),

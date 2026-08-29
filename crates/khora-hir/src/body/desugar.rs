@@ -57,16 +57,16 @@ impl<'a> Ctx<'a> {
         // cannot collide with anything the body declares.
         self.scopes.push(Vec::new());
         let state = self.declare("$iter".to_string(), true, range);
-        let state_pat = self.add_pat(Pat::Bind(state));
+        let state_pat = self.add_pat(Pat::Bind(state), range);
 
         let rest = self.declare("$rest".to_string(), false, range);
-        let rest_pat = self.add_pat(Pat::Bind(rest));
+        let rest_pat = self.add_pat(Pat::Bind(rest), range);
 
         // The arm binds its own scope: the item pattern belongs to the body.
         self.scopes.push(Vec::new());
         let item_pat = match e.pattern() {
             Some(p) => self.lower_pat(&p, false),
-            None => self.add_pat(Pat::Wildcard),
+            None => self.add_pat(Pat::Wildcard, range),
         };
 
         let advance = {
@@ -93,11 +93,11 @@ impl<'a> Ctx<'a> {
         // absence, and hoisting the calls out of `add_pat` is what lets
         // `step_cases` take `&mut self` and say so.
         let (yield_case, done_case) = self.step_cases(range);
-        let yield_pat = self.add_pat(Pat::TupleStruct {
-            resolution: yield_case,
-            fields: vec![rest_pat, item_pat],
-        });
-        let done_pat = self.add_pat(Pat::Path(done_case));
+        let yield_pat = self.add_pat(
+            Pat::TupleStruct { resolution: yield_case, fields: vec![rest_pat, item_pat] },
+            range,
+        );
+        let done_pat = self.add_pat(Pat::Path(done_case), range);
         let stop = self.add_expr(Expr::Break(None), range);
 
         let scrutinee = {

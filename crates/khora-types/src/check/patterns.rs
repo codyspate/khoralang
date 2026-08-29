@@ -38,11 +38,55 @@ impl<'a> Checker<'a> {
                 }
             }
             Pat::Tuple(fields) => {
-                // Destructuring only knows the component types when the
-                // scrutinee is a tuple of the same width; a mismatch is
-                // reported where the two are unified, not here.
+                // **A tuple pattern against something that is not a tuple is
+                // an error here**, and used to be an error nowhere.
+                //
+                //     let (a, b) = 5;
+                //
+                // checked clean with two unused-binding warnings. The comment
+                // that used to sit here said a mismatch is "reported where the
+                // two are unified" -- and nothing unifies a `let`'s pattern
+                // with its initializer's type, so the bindings took `Unknown`
+                // and the program was refused later by the code generator,
+                // against a line with nothing wrong with it, in a message
+                // ending "this is a gap in the compiler worth reporting". It
+                // was.
+                //
+                // Only when the type is settled. An unsolved variable is not a
+                // mismatch, it is inference that has not got there yet, and
+                // the `Unknown` audit at the end of checking is what reports
+                // the ones that never do.
+                let settled = self.unifier.shallow(ty);
+                match &settled {
+                    Type::Tuple(items) if items.len() == fields.len() => {}
+                    Type::Tuple(items) => {
+                        self.error(
+                            format!(
+                                "this pattern takes a value apart into {}, but `{settled}` \
+                                 has {}",
+                                pieces(fields.len()),
+                                items.len()
+                            ),
+                            self.body.pat_range(pat),
+                        );
+                    }
+                    // Inference has not settled it, so there is nothing to
+                    // disagree with yet.
+                    Type::Unknown | Type::Var(_) | Type::Never => {}
+                    other => {
+                        self.error(
+                            format!(
+                                "this pattern takes a value apart into {}, but `{other}` is \
+                                 not a tuple",
+                                pieces(fields.len())
+                            ),
+                            self.body.pat_range(pat),
+                        );
+                    }
+                }
+
                 for (i, field) in fields.iter().enumerate() {
-                    let component = match ty {
+                    let component = match &settled {
                         Type::Tuple(items) => items.get(i).cloned().unwrap_or(Type::Unknown),
                         _ => Type::Unknown,
                     };
@@ -134,3 +178,10 @@ impl<'a> Checker<'a> {
         }
     }
 }
+
+/// `2 pieces`, and `1 piece` — because a message that says "1 pieces" reads as
+/// a machine wrote it, which is the impression this whole file works against.
+fn pieces(count: usize) -> String {
+    if count == 1 { "1 piece".to_string() } else { format!("{count} pieces") }
+}
+
