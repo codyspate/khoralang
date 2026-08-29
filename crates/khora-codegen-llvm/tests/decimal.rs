@@ -27,7 +27,7 @@ fn std_source(name: &str) -> String {
 fn run(name: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Eq, Option, Ord, Ordering, Show, print}};
+import std::core::{{Eq, List, Option, Ord, Ordering, Show, print}};
 import std::decimal::{{Decimal, Rounding}};
 
 /// `Option<Decimal>` has no `Show`, and adding one to `std` for a test would
@@ -38,6 +38,9 @@ fn shown(value: Option<Decimal>) -> String {{
     Option::None => "None",
   }}
 }}
+
+/// An empty `List<Decimal>` that inference can name.
+fn nothing() -> List<Decimal> {{ List::Nil }}
 
 fn main() -> () {{
 {body}
@@ -630,4 +633,67 @@ fn a_negative_decimal_literal_may_carry_an_exponent() {
     );
 
     assert_eq!(out, "-1500\n");
+}
+
+
+/// **`zero()` is scale nought and prints as `0`**, which is the wrong shape at
+/// the bottom of a column of `1250.00`s — and a total that starts from it and
+/// adds nothing keeps that scale all the way to the report.
+#[test]
+fn zero_can_be_written_to_a_column_width() {
+    let out = run(
+        "decimal_zero_at",
+        r#"  print(Decimal::show(Decimal::zero()));
+  print(Decimal::show(Decimal::zero_at(2)));
+  print(Decimal::show(Decimal::zero_at(8)));
+  // Still zero, however it is written.
+  print(if Decimal::eq(Decimal::zero(), Decimal::zero_at(6)) { "equal" } else { "different" });
+  print(if Decimal::is_zero(Decimal::zero_at(6)) { "zero" } else { "not zero" });"#,
+    );
+
+    assert_eq!(out, "0\n0.00\n0.00000000\nequal\nzero\n");
+}
+
+/// `abs`, and `min`/`max` **by value rather than by representation** — so
+/// `1.5d` and `1.50d` are the same number and the left one comes back, which
+/// is the choice `List::min` makes for the same reason.
+#[test]
+fn a_decimal_has_a_magnitude_and_two_ends() {
+    let out = run(
+        "decimal_abs_min_max",
+        r#"  print(Decimal::show(Decimal::abs(-12.50d)));
+  print(Decimal::show(Decimal::abs(12.50d)));
+  print(Decimal::show(Decimal::abs(Decimal::zero())));
+  print(Decimal::show(Decimal::min(1.5d, 1.50d)));
+  print(Decimal::show(Decimal::max(1.5d, 1.50d)));
+  print(Decimal::show(Decimal::min(-3d, 2d)));
+  print(Decimal::show(Decimal::max(-3d, 2d)));
+  // Scales far apart, which comparison must answer without arithmetic.
+  print(Decimal::show(Decimal::max(100000000.00d, 0.000000000001d)));"#,
+    );
+
+    assert_eq!(out, "12.50\n12.50\n0\n1.5\n1.5\n-3\n2\n100000000.00\n");
+}
+
+/// **The column total every ledger writes.**
+///
+/// `add` takes the larger of two scales, so a total of numbers written to two
+/// places is written to two places. An empty list totals `zero()`, which is
+/// scale nought — `at_scale` is the fix, and it only ever raises, so it cannot
+/// round a total that was already wider.
+#[test]
+fn a_column_of_decimals_has_a_total() {
+    let out = run(
+        "decimal_total",
+        r#"  print(Decimal::show(Decimal::total([1250.00d, 99.95d, 0.05d])));
+  print(Decimal::show(Decimal::total(nothing())));
+  print(Decimal::show(Decimal::at_scale(Decimal::total(nothing()), 2)));
+  print(Decimal::show(Decimal::total([12.34d])));
+  // A rate to twelve places in the column, which sixty-four bits could not add.
+  print(Decimal::show(Decimal::total([1250.00d, 0.000000000001d])));
+  // And one that cancels, which is what a reconciler is checking for.
+  print(Decimal::show(Decimal::total([100.00d, -100.00d])));"#,
+    );
+
+    assert_eq!(out, "1350.00\n0\n0.00\n12.34\n1250.000000000001\n0.00\n");
 }

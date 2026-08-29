@@ -46,7 +46,7 @@ fn run(name: &str, main: &str) -> String {
 }
 
 const HEAD: &str = "module demo::main;
-import std::core::{Array, Dict, Eq, Halves, List, Option, Ord, Ordering, Pair, Parts, Result, Shared, Show, Split};
+import std::core::{Array, Dict, Eq, Halves, List, Map, Option, Ord, Ordering, Pair, Parts, Result, Shared, Show, Split};
 
 /// The two helpers every list test below wants: an empty `List<Int>` that
 /// inference can name, and an `Option<Int>` written out.
@@ -1089,4 +1089,78 @@ fn lists_compare_element_by_element() {
     );
 
     assert_eq!(out, "Less\nGreater\nGreater\nEqual\nEqual\nLess\n(1)(1,9)(2)\n");
+}
+
+
+/// **Counting things into a map is the most common thing a log analyser
+/// does**, and it used to be
+/// `insert(t, k, unwrap_or(get(t, k), 0) + 1)` — which names the map three
+/// times, the key twice, and walks the tree twice to answer one question.
+///
+/// `step` is handed `None` when the key is new, so the initial value and the
+/// update are one expression, and it is called exactly once.
+#[test]
+fn a_dict_updates_in_one_walk() {
+    let out = run(
+        "dict_update",
+        &program(
+            r#"  let words = ["a", "b", "a", "c", "a"];
+  let counts = List::fold(words, Dict::new(),
+    fn (t, w) => Dict::update(t, w, fn seen => seen.unwrap_or(0) + 1));
+  print(counts.show());
+  // A key that is new: `step` sees `None` and says what to start from.
+  print(Dict::update(Dict::new(), "x", fn s => s.unwrap_or(10) + 1).show());
+  // And one that is not, which replaces rather than growing the map.
+  print(Int::to_string(Dict::size(Dict::update(counts, "a", fn _s => 99))));
+  print(shown(Dict::get(Dict::update(counts, "a", fn _s => 99), "a")));"#,
+        ),
+    );
+
+    assert_eq!(out, "{a: 3, b: 1, c: 1}\n{x: 11}\n3\n99\n");
+}
+
+/// **A record holding a `Dict` or a `Map` could not derive `Show`**, which is
+/// what made this a hole rather than a nicety.
+///
+/// A `Dict` prints in key order, because it is a search tree and `entries`
+/// walks it in order — so two dictionaries with the same entries print the
+/// same way and a golden test over one is worth writing. A `Map` prints in
+/// bucket order, which is arbitrary and says so in its own doc comment; this
+/// test only has one entry in it for that reason.
+#[test]
+fn a_map_and_a_dict_can_print_themselves() {
+    let out = run(
+        "show_maps",
+        &format!(
+            "{HEAD}
+derive(Show)
+type Report = {{ counts: Dict<String, Int>, seen: Map<String, Int> }};
+
+fn main() -> Int {{
+  let counts = Dict::insert(Dict::insert(Dict::new(), \"b\", 2), \"a\", 1);
+  print(counts.show());
+  print(no_entries().show());
+
+  let one: Pair<String, Int> = {{ key: \"k\", value: 3 }};
+  print(one.show());
+
+  let seen: Map<String, Int> = Map::new();
+  Map::insert(seen, \"only\", 1);
+  print(seen.show());
+
+  // The whole reason: a record holding both, derived.
+  let r: Report = {{ counts: counts, seen: seen }};
+  print(r.show());
+  0
+}}
+
+fn no_entries() -> Dict<String, Int> {{ Dict::new() }}
+"
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "{a: 1, b: 2}\n{}\nk: 3\n{only: 1}\nReport { counts: {a: 1, b: 2}, seen: {only: 1} }\n"
+    );
 }

@@ -279,6 +279,50 @@ pub fn is_negative(self) -> Bool
 
 Whether it is less than zero.
 
+#### zero_at
+
+```khora
+pub fn zero_at(scale: Int) -> Decimal
+```
+
+Zero, written to `scale` places.
+
+**`zero()` is scale nought and prints as `0`**, which is wrong at the
+bottom of a column of `1250.00`s -- and a total that starts from
+`Decimal::zero()` and adds nothing keeps that scale all the way to the
+report. This is the empty total for a column that has a shape.
+
+#### abs
+
+```khora
+pub fn abs(self) -> Decimal
+```
+
+The magnitude, keeping the scale.
+
+Stops the program on the one significand with no positive twin, for the
+reason `negate` does: there is no honest answer, and the alternative is
+to return the negative number it was handed.
+
+#### min
+
+```khora
+pub fn min(self, other: Decimal) -> Decimal
+```
+
+The smaller of two, by value rather than by representation.
+
+So `1.0d` and `1.00d` are the same number and either may come back; the
+left one does, which is the choice `List::min` makes for the same reason.
+
+#### max
+
+```khora
+pub fn max(self, other: Decimal) -> Decimal
+```
+
+The larger of two, and the left one on a tie.
+
 #### is_zero
 
 ```khora
@@ -301,6 +345,26 @@ The whole part, towards zero.
 **Stops the program if the whole part is wider than an `Int`**, which is
 the one place a `Decimal` has to become one and may not fit. Past
 thirty-eight places there is no whole part to find and the answer is zero.
+
+#### total
+
+```khora
+pub fn total(numbers: List<Decimal>) -> Decimal
+```
+
+Every one of them added up.
+
+**The column total, which every ledger writes and nobody should write
+twice.** `add` takes the larger of two scales, so a total of numbers
+written to two places is written to two places, and one containing a
+twelve-place rate carries twelve.
+
+An empty list totals `zero()`, which is scale nought and prints as `0` --
+under a column of `1250.00`s that is the wrong shape, and
+`Decimal::total(rows).at_scale(2)` is the fix. `at_scale` only ever
+raises, so it cannot round a total that was already wider.
+
+Stops the program if the sum does not fit, like every addition here.
 
 #### of_string
 

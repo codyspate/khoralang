@@ -2657,6 +2657,15 @@ pub type Pair<K, V> = {
   value: V,
 };
 
+impl<K: Show, V: Show> Show for Pair<K, V> {
+  /// `key: value`, which is what it reads as everywhere it is written down.
+  ///
+  /// No brackets around it. A `Pair` is nearly always inside something that
+  /// has its own -- `Dict` and `Map` both print a list of these -- and a pair
+  /// that brought its own would double them.
+  fn show(self) -> String { self.key.show() + ": " + self.value.show() }
+}
+
 /// The smallest entry of a tree, and what is left without it.
 pub type Least<K, V> = {
   key: K,
@@ -2845,6 +2854,39 @@ impl<K: Ord, V> Dict<K, V> {
     }
   }
 
+  /// The map with `key` set to whatever `step` makes of what was there.
+  ///
+  /// **Counting things into a map is the most common thing a log analyser
+  /// does**, and without this it is `insert(t, k, unwrap_or(get(t, k), 0) + 1)`
+  /// every time -- which names the map three times, the key twice, and walks
+  /// the tree twice to answer one question.
+  ///
+  /// `step` is given `None` when the key is new, so the initial value and the
+  /// update are the same expression:
+  ///
+  /// ```khora
+  /// counts = Dict::update(counts, word, fn seen => seen.unwrap_or(0) + 1);
+  /// ```
+  ///
+  /// One walk, and `step` is called exactly once. There is no version that
+  /// removes the entry: `step` returns a `V` rather than an `Option<V>`
+  /// because "update or delete" is two operations wearing one name, and
+  /// `remove` is right there.
+  pub fn update(self, key: K, step: (Option<V>) -> V) -> Dict<K, V> {
+    match self {
+      Dict::Empty => Dict::Node(1, key, step(Option::None), Dict::Empty, Dict::Empty),
+      Dict::Node(n, nk, nv, l, r) =>
+      if key < nk {
+        Dict::balance(nk, nv, Dict::update(l, key, step), r)
+      } else if nk < key {
+        Dict::balance(nk, nv, l, Dict::update(r, key, step))
+      } else {
+        // Replacing, so the size does not change and neither side moves.
+        Dict::Node(n, key, step(Option::Some(nv)), l, r)
+      },
+    }
+  }
+
   /// The map without `key`. Removing what is not there is the map unchanged.
   pub fn remove(self, key: K) -> Dict<K, V> {
     match self {
@@ -2909,6 +2951,31 @@ impl<K: Ord, V> Dict<K, V> {
     }
     out
   }
+}
+
+impl<K: Ord + Show, V: Show> Show for Dict<K, V> {
+  /// `{a: 1, b: 2}`, in key order.
+  ///
+  /// **Braces rather than brackets**, so a map does not read as a list at a
+  /// glance. In key order because a `Dict` is a search tree and `entries`
+  /// walks it in order -- which means two dictionaries holding the same
+  /// entries print the same way, and a golden test over one is worth writing.
+  /// `Map` cannot promise that and says so.
+  ///
+  /// The key needs both bounds and for different reasons: `Ord` is what a
+  /// `Dict` asks of its keys at all, and `Show` is what printing one asks. A
+  /// map whose keys order but cannot print does not print, which is the right
+  /// answer -- there is nothing to write in place of the key.
+  fn show(self) -> String { "{" + entries_shown(Dict::entries(self)) + "}" }
+}
+
+/// The entries of a map, comma-separated, without the braces.
+///
+/// Shared by `Dict` and `Map` so the two cannot drift into printing
+/// differently -- the whole reason somebody reads one of these in a log is to
+/// compare it with another.
+fn entries_shown<K: Show, V: Show>(entries: List<Pair<K, V>>) -> String {
+  String::join(List::map(entries, fn pair => pair.show()), ", ")
 }
 
 /// A hash table: unordered, mutated in place, and the fast one.
@@ -3081,7 +3148,6 @@ impl<K: Hash, V> Map<K, V> {
   /// Knuth's multiplicative constant, then a shift-xor so that the high bits —
   /// where multiplication puts the information — reach the low ones the mask
   /// keeps. Wrapping on purpose: overflow is where the mixing comes from.
-  /// Which bucket a key belongs in.
   ///
   /// Negative when there are no buckets, which is the empty map: every reader
   /// checks for it, because masking against a length of zero would ask for
@@ -3123,6 +3189,22 @@ impl<K: Hash, V> Map<K, V> {
       },
     };
   }
+}
+
+impl<K: Hash + Show, V: Show> Show for Map<K, V> {
+  /// `{a: 1, b: 2}`, in whatever order the buckets are in.
+  ///
+  /// **And that order is arbitrary, so do not write a golden test over one.**
+  /// The type's own note says entries come back in no particular order and not
+  /// even a stable one, because growing rehashes everything; printing cannot
+  /// promise more than the walk it is built on. A `Dict` prints in key order
+  /// and is what to reach for when the text has to be comparable.
+  ///
+  /// Sorting here instead would need `K: Ord`, which would mean a map whose
+  /// keys hash but do not order could not print at all -- and the reason this
+  /// exists is that a record holding a `Map` could not derive `Show`. Trading
+  /// that back for a tidier order is the wrong way round.
+  fn show(self) -> String { "{" + entries_shown(Map::entries(self)) + "}" }
 }
 
 /// A sequence that grows: an array, the part of it that is in use, and a

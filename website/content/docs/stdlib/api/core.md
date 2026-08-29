@@ -1988,6 +1988,31 @@ pub fn insert(self, key: K, value: V) -> Dict<K, V>
 
 The map with `key` set to `value`, leaving this one as it was.
 
+#### update
+
+```khora
+pub fn update(self, key: K, step: (Option<V>) -> V) -> Dict<K, V>
+```
+
+The map with `key` set to whatever `step` makes of what was there.
+
+**Counting things into a map is the most common thing a log analyser
+does**, and without this it is `insert(t, k, unwrap_or(get(t, k), 0) + 1)`
+every time -- which names the map three times, the key twice, and walks
+the tree twice to answer one question.
+
+`step` is given `None` when the key is new, so the initial value and the
+update are the same expression:
+
+```khora
+counts = Dict::update(counts, word, fn seen => seen.unwrap_or(0) + 1);
+```
+
+One walk, and `step` is called exactly once. There is no version that
+removes the entry: `step` returns a `V` rather than an `Option<V>`
+because "update or delete" is two operations wearing one name, and
+`remove` is right there.
+
 #### remove
 
 ```khora
@@ -2826,6 +2851,74 @@ impl Traversable for List
 ```khora
 fn traverse<A, B, F: Applicative>(self: List<A>, f: (A) -> F<B>) -> F<List<B>>
 ```
+
+### Show for Pair<K, V>
+
+```khora
+impl<K: Show, V: Show> Show for Pair<K, V>
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+`key: value`, which is what it reads as everywhere it is written down.
+
+No brackets around it. A `Pair` is nearly always inside something that
+has its own -- `Dict` and `Map` both print a list of these -- and a pair
+that brought its own would double them.
+
+### Show for Dict<K, V>
+
+```khora
+impl<K: Ord + Show, V: Show> Show for Dict<K, V>
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+`{a: 1, b: 2}`, in key order.
+
+**Braces rather than brackets**, so a map does not read as a list at a
+glance. In key order because a `Dict` is a search tree and `entries`
+walks it in order -- which means two dictionaries holding the same
+entries print the same way, and a golden test over one is worth writing.
+`Map` cannot promise that and says so.
+
+The key needs both bounds and for different reasons: `Ord` is what a
+`Dict` asks of its keys at all, and `Show` is what printing one asks. A
+map whose keys order but cannot print does not print, which is the right
+answer -- there is nothing to write in place of the key.
+
+### Show for Map<K, V>
+
+```khora
+impl<K: Hash + Show, V: Show> Show for Map<K, V>
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+`{a: 1, b: 2}`, in whatever order the buckets are in.
+
+**And that order is arbitrary, so do not write a golden test over one.**
+The type's own note says entries come back in no particular order and not
+even a stable one, because growing rehashes everything; printing cannot
+promise more than the walk it is built on. A `Dict` prints in key order
+and is what to reach for when the text has to be comparable.
+
+Sorting here instead would need `K: Ord`, which would mean a map whose
+keys hash but do not order could not print at all -- and the reason this
+exists is that a record holding a `Map` could not derive `Show`. Trading
+that back for a tidier order is the wrong way round.
 
 ## Functions
 
