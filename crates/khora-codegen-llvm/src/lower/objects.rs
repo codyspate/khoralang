@@ -103,6 +103,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         &mut self,
         id: ExprId,
         fields: &[(String, ExprId)],
+        base: Option<ExprId>,
         range: TextRange,
     ) -> Flow<'ctx> {
         let Type::Adt { name, home, .. } = self.types.of(id).clone() else {
@@ -110,6 +111,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         };
         let Some((tag, info)) = self.be.variant_in(home.as_ref(), &name, &name) else {
             return self.fail(format!("`{name}` is not a record"), range);
+        };
+
+        // **The base first, because it is written first and can diverge.**
+        // `{ ..old, x: 1 }` evaluates `old` before `1`, which is the order the
+        // reader sees.
+        let taken_from = match base {
+            Some(base) => Some((self.expr(base)?.into_pointer_value(), base)),
+            None => None,
         };
 
         // Evaluated in written order, so side effects happen where they read,
@@ -120,6 +129,31 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
 
         let object = self.allocate_at(id, info.fields.len(), tag, &name);
+
+        // **Every field the literal did not name comes from the base**, and
+        // comes as an owned reference: the new record holds it too, so a
+        // boxed one is retained. The base is released afterwards, which for a
+        // base whose last use this is means the whole thing costs one
+        // allocation and a handful of increments.
+        if let Some((from, base)) = taken_from {
+            for label in info.labels.clone() {
+                if fields.iter().any(|(written, _)| *written == label) {
+                    continue;
+                }
+                let Some((index, field_ty)) = info.field(&label).map(|(i, t)| (i, t.clone()))
+                else {
+                    continue;
+                };
+                let carried = self.load_field(from, index, &field_ty);
+                if is_boxed(&field_ty) {
+                    self.dup(carried);
+                }
+                self.store_field(object, index, carried, &field_ty);
+            }
+            let owner = self.types.of(base).clone();
+            self.drop(from.into(), &owner);
+        }
+
         for (label, value) in values {
             let Some((index, field_ty)) = info.field(&label).map(|(i, t)| (i, t.clone())) else {
                 continue;

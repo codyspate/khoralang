@@ -243,7 +243,10 @@ impl<'a> Planner<'a> {
                 }
             }
             Expr::Lambda { body, .. } => visit(*body),
-            Expr::Record { fields, .. } => {
+            Expr::Record { fields, base, .. } => {
+                if let Some(base) = base {
+                    visit(*base);
+                }
                 for (_, value) in fields {
                     visit(*value);
                 }

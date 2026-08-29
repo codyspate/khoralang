@@ -71,6 +71,7 @@ pub enum SyntaxKind {
     SEMICOLON,
     COMMA,
     DOT,
+    DOT_DOT,
     COLON,
     /// `::` — the path separator, for compile-time namespaces.
     COLON_COLON,
@@ -184,6 +185,9 @@ pub enum SyntaxKind {
     PLACEHOLDER_EXPR,
     RECORD_EXPR,
     RECORD_EXPR_FIELD,
+    /// The `..old` in `{ ..old, field: value }`: where the fields nobody
+    /// named come from.
+    RECORD_EXPR_BASE,
     TUPLE_EXPR,
     /// `[a, b, c]`
     LIST_EXPR,

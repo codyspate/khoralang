@@ -70,6 +70,15 @@ Record:
 { id: Int, name: String }
 ```
 
+Record update, in expression position — the base first, then the fields that
+replace its own:
+
+```khora
+{ ..base }
+{ ..base, id: 7 }
+{ ..base, id: 7, name: "Grace" }
+```
+
 Open row:
 
 ```khora

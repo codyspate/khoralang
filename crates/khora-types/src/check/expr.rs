@@ -167,7 +167,9 @@ impl<'a> Checker<'a> {
                 self.hint = hint;
                 self.infer_match(scrutinee, &arms, range)
             }
-            Expr::Record { owner, fields } => self.infer_record(owner, &fields, range),
+            Expr::Record { owner, fields, base } => {
+                self.infer_record(owner, &fields, base, range)
+            }
 
             // `raise e` leaves the function, so it stands wherever an
             // expression can and its type constrains nothing.
@@ -580,9 +582,27 @@ impl<'a> Checker<'a> {
         &mut self,
         owner: Option<String>,
         fields: &[(String, ExprId)],
+        base: Option<ExprId>,
         range: TextRange,
     ) -> Type {
         let written: Vec<&str> = fields.iter().map(|(l, _)| l.as_str()).collect();
+
+        // **A field named twice is a mistake, not a last-one-wins.** Worth
+        // saying with or without a base; with one it is the difference between
+        // overriding a field and overriding it twice.
+        for (index, (label, _)) in fields.iter().enumerate() {
+            if fields[..index].iter().any(|(earlier, _)| earlier == label) {
+                self.error(format!("`{label}` is given twice in this record"), range);
+            }
+        }
+
+        // **With a base, the base decides the type**, so there is no search by
+        // label set and no ambiguity to report. That also means a record
+        // update works where a bare literal would not: the fields need not
+        // name every one, which is the entire point.
+        if let Some(base) = base {
+            return self.infer_record_update(base, fields, &written, range);
+        }
 
         let candidates: Vec<VariantInfo> = match &owner {
             Some(name) => self
@@ -694,6 +714,89 @@ impl<'a> Checker<'a> {
             self.check_handler_is_shareable(&owner, fields);
         }
         whole
+    }
+
+    /// `{ ..old, field: value }` — `old` with some fields replaced.
+    ///
+    /// **The result is a new record**; `old` is untouched and still whatever
+    /// it was. What the syntax saves is writing out the fields that do not
+    /// change, which for one accumulator in one program was thirty-five lines
+    /// of five near-identical literals.
+    ///
+    /// Every named field must belong to the base's type and match its declared
+    /// type. Nothing else is required — a record update naming no fields is
+    /// `old`, which is legal and pointless.
+    fn infer_record_update(
+        &mut self,
+        base: ExprId,
+        fields: &[(String, ExprId)],
+        written: &[&str],
+        range: TextRange,
+    ) -> Type {
+        let whole = self.infer(base);
+        let settled = self.unifier.zonk(&whole);
+
+        // Not settled yet, or already reported. Check the values so they are
+        // not left uninferred, and let the `Unknown` audit have the last word.
+        let Some(name) = traits::head_of(&settled) else {
+            for (_, value) in fields {
+                self.infer(*value);
+            }
+            return settled;
+        };
+
+        let Some(record) = self
+            .types
+            .variants
+            .iter()
+            .find(|v| v.type_name == name && v.name == name)
+            .cloned()
+        else {
+            for (_, value) in fields {
+                self.infer(*value);
+            }
+            if !matches!(settled, Type::Unknown | Type::Var(_) | Type::Never) {
+                self.error(
+                    format!(
+                        "`{settled}` is not a record, so there is nothing to take fields \
+                         from with `..`"
+                    ),
+                    self.body.range(base),
+                );
+            }
+            return Type::Unknown;
+        };
+
+        // The base's own type arguments decide the field types, which is what
+        // makes `{ ..pair, key: 2 }` keep the value's type rather than solving
+        // it again.
+        let arguments = match &settled {
+            Type::Adt { args, .. } => args.clone(),
+            _ => Vec::new(),
+        };
+        let parameters = self.types.adts.get(&name).cloned().unwrap_or_default();
+        let borrowed: HashMap<&str, Type> = parameters
+            .iter()
+            .zip(&arguments)
+            .map(|(p, a)| (p.as_str(), a.clone()))
+            .collect();
+
+        for (label, value) in fields {
+            match record.field(label) {
+                Some((_, declared)) => {
+                    let declared = unify::substitute(declared, &borrowed);
+                    self.expect(*value, &declared, &format!("field `{label}`"));
+                }
+                None => {
+                    self.infer(*value);
+                    let at = self.body.range(*value);
+                    self.error(format!("`{name}` has no field `{label}`"), at);
+                }
+            }
+        }
+        let _ = (written, range);
+
+        settled
     }
 
     /// The position and type of `label` on a record, at this instantiation.

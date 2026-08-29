@@ -249,12 +249,37 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
 fn at_record_literal(p: &mut Parser<'_>) -> bool {
     p.record_literals_allowed()
         && p.at(L_BRACE)
-        && (p.nth_at(1, R_BRACE) || (p.nth_at(1, IDENT) && p.nth_at(2, COLON)))
+        && (p.nth_at(1, R_BRACE)
+            // `{ ..old, field: value }` — a record update, which is a record
+            // literal that says where the rest of it comes from.
+            || p.nth_at(1, DOT_DOT)
+            || (p.nth_at(1, IDENT) && p.nth_at(2, COLON)))
 }
 
+/// `{ a: 1, b: 2 }`, and `{ ..old, b: 2 }`.
+///
+/// **The base comes first and only once**, which is the whole of the syntax:
+/// every field it does not name comes from `old`, and a field named twice is
+/// an error rather than a last-one-wins. Written this way because it is what a
+/// reader of Rust or JavaScript already knows, and because three people
+/// reached for it unprompted before it existed — one of them writing forty
+/// lines of near-identical five-field literals where five would have done.
 fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     let brace = p.open(L_BRACE);
+
+    if p.at(DOT_DOT) {
+        let base = p.start();
+        p.bump(DOT_DOT);
+        if expr(p).is_none() {
+            p.error("expected the record to take the rest of the fields from");
+        }
+        base.complete(p, RECORD_EXPR_BASE);
+        // A base with no fields after it is `{ ..old }`, which is `old`. Legal
+        // and pointless, so the comma is optional rather than required.
+        p.eat(COMMA);
+    }
+
     while !p.at(R_BRACE) && !p.at(EOF) {
         if !p.tick() {
             break;

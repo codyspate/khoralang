@@ -250,6 +250,13 @@ pub enum Expr {
     Record {
         owner: Option<String>,
         fields: Vec<(String, ExprId)>,
+        /// `{ ..old, field: value }` — where the fields nobody named come
+        /// from.
+        ///
+        /// A new record either way: this says which values are carried over,
+        /// not that anything is written in place. `old` is unchanged and
+        /// still whatever it was.
+        base: Option<ExprId>,
     },
     /// `(x) => x + 1`.
     ///

@@ -126,7 +126,12 @@ impl<'a> Planner<'a> {
             // The value goes to `Show::show` as an argument and comes back as
             // a `String`, so it is counted the way any other argument is.
             Expr::Shown(value) => self.walk(value),
-            Expr::Record { fields, .. } => {
+            Expr::Record { fields, base, .. } => {
+                // The base is read for the fields nobody named, so it is used
+                // here as much as any of them.
+                if let Some(base) = base {
+                    self.walk(base);
+                }
                 for (_, value) in &fields {
                     self.walk(*value);
                 }

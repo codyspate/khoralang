@@ -189,12 +189,17 @@ impl<'a> Planner<'a> {
                 }
                 self.live_before(callee, &live)
             }
-            Expr::Record { fields, .. } => {
+            Expr::Record { fields, base, .. } => {
                 let mut live = after.clone();
                 for (_, value) in fields.iter().rev() {
                     live = self.live_before(*value, &live);
                 }
-                live
+                // In reverse of evaluation order, and the base is evaluated
+                // first, so it is considered last.
+                match base {
+                    Some(base) => self.live_before(base, &live),
+                    None => live,
+                }
             }
             Expr::Tuple(items) => {
                 let mut live = after.clone();

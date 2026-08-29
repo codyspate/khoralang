@@ -278,6 +278,11 @@ impl Formatter {
         if prev == COLON_COLON || next == COLON_COLON {
             return true;
         }
+        // `..` belongs to the record it takes fields from — `{ ..old, x: 1 }`
+        // reads as one thing, and `{ .. old, x: 1 }` reads as two.
+        if prev == DOT_DOT {
+            return true;
+        }
         // `.` is tight in field access, but is a separator in
         // `forall <T> . Type` and needs its spaces there.
         if next == DOT {

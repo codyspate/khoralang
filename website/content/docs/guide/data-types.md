@@ -87,6 +87,39 @@ print(user.name);
 
 Use records when field names carry meaning or when a value will cross an API boundary.
 
+### Updating a record
+
+`{ ..base, field: value }` builds a new record from an existing one. Every field
+not named comes from `base`:
+
+```khora
+let renamed = { ..user, name: "Grace" };
+```
+
+This is a **new record**. `user` is unchanged and still whatever it was; what
+the syntax saves is writing out the fields that do not change, which matters as
+soon as a record has more than a few:
+
+```khora
+fn applied(counts: Counts, event: Event) -> Counts {
+  match event {
+    Event::Created => { ..counts, created: counts.created + 1 },
+    Event::Deleted => { ..counts, deleted: counts.deleted + 1 },
+    Event::Expired => { ..counts, expired: counts.expired + 1 },
+  }
+}
+```
+
+The base comes first and appears once. A field named twice is an error rather
+than a last-one-wins, a field the base's type does not have is an error, and a
+base that is not a record is an error. `{ ..base }` with no fields after it is
+`base`.
+
+Records with [`mut` fields](/docs/reference/types/#record-types) are the other
+way to do this, and the difference is that a record update produces a new value
+while assigning a `mut` field changes the one you already have. Reach for the
+update when the old value still matters, and for `mut` when it does not.
+
 ## Algebraic data types
 
 A variant type enumerates the shapes a value may have:

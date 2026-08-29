@@ -240,8 +240,12 @@ impl<'a> Ctx<'a> {
             ast::Expr::For(e) => self.lower_for(e, range),
             ast::Expr::Lambda(e) => self.lower_lambda(e, range),
             ast::Expr::Record(e) => {
+                let base = e
+                    .base()
+                    .and_then(|b| b.value())
+                    .map(|value| self.lower_expr(&value));
                 let fields = self.lower_record_fields(e);
-                self.add_expr(Expr::Record { owner: None, fields }, range)
+                self.add_expr(Expr::Record { owner: None, fields, base }, range)
             }
             ast::Expr::Raise(e) => {
                 let error = match e.value() {
@@ -266,7 +270,9 @@ impl<'a> Ctx<'a> {
                     .operations()
                     .map(|r| self.lower_record_fields(&r))
                     .unwrap_or_default();
-                self.add_expr(Expr::Record { owner, fields }, range)
+                // A handler names its effect, so there is nothing for a
+                // base to mean: every operation has to be given.
+                self.add_expr(Expr::Record { owner, fields, base: None }, range)
             }
             ast::Expr::Catch(e) => {
                 let inner = match e.operand() {

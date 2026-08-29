@@ -56,6 +56,12 @@ enum Tok {
     Semicolon,
     #[token(",")]
     Comma,
+    /// `..`, which only a record update uses: `{ ..old, field: value }`.
+    ///
+    /// Longest match, so `.` is unaffected — logos prefers this where both
+    /// apply, and nothing else in the language spells two dots.
+    #[token("..")]
+    DotDot,
     #[token(".")]
     Dot,
     #[token("::")]
@@ -264,6 +270,7 @@ fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
         }
         Tok::Semicolon => S::SEMICOLON,
         Tok::Comma => S::COMMA,
+        Tok::DotDot => S::DOT_DOT,
         Tok::Dot => S::DOT,
         Tok::ColonColon => S::COLON_COLON,
         Tok::Colon => S::COLON,

@@ -56,7 +56,9 @@ impl<'ctx> Lower<'_, 'ctx> {
                 None => self.expr(value),
             },
             Expr::Return(value) => self.lower_return(value),
-            Expr::Record { fields, .. } => self.build_record(id, &fields, range),
+            Expr::Record { fields, base, .. } => {
+                self.build_record(id, &fields, base, range)
+            }
             Expr::Raise(error) => self.lower_raise(error, range),
             // `!` is the identity on values. The branch it stands for is
             // emitted by the call underneath, which knows it is marked.

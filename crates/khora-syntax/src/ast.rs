@@ -175,6 +175,7 @@ ast_node!(PathExpr, PATH_EXPR);
 ast_node!(PlaceholderExpr, PLACEHOLDER_EXPR);
 ast_node!(RecordExpr, RECORD_EXPR);
 ast_node!(RecordExprField, RECORD_EXPR_FIELD);
+ast_node!(RecordExprBase, RECORD_EXPR_BASE);
 ast_node!(TupleExpr, TUPLE_EXPR);
 ast_node!(ListExpr, LIST_EXPR);
 ast_node!(UnitExpr, UNIT_EXPR);
@@ -960,6 +961,18 @@ impl MatchGuard {
 impl RecordExpr {
     pub fn fields(&self) -> impl Iterator<Item = RecordExprField> {
         children(&self.0)
+    }
+
+    /// The `..old` this literal takes its unnamed fields from, if it has one.
+    pub fn base(&self) -> Option<RecordExprBase> {
+        child(&self.0)
+    }
+}
+
+impl RecordExprBase {
+    /// The record the rest of the fields come from.
+    pub fn value(&self) -> Option<Expr> {
+        child(&self.0)
     }
 }
 
