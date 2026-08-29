@@ -279,3 +279,97 @@ fn main() -> Int {{
         "{found:?}"
     );
 }
+
+/// **A record literal takes its type from what was expected of it.**
+///
+/// A bare literal is found by its field set among the record types the module
+/// can *name*, which is right when there is nothing to go on and wrong the
+/// moment there is. `Shared::modify`'s closure returns `Changed<A, B>`, so
+///
+/// ```khora
+/// Shared::modify(cell, fn n => { state: n * 2, result: n })
+/// ```
+///
+/// was `no record type has exactly the fields `state`, `result``, and the fix
+/// was to add `Changed` to the import list — a name the source never mentions
+/// and never wants to.
+///
+/// Two things had to change. `Changed` exists only in the *signature* of
+/// `Shared::modify`, and what travels with an import is walked through a
+/// type's fields — `Shared` is opaque and holds nothing, so nothing was
+/// reached. And the walker deliberately does not descend into a function type,
+/// which is right for deciding what a value contains and wrong for deciding
+/// what a caller must be able to produce.
+///
+/// This uses the real `std::core`, because the bug was about what an import
+/// carries.
+#[test]
+fn a_record_literal_takes_its_type_from_what_expects_it() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("record_expected");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("std")
+        .join("core.kh");
+    let core = std::fs::read_to_string(&core).expect("std/core.kh");
+
+    // No `Changed` in the import list, and the source never names it.
+    let main = "module demo::main;
+import std::core::{Shared, print};
+
+fn main() -> () {
+  let cell = Shared::of(1);
+  let answer = Shared::modify(cell, fn n => { state: n * 2, result: n });
+  print(Int::to_string(answer));
+  print(Int::to_string(Shared::get(cell)));
+}
+";
+
+    let db = KhoraDatabase::new();
+    let files = vec![
+        SourceFile::new(&db, dir.join("core.kh"), core),
+        SourceFile::new(&db, dir.join("main.kh"), main.to_string()),
+    ];
+    let root = SourceRoot::new(&db, files);
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling failed:\n  {}", messages.join("\n  "));
+    }
+
+    let out = Command::new(&exe).output().expect("the program should run");
+    let printed = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    assert_eq!(printed, "1\n2\n", "the answer, then the state it left behind");
+}
+
+/// **And a literal nothing expects is still found by its labels alone.**
+///
+/// `TypeMap::reachable`'s note is the rule this had to respect: a record
+/// literal must not *infer* as a type the file cannot name. Taking the type
+/// from an expectation is not inferring — the expected type already decided
+/// which record it is, and the lookup only asks what that record holds. With
+/// no expectation, nothing changes.
+#[test]
+fn a_literal_with_nothing_expecting_it_is_still_found_by_its_labels() {
+    let found = refused(
+        "record_no_expectation",
+        "module t;
+fn print(value: Int);
+extern fn khora_print_int(value: Int);
+
+fn main() -> Int {
+  let r = { alpha: 1, beta: 2 };
+  print(r.alpha);
+  0
+}
+",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("no record type has exactly the fields")),
+        "{found:?}"
+    );
+}

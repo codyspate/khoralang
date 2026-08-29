@@ -241,10 +241,22 @@ impl TypeMap {
 
     /// Every known body for `name`, in scope or merely reachable.
     ///
-    /// The one place [`TypeMap::reachable`] is read. See its note for why the
-    /// two lists are separate.
-    fn bodies_of<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a VariantInfo> + 'a {
+    /// See [`TypeMap::reachable`]'s note for why the two lists are separate,
+    /// and read it before adding a caller: a name in here is deliberately not
+    /// in scope, so nothing that *resolves* a name the source wrote may look
+    /// here. Shareability may, because it is a fact about the type. So may a
+    /// record literal that already knows which type it is — that is not
+    /// resolution, it is a lookup of what the expected type holds.
+    pub(crate) fn bodies_of<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a VariantInfo> + 'a {
         self.variants.iter().chain(self.reachable.iter()).filter(move |v| v.type_name == name)
+    }
+
+    /// The type parameters of `name`, in scope or merely reachable.
+    ///
+    /// `params_of_public` is the same thing for the checker, which needs it
+    /// where a record literal takes its type from what was expected of it.
+    pub(crate) fn params_of_public(&self, name: &str) -> Vec<String> {
+        self.params_of(name)
     }
 
     /// The type parameters of `name`, in scope or merely reachable.
@@ -1081,23 +1093,51 @@ fn reachable_from(exported: &TypeMap, name: &str) -> Reached {
     let known = || exported.variants.iter().chain(exported.reachable.iter());
 
     while let Some(here) = queue.pop() {
+        // What the type *holds*.
+        let mut mentions: Vec<String> = Vec::new();
         for variant in known().filter(|v| v.type_name == here) {
             for field in &variant.fields {
-                for mentioned in type_names(field) {
-                    if seen.contains(&mentioned) {
-                        continue;
-                    }
-                    seen.push(mentioned.clone());
-                    queue.push(mentioned.clone());
-                    found.extend(known().filter(|v| v.type_name == mentioned).cloned());
-                    let parameters = exported
-                        .adts
-                        .get(&mentioned)
-                        .or_else(|| exported.reachable_adts.get(&mentioned));
-                    if let Some(parameters) = parameters {
-                        generics.push((mentioned.clone(), parameters.clone()));
-                    }
-                }
+                mentions.extend(type_names(field));
+            }
+        }
+
+        // **And what its methods say.** Walking only the fields missed the
+        // types a caller has to be able to *produce*: `Shared` is opaque and
+        // holds nothing, so `Changed` — which exists only in the signature of
+        // `Shared::modify` — was never reached. Writing the record that method
+        // demands then had to import a name the source never mentions.
+        //
+        // Keyed `Trait#Head::method` and `#Head::method` for an inherent one,
+        // so a suffix match on `#{here}::` finds both.
+        let suffix = format!("#{here}::");
+        for (key, signature) in &exported.signatures {
+            if !key.contains(&suffix) {
+                continue;
+            }
+            for ty in signature
+                .params
+                .iter()
+                .chain(std::iter::once(&signature.ret))
+                .chain(std::iter::once(&signature.requires))
+                .chain(std::iter::once(&signature.raises))
+            {
+                mentions.extend(type_names_through_functions(ty));
+            }
+        }
+
+        for mentioned in mentions {
+            if seen.contains(&mentioned) {
+                continue;
+            }
+            seen.push(mentioned.clone());
+            queue.push(mentioned.clone());
+            found.extend(known().filter(|v| v.type_name == mentioned).cloned());
+            let parameters = exported
+                .adts
+                .get(&mentioned)
+                .or_else(|| exported.reachable_adts.get(&mentioned));
+            if let Some(parameters) = parameters {
+                generics.push((mentioned.clone(), parameters.clone()));
             }
         }
     }
@@ -1105,6 +1145,51 @@ fn reachable_from(exported: &TypeMap, name: &str) -> Reached {
 }
 
 /// Every ADT name a type mentions, at any depth.
+/// Every ADT name a type mentions, **including through a function type**.
+///
+/// The difference from [`type_names`] is one arm and it is deliberate on both
+/// sides. That one answers "what does this value contain", where walking into
+/// a closure's parameters would suggest it holds them and it does not — which
+/// is the whole reason a closure is unshareable.
+///
+/// This one answers a different question: what must a *caller* be able to
+/// produce. `Shared::modify` takes `(A) -> Changed<A, B>`, so a caller has to
+/// build a `Changed` — and since `Shared` is opaque and holds nothing, the
+/// field walk reached nothing at all and `Changed` never arrived with it.
+/// Writing the record that method demands then meant importing a name the
+/// source never mentions.
+fn type_names_through_functions(ty: &Type) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(ty: &Type, out: &mut Vec<String>) {
+        match ty {
+            Type::Adt { name, args, .. } => {
+                out.push(name.clone());
+                args.iter().for_each(|t| walk(t, out));
+            }
+            Type::Tuple(items) => items.iter().for_each(|t| walk(t, out)),
+            Type::Applied { head, args } => {
+                walk(head, out);
+                args.iter().for_each(|t| walk(t, out));
+            }
+            Type::Fn { params, ret, requires, raises } => {
+                params.iter().for_each(|t| walk(t, out));
+                walk(ret, out);
+                walk(requires, out);
+                walk(raises, out);
+            }
+            Type::Row { fields, tail } => {
+                fields.iter().for_each(|(_, t)| walk(t, out));
+                if let Some(tail) = tail {
+                    walk(tail, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(ty, &mut out);
+    out
+}
+
 fn type_names(ty: &Type) -> Vec<String> {
     let mut out = Vec::new();
     fn walk(ty: &Type, out: &mut Vec<String>) {

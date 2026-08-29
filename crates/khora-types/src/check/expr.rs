@@ -168,7 +168,7 @@ impl<'a> Checker<'a> {
                 self.infer_match(scrutinee, &arms, range)
             }
             Expr::Record { owner, fields, base } => {
-                self.infer_record(owner, &fields, base, range)
+                self.infer_record(owner, &fields, base, hint, range)
             }
 
             // `raise e` leaves the function, so it stands wherever an
@@ -322,6 +322,13 @@ impl<'a> Checker<'a> {
                 self.enclosing_lambdas.push((id, Vec::new()));
 
                 let before = self.demanded.len();
+                // **The body is checked against what the lambda returns.**
+                // `result` has already been unified with the expected return
+                // type above, so a record literal in tail position knows which
+                // record it is rather than having to be found by its labels —
+                // which is how `Shared::modify`'s closure could write a
+                // `Changed` without importing the name.
+                self.hint = Some(result.clone());
                 let ret = self.infer(body);
                 let needs = self.absorb_requires(before);
                 // The labels the body *named* go in alongside the ones its
@@ -641,6 +648,7 @@ impl<'a> Checker<'a> {
         owner: Option<String>,
         fields: &[(String, ExprId)],
         base: Option<ExprId>,
+        hint: Option<Type>,
         range: TextRange,
     ) -> Type {
         let written: Vec<&str> = fields.iter().map(|(l, _)| l.as_str()).collect();
@@ -660,6 +668,42 @@ impl<'a> Checker<'a> {
         // name every one, which is the entire point.
         if let Some(base) = base {
             return self.infer_record_update(base, fields, &written, range);
+        }
+
+        // **What was expected of it, before what its labels look like.**
+        //
+        // A bare literal is found by its field set among the record types this
+        // module can *name*, which is right for a literal with nothing to go
+        // on and wrong the moment something does. `Shared::modify`'s closure
+        // returns `Changed<A, B>`, so
+        //
+        // ```khora
+        // Shared::modify(cell, fn n => { state: n * 2, result: n })
+        // ```
+        //
+        // was `no record type has exactly the fields `state`, `result``, and
+        // the fix was to import `Changed` — a name the source never mentions
+        // and never wants to.
+        //
+        // Reached through `bodies_of`, which sees types this module cannot
+        // name. That does not put them in scope: `TypeMap::reachable`'s note
+        // says a record literal must not *infer* as a type the file cannot
+        // write down, and this one is not inferring. The expected type already
+        // decided which record it is; this only looks up what that record
+        // holds.
+        if owner.is_none() {
+            if let Some(expected) = hint.as_ref().map(|h| self.unifier.zonk(h)) {
+                if let Some(name) = traits::head_of(&expected) {
+                    let known = self
+                        .types
+                        .bodies_of(&name)
+                        .find(|v| v.name == name && covers(&v.labels, &written))
+                        .cloned();
+                    if let Some(record) = known {
+                        return self.check_record_fields(&record, &expected, fields);
+                    }
+                }
+            }
         }
 
         let candidates: Vec<VariantInfo> = match &owner {
@@ -772,6 +816,60 @@ impl<'a> Checker<'a> {
             self.check_handler_is_shareable(&owner, fields);
         }
         whole
+    }
+
+    /// Checks each field against what the record declares, at this
+    /// instantiation.
+    ///
+    /// Shared by the two ways a literal finds its type: by its labels, and by
+    /// what was expected of it. The instantiation is passed in because those
+    /// two know it differently — the label search builds a fresh one, and an
+    /// expected type arrives already solved.
+    fn check_record_fields(
+        &mut self,
+        record: &VariantInfo,
+        whole: &Type,
+        fields: &[(String, ExprId)],
+    ) -> Type {
+        let arguments = match whole {
+            Type::Adt { args, .. } => args.clone(),
+            _ => Vec::new(),
+        };
+        let parameters = self.types.params_of_public(&record.type_name);
+        let borrowed: HashMap<&str, Type> = parameters
+            .iter()
+            .zip(&arguments)
+            .map(|(p, a)| (p.as_str(), a.clone()))
+            .collect();
+
+        for (label, value) in fields {
+            match record.field(label) {
+                Some((_, declared)) => {
+                    let declared = unify::substitute(declared, &borrowed);
+                    self.expect(*value, &declared, &format!("field `{label}`"));
+                }
+                None => {
+                    self.infer(*value);
+                    let at = self.body.range(*value);
+                    self.error(
+                        format!("`{}` has no field `{label}`", record.type_name),
+                        at,
+                    );
+                }
+            }
+        }
+        for label in &record.labels {
+            if !fields.iter().any(|(written, _)| written == label) {
+                let at = fields.first().map(|(_, v)| self.body.range(*v));
+                if let Some(at) = at {
+                    self.error(
+                        format!("this `{}` is missing `{label}`", record.type_name),
+                        at,
+                    );
+                }
+            }
+        }
+        whole.clone()
     }
 
     /// `{ ..old, field: value }` — `old` with some fields replaced.
@@ -920,6 +1018,17 @@ impl<'a> Checker<'a> {
         arms: &[khora_hir::body::MatchArm],
         range: TextRange,
     ) -> Type {
+        // **The hint belongs to the arms, not to the scrutinee.** A `match` is
+        // an expression, so what is expected of it is expected of what each
+        // arm produces; the thing being matched on is unrelated and settles
+        // itself. Taken before the scrutinee is inferred, because `self.hint`
+        // is a single slot spent by the next `infer` — leaving it armed
+        // handed a `match`'s expected type to `parse_url(text)` and reported
+        // that a closure's body was `()` where an `Option<Url>` was wanted.
+        //
+        // Latent until something set a hint on a `match` in tail position,
+        // which is what checking a lambda's body against its return type does.
+        let wanted = self.hint.take();
         let scrutinee_ty = self.infer(scrutinee);
 
         let mut result: Option<Type> = None;
@@ -928,6 +1037,7 @@ impl<'a> Checker<'a> {
             if let Some(guard) = arm.guard {
                 self.expect(guard, &Type::Bool, "a match guard");
             }
+            self.hint = wanted.clone();
             let arm_ty = self.infer(arm.body);
             match result.clone() {
                 None => result = Some(arm_ty),
