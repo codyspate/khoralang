@@ -320,10 +320,18 @@ impl Formatter {
         // above: the list belongs to the word, there is no name between them,
         // and the whole point of the spelling is that it looks like the
         // `derive(..)` a Rust reader already knows.
+        // A `>` here is either the end of `Foo<Bar>`, which the call hugs, or
+        // the greater-than in `a > (b - c)`, which it must not: that printed
+        // as `a >(b - c)`, which reads as a call on a stray angle bracket and
+        // is not what anybody wrote. The two are the same token and only the
+        // node above them tells them apart.
+        if next == L_PAREN && prev == GT {
+            return matches!(prev_parent, TYPE_ARGS | TYPE_PARAMS);
+        }
         if next == L_PAREN {
             return matches!(
                 prev,
-                IDENT | NAME_REF | GT | R_PAREN | R_BRACK | UNDERSCORE | DERIVE_KW
+                IDENT | NAME_REF | R_PAREN | R_BRACK | UNDERSCORE | DERIVE_KW
             );
         }
         if next == L_BRACK {

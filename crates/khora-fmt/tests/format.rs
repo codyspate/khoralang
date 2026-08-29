@@ -294,3 +294,38 @@ fn a_flow_survives_a_round_trip() {
     assert_eq!(format(&once).unwrap(), once, "formatting is idempotent");
     assert!(is_formatted(&once).unwrap(), "and reports itself formatted");
 }
+
+/// **`a > (b)` keeps its space.**
+///
+/// `>` closes a type argument list and is also greater-than, and the rule that
+/// lets `Foo<Bar>(x)` hug its call could not tell the two apart -- so
+/// `value > (largest - digit) / 10` was reformatted to `value >(largest -
+/// digit) / 10`, which reads as a call on a stray angle bracket.
+///
+/// Only `>` had it. `<`, `>=`, `<=`, `==` and `+` before a parenthesis were
+/// all correct, which is what made it look like a deliberate rule rather than
+/// a mistake. Found because formatting `std` after an edit changed a line
+/// nobody had touched.
+#[test]
+fn a_comparison_does_not_hug_a_parenthesis() {
+    let src = "module m;\nfn f(a: Int, b: Int, c: Int) -> Bool { a > (b - c) }\n";
+    assert_eq!(format(src).unwrap(), src, "`>` is an operator here, not a bracket");
+}
+
+/// The whole family, because the fix was to one of them and the others were
+/// already right.
+#[test]
+fn every_comparison_keeps_its_space_before_a_parenthesis() {
+    for op in [">", "<", ">=", "<=", "==", "!="] {
+        let src = format!("module m;\nfn f(a: Int, b: Int) -> Bool {{ a {op} (b - 1) }}\n");
+        assert_eq!(format(&src).unwrap(), src, "`{op}` before a parenthesis");
+    }
+}
+
+/// And a call still hugs what it applies to, which is the rule the fix had to
+/// leave alone.
+#[test]
+fn a_call_still_hugs_its_arguments() {
+    let src = "module m;\nfn f() -> Int { g(1) + h(2)(3) }\n";
+    assert_eq!(format(src).unwrap(), src, "a call hugs its parenthesis");
+}
