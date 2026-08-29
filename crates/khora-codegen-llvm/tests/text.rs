@@ -557,3 +557,102 @@ fn a_dict_gives_up_its_keys_and_values() {
 
     assert_eq!(out, "[1, 2, 3]\none,two,three\n3\n");
 }
+
+/// **The most negative `Int` prints.**
+///
+/// It did not. `to_string` took the magnitude with `0 - self`, which is the
+/// one subtraction that number does not survive, so printing it stopped the
+/// program and reported an overflow the caller never wrote. Found while
+/// testing `Decimal::show`, which could build that significand, compare it and
+/// add to it, and not show it.
+///
+/// There is no literal for it either -- `9223372036854775808` does not fit,
+/// and the minus arrives after the number is read -- so the test walks to it,
+/// which is what `std::core` does too.
+#[test]
+fn the_most_negative_int_prints() {
+    let out = run(
+        "int_show_smallest",
+        &program(
+            r#"  let smallest = 0 - 9223372036854775807 - 1;
+  print(Int::to_string(smallest));
+  print(Int::to_string(smallest + 1));
+  print(Int::to_string(9223372036854775807));
+  // And the ordinary ones are unchanged.
+  print(Int::to_string(0));
+  print(Int::to_string(-7));
+  print(Int::to_string(10));
+  print(Int::to_string(-10));
+  print(Int::to_string(-100));"#,
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "-9223372036854775808\n-9223372036854775807\n9223372036854775807\n0\n-7\n10\n-10\n-100\n"
+    );
+}
+
+/// **A numeral one past the largest `Int` is refused, not run into.**
+///
+/// `of_string`'s own doc comment says it refuses rather than overflows,
+/// because a long run of digits off a socket that stops the program is a
+/// denial of service with extra steps. The guard was a digit short: it let a
+/// total equal to a tenth of the maximum through, so `9223372036854775808`
+/// grew past the end and did the thing the comment promises it does not.
+///
+/// And the total is counted downward now, so the most negative number is one
+/// this can reach -- it used to build the positive twin on the way, and that
+/// number does not exist.
+#[test]
+fn a_numeral_past_the_end_is_refused_rather_than_overflowing() {
+    let out = run(
+        "int_of_string_edges",
+        &program(
+            r#"  // The two ends, which must read.
+  print(shown(Int::of_string("9223372036854775807")));
+  print(shown(Int::of_string("-9223372036854775808")));
+  // One past each, which must not -- and must not stop the program.
+  print(shown(Int::of_string("9223372036854775808")));
+  print(shown(Int::of_string("-9223372036854775809")));
+  // Far past, the shape somebody pastes in by accident.
+  print(shown(Int::of_string("1234567890123456789012345")));
+  print(shown(Int::of_string("-1234567890123456789012345")));
+  // Ordinary numbers are unaffected.
+  print(shown(Int::of_string("0")));
+  print(shown(Int::of_string("-1")));
+  print(shown(Int::of_string("1250")));
+  print(shown(Int::of_string("")));
+  print(shown(Int::of_string("-")));
+  print(shown(Int::of_string("12a")));"#,
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "9223372036854775807\n-9223372036854775808\nnone\nnone\nnone\nnone\n0\n-1\n1250\nnone\nnone\nnone\n"
+    );
+}
+
+/// Text in and the same text out, at both ends of the range.
+///
+/// The round trip is the property the two fixes above are really about: a
+/// number `to_string` can write is one `of_string` can read.
+#[test]
+fn a_number_survives_the_round_trip_at_both_ends() {
+    let out = run(
+        "int_text_round_trip",
+        &program(
+            r#"  let smallest = 0 - 9223372036854775807 - 1;
+  print(shown(Int::of_string(Int::to_string(smallest))));
+  print(shown(Int::of_string(Int::to_string(9223372036854775807))));
+  print(shown(Int::of_string(Int::to_string(0))));
+  print(shown(Int::of_string(Int::to_string(-1))));"#,
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "-9223372036854775808\n9223372036854775807\n0\n-1\n"
+    );
+}

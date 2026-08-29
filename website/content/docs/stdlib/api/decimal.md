@@ -34,8 +34,23 @@ of a division is done in 128 bits inside the runtime, where it is a Rust
 It stops the program, like every other number in Khora. `numbers.md`
 §"Overflow traps, in every build" argues that case and none of the argument
 changes here: a total that silently wrapped is worse than one that never
-arrived. Division is the exception, because a quotient usually has no exact
-decimal form — so it takes the scale and the rounding to use, and says so.
+arrived. That covers `add`, `sub`, `mul`, `at_scale` and `divide` alike.
+
+Division is not an exception to it. Division takes a scale and a rounding
+because a quotient usually has no exact decimal form, and answers `None`
+when the divisor is zero because that is a thing data does — but an answer
+too large for the significand stops the program, the same as anywhere else.
+It used to saturate, which meant `Decimal::divide(10d, 1d, 18, HalfEven)`
+answered `9.223372036854775807`: in range, printed to the right number of
+places, and wrong. Somebody writing a reconciler found it in the first ten
+minutes.
+
+**The three that cannot stop the program are comparing, reading and
+printing**, and each was made not to. Comparing two numbers is a question
+about order and needs no common scale to exist. Reading text that is not a
+number — including a number too long to hold — is what `of_string`'s
+`Option` is for. And `show` is string work, so it prints every scale a
+`Decimal` can carry rather than the first eighteen.
 
 ## Types
 
@@ -190,6 +205,13 @@ silently would be picking on behalf of a ledger.
 that turned out to be zero is an ordinary thing for data to do, and
 `numbers.md` reserves stopping the program for a bug.
 
+**Stops the program when the answer does not fit**, which is a different
+thing and gets the different treatment. Asking for a hundred divided by
+four at eighteen places is asking for twenty digits, and there is no
+honest sixty-four bit answer to give: the nearest one is a different
+number, and handing back a different number is the failure this whole
+type exists to prevent. `rounded` goes through here, so it stops too.
+
 #### rounded
 
 ```khora
@@ -233,6 +255,11 @@ pub fn truncated(self) -> Int
 
 The whole part, towards zero.
 
+Past eighteen places there is no whole part to find: the significand
+holds nineteen digits and they are all behind the point, so the answer is
+zero and asking `ten_to` for the step would only stop the program on the
+way to it.
+
 #### of_string
 
 ```khora
@@ -265,6 +292,14 @@ written twice, and a ledger that thought otherwise would report a
 difference where there is none. This is the whole reason `Float` cannot
 have an `Eq` and this can.
 
+**And it cannot stop the program**, which took a second attempt. It used
+to bring both operands to a common scale, the same way `add` does — so
+comparing a hundred million against a rate to twelve places asked for a
+multiplication by `10^12` that no `Int` survives, and two perfectly legal
+numbers halted a reconciler. An equality that traps is a worse trap than
+one that surprises, and this one is sold as the reason to prefer
+`Decimal` at all.
+
 ### Ord for Decimal
 
 ```khora
@@ -276,6 +311,8 @@ impl Ord for Decimal
 ```khora
 fn cmp(self, other: Decimal) -> Ordering
 ```
+
+The same comparison, and the same reason it does not go through `align`.
 
 ### Show for Decimal
 
@@ -295,4 +332,13 @@ Every place the scale says, including trailing zeros.
 scale is part of what was meant: a price to two places stays a price to
 two places, and dropping the zero is how a total stops lining up in a
 column.
+**Done as text rather than as arithmetic**, which is what lets it print
+every number a `Decimal` can hold. Splitting the significand with
+`units / 10^scale` needs `10^scale` to be a number, and past eighteen
+places it is not — so `mul` on two numbers with ten places each produced
+a value that was perfectly legal and stopped the program when printed.
+Cutting a string at a position needs nothing to fit.
+
+It also means the most negative `Int` prints. Negating it to take a
+magnitude would overflow, and the sign is a character here.
 

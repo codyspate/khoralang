@@ -268,12 +268,19 @@ is. Those are a package, by the same rule that keeps the type here.
 
 ### What was built
 
-`std/decimal.kh`, and it is almost all Khora. `add`, `sub`, `mul`, the
-comparisons and the rescaling are `Int` arithmetic with the scales lined up,
-and they trap on overflow like every other number here. `Show` prints every
-place the scale says, so `1.50` stays `1.50` — a price to two places is a price
-to two places, and dropping the zero is how a total stops lining up in a
-column.
+`std/decimal.kh`, and it is almost all Khora. `add`, `sub`, `mul` and the
+rescaling are `Int` arithmetic with the scales lined up, and they trap on
+overflow like every other number here. `Show` prints every place the scale
+says, so `1.50` stays `1.50` — a price to two places is a price to two places,
+and dropping the zero is how a total stops lining up in a column.
+
+**Comparing does not line the scales up**, which took a correction. It used to,
+which meant `==` on a hundred million and a rate to twelve places asked for a
+multiplication by `10^12` and stopped the program — an equality that traps,
+in the type sold on the fact that `Float`'s cannot be trusted. Order is a
+question about two numbers rather than a third number that has to exist, so it
+is answered in the runtime's wider arithmetic, where running out of room is
+itself the answer: a value too large to scale is larger than one that fits.
 
 **One operation needed the runtime.** Division has no exact answer in general,
 so it takes a scale and a rounding mode; and reaching that scale means
@@ -282,6 +289,16 @@ perfectly ordinary money — a hundred pounds to eight places wants twenty-six
 digits on the way to an answer needing ten. `khora_decimal_divide` does that
 intermediate in a Rust `i128` and hands back the one number that fits. Khora
 never sees the hundred and twenty-eight bits and needs no type for them.
+
+**And when none of them fits, it stops the program.** It used to saturate, on
+a written-down argument that a total which quietly became a different total is
+the failure the type exists to prevent — which is a description of saturating.
+`Decimal::divide(10d, 1d, 18, HalfEven)` answered `9.223372036854775807`: in
+range, printed to eighteen places, and balancing against itself. Somebody
+writing a reconciler found it in the first ten minutes. §"Overflow traps, in
+every build" above is the argument, and division was never outside it: `None`
+is for a divisor that turned out to be zero, which is a thing data does, and
+not for an answer that does not exist.
 
 **The significand is sixty-four bits, not the hundred and twenty-eight this
 document asked for.** Khora has no 128-bit integer and adding one to carry a

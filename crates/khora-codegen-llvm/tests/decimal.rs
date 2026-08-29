@@ -27,7 +27,7 @@ fn std_source(name: &str) -> String {
 fn run(name: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Eq, Option, Show, print}};
+import std::core::{{Eq, Option, Ord, Ordering, Show, print}};
 import std::decimal::{{Decimal, Rounding}};
 
 /// `Option<Decimal>` has no `Show`, and adding one to `std` for a test would
@@ -80,7 +80,7 @@ fn main() -> () {{
 fn run_until_it_stops(name: &str, body: &str) -> (String, bool) {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Eq, Option, Show, print}};
+import std::core::{{Eq, Option, Ord, Ordering, Show, print}};
 import std::decimal::{{Decimal, Rounding}};
 
 fn main() -> () {{
@@ -350,4 +350,162 @@ fn a_scale_that_cannot_be_reached_stops_the_program() {
     // printing something plausible.
     assert_eq!(printed, "1.000\n", "nothing after the overflow should print");
     assert!(stopped, "an unrepresentable scale must stop rather than wrap");
+}
+
+/// **Ten divided by one is ten.**
+///
+/// It was not. `divide` computed its intermediate in a hundred and twenty-eight
+/// bits and then brought it back with a saturating cast, so any quotient that
+/// did not fit the significand answered `i64::MAX` -- which at eighteen places
+/// prints as `9.223372036854775807`. In range, right number of decimal places,
+/// balances against itself, and wrong.
+///
+/// The whole module exists so that money is exact. Found by somebody writing a
+/// reconciler, eight minutes in.
+#[test]
+fn a_quotient_that_does_not_fit_stops_rather_than_saturating() {
+    let (printed, stopped) = run_until_it_stops(
+        "decimal_divide_overflow",
+        r#"  // Eighteen places of a two digit number is twenty digits, and the
+  // significand holds nineteen.
+  match Decimal::divide(10d, 1d, 18, Rounding::HalfEven) {
+    Option::Some(answer) => print(Decimal::show(answer)),
+    Option::None => print("None"),
+  };
+  print("reached the end");"#,
+    );
+
+    assert_eq!(printed, "", "a quotient that does not fit must print nothing");
+    assert!(stopped, "it must stop rather than answer i64::MAX");
+}
+
+/// The same, through `rounded`, which is `divide` by one and inherited the bug.
+#[test]
+fn rounding_to_a_scale_that_does_not_fit_stops_too() {
+    let (printed, stopped) = run_until_it_stops(
+        "decimal_rounded_overflow",
+        r#"  print(Decimal::show(Decimal::rounded(10d, 18, Rounding::HalfEven)));
+  print("reached the end");"#,
+    );
+
+    assert_eq!(printed, "");
+    assert!(stopped, "`rounded` goes through `divide` and stops where it does");
+}
+
+/// **The quotients that do fit are still exact**, which is the half of the
+/// overflow question that has an answer.
+#[test]
+fn a_quotient_at_the_edge_of_the_significand_is_exact() {
+    let out = run(
+        "decimal_divide_edge",
+        r#"  // A hundred divided four ways, at the scales a ledger uses.
+  print(shown(Decimal::divide(100d, 4d, 2, Rounding::HalfEven)));
+  print(shown(Decimal::divide(100d, 4d, 8, Rounding::HalfEven)));
+  // Eighteen places of something small enough to hold them.
+  print(shown(Decimal::divide(1d, 3d, 18, Rounding::HalfEven)));"#,
+    );
+
+    assert_eq!(out, "25.00\n25.00000000\n0.333333333333333333\n");
+}
+
+/// **Two legal numbers can always be compared.**
+///
+/// `Eq` and `Ord` used to bring both operands to a common scale, the way `add`
+/// does. A hundred million against a rate to twelve places wants a scale of
+/// twelve, which is a multiplication by `10^12` that no `Int` survives -- so
+/// asking whether two numbers were equal stopped the program.
+///
+/// An equality that traps is worse than one that surprises, and this one is
+/// sold as the reason to prefer `Decimal` over `Float`.
+#[test]
+fn comparing_two_far_apart_scales_does_not_stop_the_program() {
+    let out = run(
+        "decimal_compare_wide",
+        r#"  let notional = 100000000.00d;
+  let rate = 0.000000000001d;
+  print(if notional == rate { "equal" } else { "different" });
+  print(if notional == notional { "equal" } else { "different" });
+  print(if rate == rate { "equal" } else { "different" });
+  // And the order, both ways round, on both sides of zero.
+  print(if notional > rate { "bigger" } else { "not bigger" });
+  print(if rate < notional { "smaller" } else { "not smaller" });
+  print(if Decimal::negate(notional) < Decimal::negate(rate) {
+    "smaller"
+  } else {
+    "not smaller"
+  });"#,
+    );
+
+    assert_eq!(out, "different\nequal\nequal\nbigger\nsmaller\nsmaller\n");
+}
+
+/// A numeral too long for the significand is text that is not a number, and
+/// `of_string` already has somewhere to say so.
+///
+/// It used to stop the program instead -- in the one function whose whole job
+/// is reading numbers out of files somebody else wrote. One long cell in one
+/// CSV killed the process.
+#[test]
+fn a_numeral_too_long_to_hold_is_none_and_not_a_trap() {
+    let out = run(
+        "decimal_of_string_long",
+        r#"  print(shown(Decimal::of_string("1234567890123456789012345.00")));
+  print(shown(Decimal::of_string("-1234567890123456789012345.00")));
+  // The largest one that does fit still reads.
+  print(shown(Decimal::of_string("9223372036854775807")));
+  // And one past it does not.
+  print(shown(Decimal::of_string("9223372036854775808")));
+  // An ordinary amount is unaffected.
+  print(shown(Decimal::of_string("1250.00")));"#,
+    );
+
+    assert_eq!(out, "None\nNone\n9223372036854775807\nNone\n1250.00\n");
+}
+
+/// **Every scale a `Decimal` can carry can be printed.**
+///
+/// `show` split the significand with `units / 10^scale`, which needs
+/// `10^scale` to be a number -- and past eighteen places it is not. So `mul`
+/// on two numbers with ten decimal places each produced a value that was
+/// perfectly legal, compared correctly, and stopped the program when printed.
+///
+/// It is string work now, which needs nothing to fit.
+#[test]
+fn a_scale_past_eighteen_prints() {
+    let out = run(
+        "decimal_show_wide_scale",
+        r#"  // Ten places times ten places is twenty.
+  let small = Decimal::mul(0.0000000001d, 0.0000000001d);
+  print(Decimal::show(small));
+  print(Int::to_string(Decimal::truncated(small)));
+  // Nineteen, which is exactly where `ten_to` used to give out.
+  print(shown(Decimal::divide(1d, 3d, 19, Rounding::Towards)));
+  // And the ordinary scales still print the way they always did.
+  print(Decimal::show(Decimal::scaled(150, 2)));
+  print(Decimal::show(Decimal::scaled(-150, 2)));
+  print(Decimal::show(Decimal::scaled(1, 2)));"#,
+    );
+
+    assert_eq!(
+        out,
+        "0.00000000000000000001\n0\n0.3333333333333333333\n1.50\n-1.50\n0.01\n"
+    );
+}
+
+/// The most negative `Int` is a number, so it prints.
+///
+/// Taking a magnitude by negating it would overflow on the way. The sign is a
+/// character, and treating it as one costs nothing.
+#[test]
+fn the_most_negative_significand_prints() {
+    let out = run(
+        "decimal_show_min",
+        r#"  // There is no literal for it: `9223372036854775808` does not fit an
+  // `Int`, and the minus arrives after the number is read.
+  let smallest = 0 - 9223372036854775807 - 1;
+  print(Decimal::show(Decimal::scaled(smallest, 2)));
+  print(Decimal::show(Decimal::scaled(smallest, 0)));"#,
+    );
+
+    assert_eq!(out, "-92233720368547758.08\n-9223372036854775808\n");
 }

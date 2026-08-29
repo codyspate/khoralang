@@ -1662,6 +1662,14 @@ impl Float {
   pub fn to_int(self) -> Int;
 }
 
+/// The most negative `Int`, which has no literal.
+///
+/// `9223372036854775808` does not fit, and the minus arrives after the number
+/// has been read — so the only way to write it down is to walk to it. Wanted
+/// by `Int::of_string`, which counts downward so that this number is one it
+/// can reach.
+fn smallest_int() -> Int { 0 - 9223372036854775807 - 1 }
+
 impl Int {
   /// The number a string spells, or nothing.
   ///
@@ -1678,6 +1686,19 @@ impl Int {
   /// a long enough run of digits would have stopped the program — which for
   /// text off a socket is a denial of service with extra steps. The running
   /// total is checked before it is grown instead.
+  ///
+  /// That check used to be a digit short. It compared the total against a
+  /// tenth of the maximum and let an equal one through, so
+  /// `"9223372036854775808"` — one past the largest `Int`, and the shape of a
+  /// number somebody fat-fingered into a form — grew past the end and stopped
+  /// the program, which is the exact thing the paragraph above promises it
+  /// does not do.
+  ///
+  /// **The total is counted downward**, which is the second fix and the reason
+  /// the guard is written against `smallest_int` rather than a largest one.
+  /// Every `Int` has a negative twin and not every one has a positive twin:
+  /// building `9223372036854775808` on the way to `-9223372036854775808` is
+  /// how the most negative number becomes unreadable, and it was.
   pub fn of_string(text: String) -> Option<Int> {
     let length = String::byte_length(text);
     let negative = length > 0 && U8::to_int(String::byte(text, 0)) == 45;
@@ -1685,22 +1706,33 @@ impl Int {
     if start >= length {
       Option::None
     } else {
-      // A tenth of `Int`'s maximum: past this, one more digit cannot fit.
-      let ceiling = 922337203685477580;
+      let floor = smallest_int();
       let mut at = start;
       let mut total = 0;
       let mut ok = true;
       while at < length {
         let digit = U8::to_int(String::byte(text, at)) - 48;
-        if digit < 0 || digit > 9 || total > ceiling {
+        // Exactly the room one more digit needs, rather than a tenth and a
+        // hope: `total * 10 - digit` stays an `Int` if and only if this holds.
+        if digit < 0 || digit > 9 || total < (floor + digit) / 10 {
           ok = false;
           at = length;
         } else {
-          total = total * 10 + digit;
+          total = total * 10 - digit;
           at = at + 1;
         }
       };
-      if ok { Option::Some(if negative { 0 - total } else { total }) } else { Option::None }
+      if !ok {
+        Option::None
+      } else if negative {
+        Option::Some(total)
+      } else if total == floor {
+        // The magnitude fits going down and does not coming back up: this is
+        // `9223372036854775808` written without a sign.
+        Option::None
+      } else {
+        Option::Some(0 - total)
+      }
     }
   }
 
@@ -1716,11 +1748,19 @@ impl Int {
   /// a status line, a log — and written here rather than in the runtime
   /// because it is four lines of Khora and a good test of whether they are
   /// pleasant to write.
+  /// **The most negative `Int` prints**, which took a second attempt. Taking
+  /// its magnitude with `0 - self` overflows — that is the whole peculiarity
+  /// of the number — so it stopped the program instead, reporting a
+  /// subtraction the caller never wrote. A `Decimal` at that significand could
+  /// be built, compared and added, and not shown.
+  ///
+  /// The digits are walked on whichever side of zero the number is already on,
+  /// so nothing is ever negated.
   pub fn to_string(self) -> String {
     if self == 0 {
       "0"
     } else if self < 0 {
-      "-" + Int::digits(0 - self, "")
+      "-" + Int::below_zero(self, "")
     } else {
       Int::digits(self, "")
     }
@@ -1730,6 +1770,15 @@ impl Int {
   fn digits(self, tail: String) -> String {
     let here = Int::digit(self % 10);
     if self < 10 { here + tail } else { Int::digits(self / 10, here + tail) }
+  }
+
+  /// The same, for a negative `self`, without ever making it positive.
+  ///
+  /// `self % 10` is in `-9..=0` here, so negating *that* is safe where
+  /// negating the number is not.
+  fn below_zero(self, tail: String) -> String {
+    let here = Int::digit(0 - (self % 10));
+    if self > 0 - 10 { here + tail } else { Int::below_zero(self / 10, here + tail) }
   }
 
   fn digit(self) -> String {

@@ -29,8 +29,23 @@ module std::decimal;
 //! It stops the program, like every other number in Khora. `numbers.md`
 //! §"Overflow traps, in every build" argues that case and none of the argument
 //! changes here: a total that silently wrapped is worse than one that never
-//! arrived. Division is the exception, because a quotient usually has no exact
-//! decimal form — so it takes the scale and the rounding to use, and says so.
+//! arrived. That covers `add`, `sub`, `mul`, `at_scale` and `divide` alike.
+//!
+//! Division is not an exception to it. Division takes a scale and a rounding
+//! because a quotient usually has no exact decimal form, and answers `None`
+//! when the divisor is zero because that is a thing data does — but an answer
+//! too large for the significand stops the program, the same as anywhere else.
+//! It used to saturate, which meant `Decimal::divide(10d, 1d, 18, HalfEven)`
+//! answered `9.223372036854775807`: in range, printed to the right number of
+//! places, and wrong. Somebody writing a reconciler found it in the first ten
+//! minutes.
+//!
+//! **The three that cannot stop the program are comparing, reading and
+//! printing**, and each was made not to. Comparing two numbers is a question
+//! about order and needs no common scale to exist. Reading text that is not a
+//! number — including a number too long to hold — is what `of_string`'s
+//! `Option` is for. And `show` is string work, so it prints every scale a
+//! `Decimal` can carry rather than the first eighteen.
 
 import std::core::{Eq, Option, Ord, Ordering, Show};
 
@@ -137,6 +152,13 @@ impl Decimal {
   /// `None` when `other` is zero. Not a trap, because dividing by a quantity
   /// that turned out to be zero is an ordinary thing for data to do, and
   /// `numbers.md` reserves stopping the program for a bug.
+  ///
+  /// **Stops the program when the answer does not fit**, which is a different
+  /// thing and gets the different treatment. Asking for a hundred divided by
+  /// four at eighteen places is asking for twenty digits, and there is no
+  /// honest sixty-four bit answer to give: the nearest one is a different
+  /// number, and handing back a different number is the failure this whole
+  /// type exists to prevent. `rounded` goes through here, so it stops too.
   pub fn divide(self, other: Decimal, scale: Int, how: Rounding) -> Option<Decimal> {
     if other.units == 0 {
       Option::None
@@ -179,8 +201,13 @@ impl Decimal {
   pub fn is_zero(self) -> Bool { self.units == 0 }
 
   /// The whole part, towards zero.
+  ///
+  /// Past eighteen places there is no whole part to find: the significand
+  /// holds nineteen digits and they are all behind the point, so the answer is
+  /// zero and asking `ten_to` for the step would only stop the program on the
+  /// way to it.
   pub fn truncated(self) -> Int {
-    self.units / ten_to(self.scale)
+    if self.scale >= 19 { 0 } else { self.units / ten_to(self.scale) }
   }
 
   /// A decimal written out, or `None` if the text is not one.
@@ -202,6 +229,12 @@ impl Decimal {
   }
 }
 
+/// The largest `Int`, which is where reading a numeral has to stop.
+///
+/// A constant rather than something asked of the language, because `Int` has
+/// no `max` and this is the one place in `std::decimal` that wants it.
+fn largest_int() -> Int { 9223372036854775807 }
+
 /// Both operands brought to one scale.
 type Split2 = {
   left: Decimal,
@@ -212,6 +245,14 @@ type Split2 = {
 ///
 /// `point` is `-1` until one is seen, so that a second one is a rejection
 /// rather than a silently different number.
+///
+/// **A numeral too long for the significand is a rejection too**, which is
+/// what the `Option` is already there for. This used to stop the program: one
+/// long cell in one CSV somebody else wrote killed the process, in the
+/// function whose entire job is reading numbers out of files somebody else
+/// wrote. The guard is `value > (largest - digit) / 10`, asked before the
+/// multiply rather than after it, because after it there is nothing left to
+/// ask.
 fn read_digits(
   text: String, at: Int, length: Int, value: Int, point: Int, negative: Bool
 ) -> Option<Decimal> {
@@ -233,7 +274,12 @@ fn read_digits(
         Option::None
       }
     } else if byte >= 48 && byte <= 57 {
-      read_digits(text, at + 1, length, value * 10 + (byte - 48), point, negative)
+      let digit = byte - 48;
+      if value > (largest_int() - digit) / 10 {
+        Option::None
+      } else {
+        read_digits(text, at + 1, length, value * 10 + digit, point, negative)
+      }
     } else {
       Option::None
     }
@@ -245,17 +291,25 @@ impl Eq for Decimal {
   /// written twice, and a ledger that thought otherwise would report a
   /// difference where there is none. This is the whole reason `Float` cannot
   /// have an `Eq` and this can.
+  ///
+  /// **And it cannot stop the program**, which took a second attempt. It used
+  /// to bring both operands to a common scale, the same way `add` does — so
+  /// comparing a hundred million against a rate to twelve places asked for a
+  /// multiplication by `10^12` that no `Int` survives, and two perfectly legal
+  /// numbers halted a reconciler. An equality that traps is a worse trap than
+  /// one that surprises, and this one is sold as the reason to prefer
+  /// `Decimal` at all.
   fn eq(self, other: Decimal) -> Bool {
-    let pair = Decimal::align(self, other);
-    pair.left.units == pair.right.units
+    khora_decimal_cmp(self.units, self.scale, other.units, other.scale) == 0
   }
 }
 
 impl Ord for Decimal {
+  /// The same comparison, and the same reason it does not go through `align`.
   fn cmp(self, other: Decimal) -> Ordering {
-    let pair = Decimal::align(self, other);
-    if pair.left.units < pair.right.units { Ordering::Less }
-    else if pair.left.units == pair.right.units { Ordering::Equal }
+    let answer = khora_decimal_cmp(self.units, self.scale, other.units, other.scale);
+    if answer < 0 { Ordering::Less }
+    else if answer == 0 { Ordering::Equal }
     else { Ordering::Greater }
   }
 }
@@ -267,17 +321,32 @@ impl Show for Decimal {
   /// scale is part of what was meant: a price to two places stays a price to
   /// two places, and dropping the zero is how a total stops lining up in a
   /// column.
+  /// **Done as text rather than as arithmetic**, which is what lets it print
+  /// every number a `Decimal` can hold. Splitting the significand with
+  /// `units / 10^scale` needs `10^scale` to be a number, and past eighteen
+  /// places it is not — so `mul` on two numbers with ten places each produced
+  /// a value that was perfectly legal and stopped the program when printed.
+  /// Cutting a string at a position needs nothing to fit.
+  ///
+  /// It also means the most negative `Int` prints. Negating it to take a
+  /// magnitude would overflow, and the sign is a character here.
   fn show(self) -> String {
-    if self.scale == 0 {
+    if self.scale <= 0 {
       Int::to_string(self.units)
     } else {
+      let text = Int::to_string(self.units);
       let negative = self.units < 0;
-      let magnitude = if negative { 0 - self.units } else { self.units };
-      let step = ten_to(self.scale);
-      let whole = magnitude / step;
-      let part = magnitude % step;
+      let digits = if negative {
+        String::slice(text, 1, String::byte_length(text))
+      } else {
+        text
+      };
+      // One more than the scale, so there is always a digit before the point.
+      let filled = padded(digits, self.scale + 1);
+      let width = String::byte_length(filled);
+      let cut = width - self.scale;
       let sign = if negative { "-" } else { "" };
-      sign + Int::to_string(whole) + "." + padded(Int::to_string(part), self.scale)
+      sign + String::slice(filled, 0, cut) + "." + String::slice(filled, cut, width)
     }
   }
 }
@@ -301,4 +370,16 @@ fn padded(text: String, width: Int) -> String {
 // one number that fits.
 extern fn khora_decimal_divide(
   left: Int, left_scale: Int, right: Int, right_scale: Int, scale: Int, mode: Int
+) -> Int;
+
+// Where the left sits relative to the right: -1, 0 or 1.
+//
+// Comparing is not arithmetic and must not be able to stop the program, but it
+// still needs to line two scales up somewhere. In 128 bits it fits, and where
+// it does not — an operand enormous enough that scaling it runs past even that
+// — running out is itself the answer, because a number that will not fit is
+// larger than one that does. `Eq` and `Ord` used to do this in Khora, by
+// multiplying, and trapped on two legal numbers.
+extern fn khora_decimal_cmp(
+  left: Int, left_scale: Int, right: Int, right_scale: Int
 ) -> Int;
