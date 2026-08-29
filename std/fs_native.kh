@@ -1,6 +1,6 @@
 module std::fs;
 
-import std::core::{Array, List, Option, Ptr, Region, Scope, Split, acquire};
+import std::core::{Array, Eq, List, Option, Ptr, Region, Scope, Show, Split, acquire};
 import std::permissions::{granted};
 import std::permissions::grants::{fs_read, fs_write};
 
@@ -45,6 +45,7 @@ import std::permissions::grants::{fs_read, fs_write};
 /// promising something. What a caller can act on is "it was not there" against
 /// "it did not work", and both carry the path so the message can say which
 /// file.
+derive(Show, Eq)
 pub type IoError =
   | NotFound(path: String)
   | Failed(path: String)

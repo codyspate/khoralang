@@ -39,6 +39,7 @@ helper here that needs both, and it says so.
 ### IoError
 
 ```khora
+derive(Show, Eq)
 pub type IoError =
   | NotFound(path: String)
   | Failed(path: String)

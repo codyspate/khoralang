@@ -44,7 +44,7 @@ const HEAD: &str = r#"module demo::main;
 import std::core::{Eq, List, Option, Result, Shared, Show, print};
 import std::clock::{Clock};
 import std::random::{Random};
-import std::resilience::{Schedule, repeat, retry, retry_while};
+import std::resilience::{Schedule, Tried, repeat, retry, retry_counting, retry_while};
 
 pub type Oops = | Bad(which: Int);
 
@@ -321,4 +321,91 @@ fn a_schedule_is_a_value_that_can_be_read_and_compared() {
         "Schedule::Intersect(Schedule::Exponential(100, 200, 5000), Schedule::Times(3))\n\
          true\nfalse\n"
     );
+}
+
+
+/// **The count `retry` cannot tell you.**
+///
+/// A caller who wanted to log "succeeded on attempt 3" kept a `Shared<Int>`
+/// and took a lock on every attempt to find out — a mutex and a
+/// fiber-crossing allocation to count to three. `repeat` has always answered a
+/// count because it cannot fail and has nothing else to report; `retry`
+/// answers the value and drops it.
+///
+/// `retry_counting` does not raise, which is the only way the count survives a
+/// run that ended badly: "it failed after four goes" is exactly the line
+/// somebody wants when it did. `retry` and `retry_while` are wrappers that do
+/// the `match` and raise.
+#[test]
+fn a_retry_can_report_how_many_goes_it_took() {
+    let out = run(
+        "resilience_counting",
+        r#"fn main() -> () {
+  let now = Shared::of(0);
+  let waits = Shared::of(List::Nil);
+  with { clock: fake(now, waits), random: floor_draws() } {
+    // Succeeds on the third go, and says so.
+    let tries = Shared::of(0);
+    let third = retry_counting(
+      Schedule::Intersect(Schedule::Spaced(10), Schedule::Times(8)),
+      fn _e => true,
+      fn () => {
+        let n = Shared::update(tries, fn t => t + 1);
+        if n < 3 { raise Oops::Bad(n) } else { n }
+      },
+    );
+    print(Int::to_string(third.attempts));
+    match third.outcome {
+      Result::Ok(value) => print("ok " + Int::to_string(value)),
+      Result::Err(Oops::Bad(n)) => print("bad " + Int::to_string(n)),
+    };
+
+    // First go, which is the count that must never be zero.
+    // The predicate is annotated because an infallible body leaves the error
+    // type with nothing to fix it.
+    let once = retry_counting(Schedule::Times(8), fn (_e: Oops) => true, fn () => 7);
+    print(Int::to_string(once.attempts));
+
+    // And a run that never succeeds: the count survives, and the *last*
+    // failure is the one reported.
+    let failed = Shared::of(0);
+    let never = retry_counting(
+      Schedule::Intersect(Schedule::Spaced(10), Schedule::Times(4)),
+      fn _e => true,
+      fn () => raise Oops::Bad(Shared::update(failed, fn t => t + 1)),
+    );
+    print(Int::to_string(never.attempts));
+    match never.outcome {
+      Result::Ok(value) => print("ok " + Int::to_string(value)),
+      Result::Err(Oops::Bad(n)) => print("bad " + Int::to_string(n)),
+    };
+  }
+}"#,
+    );
+
+    assert_eq!(out, "3\nok 3\n1\n4\nbad 4\n");
+}
+
+/// **`retry` is a wrapper over `retry_counting` now**, so this pins that the
+/// raising half still raises and still gives back the last failure.
+#[test]
+fn retry_still_raises_the_last_failure() {
+    let out = run(
+        "resilience_still_raises",
+        r#"fn main() -> () {
+  let now = Shared::of(0);
+  let waits = Shared::of(List::Nil);
+  with { clock: fake(now, waits), random: floor_draws() } {
+    let tries = Shared::of(0);
+    let outcome = retry(
+      Schedule::Intersect(Schedule::Spaced(10), Schedule::Times(3)),
+      fn () => raise Oops::Bad(Shared::update(tries, fn n => n + 1)),
+    )! catch { Oops::Bad(n) => n };
+    print(Int::to_string(outcome));
+    print(shown(Shared::get(waits)));
+  }
+}"#,
+    );
+
+    assert_eq!(out, "3\n[10, 10]\n");
 }

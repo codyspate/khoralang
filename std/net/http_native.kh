@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, Fiber, List, Map, Never, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery, scoped};
+import std::core::{Array, Eq, Fiber, List, Map, Never, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery, scoped};
 import std::permissions::{granted_host};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
@@ -266,47 +266,58 @@ impl Response {
 
   /// The reason phrase for a status.
   ///
-  /// The ones a service actually sends, which turned out to be more than the
-  /// five this had: the link shortener answered a redirect and got
-  /// `HTTP/1.1 302 Unknown` on the wire. A phrase is advisory — every client
-  /// reads the number — but one that says `Unknown` about a status the server
+  /// The ones a service actually sends, which has twice turned out to be more
+  /// than the list had. The link shortener answered a redirect and got
+  /// `HTTP/1.1 302 Unknown` on the wire; later a service under load answered
+  /// 503 and got the same. A phrase is advisory — every client reads the
+  /// number — but one that says `Unknown` about a status the server
   /// deliberately chose reads as a bug to whoever is holding the packet
   /// capture, and it was.
+  ///
+  /// **The whole of 5xx is here now**, because that is the family a server
+  /// sends about *itself*: 503 under backpressure, 502 and 504 from anything
+  /// with a proxy in front of it, 501 for a method it does not implement.
+  /// Those are the lines somebody reads at three in the morning.
+  ///
+  /// A `match` rather than a chain of `else if`s. Twenty-seven of them in a
+  /// row is a table pretending to be control flow, and a table should look
+  /// like one -- the numbers are in order here, so a missing status is
+  /// something a reader can see rather than something they have to search for.
+  ///
+  /// 413 stays "Payload Too Large" although RFC 9110 renames it "Content Too
+  /// Large". That is a wire string somebody may be matching on, and changing
+  /// it is a decision of its own rather than something to slip into a list of
+  /// additions.
   pub fn reason(status: Int) -> String {
-    if status == 200 {
-      "OK"
-    } else if status == 201 {
-      "Created"
-    } else if status == 204 {
-      "No Content"
-    } else if status == 301 {
-      "Moved Permanently"
-    } else if status == 302 {
-      "Found"
-    } else if status == 304 {
-      "Not Modified"
-    } else if status == 401 {
-      "Unauthorized"
-    } else if status == 403 {
-      "Forbidden"
-    } else if status == 405 {
-      "Method Not Allowed"
-    } else if status == 409 {
-      "Conflict"
-    } else if status == 422 {
-      "Unprocessable Content"
-    } else if status == 429 {
-      "Too Many Requests"
-    } else if status == 400 {
-      "Bad Request"
-    } else if status == 404 {
-      "Not Found"
-    } else if status == 413 {
-      "Payload Too Large"
-    } else if status == 500 {
-      "Internal Server Error"
-    } else {
-      "Unknown"
+    match status {
+      200 => "OK",
+      201 => "Created",
+      202 => "Accepted",
+      204 => "No Content",
+      301 => "Moved Permanently",
+      302 => "Found",
+      304 => "Not Modified",
+      400 => "Bad Request",
+      401 => "Unauthorized",
+      402 => "Payment Required",
+      403 => "Forbidden",
+      404 => "Not Found",
+      405 => "Method Not Allowed",
+      406 => "Not Acceptable",
+      409 => "Conflict",
+      410 => "Gone",
+      413 => "Payload Too Large",
+      415 => "Unsupported Media Type",
+      422 => "Unprocessable Content",
+      428 => "Precondition Required",
+      429 => "Too Many Requests",
+      431 => "Request Header Fields Too Large",
+      500 => "Internal Server Error",
+      501 => "Not Implemented",
+      502 => "Bad Gateway",
+      503 => "Service Unavailable",
+      504 => "Gateway Timeout",
+      _other => "Unknown",
     }
   }
 }
@@ -317,6 +328,7 @@ impl Response {
 /// here — that is a response, not an error. These two are the cases where
 /// there is nobody to answer: the port would not bind, or a request could not
 /// be read at all.
+derive(Show, Eq)
 pub type HttpError =
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
@@ -1556,6 +1568,7 @@ pub type Answer = {
 /// Separate from `HttpError`, which is what goes wrong *being* a server —
 /// a port that would not bind, a request that could not be read. Nothing that
 /// matches one has any use for the cases of the other.
+derive(Show, Eq)
 pub type CallError =
   /// The URL could not be read.
   | BadUrl(String)

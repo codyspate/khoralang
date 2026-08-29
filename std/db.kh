@@ -70,6 +70,7 @@ pub type Row = {
 /// different integer in every engine, and a `std` that pretended otherwise
 /// would be wrong for the second engine anybody wrote. A package that knows
 /// its engine can offer a richer type; this is what everything can agree on.
+derive(Eq)
 pub type DbError =
   /// The statement was not accepted.
   | Rejected(String)
@@ -284,6 +285,12 @@ impl Show for Cell {
 }
 
 impl Show for DbError {
+  /// Written out rather than derived, unlike the `Eq` above.
+  ///
+  /// A derived `Show` gives `DbError::Rejected(...)`, which is right for the
+  /// error types whose cases a reader has to tell apart. This one goes into a
+  /// log line a person reads, and "rejected: duplicate key" is the sentence
+  /// they want rather than a constructor.
   fn show(self) -> String {
     match self {
       DbError::Rejected(why) => "rejected: " + why,

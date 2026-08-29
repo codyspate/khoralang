@@ -80,6 +80,7 @@ One row, in the order the query named its columns.
 ### DbError
 
 ```khora
+derive(Eq)
 pub type DbError =
   | Rejected(String)
   | Disconnected(String)
@@ -240,6 +241,13 @@ impl Show for DbError
 ```khora
 fn show(self) -> String
 ```
+
+Written out rather than derived, unlike the `Eq` above.
+
+A derived `Show` gives `DbError::Rejected(...)`, which is right for the
+error types whose cases a reader has to tell apart. This one goes into a
+log line a person reads, and "rejected: duplicate key" is the sentence
+they want rather than a constructor.
 
 ## Functions
 

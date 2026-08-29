@@ -156,6 +156,7 @@ map would silently keep only the last.
 ### HttpError
 
 ```khora
+derive(Show, Eq)
 pub type HttpError =
   | BindFailed(port: Int)
   | MalformedRequest(details: String);
@@ -450,6 +451,7 @@ same reason: HTTP header names are case-insensitive and a map is not.
 ### CallError
 
 ```khora
+derive(Show, Eq)
 pub type CallError =
   | BadUrl(String)
   | Unreachable(String)
@@ -733,12 +735,28 @@ pub fn reason(status: Int) -> String
 
 The reason phrase for a status.
 
-The ones a service actually sends, which turned out to be more than the
-five this had: the link shortener answered a redirect and got
-`HTTP/1.1 302 Unknown` on the wire. A phrase is advisory — every client
-reads the number — but one that says `Unknown` about a status the server
+The ones a service actually sends, which has twice turned out to be more
+than the list had. The link shortener answered a redirect and got
+`HTTP/1.1 302 Unknown` on the wire; later a service under load answered
+503 and got the same. A phrase is advisory — every client reads the
+number — but one that says `Unknown` about a status the server
 deliberately chose reads as a bug to whoever is holding the packet
 capture, and it was.
+
+**The whole of 5xx is here now**, because that is the family a server
+sends about *itself*: 503 under backpressure, 502 and 504 from anything
+with a proxy in front of it, 501 for a method it does not implement.
+Those are the lines somebody reads at three in the morning.
+
+A `match` rather than a chain of `else if`s. Twenty-seven of them in a
+row is a table pretending to be control flow, and a table should look
+like one -- the numbers are in order here, so a missing status is
+something a reader can see rather than something they have to search for.
+
+413 stays "Payload Too Large" although RFC 9110 renames it "Content Too
+Large". That is a wire string somebody may be matching on, and changing
+it is a decision of its own rather than something to slip into a list of
+additions.
 
 ### Connection
 

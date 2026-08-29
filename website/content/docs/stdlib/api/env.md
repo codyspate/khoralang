@@ -27,6 +27,7 @@ and `khora_arg` gives it back.
 ### EnvError
 
 ```khora
+derive(Show, Eq)
 pub type EnvError = | Denied(name: String);
 ```
 

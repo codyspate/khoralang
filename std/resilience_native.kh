@@ -274,6 +274,22 @@ pub fn retry<A, E, 'ef>(schedule: Schedule, body: () -> A with 'ef raises E) -> 
   retry_while(schedule, fn _e => true, body)!
 }
 
+/// How a retried call ended, and how many goes it took.
+///
+/// **The count is the thing `retry` cannot tell you.** `repeat` has always
+/// answered one, because it cannot fail and there is nothing else to report;
+/// `retry` answers the value and drops it, so a caller who wanted to log
+/// "succeeded on attempt 3" kept a `Shared<Int>` and took a lock on every
+/// attempt to find out. That is a mutex and a fiber-crossing allocation to
+/// count to three.
+pub type Tried<A, E> = {
+  /// What happened in the end: the value, or the failure that stopped it.
+  outcome: Result<A, E>,
+  /// How many times `body` ran. One when it succeeded first go, and never
+  /// zero -- the first attempt is unconditional.
+  attempts: Int,
+};
+
 /// `retry`, for a caller that can tell a retryable failure from a permanent one.
 ///
 /// **A predicate rather than a `Schedule` case**, which is why `Schedule` can
@@ -292,6 +308,34 @@ pub fn retry_while<A, E, 'ef>(
 ) -> A
   with { 'ef | clock: Clock, random: Random }
   raises E
+{
+  match retry_counting(schedule, again, body).outcome {
+    Result::Ok(value) => value,
+    Result::Err(error) => raise error,
+  }
+}
+
+/// `retry_while`, reporting how many attempts it took.
+///
+/// **The loop is here and the other two are wrappers over it**, so there is
+/// one place the schedule is consulted and one place the count is kept.
+///
+/// **This one does not raise.** The failure comes back inside the `Tried`
+/// rather than out of it, which is the only way the count survives a run that
+/// ended badly -- and "it failed after six goes over ninety seconds" is
+/// exactly the line somebody wants in the log when it did. A caller who wants
+/// the raise wants `retry_while`, which is two lines further down and does the
+/// `match`.
+///
+/// The **last** failure is the one reported, for the reason `retry` gives: it
+/// is the one that stopped the retrying, and an earlier error is something
+/// that was already recovered from.
+pub fn retry_counting<A, E, 'ef>(
+  schedule: Schedule,
+  again: (E) -> Bool,
+  body: () -> A with 'ef raises E,
+) -> Tried<A, E>
+  with { 'ef | clock: Clock, random: Random }
 {
   let began = clock.monotonic_millis();
   // The first attempt is outside the loop, so there is always an outcome to
@@ -320,10 +364,7 @@ pub fn retry_while<A, E, 'ef>(
       },
     }
   };
-  match outcome {
-    Result::Ok(value) => value,
-    Result::Err(error) => raise error,
-  }
+  { outcome: outcome, attempts: made }
 }
 
 /// Runs `body` on the schedule until it fails or the schedule runs out, and

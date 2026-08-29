@@ -1,6 +1,6 @@
 module std::env;
 
-import std::core::{Array, List, Option, Ptr};
+import std::core::{Array, Eq, List, Option, Ptr, Show};
 import std::permissions::{granted_name};
 import std::permissions::grants::{env as env_grants};
 
@@ -36,6 +36,7 @@ extern fn khora_arg(index: Int) -> Ptr;
 /// One case, because there is one way for it to fail that is not "no such
 /// variable": the manifest did not grant it. Not being set is `None`, which is
 /// an answer rather than a failure.
+derive(Show, Eq)
 pub type EnvError = | Denied(name: String);
 
 /// What the process was started with.

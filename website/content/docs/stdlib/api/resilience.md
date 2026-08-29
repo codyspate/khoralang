@@ -184,6 +184,41 @@ absolute.
 A wall-clock budget rather than an attempt count, which is usually what a
 person means by "give up after a minute".
 
+### Tried
+
+```khora
+pub type Tried<A, E> = {
+  outcome: Result<A, E>,
+  attempts: Int,
+};
+```
+
+How a retried call ended, and how many goes it took.
+
+**The count is the thing `retry` cannot tell you.** `repeat` has always
+answered one, because it cannot fail and there is nothing else to report;
+`retry` answers the value and drops it, so a caller who wanted to log
+"succeeded on attempt 3" kept a `Shared<Int>` and took a lock on every
+attempt to find out. That is a mutex and a fiber-crossing allocation to
+count to three.
+
+#### outcome
+
+```khora
+outcome: Result<A, E>
+```
+
+What happened in the end: the value, or the failure that stopped it.
+
+#### attempts
+
+```khora
+attempts: Int
+```
+
+How many times `body` ran. One when it succeeded first go, and never
+zero -- the first attempt is unconditional.
+
 ## Methods
 
 ### Schedule
@@ -280,6 +315,28 @@ failure is worth trying again* is knowledge about the error.
 
 Retrying a 404 is the failure this exists to prevent, and it costs the
 caller one `fn`.
+
+### retry_counting
+
+```khora
+pub fn retry_counting<A, E, 'ef>(schedule: Schedule, again: (E) -> Bool, body: () -> A with 'ef raises E) -> Tried<A, E> with { 'ef | clock: Clock, random: Random }
+```
+
+`retry_while`, reporting how many attempts it took.
+
+**The loop is here and the other two are wrappers over it**, so there is
+one place the schedule is consulted and one place the count is kept.
+
+**This one does not raise.** The failure comes back inside the `Tried`
+rather than out of it, which is the only way the count survives a run that
+ended badly -- and "it failed after six goes over ninety seconds" is
+exactly the line somebody wants in the log when it did. A caller who wants
+the raise wants `retry_while`, which is two lines further down and does the
+`match`.
+
+The **last** failure is the one reported, for the reason `retry` gives: it
+is the one that stopped the retrying, and an earlier error is something
+that was already recovered from.
 
 ### repeat
 
