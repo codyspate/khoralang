@@ -4948,6 +4948,90 @@ one that has been silently corrupting money since `std::decimal` was written.
 Reading a surface finds what is missing. Only writing a program finds what is
 wrong.
 
+## Unboxed records, and the throughput goal behind them
+
+Came out of asking how wide `Decimal` should be. The width turned out to be the
+wrong question, and the right one is worth writing down.
+
+### What was decided about `Decimal`
+
+**One `Decimal`, with a 128-bit significand.** Not a family of sized suffixes —
+`d32`, `d64`, `d128` — for four reasons. The conversion rules between members
+are where the cost lands and every rule is a place a program surprises
+somebody. `d64` would be a footgun rather than a choice, since nobody wants it
+once `d128` exists and picking it for "efficiency" walks into the `align` trap
+below. It buys one word per value behind a pointer that costs more than that.
+And each member needs literal syntax, `Show`, `Eq`, `Ord`, arithmetic,
+conversions and documentation.
+
+Sixty-four bits fails **inside** the documented use case, which is what settled
+it. `add` goes through `align`, which raises both operands to the larger scale:
+
+    notional = 100000000.00d   // units 10_000_000_000, scale 2
+    rate     = 0.000000000001d // scale 12
+
+Adding them needs the notional at scale 12 — `1e10 × 10^10 = 1e20`, against a
+ceiling of `9.22e18`. It traps. A hundred million dollars plus a twelve-decimal
+rate is unremarkable finance and does not fit. "Eighteen significant digits is
+every currency amount anybody transacts" is true about *amounts* and false
+about arithmetic on them, because `mul` adds scales and `add` aligns them.
+
+The significand becomes two `Int` fields with the arithmetic in the runtime,
+the way `khora_decimal_divide` already does its intermediate in `i128`. No new
+language type, so `numbers.md`'s objection — Khora has no 128-bit integer —
+stops applying. `Float32` and `I128`/`U128` remain separate, narrower questions:
+the latter on the *existing* rationale for fixed widths, which is representation
+at a boundary rather than choice of precision.
+
+### The question the width was standing in front of
+
+**Trading-grade throughput is a goal**, and none of these widths is where the
+performance is. A record in Khora is a heap object: sixteen bytes of header,
+fields after it, passed as a pointer, reference counted. So
+
+- a `Decimal` costs 32 bytes today and 40 at 128 bits, plus the pointer;
+- an `Array<Decimal>` is an array of *pointers* to separate objects, so a price
+  book is a pointer chase per element and a refcount touch per access;
+- 32 → 40 bytes is noise beside that.
+
+For comparison, Effect's `BigDecimal` is worse than it looks — a JS object
+holding a `bigint` that is itself a heap object with a digit array, so roughly
+80–120 bytes across two allocations, and every arithmetic result allocates a
+fresh one. There is no path there to a flat array at all. That is not the bar
+worth clearing.
+
+**The optimisation that matters is unboxing, not narrowing.** A small record of
+scalars passed in registers and stored inline would make a price book
+contiguous and refcount-free, and it would help `Decimal`, `Pair` and every
+small record at once rather than one type.
+
+What makes it plausible here: **a Khora record has no identity.** It is an
+immutable value compared structurally, so whether it lives behind a pointer is
+a representation choice the compiler may make without any program being able to
+tell. That is the property most languages lack and the reason this is worth
+attempting rather than merely wanting.
+
+What it needs, in the order the questions arrive:
+
+1. **A criterion.** All-scalar fields under some width, transitively; or an
+   annotation. The transitive part matters — a record holding a `String` holds
+   a pointer that still needs counting.
+2. **`mut` fields are the exception.** A record with one has observable
+   mutation, and passing it by value would lose the write. Either they stay
+   boxed or the criterion excludes them.
+3. **Code generation**: passed as an LLVM aggregate or exploded into fields,
+   stored inline, no header, no `dup` or `drop` at all.
+4. **`Array` is already ready.** `khora_array_new(len, fill, stride, boxed,
+   glue)` takes a stride and a boxed flag, so the runtime can already hold
+   elements inline. This is the largest piece and it exists.
+5. **The foreign boundary.** `docs/design/ffi.md` says an aggregate must not
+   cross. An unboxed record is an aggregate, so either the rule is revisited
+   deliberately or unboxed records are boxed again at the boundary.
+
+Not scheduled. Written down because the throughput goal is new information and
+it changes which of the numeric questions is worth answering first — the answer
+is neither `d64` nor `d128` but the box around both.
+
 ## Phase 15 — The Torvalds test
 
 **A named standard the codebase has to pass**, after which it should be
