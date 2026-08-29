@@ -38,6 +38,16 @@ impl<'a> Planner<'a> {
         for (_, pat) in &self.body.evidence {
             found.extend(self.bound_by(*pat));
         }
+        // And a lambda's, for the same reason: the label may be read by a call
+        // that never mentions it, so a backward pass over the expressions
+        // cannot see the read.
+        for (_, expr) in self.body.exprs() {
+            if let Expr::Lambda { evidence, .. } = expr {
+                for (_, pat) in evidence {
+                    found.extend(self.bound_by(*pat));
+                }
+            }
+        }
         found
     }
 

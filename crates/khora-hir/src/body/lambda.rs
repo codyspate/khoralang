@@ -34,6 +34,9 @@ impl<'a> Ctx<'a> {
         self.scopes.push(Vec::new());
         self.lambdas.push(local_mark);
         self.lambda_names.push(name);
+        // Filled in by `lower_segments` as the body mentions names nothing in
+        // scope answers to. See `Expr::Lambda`'s `evidence`.
+        self.lambda_evidence.push(Vec::new());
 
         let declared: Vec<ast::Param> =
             e.params().map(|list| list.params().collect()).unwrap_or_default();
@@ -65,6 +68,7 @@ impl<'a> Ctx<'a> {
 
         self.lambdas.pop();
         self.lambda_names.pop();
+        let evidence = self.lambda_evidence.pop().unwrap_or_default();
         self.scopes.pop();
 
         let mut captures: Vec<LocalId> = Vec::new();
@@ -76,7 +80,8 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        let id = self.add_expr(Expr::Lambda { params, param_types, body, captures }, range);
+        let id = self
+            .add_expr(Expr::Lambda { evidence, params, param_types, body, captures }, range);
         self.body.lambda_marks.insert(id, local_mark);
         id
     }
@@ -107,6 +112,7 @@ impl<'a> Ctx<'a> {
         self.scopes.push(Vec::new());
         self.lambdas.push(local_mark);
         self.lambda_names.push(None);
+        self.lambda_evidence.push(Vec::new());
 
         let local = self.declare("flow value".to_string(), false, range);
         let params = vec![self.add_pat(Pat::Bind(local), range)];
@@ -128,6 +134,7 @@ impl<'a> Ctx<'a> {
 
         self.lambdas.pop();
         self.lambda_names.pop();
+        let evidence = self.lambda_evidence.pop().unwrap_or_default();
         self.scopes.pop();
 
         let mut captures: Vec<LocalId> = Vec::new();
@@ -140,7 +147,13 @@ impl<'a> Ctx<'a> {
         }
 
         let id = self.add_expr(
-            Expr::Lambda { params, param_types: vec![None], body: value, captures },
+            Expr::Lambda {
+                evidence,
+                params,
+                param_types: vec![None],
+                body: value,
+                captures,
+            },
             range,
         );
         self.body.lambda_marks.insert(id, local_mark);

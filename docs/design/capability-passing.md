@@ -116,20 +116,60 @@ of this. HIR needed nothing either — see the limit below.
    argument, and released by the closure's outermost scope, because there is no
    local for the reference-counting plan to hang them on.
 
-## The limit
+## The limit, and how it was lifted
 
-A lambda can **require** a capability it never mentions. It cannot **mention**
-one that is not in scope:
+It used to read: a lambda can **require** a capability it never mentions, but
+cannot **mention** one that is not in scope.
 
 ```khora
-nursery(fn () => spawn_one()!)              // works: a call carries the row
-nursery(fn () => nursery.adopt(f))          // does not: `nursery` is a bare name
+nursery(fn () => spawn_one()!)              // a call carries the row
+nursery(fn () => nursery.adopt(f))          // and this did not work
 ```
 
-A bare name is resolved by ordinary lookup, and at that point there is nothing
-to find — the second line reads `nursery` as the top-level function and fails
-somewhere confusing. Making it resolve would mean inventing a binding for any
-unresolved name inside a lambda, which turns a typo into a capability
-requirement and loses "cannot find `x` in this scope" for every closure in the
-language. Not worth it for the case that is one helper function away, and the
-helper is where the name belongs anyway.
+Both work now. The reason recorded for leaving the second one was that making
+it resolve "would mean inventing a binding for any unresolved name inside a
+lambda, which turns a typo into a capability requirement and loses `cannot find
+x in this scope` for every closure in the language."
+
+**The binding is invented and the error is deferred**, which costs neither.
+Lowering does not know what a lambda is expected to require; the checker does,
+because the callee's parameter type says so. So an unresolved bare name inside
+a lambda becomes a binding recorded on the lambda, and the checker either types
+it from the expected row or reports exactly the message lowering would have —
+at the same span. Nothing disappears; it moves one pass later.
+
+"Not worth it for the case that is one helper function away" turned out to be
+worth it: three functions in one program existed only to hold a label, and the
+author said so.
+
+### The three pieces
+
+1. **Lowering** records `(label, binding)` on the lambda for each name it could
+   not resolve. Only inside a lambda — at the top level of a function there is
+   no row to be resolved against later, so an unresolved name is what it always
+   was.
+
+2. **The checker** binds each label from the hint's `requires` row and adds it
+   to the lambda's own, alongside what `absorb_requires` collected from the
+   calls inside. Sorted with them, because code generation appends a parameter
+   per label in that order.
+
+3. **Code generation** stores the incoming parameter into the binding's slot,
+   the way `move_parameters` does for a named function's evidence — and
+   releases it as a *local* rather than as a temporary, since the slot now owns
+   the reference. Holding it both ways is a double free; neither way leaks
+   three objects per call. Both were written before the tests that count them.
+
+### A receiver shadows an import
+
+`std::core` exports a function called `nursery` and the conventional label for
+the capability is also `nursery`, so the idiomatic call collided with itself
+and reported that a function type "has no method `adopt`".
+
+A capability a lambda requires is morally its parameter, and a parameter
+shadows an import everywhere else in the language. So a **receiver** — the `x`
+in `x.f`, not a bare `x` — resolves to the lambda's capability when nothing
+nearer answers to it. A local, a capture and a module constant all still win,
+in that order. Only a receiver, because a bare name inside a lambda is usually
+a function about to be called, and a receiver that is a top-level function is
+never meaningful: Khora's functions have no methods.

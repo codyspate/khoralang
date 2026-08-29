@@ -205,7 +205,7 @@ impl<'a> Checker<'a> {
                 self.infer(inner)
             }
             Expr::Catch { inner, arms } => self.infer_catch(inner, &arms, range),
-            Expr::Lambda { params, param_types, body, .. } => {
+            Expr::Lambda { evidence, params, param_types, body, .. } => {
                 // A parameter with no annotation gets a variable, so its type
                 // is settled by how the lambda is used: `map(xs, (x) => x + 1)`
                 // learns `x: Int` from `map`'s signature.
@@ -257,6 +257,49 @@ impl<'a> Checker<'a> {
                     self.bind_pattern(*pat, ty);
                 }
 
+                // **A capability the body named and could not resolve.**
+                //
+                // Lowering bound it rather than reporting it, because only
+                // this point knows what the lambda is *expected* to require:
+                // `bounded_nursery`'s parameter says `with { 'ef | nursery:
+                // Nursery }`, so a body that writes `nursery.adopt(f)` is
+                // naming that label and nothing else could have been meant.
+                //
+                // A label the expected row does not name is the typo lowering
+                // deferred, and gets the message lowering would have given.
+                // Nothing is lost by having moved it; `capability-passing.md`
+                // §"The limit" declined this on the grounds that the message
+                // would disappear, and it does not.
+                let expected_row = hint
+                    .as_ref()
+                    .map(|h| self.unifier.shallow(h))
+                    .and_then(|h| match h {
+                        Type::Fn { requires, .. } => Some(self.unifier.zonk(&requires)),
+                        _ => None,
+                    });
+                let offered: Vec<(String, Type)> = match &expected_row {
+                    Some(Type::Row { fields, .. }) => fields.clone(),
+                    _ => Vec::new(),
+                };
+                let mut required: Vec<(String, Type)> = Vec::new();
+                for (label, pat) in &evidence {
+                    match offered.iter().find(|(l, _)| l == label) {
+                        Some((_, ty)) => {
+                            self.bind_pattern(*pat, ty);
+                            if !required.iter().any(|(l, _)| l == label) {
+                                required.push((label.clone(), ty.clone()));
+                            }
+                        }
+                        None => {
+                            self.error(
+                                format!("cannot find `{label}` in this scope"),
+                                self.body.pat_range(*pat),
+                            );
+                            self.bind_pattern(*pat, &Type::Unknown);
+                        }
+                    }
+                }
+
                 // The whole type exists before the body is checked, because a
                 // recursive closure mentions itself inside it. The result is a
                 // variable the body then solves, and so is the error row.
@@ -281,6 +324,21 @@ impl<'a> Checker<'a> {
                 let before = self.demanded.len();
                 let ret = self.infer(body);
                 let needs = self.absorb_requires(before);
+                // The labels the body *named* go in alongside the ones its
+                // calls asked for. Sorted with them, because code generation
+                // appends a parameter per label in this order and only one
+                // side should be deciding it.
+                let needs = match needs {
+                    Type::Row { mut fields, tail } => {
+                        for (label, ty) in required {
+                            if !fields.iter().any(|(l, _)| *l == label) {
+                                fields.push((label, ty));
+                            }
+                        }
+                        Type::row(fields, tail.map(|t| *t))
+                    }
+                    other => other,
+                };
                 let _ = self.unifier.unify(&requires, &needs);
                 let mine = self.absorb_raises(before);
                 // Left open, because what the body raises is a lower bound

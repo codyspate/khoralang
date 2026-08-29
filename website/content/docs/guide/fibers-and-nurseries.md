@@ -107,6 +107,17 @@ pub fn nursery<A, 'ef, 'er>(
 
 A named function or a lambda, whichever reads better. `nursery(children)` and `nursery(fn () => children())` are the same thing: a lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs.
 
+The lambda may also **name** the nursery, so a whole group of children can be written where it is started rather than in a function of its own:
+
+```khora
+nursery(fn () => {
+  nursery.adopt(Fiber::spawn(fetch));
+  nursery.adopt(Fiber::spawn(index));
+})!
+```
+
+`nursery` here is the capability the lambda requires, not the function being called — a capability a lambda needs and cannot find is its parameter in all but spelling, and shadows an outer name the way a parameter does. The same holds for `bounded_nursery`, and for `scope` inside a `scoped` body.
+
 ### An operation can be generic in a row, but not in a type
 
 `adopt` binds `'er` and cannot bind an answer type, and that asymmetry is a real property of the design rather than a hole nobody got to. A capability crosses as evidence and an error as a tag, so a handler's closure is the same machine code for every row; a type parameter decides a layout and would have to be monomorphized, and a closure has nowhere to put that. [Effects and rows](/docs/reference/effects/#an-operation-may-be-generic-in-a-row-but-not-in-a-type) has the rule.

@@ -118,7 +118,9 @@ pub(crate) fn emit_closure<'ctx>(
     mono: &khora_types::mono::Instances,
 ) {
     let Some(function) = be.definition(&site.symbol) else { return };
-    let Expr::Lambda { params, body: root, .. } = body.expr(site.expr).clone() else { return };
+    let Expr::Lambda { evidence, params, body: root, .. } = body.expr(site.expr).clone() else {
+        return;
+    };
     let empty = RcPlan::default();
 
     let entry = be.ctx.append_basic_block(function, "entry");
@@ -181,19 +183,45 @@ pub(crate) fn emit_closure<'ctx>(
     // that did not exist where the lambda was written, supplied by whoever
     // calls it. `docs/design/capability-passing.md`.
     //
-    // No binding names these — the source never wrote them down, which is the
-    // whole point — so they go straight into `incoming`, where
-    // `evidence_from_row` already looks for a capability a `with 'r` clause
-    // forwarded. Owned like every other argument, and released here because
-    // there is no local for the reference-counting plan to hang them on.
+    // Most have no binding: the source required them without naming them,
+    // which is what a call inside the lambda does, so they go straight into
+    // `incoming` where `evidence_from_row` looks. Owned like every other
+    // argument, and released here because there is no local to hang a
+    // reference-counting plan on.
+    //
+    // **The ones the source did name get a slot as well**, exactly as a named
+    // function's do, so `nursery.adopt(f)` inside a lambda reads its binding
+    // like any other. Those are *not* held as temporaries: the local owns the
+    // reference and the plan already covers it, and releasing both is a double
+    // free. Same reasoning as `take_evidence`.
+    let named: Vec<String> = evidence.iter().map(|(label, _)| label.clone()).collect();
     let handed = crate::backend::evidence_of(&site.requires_signature());
     let base = params.len() + 1;
     for (offset, (label, ty)) in handed.into_iter().enumerate() {
         let Some(value) = function.get_nth_param((base + offset) as u32) else { continue };
-        if is_boxed(&ty) {
+        if !named.contains(&label) && is_boxed(&ty) {
             owned.push(Cleanup::Temp(value, ty));
         }
         lower.incoming.insert(label, value);
+    }
+
+    // Matched by label rather than by position, because the row's order is the
+    // contract and a body that named only some of them would otherwise bind
+    // the wrong ones.
+    //
+    // Released as a *local* rather than as a temporary, because that is what
+    // it now is: the slot holds the reference and every path out of the
+    // closure goes through this scope. Storing it and releasing nothing leaked
+    // three objects per call, which a growing `khora_live_count` found — the
+    // named-function form beside it stayed flat.
+    for (label, pat) in &evidence {
+        let Pat::Bind(local) = body.pat(*pat).clone() else { continue };
+        let Some(slot) = lower.slots.get(&local).copied() else { continue };
+        let Some(value) = lower.incoming.get(label).copied() else { continue };
+        lower.be.builder.build_store(slot, value).expect("storing a named capability");
+        if is_boxed(types.local(local)) {
+            owned.push(Cleanup::Local(local));
+        }
     }
     lower.scopes.push(owned);
 

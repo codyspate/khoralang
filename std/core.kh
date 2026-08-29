@@ -3383,12 +3383,23 @@ pub effect Nursery {
 /// `nursery(fn () => serve()!)` is the same thing. A lambda resolves a
 /// capability lexically where it can and *requires* it where it cannot, so
 /// this one's type becomes `() -> () with { nursery: Nursery }` and the
-/// `body()!` below supplies it from the handler just installed.
-/// `docs/design/capability-passing.md` is the rule and why it had to change:
+/// `body()!` below supplies it from the handler just installed. That is the
+/// rule in `docs/design/capability-passing.md`, and the reason for it is that
 /// eta-expansion must not alter what a program means.
 ///
-/// Which makes eta-expansion change meaning, and it should not.
-/// `docs/design/capability-passing.md` decides what to do about that.
+/// **And the body may name the nursery**, which for a while it could not:
+///
+/// ```khora
+/// nursery(fn () => {
+///   nursery.adopt(Fiber::spawn(work));
+///   nursery.adopt(Fiber::spawn(more));
+/// })!
+/// ```
+///
+/// A bare name used to resolve by ordinary lookup and find this function, so a
+/// whole group of children needed a named function of its own to hold the
+/// label. The label is the lambda's parameter in all but spelling, and shadows
+/// this function the way a parameter shadows anything else.
 pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A
   with 'ef
   raises 'er

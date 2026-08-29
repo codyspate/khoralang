@@ -266,6 +266,25 @@ pub enum Expr {
     /// plan cover the lambda's expressions without a second pass over a second
     /// body.
     Lambda {
+        /// Capabilities this lambda names and cannot resolve lexically, so it
+        /// requires them instead — the label and the binding that holds it.
+        ///
+        /// **`nursery(fn () => nursery.adopt(f))` used to be the one thing a
+        /// lambda could not do.** `capability-passing.md`'s rule is "resolve a
+        /// capability lexically if you can and require it if you cannot", and
+        /// a lambda could already *require* one it never mentioned — a call
+        /// inside it carries the row — but not one it named, because a bare
+        /// name is resolved by ordinary lookup and there was nothing to find.
+        /// Every group of children needed a named top-level function to hold
+        /// it, and three of one program's existed for no other reason.
+        ///
+        /// The objection recorded against fixing it was that inventing a
+        /// binding for any unresolved name turns a typo into a requirement and
+        /// loses "cannot find `x` in this scope". The binding is invented here
+        /// and the *error* is deferred: the checker knows the lambda's expected
+        /// row, and a label that row does not name is reported at the span
+        /// this pattern carries. The message moves rather than disappearing.
+        evidence: Vec<(String, PatId)>,
         params: Vec<PatId>,
         /// What each parameter was *annotated* with, positionally, and `None`
         /// where it was not.
@@ -628,6 +647,7 @@ fn lower_test(
         in_scope: Vec::new(),
         lambdas: Vec::new(),
         lambda_names: Vec::new(),
+        lambda_evidence: Vec::new(),
     };
     let root = ctx.lower_expr(&ast::Expr::Block(block.clone()));
     ctx.body.root = Some(root);
@@ -712,6 +732,7 @@ fn lower_function(
         in_scope: Vec::new(),
         lambdas: Vec::new(),
         lambda_names: Vec::new(),
+        lambda_evidence: Vec::new(),
     };
 
     if let Some(params) = decl.params() {
@@ -803,6 +824,9 @@ struct Ctx<'a> {
     /// the initializer of a `let`. Inside the innermost one, that name is the
     /// closure itself rather than a capture of it.
     lambda_names: Vec<Option<String>>,
+    /// The capability labels each open lambda has named and could not resolve,
+    /// one list per lambda on the stack. See `Expr::Lambda`'s `evidence`.
+    lambda_evidence: Vec<Vec<(String, PatId)>>,
 }
 
 // One module per lowering responsibility. Rust lets an inherent impl be split

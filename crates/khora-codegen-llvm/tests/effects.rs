@@ -2044,3 +2044,125 @@ fn main() -> Int raises DbError {{
     assert_eq!(ran.code, Some(0));
 }
 
+/// A capability, a helper that requires it, and a function that supplies it.
+const CAPABILITY: &str = "module t;
+fn print(value: Int);
+extern fn khora_print_int(value: Int);
+extern fn khora_live_count() -> Int;
+
+pub effect Ledger { record: Int -> () }
+
+fn under<A>(body: () -> A with { ledger: Ledger }) -> A {
+  with { ledger: handler for Ledger { record: fn n => print(n) } } { body() }
+}
+";
+
+/// **A lambda may name a capability it requires.**
+///
+/// `capability-passing.md`'s rule is "resolve a capability lexically if you
+/// can, and require it if you cannot", and a lambda could already require one
+/// it never *mentioned* — a call inside it carries the row. Naming one was the
+/// documented limit: a bare name is resolved by ordinary lookup and there was
+/// nothing to find, so every group of children needed a named top-level
+/// function to hold the label, and three in one program existed for no other
+/// reason.
+///
+/// Lowering binds the name and the *checker* decides, because only it knows
+/// what the lambda is expected to require.
+#[test]
+fn a_lambda_may_name_a_capability_it_requires() {
+    let ran = run(
+        "lambda_names_capability",
+        &format!(
+            "{CAPABILITY}
+fn main() -> Int {{
+  under(fn () => {{ ledger.record(7); 0 }});
+  0
+}}
+"
+        ),
+    );
+
+    assert_eq!(ran.stdout, "7\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Named more than once in one body, and beside a capability the same lambda
+/// resolves lexically.
+#[test]
+fn a_named_capability_may_be_used_more_than_once() {
+    let ran = run(
+        "lambda_names_capability_twice",
+        &format!(
+            "{CAPABILITY}
+fn main() -> Int {{
+  let outside = 100;
+  under(fn () => {{ ledger.record(1); ledger.record(outside); 0 }});
+  0
+}}
+"
+        ),
+    );
+
+    assert_eq!(ran.stdout, "1\n100\n", "twice, and a capture beside it");
+}
+
+/// **The capability is released, once.**
+///
+/// It arrives owned, like every other argument, and the slot holds the
+/// reference — so the closure's own scope releases it rather than the lifted
+/// function holding it as a temporary. Holding it both ways is a double free
+/// and holding it neither way leaks; this counts objects because both failures
+/// are silent.
+#[test]
+fn a_named_capability_is_released_exactly_once() {
+    let ran = run(
+        "lambda_capability_counts",
+        &format!(
+            "{CAPABILITY}
+fn round() -> () {{
+  under(fn () => {{ ledger.record(0); 0 }});
+}}
+
+fn main() -> Int {{
+  let mut i = 0;
+  while i < 200 {{ round(); i = i + 1; }};
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+
+    let lines: Vec<&str> = ran.stdout.lines().collect();
+    assert_eq!(lines.last(), Some(&"0"), "nothing left over: {}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// **And a typo is still a typo**, which is the objection the design doc
+/// recorded against doing any of this: inventing a binding for an unresolved
+/// name would turn one into a capability requirement and lose "cannot find `x`
+/// in this scope".
+///
+/// The binding is invented and the *error* is deferred — the checker reports
+/// it, at the same span, when the label turns out not to be one the lambda's
+/// expected row names.
+#[test]
+fn an_unresolved_name_in_a_lambda_is_still_reported() {
+    let found = refused(
+        "lambda_typo",
+        &format!(
+            "{CAPABILITY}
+fn main() -> Int {{
+  under(fn () => {{ ledgr.record(7); 0 }});
+  0
+}}
+"
+        ),
+    );
+
+    assert!(
+        found.iter().any(|e| e.contains("cannot find `ledgr` in this scope")),
+        "a misspelling must not become a capability: {found:?}"
+    );
+}

@@ -136,13 +136,22 @@ impl<'a> Planner<'a> {
                     self.walk(*value);
                 }
             }
-            Expr::Lambda { params, body, .. } => {
+            Expr::Lambda { evidence, params, body, .. } => {
                 // The lambda's parameters are owned by the lambda, exactly as a
                 // function's are, and released where its body ends. Captures
                 // are *not* released here: the closure object owns those, and
                 // its drop glue is what lets them go.
+                //
+                // A capability the lambda *named* is a parameter too — the
+                // caller hands it over owned, the same way a named function's
+                // evidence arrives — so it is bound here rather than left for
+                // the lifted function to hold as a temporary. Leaving it out
+                // released the same reference twice.
                 let mut owned = Vec::new();
                 for pat in &params {
+                    self.bind(*pat, &mut owned);
+                }
+                for (_, pat) in &evidence {
                     self.bind(*pat, &mut owned);
                 }
                 // Deliberately not recorded as drops here. A lambda body is

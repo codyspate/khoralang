@@ -92,7 +92,7 @@ impl<'a> Ctx<'a> {
             ast::Expr::Unit(_) => self.add_expr(Expr::Unit, range),
             ast::Expr::Field(e) => {
                 let base = match e.base() {
-                    Some(b) => self.lower_expr(&b),
+                    Some(b) => self.lower_receiver(&b, range),
                     None => self.add_expr(Expr::Missing, range),
                 };
                 let name = e.field().and_then(|f| f.ident()).unwrap_or_default();
@@ -332,6 +332,61 @@ impl<'a> Ctx<'a> {
         self.lower_segments(segments, range)
     }
 
+    /// The base of a `x.field` or `x.method(..)`, which is resolved slightly
+    /// differently inside a lambda.
+    ///
+    /// **A capability a lambda requires shadows a top-level name, because it is
+    /// morally the lambda's parameter.** `std::core` exports a function called
+    /// `nursery` *and* the conventional label for the capability is `nursery`,
+    /// so the idiomatic call collides with itself:
+    ///
+    /// ```khora
+    /// import std::core::{nursery};
+    /// nursery(fn () => nursery.adopt(f))
+    /// ```
+    ///
+    /// resolved the receiver to the imported function and reported
+    /// `` `(() -> _ with { nursery: Nursery, | _ } ..) -> _ ..` has no method
+    /// `adopt` ``, which is a true sentence nobody can act on.
+    ///
+    /// A parameter shadows an import everywhere else in the language and this
+    /// is the same rule, applied where the parameter is not written down. Only
+    /// a *receiver* — `x.f`, not `x` alone — because a bare name inside a
+    /// lambda is usually a function being called, and only when nothing nearer
+    /// answers to it: a local, a capture and a module constant all win, in that
+    /// order, exactly as before.
+    ///
+    /// A receiver whose name is a top-level function is never meaningful
+    /// otherwise. Khora's functions have no methods.
+    fn lower_receiver(&mut self, e: &ast::Expr, range: TextRange) -> ExprId {
+        let ast::Expr::Path(path) = e else { return self.lower_expr(e) };
+        if self.lambdas.is_empty() {
+            return self.lower_expr(e);
+        }
+        let segments: Vec<String> = path
+            .syntax()
+            .children()
+            .find_map(ast::Path::cast)
+            .map(|p| p.segments().filter_map(|s| s.ident()).collect())
+            .unwrap_or_default();
+        let [only] = segments.as_slice() else { return self.lower_expr(e) };
+
+        let nearer = self.lookup(only).is_some()
+            || self.is_own_lambda(only)
+            || self.is_enclosing_lambda(only)
+            || self.constants.iter().any(|(name, _)| name == only);
+        if nearer {
+            return self.lower_expr(e);
+        }
+
+        let local = self.declare(only.clone(), false, range);
+        let pat = self.add_pat(Pat::Bind(local), range);
+        if let Some(open) = self.lambda_evidence.last_mut() {
+            open.push((only.clone(), pat));
+        }
+        self.add_expr(Expr::Local(local), range)
+    }
+
     fn lower_segments(&mut self, segments: Vec<String>, range: TextRange) -> ExprId {
         // A bare name is a local first — shadowing is what people expect.
         if let [only] = segments.as_slice() {
@@ -402,6 +457,38 @@ impl<'a> Ctx<'a> {
             }
             if let Some(resolution) = self.scope.get(only) {
                 return self.add_expr(Expr::Path(resolution.clone()), range);
+            }
+            // **A name a lambda cannot resolve may be a capability it
+            // requires.**
+            //
+            // `capability-passing.md`'s rule is "resolve a capability lexically
+            // if you can, and require it if you cannot", and a lambda could
+            // already require one it never *mentioned* — a call inside it
+            // carries the row. What it could not do was name one:
+            //
+            //     nursery(fn () => nursery.adopt(f))
+            //
+            // read `nursery` as the top-level function and failed somewhere
+            // confusing, so every group of children needed a named function to
+            // hold the label. Three in one program existed for no other reason.
+            //
+            // The objection on record was that inventing a binding for any
+            // unresolved name turns a typo into a capability requirement and
+            // loses "cannot find `x` in this scope". So the binding is invented
+            // and the **error is deferred**: the checker knows the lambda's
+            // expected row and reports exactly this message for a label that
+            // row does not name. It moves rather than disappearing.
+            //
+            // Only inside a lambda. At the top level of a function there is no
+            // row to be resolved against later, so an unresolved name is what
+            // it has always been.
+            if !self.lambdas.is_empty() {
+                let local = self.declare(only.clone(), false, range);
+                let pat = self.add_pat(Pat::Bind(local), range);
+                if let Some(open) = self.lambda_evidence.last_mut() {
+                    open.push((only.clone(), pat));
+                }
+                return self.add_expr(Expr::Local(local), range);
             }
             self.error(format!("cannot find `{only}` in this scope"), range);
             return self.add_expr(Expr::Unresolved(only.clone()), range);
