@@ -83,23 +83,35 @@ fn the_standard_library_type_checks() {
 /// that story, the `Unknown` audit is what ended it, and
 /// `docs/design/polymorphic-operations.md` is the decision that made the
 /// program true rather than the test lenient.
-/// `packages/` is in the source set because `examples/ledger_service` depends
+/// `packages/` is in each source set because `examples/ledger_service` depends
 /// on `postgres`. A real build resolves that through the manifest; this test
-/// has no resolver, so it is handed the whole tree — which is also closer to
-/// what it is asserting, that everything in the repository agrees with
-/// everything else.
+/// has no resolver, so it is handed the whole tree.
+///
+/// **One example at a time**, which it did not used to be. All four went into
+/// a single compilation, and two of them declare `module main;` — so the test
+/// was asserting that a file set no build would ever produce type checks, and
+/// it only passed because a module declared in two files was an error nothing
+/// reported. Checking them together also meant a name in one example could
+/// satisfy a reference in another, which is the opposite of what this asserts.
 #[test]
 fn the_reference_application_type_checks() {
-    let found = errors_under(&[
-        std_dir(),
-        repo_dir().join("examples"),
-        repo_dir().join("packages"),
-    ]);
-    assert!(
-        found.is_empty(),
-        "the reference application does not type check:\n  {}",
-        found.join("\n  ")
-    );
+    let examples = repo_dir().join("examples");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&examples).expect("examples/ should exist").flatten() {
+        let example = entry.path();
+        if !example.is_dir() {
+            continue;
+        }
+        checked += 1;
+        let found = errors_under(&[std_dir(), example.clone(), repo_dir().join("packages")]);
+        assert!(
+            found.is_empty(),
+            "{} does not type check:\n  {}",
+            example.display(),
+            found.join("\n  ")
+        );
+    }
+    assert!(checked >= 4, "expected every example to be checked, saw {checked}");
 }
 
 /// The pieces that make `std::core` worth having, so that losing one is a test

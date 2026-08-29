@@ -186,6 +186,9 @@ pub fn is_test(symbol: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemMap {
     pub module: Option<ModulePath>,
+    /// Where the `module` declaration is, so that a second file claiming the
+    /// same module has somewhere to be told about it.
+    pub module_range: Option<TextRange>,
     pub items: Vec<Item>,
     /// The file's tests, in written order.
     pub tests: Vec<TestItem>,
@@ -279,7 +282,11 @@ pub fn module_api(db: &dyn Db, file: SourceFile) -> ModuleApi {
 pub fn item_map(db: &dyn Db, file: SourceFile) -> ItemMap {
     let parse = khora_db::parse(db, file);
     let source = parse.source_file();
-    let mut map = ItemMap { module: module_path_of(&source), ..ItemMap::default() };
+    let mut map = ItemMap {
+        module: module_path_of(&source),
+        module_range: module_range_of(&source),
+        ..ItemMap::default()
+    };
 
     if map.module.is_none() {
         map.errors.push(HirError {
@@ -331,6 +338,11 @@ fn module_path_of(source: &ast::SourceFile) -> Option<ModulePath> {
     let path = source.module()?.path()?;
     let segments: Vec<String> = path.segments().filter_map(|s| s.ident()).collect();
     (!segments.is_empty()).then(|| ModulePath::new(segments))
+}
+
+/// The span of the `module` declaration, for a diagnostic to point at.
+fn module_range_of(source: &ast::SourceFile) -> Option<TextRange> {
+    Some(source.module()?.syntax().text_range())
 }
 
 fn collect_import(import: &ast::ImportDecl) -> Option<Import> {
@@ -467,6 +479,14 @@ pub fn module_graph(db: &dyn Db, root: khora_db::SourceRoot) -> ModuleGraph {
         let Some(path) = api.module.clone() else { continue };
 
         if graph.modules.iter().any(|(p, _)| p == &path) {
+            // **Kept, and reported somewhere a person will see it.** This
+            // error existed and nothing ever read `graph.errors`, so two files
+            // declaring one module compiled quietly -- and since a name
+            // defined in both resolves to whichever file was read last, adding
+            // a helper whose name already existed in a sibling changed what
+            // the program did with no diagnostic anywhere. The graph has no
+            // span to point at, so [`file_scope`] says it again against the
+            // file that lost. Found by somebody's second program.
             graph.errors.push(HirError {
                 message: format!("module `{path}` is declared in more than one file"),
                 range: TextRange::empty(0.into()),
@@ -615,6 +635,44 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
 
     let Some(root) = khora_db::source_root(db) else { return out };
     let graph = module_graph(db, root);
+
+    // **A module lives in one file.** The graph keeps the first file that
+    // claims a path and drops the rest, so a second one is invisible to name
+    // resolution and perfectly visible to everything downstream that walks the
+    // file list -- which is how `fn shared_name` in two files of `module main`
+    // both compiled and the later one won, with `khora check` reporting no
+    // errors at all.
+    //
+    // Said here rather than in the graph because this is where the spans are.
+    // The file that lost is the one told, because it is the one that has to
+    // move, and it is named after the file that has the module so that the
+    // reader does not have to search for the other half.
+    if let (Some(mine), Some(range)) = (map.module.as_ref(), map.module_range) {
+        if let Some(owner) = graph.file(mine) {
+            // **Unless the two are variants of one file for different
+            // targets.** `socket_linux.kh`, `socket_macos.kh` and
+            // `socket_windows.kh` all declare `std::net::socket` and exactly
+            // one of them is ever compiled, which is the whole point of the
+            // suffix. The command line filters them out before a root is
+            // built, so this only arises where a tool hands the checker every
+            // file there is -- and there it is the correct set, not a mistake.
+            let target = khora_db::host_target();
+            let both_apply = khora_db::selected_for_target(file.path(db), target)
+                && khora_db::selected_for_target(owner.path(db), target);
+            if owner != file && both_apply {
+                out.errors.push(HirError {
+                    message: format!(
+                        "module `{mine}` is already declared in `{}`; a module \
+                         is one file, and a name defined in both resolves to \
+                         whichever was read last. Give this file a module of \
+                         its own",
+                        owner.path(db).display()
+                    ),
+                    range,
+                });
+            }
+        }
+    }
 
     let cycles = import_cycles(db, root);
 

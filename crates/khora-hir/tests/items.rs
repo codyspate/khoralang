@@ -1,7 +1,9 @@
 //! Item collection, the module graph and name resolution.
 
 use khora_db::{Db, KhoraDatabase, Setter, SourceFile, SourceRoot};
-use khora_hir::{item_map, module_graph, resolve_path, ItemKind, ModulePath, Resolution};
+use khora_hir::{
+    file_scope, item_map, module_graph, resolve_path, ItemKind, ModulePath, Resolution,
+};
 
 fn file(db: &dyn Db, name: &str, text: &str) -> SourceFile {
     SourceFile::new(db, name.into(), text.to_string())
@@ -110,6 +112,48 @@ fn declaring_one_module_in_two_files_is_an_error() {
         graph.errors.iter().any(|e| e.message.contains("more than one file")),
         "{:?}",
         graph.errors
+    );
+}
+
+/// **And somebody is told about it**, which is the half that was missing.
+///
+/// The test above passed for as long as the check has existed, and nothing
+/// ever read `graph.errors` -- so two files declaring one module compiled with
+/// `khora check` reporting nothing at all. Since the graph keeps the first
+/// file to claim a path and drops the rest, while everything downstream walks
+/// the whole file list, `fn shared_name` in both files of `module main` both
+/// compiled and the later one won. Adding a helper whose name already existed
+/// in a sibling silently changed what the program did.
+///
+/// A test that asserts a diagnostic is *produced* is not the same as one that
+/// asserts it is *reported*, and this pair is the difference.
+#[test]
+fn the_second_file_to_claim_a_module_is_told_where_the_first_is() {
+    let db = KhoraDatabase::new();
+    let a = file(&db, "a.kh", "module app::main;\n");
+    let b = file(&db, "b.kh", "module app::main;\nfn helper() -> Int { 2 }\n");
+    // A singleton: creating it is how the compilation learns its file set.
+    let _root = SourceRoot::new(&db, vec![a, b]);
+
+    // The file that lost is the one told, because it is the one that moves.
+    let scope = file_scope(&db, b);
+    let found = scope
+        .errors
+        .iter()
+        .find(|e| e.message.contains("already declared"))
+        .unwrap_or_else(|| panic!("{:?}", scope.errors));
+
+    // Named after the other half, so the reader does not have to go looking.
+    assert!(found.message.contains("a.kh"), "{}", found.message);
+    // And pointed at the `module` line rather than at byte zero of nothing.
+    assert!(!found.range.is_empty(), "the span must be the declaration");
+
+    // The file that got there first has nothing to answer for.
+    let winner = file_scope(&db, a);
+    assert!(
+        !winner.errors.iter().any(|e| e.message.contains("already declared")),
+        "{:?}",
+        winner.errors
     );
 }
 

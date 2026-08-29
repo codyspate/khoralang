@@ -2426,6 +2426,20 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             if path.file_name().is_some_and(|n| n == "target" || n == ".git") {
                 continue;
             }
+            // **A manifest is a package boundary, and a walk stops at one.**
+            // The doc comment on `collect_sources` already says the package is
+            // the manifest's directory; this is where that stopped being true.
+            // A package nested inside another -- a scratch reproducer, a
+            // vendored copy, a half-finished second program -- was absorbed
+            // into its parent's compilation, so its `fn main` competed with
+            // the parent's and its errors were reported against the parent.
+            //
+            // Workspace members are unaffected: they are checked one at a
+            // time by the member loop rather than by walking the root, and a
+            // dependency arrives as its own `gather` call.
+            if path.join("khora.toml").is_file() {
+                continue;
+            }
             walk(&path, out)?;
         } else if path.extension().is_some_and(|e| e == "kh") {
             // A file whose name carries a target suffix belongs to that target

@@ -326,3 +326,123 @@ fn a_manifest_warning_is_printed_and_is_not_fatal() {
     assert!(text.contains("never a choice"), "the reason, not just the fact: {text}");
     assert!(text.contains("unrecognized key"), "the other kind still works: {text}");
 }
+
+/// Writes a package under the scratch directory and runs `khora check` on it.
+///
+/// `files` is `(relative path, contents)`. Directories are created as needed,
+/// so a nested package is written by naming a path with a `khora.toml` in it.
+fn check_package(name: &str, files: &[(&str, &str)]) -> (bool, String) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    for (relative, contents) in files {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("could not make the fixture directory");
+        }
+        std::fs::write(&path, contents).expect("could not write the fixture");
+    }
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(&dir)
+        .output()
+        .expect("could not run `khora`");
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+const MANIFEST: &str = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+
+/// **Two files may not declare the same module, and `check` says so.**
+///
+/// It said nothing. The check existed in the module graph and nothing ever
+/// read its errors, so a helper whose name already existed in a sibling file
+/// silently changed which one the program called -- the later file won, and
+/// `khora check` reported no errors at all. Found by somebody's second
+/// program, where the name in question was `main`.
+#[test]
+fn two_files_may_not_declare_the_same_module() {
+    let (ok, output) = check_package(
+        "dup_module",
+        &[
+            ("khora.toml", MANIFEST),
+            (
+                "src/main.kh",
+                "module main;\nimport std::core::{print};\n\
+                 fn shared_name() -> Int { 1 }\n\
+                 pub fn main() { print(Int::to_string(shared_name())); }\n",
+            ),
+            ("src/second.kh", "module main;\nfn shared_name() -> Int { 2 }\n"),
+        ],
+    );
+
+    assert!(!ok, "two files claiming one module must not pass:\n{output}");
+    assert!(output.contains("already declared"), "{output}");
+    // Named after the file that has the module, so the other half is findable.
+    assert!(output.contains("main.kh"), "{output}");
+    // And pointed at the offending `module` line rather than at byte zero.
+    assert!(output.contains("second.kh:1:1"), "{output}");
+}
+
+/// **A package nested inside another is a different package.**
+///
+/// A walk collected every `.kh` under the directory it was given, manifest or
+/// no manifest, so a scratch reproducer with its own `khora.toml` was absorbed
+/// into its parent's compilation: its `fn main` competed with the parent's,
+/// its errors were reported against the parent, and `khora run` on the parent
+/// wrote the executable under the *nested* package's path and ran the wrong
+/// program. `collect_sources` already said the package is the manifest's
+/// directory; the walk did not stop there.
+#[test]
+fn a_nested_package_is_not_absorbed_by_its_parent() {
+    let files = &[
+        ("khora.toml", MANIFEST),
+        ("src/main.kh", "module main;\nimport std::core::{print};\npub fn main() { print(\"outer\"); }\n"),
+        ("repro/khora.toml", MANIFEST),
+        (
+            "repro/src/main.kh",
+            "module main;\nimport std::core::{print};\npub fn main() { print(\"inner\"); }\n",
+        ),
+    ];
+    let (ok, output) = check_package("nested_package", files);
+
+    // Two `module main;` in one compilation would be the error above; the
+    // point is that they are not in one compilation.
+    assert!(ok, "the nested package must not join its parent:\n{output}");
+    assert!(!output.contains("already declared"), "{output}");
+}
+
+/// The nested package still checks perfectly well on its own, which is the
+/// half that makes the rule a boundary rather than an exclusion.
+#[test]
+fn a_nested_package_still_checks_on_its_own() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nested_package_alone");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (relative, contents) in [
+        ("khora.toml", MANIFEST),
+        ("src/main.kh", "module main;\nimport std::core::{print};\npub fn main() { print(\"outer\"); }\n"),
+        ("repro/khora.toml", MANIFEST),
+        (
+            "repro/src/main.kh",
+            "module main;\nimport std::core::{print};\npub fn main() { print(\"inner\"); }\n",
+        ),
+    ] {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("could not make the fixture directory");
+        }
+        std::fs::write(&path, contents).expect("could not write the fixture");
+    }
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .arg("check")
+        .arg(dir.join("repro"))
+        .output()
+        .expect("could not run `khora`");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("no errors"), "{text}");
+}
