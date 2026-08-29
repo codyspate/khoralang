@@ -2086,7 +2086,8 @@ fn locked_requested() -> bool {
 fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
     let manifest_path = nearest_manifest(path).with_context(|| {
         format!(
-            "no `khora.toml` in {} or any directory above it, and a bill of materials is              about a package",
+            "no `khora.toml` in {} or any directory above it, and a bill of \
+             materials is about a package",
             path.display()
         )
     })?;

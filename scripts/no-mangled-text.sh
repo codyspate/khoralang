@@ -68,6 +68,31 @@ if [ -n "$control" ]; then
     status=1
 fi
 
+# **A swallowed line continuation.** The third one, and the one that produced
+# two of the messages this repository shipped. A Rust string literal broken
+# across lines with a trailing backslash has its newline *and* the next line's
+# indentation removed by the compiler -- but only if the backslash survives to
+# the compiler. When the patch that wrote the file eats it first (a heredoc, or
+# a Python triple-quote that is not raw), the lines are joined with the
+# indentation kept, and the message ships with fourteen spaces in the middle of
+# a sentence. It compiles, it is valid, and it is not English -- the same shape
+# as the two above.
+#
+# Two lowercase letters, then twelve spaces or more, then another. The pair
+# before the run is what tells a swallowed continuation from a deliberately
+# aligned column: a table's gap follows a digit, a colon or a single character
+# of an escape, and the runs in one are shorter than this anyway. Checked
+# against the whole tree when it was written, where it found exactly the two
+# real ones and nothing else.
+joined=$(git ls-files '*.rs' '*.kh' \
+    | grep -v "^$myself\$" \
+    | xargs grep -nP '[a-z]{2} {12,}[a-z]' 2>/dev/null | grep -v "$marker" || true)
+if [ -n "$joined" ]; then
+    printf '  FAILED  a line continuation was eaten before the compiler saw it:\n' >&2
+    printf '%s\n' "$joined" | cut -c1-120 | sed 's|^|    |' >&2
+    status=1
+fi
+
 if [ "$status" -eq 0 ]; then
     printf '  ok    no mangled text\n'
 fi

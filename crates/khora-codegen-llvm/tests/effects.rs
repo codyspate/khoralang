@@ -17,6 +17,9 @@ use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
 struct Ran {
     stdout: String,
+    /// Kept because a program that failed is supposed to say so here, and for
+    /// a long time it said nothing at all.
+    stderr: String,
     code: Option<i32>,
 }
 
@@ -68,6 +71,7 @@ fn run(name: &str, source: &str) -> Ran {
     let output = Command::new(&exe).output().expect("the program should run");
     Ran {
         stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        stderr: String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
         code: output.status.code(),
     }
 }
@@ -271,6 +275,100 @@ fn main() -> Int raises DbError {{ print(twice(7)!); 0 }}
     );
     assert_eq!(ran.stdout, "", "nothing after the raise runs");
     assert_eq!(ran.code, Some(1));
+}
+
+/// **And it says which error it was**, which it did not.
+///
+/// Exit 1 with both streams empty is the least useful thing a failure can do.
+/// The first person to write `main() raises IoError` and run it on a missing
+/// file got no output whatsoever, assumed their own `print` calls were broken,
+/// and went looking in the wrong file -- while the error object sat there
+/// holding the path.
+///
+/// The type's name rather than the value: the tag is a number generated code
+/// assigned, so only generated code can turn it back into a name, and it is
+/// available whether or not the error has a `Show`.
+#[test]
+fn an_uncaught_raise_names_the_error_on_the_way_out() {
+    let ran = run(
+        "raises_named",
+        &format!(
+            "{FALLIBLE}
+fn main() -> Int raises DbError {{ print(halve(7)!); 0 }}
+"
+        ),
+    );
+
+    assert_eq!(ran.code, Some(1), "an uncaught raise is still a failing exit");
+    assert_eq!(ran.stdout, "", "and still prints nothing to stdout");
+    assert!(
+        ran.stderr.contains("`DbError` reached the entry point"),
+        "the failure must name the error type: {:?}",
+        ran.stderr
+    );
+    // And say what to do about it, since the answer is not obvious to somebody
+    // whose program has just ended without explanation.
+    assert!(ran.stderr.contains("Catch it in `main`"), "{:?}", ran.stderr);
+}
+
+/// A program that does not fail says nothing extra, which is the half that
+/// keeps the line above worth reading.
+#[test]
+fn a_program_that_succeeds_prints_nothing_to_stderr() {
+    let ran = run(
+        "raises_quiet",
+        &format!(
+            "{FALLIBLE}
+fn main() -> Int raises DbError {{ print(halve(8)!); 0 }}
+"
+        ),
+    );
+
+    assert_eq!(ran.code, Some(0));
+    assert_eq!(ran.stdout, "4\n");
+    assert_eq!(ran.stderr, "", "a successful run has nothing to report");
+}
+
+/// **A `main` that asks for a capability is refused, rather than emitting a
+/// module LLVM rejects.**
+///
+/// Nothing calls `main`, so a `with` clause on it names something no caller
+/// exists to supply -- and the shim called it with no arguments anyway. The
+/// result was
+///
+///     the generated module is not valid LLVM IR, which is a compiler bug:
+///     "Incorrect number of arguments passed to called function!"
+///
+/// which is a true sentence about the wrong program: the compiler accusing
+/// itself of a bug the author could fix in one line. The check for parameters
+/// has been there from the start, and a capability is a parameter the
+/// signature carries somewhere else.
+#[test]
+fn a_main_that_requires_a_capability_is_refused_with_a_sentence() {
+    let found = refused(
+        "main_requires",
+        "module t;
+fn print(value: Int);
+extern fn khora_print_int(value: Int);
+
+pub effect Ledger { record: Int -> () }
+
+fn main() -> Int with { ledger: Ledger } { ledger.record(1); 0 }
+",
+    );
+
+    assert!(
+        found.iter().any(|m| m.contains("`main` requires `ledger`")),
+        "the refusal must name the capability: {found:?}"
+    );
+    assert!(
+        found.iter().any(|m| m.contains("installs its capabilities")),
+        "and say what to do instead: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|m| m.contains("compiler bug")),
+        "and must not accuse the compiler: {found:?}"
+    );
 }
 
 /// Both paths from one program, so the branch is really a branch.

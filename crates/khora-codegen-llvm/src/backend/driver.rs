@@ -276,7 +276,8 @@ pub(super) fn build(
         .collect();
     if entry_point == Entry::Library && exports.is_empty() {
         backend.error(
-            "a library has no `pub extern fn`, so nothing could call it. Mark the              functions that are its C interface — `docs/design/c-export.md`",
+            "a library has no `pub extern fn`, so nothing could call it. Mark \
+             the functions that are its C interface — `docs/design/c-export.md`",
             text_size::TextRange::empty(0.into()),
         );
     }

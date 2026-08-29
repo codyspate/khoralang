@@ -7,6 +7,51 @@
 
 use std::io::Write;
 
+/// Reports an error that reached the entry point, and does not stop.
+///
+/// **A program that fails said nothing at all.** An uncaught raise out of
+/// `main` exited 1 with both streams empty, which is the least useful thing a
+/// failure can do: the first person to hit it had `main() raises IoError`, ran
+/// it on a missing file, got no output whatsoever, and went looking at their
+/// own `print` calls. The payload was right there and carried the path.
+///
+/// Not `_Noreturn`, and not a trap. The program is *ending*, correctly, with
+/// the exit status an entry point that raised is supposed to have; this only
+/// says why on the way out. So there is no backtrace hint and no talk of a
+/// bug, because neither is true -- an error nobody handled is a program
+/// behaving as written.
+///
+/// The type's name rather than the value. Generated code knows which error
+/// type the tag stands for and could reach a `Show` for it, but only if one
+/// exists and only by forcing an instance nothing else asked for; the name is
+/// always available and answers the question that was actually being asked,
+/// which is what happened rather than to what.
+///
+/// # Safety
+///
+/// `name` must point at `len` bytes naming the error type -- generated code
+/// passes a string literal in `.rodata`, live for the program's whole run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_unhandled(name: *const u8, len: u64) {
+    let bytes = if len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: the caller's contract, above.
+        unsafe { std::slice::from_raw_parts(name, len as usize) }
+    };
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "khora: `{}` reached the entry point and nothing handled it",
+        String::from_utf8_lossy(bytes)
+    );
+    let _ = writeln!(
+        err,
+        "note: `main` has nowhere to hand an error, so the program ends here \
+         with status 1. Catch it in `main`, or return a `Result`"
+    );
+}
+
 /// Reports arithmetic that did not fit, and stops.
 ///
 /// Overflow traps in every build. A program that passes its tests and then

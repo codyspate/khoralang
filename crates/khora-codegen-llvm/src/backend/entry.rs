@@ -18,6 +18,65 @@ impl<'ctx> Backend<'ctx> {
         self.builder.build_call(close, &[], "").expect("closing the root region");
     }
 
+    /// Names the error that reached the entry point, on the way out.
+    ///
+    /// **A program that failed used to say nothing.** Exit 1, both streams
+    /// empty, and the error object still holding whatever it was carrying --
+    /// so the first person to write `main() raises IoError` and run it on a
+    /// missing file got no output at all and went looking at their own `print`
+    /// calls.
+    ///
+    /// A switch on the tag, the same shape as [`Backend::emit_error_releaser`]
+    /// and for the same reason: the tag is a number generated code assigned,
+    /// so only generated code can turn it back into a name. Sorted by id so
+    /// that two compilations of one program emit the same function.
+    ///
+    /// **A cancellation is not one of the cases.** It reaches here with its
+    /// own reserved tag, exits 130, and that status already says "interrupted"
+    /// to every shell there is; a line of prose about it would be noise on the
+    /// ordinary path of stopping a program with a keystroke. It falls through
+    /// to the default and prints nothing.
+    fn say_what_escaped(&mut self, main: FunctionValue<'ctx>, which: inkwell::values::IntValue<'ctx>) {
+        let mut known: Vec<(String, u32)> =
+            self.error_ids.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        if known.is_empty() {
+            return;
+        }
+        known.sort_by_key(|(_, id)| *id);
+
+        // Where the caller left us, because filling in the cases moves the
+        // builder and the switch has to terminate *this* block. Getting that
+        // wrong leaves the failing block with no terminator, which LLVM
+        // rejects with "does not have terminator" and the compiler reports as
+        // a bug in itself.
+        let from = self.builder.get_insert_block().expect("a block to switch from");
+
+        let quiet = self.ctx.append_basic_block(main, "escaped.unnamed");
+        let mut cases = Vec::with_capacity(known.len());
+        for (name, id) in &known {
+            let block = self.ctx.append_basic_block(main, &format!("escaped.{name}"));
+            self.builder.position_at_end(block);
+            let text = self
+                .builder
+                .build_global_string_ptr(name, "escaped.name")
+                .expect("naming the error type")
+                .as_pointer_value();
+            let len = self.ctx.i64_type().const_int(name.len() as u64, false);
+            let report = self.rt.unhandled;
+            self.builder
+                .build_call(report, &[text.into(), len.into()], "")
+                .expect("reporting an unhandled error");
+            self.builder.build_unconditional_branch(quiet).expect("leaving a report case");
+            cases.push((self.ctx.i32_type().const_int(u64::from(*id), false), block));
+        }
+
+        // Back where we started, so the switch ends that block; everything
+        // after continues from `quiet`.
+        self.builder.position_at_end(from);
+        self.builder.build_switch(which, quiet, &cases).expect("dispatching on the error type");
+        self.builder.position_at_end(quiet);
+    }
+
     /// Emits a `main` that hands every test to the runner.
     ///
     /// `int main(int argc, char **argv)`, and the call that keeps them.
@@ -145,6 +204,35 @@ impl<'ctx> Backend<'ctx> {
             );
             return;
         }
+        // **An entry point is where capabilities are installed, not asked
+        // for.** Nothing calls `main`, so a `with` clause on it names
+        // something no caller exists to supply -- and the shim called it with
+        // no arguments anyway, producing a module LLVM rejected and the
+        // compiler then reported as a bug in itself:
+        //
+        //     the generated module is not valid LLVM IR, which is a compiler
+        //     bug: "Incorrect number of arguments passed to called function!"
+        //
+        // Which is a true sentence about the wrong program. The check for
+        // parameters above has been here from the start; a capability is a
+        // parameter the signature carries somewhere else, and it needed the
+        // same sentence.
+        if let Type::Row { fields, .. } = &signature.requires {
+            if !fields.is_empty() {
+                let wanted: Vec<String> =
+                    fields.iter().map(|(name, _)| format!("`{name}`")).collect();
+                self.error(
+                    format!(
+                        "`main` requires {}, and nothing calls `main` to supply it. An \
+                         entry point installs its capabilities rather than asking for \
+                         them: wrap the body in a `with {{ .. }}` block",
+                        wanted.join(", ")
+                    ),
+                    TextRange::empty(0.into()),
+                );
+                return;
+            }
+        }
 
         let khora_main = self.functions[entry];
         let raises = self.signature_of(entry).is_some_and(|s| can_raise(&s));
@@ -201,6 +289,7 @@ impl<'ctx> Backend<'ctx> {
             self.builder.build_conditional_branch(flag, failed, ok).expect("branching on the tag");
 
             self.builder.position_at_end(failed);
+            self.say_what_escaped(main, which);
             self.close_root_region();
             // A cancellation that reached the entry point and an error that
             // did are different outcomes, and worth telling apart from

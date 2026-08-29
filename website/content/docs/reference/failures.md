@@ -236,6 +236,44 @@ let mapped = result
 
 This maps `Result<A, E>` to `Result<A, F>`. By contrast, `catch { ... raise F ... }` maps the live failure channel from `E` to `F`.
 
+## A failure that reaches `main`
+
+`main` is not called by anything, so there is nowhere to hand a failure that
+gets that far. A program whose entry point raises and does not handle it ends
+with **exit status 1**, and prints the error type's name to standard error:
+
+```
+khora: `IoError` reached the entry point and nothing handled it
+note: `main` has nowhere to hand an error, so the program ends here with status 1. Catch it in `main`, or return a `Result`
+```
+
+The *type* is named, not the value. Handle it where the program can say
+something better:
+
+```khora
+pub fn main() -> Int {
+  with { reads: FsRead::real() } {
+    match attempt(fn () => read_text(path)!) {
+      Result::Ok(text) => { print(text); 0 },
+      Result::Err(IoError::NotFound(where)) => { print("no such file: ${where}"); 1 },
+      Result::Err(other) => { print("could not read it"); 1 },
+    }
+  }
+}
+```
+
+A cancellation that reaches the entry point is a different outcome and exits
+**130** — 128 plus `SIGINT`, which is what a shell already means by
+"interrupted". It prints nothing, because stopping a program with a keystroke
+is not a failure to report.
+
+## `main` installs capabilities rather than requiring them
+
+For the same reason, `main` may not carry a `with { .. }` requirement: nothing
+calls it, so nothing could supply one. Install them in the body instead —
+`with { reads: FsRead::real() } { .. }`, as above. A `with` clause on `main` is
+refused at compile time.
+
 ## Traps are separate
 
 Arithmetic overflow, bounds failures, and other violated invariants are traps, not ordinary `raises` values. See [Traps](./traps/).

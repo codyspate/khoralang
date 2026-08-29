@@ -248,6 +248,10 @@ pub struct Runtime<'ctx> {
     pub bounds_fail: FunctionValue<'ctx>,
     /// `_Noreturn void khora_overflow(const uint8_t *what, size_t len)`
     pub overflow: FunctionValue<'ctx>,
+    /// `void khora_unhandled(const uint8_t *name, size_t len)` — says which
+    /// error left `main`. Returns, unlike its neighbours here: the program is
+    /// ending correctly and this only says why.
+    pub unhandled: FunctionValue<'ctx>,
     /// `void khora_test_register(const uint8_t *name, size_t len, const void *code,
     ///                             uint32_t (*call)(const void *, uint64_t *))`
     pub test_register: FunctionValue<'ctx>,
@@ -456,6 +460,10 @@ impl<'ctx> Runtime<'ctx> {
                 void.fn_type(&[i64t.into(), i64t.into()], false),
             ),
             overflow: declare("khora_overflow", void.fn_type(&[ptr.into(), i64t.into()], false)),
+            unhandled: declare(
+                "khora_unhandled",
+                void.fn_type(&[ptr.into(), i64t.into()], false),
+            ),
             test_register: declare(
                 "khora_test_register",
                 void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),
