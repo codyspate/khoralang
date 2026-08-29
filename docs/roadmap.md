@@ -4898,13 +4898,22 @@ produced an error, and nothing had ever read the field it produced it into.
 Making the loop back-edge a cancellation point fixed two shapes the report had
 listed as separate problems and one it had not found.
 
-Three things came out of the work rather than the reports, and are open:
+Three things came out of the work rather than the reports. Two are settled and
+one is open:
 
-- **`khora_drop` recurses per node**, so *releasing* a long list is
-  depth-proportional even though walking one is no longer. This is what still
-  caps `List::sort` in the tens of thousands. The fix puts a thread-local check
-  on every free in the language, which is a decision about the hottest path in
-  the runtime and not one to take while fixing something else.
+- **`khora_drop` recursed per node**, so *releasing* a long list was
+  depth-proportional even after walking one had stopped being — which is what
+  capped `List::sort` in the tens of thousands, since a sort releases its
+  intermediates rather than walking them. Now a per-thread worklist: the
+  outermost free drains it and a nested one queues rather than descending.
+  `List::sort` sorts a million.
+
+  It was written down as a decision because it puts a check on the free path
+  and that is the hottest path in the runtime. Measured rather than argued —
+  building and freeing a million cons cells, three runs each, 40/41/43 ms
+  before and 35/35/34 ms after. Faster: deep recursion has a cost of its own
+  and a queue does not pay it. The check also never reaches the common case, a
+  decrement that does not hit zero.
 - **`Fiber::wait` returning early does not reproduce**, and on inspection was
   never happening. Both lines of the report's own reproducer are correct
   behaviour, which is worth writing down because the reading that made them
