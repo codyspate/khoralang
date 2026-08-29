@@ -4476,6 +4476,420 @@ It read the surfaces. It did not build anything against them, and "what is
 missing from an API" and "what is painful to use" are not the same list. The
 second one needs somebody writing a real program, which is what 13.24 was for.
 
+## Four programs, written by people who had not seen Khora before
+
+The list the surface audit said it could not produce. Four programs, each by
+somebody meeting the language for the first time, each told to build something
+real and write down every place the language got in the way:
+
+- a **log analyser** — a CLI over two log files, filters, histograms,
+  percentiles, 647 lines
+- a **financial reconciler** — two CSVs matched by identifier, `Decimal` end to
+  end, 1,275 lines across six modules
+- a **concurrent web service** — ten routes, a nursery holding three background
+  fibers, retries, 867 lines
+- a **newcomer** following the website from `khora new` to a working program
+
+All four finished. That is the first result and it is worth saying before the
+rest: the programs work, the tests pass, and three of the four type-checked
+after one round of fixing imports. The complaints below are longer than the
+praise because a list of defects is what was asked for.
+
+Ordered by what it costs somebody, which is not the order they were found in.
+
+### Tier 1 — wrong answers, and programs that never return
+
+Four findings. Each one produces a result a person would act on, or no result
+at all, with nothing to say something went wrong.
+
+**1. `Decimal::divide` saturates instead of trapping.** Ten divided by one is
+not ten:
+
+    Decimal::divide(10d, 1d, 18, Rounding::HalfEven)   -> 9.223372036854775807
+    Decimal::divide(100d, 4d, 18, Rounding::HalfEven)  -> 9.223372036854775807
+
+That is `i64::MAX`. The i128 intermediate comes back through a saturating cast.
+Nothing raises, nothing traps, nothing answers `None` — the result is in range,
+prints with the right number of places, and a total built on it balances
+against itself. `add`, `sub` and `mul` all trap correctly; only division, and
+`rounded`, which is division by one.
+
+`khora_decimal_divide`'s own doc comment argues for saturating, on the grounds
+that "a total that quietly became a different total is the failure this type
+exists to prevent" — which is a description of what saturating does. Both
+`std/decimal.kh` and `numbers.md` promise the opposite in as many words.
+
+This is the worst defect the domain has and it was found eight minutes in.
+Related, same root: `Decimal::of_string` traps on a long numeral rather than
+answering the `None` its type already offers, `==` on two legal decimals traps
+when their scales are far apart (comparison goes through `align`, which scales
+*up*, and needs no such thing), and any scale at 19 or more shows as a trap.
+
+**2. Two files of the same module may define the same function, and one
+silently wins.** Verified:
+
+    src/main.kh    module main; fn shared_name() -> Int { 1 }  ... prints it
+    src/second.kh  module main; fn shared_name() -> Int { 2 }
+
+`khora check` — `checked 22 file(s): no errors`. `khora run` — `2`. Duplicates
+*within* one file are rejected; across two files of one module they are not,
+and the call resolves to whichever file was read later. The same holds for `fn
+main` itself. Adding a helper whose name already exists in a sibling file
+changes what the program does, with no diagnostic anywhere.
+
+In the same family: a nested package with its own `khora.toml` is absorbed by
+its parent rather than skipped, and its errors are reported against the parent.
+And `khora check` compiles every `.kh` under the package directory, `src/` or
+not, so a scratch file beside the manifest is a build error —
+`first-project.md` says source lives under `src/`.
+
+**3. `Clock.sleep` is not a cancellation point.** Verified: `sandbox/repro_sleep_cancel`
+never returns.
+
+    fn ticker() with { clock: Clock } raises Stop { loop { clock.sleep(200); } }
+
+`loop { sleep; work }` is the shape every periodic job in every language is
+written in. In Khora that fiber cannot be cancelled and a nursery that must
+unwind past one waits forever. Narrowed: a straight-line `sleep(5000)`
+cancelled at 500ms runs the whole five seconds *and its post-sleep work*; a
+loop with any `!` in its body cancels correctly; a fiber blocked on
+`Channel::receive` cancels instantly. So cancellation is observed at `!` sites
+and at a tagged return, and a loop back-edge is not one — which is exactly what
+`std/clock_native.kh` says it is: "every loop back-edge already has one."
+
+The service agent left it in its program deliberately, and it shows what an
+operator sees. Start a second copy on a bound port: `Router::listen` raises
+`BindFailed`, the nursery tries to cancel its children, and the process prints
+stats lines forever and never reports the error.
+
+**4. Any list past about eight thousand elements kills the process, silently.**
+`List` is the default collection, every traversal in `std` is recursive, and
+there is no tail-call optimisation — `List::fold` is written tail-recursively
+and still overflows. Exit 253, nothing on stdout, nothing on stderr. Debug dies
+past ~8,000, release past ~12,000, `List::sort` first because it stacks
+deepest.
+
+This killed the log analyser on its first realistic input: 122,000 lines read
+fine, and the *report* died sorting 27,000 durations. The workaround was a
+counting histogram, which is a better design, chosen to route around a crash
+rather than on the merits. And `Vector::to_list` then `List::sort` is the only
+sort in `std` — `Vector` has none, `Array` has none — so the trap is also the
+signposted path.
+
+Compounding it: a documented trap says `khora: index 9 is outside an array of
+3` and exits 134, exactly as `traps.md` promises. Stack exhaustion is not in
+that list and says nothing at all.
+
+**And the one already fixed.** `khora check` passed and `khora build` failed
+for `cell.get()` where `Shared::get(cell)` worked — the intrinsic ladder was
+reachable only from the namespaced spelling. Found by the newcomer on its
+fourth program; fixed the day it was reported.
+
+### Tier 2 — `check` says yes and `build` says no
+
+The class the fixed one belonged to, which is the worst thing a toolchain can
+do, because `check` is the fast loop and the LSP shares it.
+
+- **`break` with a value.** `checked 21 file(s): no errors`, then `error:
+  `break` with a value is not supported yet: a `loop`'s type is not inferred in
+  phase 2`. Documented with a worked example in `control-flow.md`.
+- **A tuple pattern is accepted against any type.** `let (a, b) = 5;` checks
+  clean with two unused-binding warnings, and touching either binding produces
+  the compiler's own confession — "the type of this expression was never worked
+  out ... this is a gap in the compiler worth reporting". `match` rejects it
+  properly; `let` and `for` do not. `for (key, value) in entries` is documented
+  verbatim in `control-flow.md` and fails exactly this way. Khora has no tuple
+  *expressions*, so the pattern should not parse.
+- **A trait bound is checked against whether the trait's name was imported.**
+  Both directions. False positive: `derive(Ord)` on an imported type makes ``
+  `String` does not implement `Ord` `` appear in the importing module. False
+  negative: without `Ord` imported, `Dict::insert` on a key with no `Ord` impl
+  type-checks and then fails in lowering with `` `Ord::cmp` has no body ``,
+  pointing past the end of the file.
+
+And the lint walks you in: `unused-import` counts neither "needed to satisfy a
+bound" nor "called with a dot" as a use, so following the compiler's advice
+breaks the build. Two agents independently ended up with warnings they could
+not silence and a comment beside each explaining why.
+
+### Tier 3 — diagnostics that say something untrue
+
+Khora's error messages were the single most praised thing in all four reports.
+That is what makes these worth listing separately: the ones that lie are
+believed.
+
+- ``derive(Eq) needs every field to implement `Eq`, and the field `x` has type
+  `Int`, which does not``. `Int` does implement `Eq`; the import is missing.
+  Importing *any other* name from `std::core` is what turns the correct message
+  (`` `Eq` is not a trait in scope ``) into this one. Two agents lost their
+  first thirty seconds looking for a field that genuinely lacked it.
+- ``error: `Int` does not implement `Show`, which `Show#List::show` requires``
+  — the service agent went and read `core.kh` to check whether the impl had
+  been deleted.
+- **`khora test` renders diagnostics against the wrong file.** Identical
+  package: `khora check` points at `src/main.kh:8:29`, correct; `khora test`
+  prints the same byte offsets against a *different module*. In the real
+  package it pointed at line 155 of a 154-line file, at doc comments in a
+  module the error was not in.
+- **`derive(Ord)` without `Ordering` imported** complains about
+  `Ordering::Less`, a constructor the programmer never wrote, at the `derive`
+  line. The `for` loop gets this exactly right — `` `for` needs `Step` and
+  `Iterator` in scope; import them from `std::core` `` — and `derive` should
+  say the same thing.
+- **`#Dict::insert`** leaks an internal `#`-prefixed name into user-facing text.
+- **A failure that escapes `main` prints nothing.** Exit 1, both streams empty,
+  and the payload is right there. The log analyser's first version had `main()
+  raises IoError`; run on a missing file it produced no output whatsoever, and
+  the author went looking at the `print` calls.
+- **A failing `assert` gives no location and no values.** `test a well formed
+  line becomes an entry ... FAILED`, and which of six asserts failed is found
+  by deleting them one at a time.
+
+### Tier 4 — where the language stops short
+
+Not bugs. The things that made the programs longer or uglier than they should
+be, in the order of how much they cost.
+
+**No record update syntax.** All three program-writing agents hit it, and it
+was the most expensive single item in two of the three reports. `{ ..tally,
+lines: tally.lines + 1 }` produces twenty parse errors starting with `expected
+a statement or expression`, none of which says the form does not exist. One
+agent's "add one to whichever counter this event names" is **forty lines** of
+five near-identical five-field literals; with the form it is five. Another
+restructured its whole fold accumulator around `mut` fields after two failed
+attempts.
+
+**String interpolation does not go through `Show`.** `"n = ${n}"` where `n: Int`
+is `error: string concatenation: expected String, found Int`. Every number
+needs `Int::to_string`, and a table row becomes unreadable. The docs' own
+examples — `"${key}: ${value}"` in `pattern-matching.md`, `"value: ${value}"`
+in `control-flow.md` — read as though it does, and do not compile. For a
+language whose pitch includes printing tables this was called the single
+biggest tax.
+
+**A nursery or scope body cannot be an inline lambda.** `bounded_nursery(16, fn
+() => { nursery.adopt(..) })` cannot name `nursery`, so every group of children
+and every region body needs its own named top-level function. One program has
+three that exist for no other reason. And if the free `nursery` helper *is*
+imported, the error becomes a type mismatch on a function type — `` `(() -> _
+with { nursery: Nursery, | _ } ...)` has no method `adopt` `` — which is
+genuinely hard to read. `fibers-and-nurseries.md` says `nursery(children)` and
+`nursery(fn () => children())` "are the same thing", which invites exactly the
+generalisation that fails.
+
+**A record literal is not resolved by its expected type.** `Shared::modify`'s
+closure returns `Changed<A, B>`; writing the record gives `no record type has
+exactly the fields `state`, `result``, and the fix is importing a name the
+source never mentions. Field *access* has the same tax: `row.txn.id` needs
+`Txn` imported. One `main.kh` imports four types purely so that dots work.
+
+**A negative `Decimal` literal does not typecheck.** `-99.95d` gives
+`negation: expected `Int`, found `Decimal``, and then calls a `Decimal` literal
+an `Int`. `-99.95` and `-5` compile in the same program; `Decimal::negate` and
+`of_string("-99.95")` both work. Only the money type cannot be written
+negative, so every refund in the test data is `neg(99.95d)`.
+
+**`type X = Int` is nominal, and documented as an alias.** Nothing converts in
+or out: no literal, no constructor, no pattern. `data-types.md` says aliases
+"do not create a new runtime representation by themselves". An agent reached
+for `type Books = Dict<Currency, Bucket>;`, got nine errors, and wrote the
+two-parameter type out longhand at eight sites. Either it is a newtype and
+needs a way in, or it is an alias and should be transparent — it is currently
+neither.
+
+**Operators are inconsistent on `Decimal`.** `a == b` and `a < b` work; `a + b`
+is `arithmetic: expected Int, found Decimal`. Money compares with operators and
+adds with function calls.
+
+**A background fiber must invent an error type to be cancellable.** A fiber
+with no error row has no channel to be interrupted on, so three fibers that
+cannot fail were given `raises NotifyError` — an error none of them raises —
+purely to be stoppable. `raises Never` is not spelled anywhere.
+
+**Inference gives up on an inferred closure parameter bound by a tuple
+pattern.** `apply((1, 2), fn p => match p { (x, y) => x + y })` where `A` is
+unambiguously `(Int, Int)`. Annotated parameters, `let`-bound tuples and
+variant patterns in the same position all work.
+
+**`Fiber<(), E>` is a type you can declare and never construct.** The row needs
+braces in type-argument position — `Fiber<(), { Oops }>` — which appears
+nowhere in `std` or the docs, both of which only ever show a row *variable*,
+which needs none. The declaration `Shared<Option<Fiber<(), NotifyError>>>`
+type-checked fine; a field type nothing can inhabit was accepted silently, and
+the error came at the assignment reading as though the two sides were the same.
+
+### Tier 5 — what `std` still does not have
+
+The surface audit closed five holes. These are the ones only writing a program
+finds. Grouped, not ordered:
+
+- **Formatting**: `String::pad_left` / `pad_right` — every one of the three
+  programs wrote its own, and `std::time` has a private `padded` already. A
+  float to a fixed number of decimals; two agents wrote the same `percent(part,
+  whole)` helper and `examples/risk_analyzer` has a third copy.
+- **`Dict::update(key, (Option<V>) -> V)`** — "count things into a map" is the
+  most common operation in a log analyser and is currently
+  `insert(t, k, unwrap_or(get(t, k), 0) + 1)` every time.
+- **`Option::and_then` / `filter`, `Result::map` / `and_then`.** `map_err`
+  exists, which makes `map`'s absence odd. Without `and_then`, parsing a record
+  out of positional fields is a five-deep `match` pyramid — `examples/link_shortener`
+  nests six levels. An `Option::or_raise(e)` would make the `!` route the
+  obvious one rather than a discovery.
+- **`List`**: `min`, `max`, `sort_by` (the doc comment on `sort` already admits
+  it), `partition`, `impl Ord`, and a sort that survives real data.
+- **`Show` for `Dict` and `Map`** — blocks `derive(Show)` on any record holding
+  one. **`Show`/`Eq` on `std`'s own error types** — `CallError`, `HttpError`,
+  `EnvError`; logging why an HTTP call failed took a hand-written seven-arm
+  match. **`Show` for `Ordering`**. **`Bool::to_string`**, and `Bool::show(x)`
+  does not resolve though `x.show()` does.
+- **`Decimal`**: `abs`, `zero_at(scale)` (`zero()` is scale 0 and prints `0`
+  under a column of `1250.00`s), `min`, `max`, a `List<Decimal>` sum, and a
+  `std::config` reader — this is the language for money and `config` types
+  `Int`, `Bool` and `String`.
+- **`Validated::map3`..`map5`.** It stops at `map2` and a CSV row has five
+  columns. `List::traverse` exists and would do the whole job, but `Validated`
+  is deliberately not an `Applicative`, so the one type in `std` built for
+  accumulating errors cannot use it. Hand-rolled twice.
+- **`derive(ToJson)`.** `std::json` has the traits and no derive, so every
+  response type gets a hand-written `as_json` — 60 of one program's 867 lines.
+  And **`Json::Object` is a hash `Map`**, so field order is neither insertion
+  nor sorted; golden tests and readable API output both want one of the two.
+- **An attempt count out of `retry` / `retry_while`** — worked around with a
+  `Shared<Int>` and a lock per attempt.
+- **`Response::reason` has no phrase for 503**, the status a service under
+  backpressure returns, nor 202, 402, 406, 410, 415, 428, 431, 501, 502, 504.
+  Its own doc comment is the story of fixing this for 302.
+- **`String::split_whitespace`** — `split` keeps empty pieces, which is right
+  for CSV and wrong for a column-aligned log.
+- **Something to wait on several fibers for their answers.** `Fibers::wait`
+  discards them.
+
+### Tier 6 — what the docs promise and the compiler does not
+
+Every agent was told to use the website as its only reference. Where they
+looked first, and what happened:
+
+- **`control-flow.md` documents `break <value>` and `for (k, v) in entries`.**
+  Neither works. Both have worked examples.
+- **`testing.md` teaches the idiom for testing a typed failure**, and it does
+  not compile: `attempt` with a nested error pattern is reported non-exhaustive
+  (`pattern Err(_) not covered` for a type with one variant) unless the result
+  is bound to an explicitly annotated `let` first — the error row is still
+  unsolved when exhaustiveness runs.
+- **`data-types.md`'s "Type aliases" is wrong**, per Tier 4.
+- **`capabilities.md`'s permission example is a trap.** `read = ["./data/**"]`
+  does not grant a path the program spells `data/foo.txt`: grants are matched
+  as literal strings after only `\` → `/` normalisation, so the `./` is
+  significant. Two agents hit this independently. Worse, grants resolve against
+  the *process* working directory rather than the package, so the same grant
+  that works from the repo root fails after `cd`. For a CLI that takes paths
+  from its user, no correct grant short of `**` exists.
+- **`first-project.md` says a package compiles `src/`**; it compiles everything.
+- **Nothing says a trait must be imported to satisfy a bound or to be called
+  with a dot.** Given Tier 2, this was called the single highest-value missing
+  sentence in the documentation.
+- **Nothing says `Clock.sleep` cannot be interrupted** — and `clock_native.kh`
+  and `concurrency.md` both say the opposite.
+- **Nothing documents the stack limit**, so Tier 1 item 4 arrives as a silent
+  death. `collections-and-strings.md` warns that `length` walks the list and
+  that repeated `concat` is quadratic — cost, but not "past ten thousand your
+  process dies".
+- **Nothing documents what happens when a program fails.** `traps.md` is
+  precise and correct about traps and says nothing about an unhandled `raise`
+  escaping `main`.
+- **Nothing shows a concrete row in type-argument position**, per Tier 4.
+- **Nothing says record update syntax does not exist**, and the parse errors do
+  not either — they say the brace is never closed.
+- **Tuple projection is undocumented**; one agent never found out whether `p.0`
+  exists and used `match` throughout.
+- **The stdlib index writes "civil dates and offsets" and "exact `Decimal`
+  arithmetic" as unlinked prose**, so `time` and `decimal` have to be guessed
+  at by URL. There is no guide page for dates at all, and the guide's "Exact
+  decimals" is eight lines showing only literals — no `add`, no `divide`, no
+  `rounded`, no word about scale, for the type the positioning doc opens on.
+- **The retrying cookbook's test snippet uses `assert`**, which is not in the
+  page's import list. One word.
+- **`examples/risk_analyzer` says "Khora has no `derive`"** in a doc comment.
+  It does.
+
+And the toolchain, from the newcomer:
+
+- **`khora doc` drops impls on primitives and on effects**, so `String` — the
+  type with the most methods anybody will look up — has no API page at all.
+- **`khora fmt --check` is permanently red on Windows.** A correctly formatted
+  file with CRLF endings reports `would reformat`, and `khora fmt` rewrites
+  every line to LF. `--check` prints only the filename, so finding out why took
+  a manual `diff` and an `od -c`. `testing.md` recommends it for CI.
+- **`khora build . --out hello` on Windows writes a file with no `.exe`.**
+- **`khora doc`'s defaults are hard-coded to this repository's paths**, `khora
+  new` and `khora run` are absent from the docs, `[dependencies]` is
+  undocumented, build artifacts land in `src/`, `RUST_BACKTRACE` is suggested
+  to Khora users, and there are no "did you mean" suggestions.
+- **`khora new` warns that the workspace does not list the new directory**,
+  which is a warning about an edit the user was told not to make, for a problem
+  that does not exist — everything works without it.
+- **Module naming is inconsistent across the shipped examples**: `module main;`,
+  `module app::main;`, and `khora new`'s `module scratch_new::main;`. A reader
+  cannot tell which is idiomatic.
+
+### What held up, unprompted
+
+Recorded because it is evidence about the design, and because three of these
+were called the best thing the writer had seen in any language.
+
+- **Effects and capabilities disappeared into the background.** Every agent
+  said some version of it. One `with { env, clock, reads }` block at the top of
+  `main`, a `with { reads: FsRead }` on the two functions that need it, and
+  nothing threaded and nothing global. Rows were inferred everywhere; not one
+  agent wrote `'ef` or `'er` except in the one place it becomes a type
+  argument. `unused-capability` caught a stale requirement left behind by a
+  refactor, and was described as "a warning I did not know I wanted".
+- **The fake-handler claim is true and it is four lines.** A `Clock` whose
+  `sleep` is `fn _ => ()` turned a five-attempt exponential-backoff test into a
+  sub-millisecond one; a `Clock` over a `Shared<Int>` drove a TTL sweeper by
+  hand; `Random::seeded` pinned the jitter. No test runtime, no mode flag.
+- **Shared state is correct under load.** 32 fibers × 500 `Shared::update` =
+  exactly 16,000, five runs of five. 200 concurrent POSTs, 201 tasks, no
+  duplicate or missing id. 400 concurrent GETs at 200-way parallelism, all 200
+  OK.
+- **The self-deadlock trap** — "this fiber is inside `Shared::update` on this
+  cell, so it cannot also read it" — was called the best runtime error message
+  the writer had seen.
+- **Exhaustiveness checking helped every time and nagged never.** It names
+  missing constructors including nested ones, and one agent never wrote a `_`
+  catch-all in 1,275 lines.
+- **The good diagnostics are very good.** `` `[a, b, c]` builds a `List`;
+  import it from `std::core` `` infers intent from a literal. `` nothing in
+  this expression raises `EnvError` `` corrected a wrong mental model in six
+  words. `` `Pair` is not in scope here, so nothing is known about its fields ``
+  explains why the consequence follows from the cause.
+- **`derive(Ord)` uses declaration order**, so `Debug < Info < Warn < Error`
+  fell out free and worked as a `Dict` key and as a `--level` floor with no
+  code. The agent had written a `rank()` shim assuming it would not, and
+  deleted it.
+- **`fold_lines` is the right primitive.** 122,000 lines in 592 ms, constant
+  memory, `\r\n` handled, and buffering never thought about once.
+- **Cancellation works everywhere except `Clock.sleep`** — channel receives,
+  nursery unwinding, `detach`. That is most of the hard part working.
+- **`std`'s doc comments were called the best-argued library prose the reader
+  had met**, each one naming the bug it exists to prevent. Which is the whole
+  argument of phase 15, tested by somebody who did not know that was the claim.
+
+### The order this gets worked in
+
+Tier 1 first and in full — a wrong number and a hung process are the two things
+a systems language may not do. Then tier 2, because `check` disagreeing with
+`build` undermines every other tool. Then tier 3, because Khora's diagnostics
+are its best feature and a lying one spends that credit. Tiers 4 and 5 are
+ordinary work. Tier 6 is cheap and should be done alongside whatever it
+documents, not batched.
+
+**And the method should be kept.** Four agents, four days of nothing, four
+programs that work and eleven defects nobody on this side had found — including
+one that has been silently corrupting money since `std::decimal` was written.
+Reading a surface finds what is missing. Only writing a program finds what is
+wrong.
+
 ## Phase 15 — The Torvalds test
 
 **A named standard the codebase has to pass**, after which it should be
