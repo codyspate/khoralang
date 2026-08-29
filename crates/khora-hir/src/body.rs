@@ -1085,7 +1085,7 @@ fn unescape(text: &str) -> String {
 
 fn unescape_inner(inner: &str) -> String {
     let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
+    let mut chars = inner.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\\' {
             out.push(c);
@@ -1103,6 +1103,24 @@ fn unescape_inner(inner: &str) -> String {
             // A literal dollar, so a template for another tool still fits in a
             // Khora string now that `${` means something.
             Some('$') => out.push('$'),
+            // `\u{1F600}`. The parser has already refused a malformed one, so
+            // what is left here is either well-formed or a value that is not a
+            // character -- a lone surrogate, or past the last code point --
+            // which becomes the replacement character rather than nothing.
+            Some('u') => out.push(unicode_escape(&mut chars).unwrap_or('\u{FFFD}')),
+            // A line continuation. The newline goes, and so does the
+            // indentation that follows it -- otherwise a message written over
+            // three lines of a nested block arrives with the block's indent in
+            // the middle of a sentence, which is what this was doing silently
+            // before the escape existed.
+            Some('\n') | Some('\r') => {
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+            }
+            // Anything else. The parser reports it, so this never runs for a
+            // program that compiles; keeping the two characters is what makes
+            // the rest of the string still readable in the error's neighbours.
             Some(other) => {
                 out.push('\\');
                 out.push(other);
@@ -1113,6 +1131,27 @@ fn unescape_inner(inner: &str) -> String {
         }
     }
     out
+}
+
+/// The character in `{..}` after a `\u`, if it is one.
+fn unicode_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
+    if chars.peek() != Some(&'{') {
+        return None;
+    }
+    chars.next();
+    let mut value: u32 = 0;
+    let mut digits = 0;
+    while let Some(c) = chars.peek() {
+        let Some(digit) = c.to_digit(16) else { break };
+        value = value * 16 + digit;
+        digits += 1;
+        chars.next();
+    }
+    if digits == 0 || chars.peek() != Some(&'}') {
+        return None;
+    }
+    chars.next();
+    char::from_u32(value)
 }
 
 fn literal_of(node: &khora_syntax::SyntaxNode) -> Option<Literal> {

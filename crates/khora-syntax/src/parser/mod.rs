@@ -27,7 +27,7 @@ mod exprs;
 mod patterns;
 mod types;
 
-use text_size::TextRange;
+use text_size::{TextRange, TextSize};
 
 use crate::event::{Event, ParseError};
 use crate::kind::SyntaxKind::{self, *};
@@ -177,7 +177,79 @@ impl<'a> Parser<'a> {
         if kind == EOF {
             return;
         }
+        if kind == STRING_LIT {
+            self.check_escapes();
+        }
         self.do_bump(kind);
+    }
+
+    /// Refuses a backslash escape the language does not know.
+    ///
+    /// **Because the alternative is silence.** An unrecognised escape used to
+    /// be kept as the two characters it was written with, so `"\\u{0}"` -- the
+    /// spelling Rust, JavaScript and Python all use -- became six literal
+    /// characters beginning with a backslash. That compiled, ran, and produced
+    /// a string nobody wanted; the one place it mattered, it packed an
+    /// argument buffer with `\\u{0}` between the arguments and every command
+    /// failed to start, reporting the error a *missing program* reports. An
+    /// hour went into the wrong file.
+    ///
+    /// A typo in an escape is never what somebody meant. Saying so costs one
+    /// scan of a token the parser is already holding.
+    fn check_escapes(&mut self) {
+        let text = self.nth_text(0);
+        let start = usize::from(self.current_range().start());
+        let mut chars = text.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            if c != '\\' {
+                continue;
+            }
+            let Some((_, escape)) = chars.next() else { break };
+            match escape {
+                'n' | 'r' | 't' | '0' | '\\' | '"' | '\'' | '`' | '$' => {}
+                // A line continuation: the newline and the indentation
+                // after it are not in the string. What a long message in
+                // a deeply indented file is written with, and what every
+                // neighbouring language spells the same way.
+                '\n' | '\r' => {}
+                // `\u{1F600}`, the spelling every neighbouring language uses.
+                'u' => {
+                    let bad = TextRange::new(
+                        TextSize::from((start + at) as u32),
+                        TextSize::from((start + at + 2) as u32),
+                    );
+                    match take_unicode(&mut chars) {
+                        Unicode::Ok => {}
+                        Unicode::Malformed => self.error_at(
+                            bad,
+                            "a `\\u` escape is written `\\u{..}` around one to six hex digits",
+                        ),
+                        Unicode::NotACharacter => self.error_at(
+                            bad,
+                            "that is not a character: a `\\u` escape names a Unicode scalar \
+                             value, so it has to be at most `10FFFF` and not a surrogate \
+                             between `D800` and `DFFF`",
+                        ),
+                    }
+                }
+                other => {
+                    let width = 1 + other.len_utf8();
+                    let bad = TextRange::new(
+                        TextSize::from((start + at) as u32),
+                        TextSize::from((start + at + width) as u32),
+                    );
+                    self.error_at(
+                        bad,
+                        format!(
+                            "`\\{other}` is not an escape. The escapes are \
+                             `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\\"`, `\\'`, `` \\` ``, \
+                             `\\$` and `\\u{{..}}` -- write `\\\\{other}` for a backslash \
+                             followed by `{other}`"
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     pub(crate) fn bump(&mut self, kind: SyntaxKind) {
@@ -415,3 +487,41 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
     decls::source_file_contents(p);
     m.complete(p, SOURCE_FILE);
 }
+
+/// Consumes `{` one to six hex digits `}` from `chars`, and says what it was.
+///
+/// The caller has already taken the `u`. Three answers rather than two,
+/// because a number that is not a character is a different mistake from a
+/// malformed escape and deserves a different sentence.
+enum Unicode {
+    /// A character.
+    Ok,
+    /// Not written `\u{..}` around hex digits at all.
+    Malformed,
+    /// Well-formed and not a Unicode scalar value: past `10FFFF`, or one half
+    /// of a surrogate pair.
+    NotACharacter,
+}
+
+fn take_unicode(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) -> Unicode {
+    if chars.peek().map(|(_, c)| *c) != Some('{') {
+        return Unicode::Malformed;
+    }
+    chars.next();
+    let mut value: u32 = 0;
+    let mut digits = 0;
+    while let Some((_, c)) = chars.peek() {
+        let Some(digit) = c.to_digit(16) else { break };
+        value = value * 16 + digit;
+        digits += 1;
+        chars.next();
+    }
+    if digits == 0 || digits > 6 || chars.peek().map(|(_, c)| *c) != Some('}') {
+        return Unicode::Malformed;
+    }
+    chars.next();
+    // `char::from_u32` refuses both of the things that are not characters, so
+    // there is nothing to spell out here that it does not already know.
+    if char::from_u32(value).is_some() { Unicode::Ok } else { Unicode::NotACharacter }
+}
+
