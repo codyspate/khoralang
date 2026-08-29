@@ -283,4 +283,36 @@ not the answer; see [Traps](/docs/reference/traps/).
 `1.50` and not `1.5`. A price to two places stays a price to two places, which
 is what makes a column of them line up.
 
+### How much fits
+
+The significand is 128 bits — 38 digits — which covers every fiat computation,
+`NUMERIC` as real schemas declare it, and an eighteen-decimal token balance.
+
+It matters because alignment happens before addition, so what has to fit is not
+the two numbers but the *aligned* ones:
+
+```khora
+let notional = 100000000.00d;   // scale 2
+let rate     = 0.000000000001d; // scale 12
+
+let together = notional.add(rate);  // needs the notional at scale 12
+```
+
+At 64 bits that stopped the program, on two numbers a rates desk writes down
+every day. Going past 38 digits still does — the answer would be a different
+number, and a different total is the failure this type exists to prevent.
+
+### A column of them
+
+```khora
+let total = Decimal::total(rows);              // every one added up
+let shown = Decimal::total(rows).at_scale(2);  // and at the column's width
+```
+
+`total` of nothing is `Decimal::zero()`, which is scale nought and prints as
+`0`; `at_scale` only ever raises, so it cannot round a total that was already
+wider. `Decimal::zero_at(2)` is the empty total when the shape matters from the
+start. `abs`, `min` and `max` are there too, and the two comparisons are by
+value, so `1.5d` and `1.50d` are the same number to them.
+
 Full API: [`std::decimal`](/docs/stdlib/api/decimal/).

@@ -192,19 +192,30 @@ fn on_which_fiber() -> String {
 /// emitted line tables there was no way for it to. Both messages named what had
 /// happened, in a program of any size, with nothing to connect it to a line.
 ///
-/// Off unless asked for, by `RUST_BACKTRACE` — the same switch every Rust
-/// binary on the machine already answers to, rather than a Khora-specific one
-/// nobody would guess. A trap is a bug and the first thing anybody does with a
-/// bug is re-run it, so a switch costs one attempt and a default costs every
+/// Off unless asked for. A trap is a bug and the first thing anybody does with
+/// a bug is re-run it, so a switch costs one attempt and a default costs every
 /// well-behaved program a page of stack on the way out.
+///
+/// **`KHORA_BACKTRACE`, and `RUST_BACKTRACE` as well.** It used to be only the
+/// second, on the argument that it is the switch every Rust binary on the
+/// machine already answers to — which is true of a machine that has Rust
+/// binaries on it, and a Khora user may not. Being told to set a variable named
+/// after a different language reads as a leak of what the compiler happens to
+/// be written in, and it is one.
+///
+/// So the message names the Khora one, and both are honoured: somebody who
+/// already exports `RUST_BACKTRACE=1` for everything still gets a backtrace
+/// without being asked twice.
 ///
 /// The frames are symbolized from the debug information the executable carries,
 /// so this is only as good as `KHORA_DEBUG` left it. With debug info off the
 /// backtrace is addresses, which is worth printing anyway: an address plus the
 /// binary is still something a symbolizer can be pointed at later.
 fn where_from(err: &mut impl Write) {
-    if std::env::var_os("RUST_BACKTRACE").is_none() {
-        let _ = writeln!(err, "note: re-run with RUST_BACKTRACE=1 to see where");
+    let asked = std::env::var_os("KHORA_BACKTRACE").is_some()
+        || std::env::var_os("RUST_BACKTRACE").is_some();
+    if !asked {
+        let _ = writeln!(err, "note: re-run with KHORA_BACKTRACE=1 to see where");
         return;
     }
     let captured = std::backtrace::Backtrace::force_capture().to_string();

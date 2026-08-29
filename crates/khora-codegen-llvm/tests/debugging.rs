@@ -140,11 +140,53 @@ fn main() -> Int {
 
     let output = Command::new(&exe)
         .env_remove("RUST_BACKTRACE")
+        .env_remove("KHORA_BACKTRACE")
         .output()
         .expect("the program should run");
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(err.contains("overflowed"), "what happened is always said: {err}");
-    assert!(err.contains("RUST_BACKTRACE=1"), "and how to learn where: {err}");
+    // **The Khora switch, not the Rust one.** Being told to set a variable
+    // named after the language the compiler happens to be written in reads as
+    // a leak, and it is one. `RUST_BACKTRACE` is still honoured for anybody
+    // who exports it globally; it is just not what the message asks for.
+    assert!(err.contains("KHORA_BACKTRACE=1"), "and how to learn where: {err}");
+}
+
+/// **And `RUST_BACKTRACE` still works**, so a machine that already exports it
+/// for everything is not asked twice.
+#[test]
+fn the_rust_switch_is_still_honoured() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("debug_rust_switch");
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let db = KhoraDatabase::new();
+    let source = "module t;
+fn print(value: Int);
+
+fn main() -> Int {
+  let big = 9223372036854775807;
+  print(big + 1);
+  0
+}
+";
+    let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
+    let root = SourceRoot::new(&db, vec![file]);
+    khora_codegen_llvm::compile_with(&db, root, &exe, Profile::Debug).expect("it compiles");
+
+    let output = Command::new(&exe)
+        .env_remove("KHORA_BACKTRACE")
+        .env("RUST_BACKTRACE", "1")
+        .output()
+        .expect("the program should run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("overflowed"), "what happened is always said: {err}");
+    assert!(
+        !err.contains("re-run with"),
+        "asking again for something already asked for: {err}"
+    );
 }
 
 /// An index outside its array, which is the other trap and reaches the same

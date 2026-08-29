@@ -4838,10 +4838,59 @@ The original list:
   `to_fixed` makes it one line. `ecosystem.md`'s rule is what a package would
   otherwise re-derive *subtly wrong*, and this is not that.
 
-### Tier 6 — what the docs promise and the compiler does not
+### Tier 6 — what the docs promise and the compiler does not — **done**
 
 Every agent was told to use the website as its only reference. Where they
-looked first, and what happened:
+looked first, and what happened.
+
+**Half of this list was already fixed**, in passing, by tiers 1 to 5 — and it
+was checked by running each one rather than by reading the page. `break value`
+out of a `loop`, `for (k, v)` over a real tuple, record update syntax, a
+concrete row in type-argument position, the stack limit in `traps.md`, what
+happens when a raise escapes `main` (`failures.md` has it down to the exit
+status and the message text), `data-types.md`'s type aliases, the stdlib
+index's unlinked prose, the trait-import rule (both the guide and the
+reference state it), and the "Exact decimals" section, which had been rewritten
+into something substantial. `first-project.md` does not exist; the page is
+`getting-started/first-project.md` and does not make the claim.
+
+**Four were real bugs**, and are the reason this tier was worth doing rather
+than proofreading:
+
+- **`testing.md`'s idiom did not compile.** Exhaustiveness ran before the error
+  row was solved, so `Err(NotFound(id))` covered part of an unsolved variable's
+  space and `Err(_)` was reported missing — for a type with one variant.
+  Coverage is collected during inference and checked after the unifier settles
+  now, beside `settle_projections`. It also names the *right* missing pattern.
+- **`read = ["./data/**"]` did not grant `data/foo.txt`.** The `./` was
+  significant on both sides. A `.` segment is dropped now; `..` is still not
+  resolved, because guessing would *widen* a grant.
+- **`khora doc` dropped every impl on a primitive**, so `String` had no page.
+  An impl belongs to a module when the module declares one of the two things it
+  names, plus a primitive clause for inherent ones. That surfaced 59
+  undocumented public items, which are now written. Effects were fine: they
+  render already, and there is no `impl` for one to drop.
+- **`khora fmt --check` was permanently red on Windows**, and `khora build
+  --out hello` wrote a file with no `.exe`. Both fixed, both tested.
+
+**And the paper cuts a newcomer meets first**: `khora new`'s workspace line
+read as an error about a problem that did not exist; Getting Started built the
+package by hand with a name `khora new` refuses, and documented neither `khora
+new`, `khora run` nor `[dependencies]`; the four shipped examples used four
+module conventions between them; `examples/risk_analyzer` said Khora had no
+`derive` above twenty lines of what the derive writes; the retrying cookbook
+used `assert` without importing it; `control-flow.md` said Khora has no tuple
+literal, which it has; and a trap told the reader to set `RUST_BACKTRACE`,
+named after the language the compiler happens to be written in. That is
+`KHORA_BACKTRACE` now, with the Rust one still honoured.
+
+**Left undone, and deliberately**: there is still no guide page for dates,
+`khora doc`'s defaults still point at this repository's paths, build artifacts
+still land beside the sources, and there are no "did you mean" suggestions.
+Each is a feature rather than a correction, and none of them makes the
+documentation say something untrue — which is what this tier was about.
+
+The original list:
 
 - **`control-flow.md` documents `break <value>` and `for (k, v) in entries`.**
   Neither works. Both have worked examples.
