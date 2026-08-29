@@ -79,10 +79,19 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
     println!("created {} ({})", directory.display(), if library { "library" } else { "program" });
     println!("  khora.toml");
     println!("  src/{file}");
+    // **A note about what listing buys, not a warning that something is
+    // wrong.** The old wording -- "does not list this directory. Add it to
+    // `members`." -- read as an error, and the first thing a newcomer did was
+    // go and edit a file. Nothing was broken: `khora build`, `khora check`,
+    // `khora test` and `khora run` all take a path and all work on a package
+    // the workspace has never heard of. What membership changes is whether the
+    // *workspace-wide* commands sweep it up, which is a choice rather than a
+    // repair, so the line says which choice it is.
     match enclosing_root(directory) {
         Some(root) if !lists(&root, directory) => {
             println!(
-                "\nThe workspace at {} does not list this directory. Add it to `members`.",
+                "\nThis package works as it is. Add it to `members` in {} to have \n\
+                 the workspace's own commands include it.",
                 root.join("khora.toml").display()
             );
         }

@@ -93,6 +93,12 @@ pub(crate) struct Checker<'a> {
     /// Where each deferred projection was written, in the order the unifier
     /// deferred them, so `settle_projections` can report against the source.
     pub(crate) projections: Vec<(TextRange, String)>,
+    /// Every `match` whose coverage is still to be checked.
+    ///
+    /// **Collected during inference and checked afterwards**, because whether
+    /// a `match` is exhaustive is a question about the scrutinee's *settled*
+    /// type and inference has not settled it yet. See [`Self::settle_coverage`].
+    pub(crate) coverage: Vec<(Type, Vec<khora_hir::body::MatchArm>, TextRange)>,
     /// The lambdas currently being inferred, innermost last, each with the
     /// bindings it has been found to use implicitly.
     pub(crate) enclosing_lambdas: Vec<(ExprId, Vec<khora_hir::body::LocalId>)>,
@@ -369,6 +375,42 @@ impl<'a> Checker<'a> {
         for ((_, why), (range, context)) in self.unifier.settle().into_iter().zip(sites) {
             let Some(why) = why else { continue };
             self.error(format!("{context}: {why}"), range);
+        }
+    }
+
+    /// Checks every `match` for coverage, now that the types are settled.
+    ///
+    /// **Run after the body rather than during it**, and that ordering is the
+    /// whole of the fix. Exhaustiveness is a question about the scrutinee's
+    /// type: to know that `Err(NotFound(id))` covers every `Err`, the checker
+    /// has to know the error type is `UserError` and that `NotFound` is its
+    /// only case. Asked mid-inference, the answer was `Result<String, ?12>` --
+    /// an unsolved variable has no constructors, so the arm covered part of
+    /// `Err`'s space and the rest was reported missing.
+    ///
+    /// That made the idiom `testing.md` teaches fail to compile:
+    ///
+    /// ```khora
+    /// let result = attempt(fn () => load_user(999)!);
+    /// match result {
+    ///   Result::Ok(_) => assert(false),
+    ///   Result::Err(UserError::NotFound(id)) => assert(id == 999),
+    /// }
+    /// ```
+    ///
+    /// `pattern Err(_) not covered`, for a type with one variant. The error
+    /// row reaches `?12` through `attempt`'s signature and a lambda's
+    /// `raises`, which is a deferred constraint -- so it was still a variable
+    /// at the `match` and was `UserError` a few lines later. Annotating the
+    /// `let` made it compile, which is what told everybody it was a bug rather
+    /// than a rule.
+    ///
+    /// After `settle_projections`, for the same reason that one runs after the
+    /// body: `?A` in `extract(Num::spec())` is settled by the call it sits in.
+    pub(crate) fn settle_coverage(&mut self) {
+        for (scrutinee, arms, range) in std::mem::take(&mut self.coverage) {
+            let settled = self.unifier.zonk(&scrutinee);
+            self.report_match_coverage(&settled, &arms, range);
         }
     }
 }

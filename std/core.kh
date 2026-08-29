@@ -1854,12 +1854,20 @@ impl<A> Array<A> {
 /// arguments; none of that is hard and none of it is what a hash was waiting
 /// for.
 impl Int {
+  /// The sum, wrapping at the type's own range instead of trapping.
   pub fn wrapping_add(self, other: Int) -> Int;
+  /// The difference, wrapping.
   pub fn wrapping_sub(self, other: Int) -> Int;
+  /// The product, wrapping.
   pub fn wrapping_mul(self, other: Int) -> Int;
+  /// Bit by bit: one wherever the two differ.
   pub fn xor(self, other: Int) -> Int;
+  /// Bit by bit: one wherever both are one.
   pub fn and(self, other: Int) -> Int;
+  /// Bit by bit: one wherever either is one.
   pub fn or(self, other: Int) -> Int;
+  /// Towards the high bits, with zeros coming in at the bottom and
+  /// whatever leaves the top gone.
   pub fn shl(self, other: Int) -> Int;
   /// Arithmetic, so a negative number stays negative. A logical shift is what
   /// `Int` cannot express and what an unsigned fixed-width type will.
@@ -1942,6 +1950,12 @@ impl String {
     if found < 0 { Option::None } else { Option::Some(found) }
   }
 
+  /// Whether `needle` sits at exactly `at`, without cutting a string out to
+  /// ask.
+  ///
+  /// The primitive `find`, `starts_with` and `ends_with` are all written over:
+  /// comparing in place costs nothing, and `slice` would allocate once per
+  /// position tried.
   pub fn matches_at(self, needle: String, at: Int) -> Bool {
     let count = String::byte_length(needle);
     let mut done = 0;
@@ -1956,6 +1970,8 @@ impl String {
     same
   }
 
+  /// Whether the text begins with `prefix`. A prefix longer than the text is
+  /// simply `false` rather than an index that would go past the end.
   pub fn starts_with(self, prefix: String) -> Bool {
     if String::byte_length(prefix) > String::byte_length(self) {
       false
@@ -2150,6 +2166,12 @@ impl String {
     byte == 32 || byte == 9 || byte == 13 || byte == 10
   }
 
+  /// The text either side of the *first* `separator`, or nothing if it does
+  /// not appear.
+  ///
+  /// For a header line, a `key=value` pair, a URL and its query — anywhere the
+  /// separator may legitimately appear again in the second half and splitting
+  /// on every one of them would be wrong.
   pub fn split_once(self, separator: String) -> Option<Split> {
     match String::index_of(self, separator) {
       Option::None => Option::None,
@@ -2529,6 +2551,20 @@ impl String {
 // Every conversion goes through `Int` — `U8::of` and `U8::to_int` rather than
 // a method for each of the forty-two ordered pairs. `U8` to `U32` is two
 // steps, which is more to type and never wrong.
+//
+// **The seven bitwise and wrapping operations mean the same thing in every
+// block below**, so the reason for them is here rather than repeated eight
+// times. `+`, `-` and `*` trap on overflow — `numbers.md` §"Overflow traps, in
+// every build" argues that at length — and `wrapping_add`, `wrapping_sub` and
+// `wrapping_mul` are how a program asks for the other behaviour *by name*.
+// That is what a hash, a checksum and a wire format want, and naming it is
+// what keeps a wrap that was intended apart from one that was a bug.
+//
+// `xor`, `and`, `or` and `shl` are the bit operations under names rather than
+// symbols, because Khora spends its operator budget on arithmetic and
+// comparison. `shr` is the one that differs by type, so it keeps a line of its
+// own in each block: logical where the type is unsigned, arithmetic where it
+// is signed.
 
 /// An unsigned byte: 0 to 255.
 ///
@@ -2550,12 +2586,20 @@ impl U8 {
   /// instruction.
   pub fn to_int(self) -> Int;
 
+  /// The sum, wrapping at the type's own range instead of trapping.
   pub fn wrapping_add(self, other: U8) -> U8;
+  /// The difference, wrapping.
   pub fn wrapping_sub(self, other: U8) -> U8;
+  /// The product, wrapping.
   pub fn wrapping_mul(self, other: U8) -> U8;
+  /// Bit by bit: one wherever the two differ.
   pub fn xor(self, other: U8) -> U8;
+  /// Bit by bit: one wherever both are one.
   pub fn and(self, other: U8) -> U8;
+  /// Bit by bit: one wherever either is one.
   pub fn or(self, other: U8) -> U8;
+  /// Towards the high bits, with zeros coming in at the bottom and
+  /// whatever leaves the top gone.
   pub fn shl(self, other: U8) -> U8;
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
@@ -2579,12 +2623,20 @@ impl U16 {
   /// instruction.
   pub fn to_int(self) -> Int;
 
+  /// The sum, wrapping at the type's own range instead of trapping.
   pub fn wrapping_add(self, other: U16) -> U16;
+  /// The difference, wrapping.
   pub fn wrapping_sub(self, other: U16) -> U16;
+  /// The product, wrapping.
   pub fn wrapping_mul(self, other: U16) -> U16;
+  /// Bit by bit: one wherever the two differ.
   pub fn xor(self, other: U16) -> U16;
+  /// Bit by bit: one wherever both are one.
   pub fn and(self, other: U16) -> U16;
+  /// Bit by bit: one wherever either is one.
   pub fn or(self, other: U16) -> U16;
+  /// Towards the high bits, with zeros coming in at the bottom and
+  /// whatever leaves the top gone.
   pub fn shl(self, other: U16) -> U16;
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
@@ -2608,12 +2660,20 @@ impl U32 {
   /// instruction.
   pub fn to_int(self) -> Int;
 
+  /// The sum, wrapping at the type's own range instead of trapping.
   pub fn wrapping_add(self, other: U32) -> U32;
+  /// The difference, wrapping.
   pub fn wrapping_sub(self, other: U32) -> U32;
+  /// The product, wrapping.
   pub fn wrapping_mul(self, other: U32) -> U32;
+  /// Bit by bit: one wherever the two differ.
   pub fn xor(self, other: U32) -> U32;
+  /// Bit by bit: one wherever both are one.
   pub fn and(self, other: U32) -> U32;
+  /// Bit by bit: one wherever either is one.
   pub fn or(self, other: U32) -> U32;
+  /// Towards the high bits, with zeros coming in at the bottom and
+  /// whatever leaves the top gone.
   pub fn shl(self, other: U32) -> U32;
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
@@ -2645,12 +2705,20 @@ impl U64 {
   /// comes back negative rather than stopping.
   pub fn wrapping_to_int(self) -> Int;
 
+  /// The sum, wrapping at the type's own range instead of trapping.
   pub fn wrapping_add(self, other: U64) -> U64;
+  /// The difference, wrapping.
   pub fn wrapping_sub(self, other: U64) -> U64;
+  /// The product, wrapping.
   pub fn wrapping_mul(self, other: U64) -> U64;
+  /// Bit by bit: one wherever the two differ.
   pub fn xor(self, other: U64) -> U64;
+  /// Bit by bit: one wherever both are one.
   pub fn and(self, other: U64) -> U64;
+  /// Bit by bit: one wherever either is one.
   pub fn or(self, other: U64) -> U64;
+  /// Towards the high bits, with zeros coming in at the bottom and
+  /// whatever leaves the top gone.
   pub fn shl(self, other: U64) -> U64;
   /// Logical, because the type is unsigned: the vacated bits are zeros
   /// and a large value stays large.
@@ -2674,12 +2742,20 @@ impl I8 {
   /// instruction.
   pub fn to_int(self) -> Int;
 
+  /// The sum, wrapping at the type's own range instead of trapping.
   pub fn wrapping_add(self, other: I8) -> I8;
+  /// The difference, wrapping.
   pub fn wrapping_sub(self, other: I8) -> I8;
+  /// The product, wrapping.
   pub fn wrapping_mul(self, other: I8) -> I8;
+  /// Bit by bit: one wherever the two differ.
   pub fn xor(self, other: I8) -> I8;
+  /// Bit by bit: one wherever both are one.
   pub fn and(self, other: I8) -> I8;
+  /// Bit by bit: one wherever either is one.
   pub fn or(self, other: I8) -> I8;
+  /// Towards the high bits, with zeros coming in at the bottom and
+  /// whatever leaves the top gone.
   pub fn shl(self, other: I8) -> I8;
   /// Arithmetic, because the type is signed: a negative number stays
   /// negative.
@@ -2703,12 +2779,20 @@ impl I16 {
   /// instruction.
   pub fn to_int(self) -> Int;
 
+  /// The sum, wrapping at the type's own range instead of trapping.
   pub fn wrapping_add(self, other: I16) -> I16;
+  /// The difference, wrapping.
   pub fn wrapping_sub(self, other: I16) -> I16;
+  /// The product, wrapping.
   pub fn wrapping_mul(self, other: I16) -> I16;
+  /// Bit by bit: one wherever the two differ.
   pub fn xor(self, other: I16) -> I16;
+  /// Bit by bit: one wherever both are one.
   pub fn and(self, other: I16) -> I16;
+  /// Bit by bit: one wherever either is one.
   pub fn or(self, other: I16) -> I16;
+  /// Towards the high bits, with zeros coming in at the bottom and
+  /// whatever leaves the top gone.
   pub fn shl(self, other: I16) -> I16;
   /// Arithmetic, because the type is signed: a negative number stays
   /// negative.
@@ -2734,12 +2818,20 @@ impl I32 {
   /// instruction.
   pub fn to_int(self) -> Int;
 
+  /// The sum, wrapping at the type's own range instead of trapping.
   pub fn wrapping_add(self, other: I32) -> I32;
+  /// The difference, wrapping.
   pub fn wrapping_sub(self, other: I32) -> I32;
+  /// The product, wrapping.
   pub fn wrapping_mul(self, other: I32) -> I32;
+  /// Bit by bit: one wherever the two differ.
   pub fn xor(self, other: I32) -> I32;
+  /// Bit by bit: one wherever both are one.
   pub fn and(self, other: I32) -> I32;
+  /// Bit by bit: one wherever either is one.
   pub fn or(self, other: I32) -> I32;
+  /// Towards the high bits, with zeros coming in at the bottom and
+  /// whatever leaves the top gone.
   pub fn shl(self, other: I32) -> I32;
   /// Arithmetic, because the type is signed: a negative number stays
   /// negative.

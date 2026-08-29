@@ -1189,8 +1189,18 @@ fn fmt_one(paths: &[PathBuf], check: bool) -> Result<bool> {
     for path in &files {
         let src = read(path)?;
         match khora_fmt::format_with(&src, &options) {
-            Ok(out) if out == src => {}
+            // **Compared and written back in the file's own line endings.**
+            // The formatter works in `\n`; a file written by an editor that
+            // uses `\r\n` is not thereby unformatted, and saying it was made
+            // `--check` permanently red on Windows for a correctly formatted
+            // tree. Normalising endings is `.gitattributes`' job, not a
+            // formatter's — one that did it would show up as every line
+            // changed in a review.
             Ok(out) => {
+                let out = khora_fmt::with_line_ending(&out, khora_fmt::line_ending(&src));
+                if out == src {
+                    continue;
+                }
                 changed.push(path.clone());
                 if !check {
                     std::fs::write(path, out)
@@ -1347,7 +1357,7 @@ fn build(
         .or_else(|| inputs.iter().find(|(file, _, _)| mine(file)))
         .or_else(|| inputs.first())
         .expect("at least one source");
-    let target = out.map(Path::to_path_buf).unwrap_or_else(|| {
+    let target = out.map(|given| named_as_asked(given, lib)).unwrap_or_else(|| {
         let stem = entry.0.file_stem().unwrap_or_default();
         entry.0.with_file_name(stem).with_extension(library_extension(lib))
     });
@@ -1461,6 +1471,30 @@ fn build(
 #[cfg(feature = "llvm")]
 fn library_extension(lib: bool) -> &'static str {
     if lib { std::env::consts::DLL_EXTENSION } else { std::env::consts::EXE_EXTENSION }
+}
+
+/// The path `--out` asked for, with the platform's extension if it named none.
+///
+/// **`khora build . --out hello` wrote a file called `hello` on Windows**,
+/// which Explorer will not start and `hello` at a prompt will not find. The
+/// flag was taken verbatim while the default name went through
+/// [`library_extension`], so the two disagreed on exactly the platform where
+/// it matters.
+///
+/// An extension the caller wrote is kept, whatever it is: `--out hello.bin` on
+/// Windows stays `hello.bin`, because somebody who typed a suffix meant it and
+/// a build system that renames its own output is worse than one that does not.
+/// On Unix, where the extension is empty, this adds nothing and `--out hello`
+/// is `hello` as it always was.
+///
+/// Only `build` asks, and `build` needs the backend.
+#[cfg(feature = "llvm")]
+fn named_as_asked(given: &Path, lib: bool) -> PathBuf {
+    let wanted = library_extension(lib);
+    if wanted.is_empty() || given.extension().is_some() {
+        return given.to_path_buf();
+    }
+    given.with_extension(wanted)
 }
 
 /// `khora run`: compile the program and start it.

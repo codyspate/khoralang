@@ -95,7 +95,14 @@ for entry in Dict::entries(table) {
 }
 ```
 
-Khora has no tuple literal, so `for (key, value) in ...` only works where the item's type genuinely is a tuple. Against anything else it is refused, naming the type it found.
+`for (key, value) in ...` works where the item's type genuinely is a tuple — `(1, "one")` is one, and a `List<(Int, String)>` iterates that way. Against anything else it is refused, naming the type it found, which is why the `Dict::entries` example above reaches its halves by name instead.
+
+A tuple is taken apart by pattern and not by position: there is no `pair.0`. Destructure it in the `for`, in a `let`, or in a `match` arm.
+
+```khora
+let point = (3, 4);
+let (x, y) = point;
+```
 
 `for` is desugared to the `Iterator` trait's `next`, which hands back the next item and the iterator that follows it. Both `Iterator` and `Step` have to be in scope where the loop is written:
 

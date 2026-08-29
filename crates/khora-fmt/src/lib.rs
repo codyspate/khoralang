@@ -104,6 +104,39 @@ pub fn is_formatted(src: &str) -> Result<bool, Vec<ParseError>> {
     format(src).map(|formatted| formatted == src)
 }
 
+/// The line ending `src` mostly uses, so formatting can hand it back.
+///
+/// **The formatter works in `\n` and always did**, which made `khora fmt
+/// --check` permanently red for anybody whose editor writes `\r\n`: a
+/// correctly formatted file was reported as needing reformatting, and
+/// `--check` printed only the name, so finding out why took a `diff` and an
+/// `od -c`. `testing.md` recommends the flag for CI, so the first thing a
+/// Windows contributor met was a red build about nothing.
+///
+/// Whichever ending appears first decides, because a file that mixes them is
+/// being rewritten by two tools and picking the majority would just pick a
+/// side quietly. Formatting is not the place to normalise line endings — that
+/// is what `.gitattributes` is for, and a formatter that did it would show up
+/// as every line changed in a review.
+pub fn line_ending(src: &str) -> &'static str {
+    match src.find('\n') {
+        Some(at) if at > 0 && src.as_bytes()[at - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    }
+}
+
+/// `text` with every line ending rewritten to `ending`.
+///
+/// The formatter's output is always `\n`-separated, so this only ever adds
+/// carriage returns; it strips first so that running it twice is the same as
+/// running it once.
+pub fn with_line_ending(text: &str, ending: &str) -> String {
+    if ending == "\n" {
+        return text.to_string();
+    }
+    text.replace("\r\n", "\n").replace('\n', ending)
+}
+
 /// What should separate the previous token from the next one.
 ///
 /// Ordered so that a stronger separator wins when several are requested for the

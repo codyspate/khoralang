@@ -750,3 +750,60 @@ fn main() -> Int {{
     assert_eq!(ran.stdout, "10\n", "4 + 4 + 2, from a double that knows only arithmetic");
     assert_eq!(ran.code, Some(0));
 }
+
+
+/// **`read = ["./data/**"]` did not grant `data/foo.txt`.**
+///
+/// The `./` was significant on both sides: a grant and a request were compared
+/// as strings after only `\` → `/`, so the example in the capabilities guide
+/// wrote a manifest line that looks like it says yes and refuses. Two readers
+/// hit it independently, which is what made it a trap rather than a surprise.
+///
+/// A `.` segment is dropped now, on both sides, so all four spellings agree.
+///
+/// **`..` is still not resolved**, and that is deliberate: dropping `a/../b`
+/// to `b` is only correct if `a` exists and is a directory rather than a link,
+/// which is a question about the filesystem — and a normalizer that guessed
+/// would *widen* a grant, which is the one direction a permission check must
+/// never be wrong in.
+#[test]
+fn a_dot_segment_does_not_change_what_a_grant_covers() {
+    let ran = run(
+        "fs_grant_dots",
+        &format!(
+            "{HEAD}
+import std::permissions::{{granted, normalized}};
+
+fn say(grant: String, path: String) -> () {{
+  let ok = granted(List::Cons(grant, List::Nil), path);
+  print(if ok {{ \"granted\" }} else {{ \"refused\" }})
+}}
+
+pub fn main() -> Int {{
+  // The four spellings of the same grant and the same path.
+  say(\"./data/**\", \"data/foo.txt\");
+  say(\"data/**\", \"./data/foo.txt\");
+  say(\"data/**\", \"data/foo.txt\");
+  say(\"./data/**\", \"./data/foo.txt\");
+  // Separators still level, which is the half that already worked.
+  say(\"data/**\", \"data\\\\foo.txt\");
+  // And the two that must still be refused.
+  say(\"data/**\", \"a/../data/foo.txt\");
+  say(\"data/**\", \"other/foo.txt\");
+  // The normalizer's own edges: a repeated `.`, a bare `.` that names the
+  // current directory and must stay something, and an absolute path.
+  print(\"[\" + normalized(\"a/././b\") + \"]\");
+  print(\"[\" + normalized(\".\") + \"]\");
+  print(\"[\" + normalized(\"/abs/./path\") + \"]\");
+  0
+}}
+"
+        ),
+    );
+
+    assert_eq!(
+        ran.stdout,
+        "granted\ngranted\ngranted\ngranted\ngranted\nrefused\nrefused\n\
+         [a/b]\n[.]\n[/abs/path]\n"
+    );
+}

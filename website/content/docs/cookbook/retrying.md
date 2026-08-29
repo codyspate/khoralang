@@ -14,7 +14,7 @@ A GET that backs off, gives up after five attempts, and does not waste any of th
 module main;
 
 import std::clock::{Clock};
-import std::core::{Result, attempt, print};
+import std::core::{Result, assert, attempt, print};
 import std::net::http::{Answer, Call, CallError, HttpClient};
 import std::random::{Random};
 import std::resilience::{Schedule, retry_while};

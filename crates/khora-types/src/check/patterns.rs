@@ -97,7 +97,22 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Remembers a `match` to check once the types have settled.
+    ///
+    /// **Not checked here**, because the scrutinee's type is still being
+    /// inferred: see [`Checker::settle_coverage`] for what asking too early
+    /// cost. The arms are cloned rather than borrowed because the check runs
+    /// after this walk is over.
     pub(super) fn check_match_coverage(
+        &mut self,
+        scrutinee_ty: &Type,
+        arms: &[khora_hir::body::MatchArm],
+        range: TextRange,
+    ) {
+        self.coverage.push((scrutinee_ty.clone(), arms.to_vec(), range));
+    }
+
+    pub(super) fn report_match_coverage(
         &mut self,
         scrutinee_ty: &Type,
         arms: &[khora_hir::body::MatchArm],

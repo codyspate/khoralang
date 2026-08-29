@@ -1,4 +1,4 @@
-module main;
+module link_shortener::main;
 
 import std::core::{Changed, Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
 import std::clock::{Clock};

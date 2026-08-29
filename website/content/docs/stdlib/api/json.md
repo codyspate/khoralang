@@ -247,6 +247,150 @@ impl FromJson for Json
 fn from_json(value: Json) -> Json raises DecodeError
 ```
 
+### ToJson for String
+
+```khora
+impl ToJson for String
+```
+
+#### to_json
+
+```khora
+fn to_json(self) -> Json
+```
+
+### FromJson for String
+
+```khora
+impl FromJson for String
+```
+
+#### from_json
+
+```khora
+fn from_json(value: Json) -> String raises DecodeError
+```
+
+### ToJson for Bool
+
+```khora
+impl ToJson for Bool
+```
+
+#### to_json
+
+```khora
+fn to_json(self) -> Json
+```
+
+### FromJson for Bool
+
+```khora
+impl FromJson for Bool
+```
+
+#### from_json
+
+```khora
+fn from_json(value: Json) -> Bool raises DecodeError
+```
+
+### ToJson for Float
+
+```khora
+impl ToJson for Float
+```
+
+#### to_json
+
+```khora
+fn to_json(self) -> Json
+```
+
+### FromJson for Float
+
+```khora
+impl FromJson for Float
+```
+
+#### from_json
+
+```khora
+fn from_json(value: Json) -> Float raises DecodeError
+```
+
+### ToJson for Int
+
+```khora
+impl ToJson for Int
+```
+
+#### to_json
+
+```khora
+fn to_json(self) -> Json
+```
+
+### FromJson for Int
+
+```khora
+impl FromJson for Int
+```
+
+#### from_json
+
+```khora
+fn from_json(value: Json) -> Int raises DecodeError
+```
+
+### ToJson for Option<A>
+
+```khora
+impl<A: ToJson> ToJson for Option<A>
+```
+
+#### to_json
+
+```khora
+fn to_json(self) -> Json
+```
+
+### FromJson for Option<A>
+
+```khora
+impl<A: FromJson> FromJson for Option<A>
+```
+
+#### from_json
+
+```khora
+fn from_json(value: Json) -> Option<A> raises DecodeError
+```
+
+### ToJson for List<A>
+
+```khora
+impl<A: ToJson> ToJson for List<A>
+```
+
+#### to_json
+
+```khora
+fn to_json(self) -> Json
+```
+
+### FromJson for List<A>
+
+```khora
+impl<A: FromJson> FromJson for List<A>
+```
+
+#### from_json
+
+```khora
+fn from_json(value: Json) -> List<A> raises DecodeError
+```
+
 ### Show for Json
 
 ```khora

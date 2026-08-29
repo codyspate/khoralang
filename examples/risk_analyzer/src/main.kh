@@ -1,41 +1,25 @@
-module app::main;
+module risk_analyzer::main;
 
 import std::core::{Eq, List, Option, Scope, SharedFn, Show, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
 import std::ai::{Extract, LLMService, ModelError, Prompt, extract};
 
+/// How bad it is, and why.
+///
+/// **`Eq` is derived.** It used to be twenty lines written out, under a
+/// comment saying Khora had no `derive` — which was true when this example
+/// was written and is not now. What the derive writes is what those twenty
+/// lines said: two `Critical`s with different actions are different risks,
+/// because equality on a variant is the case and then the payload.
+///
+/// It is still a trait rather than a builtin, and that part of the old comment
+/// stands: `==` reaches a trait so that a type gets to say what equality
+/// means. Deriving is a type saying "structurally", out loud, in one word.
+derive(Eq)
 pub type RiskLevel =
   | Low
   | Moderate(reason: String)
   | Critical(action_required: String);
-
-/// What equality means for a risk level, which is a question only `RiskLevel`
-/// can answer: two `Critical`s with different actions are different risks.
-///
-/// Written out rather than derived, because Khora has no `derive` — and
-/// because the reason `==` reaches a trait at all is that a type should get to
-/// say. `docs/design/numbers.md` has the same argument from the other end.
-impl Eq for RiskLevel {
-  fn eq(self, other: RiskLevel) -> Bool {
-    match self {
-      RiskLevel::Low => match other {
-        RiskLevel::Low => true,
-        RiskLevel::Moderate(_r) => false,
-        RiskLevel::Critical(_a) => false,
-      },
-      RiskLevel::Moderate(mine) => match other {
-        RiskLevel::Low => false,
-        RiskLevel::Moderate(theirs) => mine == theirs,
-        RiskLevel::Critical(_a) => false,
-      },
-      RiskLevel::Critical(mine) => match other {
-        RiskLevel::Low => false,
-        RiskLevel::Moderate(_r) => false,
-        RiskLevel::Critical(theirs) => mine == theirs,
-      },
-    }
-  }
-}
 
 pub type AnalysisReport = {
   account_id: String,

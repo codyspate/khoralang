@@ -329,3 +329,56 @@ fn a_call_still_hugs_its_arguments() {
     let src = "module m;\nfn f() -> Int { g(1) + h(2)(3) }\n";
     assert_eq!(format(src).unwrap(), src, "a call hugs its parenthesis");
 }
+
+
+/// **`khora fmt --check` was permanently red on Windows.**
+///
+/// The formatter works in `\n`, so a correctly formatted file written by an
+/// editor that uses `\r\n` came back differing on every line — and `--check`
+/// printed only the filename, so finding out why took a `diff` and an `od -c`.
+/// `testing.md` recommends the flag for CI, so the first thing a Windows
+/// contributor met was a red build about nothing.
+///
+/// Whichever ending appears *first* decides. A file that mixes them is being
+/// rewritten by two tools, and picking the majority would quietly pick a side.
+#[test]
+fn the_line_ending_a_file_uses_is_the_one_it_keeps() {
+    assert_eq!(khora_fmt::line_ending("a\r\nb\r\n"), "\r\n");
+    assert_eq!(khora_fmt::line_ending("a\nb\n"), "\n");
+    // No newline at all, and a lone carriage return, are both `\n`: there is
+    // nothing to preserve and `\r` on its own has not been a line ending since
+    // Mac OS 9.
+    assert_eq!(khora_fmt::line_ending("a"), "\n");
+    assert_eq!(khora_fmt::line_ending("a\rb"), "\n");
+    // First one wins.
+    assert_eq!(khora_fmt::line_ending("a\nb\r\n"), "\n");
+    assert_eq!(khora_fmt::line_ending("a\r\nb\n"), "\r\n");
+}
+
+/// Applying an ending is idempotent, which is what lets the caller run it over
+/// output it has already run it over.
+#[test]
+fn rewriting_line_endings_twice_is_rewriting_them_once() {
+    let once = khora_fmt::with_line_ending("a\nb\n", "\r\n");
+    assert_eq!(once, "a\r\nb\r\n");
+    assert_eq!(khora_fmt::with_line_ending(&once, "\r\n"), once);
+    assert_eq!(khora_fmt::with_line_ending(&once, "\n"), "a\r\nb\r\n");
+}
+
+/// **A formatted file with `\r\n` is formatted**, which is the whole of the
+/// bug: the check compares the formatter's output rewritten into the file's
+/// own endings, so the two agree.
+#[test]
+fn a_correctly_formatted_file_with_carriage_returns_needs_no_reformatting() {
+    let source = "module m;\n\nfn main() -> () {\n  0\n}\n";
+    let formatted = khora_fmt::format(source).expect("it parses");
+    assert_eq!(formatted, source, "the fixture has to be canonical to start with");
+
+    let windows = khora_fmt::with_line_ending(source, "\r\n");
+    let out = khora_fmt::format(&windows).expect("it parses");
+    assert_eq!(
+        khora_fmt::with_line_ending(&out, khora_fmt::line_ending(&windows)),
+        windows,
+        "a formatted file should not be reported as needing reformatting"
+    );
+}

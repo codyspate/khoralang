@@ -136,14 +136,27 @@ fn new_refuses_a_directory_with_something_in_it() {
     assert!(root.join("taken").join("notes.txt").is_file(), "the file survived");
 }
 
+/// **A note about what listing buys, not a warning that something is wrong.**
+///
+/// The old wording — "does not list this directory. Add it to `members`." —
+/// read as an error, so the first thing a newcomer did was go and edit a file.
+/// Nothing was broken: `build`, `check`, `test` and `run` all take a path and
+/// all work on a package the workspace has never heard of, which the second
+/// half of this test is here to say out loud. What membership changes is
+/// whether the *workspace-wide* commands sweep it up, which is a choice rather
+/// than a repair.
 #[test]
-fn new_says_when_the_workspace_will_not_pick_it_up() {
+fn new_says_what_listing_a_package_would_buy() {
     let root = workspace("new_unlisted", "");
 
     let (ok, output) = run(&root, &["new", "tools/helper"]);
     assert!(ok, "creating it is still the right thing: {output}");
-    assert!(output.contains("does not list this directory"), "{output}");
+    assert!(output.contains("works as it is"), "{output}");
     assert!(output.contains("members"), "{output}");
+
+    // And it does work as it is, unlisted, which is the claim the line makes.
+    let (checked, output) = run(&root, &["check", "tools/helper"]);
+    assert!(checked, "an unlisted package should still check: {output}");
 }
 
 #[test]

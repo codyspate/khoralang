@@ -1,4 +1,4 @@
-module demo::main;
+module core_demo::main;
 
 // A prelude does not exist yet, so the intrinsic is declared here. Code
 // generation recognizes `print` by name and lowers it to the runtime.

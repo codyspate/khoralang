@@ -916,6 +916,26 @@ nursery.adopt(Fiber::spawn(fn () => analyze(id)!));
 
 ## Methods
 
+### Bool
+
+```khora
+impl Bool
+```
+
+#### to_string
+
+```khora
+pub fn to_string(self) -> String
+```
+
+`"true"` or `"false"`.
+
+The same text `show` gives, under the name the other scalars use --
+`Int::to_string` and `Float::to_string` are both here, and a reader who
+has met those goes looking for this one. `Show for Bool` is written in
+terms of it rather than the other way round, so there is one place the
+two words are spelled.
+
 ### Ordering
 
 ```khora
@@ -1899,6 +1919,557 @@ Only an array of numbers can be lent. An `Array<A>` of Khora objects
 holds reference-counted pointers, and handing those across is the mistake
 the whole boundary exists to prevent. `docs/design/ffi.md`.
 
+### Int
+
+```khora
+impl Int
+```
+
+Arithmetic that does not trap, and the bits underneath it.
+
+Ordinary `+`, `-` and `*` **stop the program** when they do not fit: a
+program that passes its tests and then wraps in production is the failure
+worth a branch to prevent. These are how you ask for the other behaviour in
+the places that genuinely want it — a hash, a checksum, a pseudo-random
+number — by name, so that the trap stays the default without being in the
+way.
+
+Methods rather than operators for now. `^`, `&`, `|`, `<<` and `>>` are five
+new tokens and `>>` has to be told apart from the end of two nested type
+arguments; none of that is hard and none of it is what a hash was waiting
+for.
+
+#### wrapping_add
+
+```khora
+pub fn wrapping_add(self, other: Int) -> Int
+```
+
+The sum, wrapping at the type's own range instead of trapping.
+
+#### wrapping_sub
+
+```khora
+pub fn wrapping_sub(self, other: Int) -> Int
+```
+
+The difference, wrapping.
+
+#### wrapping_mul
+
+```khora
+pub fn wrapping_mul(self, other: Int) -> Int
+```
+
+The product, wrapping.
+
+#### xor
+
+```khora
+pub fn xor(self, other: Int) -> Int
+```
+
+Bit by bit: one wherever the two differ.
+
+#### and
+
+```khora
+pub fn and(self, other: Int) -> Int
+```
+
+Bit by bit: one wherever both are one.
+
+#### or
+
+```khora
+pub fn or(self, other: Int) -> Int
+```
+
+Bit by bit: one wherever either is one.
+
+#### shl
+
+```khora
+pub fn shl(self, other: Int) -> Int
+```
+
+Towards the high bits, with zeros coming in at the bottom and
+whatever leaves the top gone.
+
+#### shr
+
+```khora
+pub fn shr(self, other: Int) -> Int
+```
+
+Arithmetic, so a negative number stays negative. A logical shift is what
+`Int` cannot express and what an unsigned fixed-width type will.
+
+### String
+
+```khora
+impl String
+```
+
+#### slice
+
+```khora
+pub fn slice(self, from: Int, to: Int) -> String
+```
+
+The bytes from `from` up to but not including `to`.
+
+**Byte indices, and no rounding.** A range that splits a character gives
+back bytes that are not text, and `from_bytes` stops the program rather
+than pretend — which is the honest failure for a caller who sliced by
+eye. Indices outside the string are clamped, because "the rest of it" is
+what every caller of `slice(i, byte_length(s))` means.
+The bytes from `from` up to `to`, clamped to what is there.
+
+**One allocation and one copy**, which is why it is a compiler intrinsic
+rather than the six lines it reads like. Written in Khora it went through
+an `Array<U8>` and `String::from_bytes`, so every slice was *two*
+allocations, *two* copies and a walk of the bytes to re-check that they
+were UTF-8 — 2,915 nanoseconds for eighty bytes. `String::split_once` is
+two slices and the request parser is a dozen splits, so this one function
+was most of what a server spent its time on.
+
+**Stops the program if the ends fall inside a character**, the same
+bargain `String::byte` makes about an index. The check is two byte reads
+rather than a walk: the input is already UTF-8, so the only way out of it
+is a cut through a multi-byte character, and that shows up as a
+continuation byte at one end or the other.
+
+#### find
+
+```khora
+pub fn find(self, needle: String, from: Int) -> Int
+```
+
+Where `needle` first occurs at or after `from`, counting in bytes, or
+**-1** if it is nowhere.
+
+**The one place in this library that answers with a sentinel**, and it
+earns it the way `String::byte` earns being able to stop the program:
+this is the bottom of the string library, `index_of` is one line above it
+and is what everything else calls. A search is the C library's `memmem`,
+which says -1, and turning that into an `Option` is work the compiler
+cannot do inside an intrinsic — so it is done here, once, in the open.
+
+`from` exists so that scanning a string does not mean copying it. Walking
+a header block by slicing off the front costs a copy of everything left
+over, once per header; searching from a cursor copies only the pieces
+that are kept.
+
+An empty needle is found at `from`, which is what every other language
+says and what stops `split_once` on an empty separator from running
+forever.
+
+#### index_of
+
+```khora
+pub fn index_of(self, needle: String) -> Option<Int>
+```
+
+Where `needle` first occurs, or nothing.
+
+**A compiler intrinsic underneath**, and the reason is a measurement.
+Written as a loop over `String::byte` this took 3,180 nanoseconds to find
+a six-byte word in eighty bytes — a call and a bounds check per byte, at
+every candidate position. Bound to `memmem` but reaching it through
+`String::with_data` it still took 500, because the two nested closures
+that borrow the bytes are two heap allocations. Going straight to the
+runtime call is 40.
+
+That matters because this is the hottest thing in the request parser:
+`split_once` is built on it, and parsing one request is about eight
+searches.
+
+#### matches_at
+
+```khora
+pub fn matches_at(self, needle: String, at: Int) -> Bool
+```
+
+Whether `needle` sits at exactly `at`, without cutting a string out to
+ask.
+
+The primitive `find`, `starts_with` and `ends_with` are all written over:
+comparing in place costs nothing, and `slice` would allocate once per
+position tried.
+
+#### starts_with
+
+```khora
+pub fn starts_with(self, prefix: String) -> Bool
+```
+
+Whether the text begins with `prefix`. A prefix longer than the text is
+simply `false` rather than an index that would go past the end.
+
+#### ends_with
+
+```khora
+pub fn ends_with(self, suffix: String) -> Bool
+```
+
+Whether the text ends with `suffix`.
+
+#### contains
+
+```khora
+pub fn contains(self, needle: String) -> Bool
+```
+
+Whether `needle` occurs anywhere.
+
+The empty string is in everything, which is what `find` already answers
+and is the convention every library that has thought about it settled on:
+it is the identity of concatenation, and it is at position 0 of anything.
+
+#### is_empty
+
+```khora
+pub fn is_empty(self) -> Bool
+```
+
+Whether there are no bytes at all.
+
+#### trim
+
+```khora
+pub fn trim(self) -> String
+```
+
+The text either side of the first `separator`, or `None` if it is absent.
+
+One split rather than a list of them, because a list wants an allocation
+per piece and every caller here wants the head and the rest. A record
+rather than a pair, because `.head` says which one it is and `.0` does
+not.
+The string without leading or trailing whitespace.
+
+Space, tab, carriage return and newline -- the four a line of text picks
+up on its way through a file or a socket. Not Unicode's full set of space
+characters: that list changes with the standard, and a `std` that
+silently trimmed a non-breaking space would be surprising in the other
+direction.
+
+The ends move inwards over the original bytes and only what survives is
+copied, so trimming nothing costs one slice and no allocation.
+
+#### lower
+
+```khora
+pub fn lower(self) -> String
+```
+
+The string with `A`-`Z` written in lower case.
+
+**ASCII only, and deliberately.** Unicode case folding is locale
+dependent -- Turkish `I` lowercases to a dotless `ı`, and German `ß`
+upper-cases to two characters -- so a correct `lower` needs a locale and
+a table, and neither belongs in `core`. What this is for is comparing a
+header name or a file extension, where the input is ASCII by
+specification.
+
+Bytes outside `A`-`Z` are untouched, so text in any encoding passes
+through rather than being mangled.
+
+#### upper
+
+```khora
+pub fn upper(self) -> String
+```
+
+The same text with `a`-`z` shifted to `A`-`Z`.
+
+ASCII only, for the reason `lower` gives: a case mapping that is right
+for every script is a table that changes with the Unicode standard, and
+one that is right for *some* scripts silently is worse than one that is
+honest about being ASCII. Turkish dotless i is the example everybody
+learns this from.
+
+#### trim_start
+
+```khora
+pub fn trim_start(self) -> String
+```
+
+The text with leading whitespace removed.
+
+#### trim_end
+
+```khora
+pub fn trim_end(self) -> String
+```
+
+The text with trailing whitespace removed.
+
+#### split
+
+```khora
+pub fn split(self, separator: String) -> List<String>
+```
+
+Every piece between occurrences of `separator`, in order.
+
+**`n` separators give `n + 1` pieces, always**, which is the rule that
+makes splitting and joining inverses: `""` splits to one empty piece,
+`"a,"` splits to two of which the second is empty, and `join(split(s, x), x)`
+is `s` for every `s`. Dropping empty pieces is a filter the caller can
+write and cannot undo.
+
+An empty separator would match everywhere and split nothing, so it gives
+back the whole string as one piece rather than looping.
+
+#### join
+
+```khora
+pub fn join(pieces: List<String>, separator: String) -> String
+```
+
+The pieces laid end to end with `separator` between them.
+
+The inverse of `split` for the same separator, which is the property that
+decides both. Written here rather than on `List` because it is about text
+and not about lists: a `List<Int>` has no join.
+
+#### replace
+
+```khora
+pub fn replace(self, from: String, to: String) -> String
+```
+
+Every occurrence of `from` replaced by `to`.
+
+**Left to right over the original**, so what `to` puts in is never
+searched again: replacing `"a"` with `"aa"` doubles each `a` once rather
+than looping. An empty `from` matches everywhere and changes nothing,
+which is the only answer that terminates.
+
+#### repeat
+
+```khora
+pub fn repeat(self, count: Int) -> String
+```
+
+The text `count` times over. Below one is empty.
+
+#### is_space
+
+```khora
+pub fn is_space(byte: U8) -> Bool
+```
+
+Whether a byte is one of the four whitespace characters `trim` removes.
+
+#### split_once
+
+```khora
+pub fn split_once(self, separator: String) -> Option<Split>
+```
+
+The text either side of the *first* `separator`, or nothing if it does
+not appear.
+
+For a header line, a `key=value` pair, a URL and its query — anywhere the
+separator may legitimately appear again in the second half and splitting
+on every one of them would be wrong.
+
+#### pad_left
+
+```khora
+pub fn pad_left(self, width: Int, fill: String) -> String
+```
+
+`self` with `fill` in front of it until it is `width` bytes long.
+
+**For a column, which is the only reason anybody wants it.** Every one of
+the three programs written against this library grew its own, and
+`std::time` has a third copy under the name `padded` -- a function four
+people write is a function the library should have.
+
+Bytes rather than characters, which matters the moment the text is not
+ASCII: a column of names in Greek will not line up, and lining up text by
+display width is a font question this type cannot answer. `byte_length`
+is the length everything else here counts in, so this counts in it too.
+
+Already at or past `width` is returned unchanged: a truncating pad is a
+different function, and one that silently loses a digit from a total is
+not one this library is going to offer by accident. A `fill` that is not
+one byte long is refused the same way, since the loop could not land on
+`width` exactly.
+
+#### pad_right
+
+```khora
+pub fn pad_right(self, width: Int, fill: String) -> String
+```
+
+`self` with `fill` after it until it is `width` bytes long.
+
+The other side of `pad_left`, and the one a left-aligned label wants.
+
+#### split_whitespace
+
+```khora
+pub fn split_whitespace(self) -> List<String>
+```
+
+The pieces between runs of whitespace, with no empty ones.
+
+**Not `split(" ")`**, and the difference is the whole point: `split`
+keeps every empty piece, which is right for a CSV -- where two commas in
+a row mean a field that is there and blank -- and wrong for anything
+column-aligned, where two spaces in a row mean the writer was lining
+something up. A log line split the first way has empty strings in it that
+no reader of the log put there.
+
+Whitespace is what `is_space` says: space, tab, carriage return and
+newline.
+
+### Float
+
+```khora
+impl Float
+```
+
+#### to_string
+
+```khora
+pub fn to_string(self) -> String
+```
+
+The number, written out — `1.5`, `0.1`, `inf`.
+
+The shortest form that reads back as the same number, which is what a
+reader means by "the number" and what `print` on a `Float` already gives.
+Thirty-two bytes is always enough for a double; the call says how many it
+needed, so a longer answer would be caught rather than truncated.
+
+#### to_fixed
+
+```khora
+pub fn to_fixed(self, places: Int) -> String
+```
+
+The number to exactly `places` decimal places.
+
+**For a column and for a percentage**, which is what everybody wanted it
+for: `to_string` gives the shortest form that reads back, so `0.5` and
+`0.125` are three characters apart and a table of them does not line up.
+Two of the review programs wrote the same `percent(part, whole)` helper
+and `examples/risk_analyzer` had a third copy, and the rounding was the
+half none of them wanted to write.
+
+**Not written in Khora**, and the reason is the point of the whole
+numeric design. Multiplying by `10^places`, rounding and dividing back
+does the rounding in binary floating point — so a percentage renders as
+`33.33` on one machine and `33.34` on another, which is the bug
+`std::decimal` exists to prevent, reintroduced by the formatter. The
+runtime rounds the decimal expansion of the double instead, the way C's
+`printf` and Go's `strconv` do, so this and its neighbours agree.
+
+**Still a `Float`, so it is still a rounding of an approximation.**
+`0.1 + 0.2` to two places is `0.30`, and it is `0.30` because the sum was
+near enough, not because it was right. Money is `Decimal` and
+`Decimal::rounded` is the exact version of this; the type that cannot
+have an `Eq` cannot have an exact one of these either.
+
+`places` is clamped to nought through thirty: a double carries about
+seventeen significant digits, so past that the characters are an artefact
+of the binary value rather than information.
+
+#### to_int
+
+```khora
+pub fn to_int(self) -> Int
+```
+
+The whole part, with nothing rounded.
+
+**Truncates toward zero** — `2.9` is `2` and `-2.9` is `-2` — which is
+what every machine's "convert to integer" does, and what C, Rust and Go
+all mean by it. Rounding is a different question with four defensible
+answers, so it gets a different function when somebody needs one.
+
+A number too large for an `Int` clamps to the nearest end, and a `NaN` is
+zero. Undefined behaviour is the alternative and is not one.
+
+### Int
+
+```khora
+impl Int
+```
+
+#### of_string
+
+```khora
+pub fn of_string(text: String) -> Option<Int>
+```
+
+The number a string spells, or nothing.
+
+An `Option` rather than a trap, because the text almost always came from
+outside — an environment variable, a header, a path segment, a form field
+— and "somebody typed it wrong" is a thing to answer with a 400 rather
+than to stop the program over.
+
+Leading `-` and nothing else: no `+`, no underscores, no spaces, no
+hexadecimal. A parser that accepts more than the caller expected is how a
+configuration value ends up meaning something nobody wrote.
+
+**Refuses rather than overflows.** `*` and `+` trap in this language, so
+a long enough run of digits would have stopped the program — which for
+text off a socket is a denial of service with extra steps. The running
+total is checked before it is grown instead.
+
+That check used to be a digit short. It compared the total against a
+tenth of the maximum and let an equal one through, so
+`"9223372036854775808"` — one past the largest `Int`, and the shape of a
+number somebody fat-fingered into a form — grew past the end and stopped
+the program, which is the exact thing the paragraph above promises it
+does not do.
+
+**The total is counted downward**, which is the second fix and the reason
+the guard is written against `smallest_int` rather than a largest one.
+Every `Int` has a negative twin and not every one has a positive twin:
+building `9223372036854775808` on the way to `-9223372036854775808` is
+how the most negative number becomes unreadable, and it was.
+
+#### to_float
+
+```khora
+pub fn to_float(self) -> Float
+```
+
+The same number as a `Float`.
+
+Exact up to 2^53 and rounded beyond it, which is IEEE's business rather
+than Khora's.
+
+#### to_string
+
+```khora
+pub fn to_string(self) -> String
+```
+
+The number, written out.
+
+Needed by anything that puts a number in a message — a `Content-Length`,
+a status line, a log — and written here rather than in the runtime
+because it is four lines of Khora and a good test of whether they are
+pleasant to write.
+**The most negative `Int` prints**, which took a second attempt. Taking
+its magnitude with `0 - self` overflows — that is the whole peculiarity
+of the number — so it stopped the program instead, reporting a
+subtraction the caller never wrote. A `Decimal` at that significand could
+be built, compared and added, and not shown.
+
+The digits are walked on whichever side of zero the number is already on,
+so nothing is ever negated.
+
 ### Ptr
 
 ```khora
@@ -1921,6 +2492,838 @@ pub fn is_null(self) -> Bool
 
 Whether this is null — which is how a great many C functions say they
 failed.
+
+### String
+
+```khora
+impl String
+```
+
+A string's bytes.
+
+**Length and index are both in bytes**, and say so in their names. A
+`String` is UTF-8, so a character is one to four of these, and a `length`
+that quietly meant one of the two would be wrong for half its callers and
+silent about which half. Anything that wants characters wants a decoder,
+which is a library on top of this rather than a different meaning for the
+same word.
+
+#### byte_length
+
+```khora
+pub fn byte_length(self) -> Int
+```
+
+How many bytes the string occupies. Not how many characters it has.
+
+#### byte
+
+```khora
+pub fn byte(self, index: Int) -> U8
+```
+
+The byte at `index`, counting from zero. Out of range stops the program,
+the same as an array.
+
+#### from_bytes
+
+```khora
+pub fn from_bytes(bytes: Array<U8>) -> String
+```
+
+The same bytes, as a `String`.
+
+**Stops the program if they are not UTF-8.** The same bargain `get` makes
+about an index: the check exists — `Array::is_utf8` — and calling this
+without it is the mistake. An `Option` was the alternative and would put
+the decision in the wrong place, because what to *do* about bytes that
+are not text depends entirely on where they came from.
+
+#### bytes
+
+```khora
+pub fn bytes(self) -> Array<U8>
+```
+
+A copy of the bytes.
+
+A copy rather than a view, because a string is immutable and an array is
+not — a view would let one be edited through the other.
+
+#### with_c_string
+
+```khora
+pub fn with_c_string<B, 'ef, 'er>(self, body: (Ptr) -> B with 'ef raises 'er) -> B with 'ef raises 'er
+```
+
+Lends the bytes to `body` as a pointer and a length, for the duration of
+the call and no longer.
+
+Lends the bytes to `body` as a `const char *`: the same bytes with a
+zero after them, which is how every function in the C library finds the
+end of a string.
+
+A copy, necessarily — a Khora string knows its length instead of carrying
+a terminator, and there is nowhere to append one to a borrowed view. The
+copy lives exactly as long as the call.
+
+A string with a zero inside it is not refused: C will see a shorter
+string than Khora has, which is what C strings are.
+
+#### with_data
+
+```khora
+pub fn with_data<B, 'ef, 'er>(self, body: (Ptr, Int) -> B with 'ef raises 'er) -> B with 'ef raises 'er
+```
+
+See `Array::with_data`, which is the same thing and carries the argument
+for why the lifetime is a call rather than anything wider.
+
+### U8
+
+```khora
+impl U8
+```
+
+An unsigned byte: 0 to 255.
+
+The one every other type here is in service of — a wire format, a file and
+a string are all made of these.
+
+#### of
+
+```khora
+pub fn of(value: Int) -> U8
+```
+
+The same number as a `U8`, or a stopped program if it does not fit.
+
+Explicit, like every conversion in Khora: there is no implicit narrowing
+anywhere, because a number that silently becomes a different number is
+found in production rather than in a test.
+
+#### wrapping
+
+```khora
+pub fn wrapping(value: Int) -> U8
+```
+
+The low bits of `value`, whatever they are. The way to ask for
+truncation by name, for the wire formats that mean it.
+
+#### to_int
+
+```khora
+pub fn to_int(self) -> Int
+```
+
+Every `U8` is an `Int`, so this cannot fail and costs one
+instruction.
+
+#### wrapping_add
+
+```khora
+pub fn wrapping_add(self, other: U8) -> U8
+```
+
+The sum, wrapping at the type's own range instead of trapping.
+
+#### wrapping_sub
+
+```khora
+pub fn wrapping_sub(self, other: U8) -> U8
+```
+
+The difference, wrapping.
+
+#### wrapping_mul
+
+```khora
+pub fn wrapping_mul(self, other: U8) -> U8
+```
+
+The product, wrapping.
+
+#### xor
+
+```khora
+pub fn xor(self, other: U8) -> U8
+```
+
+Bit by bit: one wherever the two differ.
+
+#### and
+
+```khora
+pub fn and(self, other: U8) -> U8
+```
+
+Bit by bit: one wherever both are one.
+
+#### or
+
+```khora
+pub fn or(self, other: U8) -> U8
+```
+
+Bit by bit: one wherever either is one.
+
+#### shl
+
+```khora
+pub fn shl(self, other: U8) -> U8
+```
+
+Towards the high bits, with zeros coming in at the bottom and
+whatever leaves the top gone.
+
+#### shr
+
+```khora
+pub fn shr(self, other: U8) -> U8
+```
+
+Logical, because the type is unsigned: the vacated bits are zeros
+and a large value stays large.
+
+### U16
+
+```khora
+impl U16
+```
+
+An unsigned 16-bit integer: 0 to 65,535.
+
+#### of
+
+```khora
+pub fn of(value: Int) -> U16
+```
+
+The same number as a `U16`, or a stopped program if it does not fit.
+
+Explicit, like every conversion in Khora: there is no implicit narrowing
+anywhere, because a number that silently becomes a different number is
+found in production rather than in a test.
+
+#### wrapping
+
+```khora
+pub fn wrapping(value: Int) -> U16
+```
+
+The low bits of `value`, whatever they are. The way to ask for
+truncation by name, for the wire formats that mean it.
+
+#### to_int
+
+```khora
+pub fn to_int(self) -> Int
+```
+
+Every `U16` is an `Int`, so this cannot fail and costs one
+instruction.
+
+#### wrapping_add
+
+```khora
+pub fn wrapping_add(self, other: U16) -> U16
+```
+
+The sum, wrapping at the type's own range instead of trapping.
+
+#### wrapping_sub
+
+```khora
+pub fn wrapping_sub(self, other: U16) -> U16
+```
+
+The difference, wrapping.
+
+#### wrapping_mul
+
+```khora
+pub fn wrapping_mul(self, other: U16) -> U16
+```
+
+The product, wrapping.
+
+#### xor
+
+```khora
+pub fn xor(self, other: U16) -> U16
+```
+
+Bit by bit: one wherever the two differ.
+
+#### and
+
+```khora
+pub fn and(self, other: U16) -> U16
+```
+
+Bit by bit: one wherever both are one.
+
+#### or
+
+```khora
+pub fn or(self, other: U16) -> U16
+```
+
+Bit by bit: one wherever either is one.
+
+#### shl
+
+```khora
+pub fn shl(self, other: U16) -> U16
+```
+
+Towards the high bits, with zeros coming in at the bottom and
+whatever leaves the top gone.
+
+#### shr
+
+```khora
+pub fn shr(self, other: U16) -> U16
+```
+
+Logical, because the type is unsigned: the vacated bits are zeros
+and a large value stays large.
+
+### U32
+
+```khora
+impl U32
+```
+
+An unsigned 32-bit integer: 0 to 4,294,967,295.
+
+#### of
+
+```khora
+pub fn of(value: Int) -> U32
+```
+
+The same number as a `U32`, or a stopped program if it does not fit.
+
+Explicit, like every conversion in Khora: there is no implicit narrowing
+anywhere, because a number that silently becomes a different number is
+found in production rather than in a test.
+
+#### wrapping
+
+```khora
+pub fn wrapping(value: Int) -> U32
+```
+
+The low bits of `value`, whatever they are. The way to ask for
+truncation by name, for the wire formats that mean it.
+
+#### to_int
+
+```khora
+pub fn to_int(self) -> Int
+```
+
+Every `U32` is an `Int`, so this cannot fail and costs one
+instruction.
+
+#### wrapping_add
+
+```khora
+pub fn wrapping_add(self, other: U32) -> U32
+```
+
+The sum, wrapping at the type's own range instead of trapping.
+
+#### wrapping_sub
+
+```khora
+pub fn wrapping_sub(self, other: U32) -> U32
+```
+
+The difference, wrapping.
+
+#### wrapping_mul
+
+```khora
+pub fn wrapping_mul(self, other: U32) -> U32
+```
+
+The product, wrapping.
+
+#### xor
+
+```khora
+pub fn xor(self, other: U32) -> U32
+```
+
+Bit by bit: one wherever the two differ.
+
+#### and
+
+```khora
+pub fn and(self, other: U32) -> U32
+```
+
+Bit by bit: one wherever both are one.
+
+#### or
+
+```khora
+pub fn or(self, other: U32) -> U32
+```
+
+Bit by bit: one wherever either is one.
+
+#### shl
+
+```khora
+pub fn shl(self, other: U32) -> U32
+```
+
+Towards the high bits, with zeros coming in at the bottom and
+whatever leaves the top gone.
+
+#### shr
+
+```khora
+pub fn shr(self, other: U32) -> U32
+```
+
+Logical, because the type is unsigned: the vacated bits are zeros
+and a large value stays large.
+
+### U64
+
+```khora
+impl U64
+```
+
+An unsigned 64-bit integer: 0 to 18,446,744,073,709,551,615.
+
+The only type here that holds numbers `Int` cannot, which is why it is the
+only one whose `to_int` can stop the program.
+
+#### of
+
+```khora
+pub fn of(value: Int) -> U64
+```
+
+The same number as a `U64`, or a stopped program if it does not fit.
+
+Explicit, like every conversion in Khora: there is no implicit narrowing
+anywhere, because a number that silently becomes a different number is
+found in production rather than in a test.
+
+#### wrapping
+
+```khora
+pub fn wrapping(value: Int) -> U64
+```
+
+The low bits of `value`, whatever they are. The way to ask for
+truncation by name, for the wire formats that mean it.
+
+#### to_int
+
+```khora
+pub fn to_int(self) -> Int
+```
+
+`Int` cannot hold every `U64`, so this stops the program above
+`Int`'s maximum. `U64::wrapping_to_int` is how to reinterpret the bits
+instead.
+
+#### wrapping_to_int
+
+```khora
+pub fn wrapping_to_int(self) -> Int
+```
+
+The same bits read as a signed `Int`, so a `U64` above `Int`'s maximum
+comes back negative rather than stopping.
+
+#### wrapping_add
+
+```khora
+pub fn wrapping_add(self, other: U64) -> U64
+```
+
+The sum, wrapping at the type's own range instead of trapping.
+
+#### wrapping_sub
+
+```khora
+pub fn wrapping_sub(self, other: U64) -> U64
+```
+
+The difference, wrapping.
+
+#### wrapping_mul
+
+```khora
+pub fn wrapping_mul(self, other: U64) -> U64
+```
+
+The product, wrapping.
+
+#### xor
+
+```khora
+pub fn xor(self, other: U64) -> U64
+```
+
+Bit by bit: one wherever the two differ.
+
+#### and
+
+```khora
+pub fn and(self, other: U64) -> U64
+```
+
+Bit by bit: one wherever both are one.
+
+#### or
+
+```khora
+pub fn or(self, other: U64) -> U64
+```
+
+Bit by bit: one wherever either is one.
+
+#### shl
+
+```khora
+pub fn shl(self, other: U64) -> U64
+```
+
+Towards the high bits, with zeros coming in at the bottom and
+whatever leaves the top gone.
+
+#### shr
+
+```khora
+pub fn shr(self, other: U64) -> U64
+```
+
+Logical, because the type is unsigned: the vacated bits are zeros
+and a large value stays large.
+
+### I8
+
+```khora
+impl I8
+```
+
+A signed 8-bit integer: -128 to 127.
+
+#### of
+
+```khora
+pub fn of(value: Int) -> I8
+```
+
+The same number as a `I8`, or a stopped program if it does not fit.
+
+Explicit, like every conversion in Khora: there is no implicit narrowing
+anywhere, because a number that silently becomes a different number is
+found in production rather than in a test.
+
+#### wrapping
+
+```khora
+pub fn wrapping(value: Int) -> I8
+```
+
+The low bits of `value`, whatever they are. The way to ask for
+truncation by name, for the wire formats that mean it.
+
+#### to_int
+
+```khora
+pub fn to_int(self) -> Int
+```
+
+Every `I8` is an `Int`, so this cannot fail and costs one
+instruction.
+
+#### wrapping_add
+
+```khora
+pub fn wrapping_add(self, other: I8) -> I8
+```
+
+The sum, wrapping at the type's own range instead of trapping.
+
+#### wrapping_sub
+
+```khora
+pub fn wrapping_sub(self, other: I8) -> I8
+```
+
+The difference, wrapping.
+
+#### wrapping_mul
+
+```khora
+pub fn wrapping_mul(self, other: I8) -> I8
+```
+
+The product, wrapping.
+
+#### xor
+
+```khora
+pub fn xor(self, other: I8) -> I8
+```
+
+Bit by bit: one wherever the two differ.
+
+#### and
+
+```khora
+pub fn and(self, other: I8) -> I8
+```
+
+Bit by bit: one wherever both are one.
+
+#### or
+
+```khora
+pub fn or(self, other: I8) -> I8
+```
+
+Bit by bit: one wherever either is one.
+
+#### shl
+
+```khora
+pub fn shl(self, other: I8) -> I8
+```
+
+Towards the high bits, with zeros coming in at the bottom and
+whatever leaves the top gone.
+
+#### shr
+
+```khora
+pub fn shr(self, other: I8) -> I8
+```
+
+Arithmetic, because the type is signed: a negative number stays
+negative.
+
+### I16
+
+```khora
+impl I16
+```
+
+A signed 16-bit integer: -32,768 to 32,767.
+
+#### of
+
+```khora
+pub fn of(value: Int) -> I16
+```
+
+The same number as a `I16`, or a stopped program if it does not fit.
+
+Explicit, like every conversion in Khora: there is no implicit narrowing
+anywhere, because a number that silently becomes a different number is
+found in production rather than in a test.
+
+#### wrapping
+
+```khora
+pub fn wrapping(value: Int) -> I16
+```
+
+The low bits of `value`, whatever they are. The way to ask for
+truncation by name, for the wire formats that mean it.
+
+#### to_int
+
+```khora
+pub fn to_int(self) -> Int
+```
+
+Every `I16` is an `Int`, so this cannot fail and costs one
+instruction.
+
+#### wrapping_add
+
+```khora
+pub fn wrapping_add(self, other: I16) -> I16
+```
+
+The sum, wrapping at the type's own range instead of trapping.
+
+#### wrapping_sub
+
+```khora
+pub fn wrapping_sub(self, other: I16) -> I16
+```
+
+The difference, wrapping.
+
+#### wrapping_mul
+
+```khora
+pub fn wrapping_mul(self, other: I16) -> I16
+```
+
+The product, wrapping.
+
+#### xor
+
+```khora
+pub fn xor(self, other: I16) -> I16
+```
+
+Bit by bit: one wherever the two differ.
+
+#### and
+
+```khora
+pub fn and(self, other: I16) -> I16
+```
+
+Bit by bit: one wherever both are one.
+
+#### or
+
+```khora
+pub fn or(self, other: I16) -> I16
+```
+
+Bit by bit: one wherever either is one.
+
+#### shl
+
+```khora
+pub fn shl(self, other: I16) -> I16
+```
+
+Towards the high bits, with zeros coming in at the bottom and
+whatever leaves the top gone.
+
+#### shr
+
+```khora
+pub fn shr(self, other: I16) -> I16
+```
+
+Arithmetic, because the type is signed: a negative number stays
+negative.
+
+### I32
+
+```khora
+impl I32
+```
+
+A signed 32-bit integer: -2,147,483,648 to 2,147,483,647.
+
+A C `int`, which is why it is the one a foreign function usually wants.
+
+#### of
+
+```khora
+pub fn of(value: Int) -> I32
+```
+
+The same number as a `I32`, or a stopped program if it does not fit.
+
+Explicit, like every conversion in Khora: there is no implicit narrowing
+anywhere, because a number that silently becomes a different number is
+found in production rather than in a test.
+
+#### wrapping
+
+```khora
+pub fn wrapping(value: Int) -> I32
+```
+
+The low bits of `value`, whatever they are. The way to ask for
+truncation by name, for the wire formats that mean it.
+
+#### to_int
+
+```khora
+pub fn to_int(self) -> Int
+```
+
+Every `I32` is an `Int`, so this cannot fail and costs one
+instruction.
+
+#### wrapping_add
+
+```khora
+pub fn wrapping_add(self, other: I32) -> I32
+```
+
+The sum, wrapping at the type's own range instead of trapping.
+
+#### wrapping_sub
+
+```khora
+pub fn wrapping_sub(self, other: I32) -> I32
+```
+
+The difference, wrapping.
+
+#### wrapping_mul
+
+```khora
+pub fn wrapping_mul(self, other: I32) -> I32
+```
+
+The product, wrapping.
+
+#### xor
+
+```khora
+pub fn xor(self, other: I32) -> I32
+```
+
+Bit by bit: one wherever the two differ.
+
+#### and
+
+```khora
+pub fn and(self, other: I32) -> I32
+```
+
+Bit by bit: one wherever both are one.
+
+#### or
+
+```khora
+pub fn or(self, other: I32) -> I32
+```
+
+Bit by bit: one wherever either is one.
+
+#### shl
+
+```khora
+pub fn shl(self, other: I32) -> I32
+```
+
+Towards the high bits, with zeros coming in at the bottom and
+whatever leaves the top gone.
+
+#### shr
+
+```khora
+pub fn shr(self, other: I32) -> I32
+```
+
+Arithmetic, because the type is signed: a negative number stays
+negative.
 
 ### Dict<K, V>
 
@@ -2682,6 +4085,178 @@ pub fn wait(self) ->()
 Waits for every child, oldest first, and empties the nursery.
 
 ## Trait implementations
+
+### Show for Int
+
+```khora
+impl Show for Int
+```
+
+The scalars, so that `derive(Show)` on a record of them has something to
+call.
+
+One line each, and each deferring to a `to_string` that already existed.
+The two have to agree — `Show` is what a *generic* function asks for and
+`to_string` is what a caller reaches for directly — and they agree here by
+one being written in terms of the other rather than by anyone remembering.
+
+A `String` shows as itself, unquoted. A derived `Show` is for reading, not
+for parsing back: `User { name: alice }` is what a person wants in a log
+line, and a caller who needs the quotes is writing a serializer, which is
+`std::json`'s job and not this trait's.
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Show for Float
+
+```khora
+impl Show for Float
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Show for Bool
+
+```khora
+impl Show for Bool
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Show for String
+
+```khora
+impl Show for String
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Eq for Int
+
+```khora
+impl Eq for Int
+```
+
+#### eq
+
+```khora
+fn eq(self, other: Int) -> Bool
+```
+
+### Ord for Int
+
+```khora
+impl Ord for Int
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: Int) -> Ordering
+```
+
+### Hash for Int
+
+```khora
+impl Hash for Int
+```
+
+An `Int` is its own hash. `Map::slot` does the mixing, so there is nothing
+for this to add.
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Eq for Bool
+
+```khora
+impl Eq for Bool
+```
+
+#### eq
+
+```khora
+fn eq(self, other: Bool) -> Bool
+```
+
+### Eq for String
+
+```khora
+impl Eq for String
+```
+
+#### eq
+
+```khora
+fn eq(self, other: String) -> Bool
+```
+
+### Hash for Bool
+
+```khora
+impl Hash for Bool
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Hash for String
+
+```khora
+impl Hash for String
+```
+
+FNV-1a over the bytes, which is one multiply and one xor each and is what a
+string hash is supposed to look like. Wrapping on purpose: the overflow is
+where the mixing comes from.
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Ord for String
+
+```khora
+impl Ord for String
+```
+
+Byte order, which is what `<` on a `String` means here.
+
+Not a locale's order and not code-point order — the first needs a table
+nobody has bound and the second differs from this one only above the basic
+plane. What it *is* is stable, cheap, and the same on every machine, which
+is what sorting for a program's own use wants. A human-facing sort wants a
+collation library and should say so.
+
+#### cmp
+
+```khora
+fn cmp(self, other: String) -> Ordering
+```
 
 ### Eq for Ordering
 

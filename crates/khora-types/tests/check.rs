@@ -143,6 +143,74 @@ fn a_wildcard_arm_completes_a_match() {
     ));
 }
 
+/// The pieces `attempt` needs, declared here rather than imported.
+///
+/// Every test in this file is self-contained, and this one has to be: the
+/// point is that the error type reaches the `match` through a *signature*
+/// rather than an annotation, so the signature has to be in the source.
+const ATTEMPT: &str = "module m;\n\
+                       pub type Result<A, E> = | Ok(value: A) | Err(error: E);\n\
+                       pub fn attempt<A, E, 'ef>(body: () -> A with 'ef raises E)\n  \
+                         -> Result<A, E> with 'ef;\n";
+
+/// **The idiom `testing.md` teaches, which did not compile.**
+///
+/// Exhaustiveness is a question about the scrutinee's *settled* type: to know
+/// that `Err(NotFound(id))` covers every `Err`, the checker has to know the
+/// error type is `Oops` and that `NotFound` is its only case. Asked
+/// mid-inference the answer was `Result<Int, ?12>` — an unsolved variable has
+/// no constructors, so the arm covered part of `Err`'s space and the rest was
+/// reported missing: `pattern Err(_) not covered`, for a type with one
+/// variant.
+///
+/// The error type arrives through `attempt`'s signature and a lambda's
+/// `raises`, which is a deferred constraint — so it was a variable at the
+/// `match` and concrete a few lines later. Annotating the `let` made it
+/// compile, which is what told everybody it was a bug rather than a rule, and
+/// the annotation is what this test deliberately leaves off.
+#[test]
+fn a_nested_error_pattern_is_exhaustive_once_the_row_is_solved() {
+    assert_clean(&format!(
+        "{ATTEMPT}\
+         pub type Oops = | NotFound(id: Int);\n\
+         fn load(id: Int) -> Int raises Oops {{\n  \
+           if id == 999 {{ raise Oops::NotFound(id) }} else {{ id }}\n\
+         }}\n\
+         fn f() -> Int {{\n  \
+           match attempt(fn () => load(999)!) {{\n    \
+             Result::Ok(v) => v,\n    \
+             Result::Err(Oops::NotFound(id)) => id,\n  \
+           }}\n\
+         }}\n"
+    ));
+}
+
+/// **And deferring the check did not turn it into a formality.**
+///
+/// The same shape with a second case in the error type and one of them
+/// unmatched. Before the fix this said `Err(_)`, which is the wrong pattern;
+/// now it names the one actually missing, which is the answer that sends a
+/// reader to the right line.
+#[test]
+fn a_nested_error_pattern_that_misses_a_case_names_it() {
+    assert_reports(
+        &format!(
+            "{ATTEMPT}\
+             pub type Oops = | NotFound(id: Int) | Denied(id: Int);\n\
+             fn load(id: Int) -> Int raises Oops {{\n  \
+               if id == 999 {{ raise Oops::NotFound(id) }} else {{ id }}\n\
+             }}\n\
+             fn f() -> Int {{\n  \
+               match attempt(fn () => load(999)!) {{\n    \
+                 Result::Ok(v) => v,\n    \
+                 Result::Err(Oops::NotFound(id)) => id,\n  \
+               }}\n\
+             }}\n"
+        ),
+        "Err(Denied(_))",
+    );
+}
+
 #[test]
 fn an_unreachable_arm_is_reported() {
     assert_reports(

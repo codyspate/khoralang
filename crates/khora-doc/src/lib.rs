@@ -291,15 +291,36 @@ fn item_of(decl: &ast::Decl) -> Option<Item> {
 fn impl_item(i: &ast::ImplDecl) -> Option<Item> {
     let self_type = i.self_type()?;
     let self_name = signature::type_text(&self_type);
-    // Only impls written for a type this file declares and exports. An impl of
-    // somebody else's trait for somebody else's type is not this module's API.
-    if !exported_here(i.syntax(), base_name(&self_name)) {
-        return None;
-    }
+    let base = base_name(&self_name);
 
+    // An impl belongs to this module when this module declares one of the two
+    // things it names. An impl of somebody else's trait for somebody else's
+    // type is not this module's API — and coherence refuses it anyway, so the
+    // only file where that combination appears is one that owns a side.
+    //
+    // **A primitive is the exception, because it belongs to nobody.** A
+    // builtin has no `pub type` to be exported by, so requiring the *type* to
+    // be declared dropped every `impl String`, `impl Int` and `impl Float` in
+    // `std::core` — and `String`, the type with the most methods anybody will
+    // look up, had no reference page at all. Its trait impls came back on
+    // their own once the trait counted, since `Show` and `Ord` are declared in
+    // the same file; the inherent ones needed [`is_primitive`].
     let (name, kind) = match i.trait_() {
-        Some(t) => (format!("{} for {}", signature::type_text(&t), self_name), Kind::TraitImpl),
-        None => (self_name, Kind::Methods),
+        Some(t) => {
+            let trait_name = signature::type_text(&t);
+            if !exported_here(i.syntax(), base)
+                && !exported_here(i.syntax(), base_name(&trait_name))
+            {
+                return None;
+            }
+            (format!("{trait_name} for {self_name}"), Kind::TraitImpl)
+        }
+        None => {
+            if !exported_here(i.syntax(), base) && !is_primitive(base) {
+                return None;
+            }
+            (self_name, Kind::Methods)
+        }
     };
 
     // An inherent method is API only if it says so. A trait impl's methods are
@@ -332,6 +353,36 @@ fn exported_here(node: &SyntaxNode, name: &str) -> bool {
         ast::Decl::Trait(t) => t.is_exported() && named(t.name()).as_deref() == Some(name),
         _ => false,
     })
+}
+
+/// Whether `name` is a builtin the compiler knows without a declaration.
+///
+/// These have no `pub type` anywhere, so [`exported_here`] cannot see them and
+/// the module that gives them their methods has to be allowed to document
+/// them. `std::core` is that module for all of these and there is no other
+/// candidate: an `impl String` in somebody's package is refused by coherence.
+///
+/// The fixed-width names mirror `khora_types::IntKind::parse`, where `I64` is
+/// deliberately absent because it is a second spelling of `Int`. Written out
+/// rather than depending on `khora-types` for one list — this crate reads the
+/// syntax tree and nothing else, which is what keeps it fast enough to run on
+/// every save.
+fn is_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "Int"
+            | "Float"
+            | "Bool"
+            | "String"
+            | "I8"
+            | "I16"
+            | "I32"
+            | "I64"
+            | "U8"
+            | "U16"
+            | "U32"
+            | "U64"
+    )
 }
 
 /// `List` out of `List<A>`, which is what the declaration is called.

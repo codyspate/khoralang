@@ -181,6 +181,7 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             lambdas: Vec::new(),
             demanded: Vec::new(),
             projections: Vec::new(),
+            coverage: Vec::new(),
             enclosing_lambdas: Vec::new(),
             lambda_captures: HashMap::new(),
             call_rows: HashMap::new(),
@@ -195,6 +196,9 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
         checker.close_open_raises();
         checker.check_bounds();
         checker.settle_projections();
+        // After the projections, so that a scrutinee whose type came through
+        // one is settled too.
+        checker.settle_coverage();
         checker.check_effects();
         if parsed {
             checker.check_unknowns();

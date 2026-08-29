@@ -95,5 +95,29 @@ Two rules, and both are the reading that costs a newcomer least:
 pub fn normalized(path: String) -> String
 ```
 
-`\\` becomes `/`, so one spelling is compared against one spelling.
+One spelling of a path, so a grant and a request can be compared.
+
+Two things are levelled, and both were reported as traps by somebody who
+hit them:
+
+- **`\\` becomes `/`**, so a grant written with forward slashes covers a
+  path Windows spelled with back ones.
+- **A `.` segment is dropped**, so `./data/**` grants `data/foo.txt` and
+  `data/**` grants `./data/foo.txt`. Before this, the `./` was significant
+  on both sides: two readers of `capabilities.md` wrote the example's
+  `read = ["./data/**"]` into a manifest, opened `data/foo.txt`, and were
+  refused by a grant that looks like it says yes.
+
+**`..` is deliberately not resolved.** Dropping `a/../b` to `b` is only
+correct if `a` exists and is a directory rather than a link, which is a
+question about the filesystem — and a normalizer that guessed would widen
+a grant, which is the one direction a permission check must never be wrong
+in. A path containing `..` is compared as written and will usually be
+refused, which is the safe answer.
+
+**Nor is anything resolved against a working directory or a package root.**
+A grant is matched against the path the program passes, so a program that
+builds its paths from its own arguments needs a grant wide enough to cover
+what its users will type. `docs/design/permissions.md` records why that is
+the boundary and what it costs a CLI.
 
