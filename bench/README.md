@@ -11,6 +11,7 @@ one thing at a time.
 | `render/` | The floor plus `Response::rendered_keeping`. No parsing. |
 | `service/` | A `Router` with one route — the whole of `std::net::http`. |
 | `allocator/` | Not a server: what allocation costs in the states a heap gets into. |
+| `iteration/` | Not a server: what `for` costs against the same loop written out. |
 
 `floor` against `control_keepalive` is what the **runtime** costs. `service`
 against `floor` is what the **library** costs. `render` sits between them and
@@ -254,3 +255,24 @@ allocator next should be able to re-run the shapes already looked at instead of
 inventing them again — and if the pathology is real, the shape that shows it is
 one of the ones **missing** from this list, which is a more useful thing to
 know than a bare "could not reproduce".
+
+## Iteration
+
+```bash
+cargo run -p khora-cli --features llvm -- run --release bench/iteration
+```
+
+Three million elements, summed three ways:
+
+```
+for 178 ms   while 46 ms   fold 47 ms
+```
+
+`for` desugars to a `loop` over `Step`, and `Step` is an ordinary ADT, so every
+element allocates. `fold` builds a closure too and matches the hand-written
+loop, which is the row that says where the cost is: one closure per *call* is
+free, one `Step` per *element* is not.
+
+Kept as the number that unboxing has to move. `docs/roadmap.md`, under "Unboxed
+records", carries why that is the fix rather than desugaring `for` to internal
+iteration.

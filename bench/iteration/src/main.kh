@@ -1,0 +1,96 @@
+module main;
+
+import std::core::{Iterator, List, Step, print};
+import std::clock::{Clock};
+
+// What `for` costs against the two ways of writing the same loop by hand.
+//
+// **The idiomatic spelling is the slowest one, by 3.6x.** `for x in xs { .. }`
+// desugars to a `loop` over `Step`, and `Step` is an ordinary Khora ADT — so
+// every element of every `for` loop in the language allocates a heap object,
+// counts a reference up and counts it back down.
+//
+// The third shape is the one that says where the cost is. `List::fold` builds
+// a closure too, and it is exactly as fast as the hand-written `while`: one
+// closure per *call* is free, and it is the `Step` per *element* that is not.
+// That rules out the fix that looks obvious — desugaring `for` to internal
+// iteration over a closure — twice over. It would not help, because the
+// closure was never the cost; and it cannot be written anyway, because a
+// closure captures by value and cannot assign to what it captured, so
+// `for_each(fn x => { total = total + x })` is refused and every loop body
+// that keeps a running total is refused with it.
+//
+// So this is a benchmark waiting on unboxing. `docs/roadmap.md`, under
+// "Unboxed records", carries the argument; a two-field variant returned in
+// registers rather than allocated is what closes the gap, and it closes it for
+// everything shaped this way rather than for `for` alone.
+
+fn build(n: Int) -> List<Int> {
+  let mut xs: List<Int> = List::Nil;
+  let mut i = 0;
+  while i < n {
+    xs = List::Cons(i, xs);
+    i = i + 1;
+  };
+  xs
+}
+
+/// What somebody writes.
+fn with_for(xs: List<Int>) -> Int {
+  let mut total = 0;
+  for x in xs {
+    total = total + x;
+  };
+  total
+}
+
+/// The same loop, written out. No `Step`, so no allocation per element.
+fn with_while(xs: List<Int>) -> Int {
+  let mut total = 0;
+  let mut rest = xs;
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => { going = false; },
+      List::Cons(head, tail) => {
+        total = total + head;
+        rest = tail;
+      },
+    }
+  };
+  total
+}
+
+/// Through the combinator: one closure for the whole call, and no `Step`.
+fn with_fold(xs: List<Int>) -> Int {
+  List::fold(xs, 0, fn (acc, x) => acc + x)
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    // Three million, so a millisecond clock has something to measure and the
+    // list is far past anything a cache holds.
+    let xs = build(3000000);
+    let mut round = 0;
+    while round < 3 {
+      let a0 = clock.monotonic_millis();
+      let a = with_for(xs);
+      let at = clock.monotonic_millis() - a0;
+
+      let b0 = clock.monotonic_millis();
+      let b = with_while(xs);
+      let bt = clock.monotonic_millis() - b0;
+
+      let c0 = clock.monotonic_millis();
+      let c = with_fold(xs);
+      let ct = clock.monotonic_millis() - c0;
+
+      // The sums are printed so that nothing here can be optimised away, and
+      // so that a change which made one of them faster by making it wrong
+      // would be visible.
+      print("for ${at} ms   while ${bt} ms   fold ${ct} ms   (${a} ${b} ${c})");
+      round = round + 1;
+    };
+    0
+  }
+}

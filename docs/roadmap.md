@@ -5229,6 +5229,43 @@ What it needs, in the order the questions arrive:
    cross. An unboxed record is an aggregate, so either the rule is revisited
    deliberately or unboxed records are boxed again at the boundary.
 
+### And `for` is waiting on it, which was not obvious until it was measured
+
+The strongest argument for unboxing turned out not to be `Decimal` at all. It is
+`for`, which is the most idiomatic construct in the language and 3.6× slower
+than writing the same loop out. Measured over three million elements, release
+build, `bench/iteration`:
+
+| | |
+| --- | --- |
+| `for x in xs { total = total + x }` | 178 ms |
+| the same as a `while` over `Cons`/`Nil` | 46 ms |
+| `List::fold(xs, 0, fn (acc, x) => acc + x)` | 47 ms |
+
+`for` desugars to a `loop` over `Step`, and `Step` is an ordinary ADT — so every
+element of every `for` loop allocates a heap object, counts a reference up and
+counts it back down.
+
+**The third row is the one that settles what to do about it.** `fold` builds a
+closure too and matches the hand-written loop exactly, so one closure per *call*
+is free and it is the `Step` per *element* that is not. That rules out the fix
+that looks obvious — desugaring `for` to internal iteration over a closure —
+twice over:
+
+- it would not help, because the closure was never the cost; and
+- it cannot be written anyway. A closure captures by value and the checker
+  refuses assignment to a capture, so `for_each(fn x => { total = total + x })`
+  is rejected, and with it every loop body that keeps a running total. A
+  desugaring that applied only to bodies which happen not to assign would make
+  the cost of a loop depend on something invisible, which is worse than the
+  3.6×.
+
+The remaining routes are a type-directed `for` expansion after inference — which
+takes `for` out of the front end and puts it in the middle of the pipeline — or
+capture-by-reference for non-escaping closures, or unboxing `Step`. Unboxing is
+the one that fixes everything shaped this way rather than `for` alone, and a
+two-field variant returned in registers is exactly the case above.
+
 Not scheduled. Written down because the throughput goal is new information and
 it changes which of the numeric questions is worth answering first — the answer
 is neither `d64` nor `d128` but the box around both.
