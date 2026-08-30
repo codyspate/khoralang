@@ -210,6 +210,29 @@ impl<'a> Planner<'a> {
             }
             Expr::Field { base, .. } => self.live_before(base, after),
             Expr::Unary { operand, .. } => self.live_before(operand, after),
+            // **A `${..}` hole reads its value, and this pass has to see it.**
+            //
+            // It lowers to a one-argument call to `Show::show`, so it is the
+            // same shape as any other single child. Falling into the catch-all
+            // below made the read *invisible to liveness*: a binding whose only
+            // later use was inside a hole looked dead at the use before it, so
+            // that earlier use took the reference, and the hole then read freed
+            // memory.
+            //
+            // Eleven lines were enough — a two-field record, `let first = p.x;`
+            // and then `print("second ${p.y}")` — for a program that type-checks
+            // to exit with `STATUS_HEAP_CORRUPTION`. It also showed up as a
+            // segfault, as a misaligned pointer inside the allocator, and worst
+            // of all as `List::length` of a two-element list answering `1` with
+            // exit 0. Three of four people writing their first Khora program hit
+            // it, and two adopted "never call a function inside a hole" as a
+            // house rule for the rest of the day.
+            //
+            // The shape of the bug is why it survived: with *no* earlier use
+            // both reads happen before the block's release and everything works,
+            // and with a *later* use the binding stays live and everything
+            // works. Only the exact middle case is wrong.
+            Expr::Shown(inner) => self.live_before(inner, after),
             Expr::Break(Some(v)) => self.live_before(v, after),
 
             // Unreachable while `unwinds` guards this pass, and conservative if

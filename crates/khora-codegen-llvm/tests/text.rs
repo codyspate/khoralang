@@ -1323,3 +1323,87 @@ fn traversing_keeps_both_of_its_orders() {
 
     assert_eq!(out, "[10, 20, 30]\nnone\n[]\n123\n");
 }
+
+
+/// **A hole reads its value, and the reference-counting plan has to see it.**
+///
+/// `${..}` lowers to a one-argument call to `Show::show`, but the last-use pass
+/// fell into its catch-all for `Expr::Shown` and never walked the child — so a
+/// read inside a hole was invisible to liveness. A binding whose only *later*
+/// use was in a hole looked dead at the use before it, that earlier use took
+/// the reference, and the hole then read freed memory.
+///
+/// Eleven lines were enough: a two-field record, `let first = p.x;`, then
+/// `print("second ${p.y}")`. It type-checked and exited with
+/// `STATUS_HEAP_CORRUPTION`. Elsewhere it was a segfault, a misaligned pointer
+/// inside the allocator, and — worst — `List::length` of a two-element list
+/// answering `1` with exit 0.
+///
+/// The shape is why it survived a whole tier of review: with *no* earlier use
+/// both reads happen before the block's release and it works; with a *later*
+/// use the binding stays live and it works. Only the exact middle case is
+/// wrong, and it is the one three of four people writing their first Khora
+/// program landed on.
+///
+/// The live count at the end is the other half: fixing a premature release by
+/// never releasing would pass every line above and fail that one.
+#[test]
+fn a_value_read_in_a_hole_is_still_live_at_the_use_before_it() {
+    let out = run(
+        "text_hole_liveness",
+        &format!(
+            "{HEAD}
+type Point = {{ x: Int, y: Int }};
+
+fn sum(p: Point) -> Int {{ p.x + p.y }}
+
+/// The values in a scope of their own, so the count below is about what was
+/// left behind rather than what is still in scope.
+fn shapes() -> () {{
+  // A field read, then a field read in a hole. The original eleven lines.
+  let p: Point = {{ x: 1, y: 2 }};
+  let first = p.x;
+  print(\"a ${{p.y}} ${{first}}\");
+
+  // A call, then a call in a hole.
+  let q: Point = {{ x: 3, y: 4 }};
+  let total = sum(q);
+  print(\"b ${{sum(q)}} ${{total}}\");
+
+  // A `List`, which is where it showed up as a wrong answer rather than a
+  // crash: `List::length` of a two-element list came back as 1.
+  let xs = [10, 20];
+  let n = List::length(xs);
+  print(\"c ${{List::length(xs)}} ${{n}}\");
+
+  // The three that always worked, kept so a fix cannot trade one for another:
+  // no earlier use, a use after the hole, and no hole at all.
+  let r: Point = {{ x: 5, y: 6 }};
+  print(\"d ${{sum(r)}} ${{sum(r)}}\");
+
+  let s: Point = {{ x: 7, y: 8 }};
+  let before = s.x;
+  print(\"e ${{s.y}}\");
+  print(\"f ${{sum(s)}} ${{before}}\");
+
+  let t: Point = {{ x: 9, y: 10 }};
+  let one = sum(t);
+  let two = sum(t);
+  print(\"g ${{one + two}}\")
+}}
+
+fn main() -> Int {{
+  shapes();
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "a 2 1\nb 7 7\nc 2 2\nd 11 11\ne 8\nf 15 7\ng 38\n0\n",
+        "every hole reads a live value, and nothing is left behind"
+    );
+}
