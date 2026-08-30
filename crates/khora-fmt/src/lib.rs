@@ -196,13 +196,40 @@ impl Formatter {
         if brackets {
             self.type_depth += 1;
         }
+        // **Whether the `=` or `=>` has gone past.** What follows one is the
+        // value of the construct, and if it is written on its own line it is a
+        // continuation of this one -- so it is indented, and so is everything
+        // inside it. See [`carries_a_value`].
+        let mut past_the_marker = false;
         for child in node.children_with_tokens() {
             match child {
                 SyntaxElement::Node(n) => {
                     let kind = n.kind();
+                    // For the *duration* of the value, not for its first line.
+                    // A value that opens a block has the block's contents and
+                    // its closing brace inside it, and all of them belong at
+                    // the deeper level -- which is what makes this a scope
+                    // rather than a predicate on one token.
+                    // Only when the value actually begins on its own line.
+                    // `=> match .. {` starts on the line above, so its arms
+                    // are relative to *that* line and a bump here would add a
+                    // level per nesting -- a staircase across every chained
+                    // `match`, which is what the first attempt produced.
+                    let indented = past_the_marker
+                        && carries_a_value(node.kind())
+                        && self.pending >= Sep::Newline;
+                    if indented {
+                        self.depth += 1;
+                    }
                     self.node(&n, kind);
+                    if indented {
+                        self.depth -= 1;
+                    }
                 }
                 SyntaxElement::Token(t) => {
+                    if matches!(t.kind(), EQ | FAT_ARROW) {
+                        past_the_marker = true;
+                    }
                     // A comment is indented like the line it introduces, so
                     // it has to know what that line will be. Nothing else
                     // does: every other token decides its own indent from
@@ -477,6 +504,35 @@ fn introduces_a_continuation(token: &SyntaxToken) -> bool {
         }
     }
     false
+}
+
+/// Whether this node is one whose value sits after an `=` or a `=>`.
+///
+/// **A continuation has to be indented for as long as it continues.** The
+/// answer used to come from [`is_continuation`], which asks the token *starting*
+/// the new line -- and that can only work for tokens which never do anything
+/// else, like `|>` and `.`. What follows an `=` is an ordinary expression and
+/// any token at all can begin one, so
+///
+/// ```text
+/// const LIMIT: Int =        Shade::Dark =>
+/// 1000;                     "dark",
+/// ```
+///
+/// came out at column 0 and at the arm's own column. The match-arm shape is
+/// what this project's own documentation is written in, so the formatter would
+/// have reformatted the examples.
+///
+/// Asking the *node* rather than the token is what makes it work for a value
+/// that spans lines. Raising the depth for one line indents the line that opens
+/// a block and leaves the block's contents and its closing brace behind it --
+/// across this corpus that was 45 of 155 lines, which is worse than the
+/// de-indent it fixes. Raising it for the child node covers the whole value,
+/// and a value that opens a block gets a second level from the brace as usual.
+///
+/// A value that fits on one line is unaffected: no line break, nothing indented.
+fn carries_a_value(kind: SyntaxKind) -> bool {
+    matches!(kind, LET_DECL | CONST_DECL | MATCH_ARM)
 }
 
 /// Whether a token starting a line continues the line above rather than

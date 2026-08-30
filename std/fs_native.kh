@@ -344,10 +344,10 @@ fn split_lines<A>(state: Lines<A>, step: (A, String) -> A) -> Lines<A> {
   match String::split_once(state.partial, "\n") {
     Option::None => state,
     Option::Some(split) =>
-    split_lines(
-      { done: step(state.done, without_return(split.head)), partial: split.rest },
-      step,
-    ),
+      split_lines(
+        { done: step(state.done, without_return(split.head)), partial: split.rest },
+        step,
+      ),
   }
 }
 
@@ -437,11 +437,11 @@ pub fn extension(path: String) -> Option<String> {
   match last_dot(name) {
     Option::None => Option::None,
     Option::Some(at) =>
-    if at == 0 {
-      Option::None
-    } else {
-      Option::Some(String::slice(name, at + 1, String::byte_length(name)))
-    },
+      if at == 0 {
+        Option::None
+      } else {
+        Option::Some(String::slice(name, at + 1, String::byte_length(name)))
+      },
   }
 }
 
@@ -642,7 +642,7 @@ fn remove_file(path: String) -> () raises IoError {
 /// to have got wrong and the one a message reads best about.
 fn rename_file(from: String, to: String) -> () raises IoError {
   let answer =
-  String::with_c_string(from, fn f => String::with_c_string(to, fn t => khora_fs_rename(f, t)));
+    String::with_c_string(from, fn f => String::with_c_string(to, fn t => khora_fs_rename(f, t)));
   if answer == I32::of(0) {} else { raise IoError::Failed(from) }
 }
 

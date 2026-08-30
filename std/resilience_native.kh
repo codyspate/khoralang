@@ -153,7 +153,7 @@ impl Schedule {
   {
     match self {
       Schedule::Times(n) =>
-      if attempt < n { Option::Some(elapsed) } else { Option::None },
+        if attempt < n { Option::Some(elapsed) } else { Option::None },
 
       Schedule::Spaced(millis) => Option::Some(attempt * millis),
 
@@ -164,56 +164,56 @@ impl Schedule {
       // delay as though it were an instant makes the second attempt land
       // before the first one finished, and the sequence collapses.
       Schedule::Exponential(base, factor_pct, cap) =>
-      Option::Some(elapsed + grown(base, factor_pct, cap, attempt)),
+        Option::Some(elapsed + grown(base, factor_pct, cap, attempt)),
 
       Schedule::Fibonacci(base) => Option::Some(elapsed + base * fib(attempt)),
 
       Schedule::Jittered(inner, low_pct, high_pct) =>
-      match Schedule::next_after(inner, attempt, elapsed) {
-        Option::None => Option::None,
-        // The *delay* is jittered, not the instant: scaling an instant would
-        // scale everything that already happened.
-        Option::Some(at) => {
-          let delay = if at > elapsed { at - elapsed } else { 0 };
-          let low = if low_pct < 0 { 0 } else { low_pct };
-          let high = if high_pct <= low { low + 1 } else { high_pct };
-          Option::Some(elapsed + delay * random.in_range(low, high) / 100)
-        }
-      },
+        match Schedule::next_after(inner, attempt, elapsed) {
+          Option::None => Option::None,
+          // The *delay* is jittered, not the instant: scaling an instant would
+          // scale everything that already happened.
+          Option::Some(at) => {
+            let delay = if at > elapsed { at - elapsed } else { 0 };
+            let low = if low_pct < 0 { 0 } else { low_pct };
+            let high = if high_pct <= low { low + 1 } else { high_pct };
+            Option::Some(elapsed + delay * random.in_range(low, high) / 100)
+          }
+        },
 
       Schedule::Union(left, right) =>
-      match Schedule::next_after(left, attempt, elapsed) {
-        Option::None => Schedule::next_after(right, attempt, elapsed),
-        Option::Some(a) => match Schedule::next_after(right, attempt, elapsed) {
-          Option::None => Option::Some(a),
-          Option::Some(b) => Option::Some(if a < b { a } else { b }),
+        match Schedule::next_after(left, attempt, elapsed) {
+          Option::None => Schedule::next_after(right, attempt, elapsed),
+          Option::Some(a) => match Schedule::next_after(right, attempt, elapsed) {
+            Option::None => Option::Some(a),
+            Option::Some(b) => Option::Some(if a < b { a } else { b }),
+          },
         },
-      },
 
       Schedule::Intersect(left, right) =>
-      match Schedule::next_after(left, attempt, elapsed) {
-        Option::None => Option::None,
-        Option::Some(a) => match Schedule::next_after(right, attempt, elapsed) {
+        match Schedule::next_after(left, attempt, elapsed) {
           Option::None => Option::None,
-          Option::Some(b) => Option::Some(if a > b { a } else { b }),
+          Option::Some(a) => match Schedule::next_after(right, attempt, elapsed) {
+            Option::None => Option::None,
+            Option::Some(b) => Option::Some(if a > b { a } else { b }),
+          },
         },
-      },
 
       Schedule::AndThen(first, then) =>
-      match Schedule::next_after(first, attempt, elapsed) {
-        Option::Some(at) => Option::Some(at),
-        Option::None => Schedule::next_after(then, attempt, elapsed),
-      },
+        match Schedule::next_after(first, attempt, elapsed) {
+          Option::Some(at) => Option::Some(at),
+          Option::None => Schedule::next_after(then, attempt, elapsed),
+        },
 
       Schedule::UpTo(inner, millis) =>
-      match Schedule::next_after(inner, attempt, elapsed) {
-        Option::None => Option::None,
-        // The budget is checked against the instant the next attempt would
-        // *start*, not against now: an attempt that would begin after the
-        // deadline is one nobody wanted, even if there is time on the clock
-        // at the moment of asking.
-        Option::Some(at) => if at < millis { Option::Some(at) } else { Option::None },
-      },
+        match Schedule::next_after(inner, attempt, elapsed) {
+          Option::None => Option::None,
+          // The budget is checked against the instant the next attempt would
+          // *start*, not against now: an attempt that would begin after the
+          // deadline is one nobody wanted, even if there is time on the clock
+          // at the moment of asking.
+          Option::Some(at) => if at < millis { Option::Some(at) } else { Option::None },
+        },
     }
   }
 }
@@ -347,21 +347,21 @@ pub fn retry_counting<A, E, 'ef>(
     match outcome {
       Result::Ok(_value) => going = false,
       Result::Err(error) =>
-      if again(error) {
-        match Schedule::next_after(schedule, made, clock.monotonic_millis() - began) {
-          Option::None => going = false,
-          Option::Some(at) => {
-            // Only the difference is waited for. The schedule answered an
-            // instant, and some of it has already gone by.
-            let now = clock.monotonic_millis() - began;
-            if at > now { clock.sleep(at - now) };
-            outcome = attempt(body);
-            made = made + 1;
+        if again(error) {
+          match Schedule::next_after(schedule, made, clock.monotonic_millis() - began) {
+            Option::None => going = false,
+            Option::Some(at) => {
+              // Only the difference is waited for. The schedule answered an
+              // instant, and some of it has already gone by.
+              let now = clock.monotonic_millis() - began;
+              if at > now { clock.sleep(at - now) };
+              outcome = attempt(body);
+              made = made + 1;
+            }
           }
-        }
-      } else {
-        going = false
-      },
+        } else {
+          going = false
+        },
     }
   };
   { outcome: outcome, attempts: made }

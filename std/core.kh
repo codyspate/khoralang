@@ -674,7 +674,7 @@ impl<A, E> Validated<A, E> {
         Validated::Invalid(errors) => Validated::Invalid(List::concat(errors, faults_of(c))),
       },
       Validated::Invalid(errors) =>
-      Validated::Invalid(List::concat(errors, List::concat(faults_of(b), faults_of(c)))),
+        Validated::Invalid(List::concat(errors, List::concat(faults_of(b), faults_of(c)))),
     }
   }
 
@@ -692,7 +692,7 @@ impl<A, E> Validated<A, E> {
           Validated::Invalid(errors) => Validated::Invalid(List::concat(errors, faults_of(d))),
         },
         Validated::Invalid(errors) =>
-        Validated::Invalid(List::concat(errors, List::concat(faults_of(c), faults_of(d)))),
+          Validated::Invalid(List::concat(errors, List::concat(faults_of(c), faults_of(d)))),
       },
       Validated::Invalid(errors) => Validated::Invalid(List::concat(
           errors,
@@ -728,7 +728,7 @@ impl<A, E> Validated<A, E> {
             Validated::Invalid(errors) => Validated::Invalid(List::concat(errors, faults_of(e))),
           },
           Validated::Invalid(errors) =>
-          Validated::Invalid(List::concat(errors, List::concat(faults_of(d), faults_of(e)))),
+            Validated::Invalid(List::concat(errors, List::concat(faults_of(d), faults_of(e)))),
         },
         Validated::Invalid(errors) => Validated::Invalid(List::concat(
             errors,
@@ -932,7 +932,7 @@ impl<A: Ord> List<A> {
           best = match best {
             Option::None => Option::Some(head),
             Option::Some(sofar) =>
-            if better(sofar, head) { Option::Some(head) } else { Option::Some(sofar) },
+              if better(sofar, head) { Option::Some(head) } else { Option::Some(sofar) },
           };
           rest = tail;
         },
@@ -973,13 +973,13 @@ impl<A: Ord> List<A> {
             walking = false;
           },
           List::Cons(other_head, other_tail) =>
-          if head <= other_head {
-            out = List::Cons(head, out);
-            mine = tail;
-          } else {
-            out = List::Cons(other_head, out);
-            theirs = other_tail;
-          },
+            if head <= other_head {
+              out = List::Cons(head, out);
+              mine = tail;
+            } else {
+              out = List::Cons(other_head, out);
+              theirs = other_tail;
+            },
         },
       }
     };
@@ -1079,7 +1079,7 @@ impl<A> List<A> {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) =>
-        if wanted(head) { found = true; walking = false; } else { rest = tail; },
+          if wanted(head) { found = true; walking = false; } else { rest = tail; },
       }
     };
     found
@@ -1098,7 +1098,7 @@ impl<A> List<A> {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) =>
-        if wanted(head) { rest = tail; } else { holds = false; walking = false; },
+          if wanted(head) { rest = tail; } else { holds = false; walking = false; },
       }
     };
     holds
@@ -1113,7 +1113,7 @@ impl<A> List<A> {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) =>
-        if wanted(head) { answer = Option::Some(head); walking = false; } else { rest = tail; },
+          if wanted(head) { answer = Option::Some(head); walking = false; } else { rest = tail; },
       }
     };
     answer
@@ -1273,13 +1273,13 @@ impl<A> List<A> {
             walking = false;
           },
           List::Cons(other_head, other_tail) =>
-          if order(head, other_head).is_greater() {
-            out = List::Cons(other_head, out);
-            theirs = other_tail;
-          } else {
-            out = List::Cons(head, out);
-            mine = tail;
-          },
+            if order(head, other_head).is_greater() {
+              out = List::Cons(other_head, out);
+              theirs = other_tail;
+            } else {
+              out = List::Cons(head, out);
+              mine = tail;
+            },
         },
       }
     };
@@ -1421,13 +1421,13 @@ impl<A: Eq> Eq for List<A> {
         List::Cons(head, tail) => match theirs {
           List::Nil => { same = false; walking = false; },
           List::Cons(other_head, other_tail) =>
-          if Eq::eq(head, other_head) {
-            mine = tail;
-            theirs = other_tail;
-          } else {
-            same = false;
-            walking = false;
-          },
+            if Eq::eq(head, other_head) {
+              mine = tail;
+              theirs = other_tail;
+            } else {
+              same = false;
+              walking = false;
+            },
         },
       }
     };
@@ -1491,7 +1491,7 @@ impl<A: Eq> List<A> {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) =>
-        if Eq::eq(head, wanted) { found = true; walking = false; } else { rest = tail; },
+          if Eq::eq(head, wanted) { found = true; walking = false; } else { rest = tail; },
       }
     };
     found
@@ -3324,7 +3324,7 @@ impl<K: Hash, V> Chain<K, V> {
     match self {
       Chain::Empty => Option::None,
       Chain::Node(k, v, rest) =>
-      if k.eq(key) { Option::Some(v) } else { Chain::find(rest, key) },
+        if k.eq(key) { Option::Some(v) } else { Chain::find(rest, key) },
     }
   }
 
@@ -3333,7 +3333,7 @@ impl<K: Hash, V> Chain<K, V> {
     match self {
       Chain::Empty => Chain::Empty,
       Chain::Node(k, v, rest) =>
-      if k.eq(key) { rest } else { Chain::Node(k, v, Chain::without(rest, key)) },
+        if k.eq(key) { rest } else { Chain::Node(k, v, Chain::without(rest, key)) },
     }
   }
 
@@ -3440,20 +3440,20 @@ impl<K, V> Dict<K, V> {
       // Unreachable: an empty side is never the heavy one.
       Dict::Empty => Dict::node(key, value, left, Dict::Empty),
       Dict::Node(_n, rk, rv, rl, rr) =>
-      if Dict::size(rl) < 2 * Dict::size(rr) {
-        Dict::node(rk, rv, Dict::node(key, value, left, rl), rr)
-      } else {
-        match rl {
-          Dict::Empty => Dict::node(rk, rv, Dict::node(key, value, left, Dict::Empty), rr),
-          Dict::Node(_m, rlk, rlv, rll, rlr) =>
-          Dict::node(
-            rlk,
-            rlv,
-            Dict::node(key, value, left, rll),
-            Dict::node(rk, rv, rlr, rr),
-          ),
-        }
-      },
+        if Dict::size(rl) < 2 * Dict::size(rr) {
+          Dict::node(rk, rv, Dict::node(key, value, left, rl), rr)
+        } else {
+          match rl {
+            Dict::Empty => Dict::node(rk, rv, Dict::node(key, value, left, Dict::Empty), rr),
+            Dict::Node(_m, rlk, rlv, rll, rlr) =>
+              Dict::node(
+                rlk,
+                rlv,
+                Dict::node(key, value, left, rll),
+                Dict::node(rk, rv, rlr, rr),
+              ),
+          }
+        },
     }
   }
 
@@ -3462,20 +3462,20 @@ impl<K, V> Dict<K, V> {
     match left {
       Dict::Empty => Dict::node(key, value, Dict::Empty, right),
       Dict::Node(_n, lk, lv, ll, lr) =>
-      if Dict::size(lr) < 2 * Dict::size(ll) {
-        Dict::node(lk, lv, ll, Dict::node(key, value, lr, right))
-      } else {
-        match lr {
-          Dict::Empty => Dict::node(lk, lv, ll, Dict::node(key, value, Dict::Empty, right)),
-          Dict::Node(_m, lrk, lrv, lrl, lrr) =>
-          Dict::node(
-            lrk,
-            lrv,
-            Dict::node(lk, lv, ll, lrl),
-            Dict::node(key, value, lrr, right),
-          ),
-        }
-      },
+        if Dict::size(lr) < 2 * Dict::size(ll) {
+          Dict::node(lk, lv, ll, Dict::node(key, value, lr, right))
+        } else {
+          match lr {
+            Dict::Empty => Dict::node(lk, lv, ll, Dict::node(key, value, Dict::Empty, right)),
+            Dict::Node(_m, lrk, lrv, lrl, lrr) =>
+              Dict::node(
+                lrk,
+                lrv,
+                Dict::node(lk, lv, ll, lrl),
+                Dict::node(key, value, lrr, right),
+              ),
+          }
+        },
     }
   }
 
@@ -3504,7 +3504,7 @@ impl<K, V> Dict<K, V> {
     match self {
       Dict::Empty => after,
       Dict::Node(_n, k, v, l, r) =>
-      Dict::gather(l, List::Cons({ key: k, value: v }, Dict::gather(r, after))),
+        Dict::gather(l, List::Cons({ key: k, value: v }, Dict::gather(r, after))),
     }
   }
 }
@@ -3515,13 +3515,13 @@ impl<K: Ord, V> Dict<K, V> {
     match self {
       Dict::Empty => Option::None,
       Dict::Node(_n, nk, nv, l, r) =>
-      if key < nk {
-        Dict::get(l, key)
-      } else if nk < key {
-        Dict::get(r, key)
-      } else {
-        Option::Some(nv)
-      },
+        if key < nk {
+          Dict::get(l, key)
+        } else if nk < key {
+          Dict::get(r, key)
+        } else {
+          Option::Some(nv)
+        },
     }
   }
 
@@ -3538,14 +3538,14 @@ impl<K: Ord, V> Dict<K, V> {
     match self {
       Dict::Empty => Dict::Node(1, key, value, Dict::Empty, Dict::Empty),
       Dict::Node(n, nk, nv, l, r) =>
-      if key < nk {
-        Dict::balance(nk, nv, Dict::insert(l, key, value), r)
-      } else if nk < key {
-        Dict::balance(nk, nv, l, Dict::insert(r, key, value))
-      } else {
-        // Replacing, so the size does not change and neither side moves.
-        Dict::Node(n, key, value, l, r)
-      },
+        if key < nk {
+          Dict::balance(nk, nv, Dict::insert(l, key, value), r)
+        } else if nk < key {
+          Dict::balance(nk, nv, l, Dict::insert(r, key, value))
+        } else {
+          // Replacing, so the size does not change and neither side moves.
+          Dict::Node(n, key, value, l, r)
+        },
     }
   }
 
@@ -3571,14 +3571,14 @@ impl<K: Ord, V> Dict<K, V> {
     match self {
       Dict::Empty => Dict::Node(1, key, step(Option::None), Dict::Empty, Dict::Empty),
       Dict::Node(n, nk, nv, l, r) =>
-      if key < nk {
-        Dict::balance(nk, nv, Dict::update(l, key, step), r)
-      } else if nk < key {
-        Dict::balance(nk, nv, l, Dict::update(r, key, step))
-      } else {
-        // Replacing, so the size does not change and neither side moves.
-        Dict::Node(n, key, step(Option::Some(nv)), l, r)
-      },
+        if key < nk {
+          Dict::balance(nk, nv, Dict::update(l, key, step), r)
+        } else if nk < key {
+          Dict::balance(nk, nv, l, Dict::update(r, key, step))
+        } else {
+          // Replacing, so the size does not change and neither side moves.
+          Dict::Node(n, key, step(Option::Some(nv)), l, r)
+        },
     }
   }
 
@@ -3587,13 +3587,13 @@ impl<K: Ord, V> Dict<K, V> {
     match self {
       Dict::Empty => Dict::Empty,
       Dict::Node(_n, nk, nv, l, r) =>
-      if key < nk {
-        Dict::balance(nk, nv, Dict::remove(l, key), r)
-      } else if nk < key {
-        Dict::balance(nk, nv, l, Dict::remove(r, key))
-      } else {
-        Dict::glue(l, r)
-      },
+        if key < nk {
+          Dict::balance(nk, nv, Dict::remove(l, key), r)
+        } else if nk < key {
+          Dict::balance(nk, nv, l, Dict::remove(r, key))
+        } else {
+          Dict::glue(l, r)
+        },
     }
   }
 
@@ -3614,16 +3614,16 @@ impl<K: Ord, V> Dict<K, V> {
     match self {
       Dict::Empty => Option::None,
       Dict::Node(_n, nk, nv, l, r) =>
-      match Dict::least(l) {
-        // Nothing smaller: this node is it, and the right side is what is left.
-        Option::None => Option::Some({ key: nk, value: nv, rest: r }),
-        Option::Some(found) =>
-        Option::Some({
-            key: found.key,
-            value: found.value,
-            rest: Dict::balance(nk, nv, found.rest, r),
-          }),
-      },
+        match Dict::least(l) {
+          // Nothing smaller: this node is it, and the right side is what is left.
+          Option::None => Option::Some({ key: nk, value: nv, rest: r }),
+          Option::Some(found) =>
+            Option::Some({
+                key: found.key,
+                value: found.value,
+                rest: Dict::balance(nk, nv, found.rest, r),
+              }),
+        },
     }
   }
 

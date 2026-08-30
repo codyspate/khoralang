@@ -70,9 +70,9 @@ impl ConfigError {
     match self {
       ConfigError::Missing(name) => "${name} is not set",
       ConfigError::Malformed(name, wanted, found) =>
-      "${name} should be ${wanted}, and is `${found}`",
+        "${name} should be ${wanted}, and is `${found}`",
       ConfigError::Denied(name) =>
-      "${name} is not granted -- add it to `[permissions] env` in khora.toml",
+        "${name} is not granted -- add it to `[permissions] env` in khora.toml",
     }
   }
 }
@@ -184,7 +184,7 @@ pub fn or_default<A>(
   match inner {
     Validated::Valid(value) => Validated::Valid(value),
     Validated::Invalid(errors) =>
-    if all_missing(errors) { Validated::Valid(fallback) } else { Validated::Invalid(errors) },
+      if all_missing(errors) { Validated::Valid(fallback) } else { Validated::Invalid(errors) },
   }
 }
 

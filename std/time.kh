@@ -156,7 +156,7 @@ impl Date {
     let shifted = if self.month > 2 { self.month - 3 } else { self.month + 9 };
     let day_of_year = (153 * shifted + 2) / 5 + self.day - 1;
     let day_of_era =
-    year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+      year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146097 + day_of_era - 719468
   }
 
@@ -168,10 +168,10 @@ impl Date {
     let era = if shifted >= 0 { shifted / 146097 } else { (shifted - 146096) / 146097 };
     let day_of_era = shifted - era * 146097;
     let year_of_era =
-    (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+      (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
     let year = year_of_era + era * 400;
     let day_of_year =
-    day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+      day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_shifted = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_shifted + 2) / 5 + 1;
     let month = if month_shifted < 10 { month_shifted + 3 } else { month_shifted - 9 };
@@ -293,11 +293,11 @@ impl Offset {
           Option::Some(hours) => match digits(text, 4, 2) {
             Option::None => Option::None,
             Option::Some(minutes) =>
-            if hours > 23 || minutes > 59 {
-              Option::None
-            } else {
-              Option::Some(Offset::of_minutes(sign * (hours * 60 + minutes)))
-            },
+              if hours > 23 || minutes > 59 {
+                Option::None
+              } else {
+                Option::Some(Offset::of_minutes(sign * (hours * 60 + minutes)))
+              },
           },
         }
       }
@@ -336,14 +336,14 @@ impl DateTime {
     match String::index_of(text, "T") {
       Option::None => Option::None,
       Option::Some(at) =>
-      match Date::of_string(String::slice(text, 0, at)) {
-        Option::None => Option::None,
-        Option::Some(date) =>
-        match Time::of_string(String::slice(text, at + 1, String::byte_length(text))) {
+        match Date::of_string(String::slice(text, 0, at)) {
           Option::None => Option::None,
-          Option::Some(time) => Option::Some({ date: date, time: time }),
+          Option::Some(date) =>
+            match Time::of_string(String::slice(text, at + 1, String::byte_length(text))) {
+              Option::None => Option::None,
+              Option::Some(time) => Option::Some({ date: date, time: time }),
+            },
         },
-      },
     }
   }
 
@@ -360,32 +360,32 @@ impl DateTime {
   pub fn instant_of_string(text: String) -> Option<Int> {
     let length = String::byte_length(text);
     let split =
-    if String::ends_with(text, "Z") {
-      Option::Some(length - 1)
-    } else {
-      // The sign of an offset, which is the only `+` or `-` that can appear
-      // after the date -- and the date's own hyphens are all before the `T`.
-      match String::index_of(text, "T") {
-        Option::None => Option::None,
-        Option::Some(t) => {
-          let plus = String::find(text, "+", t);
-          let minus = String::find(text, "-", t);
-          let at = if plus >= 0 { plus } else { minus };
-          if at < 0 { Option::None } else { Option::Some(at) }
+      if String::ends_with(text, "Z") {
+        Option::Some(length - 1)
+      } else {
+        // The sign of an offset, which is the only `+` or `-` that can appear
+        // after the date -- and the date's own hyphens are all before the `T`.
+        match String::index_of(text, "T") {
+          Option::None => Option::None,
+          Option::Some(t) => {
+            let plus = String::find(text, "+", t);
+            let minus = String::find(text, "-", t);
+            let at = if plus >= 0 { plus } else { minus };
+            if at < 0 { Option::None } else { Option::Some(at) }
+          }
         }
-      }
-    };
+      };
     match split {
       Option::None => Option::None,
       Option::Some(at) =>
-      match DateTime::of_string(String::slice(text, 0, at)) {
-        Option::None => Option::None,
-        Option::Some(when) =>
-        match Offset::of_string(String::slice(text, at, length)) {
+        match DateTime::of_string(String::slice(text, 0, at)) {
           Option::None => Option::None,
-          Option::Some(offset) => Option::Some(DateTime::from_offset(when, offset)),
+          Option::Some(when) =>
+            match Offset::of_string(String::slice(text, at, length)) {
+              Option::None => Option::None,
+              Option::Some(offset) => Option::Some(DateTime::from_offset(when, offset)),
+            },
         },
-      },
     }
   }
 
@@ -533,7 +533,7 @@ fn milliseconds(text: String, width: Int) -> Option<Int> {
     match digits(text, 9, width) {
       Option::None => Option::None,
       Option::Some(value) =>
-      Option::Some(if width == 1 { value * 100 } else { if width == 2 { value * 10 } else { value } }),
+        Option::Some(if width == 1 { value * 100 } else { if width == 2 { value * 10 } else { value } }),
     }
   }
 }

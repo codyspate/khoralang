@@ -417,3 +417,65 @@ fn subtraction_is_still_spaced() {
         .expect("should parse");
     assert!(out.contains("a - b"), "{out}");
 }
+
+/// **A value written on its own line is indented under what it continues.**
+///
+/// It was not: a `const` initializer went to column 0 and a match arm's body to
+/// the arm's own column. The match-arm shape is what this project's
+/// documentation is written in, so the formatter would have reformatted its own
+/// examples.
+#[test]
+fn a_value_on_its_own_line_is_indented() {
+    let out = format(
+        "module m;\n\nconst LIMIT: Int =\n1000;\n\n\
+         fn f(s: Int) -> String {\n  match s {\n    1 =>\n\"one\",\n    _ =>\n\"other\",\n  }\n}\n",
+    )
+    .expect("should parse");
+
+    assert!(out.contains("const LIMIT: Int =\n  1000;"), "{out}");
+    assert!(out.contains("    1 =>\n      \"one\","), "{out}");
+}
+
+/// **And for as long as it continues, which is the part that took two goes.**
+///
+/// A value that opens a block has the block's contents and its closing brace
+/// inside it. Indenting only the line that opens it leaves the body behind:
+///
+/// ```text
+/// Option::Some(m) =>
+///   if m > 59 {
+///   Option::None      <- one level short
+/// } else {
+/// ```
+///
+/// Across this corpus that was 45 of 155 reformatted lines, which is worse than
+/// the de-indent it fixes. The indent is a scope over the value's node rather
+/// than a property of its first token, so the brace adds its level on top as
+/// usual.
+#[test]
+fn a_value_that_opens_a_block_carries_the_block_with_it() {
+    let out = format(
+        "module m;\n\nfn f(n: Int) -> Int {\n  match n {\n    1 =>\nif n > 0 {\n2\n} else {\n3\n},\n    _ => 0,\n  }\n}\n",
+    )
+    .expect("should parse");
+
+    assert!(out.contains("    1 =>\n      if n > 0 {"), "the arm's value indents:\n{out}");
+    assert!(out.contains("        2\n"), "and so does what is inside it:\n{out}");
+    assert!(out.contains("      } else {"), "and the brace that closes it:\n{out}");
+}
+
+/// **A value that starts on the same line is not a continuation.**
+///
+/// `=> match .. {` opens on the line above, so its arms are relative to *that*
+/// line. Indenting them anyway adds a level per nesting, and a chain of matches
+/// becomes a staircase — which is what the first attempt did to `std/trace.kh`.
+#[test]
+fn a_value_beginning_on_the_same_line_is_not_indented_again() {
+    let out = format(
+        "module m;\n\nfn f(a: Int, b: Int) -> Int {\n  match a {\n    1 => match b {\n      1 => 2,\n      _ => 3,\n    },\n    _ => 0,\n  }\n}\n",
+    )
+    .expect("should parse");
+
+    // The inner arms sit one level in from the `match` that owns them, not two.
+    assert!(out.contains("    1 => match b {\n      1 => 2,"), "{out}");
+}

@@ -1099,8 +1099,8 @@ fn finish_match(pattern: String, path: String, bound: Map<String, String>) -> Op
 /// The next `/`-separated piece, and what follows it.
 fn segment(text: String) -> Split {
   let without_slash =
-  if String::starts_with(text, "/") { String::slice(text, 1, String::byte_length(text)) }
-  else { text };
+    if String::starts_with(text, "/") { String::slice(text, 1, String::byte_length(text)) }
+    else { text };
   match String::split_once(without_slash, "/") {
     Option::None => { head: without_slash, rest: "" },
     Option::Some(parts) => parts,
@@ -1251,22 +1251,22 @@ impl Router {
     match routes {
       List::Nil => so_far,
       List::Cons(route, rest) =>
-      match matches(route.pattern, path) {
-        Option::None => Router::allowing(rest, path, so_far),
-        Option::Some(_params) => {
-          let name = method_name(route.method);
-          let next =
-          if String::byte_length(so_far) == 0 {
-            name
-          } else {
-            match String::index_of(so_far, name) {
-              Option::Some(_at) => so_far,
-              Option::None => so_far + ", " + name,
-            }
-          };
-          Router::allowing(rest, path, next)
-        }
-      },
+        match matches(route.pattern, path) {
+          Option::None => Router::allowing(rest, path, so_far),
+          Option::Some(_params) => {
+            let name = method_name(route.method);
+            let next =
+              if String::byte_length(so_far) == 0 {
+                name
+              } else {
+                match String::index_of(so_far, name) {
+                  Option::Some(_at) => so_far,
+                  Option::None => so_far + ", " + name,
+                }
+              };
+            Router::allowing(rest, path, next)
+          }
+        },
     }
   }
 
@@ -1490,22 +1490,22 @@ impl Router {
     match left {
       List::Nil => Router::unmatched(all, request),
       List::Cons(route, rest) =>
-      if Method::same(route.method, request.method) {
-        match matches(route.pattern, request.path) {
-          Option::Some(params) =>
-          SharedFn::call(route.handler, {
-              method: request.method,
-              path: request.path,
-              params: params,
-              queries: request.queries,
-              headers: request.headers,
-              body: request.body,
-            })!,
-          Option::None => Router::taking(rest, all, request)!,
-        }
-      } else {
-        Router::taking(rest, all, request)!
-      },
+        if Method::same(route.method, request.method) {
+          match matches(route.pattern, request.path) {
+            Option::Some(params) =>
+              SharedFn::call(route.handler, {
+                  method: request.method,
+                  path: request.path,
+                  params: params,
+                  queries: request.queries,
+                  headers: request.headers,
+                  body: request.body,
+                })!,
+            Option::None => Router::taking(rest, all, request)!,
+          }
+        } else {
+          Router::taking(rest, all, request)!
+        },
     }
   }
 }
@@ -1703,7 +1703,7 @@ fn perform(call: Call, limit: Int) -> Result<Answer, CallError> {
     // already resolved a name and opened a socket has already told the network
     // what this program wanted.
     Option::Some(url) if !granted_host(network(), authority_of(url)) =>
-    Result::Err(CallError::Denied(authority_of(url))),
+      Result::Err(CallError::Denied(authority_of(url))),
     // **A region per call**, because `std::net::tls`'s client is registered
     // with `acquire` and ends with the scope that made it. The whole
     // conversation happens inside it, so the trust store outlives the session
@@ -1822,7 +1822,7 @@ fn rendered_headers(headers: List<Header>) -> String {
   match headers {
     List::Nil => "",
     List::Cons(head, rest) =>
-    head.name + ": " + head.value + "\r\n" + rendered_headers(rest),
+      head.name + ": " + head.value + "\r\n" + rendered_headers(rest),
   }
 }
 
@@ -2132,12 +2132,12 @@ pub fn parse_url(text: String) -> Option<Url> {
         match split_authority(authority, secure) {
           Option::None => Option::None,
           Option::Some(where_) =>
-          Option::Some({
-              secure: secure,
-              host: where_.host,
-              port: where_.port,
-              target: target,
-            }),
+            Option::Some({
+                secure: secure,
+                host: where_.host,
+                port: where_.port,
+                target: target,
+              }),
         }
       } else {
         Option::None

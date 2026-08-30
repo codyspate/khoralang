@@ -116,7 +116,7 @@ fn entry_of(row: Row) -> Option<Entry> {
         Option::Some(amount) => match text_at(row.cells, 3) {
           Option::None => Option::None,
           Option::Some(memo) =>
-          Option::Some({ id: id, account: account, amount: amount, memo: memo }),
+            Option::Some({ id: id, account: account, amount: amount, memo: memo }),
         },
       },
     },
@@ -161,9 +161,9 @@ fn insert_entry(account: String, amount: Int, memo: String) -> Result<Int, DbErr
   with { db: Db }
 {
   let values =
-  List::Cons(Cell::Text(account),
-    List::Cons(Cell::Number(amount),
-      List::Cons(Cell::Text(memo), List::Nil)));
+    List::Cons(Cell::Text(account),
+      List::Cons(Cell::Number(amount),
+        List::Cons(Cell::Text(memo), List::Nil)));
   db.execute("insert into entries (account, amount, memo) values ($1, $2, $3)", values)
 }
 

@@ -204,7 +204,7 @@ fn from_json_items<A: FromJson>(items: List<Json>, at: Int) -> List<A>
     List::Cons(head, tail) => {
       let decoded: A = decode(head)! catch {
         DecodeError::At(path, expected, found) =>
-        raise DecodeError::At(List::Cons(Int::to_string(at), path), expected, found),
+          raise DecodeError::At(List::Cons(Int::to_string(at), path), expected, found),
       };
       List::Cons(decoded, from_json_items(tail, at + 1)!)
     },
@@ -237,10 +237,10 @@ pub fn field_as<A: FromJson>(value: Json, name: String) -> A raises DecodeError 
   match value {
     Json::Object(fields) => match Map::get(fields, name) {
       Option::None =>
-      raise DecodeError::At(List::Cons(name, List::Nil), "present field", "missing"),
+        raise DecodeError::At(List::Cons(name, List::Nil), "present field", "missing"),
       Option::Some(found) => decode(found)! catch {
         DecodeError::At(path, expected, actual) =>
-        raise DecodeError::At(List::Cons(name, path), expected, actual),
+          raise DecodeError::At(List::Cons(name, path), expected, actual),
       },
     },
     other => raise wrong(other, "object"),
@@ -302,7 +302,7 @@ fn item_at<A>(items: List<A>, wanted: Int) -> Option<A> {
   match items {
     List::Nil => Option::None,
     List::Cons(head, tail) =>
-    if wanted == 0 { Option::Some(head) } else { item_at(tail, wanted - 1) },
+      if wanted == 0 { Option::Some(head) } else { item_at(tail, wanted - 1) },
   }
 }
 
@@ -457,7 +457,7 @@ fn encoded_fields(fields: List<Field>, separator: String) -> String {
   match fields {
     List::Nil => "",
     List::Cons(head, tail) =>
-    separator + quote(head.name) + ":" + encode(head.value) + encoded_fields(tail, ","),
+      separator + quote(head.name) + ":" + encode(head.value) + encoded_fields(tail, ","),
   }
 }
 
@@ -479,7 +479,7 @@ fn escaped(text: String, run: Int, at: Int) -> String {
     match escape_for(U8::to_int(String::byte(text, at))) {
       Option::None => escaped(text, run, at + 1),
       Option::Some(escape) =>
-      String::slice(text, run, at) + escape + escaped(text, at + 1, at + 1),
+        String::slice(text, run, at) + escape + escaped(text, at + 1, at + 1),
     }
   }
 }
@@ -689,27 +689,27 @@ fn unicode_at(text: String, at: Int) -> Result<Scanned, JsonError> {
   match hex4(text, at) {
     Option::None => Result::Err({ at: at, expected: "four hex digits" }),
     Option::Some(first) =>
-    if first >= 55296 && first <= 56319 {
-      // A high surrogate. The low half has to be the very next escape.
-      if String::slice(text, at + 4, at + 6) == "\\u" {
-        match hex4(text, at + 6) {
-          Option::None => Result::Err({ at: at + 6, expected: "four hex digits" }),
-          Option::Some(second) =>
-          if second >= 56320 && second <= 57343 {
-            let joined = 65536 + (first - 55296) * 1024 + (second - 56320);
-            Result::Ok({ text: utf8_of(joined), at: at + 10 })
-          } else {
-            Result::Err({ at: at + 6, expected: "the low half of a surrogate pair" })
-          },
+      if first >= 55296 && first <= 56319 {
+        // A high surrogate. The low half has to be the very next escape.
+        if String::slice(text, at + 4, at + 6) == "\\u" {
+          match hex4(text, at + 6) {
+            Option::None => Result::Err({ at: at + 6, expected: "four hex digits" }),
+            Option::Some(second) =>
+              if second >= 56320 && second <= 57343 {
+                let joined = 65536 + (first - 55296) * 1024 + (second - 56320);
+                Result::Ok({ text: utf8_of(joined), at: at + 10 })
+              } else {
+                Result::Err({ at: at + 6, expected: "the low half of a surrogate pair" })
+              },
+          }
+        } else {
+          Result::Err({ at: at + 4, expected: "the low half of a surrogate pair" })
         }
+      } else if first >= 56320 && first <= 57343 {
+        Result::Err({ at: at, expected: "a character, not a low surrogate on its own" })
       } else {
-        Result::Err({ at: at + 4, expected: "the low half of a surrogate pair" })
-      }
-    } else if first >= 56320 && first <= 57343 {
-      Result::Err({ at: at, expected: "a character, not a low surrogate on its own" })
-    } else {
-      Result::Ok({ text: utf8_of(first), at: at + 4 })
-    },
+        Result::Ok({ text: utf8_of(first), at: at + 4 })
+      },
   }
 }
 
@@ -928,7 +928,7 @@ fn array_at(text: String, at: Int) -> Result<Value, JsonError> {
       Result::Ok(found) =>
       // Reversed because each item was prepended, which is the cheap end of a
       // list and the only one worth walking to.
-      Result::Ok({ json: Json::Array(List::reverse(found.items)), at: found.at }),
+        Result::Ok({ json: Json::Array(List::reverse(found.items)), at: found.at }),
     }
   }
 }

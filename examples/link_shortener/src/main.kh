@@ -131,27 +131,27 @@ fn create(store: Store, request: Request) -> Response
   match url_of(request.body) {
     Option::None => problem(400, "the body must be an object with a `url` string"),
     Option::Some(url) =>
-    if !absolute(url) {
-      problem(400, "`url` must be absolute, as `https://example.com/x`")
-    } else {
-      // Drawing the code, inserting under it, and learning which code it was
-      // are one step. `modify` rather than `update` because `update` can only
-      // answer with the new table, and finding this request's link in it
-      // afterwards is a guess — two fibers shortening in the same second
-      // produce links that are indistinguishable by anything but their code.
-      let made = Shared::modify(store.links, fn table => {
-          let code = fresh_code(table);
-          let link: Link = { created: clock.unix_seconds(), code: code, url: url, hits: 0 };
-          { state: Dict::insert(table, code, link), result: link }
-        });
-      save(store.links)! catch {
-        // A link that is served but not written down comes back as one that
-        // never existed, and the client already has the code. Worth saying out
-        // loud, not worth failing the request over.
-        _ => print("warning: could not write the link file"),
-      };
-      Response::json(201, made.as_json())
-    },
+      if !absolute(url) {
+        problem(400, "`url` must be absolute, as `https://example.com/x`")
+      } else {
+        // Drawing the code, inserting under it, and learning which code it was
+        // are one step. `modify` rather than `update` because `update` can only
+        // answer with the new table, and finding this request's link in it
+        // afterwards is a guess — two fibers shortening in the same second
+        // produce links that are indistinguishable by anything but their code.
+        let made = Shared::modify(store.links, fn table => {
+            let code = fresh_code(table);
+            let link: Link = { created: clock.unix_seconds(), code: code, url: url, hits: 0 };
+            { state: Dict::insert(table, code, link), result: link }
+          });
+        save(store.links)! catch {
+          // A link that is served but not written down comes back as one that
+          // never existed, and the client already has the code. Worth saying out
+          // loud, not worth failing the request over.
+          _ => print("warning: could not write the link file"),
+        };
+        Response::json(201, made.as_json())
+      },
   }
 }
 
@@ -254,10 +254,10 @@ fn url_of(body: String) -> Option<String> {
   match parse(body) {
     Result::Err(_why) => Option::None,
     Result::Ok(value) =>
-    match Json::field(value, "url") {
-      Option::None => Option::None,
-      Option::Some(found) => Json::text(found),
-    },
+      match Json::field(value, "url") {
+        Option::None => Option::None,
+        Option::Some(found) => Json::text(found),
+      },
   }
 }
 
@@ -370,27 +370,27 @@ fn parse_line(line: String) -> Option<Link> {
   match String::split_once(line, "\t") {
     Option::None => Option::None,
     Option::Some(a) =>
-    match String::split_once(a.rest, "\t") {
-      Option::None => Option::None,
-      Option::Some(b) =>
-      match String::split_once(b.rest, "\t") {
+      match String::split_once(a.rest, "\t") {
         Option::None => Option::None,
-        Option::Some(c) =>
-        match Int::of_string(b.head) {
-          Option::None => Option::None,
-          Option::Some(created) =>
-          match Int::of_string(c.head) {
+        Option::Some(b) =>
+          match String::split_once(b.rest, "\t") {
             Option::None => Option::None,
-            Option::Some(hits) =>
-            if String::byte_length(a.head) == 0 || String::byte_length(c.rest) == 0 {
-              Option::None
-            } else {
-              Option::Some({ created: created, code: a.head, url: c.rest, hits: hits })
-            },
+            Option::Some(c) =>
+              match Int::of_string(b.head) {
+                Option::None => Option::None,
+                Option::Some(created) =>
+                  match Int::of_string(c.head) {
+                    Option::None => Option::None,
+                    Option::Some(hits) =>
+                      if String::byte_length(a.head) == 0 || String::byte_length(c.rest) == 0 {
+                        Option::None
+                      } else {
+                        Option::Some({ created: created, code: a.head, url: c.rest, hits: hits })
+                      },
+                  },
+              },
           },
-        },
       },
-    },
   }
 }
 

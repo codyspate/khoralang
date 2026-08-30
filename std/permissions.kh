@@ -83,9 +83,9 @@ pub fn granted_host(grants: List<String>, host: String) -> Bool {
 fn host_matches(grant: String, asked: Split) -> Bool {
   let allowed = split_port(grant);
   let port_ok =
-  String::byte_length(allowed.rest) == 0
-  || allowed.rest == "*"
-  || allowed.rest == asked.rest;
+    String::byte_length(allowed.rest) == 0
+    || allowed.rest == "*"
+    || allowed.rest == asked.rest;
   port_ok && matches(allowed.head, asked.head, false)
 }
 
@@ -99,7 +99,7 @@ fn split_port(text: String) -> Split {
   match last_byte_of(text, String::byte_length(text) - 1, fn b => b == 58) {
     Option::None => { head: text, rest: "" },
     Option::Some(at) =>
-    { head: String::slice(text, 0, at), rest: String::slice(text, at + 1, String::byte_length(text)) },
+      { head: String::slice(text, 0, at), rest: String::slice(text, at + 1, String::byte_length(text)) },
   }
 }
 
