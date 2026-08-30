@@ -137,14 +137,10 @@ have the choice of really invoking a compiler or not testing the thing;
 here it installs its own handler and the code under test cannot tell:
 
 ```khora
-// A `Completed` written out, because a record literal cannot be a lambda
-// body: `fn c => { status: 0, .. }` parses the braces as a block.
-fn done(text: String) -> Completed { { status: 0, text: text } }
-
 with { process: handler for Process {
   run: fn (program, arguments) => 0,
-  output: fn (program, arguments) => done("v1.2.3"),
-  shell: fn command => done(""),
+  output: fn (program, arguments) => { status: 0, text: "v1.2.3" },
+  shell: fn command => { status: 0, text: "" },
 } } {
   check(version_reported_by("git"));
 }

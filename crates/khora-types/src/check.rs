@@ -305,15 +305,78 @@ impl<'a> Checker<'a> {
         // expression of unknown type makes the block around it one too — and
         // the smallest range is the innermost, which is where the trail starts.
         found.sort_by_key(|r| (r.len(), r.start()));
-        if let Some(range) = found.first().copied() {
+        let Some(range) = found.first().copied() else { return };
+
+        // The const is looked for across *every* unknown expression rather
+        // than only the narrowest, because it is usually not the narrowest.
+        // `with { clock: fixed_clock }` binds a local from the constant, and
+        // the shortest range with no type is the later use of `clock` — a
+        // symptom two lines below the cause. Reporting the cause is the whole
+        // point of the special case.
+        if let Some((at, name)) = found.iter().find_map(|r| self.const_at(*r).map(|n| (*r, n))) {
+
+        // **A `const` from another module is a known gap, not a mystery.** A
+        // constant's type comes from inference over its initializer, and the
+        // type map is built from syntax before any inference runs — so nothing
+        // records what an exported `const` is, and a file that imports one
+        // finds a name with no type behind it.
+        //
+        // The generic message below ends "this is a gap in the compiler worth
+        // reporting", which for this case is both true and useless: it *is* a
+        // gap, it is a known one, and sending somebody to write it up costs
+        // them an hour and tells nobody anything. The cookbook shows
+        // `const fixed_clock = handler for Clock { .. }` as the way to write a
+        // test double, so this is met by people following the documentation.
             self.error(
-                "the type of this expression was never worked out, and nothing else was \
-                 reported — so either it needs an annotation, or this is a gap in the \
-                 compiler worth reporting"
-                    .to_string(),
-                range,
+                format!(
+                    "`{name}` is a `const`, and nothing worked out its type. A constant \
+                     declared in *another* module is the usual cause: its type comes from \
+                     inferring over its initializer, and the type map is built from syntax \
+                     before anything is inferred, so nothing records what an exported one \
+                     is. Move it into this file, or wrap it in a function — \
+                     `pub fn {name}() -> ..` has a signature, and a signature is what \
+                     travels"
+                ),
+                at,
             );
+            return;
         }
+
+        self.error(
+            "the type of this expression was never worked out, and nothing else was \
+             reported — so either it needs an annotation, or this is a gap in the \
+             compiler worth reporting"
+                .to_string(),
+            range,
+        );
+    }
+
+    /// The name of the `const` at `range`, if that is what is there.
+    ///
+    /// By range rather than by id because that is what [`Self::check_unknowns`]
+    /// has left by the time it reports: the ids were consumed picking the
+    /// narrowest one.
+    ///
+    /// No check that the constant is from another module, because the checker
+    /// does not know which module it is in — and it does not need to. One
+    /// declared *here* is typed by the ordinary body pass and never reaches
+    /// this point with `Unknown`, so anything that does is either the
+    /// cross-module case or an initializer nothing could work out. The message
+    /// names the first as the usual cause and is true of both.
+    fn const_at(&self, range: TextRange) -> Option<String> {
+        self.body.exprs().find_map(|(id, expr)| {
+            if self.body.range(id) != range {
+                return None;
+            }
+            match expr {
+                khora_hir::body::Expr::Path(khora_hir::Resolution::Item {
+                    name,
+                    kind: khora_hir::ItemKind::Const,
+                    ..
+                }) => Some(name.clone()),
+                _ => None,
+            }
+        })
     }
 
     /// Why a field read did not find its field.

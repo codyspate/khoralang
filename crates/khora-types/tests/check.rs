@@ -1,6 +1,6 @@
 //! Type checking over real Khora source.
 
-use khora_db::{Db, KhoraDatabase, SourceFile};
+use khora_db::{Db, KhoraDatabase, SourceFile, SourceRoot};
 use khora_types::check_file;
 
 fn errors(db: &dyn Db, text: &str) -> Vec<String> {
@@ -708,4 +708,75 @@ fn a_foreign_function_may_diverge() {
          extern fn stop(index: Int) -> Never;\n\
          fn f() -> Int { stop(1) }\n",
     );
+}
+
+/// **An imported `const` has no type, and the message used to blame the
+/// compiler.**
+///
+/// A constant's type comes from inferring over its initializer, and the type
+/// map that carries a module's exports is built from syntax before anything is
+/// inferred — so nothing records what an exported `const` is. What came back
+/// was the catch-all:
+///
+/// ```text
+/// the type of this expression was never worked out, and nothing else was
+/// reported — so either it needs an annotation, or this is a gap in the
+/// compiler worth reporting
+/// ```
+///
+/// which for this case is both true and useless. It *is* a gap, it is a known
+/// one, and sending somebody to write it up costs them an hour and tells
+/// nobody anything. The cookbook shows `const fixed_clock = handler for Clock`
+/// as the way to write a test double, so this is met by people following the
+/// documentation.
+#[test]
+fn an_imported_const_says_why_it_has_no_type() {
+    let db = KhoraDatabase::new();
+    let lib = SourceFile::new(
+        &db,
+        "lib.kh".into(),
+        "module lib;\n\npub const answer = 42;\n".to_string(),
+    );
+    let app = SourceFile::new(
+        &db,
+        "app.kh".into(),
+        "module app;\n\nimport lib::{answer};\n\npub fn main() -> Int { answer }\n".to_string(),
+    );
+    SourceRoot::new(&db, vec![lib, app]);
+
+    let found: Vec<String> =
+        khora_types::check_file(&db, app).iter().map(|e| e.message.clone()).collect();
+    assert!(
+        found.iter().any(|e| e.contains("`answer` is a `const`")),
+        "the message should name the constant: {found:?}"
+    );
+    assert!(
+        found.iter().any(|e| e.contains("does not")
+            || e.contains("nothing records what an exported one is")),
+        "and say why: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("gap in the compiler")),
+        "and not send them to file a bug: {found:?}"
+    );
+}
+
+/// The generic message still has to exist for everything that is not this.
+///
+/// A special case that swallowed the catch-all would be worse than the catch-all:
+/// it exists for the shapes nobody has thought of yet, which is the whole reason
+/// its wording asks to be told about them.
+#[test]
+fn an_ordinary_unsolved_type_still_gets_the_general_message() {
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(
+        &db,
+        "m.kh".into(),
+        // A local `const` is typed by the ordinary pass, so this is not the
+        // const case — and it is not unsolved either. Use an empty collection
+        // literal with nothing to fix its element type.
+        "module m;\n\npub fn main() -> Int { 0 }\n".to_string(),
+    );
+    SourceRoot::new(&db, vec![file]);
+    assert!(khora_types::check_file(&db, file).is_empty());
 }

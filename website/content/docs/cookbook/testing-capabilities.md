@@ -47,6 +47,31 @@ test "session uses the supplied clock" {
 }
 ```
 
+**Keep the double in the same file as the test, or make it a function.** A
+`const` has no declared type — its type comes from inferring over its
+initializer — and the type map that carries a module's exports is built from
+syntax, before anything is inferred. So nothing records what an exported `const`
+is, and a file that imports one gets a name with no type behind it.
+
+That is a real limitation rather than a rule with a reason, and it is worth
+knowing before you factor a set of doubles into a `fakes` module. A function has
+a signature, and a signature is what travels:
+
+```khora
+// In another module, and usable from anywhere.
+pub fn fixed_clock() -> Clock {
+  handler for Clock {
+    unix_seconds: fn () => 1700000000,
+    unix_millis: fn () => 1700000000000,
+    monotonic_millis: fn () => 5000,
+    sleep: fn _millis => (),
+  }
+}
+```
+
+Called at the use site — `with { clock: fixed_clock() }` — which also means each
+test gets its own, rather than sharing one value.
+
 Run it with the normal test runner:
 
 ```bash
