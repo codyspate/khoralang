@@ -351,6 +351,19 @@ fn exported_here(node: &SyntaxNode, name: &str) -> bool {
     file.decls().any(|d| match d {
         ast::Decl::Type(t) => t.is_exported() && named(t.name()).as_deref() == Some(name),
         ast::Decl::Trait(t) => t.is_exported() && named(t.name()).as_deref() == Some(name),
+        // **Effects and contexts, without which no capability had a
+        // constructor on its page.** `impl FsRead { pub fn real() -> FsRead }`
+        // was dropped here: `FsRead` is a `pub effect`, so it was neither an
+        // exported type nor an exported trait, and the whole `impl` went with
+        // it. The same for `Clock::real`, `Env::real`, `Random::seeded` and
+        // `HttpClient::real`.
+        //
+        // Which is every capability constructor in `std` -- the one function a
+        // reader needs before they can write a program that does anything, and
+        // the reference had none of them. They were findable in cookbook code
+        // blocks, by somebody who already knew the name to search for.
+        ast::Decl::Effect(e) => e.is_exported() && named(e.name()).as_deref() == Some(name),
+        ast::Decl::Context(c) => c.is_exported() && named(c.name()).as_deref() == Some(name),
         _ => false,
     })
 }

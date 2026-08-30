@@ -78,15 +78,27 @@ fi
 # a sentence. It compiles, it is valid, and it is not English -- the same shape
 # as the two above.
 #
-# Two lowercase letters, then twelve spaces or more, then another. The pair
-# before the run is what tells a swallowed continuation from a deliberately
-# aligned column: a table's gap follows a digit, a colon or a single character
-# of an escape, and the runs in one are shorter than this anyway. Checked
-# against the whole tree when it was written, where it found exactly the two
-# real ones and nothing else.
+# A lowercase letter and then a letter or a comma, then twelve spaces or more,
+# then another letter. What comes before the run is what tells a swallowed
+# continuation from a deliberately aligned column: a table's gap follows a
+# digit, a colon or a single character of an escape, and the runs in one are
+# shorter than this anyway. Checked against the whole tree when it was written,
+# where it found exactly the two real ones and nothing else.
+#
+# **The comma was added because a third one got past.** The pattern was two
+# lowercase letters, and the string it missed broke after `so letters,` -- a
+# comma is where a sentence most naturally wraps, so requiring two letters
+# excluded the likeliest place for this to happen. It cost nothing: widening it
+# reports no line in the tree that the narrower one did not.
+#
+# The mistake that produced it is worth naming, because it is the third time.
+# A Python patch script wrote the Rust source, and a non-raw Python string
+# treats `\<newline>` as *its own* continuation and removes it -- so the
+# backslash never reached the file and Rust kept the indentation. `MEMORY.md`
+# has the rule; this is what it looks like when it is forgotten.
 joined=$(git ls-files '*.rs' '*.kh' \
     | grep -v "^$myself\$" \
-    | xargs grep -nP '[a-z]{2} {12,}[a-z]' 2>/dev/null | grep -v "$marker" || true)
+    | xargs grep -nP '[a-z][a-z,] {12,}[a-z]' 2>/dev/null | grep -v "$marker" || true)
 if [ -n "$joined" ]; then
     printf '  FAILED  a line continuation was eaten before the compiler saw it:\n' >&2
     printf '%s\n' "$joined" | cut -c1-120 | sed 's|^|    |' >&2

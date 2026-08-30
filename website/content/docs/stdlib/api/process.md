@@ -159,6 +159,22 @@ command into a `Shared<List<String>>` and the test can say that the driver
 built the command line it was supposed to, which is the assertion that
 matters and the one a real subprocess makes impossible to write.
 
+## Methods
+
+### Process
+
+```khora
+impl Process
+```
+
+#### real
+
+```khora
+pub fn real() -> Process
+```
+
+The real machine.
+
 ## Functions
 
 ### checked_output

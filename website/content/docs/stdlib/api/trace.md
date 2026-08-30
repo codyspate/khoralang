@@ -183,6 +183,26 @@ argument, which gets the scoping without the type system change.
 
 ## Methods
 
+### Tracer
+
+```khora
+impl Tracer
+```
+
+#### none
+
+```khora
+pub fn none() -> Tracer
+```
+
+A tracer that records nothing, as cheaply as possible.
+
+**The default, and it has to be nearly free.** If tracing costs when it
+is off it gets turned off, and then it does not exist. This allocates one
+span value with a zero context and does nothing else — no attributes are
+read, no strings are built, and with Perceus the list the caller passed
+is released at the call.
+
 ### Context
 
 ```khora

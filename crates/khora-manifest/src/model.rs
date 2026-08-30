@@ -92,6 +92,37 @@ pub(crate) struct RawPackage {
     pub(crate) edition: Option<Maybe<String>>,
 }
 
+/// Why `name` is not a package name, if it is not.
+///
+/// **`khora new` refused a hyphen and nothing else did.** A package name is a
+/// module path segment -- `import app::main` -- so it is an identifier, and a
+/// name that is not one cannot be written in the language that is supposed to
+/// import it. The scaffold checked the directory name and said so clearly; a
+/// manifest somebody wrote or edited by hand went through, and the first sign
+/// was whatever the name broke downstream.
+///
+/// Checked here rather than only there, because `new` is one of the ways a
+/// manifest comes to exist and hand-editing is the other.
+fn not_a_package_name(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("a package name cannot be empty".to_string());
+    }
+    if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return Some(format!(
+            "`{name}` starts with a digit, and a package name is a module path segment -- \
+             `import {name}::main` is not something the language can read"
+        ));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Some(format!(
+            "`{name}` is not a package name: a module path is made of identifiers, so letters, \
+             digits and underscores. `{}` is the usual spelling",
+            name.replace(['-', '.', ' '], "_")
+        ));
+    }
+    None
+}
+
 /// Every edition this toolchain understands.
 ///
 /// **Checked, because it was not.** `edition = "1999"` resolved, checked and
@@ -177,6 +208,10 @@ impl RawManifest {
                         "`version` under `[workspace.package]`",
                     ));
                 };
+                if let Some(why) = not_a_package_name(&raw.name) {
+                    return Err(ManifestError::invalid_value("package.name", why));
+                }
+
                 let edition = edition.into_option();
                 if let Some(named) = edition.as_deref() {
                     if !EDITIONS.contains(&named) {

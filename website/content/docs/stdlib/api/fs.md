@@ -121,6 +121,36 @@ The other half of `[permissions.fs]`. A function that takes this can alter
 what is on disk; one that takes only [`FsRead`] cannot, and its signature
 is the proof.
 
+## Methods
+
+### FsRead
+
+```khora
+impl FsRead
+```
+
+#### real
+
+```khora
+pub fn real() -> FsRead
+```
+
+The real file system, reading.
+
+### FsWrite
+
+```khora
+impl FsWrite
+```
+
+#### real
+
+```khora
+pub fn real() -> FsWrite
+```
+
+The real file system, writing.
+
 ## Functions
 
 ### read_text

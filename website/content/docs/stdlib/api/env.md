@@ -55,6 +55,22 @@ a function that reads `DATABASE_URL` says so in its signature, and a test
 can hand it something else. Reading the environment is exactly the kind of
 hidden input that makes a program hard to test, and this is the seam.
 
+## Methods
+
+### Env
+
+```khora
+impl Env
+```
+
+#### real
+
+```khora
+pub fn real() -> Env
+```
+
+The real environment.
+
 ## Functions
 
 ### variable_or

@@ -40,3 +40,45 @@ pub effect Random {
 
 A source of numbers nobody chose.
 
+## Methods
+
+### Random
+
+```khora
+impl Random
+```
+
+#### real
+
+```khora
+pub fn real() -> Random
+```
+
+The real thing, seeded by the operating system.
+
+A different sequence every run, which is what production wants and
+exactly what a test does not. Note what this is *not*: a single generator
+the whole process shares. Each call seeds a new one, so two of them handed
+to two subsystems do not interleave — and a program that wants one shared
+source passes one `Random` around, which is what the capability is for.
+
+#### seeded
+
+```khora
+pub fn seeded(seed: Int) -> Random
+```
+
+The same numbers every time, from the same seed.
+
+**The reason randomness is a capability.** A test pins the sequence and
+gets an assertion that holds every run instead of a flake that shows up
+once a fortnight in someone else's pull request. It also turns a failure
+in production into something reproducible: draw a seed from the real
+source, log it, hand it back here, and the run happens again.
+
+The state is a `Shared<Int>` and that is the answer to fibers being
+threads. Two of them drawing at once are serialized by the cell's lock —
+the same lock every other shared value uses, not a second mechanism — and
+the handler may cross into a fiber because a `Shared` is the one writable
+thing the sharing rules allow it to capture. `docs/design/sharing.md`.
+

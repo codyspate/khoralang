@@ -60,3 +60,22 @@ and the half it was wrong for would be the half that only fails in
 production, at 2am, when the clock is stepped an hour. Naming both makes
 the caller say which they meant.
 
+## Methods
+
+### Clock
+
+```khora
+impl Clock
+```
+
+#### real
+
+```khora
+pub fn real() -> Clock
+```
+
+The real clock.
+
+Seconds are milliseconds divided down rather than a second call to ISO C's
+`time`, so that a program reading both never sees them straddle a tick.
+

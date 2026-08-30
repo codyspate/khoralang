@@ -1698,6 +1698,25 @@ pub fn root() -> Region
 The region that ends when the program does, released by the entry point
 after `main` returns — on the failing path as well as the ordinary one.
 
+### Scope
+
+```khora
+impl Scope
+```
+
+#### root
+
+```khora
+pub fn root() -> Scope
+```
+
+The outermost scope: the one that ends when the program does.
+
+An entry point has to get a `Scope` from somewhere, and there is nothing
+above it to ask. Everything else should take one rather than reach for
+this — a library that roots its own scope has decided its caller's
+lifetimes for it.
+
 ### Fiber<A, 'er>
 
 ```khora

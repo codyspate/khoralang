@@ -722,3 +722,36 @@ count = 2
     assert!(!said.contains("did you mean"), "{said}");
     assert_eq!(parsed.warnings[0].suggestion(), None);
 }
+
+/// **The package-name rule was `khora new`'s and nobody else's.**
+///
+/// A package name is a module path segment — `import app::main` — so it is an
+/// identifier, and a name that is not one cannot be written in the language
+/// that is supposed to import it. The scaffold checked the directory name and
+/// said so clearly; a manifest written or edited by hand went through, and the
+/// first sign was whatever the name broke downstream.
+///
+/// `new` is one of the ways a manifest comes to exist. Hand-editing is the
+/// other, and it was the unchecked one.
+#[test]
+fn a_hyphenated_package_name_is_refused() {
+    let why = parse_error("[package]\nname = \"has-a-hyphen\"\nversion = \"0.1.0\"\n").to_string();
+    assert!(why.contains("package.name"), "{why}");
+    assert!(why.contains("identifiers"), "{why}");
+    // And it says what the name would have to be.
+    assert!(why.contains("has_a_hyphen"), "the message should suggest a spelling: {why}");
+}
+
+/// A digit cannot start an identifier either, and the message says why in the
+/// terms the reader will meet it: `import 1st::main` does not read.
+#[test]
+fn a_package_name_starting_with_a_digit_is_refused() {
+    let why = parse_error("[package]\nname = \"1st\"\nversion = \"0.1.0\"\n").to_string();
+    assert!(why.contains("starts with a digit"), "{why}");
+}
+
+#[test]
+fn an_ordinary_package_name_is_accepted() {
+    let parsed = parse("[package]\nname = \"has_an_underscore\"\nversion = \"0.1.0\"\n");
+    assert_eq!(parsed.manifest.package().map(|p| p.name.as_str()), Some("has_an_underscore"));
+}

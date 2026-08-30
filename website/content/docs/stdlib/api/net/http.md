@@ -1047,6 +1047,28 @@ Whether the status is one of the 2xx.
 Not "did the call work" — a 404 arrived successfully and is not `ok`,
 and a `CallError` is the other thing entirely.
 
+### HttpClient
+
+```khora
+impl HttpClient
+```
+
+#### real
+
+```khora
+pub fn real() -> HttpClient
+```
+
+A client that really connects, holding up to `default_answer_limit`.
+
+#### bounded
+
+```khora
+pub fn bounded(limit: Int) -> HttpClient
+```
+
+The same, holding up to `limit` bytes of answer.
+
 ## Functions
 
 ### percent_decode
