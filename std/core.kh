@@ -1540,20 +1540,82 @@ impl Traversable for Option {
 }
 
 impl Functor for List {
+  /// Each element through `f`, in order.
+  ///
+  /// **A loop and not a recursion**, which is the rule every other walk in
+  /// this file already followed: `fold`, `filter`, `any`, `contains`, `zip`
+  /// and `partition` are all `while` with an accumulator, because Khora does
+  /// not promise tail calls and a frame per element dies on a long list. This
+  /// one was `Cons(f(h), t.map(f))` and went over at about forty thousand --
+  /// `map` being, of the lot, the one people reach for first.
+  ///
+  /// Built back to front and reversed, so the answer is in the order the input
+  /// was and `f` is called in that order too. That matters when `f` has
+  /// effects: `map` over a list of requests should make them in the order the
+  /// list is in.
   fn map<A, B>(self: List<A>, f: (A) -> B) -> List<B> {
-    match self {
-      List::Nil => List::Nil,
-      List::Cons(h, t) => List::Cons(f(h), t.map(f)),
-    }
+    let mut out = List::Nil;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => { out = List::Cons(f(head), out); rest = tail; },
+      }
+    };
+    List::reverse(out)
   }
 }
 
 impl Traversable for List {
+  /// Each element through `f`, with the effects combined and the answers
+  /// collected.
+  ///
+  /// **Two loops rather than a recursion**, for the reason `map` above has
+  /// one, and two rather than one because the order has to survive being made
+  /// iterative. There are two orders and they are not the same:
+  ///
+  /// - **`f` is called front to back**, because it may have effects and a
+  ///   traversal over a list of requests should make them in the order the
+  ///   list is in. That is the first loop.
+  /// - **The effects combine back to front**, because `map2` puts its left
+  ///   side's failures first and the recursion this replaces nested to the
+  ///   right: `map2(f(a), map2(f(b), map2(f(c), pure(Nil))))`. Combining the
+  ///   other way round reverses the error list, which for `Validated` --
+  ///   the one type in `std` built for accumulating errors -- is the whole
+  ///   thing it is for. That is the second loop, over what the first collected
+  ///   in reverse.
+  ///
+  /// Doing it in one loop gets one of the two wrong, which is why there are
+  /// two.
   fn traverse<A, B, F: Applicative>(self: List<A>, f: (A) -> F<B>) -> F<List<B>> {
-    match self {
-      List::Nil => F::pure(List::Nil),
-      List::Cons(h, t) => f(h).map2(t.traverse(f), fn (b, rest) => List::Cons(b, rest)),
-    }
+    // Front to back, so `f` runs in the list's order; the results land back
+    // to front, which is the order the next loop wants.
+    let mut effects = List::Nil;
+    let mut rest = self;
+    let mut walking = true;
+    while walking {
+      match rest {
+        List::Nil => { walking = false; },
+        List::Cons(head, tail) => { effects = List::Cons(f(head), effects); rest = tail; },
+      }
+    };
+
+    // Back to front, so the last element's effect is the innermost and each
+    // `Cons` puts its answer in front of what follows it.
+    let mut out = F::pure(List::Nil);
+    let mut left = effects;
+    let mut combining = true;
+    while combining {
+      match left {
+        List::Nil => { combining = false; },
+        List::Cons(head, tail) => {
+          out = head.map2(out, fn (value, so_far) => List::Cons(value, so_far));
+          left = tail;
+        },
+      }
+    };
+    out
   }
 }
 
@@ -2243,20 +2305,31 @@ impl String {
   ///
   /// `start == at` means no word is open, which is how a run of several spaces
   /// produces one gap rather than several empty pieces.
+  ///
+  /// **A loop, because this one is per byte.** `split_onto` beside it recurses
+  /// once per *separator*, which is bounded by how many there are; this looks
+  /// at every character, so a forty-thousand-byte line was forty thousand
+  /// frames and the process died. A log line is exactly the input this
+  /// function exists for.
   fn words_onto(self, start: Int, at: Int, so_far: List<String>) -> List<String> {
     let length = String::byte_length(self);
-    if at == length {
-      if start == at { so_far } else { List::Cons(String::slice(self, start, at), so_far) }
-    } else if String::is_space(String::byte(self, at)) {
-      let closed = if start == at {
-        so_far
+    let mut out = so_far;
+    let mut opened = start;
+    let mut here = at;
+    let mut walking = true;
+    while walking {
+      if here == length {
+        if opened != here { out = List::Cons(String::slice(self, opened, here), out); };
+        walking = false;
+      } else if String::is_space(String::byte(self, here)) {
+        if opened != here { out = List::Cons(String::slice(self, opened, here), out); };
+        here = here + 1;
+        opened = here;
       } else {
-        List::Cons(String::slice(self, start, at), so_far)
-      };
-      String::words_onto(self, at + 1, at + 1, closed)
-    } else {
-      String::words_onto(self, start, at + 1, so_far)
-    }
+        here = here + 1;
+      }
+    };
+    out
   }
 }
 

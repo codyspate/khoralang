@@ -46,7 +46,7 @@ fn run(name: &str, main: &str) -> String {
 }
 
 const HEAD: &str = "module demo::main;
-import std::core::{Array, Dict, Eq, Halves, List, Map, Option, Ord, Ordering, Pair, Parts, Result, Shared, Show, Split};
+import std::core::{Array, Dict, Eq, Halves, List, Map, Option, Ord, Ordering, Pair, Parts, Result, Shared, Show, Split, Traversable};
 
 /// The two helpers every list test below wants: an empty `List<Int>` that
 /// inference can name, and an `Option<Int>` written out.
@@ -62,6 +62,14 @@ fn empty_option() -> Option<Int> { Option::None }
 fn good() -> Result<Int, String> { Result::Ok(2) }
 fn bad() -> Result<Int, String> { Result::Err(\"no\") }
 fn no_rows() -> List<Pair<Int, String>> { List::Nil }
+
+/// An `Option<List<Int>>` written out, for the traversal tests.
+fn shown_list(value: Option<List<Int>>) -> String {
+  match value {
+    Option::Some(xs) => xs.show(),
+    Option::None => \"none\",
+  }
+}
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -1211,4 +1219,107 @@ fn a_float_can_be_written_to_a_fixed_width() {
         out,
         "0.50\n2\n0.3333\n0.12\n-2.67\n0.30\n[    5.00]\n[ 1234.50]\n2\n"
     );
+}
+
+
+/// **`map` died on a long list**, which is the one everybody reaches for
+/// first.
+///
+/// It was `Cons(f(h), t.map(f))` — one frame per element — while every other
+/// walk in `std::core` is a `while` with an accumulator, because Khora does not
+/// promise tail calls. `fold`, `filter`, `any`, `contains`, `zip` and
+/// `partition` all had the loop already; `map` and `traverse` were the two that
+/// did not, and `#107` made `khora_drop` iterative on the same grounds.
+///
+/// The size is the one `a_large_list_can_be_walked_without_running_out_of_stack`
+/// uses, so a regression here fails beside its neighbour rather than instead of
+/// it.
+#[test]
+fn mapping_a_large_list_costs_no_stack() {
+    let out = run(
+        "text_map_large",
+        &program(
+            r#"  let mut xs = empty();
+  let mut n = 0;
+  while n < 200000 {
+    xs = List::Cons(n, xs);
+    n = n + 1
+  };
+  let doubled = List::map(xs, fn v => v * 2);
+  print(Int::to_string(List::length(doubled)));
+  // And the order survived: the head was the last thing pushed.
+  print(shown(List::head(doubled)));"#,
+        ),
+    );
+
+    assert_eq!(out, "200000\n399998\n");
+}
+
+/// **`split_whitespace` recursed once per byte**, which is worse than
+/// `split`'s once per separator: a forty-thousand-byte log line was forty
+/// thousand frames, and a log line is the input this function exists for.
+#[test]
+fn splitting_a_long_line_into_words_costs_no_stack() {
+    let out = run(
+        "text_words_long",
+        &program(
+            r#"  let mut line = "";
+  let mut i = 0;
+  while i < 40000 {
+    line = line + "x";
+    i = i + 1
+  };
+  // One enormous word, which is the shape that recursed deepest: no space
+  // ever closes it, so every byte was a frame.
+  print(Int::to_string(List::length(String::split_whitespace(line))));
+  print(Int::to_string(String::byte_length(line)));
+  // And many words, so the other axis is walked too.
+  let mut spaced = "";
+  let mut j = 0;
+  while j < 20000 {
+    spaced = spaced + "w ";
+    j = j + 1
+  };
+  print(Int::to_string(List::length(String::split_whitespace(spaced))));"#,
+        ),
+    );
+
+    assert_eq!(out, "1\n40000\n20000\n");
+}
+
+/// **`traverse` had the same shape, and making it a loop has two orders to
+/// keep.**
+///
+/// `f` is called front to back, because it may have effects and a traversal
+/// over a list of requests should make them in the list's order. The effects
+/// combine back to front, because `map2` puts its left side's failures first
+/// and the recursion this replaces nested to the right — combining the other
+/// way round reverses the error list, which for an accumulating applicative is
+/// the whole thing it is for.
+///
+/// Doing it in one loop gets one of the two wrong, which is why there are two.
+/// `Option` is the applicative here because `Validated` deliberately is not
+/// one; the recorder is what pins the call order.
+#[test]
+fn traversing_keeps_both_of_its_orders() {
+    let out = run(
+        "text_traverse_order",
+        &program(
+            r#"  print(shown_list(List::traverse([1, 2, 3], fn n => Option::Some(n * 10))));
+  // One failure fails the whole thing.
+  print(shown_list(List::traverse([1, 2, 3],
+    fn n => if n == 2 { Option::None } else { Option::Some(n) })));
+  print(shown_list(List::traverse(empty(), fn n => Option::Some(n))));
+
+  // `f` runs front to back.
+  let seen = Shared::of("");
+  let _ = List::traverse([1, 2, 3], fn n => {
+    Shared::update(seen, fn so_far => so_far + Int::to_string(n));
+    Option::Some(n)
+  });
+  print(Shared::get(seen));"#,
+        ),
+    );
+
+    assert_eq!(out, "[10, 20, 30]\nnone\n[]\n123\n");
 }

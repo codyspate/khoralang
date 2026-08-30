@@ -442,7 +442,18 @@ impl<'a> Checker<'a> {
         // owner names the *impl* rather than the trait, which is the reading a
         // caller with a concrete type in hand wants: they know what they have,
         // not which trait declared the function.
-        if self.types.adts.contains_key(owner) {
+        //
+        // **Asked of any owner, not only a declared one.** This used to be
+        // gated on `types.adts`, which holds the types the program *declares*
+        // -- so `Decimal::show(x)` resolved and `Int::show(x)` did not, with
+        // the same impl written the same way three hundred lines apart in the
+        // same file. `Int`, `Bool`, `String` and the fixed-width integers have
+        // no declaration to be in that map, and a caller has no way to know
+        // which side of the line a type falls on. The search itself is by the
+        // impl's own head, so an owner with no impls simply finds nothing and
+        // falls through to the trait lookup below, which is what `Show::show`
+        // and a bounded type parameter both need.
+        {
             let found = self.types.traits.impls.iter().find(|i| {
                 traits::head_of(&i.self_type).as_deref() == Some(owner)
                     && i.methods.iter().any(|m| m == name)
@@ -486,6 +497,12 @@ impl<'a> Checker<'a> {
                             "`{owner}` has no constructor or function named `{name}`"
                         ),
                     }
+                } else if bounds.is_empty() && self.names_a_type(owner) {
+                    // A type asked for a function it has not got. Saying it
+                    // "is not a trait" answers a question the caller did not
+                    // ask -- and for a builtin it is the only thing they were
+                    // told.
+                    format!("`{owner}` has no function named `{name}`")
                 } else if bounds.is_empty() {
                     format!("`{owner}` is not a trait with a function named `{name}`")
                 } else {

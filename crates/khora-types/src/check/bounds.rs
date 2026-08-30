@@ -49,6 +49,29 @@ impl<'a> Checker<'a> {
     }
 
     /// The traits the enclosing function requires of `param`.
+    /// Whether `owner` names a type at all, rather than a trait.
+    ///
+    /// Used only to choose wording. A *type* asked for a function it has not
+    /// got wants "has no function named"; saying it "is not a trait" answers a
+    /// question the caller did not ask, and is what `Int::show(x)` and
+    /// `U8::show(x)` were both told.
+    ///
+    /// Three ways to be one, because a type can be known three ways: declared
+    /// in this program, carrying an impl somebody wrote, or built in — and a
+    /// builtin is in neither of the first two maps, which is the whole reason
+    /// the message was wrong for exactly the types a newcomer tries first.
+    pub(super) fn names_a_type(&self, owner: &str) -> bool {
+        self.types.adts.contains_key(owner)
+            || crate::IntKind::parse(owner).is_some()
+            || matches!(owner, "Int" | "Float" | "Bool" | "String")
+            || self
+                .types
+                .traits
+                .impls
+                .iter()
+                .any(|i| crate::traits::head_of(&i.self_type).as_deref() == Some(owner))
+    }
+
     pub(super) fn bounds_on(&self, param: &str) -> Vec<String> {
         self.signature
             .generics

@@ -539,8 +539,22 @@ impl<'a> Ctx<'a> {
         if let [owner, name] = segments.as_slice() {
             // An `effect` names a type too — the type of its handlers — so
             // `Scope::root()` reads the same way `Router::new()` does.
+            //
+            // **And a trait, so `Ord::cmp(a, b)` resolves.** It did not: the
+            // owner of a `::` path had to be a type, so `std::core` could
+            // write `Eq::eq(head, wanted)` — the trait is declared in that
+            // file, and a declared trait *is* an item there — while a module
+            // that imported `Ord` was told it could not resolve `Ord::cmp`.
+            // The same call, refused for being one file further away.
+            //
+            // Which function it is stays the checker's question either way:
+            // `Resolution::TraitItem` carries the owner as written, and
+            // `calls.rs` looks for an impl and then for a trait of that name.
             let is_type = |kind: crate::ItemKind| {
-                matches!(kind, crate::ItemKind::Type | crate::ItemKind::Effect)
+                matches!(
+                    kind,
+                    crate::ItemKind::Type | crate::ItemKind::Effect | crate::ItemKind::Trait
+                )
             };
             let declared_here = self.map.item(owner).is_some_and(|i| is_type(i.kind))
                 || crate::BUILTIN_TYPES.contains(&owner.as_str());

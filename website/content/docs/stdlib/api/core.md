@@ -4456,6 +4456,20 @@ impl Functor for List
 fn map<A, B>(self: List<A>, f: (A) -> B) -> List<B>
 ```
 
+Each element through `f`, in order.
+
+**A loop and not a recursion**, which is the rule every other walk in
+this file already followed: `fold`, `filter`, `any`, `contains`, `zip`
+and `partition` are all `while` with an accumulator, because Khora does
+not promise tail calls and a frame per element dies on a long list. This
+one was `Cons(f(h), t.map(f))` and went over at about forty thousand --
+`map` being, of the lot, the one people reach for first.
+
+Built back to front and reversed, so the answer is in the order the input
+was and `f` is called in that order too. That matters when `f` has
+effects: `map` over a list of requests should make them in the order the
+list is in.
+
 ### Traversable for List
 
 ```khora
@@ -4467,6 +4481,27 @@ impl Traversable for List
 ```khora
 fn traverse<A, B, F: Applicative>(self: List<A>, f: (A) -> F<B>) -> F<List<B>>
 ```
+
+Each element through `f`, with the effects combined and the answers
+collected.
+
+**Two loops rather than a recursion**, for the reason `map` above has
+one, and two rather than one because the order has to survive being made
+iterative. There are two orders and they are not the same:
+
+- **`f` is called front to back**, because it may have effects and a
+  traversal over a list of requests should make them in the order the
+  list is in. That is the first loop.
+- **The effects combine back to front**, because `map2` puts its left
+  side's failures first and the recursion this replaces nested to the
+  right: `map2(f(a), map2(f(b), map2(f(c), pure(Nil))))`. Combining the
+  other way round reverses the error list, which for `Validated` --
+  the one type in `std` built for accumulating errors -- is the whole
+  thing it is for. That is the second loop, over what the first collected
+  in reverse.
+
+Doing it in one loop gets one of the two wrong, which is why there are
+two.
 
 ### Show for Pair<K, V>
 

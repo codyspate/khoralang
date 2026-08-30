@@ -28,6 +28,81 @@ const SHOW: &str = "module m;\n\
                     pub trait Show { fn show(self) -> String; }\n\
                     impl Show for Int { fn show(self) -> String { \"i\" } }\n";
 
+// --- qualified calls --------------------------------------------------------
+
+/// **`Int::show(x)` did not resolve and `Decimal::show(x)` did.**
+///
+/// The impl search was gated on the map of types the program *declares*, so a
+/// trait method could be called type-qualified on a user type and not on a
+/// builtin — with the same impl written the same way, three hundred lines
+/// apart in the same file. `Int`, `Bool`, `String` and the fixed-width
+/// integers have no declaration to be in that map, and a caller has no way to
+/// know which side of the line a type falls on.
+#[test]
+fn a_trait_method_resolves_type_qualified_on_a_builtin() {
+    assert_clean(&format!("{SHOW}fn f() -> String {{ Int::show(1) }}\n"));
+}
+
+/// And on a declared type, which is the half that always worked and must keep
+/// working: the search is by the impl's own head, so both reach it the same
+/// way.
+#[test]
+fn a_trait_method_resolves_type_qualified_on_a_declared_type() {
+    assert_clean(
+        "module m;\n\
+         pub trait Show { fn show(self) -> String; }\n\
+         pub type Money = { units: Int };\n\
+         impl Show for Money { fn show(self) -> String { \"m\" } }\n\
+         fn f(m: Money) -> String { Money::show(m) }\n",
+    );
+}
+
+/// **A type asked for a function it has not got is a type**, and the message
+/// now says so.
+///
+/// It used to read "`U8` is not a trait with a function named `show`", which
+/// answers a question the caller did not ask — and for a builtin it was the
+/// only thing they were told.
+#[test]
+fn a_type_without_the_function_is_not_told_it_is_not_a_trait() {
+    let found = errors(&format!("{SHOW}fn f() -> String {{ Int::nope(1) }}\n"));
+    assert!(
+        found.iter().any(|e| e.contains("`Int` has no function named `nope`")),
+        "{found:?}"
+    );
+    assert!(
+        !found.iter().any(|e| e.contains("is not a trait")),
+        "the old wording is gone: {found:?}"
+    );
+}
+
+/// **And a name that is nothing at all is still caught**, one step earlier and
+/// with a better message than either wording above.
+///
+/// Worth pinning because the wording change is on the checker's path, and this
+/// says that path is not the one an unknown name takes: resolution refuses it
+/// before the checker ever asks what `gone` is.
+#[test]
+fn a_name_that_is_nothing_at_all_is_refused_by_resolution() {
+    let found = errors("module m;\nfn f() -> Int { Nowhere::gone(1) }\n");
+    assert!(
+        found.iter().any(|e| e.contains("cannot resolve `Nowhere::gone`")),
+        "{found:?}"
+    );
+}
+
+/// **`Ord::cmp(a, b)` from a module that imports `Ord`.**
+///
+/// The owner of a `::` path had to name a *type*, so `std::core` could write
+/// `Eq::eq(head, wanted)` — the trait is declared in that file, and a declared
+/// trait is an item there — while a module one file away was told it could not
+/// resolve `Ord::cmp`. The same call, refused for being imported rather than
+/// declared.
+#[test]
+fn a_trait_method_resolves_trait_qualified() {
+    assert_clean(&format!("{SHOW}fn f() -> String {{ Show::show(1) }}\n"));
+}
+
 // --- resolution -----------------------------------------------------------
 
 #[test]
