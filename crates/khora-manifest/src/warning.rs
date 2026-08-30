@@ -40,19 +40,42 @@ pub struct Warning {
     key: String,
     /// What to do instead, for a key that was removed rather than never known.
     note: Option<&'static str>,
+    /// The schema key this one is probably a misspelling of.
+    ///
+    /// **Because an ignored key and an absent one are the same thing**, and for
+    /// `[permissions]` they are the same thing in the worst direction: a
+    /// manifest with no `[permissions]` table grants everything, so
+    /// `[permission.fs]` -- one letter short -- reads exactly like a program
+    /// that was never sandboxed. The author believes they wrote a sandbox. The
+    /// warning said "unrecognized key" and `check` exited 0.
+    ///
+    /// Taken from the sibling names in the schema at the point the key sits, so
+    /// it is a real key at a real place rather than a guess from a global list.
+    suggestion: Option<&'static str>,
     span: Option<Range<usize>>,
     location: Option<Location>,
 }
 
 impl Warning {
-    pub(crate) fn unknown_key(key: String, span: Option<Range<usize>>, text: &str) -> Warning {
+    pub(crate) fn unknown_key(
+        key: String,
+        suggestion: Option<&'static str>,
+        span: Option<Range<usize>>,
+        text: &str,
+    ) -> Warning {
         Warning {
             kind: WarningKind::UnknownKey,
             key,
             note: None,
+            suggestion,
             location: span.as_ref().map(|span| Location::from_offset(text, span.start)),
             span,
         }
+    }
+
+    /// The nearest sibling name, when this key looks like a misspelling of one.
+    pub fn suggestion(&self) -> Option<&'static str> {
+        self.suggestion
     }
 
     pub(crate) fn removed_key(
@@ -65,6 +88,7 @@ impl Warning {
             kind: WarningKind::RemovedKey,
             key,
             note: Some(note),
+            suggestion: None,
             location: span.as_ref().map(|span| Location::from_offset(text, span.start)),
             span,
         }
@@ -109,8 +133,22 @@ impl fmt::Display for Warning {
             Some(at) => write!(f, "{}: {} `{}`", at, self.kind, self.key)?,
             None => write!(f, "{} `{}`", self.kind, self.key)?,
         }
-        match self.note {
-            Some(note) => write!(f, ": {note}"),
+        if let Some(note) = self.note {
+            return write!(f, ": {note}");
+        }
+        match self.suggestion {
+            // **`permissions` gets a sentence the others do not**, because it
+            // is the one key where being ignored is not the same as doing
+            // nothing. Every other misspelled table leaves a setting at its
+            // default; this one leaves the program unsandboxed, which is the
+            // opposite of what its author was writing when they typed it.
+            Some("permissions") => write!(
+                f,
+                " -- did you mean `permissions`? Nothing is reading it, and a \
+                 manifest with no `[permissions]` table grants everything, so \
+                 this program is running unsandboxed"
+            ),
+            Some(near) => write!(f, " -- did you mean `{near}`?"),
             None => Ok(()),
         }
     }

@@ -643,3 +643,82 @@ fn a_git_dependency_may_name_a_subdirectory() {
     assert_eq!(deps["inner"].subdir.as_deref(), Some("packages/inner"));
     assert_eq!(deps["outer"].subdir, None);
 }
+
+/// **`[permission.fs]` is one letter short and turns the sandbox off.**
+///
+/// A manifest with no `[permissions]` table grants everything, so a misspelled
+/// one reads exactly like a program that was never sandboxed — while its author
+/// believes they wrote a sandbox. What they got was `unrecognized key
+/// permission` and an exit status of 0.
+///
+/// The warning still does not fail the build, which is deliberate and is why
+/// the sentence has to carry the weight: the audit warns rather than errors so
+/// that a manifest written against a newer toolchain stays buildable by an
+/// older one, and that reason does not stop applying because this particular
+/// key is important.
+#[test]
+fn a_misspelled_permissions_table_says_what_it_costs() {
+    let parsed = parse(
+        r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[permission.fs]
+read = ["./data/**"]
+"#,
+    );
+
+    let said = parsed.warnings[0].to_string();
+    assert!(said.contains("did you mean `permissions`?"), "{said}");
+    assert!(said.contains("running unsandboxed"), "{said}");
+    assert_eq!(parsed.warnings[0].suggestion(), Some("permissions"));
+}
+
+/// Every other key gets the suggestion and not the sermon.
+///
+/// `[permissions]` is the one place where being ignored is not the same as
+/// being left at a default, so it is the one place with a second sentence.
+#[test]
+fn another_misspelled_table_gets_only_the_suggestion() {
+    let parsed = parse(
+        r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[fmtt]
+indent-width = 2
+"#,
+    );
+
+    let said = parsed.warnings[0].to_string();
+    assert!(said.contains("did you mean `fmt`?"), "{said}");
+    assert!(!said.contains("unsandboxed"), "{said}");
+}
+
+/// And a key that is not a misspelling of anything says so and stops.
+///
+/// One edit away is the whole of what the suggestion is for — a dropped or
+/// doubled letter, a transposition, a typed-over one. Anything further is a
+/// different key rather than a misspelling of this one, and a guess at it would
+/// be worse than nothing: it would send somebody to rename a line that was
+/// never meant to be that key.
+#[test]
+fn a_key_that_resembles_nothing_is_reported_without_a_guess() {
+    let parsed = parse(
+        r#"
+[package]
+name = "app"
+version = "0.1.0"
+
+[bananas]
+count = 2
+"#,
+    );
+
+    let said = parsed.warnings[0].to_string();
+    assert!(said.contains("unrecognized key `bananas`"), "{said}");
+    assert!(!said.contains("did you mean"), "{said}");
+    assert_eq!(parsed.warnings[0].suggestion(), None);
+}

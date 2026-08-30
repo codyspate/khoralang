@@ -181,10 +181,59 @@ fn walk(node: &Node, schema: &Schema, path: &mut String, text: &str, out: &mut V
             // Reported at the unknown key itself and not descended into: a
             // warning per key underneath an unknown table would bury the one
             // line worth reading.
-            None => out.push(Warning::unknown_key(path.clone(), entry.span.clone(), text)),
+            None => out.push(Warning::unknown_key(
+                path.clone(),
+                nearest(schema, &entry.key),
+                entry.span.clone(),
+                text,
+            )),
         }
         path.truncate(restore);
     }
+}
+
+/// The sibling name `key` is most likely a misspelling of, if any is close.
+///
+/// Only names at *this* point in the schema, so the answer is a key that would
+/// have been legal exactly where the author wrote it. One edit away, which
+/// covers the whole of what this is for: a dropped or doubled letter, a
+/// transposition, or a typed-over one. Anything further is a different key
+/// rather than a misspelling of this one, and guessing at it would be worse
+/// than saying nothing.
+fn nearest(schema: &Schema, key: &str) -> Option<&'static str> {
+    let Schema::Fields(fields) = schema else { return None };
+    fields.iter().map(|(name, _)| *name).find(|name| one_edit_apart(name, key))
+}
+
+/// Whether two names differ by a single insertion, deletion or substitution.
+fn one_edit_apart(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    if a.len() == b.len() {
+        // One substitution: the same length with exactly one column differing.
+        return a.iter().zip(b).filter(|(x, y)| x != y).count() == 1;
+    }
+    // One insertion, which is a deletion read from the other side. Walk both
+    // and allow the longer one to skip exactly once.
+    let (long, short) = if a.len() > b.len() { (a, b) } else { (b, a) };
+    let mut skipped = false;
+    let mut i = 0;
+    for &c in short {
+        if long[i] != c {
+            if skipped {
+                return false;
+            }
+            skipped = true;
+            i += 1;
+            if long[i] != c {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Appends one key to a dotted path.
