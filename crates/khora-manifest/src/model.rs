@@ -92,6 +92,21 @@ pub(crate) struct RawPackage {
     pub(crate) edition: Option<Maybe<String>>,
 }
 
+/// Every edition this toolchain understands.
+///
+/// **Checked, because it was not.** `edition = "1999"` resolved, checked and
+/// built without a word. The field is inert today -- nothing reads it but the
+/// workspace-inheritance bookkeeping -- which is exactly why an unknown value
+/// had nothing to go wrong with and so nothing to notice.
+///
+/// That is the argument for checking it now rather than when it starts to
+/// matter. The two ways to write a value that is not in this list are a typo,
+/// where the line the author thought they were writing was doing nothing; and
+/// an edition newer than this toolchain, where the right answer is "get a newer
+/// `khora`" and the wrong one is to build the project under rules it did not
+/// ask for. Neither is served by silence.
+const EDITIONS: [&str; 1] = ["2026"];
+
 impl RawManifest {
     /// Whether anything here says `workspace = true`.
     ///
@@ -162,12 +177,25 @@ impl RawManifest {
                         "`version` under `[workspace.package]`",
                     ));
                 };
+                let edition = edition.into_option();
+                if let Some(named) = edition.as_deref() {
+                    if !EDITIONS.contains(&named) {
+                        return Err(ManifestError::invalid_value(
+                            "package.edition",
+                            format!(
+                                "`{named}` is not an edition this toolchain knows; it has {}. A newer one means the project wants a newer `khora`, and a typo means this line was doing nothing",
+                                EDITIONS.join(" and "),
+                            ),
+                        ));
+                    }
+                }
+
                 Some(Package {
                     name: raw.name,
                     version,
                     authors: authors.into_option().unwrap_or_default(),
                     publish: publish.into_option(),
-                    edition: edition.into_option(),
+                    edition,
                 })
             }
         };

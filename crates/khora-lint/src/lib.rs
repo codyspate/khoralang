@@ -385,6 +385,50 @@ fn unused_imports(
         mentioned.push("Iterator");
     }
 
+    // **A method call uses the trait that declares the method, and never
+    // writes its name.** `r.area()` mentions `area`; nothing in the file
+    // mentions `Area`, and the type of the call is whatever `area` returns —
+    // so the trait that has to be in scope for the call to resolve looked
+    // unused from both of the places above.
+    //
+    // Reporting it was worse than a wrong warning. Following the advice broke
+    // the program, and what came back was the compiler's own "this is a gap in
+    // the compiler worth reporting" message — so a reader who did as they were
+    // told was then told to file a bug about it.
+    //
+    // Every trait declaring a method of that name counts, not the one the call
+    // actually resolved to. Over-counting makes this lint quieter and cannot
+    // make it wrong: the failure it exists to avoid is calling a live import
+    // dead, and a name that only *might* be the one in use is not evidence
+    // that it is not.
+    // Names in method position: an identifier whose previous meaningful token
+    // is a `.`. Narrower than "every identifier", which would let a trait with
+    // a method called `show` be kept alive by any use of the word anywhere.
+    let traits = &khora_types::type_map(db, file).traits.traits;
+    let mut called: Vec<&str> = Vec::new();
+    let mut previous = None;
+    for index in 0..lexed.len() {
+        let kind = lexed.kind(index);
+        if kind.is_trivia() {
+            continue;
+        }
+        if kind == khora_syntax::SyntaxKind::IDENT
+            && previous == Some(khora_syntax::SyntaxKind::DOT)
+        {
+            let at = lexed.range(index);
+            if !items.imports.iter().any(|import| import.range.contains_range(at)) {
+                called.push(lexed.text(index));
+            }
+        }
+        previous = Some(kind);
+    }
+    let mut through_methods: Vec<String> = Vec::new();
+    for (name, def) in traits {
+        if def.methods.iter().any(|m| called.contains(&m.name.as_str())) {
+            through_methods.push(name.clone());
+        }
+    }
+
     // Every name that shows up in the *type* of anything in this file. See
     // the doc comment: a type reached only through a value is never written.
     let mut in_types: Vec<String> = Vec::new();
@@ -411,6 +455,7 @@ fn unused_imports(
         let used = |name: &khora_hir::ImportedName| {
             mentioned.contains(&name.alias.as_str())
                 || in_types.iter().any(|seen| seen == &name.alias)
+                || through_methods.iter().any(|seen| seen == &name.alias)
         };
         // See the doc comment: without a surviving name, deleting the reported
         // one could take the statement's methods with it.

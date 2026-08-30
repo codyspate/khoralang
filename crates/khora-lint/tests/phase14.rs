@@ -368,3 +368,50 @@ fn it_does_not_try_to_tell_new_from_empty() {
     assert!(ctors("module t;\n\npub fn new() -> Int { 1 }\n").is_empty());
     assert!(ctors("module t;\n\npub fn empty() -> Int { 1 }\n").is_empty());
 }
+
+/// **The sibling of the case above, and it ended somewhere worse.**
+///
+/// A method call names the *method* and never the trait that declares it.
+/// `r.area()` mentions `area`; nothing in the file mentions `Area`, and the
+/// type of the call is whatever `area` returns — so the trait that has to be in
+/// scope for the call to resolve was invisible to both halves of this lint.
+///
+/// Following the advice broke the program, and what came back was the
+/// compiler's own "the type of this expression was never worked out ... this is
+/// a gap in the compiler worth reporting" message. So a reader who did as they
+/// were told was then told to file a bug about the result.
+#[test]
+fn a_trait_a_method_call_needs_is_used() {
+    let found = two(
+        "module lib;\n\n\
+         pub trait Area {\n  fn area(self) -> Int;\n}\n\n\
+         pub type Rect = { w: Int, h: Int }\n\n\
+         impl Area for Rect {\n  fn area(self) -> Int { self.w * self.h }\n}\n",
+        "module u;\n\nimport lib::{Area, Rect};\n\n\
+         pub fn main() -> Int {\n  let r: Rect = { w: 3, h: 4 };\n  r.area()\n}\n",
+    );
+    assert!(found.is_empty(), "`Area` is what makes `r.area()` resolve: {found:?}");
+}
+
+/// And the trait that is *not* called is still reported, which is the half a
+/// fix for the case above could quietly lose.
+///
+/// The scan looks at names in method position only — an identifier after a `.`
+/// — rather than at every identifier in the file. Every identifier would let a
+/// trait with a method called `area` be kept alive by any use of the word
+/// anywhere, including as a local, and this lint would stop saying anything.
+#[test]
+fn a_trait_nothing_calls_is_still_reported() {
+    let found = two(
+        "module lib;\n\n\
+         pub trait Area {\n  fn area(self) -> Int;\n}\n\n\
+         pub trait Perimeter {\n  fn perimeter(self) -> Int;\n}\n\n\
+         pub type Rect = { w: Int, h: Int }\n\n\
+         impl Area for Rect {\n  fn area(self) -> Int { self.w * self.h }\n}\n\n\
+         impl Perimeter for Rect {\n  fn perimeter(self) -> Int { self.w + self.w + self.h + self.h }\n}\n",
+        "module u;\n\nimport lib::{Area, Perimeter, Rect};\n\n\
+         pub fn main() -> Int {\n  let r: Rect = { w: 3, h: 4 };\n  let perimeter = 0;\n  r.area() + perimeter\n}\n",
+    );
+    assert_eq!(found.len(), 1, "only `Perimeter` is unused: {found:?}");
+    assert!(found[0].message.contains("Perimeter"), "{:?}", found[0]);
+}
