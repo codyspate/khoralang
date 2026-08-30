@@ -147,7 +147,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                         .builder
                         .build_int_compare(IntPredicate::SGE, wide, zero, "fits.int")
                         .expect("range-checking a U64");
-                    self.guard(ok, &format!("converting {owner} to Int"));
+                    self.guard(ok, &format!("this {owner} is outside the range of Int"));
                 }
                 Some(wide.into())
             }
@@ -170,7 +170,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .builder
                     .build_int_compare(IntPredicate::EQ, back, value, "fits")
                     .expect("comparing the round trip");
-                self.guard(ok, &format!("converting Int to {owner}"));
+                self.guard(ok, &format!("this Int is outside the range of {owner}"));
                 let _ = range;
                 Some(narrowed.into())
             }

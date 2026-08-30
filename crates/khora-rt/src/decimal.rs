@@ -95,7 +95,7 @@ pub extern "C" fn khora_decimal_low() -> i64 {
     LOW.with(|low| low.get())
 }
 
-/// Stops the program, naming the operation that did not fit.
+/// Stops the program, printing `sentence` as the whole of what happened.
 ///
 /// The same report generated code makes for `Int` arithmetic, so a decimal
 /// that overflows and a multiplication that overflows read the same way.
@@ -105,9 +105,9 @@ pub extern "C" fn khora_decimal_low() -> i64 {
 /// the failure this type exists to prevent" — which is a description of
 /// saturating. `numbers.md` §"Overflow traps, in every build" is the argument
 /// and decimals were never outside it.
-fn overflowed(what: &str) -> ! {
-    // SAFETY: `what` is a string literal in `.rodata`, live for the whole run.
-    unsafe { crate::trap::khora_overflow(what.as_ptr(), what.len() as u64) }
+fn refuse(sentence: &str) -> ! {
+    // SAFETY: a string literal in `.rodata`, live for the whole run.
+    unsafe { crate::trap::khora_overflow(sentence.as_ptr(), sentence.len() as u64) }
 }
 
 /// Ten to the `power`, when that is a number a significand can hold.
@@ -131,8 +131,8 @@ fn ten_to(power: i64) -> Option<i128> {
 
 /// `value` moved to a scale `by` places larger, or a stopped program.
 fn raised(value: i128, by: i64, what: &str) -> i128 {
-    let step = ten_to(by).unwrap_or_else(|| overflowed(what));
-    value.checked_mul(step).unwrap_or_else(|| overflowed(what))
+    let step = ten_to(by).unwrap_or_else(|| refuse(what));
+    value.checked_mul(step).unwrap_or_else(|| refuse(what))
 }
 
 /// Both operands at the larger of their two scales.
@@ -156,9 +156,9 @@ pub extern "C" fn khora_decimal_add(
     b_lo: i64,
     b_scale: i64,
 ) -> i64 {
-    const WHAT: &str = "Decimal addition";
+    const WHAT: &str = "Decimal addition overflowed";
     let (a, b, scale) = aligned(wide(a_hi, a_lo), a_scale, wide(b_hi, b_lo), b_scale, WHAT);
-    deliver(a.checked_add(b).unwrap_or_else(|| overflowed(WHAT)), scale)
+    deliver(a.checked_add(b).unwrap_or_else(|| refuse(WHAT)), scale)
 }
 
 /// `left - right`, at the larger of their scales.
@@ -171,23 +171,23 @@ pub extern "C" fn khora_decimal_sub(
     b_lo: i64,
     b_scale: i64,
 ) -> i64 {
-    const WHAT: &str = "Decimal subtraction";
+    const WHAT: &str = "Decimal subtraction overflowed";
     let (a, b, scale) = aligned(wide(a_hi, a_lo), a_scale, wide(b_hi, b_lo), b_scale, WHAT);
-    deliver(a.checked_sub(b).unwrap_or_else(|| overflowed(WHAT)), scale)
+    deliver(a.checked_sub(b).unwrap_or_else(|| refuse(WHAT)), scale)
 }
 
 /// `left * right`. **The scales add**, which the caller works out itself.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_decimal_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> i64 {
-    const WHAT: &str = "Decimal multiplication";
+    const WHAT: &str = "Decimal multiplication overflowed";
     let (a, b) = (wide(a_hi, a_lo), wide(b_hi, b_lo));
-    deliver(a.checked_mul(b).unwrap_or_else(|| overflowed(WHAT)), 0)
+    deliver(a.checked_mul(b).unwrap_or_else(|| refuse(WHAT)), 0)
 }
 
 /// The same number at a larger scale, exactly, or a stopped program.
 #[unsafe(no_mangle)]
 pub extern "C" fn khora_decimal_rescale(hi: i64, lo: i64, from: i64, to: i64) -> i64 {
-    const WHAT: &str = "Decimal rescaling";
+    const WHAT: &str = "Decimal rescaling overflowed";
     let value = wide(hi, lo);
     if to <= from {
         return deliver(value, from);
@@ -207,7 +207,7 @@ pub extern "C" fn khora_decimal_rescale(hi: i64, lo: i64, from: i64, to: i64) ->
 pub extern "C" fn khora_decimal_truncated(hi: i64, lo: i64, scale: i64) -> i64 {
     let value = wide(hi, lo);
     let Some(step) = ten_to(scale.max(0)) else { return 0 };
-    i64::try_from(value / step).unwrap_or_else(|_| overflowed("Decimal truncation"))
+    i64::try_from(value / step).unwrap_or_else(|_| refuse("Decimal truncation overflowed"))
 }
 
 /// Whether the significand is negative, which its digits do not say.
@@ -357,7 +357,7 @@ pub extern "C" fn khora_decimal_divide(
     scale: i64,
     mode: i64,
 ) -> i64 {
-    const WHAT: &str = "Decimal division";
+    const WHAT: &str = "Decimal division overflowed";
     let (left, right) = (wide(a_hi, a_lo), wide(b_hi, b_lo));
     let scale = scale.max(0);
     if right == 0 {
@@ -373,16 +373,16 @@ pub extern "C" fn khora_decimal_divide(
     let numerator = left.unsigned_abs();
     let mut denominator = right.unsigned_abs();
     let (high, low) = if wanted >= 0 {
-        let step = ten_to(wanted).unwrap_or_else(|| overflowed(WHAT)) as u128;
+        let step = ten_to(wanted).unwrap_or_else(|| refuse(WHAT)) as u128;
         mul_wide(numerator, step)
     } else {
-        let step = ten_to(-wanted).unwrap_or_else(|| overflowed(WHAT)) as u128;
-        denominator = denominator.checked_mul(step).unwrap_or_else(|| overflowed(WHAT));
+        let step = ten_to(-wanted).unwrap_or_else(|| refuse(WHAT)) as u128;
+        denominator = denominator.checked_mul(step).unwrap_or_else(|| refuse(WHAT));
         (0, numerator)
     };
 
     let Some((quotient, remainder)) = div_wide(high, low, denominator) else {
-        overflowed(WHAT)
+        refuse(WHAT)
     };
 
     // Which way a tie goes is the whole of the mode, and the comparison is
@@ -406,11 +406,11 @@ pub extern "C" fn khora_decimal_divide(
     };
 
     let magnitude = if away && remainder != 0 {
-        quotient.checked_add(1).unwrap_or_else(|| overflowed(WHAT))
+        quotient.checked_add(1).unwrap_or_else(|| refuse(WHAT))
     } else {
         quotient
     };
-    deliver(signed_from(magnitude, negative).unwrap_or_else(|| overflowed(WHAT)), scale)
+    deliver(signed_from(magnitude, negative).unwrap_or_else(|| refuse(WHAT)), scale)
 }
 
 /// The significand's digits, without a sign or a point, into `into`.

@@ -64,8 +64,10 @@ pub unsafe extern "C" fn khora_unhandled(name: *const u8, len: u64) {
 ///
 /// # Safety
 ///
-/// `what` must point at `len` bytes naming the operation — generated code
-/// passes a string literal in `.rodata`, live for the program's whole run.
+/// `what` must point at `len` bytes saying what happened, as a whole
+/// sentence: it is printed as given, and the runtime adds only the fiber
+/// clause and the backtrace note. Generated code passes a string literal in
+/// `.rodata`, live for the program's whole run.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_overflow(what: *const u8, len: u64) -> ! {
     let bytes = if len == 0 { &[][..] } else {
@@ -84,7 +86,7 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: u64) -> ! {
         let mut err = std::io::stderr().lock();
         let _ = writeln!(
             err,
-            "khora: {} overflowed{}",
+            "khora: {}{}",
             String::from_utf8_lossy(bytes),
             on_which_fiber()
         );

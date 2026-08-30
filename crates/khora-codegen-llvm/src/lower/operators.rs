@@ -53,7 +53,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     _ => ("mul", "multiplication"),
                 };
                 let intrinsic = format!("llvm.{sign}{verb}.with.overflow.i{bits}");
-                let what = format!("{operand_ty} {what}");
+                let what = format!("{operand_ty} {what} overflowed");
                 Some(self.checked_arithmetic(&intrinsic, bits, &what, l, r))
             }
             BinOp::Div | BinOp::Rem => {
@@ -90,7 +90,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                         .expect("comparing against minus one");
                     let both = b.build_and(is_min, is_neg_one, "overflows").expect("both");
                     let ok = b.build_not(both, "in.range").expect("negating");
-                    self.guard(ok, &format!("{operand_ty} division"));
+                    self.guard(ok, &format!("{operand_ty} division overflowed"));
                 }
 
                 let b = &self.be.builder;
