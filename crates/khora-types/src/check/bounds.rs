@@ -48,7 +48,6 @@ impl<'a> Checker<'a> {
         (Type::Adt { name: declared, home, args }, mapping)
     }
 
-    /// The traits the enclosing function requires of `param`.
     /// Whether `owner` names a type at all, rather than a trait.
     ///
     /// Used only to choose wording. A *type* asked for a function it has not
@@ -72,6 +71,7 @@ impl<'a> Checker<'a> {
                 .any(|i| crate::traits::head_of(&i.self_type).as_deref() == Some(owner))
     }
 
+    /// The traits the enclosing function requires of `param`.
     pub(super) fn bounds_on(&self, param: &str) -> Vec<String> {
         self.signature
             .generics

@@ -344,6 +344,7 @@ const authority = CA_PEM;
 /// `rustls` configuration behind an `Arc` is safe for any number of readers,
 /// and a client that could not reach the fiber doing the calling would not be
 /// much of a client.
+///
 /// Answers for itself, because a fiber's body cannot raise — whatever went
 /// wrong has nobody left to tell.
 fn call(caller: TlsClient) -> () {

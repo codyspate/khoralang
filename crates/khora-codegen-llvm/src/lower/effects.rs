@@ -420,7 +420,6 @@ impl<'ctx> Lower<'_, 'ctx> {
         Some(merged.as_basic_value())
     }
 
-    /// What a `Channel<A>` carries, at this instantiation.
     /// What a `Fiber<A, 'r>` answers, and what it can raise.
     ///
     /// From the handle's own type where it has one, and otherwise from what
@@ -450,6 +449,7 @@ impl<'ctx> Lower<'_, 'ctx> {
         None
     }
 
+    /// What a `Channel<A>` carries, at this instantiation.
     pub(super) fn channel_contents(
         &mut self,
         site: ExprId,

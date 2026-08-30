@@ -83,6 +83,14 @@ step 'no text a quoting slip mangled'
 # that reached `main` before it existed.
 sh "$root/scripts/no-mangled-text.sh"
 
+step 'no doc comment on the wrong item'
+# The sibling of the check above, and the same kind of defect: an edit produces
+# something valid that says the wrong thing. Twenty-seven doc comments in this
+# tree had been separated from the item they were written for, eleven of them
+# describing something else entirely, and every test passed the whole time --
+# `std_surface` counts doc comments and the count never moved.
+sh "$root/scripts/no-stranded-docs.sh"
+
 step 'the corpus checks'
 # `std` on its own, because it is not a workspace member: it is found beside
 # the compiler rather than resolved through a manifest, and it has no

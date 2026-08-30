@@ -240,6 +240,7 @@ pub enum Expr {
     /// and reference counting does not collect cycles. It need not be a
     /// reference at all — a lifted lambda already receives its own closure
     /// object as its first argument, so self-recursion goes through that.
+    ///
     /// See `docs/design/memory.md` §3.
     LambdaSelf,
     /// `{ x: 1, y: 2 }`, or the operations of a `handler for E { .. }`.
@@ -940,20 +941,6 @@ impl<'a> Ctx<'a> {
 }
 
 
-/// A string literal's actual bytes.
-///
-/// `"a\nb"` is three characters and a newline, not four characters and a
-/// backslash. Nothing did this until an HTTP response went out with a literal
-/// `\r\n` in it, four bytes where two were meant, and a client that read the
-/// status line as the whole message.
-///
-/// The set is the small one every language has, and an unrecognised escape
-/// keeps its backslash: `\d` stays `\d`, which is what a regular expression
-/// written in a string wants and what the alternative — silently dropping the
-/// backslash — is worst at.
-///
-/// Only the outermost pair of quotes is removed. `trim_matches` took them all,
-/// so `""""` lost more than it should have.
 /// One piece of an interpolated string, and where in the literal it began.
 struct Piece {
     text: String,
@@ -1142,6 +1129,20 @@ fn unescape_body(inner: &str) -> String {
     unescape_inner(inner)
 }
 
+/// A string literal's actual bytes.
+///
+/// `"a\nb"` is three characters and a newline, not four characters and a
+/// backslash. Nothing did this until an HTTP response went out with a literal
+/// `\r\n` in it, four bytes where two were meant, and a client that read the
+/// status line as the whole message.
+///
+/// The set is the small one every language has, and an unrecognised escape
+/// keeps its backslash: `\d` stays `\d`, which is what a regular expression
+/// written in a string wants and what the alternative — silently dropping the
+/// backslash — is worst at.
+///
+/// Only the outermost pair of quotes is removed. `trim_matches` took them all,
+/// so `""""` lost more than it should have.
 fn unescape(text: &str) -> String {
     let inner = strip_quotes(text);
     if text.starts_with('`') {

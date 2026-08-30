@@ -13,7 +13,7 @@ If `khora --version` does not work yet, start with [Installation](/docs/getting-
 Create a directory like this:
 
 ```text
-hello-khora/
+hello_khora/
 ├── khora.toml
 └── src/
     └── main.kh
@@ -23,7 +23,7 @@ The manifest names the package and selects the language edition:
 
 ```toml
 [package]
-name = "hello-khora"
+name = "hello_khora"
 version = "0.1.0"
 edition = "2026"
 ```

@@ -133,6 +133,7 @@ pub fn accept_on(server: Int) -> Int {
 /// to a call that would have blocked, and a socket the reactor drives never
 /// has one — so it goes silently inert the moment the socket is prepared, and
 /// the client this exists to shed would park a fiber for ever instead.
+///
 /// The runtime keeps the deadline and a scheduler timer enforces it. A read
 /// that runs out still comes back negative, which is what every caller here
 /// already treats as a connection to give up on.

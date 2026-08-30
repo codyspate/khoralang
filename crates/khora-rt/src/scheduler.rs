@@ -125,6 +125,7 @@ struct Shared {
     /// that has suspended but whose worker has not yet filed it is in `parked`
     /// under neither key, so waking it through that map drops the wake and it
     /// sleeps for ever — `cancelling_a_sleeping_fiber_wakes_it_to_notice`.
+    ///
     /// A waker needs the *state* to set `NOTIFIED` on, and that exists from the
     /// moment the fiber does.
     live: Mutex<std::collections::HashMap<usize, Arc<crate::current::Fiber>>>,

@@ -264,6 +264,7 @@ pub(crate) fn resuming_now() -> usize {
 /// **This is a safepoint, not a cancellation point.** It cannot fail and
 /// nothing unwinds through it — which is what lets an infallible loop, which
 /// has no cancellation point at all, be preempted.
+///
 /// `docs/design/scheduler.md` §1.
 pub(crate) fn suspend() -> bool {
     let yielder = installed();

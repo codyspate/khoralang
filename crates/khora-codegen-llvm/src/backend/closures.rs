@@ -15,6 +15,7 @@ impl<'ctx> Backend<'ctx> {
     /// the lambda's own parameters after it, which is what makes an indirect
     /// call possible without knowing anything about the captures at the call
     /// site.
+    ///
     /// `shape` is the lambda's `Type::Fn` — all four of what it takes, gives
     /// back, can fail with and has to be handed, which travel together because
     /// they are one type.

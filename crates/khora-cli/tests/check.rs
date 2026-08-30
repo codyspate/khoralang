@@ -506,6 +506,7 @@ const PADDING: &str = "module fixture::first;
 /// A long doc comment, so this file has text at the byte offsets the error in
 /// `main.kh` will be rendered at if anything renders it here by mistake.
 /// Another line, to be sure of it.
+///
 /// And another.
 pub fn helper() -> Int { 1 }
 ";

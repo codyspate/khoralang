@@ -83,6 +83,7 @@ fn the_standard_library_type_checks() {
 /// that story, the `Unknown` audit is what ended it, and
 /// `docs/design/polymorphic-operations.md` is the decision that made the
 /// program true rather than the test lenient.
+///
 /// `packages/` is in each source set because `examples/ledger_service` depends
 /// on `postgres`. A real build resolves that through the manifest; this test
 /// has no resolver, so it is handed the whole tree.

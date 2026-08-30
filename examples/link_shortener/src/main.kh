@@ -295,6 +295,7 @@ fn links_file() -> String
 /// at startup, so the format that matters is the one that appends cheaply and
 /// survives a half-written last line. A tab cannot appear in a code, and a URL
 /// containing one was already not a URL.
+///
 /// **Reads the cell rather than taking a snapshot**, because a caller's
 /// snapshot is already old. Two fibers that both changed something race to
 /// write, and whichever lands last wins — with this, the loser wrote a subset

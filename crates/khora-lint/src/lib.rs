@@ -149,6 +149,7 @@ pub const DISCARDED_RESULT: &str = "discarded-result";
 ///
 /// The advice this gives will change — today it is "restructure or accept the
 /// leak", and when weak references exist it becomes "make this field weak".
+///
 /// A lint's name goes in somebody's `khora.toml`, so a name that describes the
 /// *remedy* would have to be renamed when the remedy changes, and renaming one
 /// breaks every manifest that mentions it. `reference-cycle` is true either

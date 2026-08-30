@@ -203,26 +203,6 @@ pub type Transport = {
 };
 ```
 
-Reads one request into `into`, and says how many bytes arrived.
-
-Stops at whichever comes first: the body is as long as `Content-Length`
-promised, the peer closed, the buffer filled, or the read deadline passed.
-
-**It used to stop on a short read as well, and that was a real interop
-failure.** A client is allowed to write its headers and its body separately
-— .NET's `HttpClient` does, and so does anything that sets a body from a
-stream — and the pause between the two reads as the end of the request. The
-server then answered `400` about a body that had not arrived yet, *before*
-the client had finished sending it. Reproduced with a socket and a
-three-hundred-millisecond sleep; curl never showed it, because curl writes
-small requests in one go.
-
-The rule was there for a reason, which is why it survived: `receive` blocks,
-so "keep reading until the request is complete" and "keep reading forever"
-are the same loop when the client stops talking. What makes the honest
-version safe is the deadline `serve_connection` sets before calling this —
-a client that goes quiet gets its socket closed instead of parking a fiber
-for the life of the process.
 How to speak to one client, whatever is underneath.
 
 **Three closures rather than a socket handle**, because a plain connection
@@ -818,6 +798,11 @@ Renders `response` and sends it.
 `keep` decides the `Connection` header, and is what [`Incoming::Arrived`]
 reported unless the caller has its own reason to close.
 
+The two travel together because they are decided together: the answer's
+status and the request's `Connection` header are both known once, at the
+point the request has been parsed, and working either out again afterwards
+means reading the request a second time.
+
 #### shut
 
 ```khora
@@ -832,12 +817,6 @@ Ends the conversation and releases the transport.
 impl Router
 ```
 
-A response, and whether the connection that asked for it is staying open.
-
-The two travel together because they are decided together: the answer's
-status and the request's `Connection` header are both known once, at the
-point the request has been parsed, and working either out again afterwards
-means reading the request a second time.
 Mounting is written `router |> Router::post(..)`, so the router is the
 first parameter of each. They are the type's own functions rather than free
 ones so that the pipeline reads as a chain against `Router` and cannot
@@ -934,7 +913,6 @@ Serves until the process stops, on a fiber per connection.
 pub fn listen_tls<'er>(router: Router<'er>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'er + HttpError + TlsError
 ```
 
-Accepts for as long as the process lives.
 The same, over TLS.
 
 Takes the certificate chain and the key as PEM rather than as paths: a
@@ -1100,7 +1078,13 @@ A request read off the wire.
 pub fn default_limit() -> Int
 ```
 
-The most a request may be. Anything longer gets a 413.
+The most a request may be, headers and body together, unless a caller
+says otherwise.
+
+Eight kilobytes is what a buffer costs per connection, and a connection is
+what a fiber costs — so this is the number that decides how many callers a
+server can hold, not a guess about how big a request is. `Connection::holding`
+takes another.
 
 The buffer is allocated once at this size and never grows, which is what
 makes a lying `Content-Length` harmless: the header is a promise about what
@@ -1119,13 +1103,6 @@ others allow, because the question it answers changed rather than
 disappeared. It is no longer "how much can we survive" but "how much may an
 unauthenticated client make a server hold", and that is a smaller number
 than the one the stack would now permit.
-The most a request may be, headers and body together, unless a caller
-says otherwise.
-
-Eight kilobytes is what a buffer costs per connection, and a connection is
-what a fiber costs — so this is the number that decides how many callers a
-server can hold, not a guess about how big a request is. `Connection::holding`
-takes another.
 
 ### over_socket
 
@@ -1154,8 +1131,6 @@ pub fn request_length(bytes: Array<U8>, filled: Int) -> Int
 
 How long the whole request should be, or negative while the headers are
 still arriving.
-How many bytes the request starting at 0 is, or 0 if it has not all
-arrived.
 
 **The framing primitive.** A reader needs to know when to stop, and HTTP
 answers that in two parts: the headers end at a blank line, and

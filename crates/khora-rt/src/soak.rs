@@ -541,6 +541,7 @@ fn adversarial_execution_leaves_nothing_behind() {
 /// during them, and counting that as a leak would make the check cry wolf.
 ///
 /// Ignored, because it is the version that takes minutes.
+///
 /// `cargo test -p khora-rt -- --ignored --nocapture soak`
 #[test]
 #[ignore = "the long soak; run it deliberately"]

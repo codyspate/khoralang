@@ -763,14 +763,6 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
     Ok(total == 0)
 }
 
-/// How loud each lint is, from the `[lints]` table nearest `start`.
-///
-/// A lint the manifest does not mention warns: this set is quiet enough to be
-/// worth hearing and not worth failing a build over.
-///
-/// A manifest that cannot be read contributes nothing rather than failing the
-/// command — complaining about the manifest is `khora check`'s job, not every
-/// other command's.
 /// Prints what the manifest audit noticed, if anything.
 ///
 /// **Nothing printed these until now.** `khora-manifest` has read every
@@ -817,6 +809,14 @@ fn fmt_options(start: Option<&Path>) -> khora_fmt::Options {
     }
 }
 
+/// How loud each lint is, from the `[lints]` table nearest `start`.
+///
+/// A lint the manifest does not mention warns: this set is quiet enough to be
+/// worth hearing and not worth failing a build over.
+///
+/// A manifest that cannot be read contributes nothing rather than failing the
+/// command — complaining about the manifest is `khora check`'s job, not every
+/// other command's.
 fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintLevel> {
     let mut out = std::collections::BTreeMap::new();
     let Some(manifest_path) = start.and_then(nearest_manifest) else { return out };

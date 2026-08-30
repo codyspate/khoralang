@@ -649,18 +649,6 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
     map
 }
 
-/// Brings every inherent impl of an imported module into view.
-///
-/// Every one, not only the ones whose type was named in the import. A value can
-/// arrive without its type ever being written down — `req.params` has type
-/// `Params`, and `req.params.get(..)` should work whether or not the file
-/// imported `Params` — and there is nothing to shadow, since an inherent impl
-/// is not a name but a method reached by having a value.
-///
-/// **What gates it is `pub`, not the import.** The copy is marked `foreign`, so
-/// `InherentImpl::visible` answers for another module and only exported methods
-/// bring a signature across: a hidden method is not merely unreachable, its
-/// type is not here to be read.
 /// Whether `head` names a type a program can write without importing it.
 ///
 /// The list is short and closed: these are the types the language spells and
@@ -744,6 +732,18 @@ pub(crate) fn import_builtin_impls(exported: &TypeMap, map: &mut TypeMap) {
     }
 }
 
+/// Brings every inherent impl of an imported module into view.
+///
+/// Every one, not only the ones whose type was named in the import. A value can
+/// arrive without its type ever being written down — `req.params` has type
+/// `Params`, and `req.params.get(..)` should work whether or not the file
+/// imported `Params` — and there is nothing to shadow, since an inherent impl
+/// is not a name but a method reached by having a value.
+///
+/// **What gates it is `pub`, not the import.** The copy is marked `foreign`, so
+/// `InherentImpl::visible` answers for another module and only exported methods
+/// bring a signature across: a hidden method is not merely unreachable, its
+/// type is not here to be read.
 pub(crate) fn import_inherent(exported: &TypeMap, map: &mut TypeMap) {
     for imp in &exported.traits.inherent {
         // Marked before the duplicate check, or the same impl arrives once per
@@ -1144,7 +1144,6 @@ fn reachable_from(exported: &TypeMap, name: &str) -> Reached {
     Reached { bodies: found, generics, mentioned: seen }
 }
 
-/// Every ADT name a type mentions, at any depth.
 /// Every ADT name a type mentions, **including through a function type**.
 ///
 /// The difference from [`type_names`] is one arm and it is deliberate on both
@@ -1190,6 +1189,7 @@ fn type_names_through_functions(ty: &Type) -> Vec<String> {
     out
 }
 
+/// Every ADT name a type mentions, at any depth.
 fn type_names(ty: &Type) -> Vec<String> {
     let mut out = Vec::new();
     fn walk(ty: &Type, out: &mut Vec<String>) {

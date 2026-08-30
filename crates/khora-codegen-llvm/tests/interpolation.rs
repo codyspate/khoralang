@@ -133,10 +133,6 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
-/// The type error is `+`'s, which is the right one — and it points at the
-/// expression inside the hole rather than at the string, which is what
-/// `Ctx::range_shift` is for: the hole is parsed as a little source file of its
-/// own, so its ranges start again at zero and have to be moved back.
 /// **A hole holds any value that can be shown**, which it did not.
 ///
 /// `"there are ${count} of them"` where `count: Int` was `string
@@ -149,6 +145,11 @@ fn main() -> Int {{
 /// holding an `Int` here has nothing to call — which is the *other* half of
 /// the rule and the one this test pins: the requirement is real, and it is
 /// reported at the hole rather than as a confusing complaint about `+`.
+///
+/// It is reported at the expression inside the hole rather than at the
+/// string, which is what `Ctx::range_shift` is for: the hole is parsed as a
+/// little source file of its own, so its ranges start again at zero and have
+/// to be moved back.
 #[test]
 fn a_hole_needs_a_show_for_what_it_holds() {
     let found = refused(

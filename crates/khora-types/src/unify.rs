@@ -536,12 +536,6 @@ impl Unifier {
         Ok(())
     }
 
-    /// Whether a row entry's label is one it has not earned yet.
-    ///
-    /// True when the entry's type is still a variable *and* its label is that
-    /// variable's rendering — which is what makes it an error-row entry whose
-    /// type nobody has decided. A capability's label is a name someone wrote,
-    /// and stays itself however its type is solved.
     /// Re-reads the label of every entry whose type has been solved since the
     /// row was built. See `unify_rows` for why.
     fn relabel(&self, fields: &[(String, Type)]) -> Vec<(String, Type)> {
@@ -558,6 +552,12 @@ impl Unifier {
             .collect()
     }
 
+    /// Whether a row entry's label is one it has not earned yet.
+    ///
+    /// True when the entry's type is still a variable *and* its label is that
+    /// variable's rendering — which is what makes it an error-row entry whose
+    /// type nobody has decided. A capability's label is a name someone wrote,
+    /// and stays itself however its type is solved.
     fn is_nameless(&self, label: &str, ty: &Type) -> bool {
         matches!(self.shallow(ty), Type::Var(_)) && label == row_label(ty)
     }

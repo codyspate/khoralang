@@ -46,6 +46,16 @@
 //! which is the same absence `khora-doc` had to read the syntax tree to work
 //! around — so `Show::show` lands on `trait Show`. Better than nothing and
 //! honest about which thing it found.
+//!
+//! **A local answers from both ends, because a rename is asked for from
+//! either.** Somebody renaming `total` is as likely to have the cursor on
+//! the `let` as on one of the uses, and a lookup that only understood uses
+//! would refuse the more natural of the two. So [`local_use_at`] and
+//! [`local_binding_at`] are a pair, and [`at`] tries them in that order.
+//!
+//! Bodies are searched in order and the first hit wins. A body's ranges do
+//! not overlap another's — a function is one body — so there is no
+//! ambiguity to resolve, only a scan to stop early.
 
 use khora_db::{Db, SourceFile, SourceRoot};
 use khora_hir::{ItemMap, ModulePath, Resolution};
@@ -90,16 +100,6 @@ impl LocalBinding {
     }
 }
 
-/// The local named at `offset`, whether the cursor is on a use or the binding.
-///
-/// **Both ends, because a rename is asked for from either.** Somebody renaming
-/// `total` is as likely to have the cursor on the `let` as on one of the uses,
-/// and a lookup that only understood uses would refuse the more natural of the
-/// two.
-///
-/// Bodies are searched in order and the first hit wins. A body's ranges do not
-/// overlap another's — a function is one body — so there is no ambiguity to
-/// resolve, only a scan to stop early.
 /// A local named by a *use* at `offset`.
 ///
 /// The narrow half, and the one that runs before paths: an `Expr::Local`'s

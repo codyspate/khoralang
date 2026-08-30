@@ -297,6 +297,7 @@ pub(crate) struct Backend<'ctx> {
     /// Per-ADT `drop_fields` routines. `None` records a type that owns no
     /// references, so drop sites pass a null callback rather than calling a
     /// routine that would do nothing.
+    ///
     /// Keyed by the *instantiated* type, not the type's name. `Box<String>`
     /// owns a reference and `Box<Int>` does not, so one routine per name would
     /// be wrong for whichever of them it was not written for.

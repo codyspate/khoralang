@@ -948,7 +948,6 @@ fn gather(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The `[lints]` levels for a workspace, or the defaults.
 /// The `[fmt]` settings for a workspace, or the formatter's own defaults.
 ///
 /// The same reading `khora fmt` does, and it has to stay the same reading:
@@ -967,6 +966,7 @@ fn fmt_options(root: &Path) -> khora_fmt::Options {
     }
 }
 
+/// The `[lints]` levels for a workspace, or the defaults.
 fn lint_levels(root: &Path) -> HashMap<String, LintLevel> {
     let mut out = HashMap::new();
     let Ok(parsed) = khora_manifest::Manifest::load(&root.join("khora.toml")) else {

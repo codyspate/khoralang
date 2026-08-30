@@ -336,19 +336,6 @@ pub type Pair<K, V> = {
 };
 ```
 
-A hash map from `Int` keys.
-
-Written in Khora, out of an array for the buckets and a `mut` field for the
-count — which is what phase 6 was for. Nothing below this is a compiler
-feature.
-
-Keys are `Int` because hashing a string means walking its bytes, and there
-are no bytes yet — that arrives with fixed-width integers, and is the first
-thing to revisit here.
-
-The bucket count is always a power of two, which is what lets `slot` mask
-instead of dividing. `new` starts at eight and `grow` doubles, so nothing
-else has to maintain it.
 One key and the value under it.
 
 ### Least
@@ -489,14 +476,6 @@ How big the first allocation should be. Meaningless once there is one.
 pub type SharedFn<A, B, 'er>;
 ```
 
-The fibers a block is responsible for.
-
-Releasing one *cancels its children and waits*, which is the answer for a
-block that did not finish — a raise, or a cancellation, passing through. On
-the ordinary path `nursery` has already waited, so the release finds
-nothing to stop. That is how one value means both "wait for the children"
-and "the answers are no longer wanted" without ever being told which
-happened.
 A function two fibers may hold.
 
 A closure is never shareable on its own: what it captured is not in its
@@ -622,6 +601,11 @@ Releasing one cancels its children and waits for them, which is where
 structured concurrency comes from — a fiber cannot escape the block that
 started it, because the binding holding the nursery ends on every path out.
 `nursery` is the ordinary way to get one. `docs/design/fibers.md`.
+
+One value means both "wait for the children" and "the answers are no
+longer wanted", without ever being told which of the two it is: on the
+ordinary path `nursery` has already waited, so the release finds nothing
+left to stop.
 
 ## Traits
 
@@ -1349,20 +1333,6 @@ already linearithmic.
 pub fn min(self) -> Option<A>
 ```
 
-Two sorted lists, as one.
-
-`<=` rather than `<` on the tie, which is exactly what makes the sort
-stable: an element from the left half goes first when they are equal, and
-the left half is the earlier one.
-**Written as a loop, because this is where the depth was.** It recursed
-once per element -- `Cons(mine, merge(..))` is not a tail call -- so
-merging the two halves at the top of the sort took one stack frame for
-every element in the list, and a sort of twenty-seven thousand durations
-killed the process with nothing on either stream.
-
-The algorithm is unchanged and so is the stability. What was wrong was
-never the merge sort; it was that every walk of a `List` in this library
-was as deep as the list was long.
 The smallest element, or nothing if there are none.
 
 `Option` rather than a fallback, because the smallest of nothing is not a
@@ -2063,13 +2033,6 @@ impl String
 pub fn slice(self, from: Int, to: Int) -> String
 ```
 
-The bytes from `from` up to but not including `to`.
-
-**Byte indices, and no rounding.** A range that splits a character gives
-back bytes that are not text, and `from_bytes` stops the program rather
-than pretend — which is the honest failure for a caller who sliced by
-eye. Indices outside the string are clamped, because "the rest of it" is
-what every caller of `slice(i, byte_length(s))` means.
 The bytes from `from` up to `to`, clamped to what is there.
 
 **One allocation and one copy**, which is why it is a compiler intrinsic
@@ -2085,6 +2048,10 @@ bargain `String::byte` makes about an index. The check is two byte reads
 rather than a walk: the input is already UTF-8, so the only way out of it
 is a cut through a multi-byte character, and that shows up as a
 continuation byte at one end or the other.
+
+Indices outside the string are clamped rather than refused, because
+"the rest of it" is what every caller of `slice(i, byte_length(s))`
+means.
 
 #### find
 
@@ -2187,12 +2154,6 @@ Whether there are no bytes at all.
 pub fn trim(self) -> String
 ```
 
-The text either side of the first `separator`, or `None` if it is absent.
-
-One split rather than a list of them, because a list wants an allocation
-per piece and every caller here wants the head and the rest. A record
-rather than a pair, because `.head` says which one it is and `.0` does
-not.
 The string without leading or trailing whitespace.
 
 Space, tab, carriage return and newline -- the four a line of text picks
@@ -2322,6 +2283,11 @@ not appear.
 For a header line, a `key=value` pair, a URL and its query — anywhere the
 separator may legitimately appear again in the second half and splitting
 on every one of them would be wrong.
+
+One split rather than a list of them, because a list wants an
+allocation per piece and every caller here wants the head and the
+rest. A record rather than a pair, because `.head` says which one it
+is and `.0` does not.
 
 #### pad_left
 
@@ -2507,6 +2473,7 @@ Needed by anything that puts a number in a message — a `Content-Length`,
 a status line, a log — and written here rather than in the runtime
 because it is four lines of Khora and a good test of whether they are
 pleasant to write.
+
 **The most negative `Int` prints**, which took a second attempt. Taking
 its magnitude with `0 - self` overflows — that is the whole peculiarity
 of the number — so it stopped the program instead, reporting a

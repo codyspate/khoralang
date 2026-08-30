@@ -609,6 +609,7 @@ const NESTED: &str = "module m;\n\
 /// `Full`'s payload is `A` -- a `Param`, which the column builder answered
 /// `Opaque` for -- and the column inside `Full` could not be expanded. A match
 /// with an arm for every `Reason` was told `Full(_)` was not covered.
+///
 /// Errata 58.
 #[test]
 fn a_nested_constructor_under_a_generic_completes_a_match() {

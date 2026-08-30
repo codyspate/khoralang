@@ -185,6 +185,7 @@ pub unsafe extern "C" fn khora_float_text(value: f64, into: *mut u8, capacity: i
 /// thousand lines. This one is bound because the obvious Khora version --
 /// multiply by `10^places`, round, divide back -- does its rounding in binary
 /// floating point, which is the exact error `std::decimal` exists to avoid.
+///
 /// A percentage that renders as `33.33` on one machine and `33.34` on another
 /// is the bug, and it is introduced by the arithmetic rather than by the
 /// formatting.

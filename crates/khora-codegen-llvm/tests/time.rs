@@ -174,6 +174,7 @@ fn weekdays_are_iso_numbered() {
 ///
 /// `2024-02-28` plus 366 is `2025-02-28`, not the first of March: the span
 /// contains the leap day, so a year later is 366 days away rather than 365.
+///
 /// I expected March and the calendar was right.
 #[test]
 fn adding_days_crosses_every_boundary() {

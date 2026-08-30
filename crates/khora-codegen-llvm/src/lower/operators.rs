@@ -140,6 +140,7 @@ impl<'ctx> Lower<'_, 'ctx> {
     /// `khora_str_eq` over two strings, as the C `_Bool` the runtime returns.
     ///
     /// **Borrows both**, unlike [`Self::compare_strings`], which owns them.
+    ///
     /// A literal pattern compares against a scrutinee the `match` still holds
     /// and a static literal nothing owns, so neither may be released here.
     pub(super) fn strings_equal(
