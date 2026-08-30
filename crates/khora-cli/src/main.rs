@@ -1294,6 +1294,21 @@ fn test(path: &Path, filter: Option<&str>) -> Result<bool> {
 /// Compiles the `bench` blocks and times them.
 #[cfg(feature = "llvm")]
 fn bench(path: &Path, filter: Option<&str>) -> Result<bool> {
+    // **Which profile these numbers came from, before any of them.** There is
+    // no `--release` here on purpose -- `khora test` and `khora bench` read
+    // `KHORA_PROFILE`, and `docs/design/profiles.md` argues that a flag on
+    // every subcommand is three ways to say one thing. What was missing is the
+    // other half of that bargain: if the profile is not on the command line
+    // then it has to be in the output, or a debug number and a release number
+    // look identical on the page somebody pastes them into.
+    //
+    // Measured on a small integer loop, the two differ by about a factor of
+    // two, and by much more on anything the optimizer can see through.
+    let profile = khora_codegen_llvm::Profile::from_env();
+    println!("benchmarks, built {}", profile.name());
+    if profile == khora_codegen_llvm::Profile::Debug {
+        println!("note: unoptimized. `KHORA_PROFILE=release khora bench` for the other number");
+    }
     harness(path, filter, "khora-benches", khora_codegen_llvm::compile_benches)
 }
 

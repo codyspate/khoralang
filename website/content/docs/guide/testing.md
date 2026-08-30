@@ -116,6 +116,14 @@ khora bench . --filter payload
 
 The benchmark runner compiles and times `bench` blocks. Keep setup that is not part of the measurement outside the operation you intend to compare when the benchmark design allows it.
 
+**Benchmarks build unoptimized unless you say otherwise**, like everything else the toolchain compiles — a language being brought up should give you a readable crash by default. There is no `--release` flag here; `khora test` and `khora bench` read `KHORA_PROFILE`, because a flag on every subcommand is three ways to say one thing:
+
+```bash
+KHORA_PROFILE=release khora bench .
+```
+
+`khora bench` prints which profile it used above the results, so a number pasted into an issue carries that with it. A small integer loop differs by about a factor of two between the two; code the optimizer can see through differs by much more.
+
 ## Test failure and cancellation paths
 
 Khora's strongest guarantees matter when control flow does not return normally. Tests for resources, transactions, and concurrent code should include successful completion, typed failure, cancellation where applicable, and the cleanup or rollback behavior required on those paths.
@@ -130,6 +138,6 @@ khora check .
 khora test .
 ```
 
-Projects that rely on performance budgets can run selected `khora bench` workloads separately from correctness CI.
+Projects that rely on performance budgets can run selected `khora bench` workloads separately from correctness CI — with `KHORA_PROFILE=release`, or the budget is measured against a build nobody ships.
 
 For concurrent tests, continue with [Fibers and nurseries](./fibers-and-nurseries/) and [Resources and regions](./resources-and-regions/).
