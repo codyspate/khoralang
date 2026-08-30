@@ -214,6 +214,20 @@ enum Command {
         /// Compile even if the cache already has this exact build.
         #[arg(long)]
         no_cache: bool,
+        /// Start the program in this directory instead of the current one.
+        ///
+        /// **`khora run some/package` runs the program where *you* are.** That
+        /// is what `cargo run` does and it is the right default -- a relative
+        /// path a program is *given* should mean what it means to whoever
+        /// typed it. It is also a trap for a package whose own data sits
+        /// beside it: `[permissions.fs] read = ["./data/**"]` is written
+        /// relative to the manifest, the program opens `data/thing.txt`, the
+        /// grant matches, and the file is not there.
+        ///
+        /// So the fix is a flag rather than a change of default:
+        /// `--cwd some/package` runs it where its data is.
+        #[arg(long, value_name = "DIR")]
+        cwd: Option<PathBuf>,
         /// Arguments for the program.
         #[arg(last = true)]
         args: Vec<String>,
@@ -479,8 +493,8 @@ fn dispatch() -> Result<ExitCode> {
         Command::Lsp => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
         Command::Toolchain { command } => toolchain(command),
-        Command::Run { path, release, no_cache, args } => {
-            return run_program(&path, release, no_cache, &args)
+        Command::Run { path, release, no_cache, cwd, args } => {
+            return run_program(&path, release, no_cache, cwd.as_deref(), &args)
         }
         Command::Task { name, path, since } => match name {
             Some(name) => {
@@ -1573,7 +1587,13 @@ fn named_as_asked(given: &Path, lib: bool) -> PathBuf {
 /// runner: `khora run` in a script has to behave the way running the
 /// executable would, including when the program fails.
 #[cfg(feature = "llvm")]
-fn run_program(path: &Path, release: bool, no_cache: bool, args: &[String]) -> Result<ExitCode> {
+fn run_program(
+    path: &Path,
+    release: bool,
+    no_cache: bool,
+    cwd: Option<&Path>,
+    args: &[String],
+) -> Result<ExitCode> {
     one_program(path, "run")?;
     let target = executable_for(path)?;
     if !build(path, Some(&target), false, release, no_cache)? {
@@ -1590,8 +1610,18 @@ fn run_program(path: &Path, release: bool, no_cache: bool, args: &[String]) -> R
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    let status = std::process::Command::new(&target)
-        .args(args)
+    let mut command = std::process::Command::new(&target);
+    command.args(args);
+    if let Some(directory) = cwd {
+        // Checked here rather than left to the spawn, because "the program
+        // could not be started" is a much worse sentence than the one naming
+        // the directory that is not there.
+        if !directory.is_dir() {
+            anyhow::bail!("--cwd {} is not a directory", directory.display());
+        }
+        command.current_dir(directory);
+    }
+    let status = command
         .status()
         .with_context(|| format!("running {}", target.display()))?;
 

@@ -232,3 +232,58 @@ fn fmt_bare_and_fmt_dot_are_the_same_command() {
     assert_eq!(bare_code, dot_code, "bare:\n{bare}\ndot:\n{dot}");
     assert!(bare.contains("1 member(s) clean"), "bare:\n{bare}");
 }
+
+/// **`khora run some/package` runs the program where *you* are.**
+///
+/// Which is right — a relative path a program is given should mean what it
+/// means to whoever typed it, and `cargo run` does the same. It is also a trap
+/// for a package whose data sits beside it: `[permissions.fs]
+/// read = ["./beside.txt"]` is written relative to the manifest, the program
+/// opens `beside.txt`, the grant matches, and the file is not there. Nothing in
+/// that sequence points at the working directory.
+///
+/// So a flag rather than a change of default.
+#[test]
+fn run_can_start_the_program_in_another_directory() {
+    let w = world(
+        "module app::main;\n\
+         import std::core::{Result, attempt, print};\n\
+         import std::fs::{FsRead};\n\n\
+         pub fn main() -> Int {\n  \
+           with { reads: FsRead::real() } {\n    \
+             match attempt(fn () => reads.exists(\"beside.txt\")!) {\n      \
+               Result::Ok(true) => print(\"found\"),\n      \
+               Result::Ok(false) => print(\"missing\"),\n      \
+               Result::Err(_e) => print(\"denied\"),\n    \
+             };\n    \
+             0\n  \
+           }\n\
+         }\n",
+    );
+    std::fs::write(
+        w.project.join("khora.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [permissions.fs]\nread = [\"./beside.txt\"]\n",
+    )
+    .expect("a manifest");
+    std::fs::write(w.project.join("beside.txt"), "here").expect("a file beside the package");
+
+    // From the parent, the relative path is the parent's.
+    let elsewhere = w.project.parent().expect("a parent").to_path_buf();
+    let project = w.project.to_str().expect("a path").to_string();
+    let (_, without) = khora(&w, &elsewhere, &["run", &project]);
+    assert!(without.contains("missing"), "without --cwd it should not find it:\n{without}");
+
+    let (_, with) = khora(&w, &elsewhere, &["run", &project, "--cwd", &project]);
+    assert!(with.contains("found"), "with --cwd it should:\n{with}");
+}
+
+/// A directory that is not there is named, rather than becoming "the program
+/// could not be started".
+#[test]
+fn run_says_which_cwd_is_missing() {
+    let w = world(&returning(0));
+    let (code, output) = khora(&w, &w.project, &["run", ".", "--cwd", "no-such-directory"]);
+    assert_ne!(code, Some(0), "{output}");
+    assert!(output.contains("no-such-directory"), "the message should name it:\n{output}");
+}
