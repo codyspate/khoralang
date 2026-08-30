@@ -2068,9 +2068,16 @@ fn status_of(line: String) -> Option<Int> {
 }
 
 /// A chunked body, with the framing taken back out.
+///
+/// **The pieces are collected and joined once.** Appending each chunk to what
+/// had arrived so far copied the whole body per chunk, so a ten-megabyte
+/// response in eight-kilobyte chunks moved something like six gigabytes to
+/// assemble ten. `String::join` pairs, so it moves the body about a dozen
+/// times instead — and the chunks arrive in order, so collecting them front to
+/// back and reversing once is the linear way to hold them.
 fn dechunked(body: String) -> String {
   let mut at = 0;
-  let mut out = "";
+  let mut pieces: List<String> = List::Nil;
   let mut going = true;
   while going {
     match chunk_header(body, at) {
@@ -2083,14 +2090,14 @@ fn dechunked(body: String) -> String {
           if end > String::byte_length(body) {
             going = false
           } else {
-            out = out + String::slice(body, header.after, end);
+            pieces = List::Cons(String::slice(body, header.after, end), pieces);
             at = end + 2
           }
         }
       },
     }
   };
-  out
+  String::join(List::reverse(pieces), "")
 }
 
 // ---------------------------------------------------------------------------

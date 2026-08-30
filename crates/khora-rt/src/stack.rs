@@ -1,8 +1,8 @@
 //! What happens when a program runs out of stack.
 //!
 //! **It used to be nothing at all.** A `List` past about eight thousand
-//! elements killed the process with no message on either stream: `List` is
-//! walked recursively everywhere in `std`, so a log analyser that read a
+//! elements killed the process with no message on either stream: `List` was
+//! walked recursively everywhere in `std` then, so a log analyser that read a
 //! hundred and twenty-two thousand lines died while *reporting* on them, and
 //! the only evidence was a shell prompt and an exit status nobody reads.
 //!
@@ -33,7 +33,15 @@
 //! and declines to handle. A stack that is gone cannot be unwound onto.
 
 /// What both platforms print. A constant because a handler cannot format one.
-const MESSAGE: &[u8] = b"khora: the stack ran out\nnote: a function that recurses as deep as its input will do this. `List` is\n      walked recursively, so tens of thousands of elements is enough -- see\n      `List::sort`, `fold` and `length` in the standard library reference.\n";
+///
+/// **It used to send the reader to three functions that are fine.** The note
+/// named `List::sort`, `fold` and `length` as the shape to look at, which was
+/// true when every walk in `std` was a recursion. They are loops now, and so
+/// are `String::split`, `join` and `repeat`, so a note pointing at them sends
+/// somebody to read code that cannot be the cause. What is left is a function
+/// somebody wrote, or a `derive` walking a value that is nested rather than
+/// long -- and those are worth naming instead.
+const MESSAGE: &[u8] = b"khora: the stack ran out\nnote: a function that recurses as deep as its input will do this. `std` walks\n      lists and strings with loops, so it is most likely a function of your\n      own -- or a derived `Eq`, `Ord` or `Show` on a value nested tens of\n      thousands deep.\n";
 
 /// Installs the stack guard, once, before anything else runs.
 ///

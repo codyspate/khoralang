@@ -2242,6 +2242,19 @@ The inverse of `split` for the same separator, which is the property that
 decides both. Written here rather than on `List` because it is about text
 and not about lists: a `List<Int>` has no join.
 
+**Adjacent pairs, halving, rather than one piece at a time.** Written the
+obvious way — `head + separator + join(tail)` — this was wrong twice. It
+recursed once per piece, so it stopped the program somewhere past four
+thousand of them; and every one of those concatenations copied the whole
+answer so far, so the work was quadratic in the *output*. Measured:
+joining a thousand ten-byte pieces took under a millisecond, two thousand
+took one, four thousand took four.
+
+Combining adjacent pairs copies the whole length once per round, and
+there are log2(count) rounds. Sixteen thousand pieces goes from a
+gigabyte and a half of copying to about two megabytes, using the same
+`+`, and the walk is a loop rather than a stack.
+
 #### replace
 
 ```khora
@@ -2262,6 +2275,13 @@ pub fn repeat(self, count: Int) -> String
 ```
 
 The text `count` times over. Below one is empty.
+
+**By doubling**, for the reason `join` above pairs. `self + repeat(self,
+count - 1)` was a stack frame per repetition and copied the whole of what
+it had built at every one of them, so asking for a line of ten thousand
+dashes did fifty million bytes of work and asking for a hundred thousand
+stopped the program. Squaring the chunk and taking the bits of `count`
+makes it a handful of copies of the answer's own length.
 
 #### is_space
 

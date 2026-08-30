@@ -1262,32 +1262,37 @@ impl Iterator for Range {
 /// of something unshowable is still unshowable, which is the honest answer.
 impl<A: Show> Show for List<A> {
   fn show(self) -> String {
-    "[" + List::show_rest(self, true) + "]"
+    "[" + List::shown(self) + "]"
   }
 }
 
 impl<A: Show> List<A> {
   /// The elements and their separators, without the brackets.
   ///
-  /// `first` rather than checking the tail, because a list does not know where
-  /// it ends until it gets there and looking ahead would walk it twice.
-  fn show_rest(self, first: Bool) -> String {
-    let mut out = "";
-    let mut leading = first;
+  /// **Collected and then joined, rather than appended to.** This built the
+  /// answer with `out = out + lead + show(head)`, which copies everything
+  /// written so far at every element — so printing a list was quadratic in its
+  /// own output, and printing a list is the most likely way for somebody to
+  /// meet a large one. `String::join` combines adjacent pairs, so it is the
+  /// length times a logarithm instead.
+  ///
+  /// The separator went with it. Deciding where a comma goes was the entire
+  /// reason this took a `first` flag, and `join` is the function whose job
+  /// that is.
+  fn shown(self) -> String {
+    let mut parts = List::Nil;
     let mut rest = self;
     let mut walking = true;
     while walking {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) => {
-          let lead = if leading { "" } else { ", " };
-          out = out + lead + Show::show(head);
-          leading = false;
+          parts = List::Cons(Show::show(head), parts);
           rest = tail;
         },
       }
     };
-    out
+    String::join(List::reverse(parts), ", ")
   }
 }
 
@@ -2221,19 +2226,28 @@ impl String {
   /// Backwards and then reversed, because prepending is the cheap end of a
   /// list and appending walks it once per piece — which turns splitting a
   /// thousand-field line into a million steps.
+  ///
+  /// **Written as a loop, because it was a stack frame per piece.** It called
+  /// itself once for every separator it found — a tail call, but nothing here
+  /// turns one of those into a jump — so splitting a file into ten thousand
+  /// lines was ten thousand frames deep and a large enough one stopped the
+  /// program. The same shape `List::map` and `List::merge` had.
   fn split_onto(self, separator: String, at: Int, so_far: List<String>) -> List<String> {
-    let found = String::find(self, separator, at);
-    if found < 0 {
-      List::Cons(String::slice(self, at, String::byte_length(self)), so_far)
-    } else {
-      let piece = String::slice(self, at, found);
-      String::split_onto(
-        self,
-        separator,
-        found + String::byte_length(separator),
-        List::Cons(piece, so_far),
-      )
-    }
+    let mut out = so_far;
+    let mut from = at;
+    let mut walking = true;
+    while walking {
+      let found = String::find(self, separator, from);
+      if found < 0 {
+        // No separator left, so the rest of the string is the last piece.
+        out = List::Cons(String::slice(self, from, String::byte_length(self)), out);
+        walking = false;
+      } else {
+        out = List::Cons(String::slice(self, from, found), out);
+        from = found + String::byte_length(separator);
+      }
+    };
+    out
   }
 
   /// The pieces laid end to end with `separator` between them.
@@ -2241,14 +2255,109 @@ impl String {
   /// The inverse of `split` for the same separator, which is the property that
   /// decides both. Written here rather than on `List` because it is about text
   /// and not about lists: a `List<Int>` has no join.
+  ///
+  /// **Adjacent pairs, halving, rather than one piece at a time.** Written the
+  /// obvious way — `head + separator + join(tail)` — this was wrong twice. It
+  /// recursed once per piece, so it stopped the program somewhere past four
+  /// thousand of them; and every one of those concatenations copied the whole
+  /// answer so far, so the work was quadratic in the *output*. Measured:
+  /// joining a thousand ten-byte pieces took under a millisecond, two thousand
+  /// took one, four thousand took four.
+  ///
+  /// Combining adjacent pairs copies the whole length once per round, and
+  /// there are log2(count) rounds. Sixteen thousand pieces goes from a
+  /// gigabyte and a half of copying to about two megabytes, using the same
+  /// `+`, and the walk is a loop rather than a stack.
   pub fn join(pieces: List<String>, separator: String) -> String {
     match pieces {
       List::Nil => "",
       List::Cons(head, tail) => match tail {
         List::Nil => head,
-        List::Cons(_h, _t) => head + separator + String::join(tail, separator),
+        // Two or more. Give every piece but the first its separator, then
+        // squash what that leaves.
+        List::Cons(_h, _t) => String::squash(
+          List::reverse(String::separated_onto(tail, separator, List::Cons(head, List::Nil)))
+        ),
       },
     }
+  }
+
+  /// Every piece of `rest` with `separator` in front of it, reversed onto
+  /// `so_far`.
+  ///
+  /// One small allocation per piece and none of them proportional to the
+  /// answer, so this pass is linear however long the result is. It is where
+  /// the separator goes, so that `squash` below is about nothing but
+  /// concatenation.
+  fn separated_onto(rest: List<String>, separator: String, so_far: List<String>) -> List<String> {
+    let mut out = so_far;
+    let mut walking = rest;
+    let mut going = true;
+    while going {
+      match walking {
+        List::Nil => { going = false; },
+        List::Cons(piece, more) => {
+          out = List::Cons(separator + piece, out);
+          walking = more;
+        },
+      }
+    };
+    out
+  }
+
+  /// One string from many, in order, combining adjacent pairs until one is
+  /// left.
+  ///
+  /// **Why this is not a fold.** Folding `+` over the pieces copies everything
+  /// accumulated so far at every step, which is the quadratic version. Pairing
+  /// touches each byte once per round and halves the count each time, so the
+  /// total is the length times the logarithm of the number of pieces rather
+  /// than the length times the number of pieces.
+  fn squash(items: List<String>) -> String {
+    let mut level = items;
+    let mut answer = "";
+    let mut going = true;
+    while going {
+      match level {
+        List::Nil => { answer = ""; going = false; },
+        List::Cons(first, rest) => match rest {
+          List::Nil => { answer = first; going = false; },
+          // At least two, so there is another round to do. The first pair is
+          // done here and seeds the accumulator, which is what lets the rest
+          // of the round be written without naming `level` again.
+          List::Cons(second, beyond) => {
+            level = List::reverse(
+              String::paired_onto(beyond, List::Cons(first + second, List::Nil))
+            );
+          },
+        },
+      }
+    };
+    answer
+  }
+
+  /// Adjacent pairs of `items` concatenated, reversed onto `so_far`.
+  ///
+  /// An odd one out at the end goes across untouched rather than being
+  /// concatenated with the empty string, so a round never copies a piece it
+  /// did not need to.
+  fn paired_onto(items: List<String>, so_far: List<String>) -> List<String> {
+    let mut out = so_far;
+    let mut rest = items;
+    let mut going = true;
+    while going {
+      match rest {
+        List::Nil => { going = false; },
+        List::Cons(left, more) => match more {
+          List::Nil => { out = List::Cons(left, out); going = false; },
+          List::Cons(right, beyond) => {
+            out = List::Cons(left + right, out);
+            rest = beyond;
+          },
+        },
+      }
+    };
+    out
   }
 
   /// Every occurrence of `from` replaced by `to`.
@@ -2266,8 +2375,29 @@ impl String {
   }
 
   /// The text `count` times over. Below one is empty.
+  ///
+  /// **By doubling**, for the reason `join` above pairs. `self + repeat(self,
+  /// count - 1)` was a stack frame per repetition and copied the whole of what
+  /// it had built at every one of them, so asking for a line of ten thousand
+  /// dashes did fifty million bytes of work and asking for a hundred thousand
+  /// stopped the program. Squaring the chunk and taking the bits of `count`
+  /// makes it a handful of copies of the answer's own length.
   pub fn repeat(self, count: Int) -> String {
-    if count < 1 { "" } else { self + String::repeat(self, count - 1) }
+    if count < 1 {
+      ""
+    } else {
+      let mut out = "";
+      let mut chunk = self;
+      let mut left = count;
+      let mut going = true;
+      while going {
+        // The low bit says whether this size of chunk is part of the answer.
+        if Int::and(left, 1) == 1 { out = out + chunk; };
+        left = Int::shr(left, 1);
+        if left < 1 { going = false; } else { chunk = chunk + chunk; };
+      };
+      out
+    }
   }
 
   /// Whether a byte is one of the four whitespace characters `trim` removes.

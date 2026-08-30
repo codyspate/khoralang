@@ -24,6 +24,8 @@ on standard error and exits with the platform's stack-overflow status.
 
 Every traversal in `std::core`'s `List` is written as a loop rather than as recursion — `length`, `fold`, `reverse`, `filter`, `take`, `drop`, `any`, `all`, `find`, `contains`, `zip`, `flat_map`, `sum`, and the `merge` inside `sort` — so walking a list of any size is safe. `List::sort` recurses only to divide, which is about `log2(n)` deep.
 
+The same is true of text. `String::split` was a frame per field and `String::join` a frame per piece, so splitting a large file and joining it back up were both cliffs; both are loops now, and `join` combines adjacent pairs rather than one piece at a time, so building a string out of many is no longer quadratic in its own length. `String::repeat` doubles for the same reason.
+
 Releasing a value costs no stack either: reference counting frees a value's children through a queue rather than by recursing, so letting go of a long list is a loop like walking one. A million-element `List` sorts.
 
 What is left is ordinary recursion that somebody writes. A function that calls itself once per element of its input will use a frame per element, and no analysis in the compiler turns that into a loop.

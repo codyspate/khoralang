@@ -1407,3 +1407,76 @@ fn main() -> Int {{
         "every hole reads a live value, and nothing is left behind"
     );
 }
+
+/// **`String::join` used to stop the program, and to be quadratic before it
+/// did.**
+///
+/// `head + separator + join(tail)` recursed once per piece — a tail call, but
+/// nothing turns one of those into a jump — and every concatenation copied the
+/// whole answer built so far. Measured on ten-byte pieces: a thousand took
+/// under a millisecond, two thousand took one, four thousand took four, and
+/// eight thousand ran the stack out. `String::split` and `String::repeat` had
+/// the same shape, which matters because `String::replace` is one of each.
+///
+/// The rewrite combines adjacent pairs instead, so what is asserted here is
+/// the part that a rewrite can get wrong: the *order*, and the odd one out at
+/// the end of a round. Counts of one through six cover both parities at every
+/// level of the halving, and joining is checked against splitting, which is
+/// the property that defines both.
+///
+/// Then twenty thousand pieces, because the failure this replaces was a size
+/// rather than an answer: it is well past where the old one died, and it
+/// checks the length rather than the text so the assertion stays readable.
+#[test]
+fn joining_many_pieces_neither_recurses_nor_copies_the_answer_each_time() {
+    let out = run(
+        "text_join_pairs",
+        &program(
+            r#"  // Every count from none to six: the pairing halves, so this is both
+  // parities at each round, and it is where an off-by-one in the odd
+  // one out would show.
+  print("[" + String::join(List::Nil, ",") + "]");
+  print(String::join(List::Cons("a", List::Nil), ","));
+  print(String::join(List::Cons("a", List::Cons("b", List::Nil)), ","));
+  print(String::join(List::Cons("a", List::Cons("b", List::Cons("c", List::Nil))), ","));
+  print(String::join(
+    List::Cons("a", List::Cons("b", List::Cons("c", List::Cons("d", List::Nil)))),
+    ","
+  ));
+  print(String::join(
+    List::Cons("a", List::Cons("b", List::Cons("c", List::Cons("d", List::Cons("e", List::Nil))))),
+    "-"
+  ));
+  // A separator of more than one byte, and an empty piece in the middle:
+  // `n` separators give `n + 1` pieces however empty they are.
+  print(String::join(List::Cons("a", List::Cons("", List::Cons("c", List::Nil))), "::"));
+  // The property that decides both, over a string with an empty field.
+  print(String::join(String::split("a,,b,c", ","), ","));
+
+  // Twenty thousand, which the old one did not survive. Ten bytes and a
+  // separator each, so the answer is 20000 * 11 - 1.
+  let mut many: List<String> = List::Nil;
+  let mut i = 0;
+  while i < 20000 {
+    many = List::Cons("abcdefghij", many);
+    i = i + 1;
+  };
+  let text = String::join(many, ",");
+  print(Int::to_string(String::byte_length(text)));
+  // And back out again: `split` recursed once per field, so the round trip
+  // is what pins both halves. `n` separators, `n + 1` pieces, same string.
+  print(Int::to_string(List::length(String::split(text, ","))));
+  print(if String::join(String::split(text, ","), ",") == text { "same" } else { "different" });
+
+  // `repeat` was the same shape, and is now a doubling, so an odd count and
+  // a large one are the two that could go wrong.
+  print(String::repeat("xy", 5));
+  print(Int::to_string(String::byte_length(String::repeat("-", 50000))));"#,
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "[]\na\na,b\na,b,c\na,b,c,d\na-b-c-d-e\na::::c\na,,b,c\n219999\n20000\nsame\nxyxyxyxyxy\n50000\n"
+    );
+}
