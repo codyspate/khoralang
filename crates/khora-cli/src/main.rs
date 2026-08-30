@@ -2065,7 +2065,11 @@ fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
     let store = khora_pkg::Store::open()?;
     let resolution = khora_pkg::resolve(&manifest_path, &store, locked_requested())?;
 
-    check_extern_allowlist(&parsed.manifest.permissions, &resolution)?;
+    check_extern_allowlist(
+        &parsed.manifest.permissions,
+        &resolution,
+        parsed.manifest.package().map(|p| (p.name.as_str(), manifest_path.parent())),
+    )?;
 
     // A workspace has one lockfile, at the root. One left behind in a member
     // is not read any more, and a lockfile that silently stopped being read is
@@ -2101,8 +2105,27 @@ fn dependencies_of(root: &Path) -> Result<Vec<PathBuf>> {
 fn check_extern_allowlist(
     permissions: &khora_manifest::Permissions,
     resolution: &khora_pkg::Resolution,
+    building: Option<(&str, Option<&Path>)>,
 ) -> Result<()> {
     let mut refused: Vec<String> = Vec::new();
+
+    // **The package being built, which this did not look at.** `resolution`
+    // holds the dependencies, so every package was checked except the one
+    // whose source somebody is writing -- and that is the one most likely to
+    // reach for `extern fn`, because it is the one being changed. A package
+    // could write `[permissions] extern = []` in its own manifest, declare an
+    // `extern fn` on the next screen, and build.
+    //
+    // The rule was never about dependencies. `may_declare_extern` is
+    // documented as "packages that may declare `extern fn`", and a package is
+    // no less itself for being the one at the root of the build.
+    if let Some((name, Some(directory))) = building {
+        if !permissions.may_declare_extern(name) {
+            for (file, function) in extern_declarations(directory)? {
+                refused.push(format!("  `{function}` in {}", file.display()));
+            }
+        }
+    }
 
     for package in &resolution.packages {
         if permissions.may_declare_extern(&package.name) {
@@ -2128,7 +2151,7 @@ fn check_extern_allowlist(
          rather than about types. Add the package to the list if that is what \
          you mean:\n\n    [permissions]\n    extern = [{}]",
         refused.join("\n"),
-        allow_list_suggestion(permissions, resolution)
+        allow_list_suggestion(permissions, resolution, building)
     )
 }
 
@@ -2136,9 +2159,27 @@ fn check_extern_allowlist(
 fn allow_list_suggestion(
     permissions: &khora_manifest::Permissions,
     resolution: &khora_pkg::Resolution,
+    building: Option<(&str, Option<&Path>)>,
 ) -> String {
     let mut names: Vec<String> =
         permissions.extern_.clone().unwrap_or_default().into_iter().collect();
+    // The package being built belongs in the suggestion for the same reason it
+    // belongs in the check: without it the message ends `extern = []`, which is
+    // what the manifest already says and so is no advice at all.
+    //
+    // Only when it actually declares one, though. A package that is merely
+    // *not permitted* has nothing to be allowed -- suggesting it would name a
+    // package the reader did not do anything wrong in, next to the one they
+    // did.
+    if let Some((name, Some(directory))) = building {
+        let declares = extern_declarations(directory).map(|found| !found.is_empty());
+        if !permissions.may_declare_extern(name)
+            && declares.unwrap_or(false)
+            && !names.iter().any(|n| n == name)
+        {
+            names.push(name.to_string());
+        }
+    }
     for package in &resolution.packages {
         if !permissions.may_declare_extern(&package.name) && !names.contains(&package.name) {
             names.push(package.name.clone());

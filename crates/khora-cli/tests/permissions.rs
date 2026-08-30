@@ -344,3 +344,78 @@ fn narrowing_one_category_leaves_the_others_alone() {
 
     assert!(!text.contains("DENIED"), "only `fs` was narrowed: {text}");
 }
+
+/// The package being built, with no dependency involved at all.
+///
+/// **This is the one the check did not look at.** `check_extern_allowlist`
+/// walked the resolved *dependencies*, so every package was covered except the
+/// one whose source somebody is writing — which is the one most likely to reach
+/// for `extern fn`, because it is the one being changed. A package could write
+/// `[permissions] extern = []` in its own manifest, declare an `extern fn` on
+/// the next screen, and build.
+///
+/// The rule was never about dependencies: `may_declare_extern` is documented as
+/// "packages that may declare `extern fn`", and a package is no less itself for
+/// being the one at the root of the build.
+fn build_alone(permissions: &str) -> (bool, String) {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let app = tmp.path().join("app");
+    write(
+        &app.join("khora.toml"),
+        &format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n{permissions}"),
+    );
+    write(
+        &app.join("src").join("main.kh"),
+        "module app::main;\n\nextern fn khora_live_count() -> Int;\n\n\
+         pub fn main() -> Int { khora_live_count() }\n",
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_khora"))
+        .args(["check", app.join("src").join("main.kh").to_str().expect("a path")])
+        .env("KHORA_HOME", tmp.path().join("home"))
+        .output()
+        .expect("running khora");
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+#[test]
+fn a_package_declaring_extern_in_its_own_source_is_refused() {
+    let (ok, output) = build_alone("[permissions]\nextern = []\n");
+    assert!(!ok, "its own `extern = []` should refuse it:\n{output}");
+    assert!(
+        output.contains("khora_live_count"),
+        "the message should name the declaration:\n{output}"
+    );
+}
+
+/// And the suggestion has to name it, or it reads `extern = []` — which is what
+/// the manifest already says, and so is no advice at all.
+#[test]
+fn the_suggestion_names_the_package_being_built() {
+    let (_, output) = build_alone("[permissions]\nextern = []\n");
+    assert!(
+        output.contains("extern = [\"app\"]"),
+        "the suggestion should name the package:\n{output}"
+    );
+}
+
+#[test]
+fn a_package_that_lists_itself_may_declare_extern() {
+    let (ok, output) = build_alone("[permissions]\nextern = [\"app\"]\n");
+    assert!(ok, "listing itself should be enough:\n{output}");
+}
+
+/// Absent still grants, here as everywhere else in the table. Tightening is
+/// opt-in, and this change does not make it otherwise — it makes the opting-in
+/// mean what it says.
+#[test]
+fn a_package_with_no_permissions_table_may_still_declare_extern() {
+    let (ok, output) = build_alone("");
+    assert!(ok, "no table should grant everything:\n{output}");
+}
