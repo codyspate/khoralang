@@ -59,8 +59,10 @@ import std::process::shell::{close_pipe, open_pipe, run};
 /// `NotStarted` is the shell itself refusing to run — *not* "the command was
 /// not found", which is a shell that started perfectly well and then exited
 /// 127. `NotText` is a command that ran and printed bytes that are not UTF-8,
-/// so there is no `String` to hand back; only [`Process::capture`] can raise
-/// it. `Failed` is raised by [`checked_output`] alone.
+/// so there is no `String` to hand back; only the two operations that keep the
+/// output -- [`Process::output`] and [`Process::shell`] -- can raise it, and
+/// [`Process::run`], which keeps none, cannot. `Failed` is raised by
+/// [`checked_output`] alone.
 ///
 /// Note what is *not* here: a command that ran and exited non-zero. It ran.
 /// Its status is the answer, and a caller who wanted that to be a failure says
@@ -99,13 +101,22 @@ pub type Completed = {
 /// here it installs its own handler and the code under test cannot tell:
 ///
 /// ```khora
+/// // A `Completed` written out, because a record literal cannot be a lambda
+/// // body: `fn c => { status: 0, .. }` parses the braces as a block.
+/// fn done(text: String) -> Completed { { status: 0, text: text } }
+///
 /// with { process: handler for Process {
-///   status: fn command => 0,
-///   capture: fn command => { status: 0, text: "v1.2.3\n" },
+///   run: fn (program, arguments) => 0,
+///   output: fn (program, arguments) => done("v1.2.3"),
+///   shell: fn command => done(""),
 /// } } {
-///   check(version_reported_by("git describe --tags"));
+///   check(version_reported_by("git"));
 /// }
 /// ```
+///
+/// Every operation, because a handler supplies the whole effect. The one this
+/// example is about is `output`; `run` and `shell` are there because leaving
+/// either out is not a smaller handler, it is not a handler.
 ///
 /// That double is also where a test asserts what was *asked for* — capture the
 /// command into a `Shared<List<String>>` and the test can say that the driver

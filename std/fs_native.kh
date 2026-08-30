@@ -86,6 +86,17 @@ pub effect FsRead {
   /// callers mean; this comment is where the difference is kept honest, and a
   /// caller that needs the distinction wants a permissions API rather than
   /// this one.
+  ///
+  /// **A path the manifest denies also answers `false`**, and that is the
+  /// answer most likely to mislead. `[permissions.fs] read` is checked before
+  /// the file system is, so a file that is there, readable, and simply not
+  /// granted is reported exactly as one that was never created -- which is the
+  /// confusion [`IoError::Denied`] exists to prevent everywhere it can be
+  /// raised, and this returns a `Bool` and cannot raise it.
+  ///
+  /// So a `false` here means "not readable by this program", with three
+  /// causes it cannot tell apart. When the difference matters, `read` raises:
+  /// `Denied` for the grant and `NotFound` for the file.
   exists: (String) -> Bool,
   /// How many bytes the file holds.
   size: (String) -> Int raises IoError,
@@ -105,8 +116,33 @@ pub effect FsRead {
   /// Names, not paths: joining is the caller's, and `join` is right here. `.`
   /// and `..` are not included, which is the one place this differs from
   /// `readdir` and the difference every caller would have written itself.
+  ///
+  /// **The directory needs its own grant, and `./data/**` is not one.** The
+  /// glob dialect is `.gitignore`'s, where `data/**` covers what is *inside*
+  /// `data` and not `data` itself -- so a manifest that grants
+  ///
+  /// ```toml
+  /// [permissions.fs]
+  /// read = ["./data/**"]
+  /// ```
+  ///
+  /// can read every file in the directory and cannot list it. Both entries are
+  /// what a walk wants:
+  ///
+  /// ```toml
+  /// read = ["./data", "./data/**"]
+  /// ```
+  ///
+  /// This is the first thing anybody writes with `FsRead` and the first place
+  /// the dialect's one surprise shows up, which is why it is written here
+  /// rather than only beside `granted`.
   read_dir: (String) -> List<String> raises IoError,
   /// Whether the path is a directory.
+  ///
+  /// A `Bool`, so the same three-way ambiguity as [`FsRead::exists`] above: a
+  /// directory the manifest does not grant answers `false`, exactly as a path
+  /// that is not there does. `./data/**` alone does not grant `data`, so this
+  /// says `false` about a directory whose contents the program can read.
   is_dir: (String) -> Bool,
 }
 

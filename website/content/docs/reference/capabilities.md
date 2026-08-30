@@ -214,9 +214,14 @@ network = ["api.example.com:443", "*.internal"]
 env = ["PORT", "DATABASE_*"]
 
 [permissions.fs]
-read = ["./data/**"]
+read = ["./data", "./data/**"]
 write = ["./data/out.txt"]
 ```
+
+Both `read` entries, and the reason is the one surprise in the glob dialect
+below: `./data/**` grants what is *inside* `data` and not `data` itself, so with
+only that line a program can read every file in the directory and cannot list
+it. `read_dir("data")` raises `Denied` and `is_dir("data")` answers `false`.
 
 The grants are compiled into the binary rather than read at run time. A file the program consults for its own permissions is a file an attacker edits.
 
@@ -230,12 +235,18 @@ A denial is its own error case, separate from the ordinary failure, because the 
 | a host over HTTP | `CallError::Denied(host)` | `[permissions] network` |
 | a path on disk | `IoError::Denied(path)` | `[permissions.fs]` |
 
+**Two of these cannot reach you.** `FsRead::exists` and `FsRead::is_dir` answer
+a plain `Bool` and have no way to raise, so a path the manifest denies is
+reported exactly as one that is not there. A `false` from either means "not
+readable by this program" and nothing more precise; when the difference matters,
+`read` and `read_dir` raise and say which it was.
+
 `Unreachable` is DNS or a firewall; `Denied` is a line you can copy out of the message into the manifest. `Env::variable` and `std::env::variable_or` therefore `raise EnvError`, so both need a `!` at the call site:
 
 ```khora
 let port = variable_or("PORT", "8080")!;
 ```
 
-Globbing differs by category, and each one is the reading that costs the least surprise. For a path, `*` stops at a separator and `**` crosses one. For a name — a variable, a command — there are no segments, so `*` spans everything. For a host, `*` spans dots, so `*.internal` covers `db.eu.internal`, and a grant with no port covers every port.
+Globbing differs by category, and each one is the reading that costs the least surprise. For a path, `*` stops at a separator and `**` crosses one — and, as in `.gitignore`, **neither covers the directory being described**: `data/**` is a grant over the contents of `data`, so listing `data` needs `data` named as well. For a name — a variable, a command — there are no segments, so `*` spans everything. For a host, `*` spans dots, so `*.internal` covers `db.eu.internal`, and a grant with no port covers every port.
 
 See [Effects and rows](./effects/) for effect declarations and [Failures](./failures/) for typed failure.
