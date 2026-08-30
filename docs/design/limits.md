@@ -50,6 +50,27 @@ so it has not been paid. Two cheaper improvements are worth doing before it:
 If a generated file hits this, the fix available today is to break the literal
 into pieces and join them, or to raise `COMPILER_STACK`.
 
+## The size of one object
+
+**The limit.** A single heap object's fields may total 4 GiB — `u32::MAX`,
+`MAX_FIELD_BYTES` in `khora-rt`'s `lib.rs`. Past that the process aborts.
+
+**Why the number is that.** The size is kept in the object header, in the word
+that would otherwise be padding between the reference count and the tag, and it
+is kept there because the header is the one place a `drop` routine can read it
+from without knowing what the object is. A `u32` fits in the space already
+being paid for; a `u64` would grow every object in the program by eight bytes
+to raise a ceiling that only an array reaches.
+
+**What reaches it.** Not a record — a record with four gigabytes of fields is
+not a thing anybody writes. An `Array<A>` is one object whose fields are its
+elements, so this is an array of about 536 million `Int`s, or of 4 billion
+`U8`s. A `Vector` is an array underneath and has the same ceiling.
+
+**Documented here because it was documented nowhere.** It is discoverable by
+hitting it, and hitting it aborts rather than raising, so the first anybody
+knows is a stopped process.
+
 ## The instantiation depth of a generic
 
 Monomorphisation gives up after 64 nested instantiations

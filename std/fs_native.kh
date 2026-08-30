@@ -354,6 +354,11 @@ pub fn copy(from: String, to: String) -> ()
 
 /// Joins two path pieces with a single separator.
 ///
+/// **Always `/`, on every platform including Windows.** Reading accepts either
+/// -- a base already ending in `\` is not given a second separator -- but
+/// what is written is `/`, because Windows takes it everywhere and one rule
+/// that works on all three targets beats three rules that each work on one.
+///
 /// An empty base is `child`, so folding over a list of segments needs no
 /// special first step.
 pub fn join(base: String, child: String) -> String {

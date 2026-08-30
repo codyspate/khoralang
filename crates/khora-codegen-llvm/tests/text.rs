@@ -1480,3 +1480,49 @@ fn joining_many_pieces_neither_recurses_nor_copies_the_answer_each_time() {
         "[]\na\na,b\na,b,c\na,b,c,d\na-b-c-d-e\na::::c\na,,b,c\n219999\n20000\nsame\nxyxyxyxyxy\n50000\n"
     );
 }
+
+/// **The two most-reached-for types in the language had `Show`, `Eq` and `Ord`
+/// between them: none.**
+///
+/// `print("saw ${found}")` on an `Option` was refused and the message advised
+/// `derive(Show)` — on a type in `std` the reader does not own and cannot
+/// annotate, so the shortest debugging line anybody writes was unavailable and
+/// the advice for fixing it could not be taken. `assert(found == Option::None)`
+/// was not writable either; the workaround said the right thing about `None`
+/// and nothing at all about `Some`.
+///
+/// The variant's name is printed, the way `Ordering` does it, because `Some("")`
+/// and `None` differing is most of the reason somebody is looking. `None` sorts
+/// before `Some`, which is what a sort by an optional field wants: the rows
+/// that have it, in order, after the rows that do not.
+///
+/// The nested case is here because it is the one the bound exists for — an
+/// `Option` inside a `List` prints only if its element does.
+#[test]
+fn an_option_and_a_result_can_be_printed_and_compared() {
+    let out = run(
+        "option_show_eq",
+        &program(
+            r#"  let some: Option<Int> = Option::Some(3);
+  let none: Option<Int> = Option::None;
+  print("${some} ${none}");
+  print("${some == Option::Some(3)} ${some == none} ${none == Option::None}");
+  print("${Ord::cmp(none, some)} ${Ord::cmp(some, none)} ${Ord::cmp(some, some)}");
+
+  let ok: Result<Int, String> = Result::Ok(7);
+  let err: Result<Int, String> = Result::Err("nope");
+  print("${ok} ${err}");
+  print("${ok == Result::Ok(7)} ${ok == err}");
+
+  // An `Option` inside something else, which is what the bound is for.
+  let nested: List<Option<Int>> = List::Cons(Option::Some(1), List::Cons(Option::None, List::Nil));
+  print("${nested}");"#,
+        ),
+    );
+
+    assert_eq!(
+        out,
+        "Some(3) None\ntrue false true\nLess Greater Equal\nOk(7) Err(nope)\ntrue false\n\
+         [Some(1), None]\n"
+    );
+}

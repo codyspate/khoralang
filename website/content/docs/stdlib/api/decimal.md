@@ -379,6 +379,19 @@ everything else on purpose**, including the exponent notation `Float`
 takes: a number arriving as `1e-3` is a measurement that has been through
 a float somewhere, and taking it here would launder that history.
 
+The exact grammar, because "a leading sign" and "at most one point" each
+hide a case somebody meets:
+
+- `+` is a leading sign here. `Int::of_string` refuses one, and says why
+  at some length -- so the two disagree, and a program reading `+5` out
+  of a configuration file gets a number from one and `None` from the
+  other. Neither behaviour is being changed here, because changing either
+  is a compatibility decision about a published parser rather than a
+  repair; what is fixed is that the disagreement was written down in
+  neither place.
+- The point may be leading or trailing. `"5."` is five and `".5"` is a
+  half, both accepted.
+
 A numeral too long for the significand is a rejection too, which is what
 the `Option` is already there for. This is the function that reads numbers
 out of files somebody else wrote, and one long cell must not kill the

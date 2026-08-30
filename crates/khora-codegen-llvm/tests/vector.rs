@@ -763,3 +763,39 @@ pub fn main() -> () {
     );
     assert_eq!(out, "3 2 none\n2\n");
 }
+
+/// A vector prints like a list of the same elements, and prints its elements
+/// rather than its array.
+///
+/// The two print alike on purpose: which container a value is in is a decision
+/// about cost, and a log line that changed shape when somebody swapped one for
+/// the other would put that decision somewhere it does not belong.
+///
+/// The cells past `len` hold whatever a `pop` left behind. Printing those would
+/// be printing the vector's history, which is the assertion below.
+#[test]
+fn a_vector_prints_its_elements_and_not_its_array() {
+    let out = run(
+        "vector_show",
+        "module main;
+import std::core::{List, Show, Vector, print};
+
+pub fn main() -> () {
+  let v: Vector<Int> = Vector::new();
+  let mut i = 0;
+  while i < 5 { Vector::push(v, i); i = i + 1; };
+  Vector::pop(v);
+  Vector::pop(v);
+  print(Show::show(v));
+
+  // The same elements as a list, spelled the same way.
+  let l = List::Cons(0, List::Cons(1, List::Cons(2, List::Nil)));
+  print(Show::show(l));
+
+  let empty: Vector<Int> = Vector::new();
+  print(Show::show(empty))
+}
+",
+    );
+    assert_eq!(out, "[0, 1, 2]\n[0, 1, 2]\n[]\n");
+}

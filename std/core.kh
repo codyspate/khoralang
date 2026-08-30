@@ -302,6 +302,94 @@ pub type Result<A, E> =
   | Ok(value: A)
   | Err(error: E);
 
+/// `Some(3)` and `None`, which is how they are written minus the prefix.
+///
+/// **The two most-reached-for types in the language could not be printed.**
+/// `print("saw ${found}")` on an `Option` was refused, and the message advised
+/// `derive(Show)` -- on a type in `std` that the reader does not own and cannot
+/// annotate. So the shortest debugging line anybody writes was unavailable, and
+/// the advice for fixing it could not be taken.
+///
+/// The variant's own name, the way [`Ordering`] does it, rather than the value
+/// alone. `Some("")` and `None` print differently, which is most of the reason
+/// somebody is looking.
+impl<A: Show> Show for Option<A> {
+  fn show(self) -> String {
+    match self {
+      Option::Some(value) => "Some(" + Show::show(value) + ")",
+      Option::None => "None",
+    }
+  }
+}
+
+/// Both nothing, or both something and the somethings equal.
+///
+/// **`assert(found == Option::None)` could not be written**, which is the
+/// assertion a test makes about a lookup that should miss. The workaround was
+/// `assert(Option::is_none(found))`, which says the same thing about `None` and
+/// nothing at all about `Some`.
+impl<A: Eq> Eq for Option<A> {
+  fn eq(self, other: Option<A>) -> Bool {
+    match self {
+      Option::None => Option::is_none(other),
+      Option::Some(mine) => match other {
+        Option::None => false,
+        Option::Some(theirs) => Eq::eq(mine, theirs),
+      },
+    }
+  }
+}
+
+/// Nothing sorts before something, and two somethings by their contents.
+///
+/// The order every language that has this type picks, and the one a sort by an
+/// optional field wants: the rows that have the field, in order, after the rows
+/// that do not.
+impl<A: Ord> Ord for Option<A> {
+  fn cmp(self, other: Option<A>) -> Ordering {
+    match self {
+      Option::None => match other {
+        Option::None => Ordering::Equal,
+        Option::Some(_theirs) => Ordering::Less,
+      },
+      Option::Some(mine) => match other {
+        Option::None => Ordering::Greater,
+        Option::Some(theirs) => Ord::cmp(mine, theirs),
+      },
+    }
+  }
+}
+
+/// `Ok(3)` and `Err("no")`, for the same reason `Option` has one.
+///
+/// Both halves need `Show`, because either may be the one printed and a type
+/// that could print only its successes would be the wrong way round for the
+/// line somebody is actually writing.
+impl<A: Show, E: Show> Show for Result<A, E> {
+  fn show(self) -> String {
+    match self {
+      Result::Ok(value) => "Ok(" + Show::show(value) + ")",
+      Result::Err(error) => "Err(" + Show::show(error) + ")",
+    }
+  }
+}
+
+/// Same side, and equal contents.
+impl<A: Eq, E: Eq> Eq for Result<A, E> {
+  fn eq(self, other: Result<A, E>) -> Bool {
+    match self {
+      Result::Ok(mine) => match other {
+        Result::Ok(theirs) => Eq::eq(mine, theirs),
+        Result::Err(_e) => false,
+      },
+      Result::Err(mine) => match other {
+        Result::Ok(_v) => false,
+        Result::Err(theirs) => Eq::eq(mine, theirs),
+      },
+    }
+  }
+}
+
 impl<A> Option<A> {
   /// Whether there is a value.
   ///
@@ -450,10 +538,19 @@ impl<A, E> Result<A, E> {
 /// connect(Redacted::expose(settings.password));
 /// ```
 ///
-/// Interpolation is closed off separately and for free: `"${key}"` wants a
-/// `String` and does not call `Show`, so it does not compile at all. The
-/// remaining ways a value reaches a log are `show` and a derived `Show` on
-/// something holding it, and this covers both.
+/// Interpolation is covered by the same `Show`. `"${key}"` calls it like any
+/// other hole, so the line compiles and prints `<redacted>`.
+///
+/// **That is better than refusing, which is what it used to do.** A hole
+/// wanted a `String` before it called `Show`, so `"${key}"` did not compile --
+/// and the way past a hole that will not compile is `expose`, which puts the
+/// secret in the log by the shortest route available to somebody who just
+/// wants their message printed. Refusing read as the stricter of the two and
+/// was not.
+///
+/// So every way a value reaches a log -- `show`, a derived `Show` on something
+/// holding it, and a hole -- goes through the one implementation, and there is
+/// no second thing to keep in step with it.
 ///
 /// **Deliberately no `Eq`.** Comparing two secrets is a real thing to want and
 /// a derived `Eq` would compare them byte by byte and stop at the first
@@ -1219,9 +1316,21 @@ impl<A> List<A> {
 
 /// One step of an iteration: the next item and the rest, or the end.
 ///
-/// Khora has no mutable references and no mutable fields, so Rust's
-/// `fn next(&mut self) -> Option<Item>` is not expressible. An iterator hands
-/// back its successor instead. `for` desugars to this and reads the same.
+/// Khora has no mutable references, so Rust's
+/// `fn next(&mut self) -> Option<Item>` is not expressible: there is no way to
+/// hand `next` something it may write through. An iterator hands back its
+/// successor instead. `for` desugars to this and reads the same.
+///
+/// This said "no mutable references and no mutable fields" until `mut` fields
+/// arrived -- `Map` is built out of one, `Vector` out of two -- and the second
+/// half stopped being true without the first half needing to change. It is the
+/// *reference* that is missing, not the mutation.
+///
+/// **This is the allocation `for` pays per element.** A `Step` is an ordinary
+/// heap object, so a `for` loop is about 3.6 times slower than the same loop
+/// written out -- measured in `bench/iteration`. Unboxing is what closes that;
+/// `docs/roadmap.md` has the argument and why desugaring `for` to a closure is
+/// not the answer.
 pub type Step<S, A> =
   | Yield(state: S, item: A)
   | Done;
@@ -3905,6 +4014,26 @@ pub type Vector<A> = {
 /// runtime call already says.
 extern fn khora_bounds_fail(index: Int, length: Int) -> ();
 
+/// `[a, b, c]`, the same as a `List` of the same elements.
+///
+/// The two print alike on purpose: which container a value is in is a decision
+/// about cost, and a log line that changed shape when somebody swapped one for
+/// the other would make that decision visible in the wrong place.
+///
+/// Its elements, not its array. The cells past `len` hold whatever a `pop` left
+/// behind, and printing those would be printing the vector's history.
+impl<A: Show> Show for Vector<A> {
+  fn show(self) -> String {
+    let mut parts = List::Nil;
+    let mut i = self.len;
+    while i > 0 {
+      i = i - 1;
+      parts = List::Cons(Show::show(Array::get(self.items, i)), parts);
+    };
+    "[" + String::join(parts, ", ") + "]"
+  }
+}
+
 impl<A> Vector<A> {
   /// Empty, holding no storage at all.
   ///
@@ -4138,10 +4267,15 @@ impl<A> Vector<A> {
   /// A vector of the list's elements, in the same order.
   ///
   /// Pushed one at a time into an empty vector rather than sized up front with
-  /// `List::length`: that walk recurses once per element, so a list long
-  /// enough to be worth pre-sizing for is a list long enough to overflow the
-  /// stack being measured. Doubling costs a handful of reallocations and no
-  /// stack at all.
+  /// `List::length`. The reason used to be that the measuring walk recursed
+  /// once per element, so a list long enough to be worth pre-sizing for was a
+  /// list long enough to overflow the stack being measured. `List::length` is
+  /// a loop now and that is no longer true.
+  ///
+  /// It stays as it is on the weaker but still sufficient argument: pre-sizing
+  /// costs a second full walk of the list to save a handful of reallocations
+  /// that double, and a walk of the whole input is the more expensive half of
+  /// that trade.
   pub fn from_list(items: List<A>) -> Vector<A> {
     let out: Vector<A> = Vector::new();
     let mut rest = items;
