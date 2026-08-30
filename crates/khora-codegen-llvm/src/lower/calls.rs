@@ -372,6 +372,23 @@ fn intrinsic_owner(ty: &Type) -> Option<String> {
     match ty {
         Type::Str => Some("String".to_string()),
         Type::Adt { name, .. } => Some(name.clone()),
+        // **The builtins, which were missing and are where the intrinsics
+        // are.** `a.xor(3)` reported ``#Int::xor` has no body, so there is
+        // nothing to call. Give it one` -- advice nobody can take about a
+        // function in `std` -- while `Int::xor(a, 3)` worked. The reference
+        // documents all eight of `xor`, `and`, `or`, `shl`, `shr`,
+        // `wrapping_add`, `wrapping_sub` and `wrapping_mul` as `self` methods,
+        // so the `self` was a lie for exactly the operations a hash or a
+        // checksum is written out of.
+        //
+        // Only a *bodiless* declaration reaches here -- the caller checks
+        // `has_body` first -- so `n.to_string()`, which is ordinary Khora in
+        // `std::core`, still goes to its own body rather than being handed to
+        // the integer backend to fail on.
+        Type::Int => Some("Int".to_string()),
+        Type::Fixed(kind) => Some(kind.name()),
+        Type::Float => Some("Float".to_string()),
+        Type::Ptr => Some("Ptr".to_string()),
         _ => None,
     }
 }

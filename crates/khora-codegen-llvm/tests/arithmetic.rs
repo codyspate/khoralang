@@ -362,3 +362,51 @@ fn main() -> Int {{
     assert_eq!(overflowing.stdout, "");
     assert_ne!(overflowing.code, Some(0));
 }
+
+
+/// **`a.xor(3)` did not compile while `Int::xor(a, 3)` did.**
+///
+/// The method spelling looks up an intrinsic by the receiver's type, and the
+/// lookup only knew `String` and declared types — so a receiver of `Int`,
+/// `U8` or `Float` fell through to "resolve it to a body", and these eight
+/// have none. What came back was
+///
+/// ```text
+/// error: `#Int::xor` has no body, so there is nothing to call. Give it one,
+///        or write `extern fn` if it is a C symbol to be found at link time
+/// ```
+///
+/// which is advice nobody can take about a function in `std`. The reference
+/// documents all eight as `self` methods, so the `self` was a lie for exactly
+/// the operations a hash or a checksum is written out of — and it drove the
+/// first of four people writing their first Khora program into the compiler's
+/// own test files to find the working call form.
+///
+/// Both spellings, side by side, because the fix must not trade one for the
+/// other.
+#[test]
+fn the_bit_operations_take_both_spellings() {
+    let ran = run(
+        "int_bits_method",
+        &format!(
+            "{INT}
+fn main() -> Int {{
+  let a = 12;
+  print(a.xor(10));
+  print(a.and(10));
+  print(a.or(10));
+  print(a.shl(2));
+  print(a.shr(2));
+  print(a.wrapping_add(1));
+  print(a.wrapping_sub(1));
+  print(a.wrapping_mul(3));
+  // And the namespaced form still reaches the same operation.
+  print(Int::xor(12, 10));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "6\n8\n14\n48\n3\n13\n11\n36\n6\n");
+    assert_eq!(ran.code, Some(0));
+}

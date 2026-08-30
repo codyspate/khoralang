@@ -225,3 +225,79 @@ fn main() -> Int {{ print(work()); print(khora_live_count()); 0 }}
     );
     assert_eq!(ran.code, Some(0));
 }
+
+
+/// **`Array::new` fills every cell with the *same* value**, and that is only
+/// visible when the value can be written.
+///
+/// A record is a value, so two cells holding one nobody can change are
+/// indistinguishable from two copies. Give it a `mut` field and they are one
+/// object with two names — and an array of mutable accumulators is both the
+/// natural way to group by a small key and the fast way, so it is a shape
+/// people reach for. It reports every total multiplied by the number of
+/// buckets, silently.
+///
+/// `from_fn` is the answer: `make` runs once per cell, so each one is its own.
+/// Both are here together because the contrast is the whole point — the first
+/// assertion is not a bug being pinned as correct, it is the documented
+/// behaviour of `new` that `from_fn` exists to avoid.
+#[test]
+fn from_fn_gives_every_cell_its_own_value() {
+    let ran = run(
+        "array_from_fn",
+        "module t;
+fn print(value: Int);
+
+pub type Array<A>;
+impl<A> Array<A> {
+  fn empty() -> Array<A>;
+  fn new(length: Int, fill: A) -> Array<A>;
+  fn length(self) -> Int;
+  fn get(self, index: Int) -> A;
+  fn set(self, index: Int, value: A) -> ();
+  fn from_fn(count: Int, make: (Int) -> A) -> Array<A> {
+    if count < 1 {
+      Array::empty()
+    } else {
+      let out = Array::new(count, make(0));
+      let mut i = 1;
+      while i < count {
+        Array::set(out, i, make(i));
+        i = i + 1
+      };
+      out
+    }
+  }
+}
+
+type Agg = { mut count: Int };
+
+fn main() -> Int {
+  // One object with three names: two increments, and every cell reads 2.
+  let shared: Array<Agg> = Array::new(3, { count: 0 });
+  Array::get(shared, 0).count = Array::get(shared, 0).count + 1;
+  Array::get(shared, 1).count = Array::get(shared, 1).count + 1;
+  print(Array::get(shared, 0).count);
+  print(Array::get(shared, 2).count);
+
+  // Three objects: the same two increments land where they were written.
+  let apart: Array<Agg> = Array::from_fn(3, fn _i => { count: 0 });
+  Array::get(apart, 0).count = Array::get(apart, 0).count + 1;
+  Array::get(apart, 1).count = Array::get(apart, 1).count + 1;
+  print(Array::get(apart, 0).count);
+  print(Array::get(apart, 2).count);
+
+  // `make` sees the index, so it can be the source of the difference.
+  let squares: Array<Int> = Array::from_fn(5, fn i => i * i);
+  print(Array::get(squares, 4));
+
+  // A count below one calls `make` not at all.
+  let none: Array<Int> = Array::from_fn(0, fn i => i);
+  print(Array::length(none));
+  0
+}
+",
+    );
+    assert_eq!(ran.stdout, "2\n2\n1\n0\n16\n0\n");
+    assert_eq!(ran.code, Some(0));
+}

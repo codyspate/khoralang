@@ -1831,6 +1831,25 @@ pub fn new(length: Int, fill: A) -> Array<A>
 
 `length` elements, every one of them `fill`.
 
+**Every one of them the *same* `fill`, which matters when it can be
+written.** A record is a value and two cells holding one that nobody can
+change are indistinguishable from two copies -- but give it a `mut` field
+and they are one object with two names:
+
+```khora
+type Agg = { mut count: Int };
+let slots: Array<Agg> = Array::new(3, { count: 0 });
+Array::get(slots, 0).count = 1;
+Array::get(slots, 1).count = 1;
+// every slot now reads 2
+```
+
+An array of mutable accumulators is the natural way to group by a small
+key and it is the *fast* way -- thirteen nanoseconds an event -- so this
+is a shape people reach for. It reports counts multiplied by the number
+of buckets, silently, with nothing to say so. Use [`Array::from_fn`]
+below, which builds each cell separately.
+
 **The one place `std` disagrees with its own naming rule.** `new`
 means "an empty one of something that grows", and an array does
 neither -- `Array::empty` sits above this for the empty case.
@@ -1872,6 +1891,33 @@ two fibers writing one array is a data race, so an array crosses into a
 fiber only inside a type that says it is safe. `docs/design/sharing.md`.
 
 An index outside the array stops the program, as `get` does.
+
+#### from_fn
+
+```khora
+pub fn from_fn(count: Int, make: (Int) -> A) -> Array<A>
+```
+
+`count` elements, each one built by calling `make` with its index.
+
+**The answer when the cells must not be the same object.**
+[`Array::new`] fills every cell with one value, which is right for a
+number and wrong for anything with a `mut` field -- an array of
+accumulators built that way is one accumulator with `count` names, and it
+reports every total multiplied by the number of buckets with nothing to
+say so.
+
+`make` is called exactly `count` times, in order, so it may be the source
+of the difference rather than only of the shape:
+
+```khora
+let slots: Array<Agg> = Array::from_fn(16, fn _i => { count: 0 });
+let squares: Array<Int> = Array::from_fn(10, fn i => i * i);
+```
+
+A count below one is [`Array::empty`], and `make` is not called at all --
+which is the reason this is not `Array::new(count, make(0))` with a loop
+after it.
 
 #### is_utf8
 
