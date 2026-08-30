@@ -86,11 +86,26 @@ fn the_second_run_comes_from_the_cache() {
     // Which is what makes this the command somebody reaches for rather than
     // one they wait on.
     let w = world(&returning(0));
-    khora(&w, &w.project, &["run"]);
+
+    // **The first run is checked, and it was not.** This discarded its result
+    // entirely, so a first run that failed stored nothing and the assertion
+    // below blamed the second for a miss the first one caused -- reporting
+    // `built ... [debug]` with no hint that anything had gone wrong earlier.
+    // The test then reads as "the cache is flaky" when what it saw was one
+    // failed build, which is a different problem in a different place.
+    //
+    // This has been intermittent under full-baseline load and passes in
+    // isolation, which is exactly the shape a discarded exit status produces.
+    let (first, first_output) = khora(&w, &w.project, &["run"]);
+    assert_eq!(first, Some(0), "the first run has to succeed to store anything:\n{first_output}");
+    assert!(
+        first_output.contains("built"),
+        "the first run should be the one that compiles:\n{first_output}"
+    );
 
     let (code, output) = khora(&w, &w.project, &["run"]);
     assert_eq!(code, Some(0), "{output}");
-    assert!(output.contains("reused"), "{output}");
+    assert!(output.contains("reused"), "first run:\n{first_output}\nsecond run:\n{output}");
 }
 
 #[test]

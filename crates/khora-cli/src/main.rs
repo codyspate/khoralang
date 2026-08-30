@@ -1494,8 +1494,26 @@ fn build(
                     Err(why) => eprintln!("khora: the cache had this build but {why:#}"),
                 },
                 Err(miss) => {
-                    if cache::Cache::explaining() {
+                    // **An ordinary miss is silent; an anomalous one is not.**
+                    // `NoEntry` is the first build of anything and is what the
+                    // cache is supposed to say most of the time, so printing it
+                    // would be noise on every clean checkout. The other four
+                    // all mean something went wrong -- an entry that does not
+                    // say what it holds, one whose artifact is missing or
+                    // unreadable, one whose artifact is not what was recorded
+                    // -- and each is rare enough that saying so costs nothing.
+                    //
+                    // This is the line that was missing. A flaky test said
+                    // `built` where it expected `reused`, and the reason was
+                    // reachable only with `KHORA_CACHE_EXPLAIN=1` -- which
+                    // changes the timing of the thing being measured, and under
+                    // which it passed. A diagnosis you cannot switch on without
+                    // destroying the evidence is not a diagnosis.
+                    let explaining = cache::Cache::explaining();
+                    if explaining || !matches!(miss, cache::Miss::NoEntry) {
                         eprintln!("khora: cache miss, {miss}");
+                    }
+                    if explaining {
                         let held = store.keys();
                         eprintln!(
                             "khora: the cache holds {} entr(y/ies): {}",
