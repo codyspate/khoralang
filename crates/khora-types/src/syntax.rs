@@ -228,6 +228,24 @@ pub(crate) fn named_type(
         "Bool" => Type::Bool,
         "String" => Type::Str,
         "Ptr" => Type::Ptr,
+        // **The bottom type, and it was not reaching it.** `std::core` declares
+        // `pub type Never;`, so a mention of the name resolved through
+        // `homes.of` to an ordinary opaque `Type::Adt` -- while the solver's
+        // own `Type::Never`, the type a `raise` already has, sat next to it
+        // unrelated. Everything a bottom type needs was built and working:
+        // `raise` in one arm of a `match` discharges against a caller's `A`
+        // today. The name simply never arrived.
+        //
+        // So this is a binding rather than a feature. What it buys is that a
+        // function which stops the program can be written in the branch of an
+        // `if` whose other branch produces a generic -- `Vector::at` is the
+        // first, and every later `std` function that traps on a type it does
+        // not choose is the rest.
+        //
+        // The declaration in `core.kh` stays: it is what `Never` is documented
+        // on and what an `import` can name, the same way `pub fn print` is
+        // declared without a body. Nothing resolves *to* it any more.
+        "Never" => Type::Never,
         "" => Type::Unknown,
         other if IntKind::parse(other).is_some() => {
             Type::Fixed(IntKind::parse(other).expect("just checked"))

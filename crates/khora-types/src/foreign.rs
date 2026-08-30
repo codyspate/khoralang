@@ -74,7 +74,13 @@ pub fn foreign_signature_obstacle(signature: &Signature) -> Option<String> {
             return Some(format!("its parameter of type `{param}` cannot cross: {why}"));
         }
     }
-    if !matches!(signature.ret, Type::Unit) {
+    // `()` and `Never` are the two returns that are not values. `()` because
+    // it carries nothing, and `Never` because there is no return: a symbol
+    // declared `-> Never` is one the C side never comes back from, so nothing
+    // crosses and there is nothing for the boundary rule to be about. Without
+    // this, `khora_bounds_fail` -- which is `-> !` in Rust and diverges -- had
+    // to be declared `-> ()` and lie about what it does.
+    if !matches!(signature.ret, Type::Unit | Type::Never) {
         if let Some(why) = foreign_obstacle(&signature.ret) {
             return Some(format!("its return type `{}` cannot cross: {why}", signature.ret));
         }

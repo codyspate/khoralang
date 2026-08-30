@@ -259,6 +259,17 @@ pub type Never;
 The empty type. A function whose return type is `Never` does not return
 normally — it raises, diverges, or transfers control to a handler.
 
+**The bottom type, which means a `Never` branch takes the other branch's
+type.** `if index < 0 { stop(index) } else { xs }` is an `A` when `xs` is,
+including when `A` is a type the caller chose — the branch that cannot
+return has nothing to disagree with.
+
+The name is the compiler's, the way `Int` and `String` are, so it needs no
+import. This declaration is where it is documented and what an `import`
+naming it resolves against; nothing resolves *to* it. It read as an
+ordinary opaque type until recently, which left the solver's bottom — the
+type a `raise` already has — sitting next to a name that could not reach it.
+
 ### Region
 
 ```khora

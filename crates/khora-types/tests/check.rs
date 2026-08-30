@@ -649,3 +649,63 @@ fn a_missing_outer_constructor_is_still_caught() {
         "Empty",
     );
 }
+
+/// **A branch that cannot return discharges against a type the caller chose.**
+///
+/// `Never` is the bottom type and the solver has always treated it as one —
+/// `raise` in one arm of a `match` has always type-checked against a generic
+/// `A`. What it did not do was arrive: `std::core` declares `pub type Never;`,
+/// so a mention of the *name* resolved to an ordinary opaque `Type::Adt` and
+/// the two sat next to each other unrelated. The refusal was
+///
+/// ```text
+/// `if` branches disagree: `A` is a type the caller chooses, so it cannot be
+/// assumed to be `Never`
+/// ```
+///
+/// which is the right answer to the wrong question. *Solving* a variable to
+/// `Never` would be wrong; *discharging* a branch that cannot return is not the
+/// same operation.
+///
+/// This is what every `std` function that traps on a type it does not choose
+/// needs. `Vector::at` was the first, and it was written with the trap as a
+/// statement and the read following it unconditionally, because the shape below
+/// would not compile.
+#[test]
+fn a_diverging_branch_takes_the_other_branchs_type() {
+    assert_clean(
+        "module m;\n\
+         extern fn stop(index: Int) -> Never;\n\
+         fn at<A>(xs: A, index: Int) -> A {\n  \
+           if index < 0 { stop(index) } else { xs }\n\
+         }\n",
+    );
+}
+
+/// And the direction that must keep failing: two branches that are both real
+/// types still have to agree.
+///
+/// The risk in binding `Never` to the bottom is over-quieting — a bottom that
+/// unified with anything in *both* directions would take this with it.
+#[test]
+fn two_ordinary_branches_still_have_to_agree() {
+    assert_reports(
+        "module m;\nfn f(c: Bool) -> Int { if c { 1 } else { true } }\n",
+        "branches disagree",
+    );
+}
+
+/// `Never` may be a foreign function's return type, and nothing else new may.
+///
+/// An uninhabited return is not a value crossing the boundary; it is no return
+/// at all, so the rule that only scalars and pointers cross has nothing to say
+/// about it. `khora_bounds_fail` is `-> !` on the Rust side and had to be
+/// declared `-> ()` — true about what crosses, and a lie about what it does.
+#[test]
+fn a_foreign_function_may_diverge() {
+    assert_clean(
+        "module m;\n\
+         extern fn stop(index: Int) -> Never;\n\
+         fn f() -> Int { stop(1) }\n",
+    );
+}

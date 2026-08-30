@@ -290,7 +290,13 @@ impl<'ctx> Backend<'ctx> {
             return Some(self.tagged_type().fn_type(&params, false));
         }
         Some(match &signature.ret {
-            Type::Unit => self.ctx.void_type().fn_type(&params, false),
+            // `Never` shapes like `()` and means something stronger: not "it
+            // returns nothing" but "it does not return". LLVM has no type for
+            // that -- divergence is a property of the call, marked `noreturn`
+            // at the site -- so `void` is the honest shape and the type system
+            // is what knows the difference. `khora_bounds_fail` is the first,
+            // and every trap the runtime exports after it is the rest.
+            Type::Unit | Type::Never => self.ctx.void_type().fn_type(&params, false),
             other => self.llvm_type(other)?.fn_type(&params, false),
         })
     }

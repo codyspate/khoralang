@@ -1760,6 +1760,17 @@ pub fn print(value: String);
 
 /// The empty type. A function whose return type is `Never` does not return
 /// normally — it raises, diverges, or transfers control to a handler.
+///
+/// **The bottom type, which means a `Never` branch takes the other branch's
+/// type.** `if index < 0 { stop(index) } else { xs }` is an `A` when `xs` is,
+/// including when `A` is a type the caller chose — the branch that cannot
+/// return has nothing to disagree with.
+///
+/// The name is the compiler's, the way `Int` and `String` are, so it needs no
+/// import. This declaration is where it is documented and what an `import`
+/// naming it resolves against; nothing resolves *to* it. It read as an
+/// ordinary opaque type until recently, which left the solver's bottom — the
+/// type a `raise` already has — sitting next to a name that could not reach it.
 pub type Never;
 
 /// Resource lifetimes.
@@ -4005,14 +4016,11 @@ pub type Vector<A> = {
 /// end stops the same way an `Array` read past its end does, with the same
 /// wording and the same exit status.
 ///
-/// **`-> ()` and not `-> Never`, which is what it is.** The symbol is `-> !`
-/// on the Rust side and does not come back. `Never` here is an opaque type
-/// declared in this file rather than the type system's bottom, so the FFI
-/// check reads it as an ordinary Khora object and refuses it as a return
-/// type -- correctly, for what it is being told. Saying `()` is true about
-/// what crosses, which is nothing, and it is what every other diverging
-/// runtime call already says.
-extern fn khora_bounds_fail(index: Int, length: Int) -> ();
+/// `-> Never`, which is what it is: the symbol is `-> !` on the Rust side and
+/// does not come back. Nothing crosses the boundary, because there is no
+/// return -- which is why the FFI rule, that only scalars and pointers cross,
+/// has nothing to say about it.
+extern fn khora_bounds_fail(index: Int, length: Int) -> Never;
 
 /// `[a, b, c]`, the same as a `List` of the same elements.
 ///
@@ -4193,17 +4201,11 @@ impl<A> Vector<A> {
   /// cells a `pop` left behind are past the end here as they are everywhere
   /// else.
   pub fn at(self, index: Int) -> A {
-    // The trap is a *statement* and the read follows it unconditionally, which
-    // is not how this wants to be written. `Never` does not unify with a type
-    // the caller chose: the checker refuses `if .. { bounds_fail(..) } else {
-    // read }` with "`A` is a type the caller chooses, so it cannot be assumed
-    // to be `Never`", which is the right answer to the wrong question --
-    // solving a variable to `Never` would be wrong, and *discharging* a branch
-    // that cannot return is not the same thing. Until a bottom type is a
-    // bottom type, this shape is the honest one: nothing follows the call,
-    // because nothing can.
-    if index < 0 || index >= self.len { khora_bounds_fail(index, self.len); };
-    Array::get(self.items, index)
+    if index < 0 || index >= self.len {
+      khora_bounds_fail(index, self.len)
+    } else {
+      Array::get(self.items, index)
+    }
   }
 
   /// Sorts the vector in place, stably, by `order`.
