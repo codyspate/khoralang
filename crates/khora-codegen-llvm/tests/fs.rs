@@ -319,8 +319,8 @@ fn work() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
   let path = \"@DIR@/sized.txt\";
   write_text(path, \"12345\")!;
   print(Int::to_string(reads.size(path)!));
-  print(yes_no(reads.exists(path)));
-  print(yes_no(reads.exists(\"@DIR@/never-written.txt\")));
+  print(yes_no(reads.exists(path)!));
+  print(yes_no(reads.exists(\"@DIR@/never-written.txt\")!));
 }}
 
 fn main() -> Int {{
@@ -355,8 +355,8 @@ fn work() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
   let to = \"@DIR@/after.txt\";
   write_text(from, \"carried\")!;
   writes.rename(from, to)!;
-  print(yes_no(reads.exists(from)));
-  print(yes_no(reads.exists(to)));
+  print(yes_no(reads.exists(from)!));
+  print(yes_no(reads.exists(to)!));
   print(read_text(to)!);
 }}
 
@@ -392,7 +392,7 @@ fn work() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
   let path = \"@DIR@/doomed.txt\";
   write_text(path, \"x\")!;
   writes.remove(path)!;
-  print(yes_no(reads.exists(path)));
+  print(yes_no(reads.exists(path)!));
 }}
 
 fn again() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
@@ -491,7 +491,7 @@ fn work() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
   writes.remove(join(dir, \"a.txt\"))!;
   writes.remove(join(dir, \"b.txt\"))!;
   writes.remove_dir(dir)!;
-  print(if reads.is_dir(dir) {{ \"still there\" }} else {{ \"gone\" }});
+  print(if reads.is_dir(dir)! {{ \"still there\" }} else {{ \"gone\" }});
 }}
 
 fn main() -> Int {{
@@ -526,9 +526,9 @@ fn work() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError {{
   let file = \"@DIR@/plain.txt\";
   writes.create_dir(dir)!;
   write_text(file, \"x\")!;
-  print(yes_no(reads.is_dir(dir)));
-  print(yes_no(reads.is_dir(file)));
-  print(yes_no(reads.is_dir(\"@DIR@/never\")));
+  print(yes_no(reads.is_dir(dir)!));
+  print(yes_no(reads.is_dir(file)!));
+  print(yes_no(reads.is_dir(\"@DIR@/never\")!));
 }}
 
 fn main() -> Int {{

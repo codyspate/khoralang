@@ -77,11 +77,11 @@ own manifest made. `docs/design/permissions.md`.
 ```khora
 pub effect FsRead {
   read: (String) -> Array<U8> raises IoError,
-  exists: (String) -> Bool,
+  exists: (String) -> Bool raises IoError,
   size: (String) -> Int raises IoError,
   read_at: (String, Int, Int) -> Array<U8> raises IoError,
   read_dir: (String) -> List<String> raises IoError,
-  is_dir: (String) -> Bool,
+  is_dir: (String) -> Bool raises IoError,
 }
 ```
 

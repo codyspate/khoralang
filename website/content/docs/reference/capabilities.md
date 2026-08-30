@@ -235,11 +235,17 @@ A denial is its own error case, separate from the ordinary failure, because the 
 | a host over HTTP | `CallError::Denied(host)` | `[permissions] network` |
 | a path on disk | `IoError::Denied(path)` | `[permissions.fs]` |
 
-**Two of these cannot reach you.** `FsRead::exists` and `FsRead::is_dir` answer
-a plain `Bool` and have no way to raise, so a path the manifest denies is
-reported exactly as one that is not there. A `false` from either means "not
-readable by this program" and nothing more precise; when the difference matters,
-`read` and `read_dir` raise and say which it was.
+**Including the two probes.** `FsRead::exists` and `FsRead::is_dir` answer a
+`Bool` and raise `IoError` as well, so a path the manifest denies is `Denied`
+rather than `false`. They answered a plain `Bool` until recently, which made
+three situations one word — not there, there but unreadable, and there and
+readable and simply not granted — and the third is the one somebody debugs for
+an hour, because nothing in a `false` points at a manifest. The remaining
+`false` means one thing: the operating system would not open it.
+
+That combines with the glob rule above, which is where it bit hardest.
+`./data/**` does not grant `data`, so `is_dir("data")` used to answer `false`
+about a directory whose every file the program could read.
 
 `Unreachable` is DNS or a firewall; `Denied` is a line you can copy out of the message into the manifest. `Env::variable` and `std::env::variable_or` therefore `raise EnvError`, so both need a `!` at the call site:
 

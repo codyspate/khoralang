@@ -87,17 +87,18 @@ pub effect FsRead {
   /// caller that needs the distinction wants a permissions API rather than
   /// this one.
   ///
-  /// **A path the manifest denies also answers `false`**, and that is the
-  /// answer most likely to mislead. `[permissions.fs] read` is checked before
-  /// the file system is, so a file that is there, readable, and simply not
-  /// granted is reported exactly as one that was never created -- which is the
-  /// confusion [`IoError::Denied`] exists to prevent everywhere it can be
-  /// raised, and this returns a `Bool` and cannot raise it.
+  /// **A path the manifest denies raises `Denied` rather than answering
+  /// `false`.** It used to answer `false`, and that made three different
+  /// situations one word: a file that is not there, a file that is there and
+  /// unreadable, and a file that is there, readable, and simply not granted.
+  /// The third is the one somebody debugs for an hour, because nothing in a
+  /// `false` points at the manifest -- and it is exactly the confusion
+  /// [`IoError::Denied`] exists to prevent everywhere else.
   ///
-  /// So a `false` here means "not readable by this program", with three
-  /// causes it cannot tell apart. When the difference matters, `read` raises:
-  /// `Denied` for the grant and `NotFound` for the file.
-  exists: (String) -> Bool,
+  /// The cost is a `!` on a probe, which is the same cost `read` has always
+  /// had and for the same reason. What it buys is that the remaining `false`
+  /// means one thing: the operating system would not open it.
+  exists: (String) -> Bool raises IoError,
   /// How many bytes the file holds.
   size: (String) -> Int raises IoError,
   /// At most `size` bytes, starting at `offset`.
@@ -139,11 +140,13 @@ pub effect FsRead {
   read_dir: (String) -> List<String> raises IoError,
   /// Whether the path is a directory.
   ///
-  /// A `Bool`, so the same three-way ambiguity as [`FsRead::exists`] above: a
-  /// directory the manifest does not grant answers `false`, exactly as a path
-  /// that is not there does. `./data/**` alone does not grant `data`, so this
-  /// says `false` about a directory whose contents the program can read.
-  is_dir: (String) -> Bool,
+  /// Raises `Denied` for a path the manifest does not grant, the same as
+  /// [`FsRead::exists`] and for the same reason -- and this is where it mattered
+  /// most. `./data/**` does not grant `data` itself, so before this an ordinary
+  /// two-line mistake in a manifest made `is_dir("data")` answer `false` about
+  /// a directory whose every file the program could read, with nothing
+  /// anywhere pointing at the cause.
+  is_dir: (String) -> Bool raises IoError,
 }
 
 /// Changing the file system.
@@ -178,14 +181,14 @@ impl FsRead {
   pub fn real() -> FsRead {
     handler for FsRead {
       read: fn path => { allow_read(path)!; read_whole(path)! },
-      exists: fn path => granted(fs_read(), path) && can_open(path),
+      exists: fn path => { allow_read(path)!; can_open(path) },
       size: fn path => { allow_read(path)!; size_of_path(path)! },
       read_at: fn (path, offset, want) => {
         allow_read(path)!;
         read_part(path, offset, want)!
       },
       read_dir: fn path => { allow_read(path)!; list_dir(path)! },
-      is_dir: fn path => granted(fs_read(), path) && is_directory(path),
+      is_dir: fn path => { allow_read(path)!; is_directory(path) },
     }
   }
 }
