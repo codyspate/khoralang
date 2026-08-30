@@ -1,0 +1,162 @@
+module main;
+
+import std::core::{Array, List, Vector, print};
+import std::clock::{Clock};
+
+// What it costs to allocate, in the states a heap gets into.
+//
+// **Written to chase a report that did not reproduce.** A round of people
+// writing Khora programs reported that allocation ran about twenty-seven times
+// slower after a large number of cons cells had been freed. Nothing here shows
+// it: every phase below is within a few percent of the same phase on a fresh
+// heap, in both a debug and a release build. That is worth keeping rather than
+// deleting, because the next person to suspect the allocator should be able to
+// re-run the shapes that were already looked at instead of inventing them
+// again -- and because if the pathology is real, the shape that shows it is
+// one of the ones missing from this list.
+//
+// Each phase prints nanoseconds per object so the numbers mean something on a
+// machine other than the one they were first taken on. Build and release are
+// both timed together: an object that is allocated and then dropped is what a
+// program actually does, and separating them would measure a shape nobody
+// writes.
+
+type One = { a: Int };
+type Three = { a: Int, b: Int, c: Int };
+type Seven = { a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int };
+
+/// `n` cons cells, built and released. The unit every phase is measured in.
+fn cells(n: Int) -> Int {
+  let mut xs: List<Int> = List::Nil;
+  let mut i = 0;
+  while i < n {
+    xs = List::Cons(i, xs);
+    i = i + 1;
+  };
+  List::length(xs)
+}
+
+/// `n` cons cells, kept, so a later phase runs with them live.
+fn keep(n: Int) -> List<Int> {
+  let mut xs: List<Int> = List::Nil;
+  let mut i = 0;
+  while i < n {
+    xs = List::Cons(i, xs);
+    i = i + 1;
+  };
+  xs
+}
+
+/// Objects of a size a cons cell is not, so a phase can ask whether the holes
+/// left by cells are usable by anything else.
+fn strings(n: Int) -> Int {
+  let out: Vector<String> = Vector::new();
+  let mut i = 0;
+  while i < n {
+    Vector::push(out, "a piece of text number " + Int::to_string(i));
+    i = i + 1;
+  };
+  Vector::length(out)
+}
+
+/// Three sizes interleaved and all kept, which is what leaves a heap with
+/// holes of assorted sizes when it goes.
+fn mixed(n: Int) -> Int {
+  let ones: Vector<One> = Vector::new();
+  let threes: Vector<Three> = Vector::new();
+  let sevens: Vector<Seven> = Vector::new();
+  let mut i = 0;
+  while i < n {
+    Vector::push(ones, { a: i });
+    Vector::push(threes, { a: i, b: i, c: i });
+    Vector::push(sevens, { a: i, b: i, c: i, d: i, e: i, f: i, g: i });
+    i = i + 1;
+  };
+  Vector::length(ones) + Vector::length(threes) + Vector::length(sevens)
+}
+
+/// Every other object released where it was made and the rest kept, which is
+/// the swiss-cheese case a free list is worst at.
+fn holes(n: Int) -> Int {
+  let kept: Vector<Three> = Vector::new();
+  let mut i = 0;
+  while i < n {
+    let passing = { a: i, b: i, c: i };
+    if i % 2 == 0 { Vector::push(kept, passing); };
+    i = i + 1;
+  };
+  Vector::length(kept)
+}
+
+/// Nanoseconds an object, from a millisecond clock and a count.
+fn each(millis: Int, count: Int) -> Int {
+  if count < 1 { 0 } else { millis * 1000000 / count }
+}
+
+pub fn main() -> Int {
+  with { clock: Clock::real() } {
+    let n = 1000000;
+
+    let a0 = clock.monotonic_millis();
+    let a = cells(n);
+    let at = clock.monotonic_millis() - a0;
+    print("cells, fresh heap        ${at} ms, ${each(at, a)} ns each");
+
+    // With a large number of them live rather than freed: the allocator is
+    // handing out new memory rather than reusing any.
+    let live = keep(2 * n);
+    let b0 = clock.monotonic_millis();
+    let b = cells(n);
+    let bt = clock.monotonic_millis() - b0;
+    print("cells, two million live  ${bt} ms, ${each(bt, b)} ns each");
+
+    let c0 = clock.monotonic_millis();
+    let sc = strings(n / 5);
+    let ct = clock.monotonic_millis() - c0;
+    print("strings, cells live      ${ct} ms, ${each(ct, sc)} ns each");
+
+    // And now released. This is the state the report was about.
+    let released = List::length(live);
+    let d0 = clock.monotonic_millis();
+    let d = cells(n);
+    let dt = clock.monotonic_millis() - d0;
+    print("cells, after ${released} freed  ${dt} ms, ${each(dt, d)} ns each");
+
+    let e0 = clock.monotonic_millis();
+    let se = strings(n / 5);
+    let et = clock.monotonic_millis() - e0;
+    print("strings, after them      ${et} ms, ${each(et, se)} ns each");
+
+    let f0 = clock.monotonic_millis();
+    let sf = mixed(n / 2);
+    let ft = clock.monotonic_millis() - f0;
+    print("three sizes interleaved  ${ft} ms, ${each(ft, sf)} ns each");
+
+    let g0 = clock.monotonic_millis();
+    let g = cells(n);
+    let gt = clock.monotonic_millis() - g0;
+    print("cells, after those       ${gt} ms, ${each(gt, g)} ns each");
+
+    let h0 = clock.monotonic_millis();
+    let sh = holes(2 * n);
+    let ht = clock.monotonic_millis() - h0;
+    print("half kept, half dropped  ${ht} ms, ${each(ht, sh)} ns each");
+
+    let i0 = clock.monotonic_millis();
+    let ic = cells(n);
+    let it = clock.monotonic_millis() - i0;
+    print("cells, after the holes   ${it} ms, ${each(it, ic)} ns each");
+
+    let j0 = clock.monotonic_millis();
+    let j = cells(n);
+    let jt = clock.monotonic_millis() - j0;
+    print("cells, once more         ${jt} ms, ${each(jt, j)} ns each");
+
+    // Every phase releases what it built before the next one is timed, which
+    // is what makes the numbers comparable. `khora_live_count` is what would
+    // assert it, and it is an `extern fn` -- which a workspace member should
+    // not be declaring. `crates/khora-codegen-llvm/tests/vector.rs` holds the
+    // leak assertions instead, where the harness may reach for it.
+    0
+  }
+}

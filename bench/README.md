@@ -10,6 +10,7 @@ one thing at a time.
 | `floor/` | Khora: accept, read, write a fixed string, repeat. No parsing. |
 | `render/` | The floor plus `Response::rendered_keeping`. No parsing. |
 | `service/` | A `Router` with one route — the whole of `std::net::http`. |
+| `allocator/` | Not a server: what allocation costs in the states a heap gets into. |
 
 `floor` against `control_keepalive` is what the **runtime** costs. `service`
 against `floor` is what the **library** costs. `render` sits between them and
@@ -213,3 +214,43 @@ Latency distribution, behaviour under more connections than cores, cold start,
 memory, or anything with a body. A `/health` route returning a fixed JSON
 object is the thinnest possible request; it is chosen to isolate the library
 from the handler, not because it resembles a real workload.
+
+## The allocator
+
+`bench/allocator` is the odd one out — no sockets, no load generator, one
+process that prints nanoseconds per object.
+
+```bash
+cargo run -p khora-cli --features llvm -- run --release bench/allocator
+```
+
+**It exists because of a report that did not reproduce.** A round of people
+writing Khora programs reported that allocation ran about twenty-seven times
+slower after a large number of cons cells had been freed. Ten phases here put
+the heap into the states that could plausibly cause that — two million cells
+live, the same two million freed, a different size allocated while they are
+live and again after they are gone, three sizes interleaved, and half of a
+large batch released where it was made so the free space is in holes — and
+then time cons cells again against a fresh heap.
+
+Every phase lands within a few percent of the fresh-heap number, in a debug
+build and a release one:
+
+```
+cells, fresh heap        77 ms, 77 ns each
+cells, two million live  66 ms, 66 ns each
+cells, after 2000000 freed  64 ms, 64 ns each
+cells, after those       66 ms, 66 ns each
+cells, after the holes   72 ms, 72 ns each
+cells, once more         65 ms, 65 ns each
+```
+
+16-core Windows desktop; `khora_alloc` goes to Rust's global allocator, which
+is the system heap here, so the numbers are that allocator's and not one this
+repository wrote.
+
+This is kept rather than deleted for two reasons. Somebody who suspects the
+allocator next should be able to re-run the shapes already looked at instead of
+inventing them again — and if the pathology is real, the shape that shows it is
+one of the ones **missing** from this list, which is a more useful thing to
+know than a bare "could not reproduce".

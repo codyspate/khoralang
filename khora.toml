@@ -45,11 +45,19 @@ indent-width = 2
 # and a fourth one that decides to is a build failure rather than something a
 # reviewer has to notice.
 #
-# `extern = []` is the strict one and the one that matters most: nothing here
-# may declare an `extern fn` or hand that permission to a dependency. `std`
-# always may, which is the design rather than an exception to it -- everything
-# leaving Khora goes through functions whose signatures carry capability rows,
-# and those live in `std`. `docs/design/permissions.md`.
+# `extern = []` is the strict one: no member here may hand the permission to
+# reach outside Khora to a dependency. `std` always may, which is the design
+# rather than an exception to it -- everything leaving Khora goes through
+# functions whose signatures carry capability rows, and those live in `std`.
+# `docs/design/permissions.md`.
+#
+# **It caps the table, not the source.** What is checked is a member's
+# `[permissions] extern`, which is that member saying which of *its
+# dependencies* may reach outside; a member writing `extern fn` in its own
+# source is not refused by this and builds today. That is a narrower promise
+# than this comment used to make, and the gap is worth closing -- a cap on
+# reaching outside Khora that a member can step around by declaring the symbol
+# itself is not much of a cap.
 [workspace.policy]
 network = ["ledger_service", "link_shortener", "risk_analyzer"]
 env = ["ledger_service", "link_shortener", "risk_analyzer"]

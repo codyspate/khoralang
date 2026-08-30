@@ -1,0 +1,3 @@
+[package]
+name = "allocator"
+version.workspace = true

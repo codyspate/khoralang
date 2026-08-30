@@ -42,8 +42,26 @@ cargo clippy -p khora-rt --all-targets -- -D warnings
 # copied out first: cargo rebuilds under a different hash often enough that a
 # loop over `cargo test` measures the wrong thing.
 say 'the runtime, repeatedly, because a race needs more than one look'
-cargo test -q -p khora-rt --lib --no-run 2>/dev/null
-bin=$(ls -t "$TARGET"/debug/deps/khora_rt-* | grep -v '[.]d$' | head -1)
+
+# **Not `2>/dev/null`, which is how this failed silently twice.** The whole
+# Linux check exited 101 with its log ending at the line above and nothing
+# after it: no test output, no error, no clue. That is not the repeat loop
+# failing -- a failing run prints which one and keeps its log -- it is *this*
+# build step failing with its stderr thrown away, after which `set -e` kills
+# the script without a word. A step that can end the run has to be able to say
+# why it did.
+if ! cargo test -q -p khora-rt --lib --no-run; then
+    echo "the runtime's tests would not build; the error is above" >&2
+    exit 1
+fi
+
+# And the same again for finding the binary. A `ls` that matches nothing is a
+# `set -e` exit with no message, which looks identical to the case above.
+bin=$(ls -t "$TARGET"/debug/deps/khora_rt-* 2>/dev/null | grep -v '[.]d$' | head -1)
+if [ -z "$bin" ]; then
+    echo "no khora_rt test binary under $TARGET/debug/deps after building one" >&2
+    exit 1
+fi
 cp "$bin" /tmp/khora-rt-under-test
 chmod +x /tmp/khora-rt-under-test
 
