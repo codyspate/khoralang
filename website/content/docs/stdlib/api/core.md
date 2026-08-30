@@ -1889,6 +1889,14 @@ A count below one is [`Array::empty`], and `make` is not called at all --
 which is the reason this is not `Array::new(count, make(0))` with a loop
 after it.
 
+#### sort_by
+
+```khora
+pub fn sort_by(self, order: (A, A) -> Ordering) ->()
+```
+
+Sorts the whole array in place, stably, by `order`.
+
 #### is_utf8
 
 ```khora
@@ -3579,6 +3587,41 @@ Adds `key`, replacing whatever was there. The count only moves when the
 key is new, which is what makes it the number of entries rather than the
 number of insertions.
 
+#### update
+
+```khora
+pub fn update(self, key: K, step: (Option<V>) -> V) ->()
+```
+
+Puts `step` of whatever is under `key` back under it.
+
+**One hash instead of two**, which is the whole point. Counting things is
+the commonest thing a mutable map is for, and written with what was here
+it is
+
+```khora
+let seen = match Map::get(counts, word) {
+  Option::Some(n) => n + 1,
+  Option::None => 1,
+};
+Map::insert(counts, word, seen);
+```
+
+— two hashes of the same key, two walks of the same bucket and an
+`Option` built in between, on the hot line of every histogram, word count
+and group-by anybody writes. This is
+
+```khora
+Map::update(counts, word, fn seen => match seen {
+  Option::Some(n) => n + 1,
+  Option::None => 1,
+});
+```
+
+`step` is handed `None` when the key is new, so it is also how a default
+is written without saying the key twice. The mirror of [`Dict::update`],
+which answers a new dictionary where this changes the one it is given.
+
 #### remove
 
 ```khora
@@ -3794,6 +3837,45 @@ Bounded by `len` and never by `Array::length`. The cells in between are
 not empty — they hold the fill, or an element a `pop` left behind — and
 handing one of those back would be a phantom element rather than an
 error.
+
+#### at
+
+```khora
+pub fn at(self, index: Int) -> A
+```
+
+The element at `index`, or the program stops.
+
+**The one that does not allocate.** [`Vector::get`] answers an
+`Option<A>`, which is right when the index is a *question* — and it is
+wrong when it is not. Walking a vector by index is the ordinary way to
+read one, and every read of that walk allocated a `Some` for the caller
+to match away one line later. The bound is checked either way; what this
+removes is the object built to carry an answer that was never in doubt.
+
+So the two are a pair, and which one to reach for is a question about the
+index rather than about speed: `get` when the index came from outside and
+might not be there, `at` when the loop that produced it is right above.
+`Array::get` has been the second of those all along, and a vector had
+only the first.
+
+Out of range stops the program and says which index and how long the
+vector was — bounded by `len` and not by the array underneath it, so the
+cells a `pop` left behind are past the end here as they are everywhere
+else.
+
+#### sort_by
+
+```khora
+pub fn sort_by(self, order: (A, A) -> Ordering) ->()
+```
+
+Sorts the vector in place, stably, by `order`.
+
+The elements, and not the array underneath them: a vector's array is as
+long as the last `push` made it and the cells past `len` hold whatever a
+`pop` left behind, so sorting the array would sort those into the middle
+of the answer.
 
 #### set
 

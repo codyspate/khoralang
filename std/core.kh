@@ -1909,6 +1909,97 @@ impl<A> Array<A> {
     }
   }
 
+  /// Sorts the first `count` elements in place, stably, by `order`.
+  ///
+  /// **In place, and stable, and neither of those is the default anywhere
+  /// else here.** [`List::sort`] answers a new list, which is what a list is
+  /// for; an array is the shape somebody reaches for when they did not want a
+  /// copy, and sorting one by going through a list and back defeats the reason
+  /// they reached for it — it is two allocations per element plus the sort.
+  ///
+  /// Stable for the same reason `List::sort` is: sorting by one field and
+  /// expecting the previous sort to survive is the thing people do with a
+  /// second sort, and an unstable one silently does not.
+  ///
+  /// `order` rather than `A: Ord`, because sorting by a field is what a sort
+  /// over records is for. `Ord::cmp` is what to pass when the type's own
+  /// order is wanted, and `.reverse()` on the result is descending.
+  ///
+  /// A bottom-up merge, so nothing recurses: runs of one are merged into runs
+  /// of two, then four, and so on. The scratch array is allocated once and the
+  /// rounds copy back into `self`, which costs one extra pass per round and
+  /// keeps the two halves from having to agree about which one is current.
+  fn sort_upto(self, count: Int, order: (A, A) -> Ordering) -> () {
+    if count < 2 {
+    } else {
+      // One cell of the array is the only value of `A` in reach, and a scratch
+      // array has to start as something; every cell is overwritten before it
+      // is read.
+      let scratch = Array::new(count, Array::get(self, 0));
+      let mut width = 1;
+      while width < count {
+        let mut lo = 0;
+        while lo < count {
+          let mid = if lo + width < count { lo + width } else { count };
+          let hi = if lo + width * 2 < count { lo + width * 2 } else { count };
+          Array::merge_run(self, scratch, lo, mid, hi, order);
+          lo = lo + width * 2;
+        };
+        let mut i = 0;
+        while i < count {
+          Array::set(self, i, Array::get(scratch, i));
+          i = i + 1;
+        };
+        width = width * 2;
+      }
+    }
+  }
+
+  /// Sorts the whole array in place, stably, by `order`.
+  pub fn sort_by(self, order: (A, A) -> Ordering) -> () {
+    Array::sort_upto(self, Array::length(self), order)
+  }
+
+  /// `source[lo..mid]` and `source[mid..hi]`, already sorted, merged into
+  /// `into[lo..hi]`.
+  ///
+  /// The tie goes to the left, which is the whole of the stability: the left
+  /// run holds the elements that came first, so taking from it whenever the
+  /// comparison is not `Greater` keeps equal elements in the order they were
+  /// given.
+  fn merge_run(
+    source: Array<A>,
+    into: Array<A>,
+    lo: Int,
+    mid: Int,
+    hi: Int,
+    order: (A, A) -> Ordering
+  ) -> () {
+    let mut left = lo;
+    let mut right = mid;
+    let mut out = lo;
+    while out < hi {
+      // One side spent means the rest of the other goes across whole, and
+      // asking `order` about it would be asking about an element that is not
+      // there.
+      let from_left = if left >= mid {
+        false
+      } else if right >= hi {
+        true
+      } else {
+        order(Array::get(source, left), Array::get(source, right)).is_greater() == false
+      };
+      if from_left {
+        Array::set(into, out, Array::get(source, left));
+        left = left + 1;
+      } else {
+        Array::set(into, out, Array::get(source, right));
+        right = right + 1;
+      };
+      out = out + 1;
+    }
+  }
+
   /// Whether these bytes are well-formed UTF-8, and so whether
   /// `String::from_bytes` will accept them. Only an `Array<U8>` has an answer.
   pub fn is_utf8(self) -> Bool;
@@ -3521,6 +3612,53 @@ impl<K: Hash, V> Map<K, V> {
     }
   }
 
+  /// Puts `step` of whatever is under `key` back under it.
+  ///
+  /// **One hash instead of two**, which is the whole point. Counting things is
+  /// the commonest thing a mutable map is for, and written with what was here
+  /// it is
+  ///
+  /// ```khora
+  /// let seen = match Map::get(counts, word) {
+  ///   Option::Some(n) => n + 1,
+  ///   Option::None => 1,
+  /// };
+  /// Map::insert(counts, word, seen);
+  /// ```
+  ///
+  /// — two hashes of the same key, two walks of the same bucket and an
+  /// `Option` built in between, on the hot line of every histogram, word count
+  /// and group-by anybody writes. This is
+  ///
+  /// ```khora
+  /// Map::update(counts, word, fn seen => match seen {
+  ///   Option::Some(n) => n + 1,
+  ///   Option::None => 1,
+  /// });
+  /// ```
+  ///
+  /// `step` is handed `None` when the key is new, so it is also how a default
+  /// is written without saying the key twice. The mirror of [`Dict::update`],
+  /// which answers a new dictionary where this changes the one it is given.
+  pub fn update(self, key: K, step: (Option<V>) -> V) -> () {
+    if self.count * 4 >= Array::length(self.buckets) * 3 { Map::grow(self); }
+    let at = Map::slot(self, key);
+    let bucket = Array::get(self.buckets, at);
+    match Chain::find(bucket, key) {
+      // Replacing, so the old entry comes out of the chain and the count
+      // stays where it is.
+      Option::Some(had) => Array::set(
+        self.buckets,
+        at,
+        Chain::Node(key, step(Option::Some(had)), Chain::without(bucket, key))
+      ),
+      Option::None => {
+        Array::set(self.buckets, at, Chain::Node(key, step(Option::None), bucket));
+        self.count = self.count + 1;
+      },
+    }
+  }
+
   /// Takes `key` out, in place. Removing what is not there does nothing.
   ///
   /// The table never shrinks. A map emptied of a million entries keeps its
@@ -3754,6 +3892,19 @@ pub type Vector<A> = {
   mut wanted: Int,
 };
 
+/// The runtime's own out-of-range report, so that a `Vector` read past its
+/// end stops the same way an `Array` read past its end does, with the same
+/// wording and the same exit status.
+///
+/// **`-> ()` and not `-> Never`, which is what it is.** The symbol is `-> !`
+/// on the Rust side and does not come back. `Never` here is an opaque type
+/// declared in this file rather than the type system's bottom, so the FFI
+/// check reads it as an ordinary Khora object and refuses it as a return
+/// type -- correctly, for what it is being told. Saying `()` is true about
+/// what crosses, which is nothing, and it is what every other diverging
+/// runtime call already says.
+extern fn khora_bounds_fail(index: Int, length: Int) -> ();
+
 impl<A> Vector<A> {
   /// Empty, holding no storage at all.
   ///
@@ -3891,6 +4042,49 @@ impl<A> Vector<A> {
     } else {
       Option::Some(Array::get(self.items, index))
     }
+  }
+
+  /// The element at `index`, or the program stops.
+  ///
+  /// **The one that does not allocate.** [`Vector::get`] answers an
+  /// `Option<A>`, which is right when the index is a *question* — and it is
+  /// wrong when it is not. Walking a vector by index is the ordinary way to
+  /// read one, and every read of that walk allocated a `Some` for the caller
+  /// to match away one line later. The bound is checked either way; what this
+  /// removes is the object built to carry an answer that was never in doubt.
+  ///
+  /// So the two are a pair, and which one to reach for is a question about the
+  /// index rather than about speed: `get` when the index came from outside and
+  /// might not be there, `at` when the loop that produced it is right above.
+  /// `Array::get` has been the second of those all along, and a vector had
+  /// only the first.
+  ///
+  /// Out of range stops the program and says which index and how long the
+  /// vector was — bounded by `len` and not by the array underneath it, so the
+  /// cells a `pop` left behind are past the end here as they are everywhere
+  /// else.
+  pub fn at(self, index: Int) -> A {
+    // The trap is a *statement* and the read follows it unconditionally, which
+    // is not how this wants to be written. `Never` does not unify with a type
+    // the caller chose: the checker refuses `if .. { bounds_fail(..) } else {
+    // read }` with "`A` is a type the caller chooses, so it cannot be assumed
+    // to be `Never`", which is the right answer to the wrong question --
+    // solving a variable to `Never` would be wrong, and *discharging* a branch
+    // that cannot return is not the same thing. Until a bottom type is a
+    // bottom type, this shape is the honest one: nothing follows the call,
+    // because nothing can.
+    if index < 0 || index >= self.len { khora_bounds_fail(index, self.len); };
+    Array::get(self.items, index)
+  }
+
+  /// Sorts the vector in place, stably, by `order`.
+  ///
+  /// The elements, and not the array underneath them: a vector's array is as
+  /// long as the last `push` made it and the cells past `len` hold whatever a
+  /// `pop` left behind, so sorting the array would sort those into the middle
+  /// of the answer.
+  pub fn sort_by(self, order: (A, A) -> Ordering) -> () {
+    Array::sort_upto(self.items, self.len, order)
   }
 
   /// Replaces the element at `index`. Answers whether there was one to

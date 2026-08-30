@@ -70,6 +70,31 @@ fn run(name: &str, main: &str) -> String {
     String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
 }
 
+/// The same, for a program that is meant to stop: stderr and the exit status.
+///
+/// `run` above asserts success, which is right for every other test here and
+/// wrong for the one that checks a trap. A trap is part of the surface — what
+/// it says and that it happens — so it needs a runner that does not treat
+/// stopping as the test failing.
+fn stopped(name: &str, main: &str) -> (String, Option<i32>) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let db = KhoraDatabase::new();
+    let root = SourceRoot::new(&db, sources(&db, &dir, main));
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling `{name}` failed:\n  {}\n\n{main}", messages.join("\n  "));
+    }
+
+    let output = Command::new(&exe).output().expect("the program should run");
+    let said = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+    (said, output.status.code())
+}
+
 // --- the array's missing constructor ---------------------------------------
 
 /// `Array::empty`, on its own: a zero-length array of a number and of a boxed
@@ -540,4 +565,201 @@ pub fn main() -> () {
 ",
     );
     assert_eq!(out, "300\n0\n", "100 left in the vector, 100 in the map, 100 keys, nothing leaked");
+}
+
+// --- indexing, sorting, and one lookup instead of two ----------------------
+
+/// **`at` where the index is not a question, `get` where it is.**
+///
+/// `Vector::get` answers an `Option<A>`, which is right when the index came
+/// from outside and might not be there. Walking a vector by index is not that:
+/// the loop that produced the index is directly above, the answer is never in
+/// doubt, and every read still allocated a `Some` for the caller to match away
+/// one line later. `Array::get` has been the other of the pair all along and a
+/// vector had only the first.
+///
+/// The bound is `len` and not the array underneath it, which is the part worth
+/// pinning: a vector that has been pushed to thirty and popped back to three
+/// still has a thirty-two cell array holding real numbers in cells 3 to 29,
+/// and reading one of those would be a phantom element rather than an error.
+#[test]
+fn a_vector_indexes_without_building_an_option() {
+    let out = run(
+        "vector_at",
+        "module main;
+import std::core::{Vector, print};
+
+pub fn main() -> () {
+  let ns: Vector<Int> = Vector::new();
+  let mut i = 0;
+  while i < 30 { Vector::push(ns, i * 3); i = i + 1; };
+  let mut p = 0;
+  while p < 27 { Vector::pop(ns); p = p + 1; };
+
+  let mut seen = \"\";
+  let mut k = 0;
+  while k < Vector::length(ns) { seen = seen + \"${Vector::at(ns, k)},\"; k = k + 1; };
+  print(seen)
+}
+",
+    );
+    assert_eq!(out, "0,3,6,\n");
+}
+
+/// Reading past the end stops, and says the vector's length rather than its
+/// array's.
+///
+/// The cells between `len` and the array's length hold whatever a `pop` left
+/// behind, so this is the difference between a trap and a wrong answer — and
+/// the number in the message is the one that tells a reader which of the two
+/// they are looking at.
+#[test]
+fn indexing_a_vector_past_its_length_stops_the_program() {
+    let (said, code) = stopped(
+        "vector_at_past_end",
+        "module main;
+import std::core::{Vector, print};
+
+pub fn main() -> () {
+  let ns: Vector<Int> = Vector::new();
+  let mut i = 0;
+  while i < 30 { Vector::push(ns, i); i = i + 1; };
+  let mut p = 0;
+  while p < 27 { Vector::pop(ns); p = p + 1; };
+  // Cell 5 of the array holds a 5. The vector is three long.
+  print(Int::to_string(Vector::at(ns, 5)))
+}
+",
+    );
+    assert!(said.contains("index 5 is outside an array of 3"), "said: {said:?}");
+    assert_ne!(code, Some(0), "a trap is not a clean exit");
+}
+
+/// **Stable, in place, and by a comparison rather than by `Ord`.**
+///
+/// `List::sort` answers a new list, which is what a list is for. An array is
+/// what somebody reaches for when they did not want a copy, and sorting one
+/// through a list and back is two allocations per element plus the sort — so
+/// the shape people reach for was the slow one.
+///
+/// Stability is what this asserts, in both directions, because it is the
+/// property a second sort depends on and the one an unstable sort breaks
+/// silently: `2a` before `2c` and `1b` before `1d` in the order they were
+/// pushed, and still in that order when the comparison is reversed.
+///
+/// A vector sorts its elements and not its array — the popped cells must not
+/// arrive in the middle of the answer — and `Array::sort_by` sorts the whole
+/// of one.
+#[test]
+fn sorting_in_place_keeps_equal_elements_in_the_order_they_were_given() {
+    let out = run(
+        "vector_sort_by",
+        "module main;
+import std::core::{Array, Ord, Vector, print};
+
+type Row = { key: Int, tag: String };
+
+fn spell(rows: Vector<Row>) -> String {
+  let mut out = \"\";
+  let mut i = 0;
+  while i < Vector::length(rows) {
+    let row = Vector::at(rows, i);
+    out = out + \"${row.key}${row.tag}\";
+    i = i + 1;
+  };
+  out
+}
+
+pub fn main() -> () {
+  let rows: Vector<Row> = Vector::new();
+  Vector::push(rows, { key: 2, tag: \"a\" });
+  Vector::push(rows, { key: 1, tag: \"b\" });
+  Vector::push(rows, { key: 2, tag: \"c\" });
+  Vector::push(rows, { key: 1, tag: \"d\" });
+  Vector::push(rows, { key: 3, tag: \"e\" });
+
+  Vector::sort_by(rows, fn (l, r) => Ord::cmp(l.key, r.key));
+  print(spell(rows));
+  // Descending is the same comparison reversed, and is stable the same way.
+  Vector::sort_by(rows, fn (l, r) => Ord::cmp(l.key, r.key).reverse());
+  print(spell(rows));
+
+  // A vector whose array is longer than it is: the cells a `pop` left behind
+  // must not sort into the middle.
+  let ns: Vector<Int> = Vector::new();
+  let mut i = 0;
+  while i < 9 { Vector::push(ns, 9 - i); i = i + 1; };
+  Vector::pop(ns);
+  Vector::pop(ns);
+  Vector::sort_by(ns, fn (l, r) => Ord::cmp(l, r));
+  let mut spelled = \"\";
+  let mut k = 0;
+  while k < Vector::length(ns) { spelled = spelled + \"${Vector::at(ns, k)}\"; k = k + 1; };
+  print(spelled);
+
+  // The whole of an array, and an odd length so the merge meets a run with no
+  // partner on every round.
+  let arr: Array<Int> = Array::from_fn(7, fn n => (n * 5) % 7);
+  Array::sort_by(arr, fn (l, r) => Ord::cmp(l, r));
+  let mut sorted = \"\";
+  let mut m = 0;
+  while m < 7 { sorted = sorted + \"${Array::get(arr, m)}\"; m = m + 1; };
+  print(sorted);
+
+  // Nothing to do, twice over, because the merge has to survive both.
+  let none: Array<Int> = Array::empty();
+  Array::sort_by(none, fn (l, r) => Ord::cmp(l, r));
+  let one: Array<Int> = Array::from_fn(1, fn _n => 4);
+  Array::sort_by(one, fn (l, r) => Ord::cmp(l, r));
+  print(\"${Array::length(none)}${Array::get(one, 0)}\")
+}
+",
+    );
+    assert_eq!(out, "1b1d2a2c3e\n3e2a2c1b1d\n3456789\n0123456\n04\n");
+}
+
+/// **`Map::update` is one hash where `get` and `insert` are two.**
+///
+/// Counting is the commonest thing a mutable map is for, and it was written as
+/// a `get`, a `match`, and an `insert` — two hashes of the same key, two walks
+/// of the same bucket, and an `Option` built in between, on the hot line of
+/// every histogram and group-by. `step` is handed `None` for a key that is not
+/// there, so it is also how a default is written without naming the key twice.
+///
+/// The count is what a rewrite of this would get wrong: it moves for a key
+/// that is new and stays put for one that is not.
+#[test]
+fn updating_a_map_hashes_the_key_once() {
+    let out = run(
+        "map_update",
+        "module main;
+import std::core::{List, Map, Option, print};
+
+pub fn main() -> () {
+  let counts: Map<Int, Int> = Map::new();
+  let mut rest = List::Cons(3, List::Cons(1, List::Cons(3, List::Cons(3, List::Cons(1, List::Nil)))));
+  let mut going = true;
+  while going {
+    match rest {
+      List::Nil => going = false,
+      List::Cons(n, more) => {
+        Map::update(counts, n, fn seen => match seen {
+          Option::Some(had) => had + 1,
+          Option::None => 1,
+        });
+        rest = more;
+      },
+    }
+  };
+  let shown = fn (v: Option<Int>) => match v {
+    Option::Some(n) => Int::to_string(n),
+    Option::None => \"none\",
+  };
+  print(shown(Map::get(counts, 3)) + \" \" + shown(Map::get(counts, 1)) + \" \" + shown(Map::get(counts, 2)));
+  // Two keys, however many times they were counted.
+  print(Int::to_string(Map::len(counts)))
+}
+",
+    );
+    assert_eq!(out, "3 2 none\n2\n");
 }
