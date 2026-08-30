@@ -35,6 +35,33 @@ fn a_correct_program_passes() {
     assert!(output.contains("no errors"), "{output}");
 }
 
+/// **A seventy-element list literal used to kill the process.**
+///
+/// `[1, 2, ..]` desugars to `Cons(1, Cons(2, ..))`, so a literal of *n* items
+/// is a tree *n* deep and every pass that walks an expression tree recurses
+/// once per level. On the main thread's one megabyte that ran out at
+/// sixty-nine items, and the whole of the output was `thread 'main' has
+/// overflowed its stack` -- no file, no line, no note. It was found by
+/// somebody writing an ordinary test: a hundred copies of `0.11d`.
+///
+/// The fix is a worker thread with a large stack, which lives in the binary's
+/// `main`, so this has to run the binary to see it. A thousand elements is far
+/// past the old ceiling and far short of the new one, and it checks the
+/// *answer* rather than only the exit status: a compiler that lost elements on
+/// the way through would otherwise pass.
+#[test]
+fn a_long_list_literal_does_not_exhaust_the_stack() {
+    let ns = vec!["1"; 1000].join(", ");
+    let (ok, output) = check(
+        "long_list_literal",
+        &format!(
+            "module m;\nimport std::core::{{List}};\n\n             pub fn main() -> Int {{ let ns = [{ns}]; List::length(ns) - 1000 }}\n"
+        ),
+    );
+    assert!(ok, "expected success, got:\n{output}");
+    assert!(output.contains("no errors"), "{output}");
+}
+
 #[test]
 fn a_syntax_error_fails() {
     let (ok, output) = check("syntax", "module m;\nfn f( -> Int { 1 }\n");

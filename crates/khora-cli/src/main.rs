@@ -327,17 +327,66 @@ enum Command {
     },
 }
 
-fn main() -> ExitCode {
-    // Before anything else, including argument parsing: a project pinning a
-    // version whose flags this build does not recognise must still work.
-    hand_over_if_pinned();
+/// How much stack the compiler gets to walk a program with.
+///
+/// **A seventy-element list literal used to kill the process.** `[1, 2, ..]`
+/// desugars to `Cons(1, Cons(2, ..))`, so a literal of *n* items is a tree *n*
+/// deep, and every pass that walks an expression tree -- inference, the
+/// reference-counting plan, code generation -- recurses once per level. On the
+/// main thread, which Windows gives one megabyte, that ran out at sixty-nine
+/// items in a debug build and somewhere past two hundred in a release one. The
+/// whole of the output was
+///
+/// ```text
+/// thread 'main' (23940) has overflowed its stack
+/// ```
+///
+/// no file, no line, no note. It was found by somebody writing an ordinary
+/// test: a hundred copies of `0.11d`, to show that decimal addition is exact.
+///
+/// Half a gigabyte, rather than rewriting a dozen recursive walks -- which is
+/// what rustc, clang and swiftc all do for the same reason. It costs nothing:
+/// the pages are reserved address space and are committed only as they are
+/// touched, so a one-line program pays for none of them. Measured, on the
+/// literal above: sixty-four megabytes held five hundred elements and not five
+/// thousand, and this holds twenty thousand and not sixty.
+///
+/// It does not *remove* the recursion, so a generated file can still find the
+/// new limit, and when it does the process still dies with that one line and
+/// no diagnostic. `docs/design/limits.md` states the bargain and what it would
+/// take to be rid of it.
+const COMPILER_STACK: usize = 512 * 1024 * 1024;
 
+/// Everything the process does, once it has a stack big enough to do it on.
+fn run() -> ExitCode {
     match dispatch() {
         Ok(code) => code,
         Err(err) => {
             eprintln!("khora: {err:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn main() -> ExitCode {
+    // Before anything else, including argument parsing: a project pinning a
+    // version whose flags this build does not recognise must still work.
+    hand_over_if_pinned();
+
+    // On a thread of our own, for the stack. `main`'s is fixed by the loader
+    // before any of this runs, so the size can only be asked for here.
+    let worker = std::thread::Builder::new()
+        .name("khora".to_string())
+        .stack_size(COMPILER_STACK)
+        .spawn(run);
+
+    match worker {
+        // A panic has already printed itself on the way out.
+        Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+        // No thread to be had, which is a machine in trouble rather than a
+        // program in trouble. Carry on where we are: a small stack is better
+        // than refusing to compile at all.
+        Err(_) => run(),
     }
 }
 
