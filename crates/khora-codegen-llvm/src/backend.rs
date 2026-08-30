@@ -271,6 +271,16 @@ pub(crate) struct Backend<'ctx> {
     pub(crate) c_exports: Vec<String>,
     /// DWARF line tables, or `None` when `KHORA_DEBUG=0`. See [`crate::debug`].
     pub(crate) debug: Option<crate::debug::Debug<'ctx>>,
+    /// The text of the file whose body is being emitted.
+    ///
+    /// **Kept whatever the profile is**, which is the point. `enter_debug_scope`
+    /// already reads this text and hands it to the debug builder, and returns
+    /// early when there is no debug information to build — so a release build
+    /// had the file in hand and threw it away. An `assert` needs one number out
+    /// of it, and needs it in both profiles.
+    ///
+    /// Empty when nothing is being emitted, and between bodies.
+    pub(crate) source: String,
     pub rt: Runtime<'ctx>,
     pub types: TypeMap,
     /// Khora function name to the LLVM function, whether definition or extern.
@@ -416,6 +426,7 @@ impl<'ctx> Backend<'ctx> {
             // Installed by `build`, which is where the entry file's path is
             // known. `Backend::new` has a module name and not a path.
             debug: None,
+            source: String::new(),
             rt,
             types,
             functions: HashMap::new(),

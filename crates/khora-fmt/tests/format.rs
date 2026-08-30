@@ -382,3 +382,38 @@ fn a_correctly_formatted_file_with_carriage_returns_needs_no_reformatting() {
         "a formatted file should not be reported as needing reformatting"
     );
 }
+
+/// **A prefix `-` hugs its operand.**
+///
+/// It did not: `-1` came back as `- 1` and `n * -1` as `n * - 1`. Both still
+/// parse, which is why nothing caught it — the formatter turned a number into
+/// an operator and an operand, and the result reads like a typo somebody left
+/// in.
+///
+/// The rule beside it was written for prefix `!` and `-` was left to the
+/// default. Only the space *after* the minus is decided here: `n * -1` wants
+/// the one before it, and `(-1)` is already tight because the bracket rule runs
+/// first. All three are checked, because a fix for the first that broke either
+/// of the others would look correct in isolation.
+#[test]
+fn a_prefix_minus_hugs_its_operand() {
+    let out = format(
+        "module m;\n\nfn f(n: Int) -> Int {\n  let a = -1;\n  let b = n * -1;\n  \
+         let c = (-1);\n  a + b + c\n}\n",
+    )
+    .expect("should parse");
+
+    assert!(out.contains("let a = -1;"), "{out}");
+    assert!(out.contains("let b = n * -1;"), "{out}");
+    assert!(out.contains("let c = (-1);"), "{out}");
+    assert!(!out.contains("- 1"), "no minus should be separated from its operand:\n{out}");
+}
+
+/// And subtraction keeps its spaces, which is the same token doing the other
+/// job.
+#[test]
+fn subtraction_is_still_spaced() {
+    let out = format("module m;\n\nfn f(a: Int, b: Int) -> Int {\n  a - b\n}\n")
+        .expect("should parse");
+    assert!(out.contains("a - b"), "{out}");
+}

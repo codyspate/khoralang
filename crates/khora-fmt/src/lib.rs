@@ -387,6 +387,18 @@ impl Formatter {
         if prev == BANG {
             return prev_parent == PREFIX_EXPR;
         }
+        // **A prefix `-` hugs its operand, exactly as a prefix `!` does.** The
+        // rule above was written for `!` and `-` was left to the default, so
+        // `-1` came back as `- 1` and `n * -1` as `n * - 1`. Both still parse,
+        // which is why nothing caught it: it is a formatter turning a number
+        // into an operator and an operand and reading like a typo.
+        //
+        // Only *after* the `-`. What comes before depends on where the minus
+        // is: `n * -1` wants the space that the default gives it, and `(-1)`
+        // is already tight because the bracket rule ran first.
+        if prev == MINUS {
+            return prev_parent == PREFIX_EXPR;
+        }
         false
     }
 

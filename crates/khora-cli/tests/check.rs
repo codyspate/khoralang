@@ -596,4 +596,8 @@ fn a_failing_assertion_says_which_one_it_was() {
 
     assert!(!ok, "the third assertion does not hold:\n{output}");
     assert!(output.contains("assertion 3 failed"), "and it says which:\n{output}");
+    // **And where.** The ordinal alone meant counting `assert`s to find the
+    // one that went; the line is passed as an immediate at the call, so it
+    // reads the same in a release build as in a debug one.
+    assert!(output.contains("at line"), "and where it was written:\n{output}");
 }

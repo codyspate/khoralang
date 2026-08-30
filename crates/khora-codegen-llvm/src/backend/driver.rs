@@ -223,6 +223,7 @@ pub(super) fn build(
         // a counted pointer at `A = List<Int>`, so one plan for both is wrong
         // for whichever it was not made for.
         let plan = khora_perceus::plan(body, instance_types, &defined);
+        backend.source = source_of(db, mono, &instance.symbol());
         enter_debug_scope(db, &mut backend, mono, instance, body, &instance.symbol(), None);
         crate::lower::emit_function(
             &mut backend,
@@ -259,6 +260,7 @@ pub(super) fn build(
             &site.symbol,
             Some(body.range(site.expr)),
         );
+        backend.source = source_of(db, mono, &owner.symbol());
         crate::lower::emit_closure(&mut backend, &site, body, Some(&plan), owner_types, mono);
         backend.end_debug_scope();
     }
@@ -338,6 +340,15 @@ pub(super) fn build(
         debug.finalize();
     }
     backend.finish(&machine, out, stop, entry_point == Entry::Library, profile)
+}
+
+/// The text of the file a symbol's body came from.
+///
+/// Empty when it cannot be found, which every reader of it treats as "no
+/// position" rather than as an error: a missing line is a less useful message,
+/// and a failed build over one would be a worse trade.
+fn source_of(db: &dyn Db, mono: &khora_types::mono::Instances, symbol: &str) -> String {
+    mono.home(symbol).map(|home| home.text(db).to_string()).unwrap_or_default()
 }
 
 /// Opens the debug scope for one emitted function.

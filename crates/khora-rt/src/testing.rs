@@ -75,15 +75,28 @@ pub(crate) fn name_filter() -> Option<String> {
 /// which of six assertions it was -- so the way to find out was to delete
 /// assertions one at a time until it passed. Somebody did.
 ///
-/// The ordinal rather than the line, because a line needs the debug info that
-/// only a debug profile emits, and a test that reports where it failed in one
-/// profile and not the other is worse than one that always reports the same
-/// thing. Counting is exact in both: the third `assert` written in the block
-/// is the third one, whatever the optimiser did to it.
+/// **The ordinal *and* the line.** It was the ordinal alone, on the reasoning
+/// that a line needs the debug information only a debug profile emits, and that
+/// a message which differs between profiles is worse than one that is always
+/// the same. The first half of that is not true: the compiler knows the line
+/// while it is lowering the call and can pass it as an immediate, which costs
+/// nothing and is identical in both profiles.
+///
+/// The ordinal stays because it is the thing that cannot be wrong. A line is
+/// where the `assert` was written; in a test with a loop or a helper, the same
+/// line fails on many different iterations, and the count says which time.
+///
+/// A `line` of zero means the lowering had no position — nothing generated
+/// today is in that case, and printing "line 0" would be worse than saying
+/// only what is known.
 #[unsafe(no_mangle)]
-pub extern "C" fn khora_assert_failed(ordinal: u32) {
+pub extern "C" fn khora_assert_failed(ordinal: u32, line: u32) {
     let mut err = std::io::stderr().lock();
-    let _ = writeln!(err, "khora: assertion {ordinal} failed");
+    if line == 0 {
+        let _ = writeln!(err, "khora: assertion {ordinal} failed");
+    } else {
+        let _ = writeln!(err, "khora: assertion {ordinal} failed, at line {line}");
+    }
 }
 
 /// Runs every registered test, one fiber each, and reports.

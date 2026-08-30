@@ -162,9 +162,14 @@ impl<'ctx> Lower<'_, 'ctx> {
         // one at a time.
         let say = self.be.rt.assert_failed;
         let ordinal = self.be.ctx.i32_type().const_int(u64::from(ordinal), false);
+        // **The line, as an immediate.** It is known here and costs a constant
+        // in the call, so it works in a release build exactly as it does in a
+        // debug one — which was the objection to reporting one at all, on the
+        // belief that a line has to come from debug information. It does not.
+        let line = self.be.ctx.i32_type().const_int(u64::from(line_of(&self.be.source, range)), false);
         self.be
             .builder
-            .build_call(say, &[ordinal.into()], "")
+            .build_call(say, &[ordinal.into(), line.into()], "")
             .expect("reporting which assertion failed");
         let which = self.be.ctx.i32_type().const_int(runtime::FAILED_WHICH, false);
         let none = self.be.ctx.i64_type().const_zero();
@@ -404,4 +409,18 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(continue_to);
         Some(self.be.word_to_value(word, ret))
     }
+}
+
+/// The one-based line `at` starts on, or 0 when there is no source to count in.
+///
+/// Counting newlines rather than keeping a table: an `assert` is rare, this
+/// runs once per one at compile time, and a table would have to be built for
+/// every file whether or not it had any.
+fn line_of(source: &str, at: TextRange) -> u32 {
+    if source.is_empty() {
+        return 0;
+    }
+    let offset = usize::from(at.start()).min(source.len());
+    u32::try_from(source[..offset].bytes().filter(|b| *b == b'\n').count() + 1)
+        .unwrap_or(0)
 }
