@@ -128,6 +128,31 @@ print(user.name);
 
 Use records when field names carry meaning or when a value will cross an API boundary.
 
+### Mutable fields
+
+A field marked `mut` can be assigned through a value of the record type. Every other field is fixed once the value exists.
+
+```khora
+pub type Tally = {
+  name: String,
+  mut count: Int,
+};
+
+let seen: Tally = { name: "hits", count: 0 };
+seen.count = seen.count + 1;
+```
+
+This is what in-place aggregation is written out of, and it is the fast shape for grouping by a small key — an array of counters updated where they sit, rather than a new value per event:
+
+```khora
+let buckets: Array<Tally> = Array::from_fn(3, fn i => { name: "b${i}", count: 0 });
+Array::get(buckets, 1).count = Array::get(buckets, 1).count + 5;
+```
+
+`Array::from_fn` rather than `Array::new`, because `new` puts the *same* value in every cell — which is invisible for a record nobody can change and is one counter with three names once a field is `mut`. `Array::from_fn` calls its function once per cell.
+
+A record with a `mut` field cannot cross into a fiber: two fibers writing one record is a data race, and the type says so. See [Fibers and nurseries](./fibers-and-nurseries/) for what does cross.
+
 ### Updating a record
 
 `{ ..base, field: value }` builds a new record from an existing one. Every field

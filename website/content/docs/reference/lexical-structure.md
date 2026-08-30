@@ -122,6 +122,26 @@ let query = `
 
 When a multiline backtick literal opens on its own line, common source indentation is stripped so the surrounding code can remain indented without changing the text's intended layout.
 
+Three things are removed, and the last two are the ones that surprise people:
+
+- the **common indentation**, measured over the whole body and taken off each line, so the deepest-indented line keeps whatever it has beyond the shallowest;
+- the newline **immediately after the opening backtick**;
+- the newline and indentation **before the closing backtick**.
+
+So this literal is thirty bytes and three lines, with no leading or trailing newline:
+
+```khora
+fn block() -> String {
+  `
+  line one
+    indented
+  line three
+  `
+}
+```
+
+It is `"line one\n  indented\nline three"`. `indented` keeps two spaces because the common prefix was two, not four. A literal that should *end* with a newline needs a blank line before the closing backtick, and one that should start with a newline needs a blank line after the opening one.
+
 ## Line comments
 
 ```khora

@@ -76,9 +76,36 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
     std::fs::write(directory.join("src").join(file), source)
         .with_context(|| format!("writing src/{file}"))?;
 
+    // **What a build leaves beside the source, which nothing told anybody.**
+    // A compiled program lands in `src/` next to the `.kh` it came from, along
+    // with its object file and, on Windows, its debug information. Nothing
+    // documents that and nothing ignored it, so the first `git status` after a
+    // first build is three files nobody recognises -- and this repository
+    // itself carries the rules, worked out once by whoever hit it first.
+    //
+    // Written by the scaffold rather than documented, because a list of
+    // patterns is exactly the kind of thing that belongs in a file rather than
+    // in a paragraph somebody has to find and copy.
+    //
+    // Not overwritten if one is already there: `khora new` refuses a directory
+    // that is not empty, so there cannot be one -- but that is `new`'s rule to
+    // change and not this line's to depend on.
+    let ignore = "# What a compiled Khora program leaves beside its source.\n\
+                  src/*.exe\n\
+                  src/*.o\n\
+                  src/*.pdb\n\
+                  # The IR dump `KHORA_EMIT_LLVM` asks for.\n\
+                  src/*.ll\n";
+    let ignore_path = directory.join(".gitignore");
+    if !ignore_path.exists() {
+        std::fs::write(&ignore_path, ignore)
+            .with_context(|| format!("writing {}", ignore_path.display()))?;
+    }
+
     println!("created {} ({})", directory.display(), if library { "library" } else { "program" });
     println!("  khora.toml");
     println!("  src/{file}");
+    println!("  .gitignore");
     // **A note about what listing buys, not a warning that something is
     // wrong.** The old wording -- "does not list this directory. Add it to
     // `members`." -- read as an error, and the first thing a newcomer did was

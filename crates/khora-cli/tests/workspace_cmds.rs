@@ -262,3 +262,28 @@ fn graph_of_a_workspace_with_no_edges_says_so() {
     assert!(ok, "{output}");
     assert!(output.contains("nothing depends on anything yet"), "{output}");
 }
+
+/// **A build lands beside the source, and nothing said so.**
+///
+/// A compiled program goes into `src/` next to the `.kh` it came from, with its
+/// object file and, on Windows, its debug information — so the first
+/// `git status` after a first build is three files nobody recognises. Nothing
+/// documented it and nothing ignored it. This repository has carried the
+/// patterns since somebody hit it here first; a package made with `khora new`
+/// got to work them out again.
+///
+/// Written by the scaffold rather than documented, because a list of patterns
+/// belongs in a file rather than in a paragraph somebody has to find and copy.
+#[test]
+fn new_writes_a_gitignore_for_what_a_build_leaves() {
+    let root = scratch("new_ignore");
+    run(&root, &["new", "tidy"]);
+
+    let ignore = std::fs::read_to_string(root.join("tidy").join(".gitignore"))
+        .expect("a .gitignore");
+    for pattern in ["src/*.exe", "src/*.o", "src/*.pdb", "src/*.ll"] {
+        assert!(ignore.contains(pattern), "{pattern} should be ignored:\n{ignore}");
+    }
+    // The source itself obviously must not be.
+    assert!(!ignore.contains("*.kh"), "the source is the point:\n{ignore}");
+}
