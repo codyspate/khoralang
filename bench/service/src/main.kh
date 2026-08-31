@@ -1,13 +1,13 @@
 module main;
 
-import std::core::{SharedFn};
+import std::core::{ChildFailed, SharedFn};
 import std::net::http::{HttpError, Response, Router};
 
 // The whole thing: accept, read, parse, route, render. Against `bench/floor`
 // this is what `std::net::http` costs from end to end, and against
 // `bench/render` it is what the parser and the router cost between them.
 
-pub fn main() raises HttpError {
+pub fn main() raises HttpError + ChildFailed {
   Router::new()
     |> Router::get("/health", SharedFn::of(fn _request => Response::json(200, "{\"status\":\"ok\"}")))
     |> Router::listen(18952)!

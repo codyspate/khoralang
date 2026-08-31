@@ -87,18 +87,28 @@ pub fn nursery<A, 'ef, 'er>(
   body: () -> A with { 'ef | nursery: Nursery } raises 'er
 ) -> A
   with 'ef
-  raises 'er
+  raises 'er + ChildFailed
 ```
 
 Example:
 
 ```khora
-fn run() -> () {
-  nursery(fan_out)
+fn run() -> () raises ChildFailed {
+  nursery(fan_out)!
 }
 ```
 
 When the body completes normally, `nursery` waits until every adopted child is finished. If the body leaves by failure or cancellation, releasing the nursery cancels children that are still running and waits for them before the scope is gone.
+
+### A child that failed
+
+A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. The first failure cancels the siblings, every child is still waited for, and the nursery raises
+
+```khora
+pub type ChildFailed = { children: Int };
+```
+
+A count rather than the child's own error, because `adopt` binds the row per adoption — two children may fail with two unrelated types and there is no one value to hand back. A child the nursery *cancelled* is not counted: that is what a nursery does to its children, not something that went wrong.
 
 The body may be a named function or a lambda. A lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs, so `nursery(fan_out)` and `nursery(fn () => fan_out())` mean the same thing.
 
@@ -122,7 +132,7 @@ pub fn bounded_nursery<A, 'ef, 'er>(
   body: () -> A with { 'ef | nursery: Nursery } raises 'er
 ) -> A
   with 'ef
-  raises 'er
+  raises 'er + ChildFailed
 ```
 
 ```khora

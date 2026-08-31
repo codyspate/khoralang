@@ -1,6 +1,6 @@
 module link_shortener::main;
 
-import std::core::{Changed, Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
+import std::core::{Changed, ChildFailed, Dict, Eq, List, Map, Option, Ord, Pair, Result, Shared, SharedFn, Show, Split, print};
 import std::clock::{Clock};
 import std::env::{Env, EnvError, variable_or};
 import std::fs::{FsRead, FsWrite, IoError, read_text, write_text};
@@ -416,7 +416,7 @@ fn port() -> Int
   }
 }
 
-pub fn main() raises HttpError + EnvError {
+pub fn main() raises HttpError + EnvError + ChildFailed {
   with { env: Env::real(), clock: Clock::real(), reads: FsRead::real(), writes: FsWrite::real(), random: Random::real() } {
     let store: Store = { links: Shared::of(load()!), started: clock.monotonic_millis() };
     print("restored ${Int::to_string(Dict::size(Shared::get(store.links)))} link(s)");

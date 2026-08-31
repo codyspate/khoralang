@@ -1,6 +1,6 @@
 module main;
 
-import std::core::{Array, Fiber, Nursery, bounded_nursery, print};
+import std::core::{Array, ChildFailed, Fiber, Nursery, bounded_nursery, print};
 import std::net::socket::{accept_on, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
 
 // The floor: accept, then answer whatever arrives with a fixed string until the
@@ -38,9 +38,9 @@ fn loop_forever(server: Int) -> ()
   loop_forever(server)
 }
 
-pub fn main() -> () {
+pub fn main() raises ChildFailed {
   start();
   let server = listen_on(18950);
   print("listening");
-  bounded_nursery(256, fn () => loop_forever(server))
+  bounded_nursery(256, fn () => loop_forever(server))!
 }

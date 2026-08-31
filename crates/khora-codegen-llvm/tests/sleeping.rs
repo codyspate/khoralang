@@ -151,7 +151,7 @@ fn main() -> () {
         spawned = spawned + 1
       }
     };
-    Fibers::wait(crew);
+    let _stopped = Fibers::wait(crew);
     print(Int::to_string(Shared::get(done)));
   }
 }"#,

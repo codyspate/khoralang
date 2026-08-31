@@ -1,6 +1,6 @@
 module std::net::http;
 
-import std::core::{Array, Eq, Fiber, List, Map, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery, scoped};
+import std::core::{Array, ChildFailed, Eq, Fiber, List, Map, Nursery, Option, Result, Scope, SharedFn, Show, Split, attempt, bounded_nursery, scoped};
 import std::permissions::{granted_host};
 import std::permissions::grants::{network};
 import std::net::socket::{accept_on, connect_to, invalid_handle, listen_on, receive, set_receive_timeout, shut, start, transmit};
@@ -1272,7 +1272,7 @@ impl Router {
 
   /// Serves until the process stops, on a fiber per connection.
   pub fn listen<'er>(router: Router<'er>, port: Int) -> ()
-    raises 'er + HttpError
+    raises 'er + HttpError + ChildFailed
   {
     if start() {
     } else {
@@ -1318,7 +1318,7 @@ impl Router {
   /// server is usually the program's.
   pub fn listen_tls<'er>(router: Router<'er>, port: Int, certificate: String, key: String) -> ()
     with { scope: Scope }
-    raises 'er + HttpError + TlsError
+    raises 'er + HttpError + TlsError + ChildFailed
   {
     let settings = tls_server(certificate, key)!;
     let server = Router::bound(port)!;

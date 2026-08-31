@@ -137,7 +137,7 @@ pub fn main() -> () {
     Fibers::adopt(crew, Fiber::spawn(fn () => bump(count)));
     i = i + 1;
   };
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   print(Int::to_string(Shared::get(count)))
 }
 ",
@@ -333,7 +333,7 @@ pub fn main() -> () {
     Fibers::adopt(crew, Fiber::spawn(fn () => record(cache, i)));
     i = i + 1;
   };
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   let table = Shared::get(cache);
   print(Int::to_string(Dict::size(table)));
   match Dict::get(table, 9) {

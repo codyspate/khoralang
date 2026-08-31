@@ -524,9 +524,8 @@ fn serve() -> () {{
   let router = Router::new()
     |> Router::get("/greet/:name", SharedFn::of(fn r => greet(r)))
     |> Router::post("/echo", SharedFn::of(fn r => echo(r)));
-  match attempt(fn () => Router::listen(router, {port})!) {{
-    Result::Ok(_) => (),
-    Result::Err(_) => print("the server stopped"),
+  Router::listen(router, {port})! catch {{
+    _ => print("the server stopped"),
   }}
 }}
 

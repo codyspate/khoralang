@@ -293,7 +293,7 @@ impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
   fn adopt<'er>(self, child: Fiber<(), 'er>) -> ();
-  fn wait(self) -> ();
+  fn wait(self) -> Int;
 }
 pub effect Nursery { adopt: (Fiber<(), 'er>) -> (), }
 ";
@@ -329,7 +329,7 @@ fn drain() -> () {{
       Option::None => going = false,
     }}
   }};
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
 }}
 
 fn main() -> Int {{
@@ -379,7 +379,7 @@ fn main() -> Int {{
       Option::None => going = false,
     }}
   }};
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   print(total);
   0
 }}
@@ -433,7 +433,7 @@ fn converse() -> () {{
   print(request(requests, 21));
   print(request(requests, 5));
   Channel::close(requests);
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
 }}
 
 fn main() -> Int {{

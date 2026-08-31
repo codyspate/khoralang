@@ -170,5 +170,10 @@ pub fn close(pool: Pool) -> () {
       Option::Some(requests) => Channel::close(requests),
     }
   };
-  Fibers::wait(pool.crew);
+  // **The count is discarded here, and only here.** `Fibers::wait` answers
+  // how many children ended with an error, and this is a shutdown: the serving
+  // fibers were stopped on purpose a few lines above, by closing the channels
+  // they were waiting on. A pool that raised on the way out would be reporting
+  // its own request to stop as a fault, and there is nobody left to tell.
+  let _stopped = Fibers::wait(pool.crew);
 }

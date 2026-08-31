@@ -816,12 +816,20 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let nursery_ty = self.types.of(*nursery).clone();
                 let handle = self.expr(*nursery)?;
                 let wait = self.be.rt.fibers_wait;
-                self.be
+                // How many children ended with an error, which `std` turns
+                // into a `ChildFailed`. The runtime cannot raise it itself:
+                // every child's error has a type of its own and a nursery
+                // holds them as bare handles, so a count is what it has.
+                let failed = self
+                    .be
                     .builder
-                    .build_call(wait, &[handle.into()], "")
-                    .expect("waiting for a nursery");
+                    .build_call(wait, &[handle.into()], "failed")
+                    .expect("waiting for a nursery")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a count is a value");
                 self.release_unless_lent(*nursery, handle, &nursery_ty);
-                Some(self.be.unit_value())
+                Some(failed)
             }
             _ => self.fail(
                 format!("`Fibers::{name}` is not a nursery operation the backend knows"),

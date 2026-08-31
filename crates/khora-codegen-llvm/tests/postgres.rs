@@ -721,7 +721,7 @@ fn main() -> Int {
   };
   work(requests);
   Channel::close(requests);
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   0
 }
 ";
@@ -831,7 +831,7 @@ fn main() -> Int {
   run_jobs(pool);
   print(Int::to_string(Channel::depth(pool.idle)));
   close(pool);
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   0
 }
 ";

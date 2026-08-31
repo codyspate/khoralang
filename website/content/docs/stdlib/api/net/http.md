@@ -908,7 +908,7 @@ a router's job is to say what the wire says.
 #### listen
 
 ```khora
-pub fn listen<'er>(router: Router<'er>, port: Int) ->() raises 'er + HttpError
+pub fn listen<'er>(router: Router<'er>, port: Int) ->() raises 'er + HttpError + ChildFailed
 ```
 
 Serves until the process stops, on a fiber per connection.
@@ -916,7 +916,7 @@ Serves until the process stops, on a fiber per connection.
 #### listen_tls
 
 ```khora
-pub fn listen_tls<'er>(router: Router<'er>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'er + HttpError + TlsError
+pub fn listen_tls<'er>(router: Router<'er>, port: Int, certificate: String, key: String) ->() with { scope: Scope } raises 'er + HttpError + TlsError + ChildFailed
 ```
 
 The same, over TLS.

@@ -6,7 +6,9 @@
 //! fiber cannot outlive the block that spawned it and nobody writes the cancel.
 
 use super::*;
-use crate::fiber::{fiber_state, khora_fiber_cancel, khora_fiber_release, wait_for, Handed};
+use crate::fiber::{
+    failed_and_reported, fiber_state, khora_fiber_cancel, khora_fiber_release, wait_for, Handed,
+};
 use crate::heap::{khora_alloc, khora_drop};
 use std::sync::Mutex;
 
@@ -36,6 +38,15 @@ struct Children {
     /// there are.
     sweep_at: usize,
     held: Vec<Handed>,
+    /// How many children have ended with an error.
+    ///
+    /// **Kept on the nursery rather than answered at the wait**, because the
+    /// wait is not the only place a child's outcome is seen. Adopting sweeps
+    /// the children that have finished, and a failure swept there would
+    /// otherwise be let go of before anybody counted it -- so a program that
+    /// adopts a thousand fibers and waits once would report only whatever
+    /// happened to be left in the list at the end.
+    failed: i64,
 }
 
 /// The shortest list worth walking. Below this a sweep costs more in
@@ -96,6 +107,7 @@ pub extern "C" fn khora_fibers_open_bounded(limit: i64) -> *mut u8 {
         limit,
         sweep_at: SWEEP_FLOOR,
         held: Vec::new(),
+        failed: 0,
     }));
     // SAFETY: `khora_alloc` returned an object with one field's worth of
     // space, zeroed and aligned, and nothing else holds this pointer yet.
@@ -187,12 +199,23 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
         // Joining a thread that has already ended returns at once, but a drop
         // routine can reach another nursery, and a lock held across one of
         // those is a lock ordering nobody agreed to.
+        //
+        // **The sweep counts what it buries.** These children have finished
+        // and one of them may have finished badly; letting them go without
+        // asking is how a failure disappeared between two adoptions.
+        let mut swept: i64 = 0;
         for Handed(spent) in done {
             // SAFETY: as above; this is the last reference to each.
             unsafe {
                 wait_for(spent);
+                if failed_and_reported(spent) {
+                    swept += 1;
+                }
                 khora_drop(spent, Some(fiber_release_shim));
             }
+        }
+        if swept > 0 {
+            record_failures(list, swept);
         }
 
         match waiting {
@@ -201,6 +224,9 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
                 // SAFETY: as above.
                 unsafe {
                     wait_for(oldest);
+                    if failed_and_reported(oldest) {
+                        record_failures(list, 1);
+                    }
                     khora_drop(oldest, Some(fiber_release_shim));
                 }
             }
@@ -208,20 +234,61 @@ pub unsafe extern "C" fn khora_fibers_adopt(fibers: *mut u8, fiber: *mut u8) {
     }
 }
 
+/// Records `count` failures, and stops whatever is still running.
+///
+/// **The first failure ends the nursery's other work.** That is what makes a
+/// nursery a unit rather than a bag: the block asked for these fibers together,
+/// so one of them failing means the answer the group was computing is not
+/// coming, and the siblings are working on a question nobody will ask. Trio and
+/// every structured-concurrency design since says the same, and the alternative
+/// is what this replaced -- siblings running on for as long as they liked while
+/// the failure waited to be noticed.
+///
+/// Cancelled rather than killed: a child stops at its next `!` and runs its
+/// finalizers on the way out, which is the only kind of stopping this runtime
+/// has and the only kind worth having.
+fn record_failures(list: &Crew, count: i64) {
+    let stopping = {
+        let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
+        crew.failed += count;
+        // Only the first failure cancels. Later ones are arriving *because* of
+        // it -- a sibling that stopped where it was told to and then failed on
+        // the way out -- and cancelling twice says nothing new.
+        if crew.failed > count {
+            Vec::new()
+        } else {
+            crew.held.iter().map(|Handed(fiber)| *fiber).collect::<Vec<_>>()
+        }
+    };
+    for fiber in stopping {
+        // SAFETY: every handle in the list was live when adopted and the list
+        // holds the only reference; this only sets a flag on it.
+        unsafe { khora_fiber_cancel(fiber) };
+    }
+}
+
 /// Waits for every fiber in the nursery, oldest first, and empties it.
 ///
+/// Answers how many children ended with an error, which is the whole of what a
+/// nursery can say about them: every child's error has a type of its own and a
+/// nursery holds them as bare handles, so the count is what survives. `std`
+/// turns a non-zero answer into a `ChildFailed` raise.
+///
+/// **A child that failed stops the others.** The first failure cancels every
+/// sibling still running, here and at every later observation -- see
+/// [`record_failures`]. Every child is still *waited* for, because a nursery
+/// that returned while one was winding up would not be structured at all.
+///
 /// Oldest first because there is no reason to prefer otherwise and an order
-/// that is stated is easier to reason about than one that is not. Every child
-/// is waited for regardless: a nursery that returned after the first one
-/// finished would not be structured at all.
+/// that is stated is easier to reason about than one that is not.
 ///
 /// # Safety
 ///
 /// `fibers` must be a live object from [`khora_fibers_open`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) {
+pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) -> i64 {
     // SAFETY: the caller guarantees a live nursery.
-    let Some(list) = (unsafe { crew(fibers) }) else { return };
+    let Some(list) = (unsafe { crew(fibers) }) else { return 0 };
     // **Drained in rounds, until a round finds nothing.** A child may adopt a
     // fiber of its own while this one is waiting — that is what a shareable
     // nursery is for — and a single pass would return with that grandchild
@@ -230,17 +297,42 @@ pub unsafe extern "C" fn khora_fibers_wait(fibers: *mut u8) {
     // Taken under the lock and joined outside it, because holding the lock
     // across a join would deadlock against exactly that adoption.
     loop {
-        let waiting = std::mem::take(&mut list.lock().unwrap_or_else(|e| e.into_inner()).held);
+        let waiting = {
+            let mut crew = list.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut crew.held)
+        };
         if waiting.is_empty() {
-            return;
+            return list.lock().unwrap_or_else(|e| e.into_inner()).failed;
         }
-        for Handed(fiber) in waiting {
+        // A round adopted after a failure was already seen is a round nobody
+        // is waiting on the answers of, so it is stopped before it is waited
+        // for rather than after.
+        if list.lock().unwrap_or_else(|e| e.into_inner()).failed > 0 {
+            for Handed(fiber) in waiting.iter() {
+                // SAFETY: as below.
+                unsafe { khora_fiber_cancel(*fiber) };
+            }
+        }
+        for index in 0..waiting.len() {
+            let fiber = waiting[index].0;
             // SAFETY: each handle was live when adopted and this list has held
             // the only reference since.
             unsafe {
                 wait_for(fiber);
-                khora_drop(fiber, Some(fiber_release_shim));
+                if failed_and_reported(fiber) {
+                    // The siblings still in this round are not in the list any
+                    // more -- this round took them -- so `record_failures`
+                    // cannot reach them and they are stopped here.
+                    for Handed(other) in waiting.iter().skip(index + 1) {
+                        khora_fiber_cancel(*other);
+                    }
+                    record_failures(list, 1);
+                }
             }
+        }
+        for Handed(fiber) in waiting {
+            // SAFETY: as above; this is the last reference to each.
+            unsafe { khora_drop(fiber, Some(fiber_release_shim)) };
         }
     }
 }

@@ -174,6 +174,19 @@ impl Legacy {
         }
     }
 
+    /// Whether the answer is an error, without taking it.
+    ///
+    /// For a nursery, which waits for its children without joining them. A
+    /// cancellation is not a failure: it is what a nursery *does* to a child,
+    /// and counting it would make every early exit look like one.
+    fn failed(&self) -> bool {
+        match self.outcome.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(outcome) => outcome.which != 0 && outcome.which != CANCELLED_WHICH,
+            // Not finished, which a caller that waited first cannot see.
+            None => false,
+        }
+    }
+
     /// Whether the stored word is a Khora object this state has a reference to.
     fn points_at_an_object(&self, outcome: &Tagged) -> bool {
         if outcome.payload == 0 || outcome.which == CANCELLED_WHICH {
@@ -525,6 +538,29 @@ pub(crate) unsafe fn wait_for(fiber: *mut u8) {
     // SAFETY: the caller guarantees a live handle.
     let Some(state) = (unsafe { fiber_state(fiber) }) else { return };
     state.completion.wait();
+}
+
+/// Whether a finished fiber ended with an error, and takes the reporting on.
+///
+/// **The second half is why this is not a bare question.** A handle released
+/// without anybody having joined it prints a line on stderr, because a failure
+/// that nobody looked at would otherwise leave no trace anywhere. A nursery
+/// that asks this *is* looking: it is about to raise `ChildFailed`, which is a
+/// better report than the line and reaches the program rather than only the
+/// terminal. So asking marks the answer observed, and the two reports do not
+/// both happen.
+///
+/// # Safety
+///
+/// `fiber` must be a live object from [`khora_fiber_spawn`] that has finished.
+pub(crate) unsafe fn failed_and_reported(fiber: *mut u8) -> bool {
+    // SAFETY: the caller guarantees a live handle.
+    let Some(state) = (unsafe { fiber_state(fiber) }) else { return false };
+    let failed = state.legacy.failed();
+    if failed {
+        state.observed.store(true, Ordering::Relaxed);
+    }
+    failed
 }
 
 /// The same, for a program that wants the ordering and not the answer.

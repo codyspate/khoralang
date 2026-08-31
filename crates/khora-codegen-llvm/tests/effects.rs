@@ -1967,7 +1967,7 @@ impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
   fn adopt<'er>(self, fiber: Fiber<(), 'er>) -> ();
-  fn wait(self) -> ();
+  fn wait(self) -> Int;
 }
 
 pub effect Nursery { adopt: (Fiber<(), 'er>) -> (), }
@@ -1980,7 +1980,7 @@ pub fn nursery<A, 'e, 'r>(body: () -> A with { 'e | nursery: Nursery } raises 'r
   let value = with { nursery: handler for Nursery { adopt: fn f => Fibers::adopt(crew, f) } } {
     body()!
   };
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   value
 }
 

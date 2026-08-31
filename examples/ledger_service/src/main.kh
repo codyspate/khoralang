@@ -1,6 +1,6 @@
 module ledger_service::main;
 
-import std::core::{Fibers, List, Map, Option, Result, SharedFn, Show, print};
+import std::core::{ChildFailed, Fibers, List, Map, Option, Result, SharedFn, Show, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
 import std::clock::{Clock};
 import std::env::{Env, EnvError, variable_or};
@@ -416,7 +416,7 @@ fn number_setting(name: String, fallback: Int) -> Int with { env: Env } raises E
   }
 }
 
-pub fn main() raises HttpError + EnvError {
+pub fn main() raises HttpError + EnvError + ChildFailed {
   with { env: Env::real(), clock: Clock::real() } {
     let settings: Settings = {
       host: setting("PGHOST", "127.0.0.1")!,

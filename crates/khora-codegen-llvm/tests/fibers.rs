@@ -427,7 +427,7 @@ impl Share for Fibers {}
 impl Fibers {
   fn open() -> Fibers;
   fn adopt<'er>(self, fiber: Fiber<(), 'er>) -> ();
-  fn wait(self) -> ();
+  fn wait(self) -> Int;
 }
 
 pub effect Nursery { adopt: (Fiber<(), 'er>) -> (), }
@@ -453,7 +453,7 @@ fn work() -> () {{
     nursery.adopt(Fiber::spawn(fn () => first()!));
     nursery.adopt(Fiber::spawn(fn () => second()!));
   }}
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   print(3);
 }}
 
@@ -498,7 +498,7 @@ fn second() -> () raises Oops {{ print(2); }}
 fn scope(body: () -> () with {{ nursery: Nursery }}) -> () {{
   let crew = Fibers::open();
   body() with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }};
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
 }}
 
 fn work() -> () {{
@@ -547,7 +547,7 @@ fn work() -> Int raises Oops {{
     nursery.adopt(Fiber::spawn(fn () => forever()!));
     boom()!
   }};
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   value
 }}
 
@@ -572,6 +572,89 @@ fn main() -> Int {{
     assert_eq!(ran.code, Some(0));
 }
 
+/// A child that fails is the nursery's failure, and it stops the siblings.
+///
+/// **The three things that were each wrong on their own.** A child that raised
+/// was waited for, its outcome discarded, and a line printed on stderr; the
+/// siblings ran to completion on an answer nobody would use; and the nursery
+/// returned the body's value, so the program exited 0. A failure that leaves no
+/// trace in the program is a failure the program cannot act on.
+///
+/// `forever` has a `!` in its loop, which is what a cancellation point is. It
+/// runs until it is told to stop, so the test terminating at all is the
+/// evidence that it was told.
+///
+/// **The count is one, and that is the second assertion in it.** Two children
+/// finish here and both of them stop early — one by raising and two by being
+/// cancelled because of it. A cancellation is not a failure: it is what a
+/// nursery does to its children, and counting it would make every early exit
+/// look like a fault.
+#[test]
+fn a_child_that_fails_stops_its_siblings_and_is_counted() {
+    let ran = run(
+        "nursery_child_failed",
+        &format!(
+            "{NURSERY}
+fn forever() -> () raises Oops {{
+  loop {{ ok(1)!; }}
+}}
+
+fn bad() -> () raises Oops {{ raise Oops::Bad }}
+
+fn work() -> Int {{
+  let crew = Fibers::open();
+  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
+    nursery.adopt(Fiber::spawn(fn () => bad()!));
+    nursery.adopt(Fiber::spawn(fn () => forever()!));
+    nursery.adopt(Fiber::spawn(fn () => forever()!));
+  }}
+  Fibers::wait(crew)
+}}
+
+fn main() -> Int {{
+  print(work());
+  print(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    // One failure, two cancellations, and nothing left over. That the program
+    // ends at all is the other half: `forever` loops until it is cancelled, so
+    // a nursery that let its siblings run would hang here rather than fail.
+    assert_eq!(ran.stdout, "1\n0\n", "one failure and nothing leaked: {:?}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
+/// Nothing went wrong, so the count is nothing.
+///
+/// The other side of the one above, and worth its own test because a count that
+/// is never zero is a `ChildFailed` on every nursery in the program.
+#[test]
+fn a_nursery_whose_children_all_finished_counts_none() {
+    let ran = run(
+        "nursery_no_failures",
+        &format!(
+            "{NURSERY}
+fn fine() -> () raises Oops {{ print(1); }}
+
+fn work() -> Int {{
+  let crew = Fibers::open();
+  with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }} {{
+    nursery.adopt(Fiber::spawn(fn () => fine()!));
+    nursery.adopt(Fiber::spawn(fn () => fine()!));
+  }}
+  Fibers::wait(crew)
+}}
+
+fn main() -> Int {{ print(work()); print(khora_live_count()); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n1\n0\n0\n", "no failures, nothing leaked: {:?}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
 /// Every child, not just the first one that finishes.
 #[test]
 fn a_nursery_waits_for_all_of_them() {
@@ -590,7 +673,7 @@ fn work() -> () {{
     nursery.adopt(Fiber::spawn(fn () => two()!));
     nursery.adopt(Fiber::spawn(fn () => three()!));
   }}
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
 }}
 
 fn main() -> Int {{ work(); print(khora_live_count()); 0 }}

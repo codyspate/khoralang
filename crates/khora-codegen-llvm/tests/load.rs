@@ -40,7 +40,7 @@ fn std_source(name: &str) -> String {
 fn run(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Changed, Channel, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, attempt, bounded_nursery, join_all, print}};
+import std::core::{{Changed, Channel, ChildFailed, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, attempt, bounded_nursery, join_all, print}};
 
 extern fn khora_live_count() -> Int;
 
@@ -75,7 +75,7 @@ fn spin(rounds: Int) -> Int {{
 
 {items}
 
-fn main() -> () {{
+fn main() -> () raises ChildFailed {{
 {body}
 }}
 "#
@@ -141,17 +141,17 @@ fn crowd<'e>(gauge: Shared<Gauge>, done: Shared<Int>) -> ()
   };
 }
 
-fn workload() -> () {
+fn workload() -> () raises ChildFailed {
   let gauge = Shared::of({ live: 0, peak: 0 });
   let done = Shared::of(0);
-  bounded_nursery(8, fn () => crowd(gauge, done));
+  bounded_nursery(8, fn () => crowd(gauge, done))!;
   let final = Shared::get(gauge);
   print("done " + Int::to_string(Shared::get(done)));
   print("live " + Int::to_string(final.live));
   print("within " + (if final.peak <= 8 { "yes" } else { "no, " + Int::to_string(final.peak) }));
 }
 "#,
-        r#"  workload();
+        r#"  workload()!;
   // Read here rather than inside: the cells above are still held while the
   // function holding them is running, and a count taken then is a count of
   // things that have not been released *yet* rather than of things that will
@@ -188,7 +188,7 @@ fn crowd<'e>(done: Shared<Int>) -> ()
 }
 "#,
         r#"  let done = Shared::of(0);
-  bounded_nursery(0, fn () => crowd(done));
+  bounded_nursery(0, fn () => crowd(done))!;
   print(Int::to_string(Shared::get(done)));"#,
     );
     assert_eq!(out, "64\n");
@@ -246,7 +246,7 @@ fn consume<'er>(work: Channel<Int>, deepest: Shared<Int>) -> Int raises 'er {
     Result::Ok(n) => n,
     Result::Err(_) => 0 - 1,
   };
-  Fibers::wait(crew);
+  let _stopped = Fibers::wait(crew);
   print("received " + Int::to_string(seen));
   print("deepest " + (if Shared::get(deepest) <= 4 { "within" } else { "over" }));"#,
     );
@@ -358,8 +358,8 @@ fn hire<'e>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
 
   let crew = Fibers::open();
   Fibers::adopt(crew, Fiber::spawn(fn () => offer(work, deepest)!));
-  bounded_nursery(4, fn () => hire(work, gauge, total));
-  Fibers::wait(crew);
+  bounded_nursery(4, fn () => hire(work, gauge, total))!;
+  let _stopped = Fibers::wait(crew);
 
   // 1 + 2 + ... + 300. Every unit of offered work was done, and done once.
   print("total " + Int::to_string(Shared::get(total)));
@@ -412,15 +412,15 @@ fn serve<'e>(work: Channel<Int>, total: Shared<Int>) -> ()
   };
 }
 
-fn rounds() -> () {
+fn rounds() -> () raises ChildFailed {
   let total = Shared::of(0);
-  print("burst left " + Int::to_string(round(total, 150)));
+  print("burst left " + Int::to_string(round(total, 150)!));
   print("after burst " + Int::to_string(Shared::get(total)));
-  print("quiet left " + Int::to_string(round(total, 3)));
+  print("quiet left " + Int::to_string(round(total, 3)!));
   print("after quiet " + Int::to_string(Shared::get(total)));
 }
 
-fn round(total: Shared<Int>, count: Int) -> Int {
+fn round(total: Shared<Int>, count: Int) -> Int raises ChildFailed {
   let work: Channel<Int> = Channel::bounded(4);
   let crew = Fibers::open();
   Fibers::adopt(crew, Fiber::spawn(fn () => {
@@ -431,12 +431,12 @@ fn round(total: Shared<Int>, count: Int) -> Int {
     };
     Channel::close(work)
   }));
-  bounded_nursery(3, fn () => serve(work, total));
-  Fibers::wait(crew);
+  bounded_nursery(3, fn () => serve(work, total))!;
+  let _stopped = Fibers::wait(crew);
   Channel::depth(work)
 }
 "#,
-        r#"  rounds();
+        r#"  rounds()!;
   print("live objects " + Int::to_string(khora_live_count()));"#,
     );
     assert_eq!(
@@ -496,7 +496,7 @@ fn hire<'e>(work: Channel<Int>, done: Shared<Int>) -> ()
     };
   });
   Channel::close(work);
-  bounded_nursery(2, fn () => hire(work, done));
+  bounded_nursery(2, fn () => hire(work, done))!;
   print(Int::to_string(Shared::get(done)));
   print(Int::to_string(Channel::depth(work)));"#,
     );
@@ -547,7 +547,7 @@ fn a_server_under_more_load_than_it_can_serve_answers_everybody() {
 
     let main = format!(
         r#"module demo::main;
-import std::core::{{Nursery, Option, Result, Share, Shared, SharedFn, Show, attempt, bounded_nursery, print}};
+import std::core::{{ChildFailed, Nursery, Option, Result, Share, Shared, SharedFn, Show, attempt, bounded_nursery, print}};
 import std::net::http::{{HttpError, Request, Response, Router}};
 import std::net::socket::{{invalid_handle, listen_on, start}};
 
@@ -587,7 +587,7 @@ fn serve<'e>(gauge: Shared<Gauge>, server: Int) -> ()
   Router::serve_forever(router, server)!
 }}
 
-fn main() -> () {{
+fn main() -> () raises ChildFailed {{
   let gauge = Shared::of({{ live: 0, peak: 0 }});
   if start() {{ }} else {{ print("no sockets") }};
   let server = listen_on({port});
@@ -595,9 +595,8 @@ fn main() -> () {{
     print("could not bind")
   }} else {{
     print("listening on {port}");
-    match attempt(fn () => bounded_nursery(4, fn () => serve(gauge, server)!)!) {{
-      Result::Ok(_) => (),
-      Result::Err(_) => print("the server stopped"),
+    bounded_nursery(4, fn () => serve(gauge, server)!)! catch {{
+      _ => print("the server stopped"),
     }}
   }}
 }}

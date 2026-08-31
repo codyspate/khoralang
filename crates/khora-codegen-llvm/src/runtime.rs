@@ -231,7 +231,8 @@ pub struct Runtime<'ctx> {
     pub fibers_bounded: FunctionValue<'ctx>,
     /// `void khora_fibers_adopt(void *fibers, void *fiber)`
     pub fibers_adopt: FunctionValue<'ctx>,
-    /// `void khora_fibers_wait(void *fibers)`
+    /// `int64_t khora_fibers_wait(void *fibers)`, answering how many children
+    /// ended with an error.
     pub fibers_wait: FunctionValue<'ctx>,
     /// `void khora_fibers_release(void *fibers)` — a `drop_fields` callback.
     pub fibers_release: FunctionValue<'ctx>,
@@ -442,7 +443,7 @@ impl<'ctx> Runtime<'ctx> {
                 "khora_fibers_adopt",
                 void.fn_type(&[ptr.into(), ptr.into()], false),
             ),
-            fibers_wait: declare("khora_fibers_wait", void.fn_type(&[ptr.into()], false)),
+            fibers_wait: declare("khora_fibers_wait", i64t.fn_type(&[ptr.into()], false)),
             fibers_release: declare("khora_fibers_release", void.fn_type(&[ptr.into()], false)),
             args_set: declare(
                 "khora_args_set",

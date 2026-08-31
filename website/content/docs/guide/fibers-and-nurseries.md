@@ -95,14 +95,37 @@ fn run() -> () {
 
 `nursery(children)` does not return normally until every adopted child is finished. If the body leaves through failure or cancellation instead, the nursery cancels the children that are still running and waits for them before the scope is released.
 
-The generic helper is effect-polymorphic:
+### A child that fails is the nursery's failure
+
+A nursery is a unit. The block asked for these fibers together, so one of them failing means the answer the group was computing is not coming — and the siblings are working on a question nobody will ask.
+
+So the first child to fail cancels the rest, every child is still waited for, and the nursery raises `ChildFailed`:
+
+```khora
+pub type ChildFailed = { children: Int };
+```
+
+The count, and not the child's own error, because there is no such single thing to hand back: `adopt` binds the row per adoption, so two children may fail with two unrelated types. What survives the handles is how many of them did.
+
+A child a nursery *cancelled* is not counted. Cancellation is what a nursery does to its children on the way out, and counting it would make every early exit look like a fault.
+
+Catch it where you can do something about it:
+
+```khora
+match attempt(fn () => nursery(children)!) {
+  Result::Ok(answer) => answer,
+  Result::Err(_failure) => fallback(),
+}
+```
+
+The generic helper is effect-polymorphic, and carries `ChildFailed` on top of whatever the body raises:
 
 ```khora
 pub fn nursery<A, 'ef, 'er>(
   body: () -> A with { 'ef | nursery: Nursery } raises 'er
 ) -> A
   with 'ef
-  raises 'er
+  raises 'er + ChildFailed
 ```
 
 A named function or a lambda, whichever reads better. `nursery(children)` and `nursery(fn () => children())` are the same thing: a lambda resolves its capabilities where it is written, and as the argument to `nursery` that is inside the row `nursery` installs.

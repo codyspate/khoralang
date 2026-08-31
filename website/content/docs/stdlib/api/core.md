@@ -639,6 +639,31 @@ longer wanted", without ever being told which of the two it is: on the
 ordinary path `nursery` has already waited, so the release finds nothing
 left to stop.
 
+### ChildFailed
+
+```khora
+pub type ChildFailed = { children: Int };
+```
+
+Raised by a nursery when one or more of its children ended with an error.
+
+**Not the child's own error, because there is no such single thing.** A
+nursery holds `Fiber<(), 'er>` with the row quantified per adoption, so two
+children may fail with two unrelated types and the nursery has nowhere to
+put either — `Nursery` says why. What survives the handles is the count, so
+that is what this carries.
+
+A child that a nursery *cancelled* is not a failure and is not counted:
+cancellation is what a nursery does to its children on the way out, and
+counting it would make every early exit look like a fault.
+
+```khora
+match attempt(fn () => nursery(gather)!) {
+  Result::Ok(answer) => answer,
+  Result::Err(failure) => retry_smaller(failure.children)!,
+}
+```
+
 ## Traits
 
 ### Eq
@@ -4284,10 +4309,25 @@ not a nursery.
 #### wait
 
 ```khora
-pub fn wait(self) ->()
+pub fn wait(self) -> Int
 ```
 
-Waits for every child, oldest first, and empties the nursery.
+Waits for every child, oldest first, and empties the nursery, and
+answers how many of them ended with an error.
+
+**A count, because a count is what a nursery can honestly say.** Every
+child's error has a type of its own and a nursery holds them as bare
+handles — that is written down at `adopt` and is not going to change — so
+there is no one value to hand back. `bounded_nursery` turns a non-zero
+answer into a `ChildFailed`, which is what a program should be reading
+rather than this.
+
+**The first failure cancels the siblings.** A nursery is a unit: the block
+asked for these fibers together, so one of them failing means the answer
+the group was computing is not coming and the rest are working on a
+question nobody will ask. They are cancelled rather than killed, so each
+stops at its next `!` and runs its finalizers on the way out, and every
+one of them is still waited for.
 
 ## Trait implementations
 
@@ -5293,7 +5333,7 @@ computed on another fiber and has to be safe to hold from this one.
 ### nursery
 
 ```khora
-pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A with 'ef raises 'er
+pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A with 'ef raises 'er + ChildFailed
 ```
 
 Runs `body` with a nursery, and does not return until its children are done.
@@ -5336,7 +5376,7 @@ this function the way a parameter shadows anything else.
 ### bounded_nursery
 
 ```khora
-pub fn bounded_nursery<A, 'ef, 'er>(limit: Int, body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A with 'ef raises 'er
+pub fn bounded_nursery<A, 'ef, 'er>(limit: Int, body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A with 'ef raises 'er + ChildFailed
 ```
 
 The same, holding at most `limit` children at once.

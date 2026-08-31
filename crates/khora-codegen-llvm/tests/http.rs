@@ -49,7 +49,7 @@ fn sources(db: &KhoraDatabase, dir: &std::path::Path, main: &str) -> Vec<SourceF
 /// `echo` reports what the parser made of the request, one field per line, so
 /// a single response can be read for several separate claims.
 const SERVER: &str = "module demo::main;
-import std::core::{Option, SharedFn};
+import std::core::{ChildFailed, Option, SharedFn};
 import std::net::http::{HttpError, Method, Params, Request, Response, Router};
 
 fn print(value: String);
@@ -85,7 +85,7 @@ fn method_of(req: Request) -> String {
   else { \"other\" } } }
 }
 
-pub fn main() raises HttpError {
+pub fn main() raises HttpError + ChildFailed {
   // No `with` block: `listen` opens the nursery it needs itself, and these
   // handlers want no capabilities. `SharedFn::of` is what each mount says
   // instead — the certificate that lets the whole router cross into the fiber
