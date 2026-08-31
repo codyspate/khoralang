@@ -155,6 +155,8 @@ continue_parent();
 
 Cancelling a child does not cancel its parent.
 
+**There is no `timeout`, no `race` and no `select`.** A deadline on a piece of work is built from the pieces above — two fibers and a `Channel::dropping(1)` that the first one to finish sends into, with the loser detached rather than joined. [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) and [Bound concurrent work](/docs/cookbook/bounded-concurrency/) are the recipes nearest to it. `docs/limitations/` says the same and is the page to check before assuming an operation exists.
+
 Cancellation is observed at cancellation points rather than between arbitrary source instructions. There are two:
 
 - a `!` site, which is also where propagation and suspension are marked; and

@@ -15,6 +15,13 @@ let total = left + right;
 let product = width * height;
 ```
 
+Integer division and remainder trap when the divisor is zero, and when the quotient does not fit — which for a signed type is the one pair `minimum / -1`:
+
+```khora
+let each = total / people;
+let over = total % people;
+```
+
 Array access traps when the index is outside the array:
 
 ```khora

@@ -477,6 +477,45 @@ fn an_effects_methods_are_documented() {
     assert!(page.contains("The real one."), "{page}");
 }
 
+/// An effect's *operations*, which is what a caller actually writes.
+///
+/// `Env::arguments` and `Env::variable` are not methods on `Env`; they are the
+/// operations the effect declares, and they carried the only written answers
+/// to "does the argument list include the program's own name" and "why is a
+/// denied read a failure rather than `None`". The page showed the declaration
+/// block and stopped: `members` was `Vec::new()` for effects and for nothing
+/// else that has members. Twelve effects in `std` and 155 lines of writing
+/// were invisible on the website while sitting in the source the whole time.
+#[test]
+fn an_effects_operations_are_documented() {
+    let page = markdown(&module(
+        "module std::thing;\n\n//! What it is.\n\n\
+         /// Reaching outside.\npub effect Out {\n  \
+         /// Why this one is here.\n  go: () -> Int,\n  \
+         /// And this one.\n  stop: (Int) -> (),\n}\n",
+    ));
+    assert!(page.contains("\n## Effects\n"), "{page}");
+    assert!(page.contains("#### go"), "the operation is listed: {page}");
+    assert!(page.contains("Why this one is here."), "with its documentation: {page}");
+    assert!(page.contains("#### stop"), "every operation, not the first: {page}");
+    assert!(page.contains("And this one."), "{page}");
+}
+
+/// An operation with nothing written about it is still listed.
+///
+/// A record field with no documentation is left out, because the signature
+/// above already shows it and a bare entry is noise. An operation is the thing
+/// a caller writes, so a list missing half of them is worse than one with a
+/// bare line in it.
+#[test]
+fn an_undocumented_operation_is_still_listed() {
+    let page = markdown(&module(
+        "module std::thing;\n\n//! What it is.\n\n\
+         /// Reaching outside.\npub effect Out {\n  go: () -> Int,\n}\n",
+    ));
+    assert!(page.contains("#### go"), "{page}");
+}
+
 /// A context's methods too, for the same reason and by the same arm.
 #[test]
 fn a_contexts_methods_are_documented() {

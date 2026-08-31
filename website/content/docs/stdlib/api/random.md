@@ -40,6 +40,42 @@ pub effect Random {
 
 A source of numbers nobody chose.
 
+#### int
+
+```khora
+int: () -> Int
+```
+
+A number with all sixty-four bits drawn, which means it is negative about
+half the time. `in_range` is what a caller who wanted a positive number
+meant.
+
+#### in_range
+
+```khora
+in_range: (Int, Int) -> Int
+```
+
+A number in `[low, high)` — `low` included, `high` not.
+
+Half-open because that is the range that composes: `in_range(0, n)`
+indexes an array of `n`, and two adjacent ranges cover the space between
+them exactly once. An empty range stops the program, like an index
+outside an array does; there is no number in `[low, low)` to hand back,
+and returning `low` would make an off-by-one look like data.
+
+#### bytes
+
+```khora
+bytes: (Array<U8>) ->()
+```
+
+Fills every element of the array with a drawn byte.
+
+Into a buffer the caller owns rather than out of a returned one, because
+the caller is the one who knows how many bytes it wants and usually
+already has somewhere to put them — the same shape a socket read has.
+
 ## Methods
 
 ### Random

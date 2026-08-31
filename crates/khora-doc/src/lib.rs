@@ -91,6 +91,13 @@ pub enum Kind {
     Variant,
     /// One field of a record type.
     Field,
+    /// One operation of an effect.
+    ///
+    /// **Its own kind rather than a `Field`**, because that is what the
+    /// declaration calls it and what a reader is looking for: `nursery.adopt`
+    /// is something the capability *does*, and heading the list "Fields" would
+    /// describe the record it happens to be built from instead.
+    Operation,
     /// `type Item;` in a trait, or `type Item = Int;` in an impl.
     AssocType,
 }
@@ -109,6 +116,7 @@ impl Kind {
             Kind::TraitImpl => "trait implementation",
             Kind::Variant => "variant",
             Kind::Field => "field",
+            Kind::Operation => "operation",
             Kind::AssocType => "associated type",
         }
     }
@@ -126,6 +134,7 @@ impl Kind {
             Kind::TraitImpl => "Trait implementations",
             Kind::Variant => "Variants",
             Kind::Field => "Fields",
+            Kind::Operation => "Operations",
             Kind::AssocType => "Associated types",
         }
     }
@@ -255,7 +264,7 @@ fn item_of(decl: &ast::Decl) -> Option<Item> {
             kind: Kind::Effect,
             signature: signature::declaration(e.syntax()),
             doc: doc_of(e.syntax()),
-            members: Vec::new(),
+            members: operations(e.operations()),
         }),
         ast::Decl::Context(c) if c.is_exported() => Some(Item {
             name: named(c.name())?,
@@ -413,6 +422,28 @@ fn functions(decls: impl Iterator<Item = ast::FnDecl>) -> impl Iterator<Item = I
             members: Vec::new(),
         })
     })
+}
+
+/// The operations an effect declares.
+///
+/// **This was `Vec::new()`**, and it is the whole of why an effect's page was a
+/// signature block with nothing under it. Every other kind that has members
+/// collects them; effects were the one that did not, and they are the kind
+/// whose members carry the most documentation -- an operation is where the
+/// decision about what a capability may do is written down. Twelve effects and
+/// 155 lines of it never reached the site.
+fn operations(fields: impl Iterator<Item = ast::Field>) -> Vec<Item> {
+    fields
+        .filter_map(|field| {
+            Some(Item {
+                name: named(field.name())?,
+                kind: Kind::Operation,
+                signature: signature::one_line(field.syntax()),
+                doc: doc_of(field.syntax()),
+                members: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 fn assoc_types(decls: impl Iterator<Item = ast::AssocTypeDecl>) -> impl Iterator<Item = Item> {

@@ -296,3 +296,39 @@ pub fn type_of_ref(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `khora-hir` decides whether importing a name is allowed; this file
+    /// decides whether the name means a builtin. They have to be the same set.
+    ///
+    /// **They cannot share a function.** `khora-types` depends on `khora-hir`,
+    /// so the list lives over there and this is the only side that can compare
+    /// them. Without this, adding a width to `IntKind` would leave
+    /// `import std::core::{I128}` rejected for a type the language has, and
+    /// nothing would notice until somebody wrote it.
+    #[test]
+    fn builtin_names_agree() {
+        let homes = TypeHomes::default();
+        let candidates = [
+            "Int", "I64", "Float", "Bool", "String", "Ptr", "Never", "I8", "I16", "I32", "U8",
+            "U16", "U32", "U64", "I128", "U128", "I7", "Integer", "Str", "List", "Option", "Foo",
+            "", "I", "U",
+        ];
+        for name in candidates {
+            // A name this file knows is anything it does not hand to `homes`,
+            // which is what produces an `Adt`.
+            let known = !matches!(
+                named_type(name, Vec::new(), &[], &homes),
+                Type::Adt { .. } | Type::Unknown
+            );
+            assert_eq!(
+                known,
+                khora_hir::is_builtin_type(name),
+                "`{name}`: this file says builtin={known}, khora-hir disagrees"
+            );
+        }
+    }
+}

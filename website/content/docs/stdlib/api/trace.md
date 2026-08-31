@@ -181,6 +181,30 @@ type — a different feature from ordinary generics, and one
 below is an ordinary generic *function* that takes the tracer as an
 argument, which gets the scoping without the type system change.
 
+#### start
+
+```khora
+start: (String, List<Attribute>) -> Span
+```
+
+Begins a span inside whatever is current.
+
+#### finish
+
+```khora
+finish: (Span, Status) ->()
+```
+
+Ends it. Idempotent is not promised; end a span once.
+
+#### event
+
+```khora
+event: (Span, String, List<Attribute>) ->()
+```
+
+Something that happened during the span, with no duration of its own.
+
 ## Methods
 
 ### Tracer

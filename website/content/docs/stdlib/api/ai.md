@@ -248,6 +248,21 @@ Keeping the effect this small is what makes a mock one line: return a
 string. It used to have to fabricate whatever the caller asked for, which
 tests the mock rather than the code under it.
 
+#### complete
+
+```khora
+complete: Prompt -> String raises ModelError
+```
+
+#### embed_raw
+
+```khora
+embed_raw: String -> List<Float> raises ModelError
+```
+
+The raw vector, at whatever width the model produces. `embed` below is
+the shape-safe reading of it.
+
 ## Methods
 
 ### Tensor<D, Shape, T>

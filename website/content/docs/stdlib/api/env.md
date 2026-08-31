@@ -55,6 +55,30 @@ a function that reads `DATABASE_URL` says so in its signature, and a test
 can hand it something else. Reading the environment is exactly the kind of
 hidden input that makes a program hard to test, and this is the seam.
 
+#### variable
+
+```khora
+variable: (String) -> Option<String> raises EnvError
+```
+
+The value of a variable, or `None` when it is not set.
+
+**`raises` because a denial is not `None`.** A variable the manifest does
+not grant is a different thing from one nobody set, and the fix is a line
+in `khora.toml` rather than a line in a deployment script. Answering
+`None` for both would send a reader to look at their environment for a
+decision their own manifest made -- the same reasoning `IoError::Denied`
+records. `docs/design/permissions.md`.
+
+#### arguments
+
+```khora
+arguments: () -> List<String>
+```
+
+Everything the process was invoked with, the program's own name first —
+the same convention C, Rust and Go all follow.
+
 ## Methods
 
 ### Env

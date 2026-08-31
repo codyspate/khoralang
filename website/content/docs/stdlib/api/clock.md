@@ -60,6 +60,64 @@ and the half it was wrong for would be the half that only fails in
 production, at 2am, when the clock is stepped an hour. Naming both makes
 the caller say which they meant.
 
+#### unix_seconds
+
+```khora
+unix_seconds: () -> Int
+```
+
+Seconds since 1970, on the wall clock.
+
+Kept, because it is what a caller who wants a date wants, and it is
+derived from the same source as `unix_millis` so the two can never
+disagree about what second it is.
+
+#### unix_millis
+
+```khora
+unix_millis: () -> Int
+```
+
+Milliseconds since 1970, on the wall clock. A timestamp, not a duration.
+
+#### monotonic_millis
+
+```khora
+monotonic_millis: () -> Int
+```
+
+Milliseconds on a clock that only goes forwards, counted from the first
+time anything in the process asked.
+
+The one to subtract. Two readings are always ordered and their difference
+is always a real elapsed time — which is exactly what `unix_millis`
+cannot promise.
+
+#### sleep
+
+```khora
+sleep: (Int) ->()
+```
+
+Waits this many milliseconds before going on.
+
+**An operation on the clock, and that is the whole design.** Waiting is
+the one thing a program does that a test cannot afford to actually do, and
+putting it here means a fake clock is `handler for Clock { sleep: fn ms
+=> .. }` and nothing else -- no test runtime, no special mode, no rule
+about which fiber may advance time. The alternative is what every
+language with an ambient sleep ends up building: a parallel clock the
+runtime knows about, and documentation that has to open by warning you to
+fork the sleeping code or deadlock.
+
+The capability *is* the seam, which is the argument `Random::seeded`
+already makes about the other unrepeatable input.
+
+Zero or less returns at once. A caller who meant "let somebody else run"
+wants a safepoint, and every loop back-edge already has one — and a
+back-edge in a function that can raise is a cancellation point too, so a
+`loop { sleep }` worker stops when it is asked to.
+
 ## Methods
 
 ### Clock

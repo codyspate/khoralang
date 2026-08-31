@@ -532,6 +532,12 @@ the wrapper.
 One operation. `Call` carries everything a request is, so a second would
 only be a shorter way to build one, and `Call::get` is already that.
 
+#### send
+
+```khora
+send: (Call) -> Result<Answer, CallError>
+```
+
 ## Methods
 
 ### Method

@@ -138,6 +138,46 @@ Somewhere to run statements.
 A record of closures, so a Postgres package, a SQLite package, D1 behind a
 Worker and an in-memory double are the same type to everything above.
 
+#### query
+
+```khora
+query: (String, List<Cell>) -> Result<List<Row>, DbError>
+```
+
+Runs a query and gives back every row.
+
+#### execute
+
+```khora
+execute: (String, List<Cell>) -> Result<Int, DbError>
+```
+
+Runs a statement and gives back how many rows it changed.
+
+#### begin
+
+```khora
+begin: () -> Result<(), DbError>
+```
+
+Begins a transaction. Handlers use this to implement `transaction`.
+
+#### commit
+
+```khora
+commit: () -> Result<(), DbError>
+```
+
+Commits the transaction in progress.
+
+#### rollback
+
+```khora
+rollback: () -> Result<(), DbError>
+```
+
+Rolls the transaction in progress back.
+
 ## Methods
 
 ### Cell

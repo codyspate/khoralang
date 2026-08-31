@@ -93,6 +93,24 @@ Parentheses without a comma group an expression:
 ]
 ```
 
+## Integer division and remainder
+
+`/` **truncates toward zero** and `%` **takes the sign of the dividend**, which is what C, Rust, Go and the hardware instruction all do:
+
+```khora
+(0 - 7) / 2       // -3, not -4
+7 / (0 - 2)       // -3
+(0 - 7) / (0 - 2) //  3
+
+(0 - 7) % 2       // -1
+7 % (0 - 2)       //  1
+(0 - 7) % (0 - 2) // -1
+```
+
+The two agree, so `a == (a / b) * b + (a % b)` holds for every pair that does not trap. `Float::to_int` truncates toward zero for the same reason, and says so.
+
+Both trap on a zero divisor rather than answering anything — see [Traps](/docs/reference/traps/). For a quotient that rounds rather than truncating, do the rounding in `Decimal`, where the mode is a parameter and not a convention.
+
 ## Blocks
 
 ```khora

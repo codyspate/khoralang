@@ -155,6 +155,39 @@ command into a `Shared<List<String>>` and the test can say that the driver
 built the command line it was supposed to, which is the assertion that
 matters and the one a real subprocess makes impossible to write.
 
+#### run
+
+```khora
+run: (String, List<String>) -> Int raises ProcessError
+```
+
+Runs `program` with `arguments` and waits, giving what it exited with.
+
+**No shell.** Each argument crosses whole, so one containing a space, a
+quote or a `;` is one argument with punctuation in it. Whatever the
+program prints goes to this process's own output, unredirected.
+
+#### output
+
+```khora
+output: (String, List<String>) -> Completed raises ProcessError
+```
+
+The same, keeping what the program wrote to its standard output.
+
+#### shell
+
+```khora
+shell: (String) -> Completed raises ProcessError
+```
+
+Runs a line of *shell*, and everything true of a line of shell is true
+of it.
+
+Named for what it does rather than for what it is used for, because a
+caller reaching for it should have to write the word. `run` is the one
+for a command built out of anything that came from outside the program.
+
 ## Methods
 
 ### Process

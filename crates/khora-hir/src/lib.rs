@@ -795,6 +795,17 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                             ),
                             range: wanted.range,
                         }),
+                        // **A builtin is already in scope, so importing it
+                        // is a harmless no-op rather than a mistake.** The
+                        // generated API pages carry `### String` and `### Int`
+                        // sections under `std::core` and spell their functions
+                        // `String::join`, `Int::of_string` -- so a reader
+                        // building an import list from those headings writes
+                        // exactly this, and was told the module does not
+                        // declare them. It failed four files at once on a
+                        // first program, and nothing anywhere said where the
+                        // line between "importable" and "always there" falls.
+                        None if is_builtin_type(&wanted.name) => {}
                         None => out.errors.push(HirError {
                             message: format!(
                                 "`{}` does not declare `{}`",
@@ -1163,4 +1174,26 @@ fn resolve_through_imports(
         }
     }
     None
+}
+
+/// Whether `name` is a type the language provides rather than a module does.
+///
+/// **Kept in step with `khora_types::syntax::named_type` by a test, not by
+/// hope.** That function is the authority on which names mean a builtin, and
+/// this crate cannot call it -- `khora-types` depends on this one, so the
+/// dependency only runs the other way, for tests. `builtin_names_agree` over
+/// there fails if the two ever drift.
+pub fn is_builtin_type(name: &str) -> bool {
+    if matches!(name, "Int" | "Float" | "Bool" | "String" | "Ptr" | "Never") {
+        return true;
+    }
+    // `I8` through `U64`, and `I64`, which is `Int` spelled the other way.
+    // Taken a character at a time rather than `split_at(1)`, which panics on
+    // the empty name -- and the empty name reaches here, because a malformed
+    // import is still an import.
+    let mut letters = name.chars();
+    match (letters.next(), letters.as_str()) {
+        (Some('I' | 'U'), bits) => matches!(bits, "8" | "16" | "32" | "64"),
+        _ => false,
+    }
 }

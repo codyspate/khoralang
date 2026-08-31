@@ -897,6 +897,12 @@ and a closure is monomorphic, so an operation cannot be generic — and it
 need not be: `acquire` below is an ordinary generic function that closes
 over the value and the release, which is where the polymorphism belongs.
 
+#### defer
+
+```khora
+defer: (() ->()) ->()
+```
+
 ### Nursery
 
 ```khora
@@ -937,6 +943,12 @@ So the idiom is one call inside another, and the body is on the screen:
 
 ```
 nursery.adopt(Fiber::spawn(fn () => analyze(id)!));
+```
+
+#### adopt
+
+```khora
+adopt: (Fiber<(), 'er>) ->()
 ```
 
 ## Methods

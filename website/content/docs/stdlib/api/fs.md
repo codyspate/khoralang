@@ -102,6 +102,113 @@ Streaming will want one and can have its own effect when something needs it.
 **Every operation here is one a test double has to write**, which is the
 standing argument against adding another.
 
+#### read
+
+```khora
+read: (String) -> Array<U8> raises IoError
+```
+
+The whole file, as bytes.
+
+#### exists
+
+```khora
+exists: (String) -> Bool raises IoError
+```
+
+Whether the path can be opened for reading.
+
+**Not "whether it exists".** ISO C has no `stat`, so the only portable
+question is whether `fopen` succeeds, and a file that is there but
+unreadable answers `false`. The name says `exists` because that is what
+callers mean; this comment is where the difference is kept honest, and a
+caller that needs the distinction wants a permissions API rather than
+this one.
+
+**A path the manifest denies raises `Denied` rather than answering
+`false`.** It used to answer `false`, and that made three different
+situations one word: a file that is not there, a file that is there and
+unreadable, and a file that is there, readable, and simply not granted.
+The third is the one somebody debugs for an hour, because nothing in a
+`false` points at the manifest -- and it is exactly the confusion
+[`IoError::Denied`] exists to prevent everywhere else.
+
+The cost is a `!` on a probe, which is the same cost `read` has always
+had and for the same reason. What it buys is that the remaining `false`
+means one thing: the operating system would not open it.
+
+#### size
+
+```khora
+size: (String) -> Int raises IoError
+```
+
+How many bytes the file holds.
+
+#### read_at
+
+```khora
+read_at: (String, Int, Int) -> Array<U8> raises IoError
+```
+
+At most `size` bytes, starting at `offset`.
+
+Fewer near the end, and none at or past it. This is how a file larger
+than memory is read, and **the position is an argument rather than a
+handle** on purpose: a handle would be an opaque type nothing but this
+module could construct, and an effect whose operations only the real
+implementation can satisfy is not a seam, it is a wrapper. An offset is
+an `Int`, so a double needs arithmetic and nothing else.
+
+`fold_chunks` and `fold_lines` are what most callers want.
+
+#### read_dir
+
+```khora
+read_dir: (String) -> List<String> raises IoError
+```
+
+The names in a directory, without the directory.
+
+Names, not paths: joining is the caller's, and `join` is right here. `.`
+and `..` are not included, which is the one place this differs from
+`readdir` and the difference every caller would have written itself.
+
+**The directory needs its own grant, and `./data/**` is not one.** The
+glob dialect is `.gitignore`'s, where `data/**` covers what is *inside*
+`data` and not `data` itself -- so a manifest that grants
+
+```toml
+[permissions.fs]
+read = ["./data/**"]
+```
+
+can read every file in the directory and cannot list it. Both entries are
+what a walk wants:
+
+```toml
+read = ["./data", "./data/**"]
+```
+
+This is the first thing anybody writes with `FsRead` and the first place
+the dialect's one surprise shows up, which is why it is written here
+rather than only beside `granted`.
+
+#### is_dir
+
+```khora
+is_dir: (String) -> Bool raises IoError
+```
+
+Whether the path is a directory.
+
+Raises `Denied` for a path the manifest does not grant, the same as
+[`FsRead::exists`] and for the same reason -- and this is where it mattered
+most. `./data/**` does not grant `data` itself, so before this an ordinary
+two-line mistake in a manifest made `is_dir("data")` answer `false` about
+a directory whose every file the program could read, with nothing
+anywhere pointing at the cause.
+
 ### FsWrite
 
 ```khora
@@ -120,6 +227,61 @@ Changing the file system.
 The other half of `[permissions.fs]`. A function that takes this can alter
 what is on disk; one that takes only [`FsRead`] cannot, and its signature
 is the proof.
+
+#### write
+
+```khora
+write: (String, Array<U8>) ->() raises IoError
+```
+
+Replaces the file's contents, creating it when it is not there.
+
+#### append
+
+```khora
+append: (String, Array<U8>) ->() raises IoError
+```
+
+Adds to the end, creating the file when it is not there.
+
+#### remove
+
+```khora
+remove: (String) ->() raises IoError
+```
+
+Deletes a file. Not a directory — that is `remove_dir`.
+
+#### rename
+
+```khora
+rename: (String, String) ->() raises IoError
+```
+
+Moves or renames. Across file systems C's `rename` fails rather than
+copying, and that failure is reported rather than papered over.
+
+#### create_dir
+
+```khora
+create_dir: (String) ->() raises IoError
+```
+
+Creates one directory. The parents are **not** created: a caller that
+wants that can walk the path, and one that did not ask should be told the
+parent is missing rather than have four directories appear.
+
+#### remove_dir
+
+```khora
+remove_dir: (String) ->() raises IoError
+```
+
+Removes an empty directory.
+
+Empty only, which is `rmdir`'s own rule and worth keeping: a recursive
+delete that removed the wrong tree is the one file system mistake with no
+undo.
 
 ## Methods
 

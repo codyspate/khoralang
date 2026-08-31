@@ -77,10 +77,15 @@ fn entry(out: &mut String, item: &Item, depth: usize) {
     // nothing, and it buries the ones that do have something to say.
     let worth_saying = |m: &&Item| match m.kind {
         Kind::Field | Kind::Variant => !m.doc.is_empty(),
+        // **An operation is listed whether or not it is documented.** A record
+        // field with nothing to say is noise beside a signature that already
+        // shows it; an effect's operation is the thing a caller writes, and a
+        // list missing half of them is worse than one with a bare entry.
         _ => true,
     };
 
-    let kinds: Vec<Kind> = [Kind::Variant, Kind::Field, Kind::AssocType, Kind::Function]
+    let kinds: Vec<Kind> =
+        [Kind::Variant, Kind::Field, Kind::Operation, Kind::AssocType, Kind::Function]
         .into_iter()
         .filter(|k| item.members.iter().filter(worth_saying).any(|m| m.kind == *k))
         .collect();
