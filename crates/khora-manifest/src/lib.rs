@@ -56,7 +56,7 @@ mod workspace;
 
 pub use crate::error::{Location, ManifestError};
 pub use crate::model::{
-    Build, Category, Default_, Dependency, Fmt, FsGrants, IndentStyle, Lint, LintLevel, Lints, Manifest, Package, Permissions, Policy, Task, Toolchain, WorkspacePackage, granted_host, granted_name, granted_path,
+    Build, Category, Default_, Dependency, Fmt, FsGrants, IndentStyle, Lint, LintLevel, Lints, Manifest, Package, Permissions, Policy, Task, Toolchain, WorkspacePackage, granted_host, granted_name, granted_path, newest_edition,
 };
 pub use crate::semver::Version;
 

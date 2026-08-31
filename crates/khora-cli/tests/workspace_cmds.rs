@@ -72,8 +72,14 @@ fn new_inside_a_sharing_workspace_inherits() {
     assert!(!manifest.contains("0.4.0"), "the value should not be copied: {manifest}");
 }
 
+/// A package with nothing to inherit from writes both fields out.
+///
+/// The edition was the one it left off, while
+/// `getting-started/first-project.md` shows `edition = "2026"` and says the
+/// manifest "selects the language edition" -- so the very first thing a
+/// newcomer compares against the documentation disagreed with it.
 #[test]
-fn new_outside_a_workspace_writes_a_version() {
+fn new_outside_a_workspace_writes_a_version_and_an_edition() {
     let root = scratch("new_solo");
 
     let (ok, output) = run(&root, &["new", "solo"]);
@@ -81,6 +87,10 @@ fn new_outside_a_workspace_writes_a_version() {
     let manifest =
         std::fs::read_to_string(root.join("solo").join("khora.toml")).expect("the new manifest");
     assert!(manifest.contains("version = \"0.1.0\""), "{manifest}");
+    assert!(
+        manifest.contains(&format!("edition = \"{}\"", khora_manifest::newest_edition())),
+        "{manifest}"
+    );
     assert!(!manifest.contains("workspace"), "{manifest}");
 }
 

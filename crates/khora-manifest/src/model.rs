@@ -138,6 +138,17 @@ fn not_a_package_name(name: &str) -> Option<String> {
 /// ask for. Neither is served by silence.
 const EDITIONS: [&str; 1] = ["2026"];
 
+/// The edition a new package is written with.
+///
+/// The last of [`EDITIONS`], so the scaffold cannot fall behind the validator:
+/// adding one here is adding it there. `khora new` used to write no `edition`
+/// line at all outside a workspace, while `getting-started/first-project.md`
+/// shows one and says the manifest "selects the language edition" -- so the
+/// first thing a newcomer compared against the documentation disagreed with it.
+pub fn newest_edition() -> &'static str {
+    EDITIONS[EDITIONS.len() - 1]
+}
+
 impl RawManifest {
     /// Whether anything here says `workspace = true`.
     ///

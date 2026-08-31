@@ -47,6 +47,11 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
     manifest.push_str(if shared.version { "version.workspace = true\n" } else { "version = \"0.1.0\"\n" });
     if shared.edition {
         manifest.push_str("edition.workspace = true\n");
+    } else {
+        // Written out when there is no workspace to inherit it from, rather
+        // than left off. An absent `edition` is a package that does not say
+        // which language it is in, and the page a newcomer follows shows one.
+        manifest.push_str(&format!("edition = \"{}\"\n", khora_manifest::newest_edition()));
     }
     if library {
         manifest.push_str(
