@@ -11,7 +11,8 @@
 mod harness;
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
@@ -20,7 +21,7 @@ struct Ran {
     code: Option<i32>,
 }
 
-fn run_tests(name: &str, source: &str) -> Ran {
+fn build_suite(name: &str, source: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     harness::ensure_runtime();
     std::fs::create_dir_all(&dir).expect("a workspace");
@@ -35,7 +36,11 @@ fn run_tests(name: &str, source: &str) -> Ran {
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
         panic!("compiling `{name}` failed:\n  {}\n\n{source}", messages.join("\n  "));
     }
+    exe
+}
 
+fn run_tests(name: &str, source: &str) -> Ran {
+    let exe = build_suite(name, source);
     let output = Command::new(&exe).output().expect("the suite should run");
     Ran {
         stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
@@ -52,6 +57,54 @@ fn halve(n: Int) -> Int raises Oops {
   if n % 2 == 0 { n / 2 } else { raise Oops::Bad }
 }
 ";
+
+/// A trap in a test fiber ends the run rather than hanging it.
+///
+/// `khora_test_run` took the stdout lock before its `join` loop and held it
+/// for the whole loop. A fiber that traps writes its message to stderr and
+/// then flushes stdout on the way to `exit` -- so the trapping fiber blocked
+/// on the lock and the runner blocked on the fiber, for ever. The suite
+/// printed the trap and then hung. In CI that is a stuck job rather than a red
+/// build, which is the worse of the two, and `khora run` never showed it
+/// because nothing there holds the lock.
+///
+/// **Waited on with a deadline, not `output()`.** A regression is a hang, and
+/// an unbounded wait would take this whole suite down with it rather than
+/// failing one test.
+#[test]
+fn a_trap_in_a_test_ends_the_run_rather_than_hanging_it() {
+    let exe = build_suite(
+        "suite_trap",
+        &format!(
+            "{PRELUDE}
+fn zero(n: Int) -> Int {{ n - n }}
+
+test \"divides by zero\" {{ assert(7 / zero(3) == 0); }}
+"
+        ),
+    );
+    let mut child = Command::new(&exe)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the suite should start");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        match child.try_wait().expect("waiting on the suite") {
+            Some(status) => break status,
+            None if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the suite hung after the trap instead of ending");
+            }
+        }
+    };
+    assert_ne!(status.code(), Some(0), "a trapped run is not a pass");
+}
 
 /// A suite that passes says so, and exits 0.
 #[test]

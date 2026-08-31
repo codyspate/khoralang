@@ -154,9 +154,16 @@ pub extern "C" fn khora_test_run() -> i32 {
         })
         .collect();
 
+    // **The lock is taken per line rather than held across the loop**, and
+    // that is a deadlock rather than a style. A fiber that traps writes its
+    // message to stderr and then flushes stdout on the way to `exit`; a
+    // `StdoutLock` held here while this thread sat in `join` blocked that
+    // flush, and the two threads waited on each other for ever. `khora test`
+    // printed the trap and then hung -- in CI a stuck job rather than a red
+    // build, which is the worse of the two. `khora run` was always fine,
+    // because nothing there holds the lock.
     let mut failed = 0usize;
     let mut total = 0usize;
-    let mut out = std::io::stdout().lock();
     for (name, handle) in running {
         total += 1;
         let verdict = match handle.join() {
@@ -177,10 +184,11 @@ pub extern "C" fn khora_test_run() -> i32 {
         if verdict != "ok" {
             failed += 1;
         }
-        let _ = writeln!(out, "test {name} ... {verdict}");
+        let _ = writeln!(std::io::stdout().lock(), "test {name} ... {verdict}");
     }
 
     let passed = total - failed;
+    let mut out = std::io::stdout().lock();
     let _ = match filtered_out {
         0 => writeln!(out, "\n{passed} passed, {failed} failed"),
         skipped => writeln!(out, "\n{passed} passed, {failed} failed, {skipped} filtered out"),
