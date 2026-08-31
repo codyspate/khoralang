@@ -416,3 +416,91 @@ fn main() -> Int {{
     );
     assert_eq!(ran.code, Some(0));
 }
+
+// --- the traits, against the real `std` ------------------------------------
+
+/// Every `.kh` file of `std`, plus the program under test.
+///
+/// The prelude above declares its own `U8` so the tests before this one can
+/// pin the *backend's* behaviour without `std` in the way. This claim is about
+/// what `std` ships, so it has to compile against `std`.
+fn std_sources(
+    db: &KhoraDatabase,
+    dir: &std::path::Path,
+    main: &str,
+) -> Vec<khora_db::SourceFile> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("std");
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(here) = stack.pop() {
+        for entry in std::fs::read_dir(&here).expect("a readable std") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "kh")
+                && khora_db::selected_for_target(&path, khora_db::host_target())
+            {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                out.push(khora_db::SourceFile::new(db, path, text));
+            }
+        }
+    }
+    out.push(khora_db::SourceFile::new(db, dir.join("main.kh"), main.to_string()));
+    out
+}
+
+fn with_std(name: &str, main: &str) -> String {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let db = KhoraDatabase::new();
+    let root = khora_db::SourceRoot::new(&db, std_sources(&db, &dir, main));
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling `{name}` failed:\n  {}\n\n{main}", messages.join("\n  "));
+    }
+    let out = std::process::Command::new(&exe).output().expect("the program should run");
+    assert_eq!(out.status.code(), Some(0), "{name} exited badly");
+    String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+}
+
+/// `Eq`, `Ord`, `Show` and `Hash` reach the fixed-width integers.
+///
+/// **The operators worked and the traits did not, which is the worse of the
+/// two gaps.** `a == b` on two `U8`s has always compiled, so nothing looked
+/// missing until something *generic* needed it: `List::contains`, a sort, a
+/// `${..}` hole. An agent writing a tokenizer against this reached for
+/// `byte.to_int() == 34` and a block of named ASCII constants, which is a
+/// language telling you to work around it.
+///
+/// Asked through the traits by name rather than with operators, because it is
+/// the traits that were absent and an operator would pass either way.
+#[test]
+fn the_fixed_widths_have_eq_ord_show_and_hash() {
+    let out = with_std(
+        "fixed_traits",
+        "module main;
+import std::core::{Eq, Hash, List, Ord, Ordering, Show, print};
+
+pub fn main() -> Int {
+  let quote = U8::of(34);
+  let bytes = [U8::of(104), U8::of(105), U8::of(34)];
+  print(\"show ${quote}\");
+  print(\"eq ${Eq::eq(quote, U8::of(34))}\");
+  print(\"contains ${List::contains(bytes, quote)}\");
+  print(\"cmp ${Ord::cmp(U8::of(1), U8::of(2)) == Ordering::Less}\");
+  print(\"hash ${Hash::hash(quote)}\");
+  print(\"sorted ${List::sort_by(bytes, fn (a, b) => Ord::cmp(a, b))}\");
+  print(\"i32 ${Eq::eq(I32::of(0 - 7), I32::of(0 - 7))} ${I32::of(0 - 7)}\");
+  0
+}
+",
+    );
+    assert_eq!(
+        out,
+        "show 34\neq true\ncontains true\ncmp true\nhash 34\nsorted [34, 104, 105]\ni32 true -7\n"
+    );
+}

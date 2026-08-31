@@ -92,41 +92,99 @@ call for anyone who disagrees.
 
 ## The representation
 
-**A tree, not a closure.** The obvious implementation is a record of two
-closures, `decode` and `encode`, and it is wrong for one reason: a closure
-cannot be asked anything. A schema has to answer questions other than "decode
-this" —
-
-- which keys does this need (a deployment listing its variables);
-- what does this look like as a JSON Schema or an OpenAPI fragment;
-- what does the documentation generator print for this request body.
-
-So the core is a variant, and the combinators are its constructors:
+**Both halves, in one record.** The first draft of this document said "a tree,
+not a closure" and that was a false choice — the two properties wanted are not
+in conflict, they are just carried by different fields:
 
 ```khora
-pub type Schema<A> =
-  | Text
-  | Whole
-  | Exact                                     // Decimal
-  | Truth
-  | Nothing                                   // ()
-  | List_(of: Schema<A>)
-  | Struct_(fields: List<FieldSchema>)
-  | Optional(inner: Schema<A>)
-  | Choice(cases: List<CaseSchema>)
-  | Refined(inner: Schema<A>, ..)
-  | Transformed(inner: Schema<A>, ..)
-  | Secret(inner: Schema<A>);
+pub type Schema<A> = {
+  shape: Shape,
+  read: (Value) -> A raises DecodeError,
+};
 ```
 
-Closures appear only where they must — in `Refined` and `Transformed`, which
-carry a user predicate and a user conversion. Everything structural stays
-inspectable. That is the same split Effect.Schema arrives at, and for the same
-reason.
+`read` is the typed half. It is a closure, so it can be built by combination
+and it is what makes `schema.decode(value)` an ordinary method call:
 
-The exact spelling of the payloads is left to the implementation; what this
-document fixes is that structure is data and only the two escape hatches are
-functions.
+```khora
+let settings = Schema::two("port", integer(), "host", text(),
+                           fn (p, h) => { port: p, host: h });
+let decoded = settings.decode(input)!;
+```
+
+`shape` is the untyped half, and it is untyped **on purpose**: with no type
+parameter it goes in a `List`, which is what lets a record schema hold fields of
+different types and still be walked.
+
+```khora
+pub type Shape = | Whole | Text_ | Exact | Truth | Nothing
+                 | Sequence(of: Shape)
+                 | Struct_(fields: List<Named>)
+                 | Optional(inner: Shape)
+                 | Choice(cases: List<Named>)
+                 | Refined(inner: Shape, must: String)
+                 | Secret(inner: Shape);
+pub type Named = { name: String, shape: Shape };
+```
+
+So a deployment can ask a configuration which variables it needs without
+running the program, the documentation generator can print a request body, and
+a caller can still write `schema.decode(..)`. A record of two closures would
+have lost the first; a bare tree would have lost the second.
+
+This was built and run before it was written down; the sketch answers both
+`keys it needs: port host` and `decoded localhost:8080` from the same value.
+
+### Why a record literal of schemas cannot be the spelling
+
+The shape a reader reaches for first is this:
+
+```khora
+let s = Schema::struct({ a: Schema::integer(), b: Schema::string() });
+```
+
+It cannot be typed. That argument is a `{ a: Schema<Int>, b: Schema<String> }`
+and the result would have to be a `Schema<{ a: Int, b: String }>` — which needs
+a type-level map from a record of schemas to the record of what they decode.
+Khora has no mapped types, and the compiler says so plainly:
+
+```text
+this function returns `Schema<Wanted>`, but its body has type
+`Schema<Described>`; `Wanted` does not match `Described`
+```
+
+Adding mapped types to get a nicer literal would be a far larger change than
+this library, and it is the same wall `Validated`'s docstring already records
+about partial application of type constructors.
+
+So there are two ways to build a record schema, and the ordering matters:
+
+**`derive(Schema)` is the primary one**, not a convenience.
+
+```khora
+derive(Show, Schema)
+pub type Settings = { port: Int, host: String };
+
+let decoded = Settings::schema().decode(input)!;
+```
+
+The type is written once and the schema is generated from it. This is the
+answer to the mapped-type problem rather than a way around typing less, which
+is why it moves from "sequencing question" in the first draft to a required
+part of the first version.
+
+**A combinator with an explicit assembler** is the hand-written form, for a
+renamed key, a refinement, or anything derivation cannot know:
+
+```khora
+Schema::two("port", integer(), "host", text(), fn (p, h) => { port: p, host: h })
+```
+
+The assembler is the price of no mapped types: something has to say how the
+decoded pieces become the record, and in this language that is a function. An
+arity family (`two`, `three`, `four`) is ugly and finite; the alternative is
+`map2` chaining, which composes but reads worse past three fields. Either way
+`derive` is what a reader should meet first.
 
 ## Secret is a combinator
 
@@ -206,9 +264,9 @@ language where the type is written first. A hand-written schema stays available
 for everything derivation cannot know — a refinement, a renamed key, a
 transform.
 
-Whether `derive(Schema)` lands with the first version or after it is a
-sequencing question, not a design one. The library has to work when written by
-hand either way.
+`derive(Schema)` is required in the first version rather than optional, for
+the reason under "The representation": without mapped types it is the only way
+to get a record schema without writing an assembler by hand for every type.
 
 ## What this replaces
 

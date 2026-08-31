@@ -294,9 +294,28 @@ pub(super) fn build(
 
     match entry_point {
         Entry::Main => {
-            let entry =
-                mono.instances.iter().find(|(i, _)| i.function == "main").map(|(i, _)| i.symbol());
-            backend.emit_c_main(entry.as_deref());
+            // **Every one of them, not the first.** `find` picked whichever
+            // module happened to come first and said nothing about the others,
+            // so a package with a `main` in two modules compiled clean, ran one
+            // of them, and gave no hint the other existed. `khora run
+            // some/file.kh` inside such a package is where it bites: the file
+            // is built, the package's `main` runs, and the two are not the
+            // same program.
+            let mains: Vec<&khora_types::mono::Instance> =
+                mono.instances.iter().map(|(i, _)| i).filter(|i| i.function == "main").collect();
+            if mains.len() > 1 {
+                let named: Vec<String> = mains.iter().map(|i| i.module.to_string()).collect();
+                backend.error(
+                    format!(
+                        "`main` is declared in more than one module here ({}), so which of \
+                         them runs would be an accident. A package has one entry point, in \
+                         `src/main.kh`; another program wants its own file",
+                        named.join(", ")
+                    ),
+                    TextRange::empty(0.into()),
+                );
+            }
+            backend.emit_c_main(mains.first().map(|i| i.symbol()).as_deref());
         }
         // Nothing to emit. The exported symbols *are* the entry points, and
         // `emit_c_exports` has already written them.

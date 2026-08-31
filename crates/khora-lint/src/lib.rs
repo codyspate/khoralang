@@ -64,6 +64,7 @@ pub const LINTS: &[&str] = &[
     DANGLING_EXPRESSION,
     DISCARDED_RESULT,
     INCONSISTENT_CONSTRUCTOR,
+    MISPLACED_MAIN,
     REFERENCE_CYCLE,
     UNDOCUMENTED_EXPORT,
     UNKNOWN_ALLOW,
@@ -73,6 +74,21 @@ pub const LINTS: &[&str] = &[
     UNUSED_IMPORT,
     USELESS_ALLOW,
 ];
+
+/// A `main` in a file that is not an entry point.
+///
+/// **A package has one program, and one file that starts it.** Nothing said
+/// so, so a `main` in `src/helpers.kh` was picked up and run as the program's
+/// entry point, and a second one somewhere else meant whichever the compiler
+/// reached first won. A reader looking for what a package does had to search
+/// every file to find out where it begins.
+///
+/// `src/main.kh` is that file. A package with more than one program puts each
+/// under `src/bin/`, the way Cargo does, and each becomes its own executable.
+///
+/// Only inside a `src` directory: a loose `.kh` file run directly is a script
+/// and has no layout to disagree with.
+pub const MISPLACED_MAIN: &str = "misplaced-main";
 
 /// A constructor whose name disagrees with what it takes.
 ///
@@ -181,6 +197,7 @@ pub fn findings(db: &dyn Db, file: SourceFile) -> Vec<Finding> {
 
     unused_imports(db, file, checked, &mut out);
     undocumented_exports(db, file, &mut out);
+    misplaced_main(db, file, &mut out);
 
     // **Here rather than in each consumer.** The CLI, the language server and
     // the MCP server all read this, and a suppression one of them honoured and
@@ -251,6 +268,45 @@ fn line_of(starts: &[u32], offset: u32) -> usize {
     match starts.binary_search(&offset) {
         Ok(exact) => exact,
         Err(after) => after - 1,
+    }
+}
+
+/// Reports a `main` in a file that is not an entry point.
+///
+/// The rule is the layout's, so it is asked of the path rather than the tree:
+/// `src/main.kh` is the program, and `src/bin/anything.kh` is one of several.
+/// Anywhere else under `src` and the function is either dead or the program's
+/// real entry point hiding in a file nobody would look in.
+fn misplaced_main(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
+    let path = file.path(db);
+    let parts: Vec<String> =
+        path.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    // **Only where there is a layout to disagree with.** A `.kh` file run
+    // directly is a script, and telling somebody their one-file program is in
+    // the wrong place would be worse than saying nothing.
+    let Some(src) = parts.iter().rposition(|part| part == "src") else { return };
+    let after: &[String] = &parts[src + 1..];
+    let allowed = match after {
+        [only] => only == "main.kh",
+        [folder, _file] => folder == "bin",
+        _ => false,
+    };
+    if allowed {
+        return;
+    }
+
+    let parse = khora_db::parse(db, file);
+    if !parse.errors().is_empty() {
+        return;
+    }
+    for found in exported::functions_named(&parse.syntax(), "main") {
+        out.push(Finding {
+            lint: MISPLACED_MAIN,
+            message: "`main` is the program's entry point and belongs in `src/main.kh`. \
+                      A package with more than one program puts each under `src/bin/`"
+                .to_string(),
+            range: found,
+        });
     }
 }
 

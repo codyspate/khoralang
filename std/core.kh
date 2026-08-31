@@ -3361,6 +3361,154 @@ impl I32 {
   pub fn shr(self, other: I32) -> I32;
 }
 
+// ---------------------------------------------------------------------------
+// The fixed-width integers, and the four traits every other number has
+// ---------------------------------------------------------------------------
+
+/// **The operators worked and the traits did not, which is a worse gap than
+/// neither.** `a == b` on two `U8`s has always compiled -- comparison is built
+/// in for every integer width -- but with no `impl Eq for U8` nothing generic
+/// could use it: not `List::contains`, not a `Dict<U8, _>`, not a `derive(Eq)`
+/// on a record with a byte in it. A tokenizer written against this reached for
+/// `byte.to_int() == 34` and a block of named ASCII constants, which is the
+/// shape of a language telling you to work around it.
+///
+/// `Hash` is `to_int`, for the reason `Hash for Int` gives: the map does the
+/// mixing, so there is nothing here to add.
+
+impl Eq for U8 {
+  fn eq(self, other: U8) -> Bool { self == other }
+}
+
+impl Ord for U8 {
+  fn cmp(self, other: U8) -> Ordering {
+    if self < other { Ordering::Less } else if self == other { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for U8 {
+  fn show(self) -> String { Int::to_string(U8::to_int(self)) }
+}
+
+impl Hash for U8 {
+  fn hash(self) -> Int { U8::to_int(self) }
+}
+
+impl Eq for U16 {
+  fn eq(self, other: U16) -> Bool { self == other }
+}
+
+impl Ord for U16 {
+  fn cmp(self, other: U16) -> Ordering {
+    if self < other { Ordering::Less } else if self == other { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for U16 {
+  fn show(self) -> String { Int::to_string(U16::to_int(self)) }
+}
+
+impl Hash for U16 {
+  fn hash(self) -> Int { U16::to_int(self) }
+}
+
+impl Eq for U32 {
+  fn eq(self, other: U32) -> Bool { self == other }
+}
+
+impl Ord for U32 {
+  fn cmp(self, other: U32) -> Ordering {
+    if self < other { Ordering::Less } else if self == other { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for U32 {
+  fn show(self) -> String { Int::to_string(U32::to_int(self)) }
+}
+
+impl Hash for U32 {
+  fn hash(self) -> Int { U32::to_int(self) }
+}
+
+impl Eq for U64 {
+  fn eq(self, other: U64) -> Bool { self == other }
+}
+
+impl Ord for U64 {
+  fn cmp(self, other: U64) -> Ordering {
+    if self < other { Ordering::Less } else if self == other { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for U64 {
+  fn show(self) -> String { Int::to_string(U64::to_int(self)) }
+}
+
+impl Hash for U64 {
+  fn hash(self) -> Int { U64::to_int(self) }
+}
+
+impl Eq for I8 {
+  fn eq(self, other: I8) -> Bool { self == other }
+}
+
+impl Ord for I8 {
+  fn cmp(self, other: I8) -> Ordering {
+    if self < other { Ordering::Less } else if self == other { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for I8 {
+  fn show(self) -> String { Int::to_string(I8::to_int(self)) }
+}
+
+impl Hash for I8 {
+  fn hash(self) -> Int { I8::to_int(self) }
+}
+
+impl Eq for I16 {
+  fn eq(self, other: I16) -> Bool { self == other }
+}
+
+impl Ord for I16 {
+  fn cmp(self, other: I16) -> Ordering {
+    if self < other { Ordering::Less } else if self == other { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for I16 {
+  fn show(self) -> String { Int::to_string(I16::to_int(self)) }
+}
+
+impl Hash for I16 {
+  fn hash(self) -> Int { I16::to_int(self) }
+}
+
+impl Eq for I32 {
+  fn eq(self, other: I32) -> Bool { self == other }
+}
+
+impl Ord for I32 {
+  fn cmp(self, other: I32) -> Ordering {
+    if self < other { Ordering::Less } else if self == other { Ordering::Equal }
+    else { Ordering::Greater }
+  }
+}
+
+impl Show for I32 {
+  fn show(self) -> String { Int::to_string(I32::to_int(self)) }
+}
+
+impl Hash for I32 {
+  fn hash(self) -> Int { I32::to_int(self) }
+}
+
 /// One bucket's worth of entries: the keys that hashed to the same slot.
 ///
 /// Separate chaining rather than open addressing, because a chain is an

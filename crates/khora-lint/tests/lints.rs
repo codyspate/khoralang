@@ -37,6 +37,70 @@ const EFFECT: &str = "module m;\n\
                       now: () -> Int,\n\
                       }\n";
 
+// --- misplaced main --------------------------------------------------------
+
+/// The same, for a file at a chosen path: this lint asks the layout, not the
+/// tree, so the path is the input that matters.
+fn lint_at(db: &dyn Db, path: &str, text: &str) -> Vec<Finding> {
+    let file = SourceFile::new(db, path.into(), text.to_string());
+    findings(db, file)
+        .iter()
+        .filter(|f| khora_lint::default_level(f.lint) != khora_manifest::LintLevel::Allow)
+        .cloned()
+        .collect()
+}
+
+const PROGRAM: &str = "module m;\nfn print(v: Int);\npub fn main() -> Int { print(1); 0 }\n";
+
+/// A `main` anywhere under `src` but the two places allowed to have one.
+///
+/// It used to be picked up and run as the program's entry point wherever it
+/// sat, so a reader looking for where a package begins had to search every
+/// file, and a second one meant whichever the compiler reached first won.
+#[test]
+fn a_main_outside_an_entry_point_is_reported() {
+    let db = KhoraDatabase::new();
+    let found = lint_at(&db, "app/src/helpers.kh", PROGRAM);
+    assert_eq!(names(&found), vec![khora_lint::MISPLACED_MAIN], "{found:?}");
+}
+
+/// `src/main.kh` is the program, and `src/bin/anything.kh` is one of several.
+#[test]
+fn an_entry_point_is_not_reported() {
+    let db = KhoraDatabase::new();
+    assert!(lint_at(&db, "app/src/main.kh", PROGRAM).is_empty(), "src/main.kh is the program");
+    assert!(
+        lint_at(&db, "app/src/bin/tool.kh", PROGRAM).is_empty(),
+        "src/bin holds the others"
+    );
+}
+
+/// A loose file has no layout to disagree with.
+///
+/// `khora run hello.kh` is a script. Telling somebody their one-file program
+/// is in the wrong place would be worse than saying nothing, so the lint only
+/// speaks where there is a `src` directory to have an opinion about.
+#[test]
+fn a_script_is_not_reported() {
+    let db = KhoraDatabase::new();
+    assert!(lint_at(&db, "hello.kh", PROGRAM).is_empty(), "a loose file");
+    assert!(lint_at(&db, "scratch/hello.kh", PROGRAM).is_empty(), "and one in a folder");
+}
+
+/// A nested `src` is read from the innermost one.
+///
+/// A workspace is `packages/thing/src/main.kh`, and a checkout of it might sit
+/// under a directory of somebody else's called `src`. The last one is the
+/// package's.
+#[test]
+fn the_innermost_src_is_the_one_that_counts() {
+    let db = KhoraDatabase::new();
+    assert!(
+        lint_at(&db, "src/vendor/app/src/main.kh", PROGRAM).is_empty(),
+        "the package's own src decides"
+    );
+}
+
 // --- unused capability -----------------------------------------------------
 
 #[test]

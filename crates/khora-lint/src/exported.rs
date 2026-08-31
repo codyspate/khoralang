@@ -211,3 +211,30 @@ fn parameters(node: &SyntaxNode) -> usize {
         })
         .count()
 }
+
+/// Every function declaration with this name, by the range of its name.
+///
+/// `descendants` rather than `children`, because that is where the
+/// declarations are -- the same walk `misnamed_constructors` does, and the
+/// reason this returned nothing on its first run.
+///
+/// The name's range rather than the declaration's, so the caret lands on the
+/// word the reader has to change.
+pub(crate) fn functions_named(tree: &SyntaxNode, wanted: &str) -> Vec<TextRange> {
+    let mut out = Vec::new();
+    for node in tree.descendants() {
+        if node.kind() != SyntaxKind::FN_DECL {
+            continue;
+        }
+        let named = node
+            .descendants_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|token| token.kind() == SyntaxKind::IDENT);
+        if let Some(token) = named {
+            if token.text() == wanted {
+                out.push(token.text_range());
+            }
+        }
+    }
+    out
+}

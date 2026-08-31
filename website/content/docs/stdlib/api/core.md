@@ -4801,6 +4801,342 @@ iterative. There are two orders and they are not the same:
 Doing it in one loop gets one of the two wrong, which is why there are
 two.
 
+### Eq for U8
+
+```khora
+impl Eq for U8
+```
+
+#### eq
+
+```khora
+fn eq(self, other: U8) -> Bool
+```
+
+### Ord for U8
+
+```khora
+impl Ord for U8
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: U8) -> Ordering
+```
+
+### Show for U8
+
+```khora
+impl Show for U8
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Hash for U8
+
+```khora
+impl Hash for U8
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Eq for U16
+
+```khora
+impl Eq for U16
+```
+
+#### eq
+
+```khora
+fn eq(self, other: U16) -> Bool
+```
+
+### Ord for U16
+
+```khora
+impl Ord for U16
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: U16) -> Ordering
+```
+
+### Show for U16
+
+```khora
+impl Show for U16
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Hash for U16
+
+```khora
+impl Hash for U16
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Eq for U32
+
+```khora
+impl Eq for U32
+```
+
+#### eq
+
+```khora
+fn eq(self, other: U32) -> Bool
+```
+
+### Ord for U32
+
+```khora
+impl Ord for U32
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: U32) -> Ordering
+```
+
+### Show for U32
+
+```khora
+impl Show for U32
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Hash for U32
+
+```khora
+impl Hash for U32
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Eq for U64
+
+```khora
+impl Eq for U64
+```
+
+#### eq
+
+```khora
+fn eq(self, other: U64) -> Bool
+```
+
+### Ord for U64
+
+```khora
+impl Ord for U64
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: U64) -> Ordering
+```
+
+### Show for U64
+
+```khora
+impl Show for U64
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Hash for U64
+
+```khora
+impl Hash for U64
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Eq for I8
+
+```khora
+impl Eq for I8
+```
+
+#### eq
+
+```khora
+fn eq(self, other: I8) -> Bool
+```
+
+### Ord for I8
+
+```khora
+impl Ord for I8
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: I8) -> Ordering
+```
+
+### Show for I8
+
+```khora
+impl Show for I8
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Hash for I8
+
+```khora
+impl Hash for I8
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Eq for I16
+
+```khora
+impl Eq for I16
+```
+
+#### eq
+
+```khora
+fn eq(self, other: I16) -> Bool
+```
+
+### Ord for I16
+
+```khora
+impl Ord for I16
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: I16) -> Ordering
+```
+
+### Show for I16
+
+```khora
+impl Show for I16
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Hash for I16
+
+```khora
+impl Hash for I16
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
+### Eq for I32
+
+```khora
+impl Eq for I32
+```
+
+#### eq
+
+```khora
+fn eq(self, other: I32) -> Bool
+```
+
+### Ord for I32
+
+```khora
+impl Ord for I32
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: I32) -> Ordering
+```
+
+### Show for I32
+
+```khora
+impl Show for I32
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+### Hash for I32
+
+```khora
+impl Hash for I32
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
+```
+
 ### Show for Pair<K, V>
 
 ```khora
