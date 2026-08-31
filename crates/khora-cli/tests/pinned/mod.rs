@@ -20,27 +20,52 @@
 //! depend on nobody doing that, and one copy of a file is a cheap way not
 //! to.
 //!
-//! Copied once per test *run* rather than once per test: the archive is tens
-//! of megabytes.
+//! **And it has to be pinned per process, at a name that is never rewritten.**
+//! The first two attempts were not. Copying once per test *run* into one fixed
+//! name, and re-copying whenever the real archive looked newer, meant the
+//! answer was recomputed before *every* `khora` invocation — so a test that
+//! runs the compiler twice could be handed one archive and then a different
+//! one, which is precisely the thing this module exists to prevent. That is
+//! #115: `the_second_run_comes_from_the_cache` failed about one baseline in
+//! two, and the cache was right every time. Both runs were told the truth
+//! about a different runtime:
 //!
-//! **And re-copied when the real one is newer**, which it was not until the
-//! runtime grew a symbol. `std::fs` gained `remove` and `rename`, `khora-rt`
-//! gained the shims they call, and every test holding the old pin failed to
-//! link with `undefined symbol: khora_fs_remove` -- naming a function that
-//! exists, in a file that declares it, against an archive from before it was
-//! written. The pin was decided by whether the copy existed, so it never
-//! expired. This is the same mtime test errata 51 gave the code generation
-//! harness, for the same reason.
+//! ```text
+//! khora: key from compiler 7a2f08c81301 linker 8bbe086dfb0f runtime 655dd165f859
+//! khora: key from compiler 7a2f08c81301 linker 8bbe086dfb0f runtime 334a4f2499dd
+//! ```
+//!
+//! So the copy is filed under what the archive *was* when this process first
+//! looked — its size and modification time — and a file at that name is
+//! written once and never replaced. A rebuild produces a new name and leaves
+//! every process already using the old one alone. The [`OnceLock`] is the
+//! other half: within one process the question is asked once, so the answer
+//! cannot change between two calls even if the directory gains a newer entry.
+//!
+//! Copies are tens of megabytes and one accumulates per distinct build, under
+//! `CARGO_TARGET_TMPDIR`, which `cargo clean` removes.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// A private copy of the runtime archive, or `None` if there is none to copy.
+///
+/// Resolved once per process; see the module comment for why that matters more
+/// than it looks.
 pub fn runtime() -> Option<PathBuf> {
+    static PINNED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PINNED.get_or_init(pin).clone()
+}
+
+/// Makes the copy, or finds the one a previous process made.
+fn pin() -> Option<PathBuf> {
     let real = beside_the_compiler()?;
-    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pinned-rt");
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pinned-rt").join(stamp(&real)?);
     std::fs::create_dir_all(&directory).ok()?;
     let pinned = directory.join(real.file_name()?);
-    if is_current(&pinned, &real) {
+    // Never overwritten: the name says which build this is, so a file already
+    // there is the same bytes and may be in use by somebody else.
+    if pinned.is_file() {
         return Some(pinned);
     }
     // Written under a temporary name and renamed, so two test processes
@@ -53,17 +78,16 @@ pub fn runtime() -> Option<PathBuf> {
     pinned.is_file().then_some(pinned)
 }
 
-/// Whether the copy is at least as new as what it was copied from.
+/// A name for one build of the archive: when it was written, and how big.
 ///
-/// Errs towards re-copying: a timestamp that cannot be read is treated as out
-/// of date, because copying tens of megabytes again is cheaper than a link
-/// error that names the wrong culprit.
-fn is_current(pinned: &std::path::Path, real: &std::path::Path) -> bool {
-    let stamp = |path: &std::path::Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    match (stamp(pinned), stamp(real)) {
-        (Some(copy), Some(source)) => copy >= source,
-        _ => false,
-    }
+/// Not a digest of the contents, which would be a hundred megabytes of hashing
+/// per test process to answer a question the file's own metadata already
+/// answers. Two different builds sharing a size *and* a modification time to
+/// the nanosecond is not a case worth the cost.
+fn stamp(real: &std::path::Path) -> Option<String> {
+    let meta = std::fs::metadata(real).ok()?;
+    let written = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{:x}-{:x}", written.as_nanos(), meta.len()))
 }
 
 /// The archive `khora build` would have found on its own.

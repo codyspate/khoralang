@@ -36,7 +36,23 @@ fn returning(answer: i64) -> String {
 
 /// Runs `khora` in `cwd`, returning the exit code and the merged output.
 fn khora(w: &World, cwd: &Path, args: &[&str]) -> (Option<i32>, String) {
+    khora_with(w, cwd, args, false)
+}
+
+/// The same, with the cache asked to show its working.
+///
+/// For the one test whose subject is the key. It prints a line per source, so
+/// it is opt-in -- but the output is only ever read when a test fails, and a
+/// key that moved is unreadable without it.
+fn khora_explaining(w: &World, cwd: &Path, args: &[&str]) -> (Option<i32>, String) {
+    khora_with(w, cwd, args, true)
+}
+
+fn khora_with(w: &World, cwd: &Path, args: &[&str], explain: bool) -> (Option<i32>, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_khora"));
+    if explain {
+        command.env("KHORA_CACHE_EXPLAIN", "1");
+    }
     // One archive for the whole test run. `pinned` says why a test has to
     // care.
     if let Some(archive) = pinned::runtime() {
@@ -51,6 +67,14 @@ fn khora(w: &World, cwd: &Path, args: &[&str]) -> (Option<i32>, String) {
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (out.status.code(), text)
+}
+
+/// The compiler, linker and runtime digests a run keyed on.
+///
+/// `KHORA_CACHE_EXPLAIN` prints them on one line. Empty when it is not on,
+/// which compares equal and leaves the reuse assertion to speak.
+fn toolchain_of(output: &str) -> &str {
+    output.lines().find(|line| line.starts_with("khora: key from ")).unwrap_or_default()
 }
 
 #[test]
@@ -96,16 +120,37 @@ fn the_second_run_comes_from_the_cache() {
     //
     // This has been intermittent under full-baseline load and passes in
     // isolation, which is exactly the shape a discarded exit status produces.
-    let (first, first_output) = khora(&w, &w.project, &["run"]);
+    let (first, first_output) = khora_explaining(&w, &w.project, &["run"]);
     assert_eq!(first, Some(0), "the first run has to succeed to store anything:\n{first_output}");
     assert!(
         first_output.contains("built"),
         "the first run should be the one that compiles:\n{first_output}"
     );
 
-    let (code, output) = khora(&w, &w.project, &["run"]);
+    let (code, output) = khora_explaining(&w, &w.project, &["run"]);
     assert_eq!(code, Some(0), "{output}");
-    assert!(output.contains("reused"), "first run:\n{first_output}\nsecond run:\n{output}");
+
+    // **Checked before the reuse, because it is the thing that went wrong.**
+    // This failed about one baseline in two, and the cache was right every
+    // time: the two runs were handed *different runtime archives*, because the
+    // pin was recomputed before each invocation and something rebuilt
+    // `khora-rt` in between. Comparing the toolchain line the two runs printed
+    // says so in one line, where "expected reused, got built" said nothing.
+    // `tests/pinned` is where the fix lives.
+    assert_eq!(
+        toolchain_of(&first_output),
+        toolchain_of(&output),
+        "the toolchain moved between two runs, so the key was right to change.\n\
+         first run:\n{first_output}\nsecond run:\n{output}"
+    );
+
+    assert!(
+        output.contains("reused"),
+        "the key moved between two runs of an unchanged tree, and it was not \
+         the toolchain. The `source` lines below carry each path and its \
+         digest; whichever pair differs is the input that moved.\n\n\
+         first run:\n{first_output}\nsecond run:\n{output}"
+    );
 }
 
 #[test]
