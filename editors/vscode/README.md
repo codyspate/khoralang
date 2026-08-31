@@ -23,7 +23,20 @@ do when working on the compiler itself.
 | Completion | the checker's types, and `khora-types`' signature keys |
 | Semantic highlighting over the grammar | the resolver, for what a regex cannot decide |
 | Format on save | `khora_fmt`, the same formatter the baseline gates on |
+| Add a missing import, from the diagnostic that says it is missing | `khora_lsp::imports` over what the modules export |
 | Highlighting, comment toggling, bracket matching | the TextMate grammar here |
+
+The corner of the window says which toolchain answered — `Khora 0.1.0` — with
+the reason on hover. **The pin is honoured whether or not this is shown**:
+`khora lsp` hands over to the version a project's `[toolchain]` names, because
+the shim runs before argument parsing. What was missing was any way to see
+which one you got, which matters the moment there are two on the machine. The
+item turns yellow when a project pins a version that is not installed, since
+that is a project which will not build.
+
+Nothing here decides which toolchain to use. `khora toolchain which` decides,
+and the extension shows its sentence — a second copy of that rule in JavaScript
+would be a second answer to disagree with the first.
 
 Format on save is on by default for `.kh` and nothing else — `package.json`
 scopes it under `[khora]`, so it cannot turn the setting on for a language
