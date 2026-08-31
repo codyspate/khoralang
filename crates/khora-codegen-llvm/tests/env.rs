@@ -98,6 +98,55 @@ fn main() -> Int {{
     assert_eq!(lines[3], "0");
 }
 
+/// An argument that is not ASCII arrives intact instead of killing the process.
+///
+/// On Windows the `argv` a C `main` is handed is the command line in the
+/// machine's ANSI code page, so `café` reached Khora as bytes that are not
+/// UTF-8 and `String::from_bytes` trapped on them:
+///
+/// ```text
+/// khora: these bytes are not UTF-8, so they are not a String
+/// ```
+///
+/// `arguments()` has no failure row, so there was no check a program could make
+/// first and nothing it could do about it -- every Khora command-line program
+/// was one accented character away from a 134. The runtime reads the wide
+/// command line on Windows now and owns the converted copies.
+#[test]
+fn an_argument_that_is_not_ascii_survives() {
+    let exe = build(
+        "env_wide_arguments",
+        &format!(
+            "{HEAD}
+fn work() -> Int with {{ env: Env }} {{ show_all(env.arguments()); 0 }}
+
+fn main() -> Int {{
+  with {{ env: Env::real() }} {{ khora_print_int(work()); }}
+  0
+}}
+"
+        ),
+    );
+
+    // An accent, a two-byte character, a three-byte one, and one outside the
+    // basic plane -- which is a surrogate pair in UTF-16 and four bytes in
+    // UTF-8, so it is the one that catches a conversion done a character at a
+    // time.
+    let sent = ["café", "naïve", "日本語", "🐛"];
+    let out = std::process::Command::new(&exe)
+        .args(sent)
+        .output()
+        .expect("the program should run");
+    let text = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert_eq!(out.status.code(), Some(0), "it must not trap: {text:?}");
+    assert_eq!(lines.len(), sent.len() + 2, "argv[0], the arguments, the answer: {text:?}");
+    for (index, want) in sent.iter().enumerate() {
+        assert_eq!(&lines[index + 1], want, "argument {index} came back changed: {text:?}");
+    }
+}
+
 /// A program with no arguments still has its own name.
 #[test]
 fn a_program_with_no_arguments_has_one() {
