@@ -1467,6 +1467,14 @@ fn build(
             "khora: the toolchain could not be identified, so this build is not cached"
         );
     }
+    // **And the other way to be uncached silently.** `Cache::open` failing left
+    // no store, and the message above is guarded on there being one -- so a
+    // cache that could not be created said nothing whatever, and the build
+    // simply repeated itself for ever with no clue anywhere. Every other way to
+    // miss says so; this was the hole.
+    if store.is_none() {
+        eprintln!("khora: the cache could not be opened, so this build is not cached");
+    }
 
     if let (true, Some(store), Some(key)) = (cache::Cache::explaining(), &store, &key) {
         let _ = store;

@@ -136,8 +136,18 @@ pub struct Cache {
 /// there was nothing else to read.
 #[derive(Debug)]
 pub enum Miss {
-    /// Nothing has been built with this key.
+    /// Nothing has been built with this key, and nothing has been built at all.
+    ///
+    /// The ordinary first build, and the only miss worth staying quiet about.
     NoEntry,
+    /// Nothing has been built with this key, but the cache holds other keys.
+    ///
+    /// **Split out from `NoEntry` because the two look identical and mean
+    /// opposite things.** An empty cache is a first build. A cache holding
+    /// somebody else's key, on a tree that has not changed, means the key
+    /// moved between one build and the next -- which is the interesting
+    /// failure and was invisible while both were called `NoEntry`.
+    KeyMoved(Vec<String>),
     /// The entry is there and does not record what it holds.
     NoRecord,
     /// The entry records an artifact it does not have.
@@ -152,6 +162,17 @@ impl std::fmt::Display for Miss {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Miss::NoEntry => f.write_str("nothing has been built with this key"),
+            Miss::KeyMoved(others) => {
+                let held: Vec<&str> = others.iter().map(|k| &k[..12.min(k.len())]).collect();
+                let count = others.len();
+                write!(
+                    f,
+                    "the key moved. Nothing is stored under this one, but the \
+                     cache holds {count}: {}. `KHORA_CACHE_EXPLAIN=1` names \
+                     the input that changed",
+                    held.join(" ")
+                )
+            }
             Miss::NoRecord => f.write_str("the entry does not say what it holds"),
             Miss::NoArtifact => f.write_str("the entry has no artifact"),
             Miss::Unreadable(why) => write!(f, "the artifact could not be read: {why}"),
@@ -274,7 +295,10 @@ impl Cache {
     pub fn lookup(&self, key: &str) -> Result<Hit, Miss> {
         let entry = self.root.join("build").join(key);
         if !entry.is_dir() {
-            return Err(Miss::NoEntry);
+            // Which of the two it is decides whether anything is wrong, so it
+            // is worked out here rather than left to the reader.
+            let others = self.keys();
+            return Err(if others.is_empty() { Miss::NoEntry } else { Miss::KeyMoved(others) });
         }
         let artifact = entry.join("artifact");
         let Ok(recorded) = std::fs::read_to_string(entry.join("artifact.sha256")) else {
@@ -423,15 +447,40 @@ impl Cache {
         // may have changed inside the same tick.
         let recorded = std::fs::metadata(&memo).ok().map(|meta| modified(&meta));
         if let (Some(recorded), Ok(known)) = (recorded, std::fs::read_to_string(&memo)) {
-            if recorded > written {
-                return Some(known.trim().to_string());
+            let known = known.trim();
+            // **Checked before it is believed, because a memo is the file's
+            // identity and a wrong one is a wrong cache key.** Anything that is
+            // not a whole digest is treated as absent and recomputed, so a memo
+            // that was truncated -- by a full disk, an interrupted write, or the
+            // race the write below now avoids -- costs a re-read instead of a
+            // build that never hits again.
+            if recorded > written && looks_like_a_digest(known) {
+                return Some(known.to_string());
             }
         }
 
         let digest = hash_file(path).ok()?;
-        let _ = std::fs::write(&memo, &digest);
+        // **Staged and renamed, not written in place.** `fs::write` truncates
+        // and then writes, so a second `khora` sharing this `KHORA_HOME` -- two
+        // packages of a workspace at once, a CI matrix on one runner -- could
+        // read the memo in between and take an empty or half-written string as
+        // the file's identity. A rename is atomic, so a reader sees the old
+        // memo or the new one and never a partial one.
+        let staged = memo.with_extension(format!("tmp-{}", std::process::id()));
+        if std::fs::write(&staged, &digest).is_ok() && std::fs::rename(&staged, &memo).is_err() {
+            let _ = std::fs::remove_file(&staged);
+        }
         Some(digest)
     }
+}
+
+/// Whether a memo holds a whole SHA-256, rather than part of one.
+///
+/// The digests this cache writes are 64 hexadecimal characters. Nothing else
+/// is a file's identity, and treating a short string as one produces a key no
+/// entry will ever match.
+fn looks_like_a_digest(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// A path as the filesystem knows it, for a key that must not depend on where
@@ -531,6 +580,52 @@ mod tests {
 
         std::fs::write(&file, b"one").expect("undone");
         assert_eq!(cache.identity(&file).expect("a digest"), first, "and change back");
+    }
+
+    /// A memo that is not a whole digest is not believed either.
+    ///
+    /// `fs::write` truncates and then writes, so a second `khora` sharing this
+    /// `KHORA_HOME` could read a memo in between and take the empty string, or
+    /// half a digest, as a file's identity. That produces a cache key no entry
+    /// will ever match -- a cache that has silently stopped working, with the
+    /// build succeeding every time and nothing to read.
+    ///
+    /// The write is a rename now, so the window is gone; this pins the other
+    /// half, which is that a memo left short by anything at all -- a full disk,
+    /// an interrupted write, an older version of this code -- costs a re-read
+    /// rather than becoming the answer.
+    #[test]
+    fn a_memo_that_is_not_a_whole_digest_is_ignored() {
+        let cache = scratch("partial_memo");
+        let file = cache.root.join("subject");
+        std::fs::write(&file, b"one").expect("a file");
+
+        let honest = cache.identity(&file).expect("a digest");
+        assert!(looks_like_a_digest(&honest), "a digest is 64 hex characters: {honest}");
+
+        // Find the memo this subject writes, and damage it the way a reader
+        // catching the old `fs::write` mid-flight would have seen it.
+        let ids = cache.root.join("ids");
+        let memo = std::fs::read_dir(&ids)
+            .expect("the memo directory")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_file())
+            .expect("a memo was written");
+
+        for damage in ["", &honest[..40]] {
+            // Strictly newer than the subject, or the mtime rule below rejects
+            // it before the contents are ever looked at -- which would leave
+            // this passing without testing anything.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::fs::write(&memo, damage).expect("a short memo");
+            assert_eq!(
+                cache.identity(&file).as_deref(),
+                Some(honest.as_str()),
+                "a memo of {} character(s) must be recomputed, not believed",
+                damage.len()
+            );
+        }
     }
 
     /// A memo written before its subject is not believed.
