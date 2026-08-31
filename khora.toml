@@ -63,6 +63,37 @@ env = ["ledger_service", "link_shortener", "risk_analyzer"]
 fs = ["link_shortener", "risk_analyzer"]
 extern = []
 
+# The two lints that are off by default, on for this repository.
+#
+# `khora_lint::default_level` warns for everything except these, and each has a
+# reason that is about the language's users rather than about this checkout.
+# Neither reason survives contact with the project's own standard.
+#
+# **`undocumented-export` is a `deny` because the gate had a hole exactly the
+# shape of it.** `khora doc` regenerates the reference from `///` comments, and
+# `scripts/baseline.sh` fails when a page is stale -- so a documented export
+# cannot drift. Nothing checked that an export was documented at *all*: a new
+# `pub fn` with no comment above it generated a page entry with nothing under
+# it, passed every step, and shipped. `deny` rather than `warn` because a warn
+# does not fail `khora check`, and a rule the gate does not enforce is a
+# preference rather than a standard.
+#
+# It costs nothing today. `std`, four examples, two packages and four
+# benchmarks were all clean when this was switched on, which is why it could be
+# switched on at a stroke rather than as a project.
+#
+# **`useless-allow` stays a `warn`**, and the difference is deliberate. Its own
+# doc comment argues it should be off while lints are still being added,
+# because it fires on the lines somebody is already editing to satisfy a new
+# one. That argument is about churn, and a warning does not fail the build --
+# so what this buys is the yellow underline in the editor on a suppression that
+# has outlived its reason, without the interruption of an error. A stale
+# `allow` hides the next finding on that line, which is the thing worth being
+# told about.
+[lints]
+undocumented-export = "deny"
+useless-allow = "warn"
+
 # What somebody runs before pushing. Roadmap 14.18.
 #
 # Run with `khora task ci`. Declared at the root, so it runs once here rather

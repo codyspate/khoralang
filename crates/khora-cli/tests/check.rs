@@ -120,13 +120,17 @@ fn only_this_targets_files_are_read() {
             .to_string();
         std::fs::write(
             dir.join(name),
-            format!("module t::which;\npub fn which() -> Int {{ 1 }} // {target}\n"),
+            format!(
+                "module t::which;\n/// Which target this file is for.\n\
+                 pub fn which() -> Int {{ 1 }} // {target}\n"
+            ),
         )
         .expect("writing a fixture");
     }
     std::fs::write(
         dir.join("main.kh"),
-        "module t::main;\nimport t::which::{which};\npub fn main() -> Int { which() }\n",
+        "module t::main;\nimport t::which::{which};\n/// The entry point.\n\
+         pub fn main() -> Int { which() }\n",
     )
     .expect("writing a fixture");
 
@@ -155,7 +159,8 @@ fn a_file_named_outright_is_read_anyway() {
     // A name that cannot be this host's, whichever host that is.
     let other = if cfg!(windows) { "linux" } else { "windows" };
     let path = dir.join(format!("only_{other}.kh"));
-    std::fs::write(&path, "module t;\npub fn f() -> Int { 1 }\n").expect("a fixture");
+    std::fs::write(&path, "module t;\n/// Something to read.\npub fn f() -> Int { 1 }\n")
+        .expect("a fixture");
 
     let out = Command::new(env!("CARGO_BIN_EXE_khora"))
         .arg("check")
@@ -299,7 +304,7 @@ edition = \"2026\"
 ",
     )
     .expect("a manifest");
-    std::fs::write(dir.join("main.kh"), "module app::main;\npub fn main() -> Int { 0 }\n")
+    std::fs::write(dir.join("main.kh"), "module app::main;\n/// The entry point.\npub fn main() -> Int { 0 }\n")
         .expect("a fixture");
 
     let out = Command::new(env!("CARGO_BIN_EXE_khora"))
