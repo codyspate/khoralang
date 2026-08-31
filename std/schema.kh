@@ -1,0 +1,571 @@
+module std::schema;
+
+import std::core::{Eq, List, Option, Pair, Redacted, Result, Show, Validated};
+import std::decimal::{Decimal};
+
+//! One description of a value's shape, used to decode untrusted input.
+//!
+//! **A schema describes a value. It does not know where the bytes came from.**
+//! That separation is the whole of the library. `std::config` reads settings
+//! well and none of it is reusable, because its `string(name)` is not "this
+//! field is text" -- it is *go to the environment, fetch this variable, and
+//! give me the text or a reason*. The shape and the reading are one function,
+//! so a JSON body, a CLI argument and a database row each need their own
+//! vocabulary or go without.
+//!
+//! Here a `Schema<A>` describes an `A` and a [`Raw`] is whatever a source
+//! produced, and `decode` is one function over the pair.
+//!
+//! # Both halves, in one record
+//!
+//! A schema carries a `read` closure *and* a [`Shape`] beside it, and both are
+//! load-bearing. The closure is what makes `schema.decode(value)` an ordinary
+//! call and what lets schemas be combined. The shape is untyped -- no type
+//! parameter -- which is what lets a record's fields sit in a `List` and be
+//! walked, so a deployment can ask which keys a configuration needs without
+//! starting the program.
+//!
+//! A record of two closures would have lost the second; a bare tree would have
+//! lost the first. `docs/design/schema.md` has the argument in full.
+//!
+//! # Every problem, not the first
+//!
+//! Decoding answers a `Validated`, so a record with three bad fields reports
+//! three. That is the property `std::config` already has and the one worth
+//! keeping: a person fixing a deployment wants the list, not one line of it at
+//! a time. `Validated::to_result` is one call for a caller who wants to stop.
+
+// ---------------------------------------------------------------------------
+// What arrived
+// ---------------------------------------------------------------------------
+
+/// A value as a source handed it over, before anything has been asked of it.
+///
+/// A record's fields are `Pair`s rather than a type of this module's own.
+/// **A record type is resolved by the set of its field names**, so a
+/// `{ key: String, value: Raw }` declared here *is* `std::core::Pair` as far
+/// as trait resolution is concerned -- and declaring the twin broke `Show` for
+/// every program that used a `Map`, at link time, with a message naming
+/// neither type. Roadmap #143.
+///
+/// **A number is its text, and that is not an oversight.** `std::json`'s
+/// `Number` holds a `Float`, which means `9007199254740993` comes back as
+/// `9007199254740992` and `10.10` is never exactly recoverable -- so a schema
+/// that decoded a `Decimal` through one would rebuild, inside the library
+/// meant to prevent that class of thing, the exact bug it exists to prevent.
+/// Keeping the token lets [`whole`] and [`exact`] parse it the way
+/// `std::config` does, which is why `std::config` is exact. Roadmap #142.
+derive(Show)
+pub type Raw =
+  | Absent
+  | Text_(text: String)
+  | Num(text: String)
+  | Truth(value: Bool)
+  | Sequence(items: List<Raw>)
+  | Record(fields: List<Pair<String, Raw>>);
+
+impl Raw {
+  /// The field of a record, or [`Raw::Absent`].
+  ///
+  /// Absent rather than an `Option`, so that a missing field and a field
+  /// holding nothing are the same thing to everything downstream and only
+  /// [`optional`] has to know the difference.
+  pub fn field(self, name: String) -> Raw {
+    match self {
+      Raw::Record(fields) =>
+        match List::find(fields, fn entry => entry.key == name) {
+          Option::Some(entry) => entry.value,
+          Option::None => Raw::Absent,
+        },
+      _ => Raw::Absent,
+    }
+  }
+
+  /// What to call this in a message: `text`, `a number`, and so on.
+  pub fn describe(self) -> String {
+    match self {
+      Raw::Absent => "nothing",
+      Raw::Text_(_t) => "text",
+      Raw::Num(_t) => "a number",
+      Raw::Truth(_b) => "true or false",
+      Raw::Sequence(_i) => "a list",
+      Raw::Record(_f) => "a record",
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Where it went wrong
+// ---------------------------------------------------------------------------
+
+/// One step into a value, so an error can say `listen.port` or `items[3].id`.
+derive(Show, Eq)
+pub type Segment = | Field(name: String) | Index(at: Int);
+
+/// What was wrong at one place.
+///
+/// **`found` is a `Redacted<String>`**, always, rather than only inside a
+/// secret. A decode error quotes what it saw, which is most of its value, and
+/// that is the easiest imaginable way to put a password in a log. Making the
+/// wrapper unconditional means [`describe`] decides once whether to expose it
+/// and no future variant can forget.
+derive(Show)
+pub type Problem =
+  | Missing
+  | Wrong(wanted: String, found: Redacted<String>)
+  | Refused(must: String);
+
+/// A problem, and where it was.
+derive(Show)
+pub type Rejection = { path: List<Segment>, secret: Bool, problem: Problem };
+
+impl Segment {
+  /// The step as it appears in a path: `.name` or `[3]`.
+  pub fn write(self) -> String {
+    match self {
+      Segment::Field(name) => "." + name,
+      Segment::Index(at) => "[" + Int::to_string(at) + "]",
+    }
+  }
+}
+
+impl Rejection {
+  /// Where this was, as a reader would write it: `listen.port`.
+  ///
+  /// The leading dot is dropped, so a top-level field reads `port` rather than
+  /// `.port`, and a failure at the root reads `the value` rather than nothing.
+  ///
+  /// **The path is held innermost-first and turned round here.** Appending to
+  /// the end of a `List` walks it, and a path is extended once per field at
+  /// every depth; pushing is one cell and this runs only when something has
+  /// gone wrong.
+  pub fn where_(self) -> String {
+    let outward = List::reverse(self.path);
+    let written = List::fold(outward, "", fn (acc, step) => acc + Segment::write(step));
+    if written == "" {
+      "the value"
+    } else if String::starts_with(written, ".") {
+      // Only a *dot*, and only the leading one. Dropping the first byte
+      // whatever it was ate the bracket off `[1]`, which a test caught and a
+      // reader would have read as a typo.
+      String::slice(written, 1, String::byte_length(written))
+    } else {
+      written
+    }
+  }
+
+  /// One line a person can act on.
+  ///
+  /// **What was found is quoted, unless this is inside a secret.** A message
+  /// naming the bad value is what makes a decode error worth reading, and a
+  /// message naming a password is a leak. The flag is set by [`secret`] and
+  /// nothing else looks at it.
+  pub fn describe(self) -> String {
+    let at = Rejection::where_(self);
+    match self.problem {
+      Problem::Missing => at + " is not set",
+      Problem::Refused(must) => at + " must be " + must,
+      Problem::Wrong(wanted, found) =>
+        if self.secret {
+          at + " should be " + wanted
+        } else {
+          at + " should be " + wanted + ", and is `" + Redacted::expose(found) + "`"
+        },
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// What a schema looks like
+// ---------------------------------------------------------------------------
+
+/// The untyped half of a schema: what it describes, without saying as what.
+///
+/// No type parameter, which is the point. A record's fields have different
+/// types and this is what lets them sit in one `List` and be walked -- to list
+/// the keys a configuration needs, to print a request body in generated
+/// documentation, to render a JSON Schema. A closure answers none of those.
+derive(Show)
+pub type Shape =
+  | AnyText
+  | Whole
+  | Exact
+  | Truth
+  | Many(of: Shape)
+  | Struct_(fields: List<Named>)
+  | Maybe(inner: Shape)
+  | Refined(inner: Shape, must: String)
+  | Secret(inner: Shape);
+
+/// One named field of a [`Shape::Struct_`].
+derive(Show)
+pub type Named = { name: String, shape: Shape };
+
+/// A description of an `A`, and how to read one.
+///
+/// Built with the combinators below rather than by hand: the record is public
+/// so that a package may add a primitive of its own, and everything `std`
+/// offers goes through [`text`], [`whole`] and their neighbours.
+pub type Schema<A> = {
+  shape: Shape,
+  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+};
+
+impl<A> Schema<A> {
+  /// Reads a value, reporting every problem rather than the first.
+  ///
+  /// The method a caller wants: `Settings::schema().decode(input)`.
+  pub fn decode(self, from: Raw) -> Validated<A, Rejection> {
+    (self.read)(List::Nil, from)
+  }
+
+  /// The same, stopping at the first problem.
+  ///
+  /// For one field, or for a caller with nothing to do with a list.
+  pub fn decode_or_stop(self, from: Raw) -> Result<A, List<Rejection>> {
+    Validated::to_result(Schema::decode(self, from))
+  }
+}
+
+impl Shape {
+  /// The keys a record shape needs, in the order they were declared.
+  ///
+  /// **The question a deployment asks and a program should not have to be
+  /// started to answer.** Empty for anything that is not a record.
+  pub fn keys(self) -> List<String> {
+    match self {
+      Shape::Struct_(fields) => List::map(fields, fn named => named.name),
+      Shape::Maybe(inner) => Shape::keys(inner),
+      Shape::Refined(inner, _must) => Shape::keys(inner),
+      Shape::Secret(inner) => Shape::keys(inner),
+      _ => List::Nil,
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The primitives
+// ---------------------------------------------------------------------------
+
+/// The one place a `Wrong` is built, so the redaction cannot be forgotten.
+fn wrong<A>(path: List<Segment>, wanted: String, saw: Raw) -> Validated<A, Rejection> {
+  match saw {
+    Raw::Absent =>
+      Validated::error({ path: path, secret: false, problem: Problem::Missing }),
+    _ => {
+      let found = match saw {
+        Raw::Text_(text) => text,
+        Raw::Num(text) => text,
+        Raw::Truth(value) => Show::show(value),
+        other => Raw::describe(other),
+      };
+      Validated::error({
+          path: path,
+          secret: false,
+          problem: Problem::Wrong(wanted, Redacted::of(found)),
+        })
+    },
+  }
+}
+
+/// Text, as it arrived.
+pub fn text() -> Schema<String> {
+  {
+    shape: Shape::AnyText,
+    read: fn (path, value) =>
+    match value {
+      Raw::Text_(t) => Validated::of(t),
+      // A number or a boolean is text a source has already labelled, and
+      // refusing it would make every environment variable a special case.
+      Raw::Num(t) => Validated::of(t),
+      other => wrong(path, "text", other),
+    },
+  }
+}
+
+/// A whole number, parsed from the token rather than from a float.
+pub fn whole() -> Schema<Int> {
+  {
+    shape: Shape::Whole,
+    read: fn (path, value) =>
+    match value {
+      Raw::Num(t) =>
+        match Int::of_string(t) {
+          Option::Some(n) => Validated::of(n),
+          Option::None => wrong(path, "a whole number", value),
+        },
+      Raw::Text_(t) =>
+        match Int::of_string(t) {
+          Option::Some(n) => Validated::of(n),
+          Option::None => wrong(path, "a whole number", value),
+        },
+      other => wrong(path, "a whole number", other),
+    },
+  }
+}
+
+/// An exact decimal, parsed from the token.
+///
+/// The reason [`Raw::Num`] keeps its text: this is the one a price goes
+/// through, and a `Float` on the way would make it the wrong price.
+pub fn exact() -> Schema<Decimal> {
+  {
+    shape: Shape::Exact,
+    read: fn (path, value) =>
+    match value {
+      Raw::Num(t) =>
+        match Decimal::of_string(t) {
+          Option::Some(d) => Validated::of(d),
+          Option::None => wrong(path, "an exact decimal", value),
+        },
+      Raw::Text_(t) =>
+        match Decimal::of_string(t) {
+          Option::Some(d) => Validated::of(d),
+          Option::None => wrong(path, "an exact decimal", value),
+        },
+      other => wrong(path, "an exact decimal", other),
+    },
+  }
+}
+
+/// True or false, spelled the way a configuration file spells it.
+pub fn truth() -> Schema<Bool> {
+  {
+    shape: Shape::Truth,
+    read: fn (path, value) =>
+    match value {
+      Raw::Truth(b) => Validated::of(b),
+      Raw::Text_(t) =>
+        if t == "true" || t == "yes" || t == "1" {
+          Validated::of(true)
+        } else if t == "false" || t == "no" || t == "0" {
+          Validated::of(false)
+        } else {
+          wrong(path, "true or false", value)
+        },
+      other => wrong(path, "true or false", other),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The combinators
+// ---------------------------------------------------------------------------
+
+/// A value that may not be there.
+///
+/// Absent is `None`; present and the wrong shape is still an error, which is
+/// the distinction that matters: a misspelled setting should not read as one
+/// nobody set.
+pub fn optional<A>(inner: Schema<A>) -> Schema<Option<A>> {
+  {
+    shape: Shape::Maybe(inner.shape),
+    read: fn (path, value) =>
+    match value {
+      Raw::Absent => Validated::of(Option::None),
+      present => Validated::map((inner.read)(path, present), fn a => Option::Some(a)),
+    },
+  }
+}
+
+/// A list of them, with each element's index in its own path.
+pub fn many<A>(inner: Schema<A>) -> Schema<List<A>> {
+  {
+    shape: Shape::Many(inner.shape),
+    read: fn (path, value) =>
+    match value {
+      Raw::Sequence(items) => {
+        let mut out = Validated::of(List::Nil);
+        let mut at = 0;
+        let mut rest = items;
+        let mut walking = true;
+        while walking {
+          match rest {
+            List::Nil => { walking = false; },
+            List::Cons(head, tail) => {
+              let here = List::push(path, Segment::Index(at));
+              let one = (inner.read)(here, head);
+              out = Validated::map2(out, one, fn (so_far, next) => List::Cons(next, so_far));
+              at = at + 1;
+              rest = tail;
+            },
+          }
+        };
+        // Built back to front, for the reason `List::map` is: an accumulator
+        // and a reverse rather than a frame per element.
+        Validated::map(out, fn built => List::reverse(built))
+      },
+      other => wrong(path, "a list", other),
+    },
+  }
+}
+
+/// A condition on a value that is otherwise the right shape.
+///
+/// `must` is the sentence the error uses, so write it as one: `"between 1 and
+/// 65535"` reads as *port must be between 1 and 65535*.
+pub fn refine<A>(inner: Schema<A>, must: String, holds: (A) -> Bool) -> Schema<A> {
+  {
+    shape: Shape::Refined(inner.shape, must),
+    read: fn (path, value) =>
+    Validated::and_then((inner.read)(path, value), fn a =>
+      if holds(a) {
+        Validated::of(a)
+      } else {
+        Validated::error({ path: path, secret: false, problem: Problem::Refused(must) })
+      }),
+  }
+}
+
+/// A value nothing may print.
+///
+/// **A combinator over any inner schema, not a leaf.** `secret(whole())` and
+/// `secret(text())` both work, and redaction composes with everything else
+/// instead of sitting beside it. No bound on `A`: a `Schema<A>` is a value, and
+/// holding one already is the evidence that an `A` can be decoded.
+///
+/// A failure inside one is marked, and [`Rejection::describe`] then says what
+/// was wanted without quoting what it saw.
+pub fn secret<A>(inner: Schema<A>) -> Schema<Redacted<A>> {
+  {
+    shape: Shape::Secret(inner.shape),
+    read: fn (path, value) =>
+    match Validated::map((inner.read)(path, value), fn a => Redacted::of(a)) {
+      Validated::Valid(wrapped) => Validated::Valid(wrapped),
+      Validated::Invalid(errors) =>
+        Validated::Invalid(List::map(errors, fn e => { ..e, secret: true })),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Records
+// ---------------------------------------------------------------------------
+
+/// One named field, for the `struct` family below.
+fn at<A>(name: String, inner: Schema<A>, path: List<Segment>, value: Raw)
+  -> Validated<A, Rejection>
+{
+  (inner.read)(List::push(path, Segment::Field(name)), Raw::field(value, name))
+}
+
+/// A record of two fields.
+///
+/// **The assembler is the price of having no mapped types.** The spelling a
+/// reader reaches for --
+/// `struct({ port: whole(), host: text() })` -- cannot be typed: its argument
+/// is a record of *schemas* and the result would have to be a schema of the
+/// record of what they decode, which needs a type-level map Khora does not
+/// have. Something must say how the pieces become the record, and here that is
+/// a function.
+///
+/// `derive(Schema)` writes this for you and is what a reader should meet
+/// first; these are for a renamed key, a refinement, or a shape derivation
+/// cannot know. `docs/design/schema.md`.
+pub fn struct2<A, B, C>(
+  a_name: String,
+  a: Schema<A>,
+  b_name: String,
+  b: Schema<B>,
+  combine: (A, B) -> C,
+) -> Schema<C> {
+  {
+    shape: Shape::Struct_([{ name: a_name, shape: a.shape }, { name: b_name, shape: b.shape }]),
+    read: fn (path, value) =>
+    Validated::map2(at(a_name, a, path, value), at(b_name, b, path, value), combine),
+  }
+}
+
+/// A record of three fields. See [`struct2`].
+pub fn struct3<A, B, C, D>(
+  a_name: String,
+  a: Schema<A>,
+  b_name: String,
+  b: Schema<B>,
+  c_name: String,
+  c: Schema<C>,
+  combine: (A, B, C) -> D,
+) -> Schema<D> {
+  {
+    shape: Shape::Struct_([
+        { name: a_name, shape: a.shape },
+        { name: b_name, shape: b.shape },
+        { name: c_name, shape: c.shape },
+      ]),
+    read: fn (path, value) =>
+    Validated::map3(
+      at(a_name, a, path, value),
+      at(b_name, b, path, value),
+      at(c_name, c, path, value),
+      combine,
+    ),
+  }
+}
+
+/// A record of four fields. See [`struct2`].
+pub fn struct4<A, B, C, D, E>(
+  a_name: String,
+  a: Schema<A>,
+  b_name: String,
+  b: Schema<B>,
+  c_name: String,
+  c: Schema<C>,
+  d_name: String,
+  d: Schema<D>,
+  combine: (A, B, C, D) -> E,
+) -> Schema<E> {
+  {
+    shape: Shape::Struct_([
+        { name: a_name, shape: a.shape },
+        { name: b_name, shape: b.shape },
+        { name: c_name, shape: c.shape },
+        { name: d_name, shape: d.shape },
+      ]),
+    read: fn (path, value) =>
+    Validated::map4(
+      at(a_name, a, path, value),
+      at(b_name, b, path, value),
+      at(c_name, c, path, value),
+      at(d_name, d, path, value),
+      combine,
+    ),
+  }
+}
+
+/// A record of five fields. See [`struct2`].
+///
+/// The family stops here because `Validated` does: beyond five, nest a record
+/// rather than growing the arity, which is what the shape of the data is
+/// telling you anyway.
+pub fn struct5<A, B, C, D, E, F>(
+  a_name: String,
+  a: Schema<A>,
+  b_name: String,
+  b: Schema<B>,
+  c_name: String,
+  c: Schema<C>,
+  d_name: String,
+  d: Schema<D>,
+  e_name: String,
+  e: Schema<E>,
+  combine: (A, B, C, D, E) -> F,
+) -> Schema<F> {
+  {
+    shape: Shape::Struct_([
+        { name: a_name, shape: a.shape },
+        { name: b_name, shape: b.shape },
+        { name: c_name, shape: c.shape },
+        { name: d_name, shape: d.shape },
+        { name: e_name, shape: e.shape },
+      ]),
+    read: fn (path, value) =>
+    Validated::map5(
+      at(a_name, a, path, value),
+      at(b_name, b, path, value),
+      at(c_name, c, path, value),
+      at(d_name, d, path, value),
+      at(e_name, e, path, value),
+      combine,
+    ),
+  }
+}

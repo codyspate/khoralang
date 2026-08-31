@@ -18,10 +18,28 @@ import std::core::{Array, List, Map, Option, Pair, Result, Show};
 
 /// A JSON value.
 ///
-/// `Number` is a `Float` because that is what JSON has — the specification
-/// says "number" and means a double, and a separate integer case would be a
-/// distinction the format cannot round-trip. A caller who wants an `Int` asks
-/// for one with `Float::to_int`.
+/// **`Number` is a `Float`, and that loses information the format does not.**
+/// RFC 8259 §6 admits a number of arbitrary precision; what it does is *warn*
+/// that implementations commonly use IEEE 754 doubles and that anything
+/// outside the range of an exact integer double may not survive a round trip
+/// between two of them. This parser is one of those implementations, so:
+///
+///     parse("{\"big\": 9007199254740993}")   ->   9007199254740992
+///
+/// Off by one, quietly, on an ordinary sixty-four-bit identifier. A decimal is
+/// worse in kind and less visible: `10.10` becomes the nearest double and is
+/// never exactly recoverable, which matters in the language that gives
+/// `Decimal` a 128-bit significand for money and whose configuration reader
+/// refuses exponent notation on the grounds that a number arriving as `1e-3`
+/// has been through a float somewhere.
+///
+/// **Do not read money or an identifier out of JSON through this yet.** The
+/// fix is for `Number` to carry the token's text and for each accessor to
+/// parse from it — `Int::of_string`, `Decimal::of_string` — which is what
+/// `std::config` does and why `std::config` is exact. Roadmap #142.
+///
+/// A caller who wants an `Int` asks for one with `Float::to_int`, and inherits
+/// the limit above.
 pub type Json =
   | Null
   | Bool(value: Bool)
