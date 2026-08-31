@@ -107,13 +107,18 @@ A channel is not shared mutable state. It is a bounded queue whose values are co
 ```khora
 let jobs = Channel::bounded(64);
 
-Channel::send(jobs, job);
+Channel::send(jobs, job)!;
 
-match Channel::receive(jobs) {
+match Channel::receive(jobs)! {
   Option::Some(next) => process(next),
   Option::None => (),
 }
 ```
+
+Both carry a `!`. Waiting for room and waiting for a value are the two places a
+fiber can sit indefinitely, so both are cancellation points -- `Fiber::cancel`
+reaches a fiber parked on a channel, and a cancellation leaves on a `raises`
+row or not at all. `poll` never waits and needs no mark.
 
 The API is:
 
@@ -124,8 +129,8 @@ impl<A: Share> Channel<A> {
   pub fn bounded(capacity: Int) -> Channel<A>;
   pub fn dropping(capacity: Int) -> Channel<A>;
   pub fn sliding(capacity: Int) -> Channel<A>;
-  pub fn send(self, value: A) -> Bool;
-  pub fn receive(self) -> Option<A>;
+  pub fn send<'er>(self, value: A) -> Bool raises 'er;
+  pub fn receive<'er>(self) -> Option<A> raises 'er;
   pub fn poll(self) -> Option<A>;
   pub fn close(self) -> ();
   pub fn depth(self) -> Int;

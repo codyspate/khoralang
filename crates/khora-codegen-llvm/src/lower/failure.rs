@@ -319,6 +319,37 @@ impl<'ctx> Lower<'_, 'ctx> {
         self.at(carry_on);
     }
 
+    /// A cancellation point on the path where a blocking call gave up.
+    ///
+    /// `Channel::send` and `Channel::receive` are the only two places in
+    /// `std::core` where a fiber can sit indefinitely, so they carry a row and
+    /// are cancellation points. But only when they come back **empty-handed**:
+    /// a receive that got a value hands it over and lets the caller's next `!`
+    /// see the flag, because unwinding while holding it would drop it on the
+    /// floor -- which is the failure this whole change exists to prevent, not
+    /// a new place to commit it.
+    ///
+    /// The runtime keeps the other half of that bargain: it checks the
+    /// cancellation flag only once it has established there is nothing to
+    /// take, so a send racing the cancellation still wins.
+    pub(super) fn cancelled_empty_handed(&mut self, moved: IntValue<'ctx>, range: TextRange) {
+        if !self.raises || self.aborted {
+            return;
+        }
+        let empty = self.block("moved.not");
+        let carry_on = self.block("moved.yes");
+        self.be
+            .builder
+            .build_conditional_branch(moved, carry_on, empty)
+            .expect("branching on whether the channel moved");
+
+        self.at(empty);
+        self.check_cancellation(range);
+        self.br(carry_on);
+
+        self.at(carry_on);
+    }
+
     /// Sends an error on from the block it was found in.
     ///
     /// Out of the function, releasing the whole frame — or, inside a `catch`,

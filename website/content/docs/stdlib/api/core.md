@@ -4069,7 +4069,7 @@ for `dropping` where somebody would.
 #### send
 
 ```khora
-pub fn send(self, value: A) -> Bool
+pub fn send<'er>(self, value: A) -> Bool raises 'er
 ```
 
 Puts a value in, waiting while the channel is full.
@@ -4078,15 +4078,28 @@ False when the channel is closed, in which case the value is released
 rather than kept: a send with nowhere to put its value must not be the
 quietest possible leak.
 
+**A cancellation point, which is what the row is for.** Waiting for room
+is one of the two places in this library where a fiber can sit
+indefinitely, so `Fiber::cancel` has to be able to reach it -- and a
+cancellation travels out on a `raises` row or not at all. The row is a
+variable because nothing here raises an error of its own; it carries the
+caller's. A send that had to give up releases the value, the same as a
+closed one.
+
 #### receive
 
 ```khora
-pub fn receive(self) -> Option<A>
+pub fn receive<'er>(self) -> Option<A> raises 'er
 ```
 
 Takes a value out, waiting while the channel is empty.
 
 `None` only when the channel is closed *and* drained.
+
+**A cancellation point**, for the reason `send` gives. A receive that is
+cancelled is always cancelled empty-handed: the runtime looks at the flag
+only once it has established the queue is empty, so a send arriving at
+the same moment still wins and the value is never dropped on the floor.
 
 #### poll
 

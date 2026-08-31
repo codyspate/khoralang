@@ -38,7 +38,7 @@
 
 use std::cell::Cell;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::counters::COUNTER_ORDER;
 
@@ -79,6 +79,18 @@ pub(crate) struct Fiber {
     spawned: bool,
     /// Where this fiber is in the sleep/wake protocol. [`crate::wait`].
     wait: crate::wait::Wait,
+    /// What this fiber is parked on, while it is parked off the scheduler.
+    ///
+    /// On a worker, `cancel_fiber` wakes through the pool. Off one -- which is
+    /// every fiber today, since a fiber is an operating-system thread -- a
+    /// parked fiber is a thread inside `Condvar::wait`, and storing a word
+    /// does not wake a thread. So a blocking primitive leaves the variable it
+    /// is about to wait on here, and [`Fiber::cancel`] notifies it.
+    ///
+    /// An `Arc<Condvar>` rather than a borrow of the primitive: a `Channel` is
+    /// a raw `Box` with no handle a fiber could hold, so the variable has to
+    /// outlive it independently.
+    parked_on: Mutex<Option<Arc<Condvar>>>,
 }
 
 impl Fiber {
@@ -93,6 +105,7 @@ impl Fiber {
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: false,
             wait: crate::wait::Wait::default(),
+            parked_on: Mutex::new(None),
         }
     }
 
@@ -106,6 +119,7 @@ impl Fiber {
             resuming: std::sync::atomic::AtomicBool::new(false),
             spawned: true,
             wait: crate::wait::Wait::default(),
+            parked_on: Mutex::new(None),
         })
     }
 
@@ -127,8 +141,31 @@ impl Fiber {
     }
 
     /// Asks this fiber to stop. Idempotent: asking twice is asking once.
+    ///
+    /// **Setting the flag is not enough on its own.** A fiber parked in
+    /// `Channel::receive` observes the flag at its next cancellation point and
+    /// will not reach one while it is parked, so cancelling it used to hang
+    /// for ever -- and `reference/concurrency.md` says the opposite, that a
+    /// blocked operation is made runnable so the fiber can unwind. Waking
+    /// whatever it registered is what makes that true.
     pub(crate) fn cancel(&self) {
         self.cancelled.store(1, COUNTER_ORDER);
+        let parked = self.parked_on.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(moved) = parked.as_ref() {
+            moved.notify_all();
+        }
+    }
+
+    /// Registers what this fiber is about to wait on, so `cancel` can reach it.
+    pub(crate) fn park_on(&self, moved: &Arc<Condvar>) {
+        let mut parked = self.parked_on.lock().unwrap_or_else(|e| e.into_inner());
+        *parked = Some(Arc::clone(moved));
+    }
+
+    /// Forgets it again. Called on every path out of the wait, woken or not.
+    pub(crate) fn unpark_from(&self) {
+        let mut parked = self.parked_on.lock().unwrap_or_else(|e| e.into_inner());
+        *parked = None;
     }
 
     pub(crate) fn uncancel(&self) {

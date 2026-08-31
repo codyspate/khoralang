@@ -162,6 +162,8 @@ Cancellation is observed at cancellation points rather than between arbitrary so
 
 Both only exist in a function that can raise, because a `raises` row is the channel a cancellation travels on.
 
+A `!` observes a pending cancellation *before* the call it marks, so a computation already asked to stop does not do work it is about to throw away, and the arguments are not evaluated. `Channel::send` and `Channel::receive` are the exception, and carry a row for exactly this reason — see below.
+
 The back-edge is why an ordinary background worker can be stopped:
 
 ```khora
@@ -175,7 +177,11 @@ fn reaper() -> () with { clock: Clock } raises Stop {
 
 There is no `!` in that body. Without the back-edge it could not be cancelled, and a nursery that had to unwind past it would wait for ever.
 
-A blocked or suspended operation is made runnable so that the fiber can unwind its structured scopes. A *straight-line* blocking call is not itself a cancellation point: the fiber wakes, finishes the call, and stops at the next `!` or back-edge after it.
+A blocked or suspended operation is made runnable so that the fiber can unwind its structured scopes. For most calls that is all it is: a *straight-line* blocking call is not itself a cancellation point, so the fiber wakes, finishes the call, and stops at the next `!` or back-edge after it.
+
+`Channel::send` and `Channel::receive` are the exception, because they are the only two operations in `std::core` with no bound on how long they may wait. A worker parked on an empty queue has no next back-edge to reach, so leaving it to find one meant it never stopped at all. Both therefore carry a `raises 'er` row and are written `Channel::receive(jobs)!`; the row is what gives the cancellation something to travel out on. `poll` never waits and is not a cancellation point.
+
+The check on these two comes *after* the call rather than before it, and only when the call comes back **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is delivered rather than discarded — a cancelled receive is never holding a value nobody will see again. A send that gives up releases its value, the same as a send to a closed channel.
 
 ### A fiber with no error row runs to its end
 

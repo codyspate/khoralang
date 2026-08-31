@@ -278,9 +278,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .basic()
                     .expect("a send answers");
                 // The value was handed over -- the queue owns it now, and
-                // releases it if the channel was closed. The handle was only
+                // releases it if the channel was closed, or if this fiber was
+                // cancelled before it could find room. The handle was only
                 // borrowed.
                 self.release_unless_lent(*channel, handle, &channel_ty);
+                self.cancelled_empty_handed(answered.into_int_value(), range);
                 Some(answered)
             }
             // `receive` waits and `poll` does not; everything else about the
@@ -322,6 +324,11 @@ impl<'ctx> Lower<'_, 'ctx> {
                     .expect("reading the received word")
                     .into_int_value();
                 self.release_unless_lent(*channel, handle, &channel_ty);
+                // `poll` never waits, so it can never be the thing a
+                // cancellation is stuck behind and carries no row.
+                if name != "poll" {
+                    self.cancelled_empty_handed(arrived, range);
+                }
                 self.option_of_word(arrived, word, &held)
             }
             ("close", [channel]) => {

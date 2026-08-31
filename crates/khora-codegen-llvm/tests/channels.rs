@@ -17,7 +17,8 @@
 mod harness;
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use khora_db::{KhoraDatabase, SourceFile, SourceRoot};
 
@@ -47,6 +48,157 @@ fn run(name: &str, source: &str) -> Ran {
         stdout: String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n"),
         code: ran.status.code(),
     }
+}
+
+/// Builds and runs, but gives up rather than waiting for ever.
+///
+/// For the cancellation tests, where the failure being guarded against *is* a
+/// hang: `output()` would take the whole suite down with it instead of failing
+/// one test.
+fn run_bounded(name: &str, source: &str) -> Ran {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    harness::ensure_runtime();
+    std::fs::create_dir_all(&dir).expect("a workspace");
+    let exe = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let _ = std::fs::remove_file(&exe);
+
+    let db = KhoraDatabase::new();
+    let file = SourceFile::new(&db, dir.join("main.kh"), source.to_string());
+    let root = SourceRoot::new(&db, vec![file]);
+
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        panic!("compiling `{name}` failed:\n  {}\n\n{source}", messages.join("\n  "));
+    }
+
+    let mut child = Command::new(&exe)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the program should start");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match child.try_wait().expect("waiting on the program") {
+            Some(_) => break,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("`{name}` hung: the cancellation never reached the parked fiber");
+            }
+        }
+    }
+    let ran = child.wait_with_output().expect("collecting the output");
+    Ran {
+        stdout: String::from_utf8_lossy(&ran.stdout).replace("\r\n", "\n"),
+        code: ran.status.code(),
+    }
+}
+
+/// The same prelude, with the two blocking operations spelled the way
+/// `std::core` spells them: carrying a row, because they are cancellation
+/// points. Kept separate so the tests above go on pinning the runtime
+/// behaviour on its own.
+const CANCELLABLE: &str = "module t;
+fn print(value: Int);
+extern fn khora_live_count() -> Int;
+extern fn khora_sleep(millis: Int) -> ();
+
+pub type Option<A> = | None | Some(A);
+pub trait Share {}
+
+pub type Oops = | Bad;
+
+pub type Channel<A>;
+impl<A> Share for Channel<A> {}
+impl<A: Share> Channel<A> {
+  fn bounded(capacity: Int) -> Channel<A>;
+  fn send<'er>(self, value: A) -> Bool raises 'er;
+  fn receive<'er>(self) -> Option<A> raises 'er;
+  fn close(self) -> ();
+  fn depth(self) -> Int;
+}
+
+pub type Fiber<A, 'r>;
+impl<A, 'r> Fiber<A, 'r> {
+  fn spawn(body: () -> A raises 'r) -> Fiber<A, 'r>;
+  fn wait(self) -> ();
+  fn cancel(self) -> ();
+}
+impl<A, 'r> Share for Fiber<A, 'r> {}
+";
+
+/// Cancelling a fiber parked on an empty channel wakes it, and it unwinds.
+///
+/// The receive is a cancellation point, so the match after it never runs: the
+/// fiber leaves through its row rather than coming back with `None` and going
+/// on to do work nobody wants any more. Before this, `cancel` set a flag that
+/// a parked thread was never going to read, `wait` never returned, and the
+/// program hung -- while `reference/concurrency.md` said a blocked operation
+/// is made runnable so the fiber can unwind.
+#[test]
+fn cancelling_a_parked_receive_unwinds_it() {
+    let ran = run_bounded(
+        "channel_cancel_receive",
+        &format!(
+            "{CANCELLABLE}
+fn worker(inbox: Channel<Int>) -> () raises Oops {{
+  match Channel::receive(inbox)! {{
+    Option::Some(_) => print(1),
+    Option::None => print(2),
+  }};
+  print(3);
+}}
+
+fn go() -> () {{
+  let inbox: Channel<Int> = Channel::bounded(1);
+  let hand = Fiber::spawn(fn () => worker(inbox)!);
+  khora_sleep(50);
+  Fiber::cancel(hand);
+  Fiber::wait(hand);
+  print(9);
+}}
+
+fn main() -> Int {{ go(); print(khora_live_count()); 0 }}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "9\n0\n", "the worker unwound and left nothing alive");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// The same for a sender waiting on a full channel.
+///
+/// The first value goes in, the second parks, and the cancellation gets it
+/// out. The value it was holding is released rather than leaked, which is
+/// what the live count at the end is for.
+#[test]
+fn cancelling_a_parked_send_unwinds_it() {
+    let ran = run_bounded(
+        "channel_cancel_send",
+        &format!(
+            "{CANCELLABLE}
+fn worker(pipe: Channel<Int>) -> () raises Oops {{
+  Channel::send(pipe, 1)!;
+  print(1);
+  Channel::send(pipe, 2)!;
+  print(2);
+}}
+
+fn main() -> Int {{
+  let pipe: Channel<Int> = Channel::bounded(1);
+  let hand = Fiber::spawn(fn () => worker(pipe)!);
+  khora_sleep(50);
+  Fiber::cancel(hand);
+  Fiber::wait(hand);
+  print(9);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "1\n9\n", "the second send never completed");
+    assert_eq!(ran.code, Some(0));
 }
 
 /// Everything a channel test needs and nothing it does not: `Option`, `Fiber`,

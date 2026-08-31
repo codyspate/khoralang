@@ -116,10 +116,10 @@ pub fn serve(settings: Settings, requests: Channel<Request>) -> () {
 fn answer_all(c: Connection, requests: Channel<Request>) -> () {
   let mut going = true;
   while going {
-    match Channel::receive(requests) {
+    match Channel::receive(requests)! {
       Option::None => going = false,
       Option::Some(request) => {
-        Channel::send(request.reply, answer(c, request.work));
+        Channel::send(request.reply, answer(c, request.work))!;
         // Closed by the server rather than the caller, so a caller that gave
         // up -- cancelled, or raised on the way to its receive -- still leaves
         // a channel that will be released rather than one somebody is expected
@@ -139,10 +139,10 @@ fn answer_all(c: Connection, requests: Channel<Request>) -> () {
 fn refuse(requests: Channel<Request>, why: DbError) -> () {
   let mut going = true;
   while going {
-    match Channel::receive(requests) {
+    match Channel::receive(requests)! {
       Option::None => going = false,
       Option::Some(request) => {
-        Channel::send(request.reply, apology(request.work, why));
+        Channel::send(request.reply, apology(request.work, why))!;
         Channel::close(request.reply);
       },
     }
@@ -190,11 +190,11 @@ pub fn over(requests: Channel<Request>) -> Db {
 /// the same fact to a caller, and `Disconnected` is what `std::db` calls it.
 fn exchange(requests: Channel<Request>, work: Work) -> Option<Reply> {
   let reply: Channel<Reply> = Channel::bounded(1);
-  if !Channel::send(requests, { work: work, reply: reply }) {
-    Option::None
-  } else {
-    Channel::receive(reply)
-  }
+  // Bound rather than negated in place: `!Channel::send(..)!` is a `not` and a
+  // `try` on one expression, and the two spellings do not deserve to be read
+  // together.
+  let accepted = Channel::send(requests, { work: work, reply: reply })!;
+  if accepted { Channel::receive(reply)! } else { Option::None }
 }
 
 fn gone() -> DbError {

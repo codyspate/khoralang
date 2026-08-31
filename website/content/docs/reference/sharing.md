@@ -122,19 +122,25 @@ Typical use:
 ```khora
 let jobs = Channel::bounded(64);
 
-if Channel::send(jobs, job) {
+if Channel::send(jobs, job)! {
   ()
 } else {
   handle_closed_queue(job)
 }
 
-match Channel::receive(jobs) {
+match Channel::receive(jobs)! {
   Option::Some(next) => process(next),
   Option::None => (),
 }
 ```
 
 A send to a full channel suspends until space becomes available. A receive from an empty open channel suspends until a value arrives. Suspension gives the scheduler worker back; it is not a busy wait or a blocked worker thread.
+
+Both take a `!`, because both are cancellation points. These are the only two operations in `std::core` where a fiber can wait indefinitely, so a fiber parked on one has to be reachable by `Fiber::cancel` -- and a cancellation travels out of a call on a `raises` row or not at all. The row is a variable: neither operation raises an error of its own, and it carries whatever the caller's does.
+
+A cancelled channel operation is always cancelled **empty-handed**. The runtime looks at the cancellation flag only once it has established there is nothing to take and no room to send, so a value arriving at the same moment as the cancellation is still delivered rather than dropped. A send that gives up releases its value, the same as a send to a closed channel.
+
+`poll` never waits, so it is not a cancellation point and carries no row. That is the distinction between the two: the ones that can block are marked.
 
 `send` returns `false` when the channel is closed. Closing wakes waiters. Receivers drain values already queued before `receive` begins returning `Option::None`.
 

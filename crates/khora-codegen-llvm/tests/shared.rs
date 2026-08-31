@@ -400,7 +400,11 @@ fn a_method_call_reaches_the_same_intrinsic_the_path_call_does() {
         "module main;
 import std::core::{Array, Channel, Region, Shared, print};
 
-pub fn main() {
+// A row on `main` only so the channel stanza below can carry the `!` that
+// `Channel::send` now wants. Nothing here raises.
+pub type Stop = | Never;
+
+pub fn main() -> () raises Stop {
   let cell = Shared::of(1);
   Shared::set(cell, 7);
   print(Int::to_string(Shared::get(cell)) + \" \" + Int::to_string(cell.get()));
@@ -416,7 +420,7 @@ pub fn main() {
   print(Int::to_string(Array::get(room, 1)) + \" \" + Int::to_string(room.get(1)));
 
   let line: Channel<Int> = Channel::bounded(2);
-  Channel::send(line, 4);
+  Channel::send(line, 4)!;
   print(Int::to_string(Channel::depth(line)) + \" \" + Int::to_string(line.depth()));
   Channel::close(line);
 }

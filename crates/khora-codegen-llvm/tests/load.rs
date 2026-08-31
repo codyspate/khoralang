@@ -40,7 +40,7 @@ fn std_source(name: &str) -> String {
 fn run(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Changed, Channel, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, bounded_nursery, join_all, print}};
+import std::core::{{Changed, Channel, Eq, Fiber, Fibers, List, Nursery, Option, Result, Share, Shared, Show, attempt, bounded_nursery, join_all, print}};
 
 extern fn khora_live_count() -> Int;
 
@@ -208,22 +208,22 @@ fn crowd<'e>(done: Shared<Int>) -> ()
 fn a_full_channel_stops_its_sender() {
     let out = run(
         "load_backpressure",
-        r#"fn produce(work: Channel<Int>) -> () {
+        r#"fn produce<'er>(work: Channel<Int>) -> () raises 'er {
   let mut i = 0;
   while i < 200 {
-    Channel::send(work, i);
+    Channel::send(work, i)!;
     i = i + 1
   };
   Channel::close(work);
 }
 
 /// Takes everything, slowly, watching how much was waiting each time.
-fn consume(work: Channel<Int>, deepest: Shared<Int>) -> Int {
+fn consume<'er>(work: Channel<Int>, deepest: Shared<Int>) -> Int raises 'er {
   let mut seen = 0;
   let mut ordered = true;
   let mut going = true;
   while going {
-    match Channel::receive(work) {
+    match Channel::receive(work)! {
       Option::None => going = false,
       Option::Some(value) => {
         if value != seen { ordered = false };
@@ -240,8 +240,12 @@ fn consume(work: Channel<Int>, deepest: Shared<Int>) -> Int {
         r#"  let work: Channel<Int> = Channel::bounded(4);
   let deepest = Shared::of(0);
   let crew = Fibers::open();
-  Fibers::adopt(crew, Fiber::spawn(fn () => produce(work)));
-  let seen = consume(work, deepest);
+  Fibers::adopt(crew, Fiber::spawn(fn () => produce(work)!));
+  // `main` carries no row, so the drain that now wants one is attempted.
+  let seen = match attempt(fn () => consume(work, deepest)!) {
+    Result::Ok(n) => n,
+    Result::Err(_) => 0 - 1,
+  };
   Fibers::wait(crew);
   print("received " + Int::to_string(seen));
   print("deepest " + (if Shared::get(deepest) <= 4 { "within" } else { "over" }));"#,
@@ -263,11 +267,11 @@ fn consume(work: Channel<Int>, deepest: Shared<Int>) -> Int {
 fn a_closed_channel_drains_before_it_ends() {
     let out = run(
         "load_drain",
-        r#"fn drain(work: Channel<Int>) -> Int {
+        r#"fn drain<'er>(work: Channel<Int>) -> Int raises 'er {
   let mut total = 0;
   let mut going = true;
   while going {
-    match Channel::receive(work) {
+    match Channel::receive(work)! {
       Option::None => going = false,
       Option::Some(value) => total = total + value,
     }
@@ -276,13 +280,17 @@ fn a_closed_channel_drains_before_it_ends() {
 }
 "#,
         r#"  let work: Channel<Int> = Channel::bounded(8);
-  Channel::send(work, 1);
-  Channel::send(work, 2);
-  Channel::send(work, 3);
-  Channel::close(work);
-  Channel::close(work);
-  print(Int::to_string(drain(work)));
-  print(if Channel::send(work, 4) { "accepted after close" } else { "refused after close" });"#,
+  // One `attempt` around the whole thing: `main` has no row, and every channel
+  // operation that can wait now wants one.
+  let _ = attempt(fn () => {
+    Channel::send(work, 1)!;
+    Channel::send(work, 2)!;
+    Channel::send(work, 3)!;
+    Channel::close(work);
+    Channel::close(work);
+    print(Int::to_string(drain(work)!));
+    print(if Channel::send(work, 4)! { "accepted after close" } else { "refused after close" });
+  });"#,
     );
     assert_eq!(out, "6\nrefused after close\n");
 }
@@ -302,10 +310,15 @@ fn a_closed_channel_drains_before_it_ends() {
 fn overload_becomes_latency_rather_than_loss() {
     let out = run(
         "load_overload",
-        r#"fn worker(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> () {
+        r#"// A row variable, because `Channel::receive` is a cancellation point and a
+// cancellation leaves on a row or not at all. This worker raises nothing of
+// its own; it carries whatever its caller does.
+fn worker<'er>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
+  raises 'er
+{
   let mut going = true;
   while going {
-    match Channel::receive(work) {
+    match Channel::receive(work)! {
       Option::None => going = false,
       Option::Some(value) => {
         entered(gauge);
@@ -317,10 +330,10 @@ fn overload_becomes_latency_rather_than_loss() {
   };
 }
 
-fn offer(work: Channel<Int>, deepest: Shared<Int>) -> () {
+fn offer<'er>(work: Channel<Int>, deepest: Shared<Int>) -> () raises 'er {
   let mut i = 1;
   while i <= 300 {
-    Channel::send(work, i);
+    Channel::send(work, i)!;
     let depth = Channel::depth(work);
     Shared::update(deepest, fn most => if depth > most { depth } else { most });
     i = i + 1
@@ -333,7 +346,7 @@ fn hire<'e>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 4 {
-    nursery.adopt(Fiber::spawn(fn () => worker(work, gauge, total)));
+    nursery.adopt(Fiber::spawn(fn () => worker(work, gauge, total)!));
     i = i + 1
   };
 }
@@ -344,7 +357,7 @@ fn hire<'e>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
   let deepest = Shared::of(0);
 
   let crew = Fibers::open();
-  Fibers::adopt(crew, Fiber::spawn(fn () => offer(work, deepest)));
+  Fibers::adopt(crew, Fiber::spawn(fn () => offer(work, deepest)!));
   bounded_nursery(4, fn () => hire(work, gauge, total));
   Fibers::wait(crew);
 
@@ -371,18 +384,18 @@ fn hire<'e>(work: Channel<Int>, gauge: Shared<Gauge>, total: Shared<Int>) -> ()
 fn a_service_recovers_after_the_burst() {
     let out = run(
         "load_recovery",
-        r#"fn burst(work: Channel<Int>, total: Shared<Int>) -> () {
+        r#"fn burst<'er>(work: Channel<Int>, total: Shared<Int>) -> () raises 'er {
   let mut i = 0;
   while i < 150 {
-    Channel::send(work, 1);
+    Channel::send(work, 1)!;
     i = i + 1
   };
 }
 
-fn worker(work: Channel<Int>, total: Shared<Int>) -> () {
+fn worker<'er>(work: Channel<Int>, total: Shared<Int>) -> () raises 'er {
   let mut going = true;
   while going {
-    match Channel::receive(work) {
+    match Channel::receive(work)! {
       Option::None => going = false,
       Option::Some(value) => { Shared::update(total, fn n => n + value); },
     }
@@ -394,7 +407,7 @@ fn serve<'e>(work: Channel<Int>, total: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 3 {
-    nursery.adopt(Fiber::spawn(fn () => worker(work, total)));
+    nursery.adopt(Fiber::spawn(fn () => worker(work, total)!));
     i = i + 1
   };
 }
@@ -413,7 +426,7 @@ fn round(total: Shared<Int>, count: Int) -> Int {
   Fibers::adopt(crew, Fiber::spawn(fn () => {
     let mut i = 0;
     while i < count {
-      Channel::send(work, 1);
+      Channel::send(work, 1)!;
       i = i + 1
     };
     Channel::close(work)
@@ -446,10 +459,10 @@ fn round(total: Shared<Int>, count: Int) -> Int {
 fn shutdown_completes_what_was_already_accepted() {
     let out = run(
         "load_shutdown",
-        r#"fn worker(work: Channel<Int>, done: Shared<Int>) -> () {
+        r#"fn worker<'er>(work: Channel<Int>, done: Shared<Int>) -> () raises 'er {
   let mut going = true;
   while going {
-    match Channel::receive(work) {
+    match Channel::receive(work)! {
       Option::None => going = false,
       Option::Some(_) => {
         let _ = spin(200);
@@ -464,7 +477,7 @@ fn hire<'e>(work: Channel<Int>, done: Shared<Int>) -> ()
 {
   let mut i = 0;
   while i < 2 {
-    nursery.adopt(Fiber::spawn(fn () => worker(work, done)));
+    nursery.adopt(Fiber::spawn(fn () => worker(work, done)!));
     i = i + 1
   };
 }
@@ -473,11 +486,15 @@ fn hire<'e>(work: Channel<Int>, done: Shared<Int>) -> ()
   let done = Shared::of(0);
   // Twenty accepted before anybody starts, then the door is shut. Everything
   // queued is owed to somebody.
-  let mut i = 0;
-  while i < 20 {
-    Channel::send(work, i);
-    i = i + 1
-  };
+  // `attempt` only because `main` carries no row and the send now wants one;
+  // a channel of 32 taking 20 values never actually waits.
+  let _ = attempt(fn () => {
+    let mut i = 0;
+    while i < 20 {
+      Channel::send(work, i)!;
+      i = i + 1
+    };
+  });
   Channel::close(work);
   bounded_nursery(2, fn () => hire(work, done));
   print(Int::to_string(Shared::get(done)));
