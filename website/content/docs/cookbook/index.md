@@ -11,6 +11,7 @@ Start with the recipe closest to the problem you are solving:
 - [Build an HTTP service](/docs/cookbook/http-service/) — route requests with `Router`, `Request`, `Response`, and `SharedFn`.
 - [Build a typed JSON API](/docs/cookbook/json-api/) — parse JSON, decode typed request bodies, derive encoders/decoders, and return JSON responses.
 - [Run a database transaction](/docs/cookbook/database-transactions/) — use the portable `Db` capability and `transaction` so failure and cancellation cannot leak an open transaction.
+- [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) — register a job with a region before the first `!` after it, so a cancellation cannot drop work nobody knows the fiber was holding.
 - [Bound concurrent work](/docs/cookbook/bounded-concurrency/) — use `Fiber`, `Nursery`, and `bounded_nursery` to turn a concurrency limit into backpressure.
 - [Make resource cleanup cancellation-safe](/docs/cookbook/cancellation-safe-resources/) — pair `scoped` and `acquire` so cleanup runs on return, failure, and cancellation.
 - [Load application configuration](/docs/cookbook/configuration/) — read settings with `std::config`, report every bad key at once, and keep secrets out of the logs with `Redacted`.

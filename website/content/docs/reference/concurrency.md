@@ -164,6 +164,10 @@ Both only exist in a function that can raise, because a `raises` row is the chan
 
 A `!` observes a pending cancellation *before* the call it marks, so a computation already asked to stop does not do work it is about to throw away, and the arguments are not evaluated. `Channel::send` and `Channel::receive` are the exception, and carry a row for exactly this reason — see below.
 
+**A value the fiber is already holding is discarded with it.** Between the point a value becomes the fiber's responsibility and the first `!` after that point, nobody else knows the fiber has it — so a cancellation there drops it, cleanly and silently. The shape that meets this is a worker taking a job off a channel and then calling something fallible with it. Register the value with a region before that `!` and the region's finalizer runs on the unwind; [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) is the recipe.
+
+Reading the flag after the call instead would move the problem rather than remove it: the fiber would be holding the call's result at the same point. Work in flight across a cancellation boundary is at risk whichever side the boundary is read on.
+
 The back-edge is why an ordinary background worker can be stopped:
 
 ```khora
