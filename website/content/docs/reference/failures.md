@@ -108,6 +108,24 @@ let user = load_user(id)! catch {
 
 A `catch` arm uses ordinary pattern syntax over the failure value. The success path keeps the value produced by the inner expression; a matching arm produces the replacement value.
 
+A bare name binds the whole failure, the way it does in a `match`:
+
+```khora
+let user = load_user(id)! catch { trouble => User::unavailable(Show::show(trouble)) };
+```
+
+That arm handles everything the operand can raise, so it needs no companion. It is the form to reach for when the answer does not depend on which variant arrived -- turning a nine-variant error into one `Refused` is one arm this way and nine identical ones by constructor.
+
+The binding is typed by the operand's failure row, so it works when that row names **one** type. Where an operand raises two, there is no single type to give the name, and the compiler says so:
+
+```text
+this `catch` arm binds the failure, but the operand can raise more than one
+type (DbError, ModelError), so there is no single type to give the binding.
+Name a constructor, or use `_` to handle them all without looking
+```
+
+`_` remains the arm for "handle everything and do not look at it": it binds nothing, and the failure is released without being read.
+
 ## Exhaustiveness by failure type
 
 Handling a named failure type commits to handling all of that type's variants:

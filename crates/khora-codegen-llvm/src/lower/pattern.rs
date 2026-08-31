@@ -150,7 +150,13 @@ impl<'ctx> Lower<'_, 'ctx> {
         let mut everything: Option<MatchArm> = None;
         for arm in arms {
             let Some(owner) = self.owner_of(arm.pat) else {
-                if matches!(self.body.pat(arm.pat), khora_hir::body::Pat::Wildcard) {
+                // A binding takes everything a `_` does. The difference is on
+                // the way out: `_` has no name to release the error under, and
+                // this does.
+                if matches!(
+                    self.body.pat(arm.pat),
+                    khora_hir::body::Pat::Wildcard | khora_hir::body::Pat::Bind(_)
+                ) {
                     everything = Some(arm.clone());
                 }
                 continue;
@@ -234,6 +240,40 @@ impl<'ctx> Lower<'_, 'ctx> {
 
         if let Some(arm) = everything {
             self.at(fallthrough);
+
+            // **A bound arm is the named path with the type read elsewhere.**
+            // A constructor arm knows what it caught because it says so; a
+            // binding knows because the operand raises one type and the
+            // checker gave the local that type. From there it is the same
+            // shape: own the error, let the arm read it, release it on the way
+            // to the join.
+            if let khora_hir::body::Pat::Bind(local) = self.body.pat(arm.pat) {
+                let error_ty = self.types.local(*local).clone();
+                let error = self.be.word_to_value(word, &error_ty);
+                let released = self.block("catch.bound.done");
+                self.scopes.push(vec![Cleanup::Temp(error, error_ty.clone())]);
+                let on = Scrutinee {
+                    value: error,
+                    ty: error_ty,
+                    released_by_arms: false,
+                };
+                let mine = [arm.clone()];
+                let reached_here = self.emit_arms(&mine, &on, slot, released, range);
+                let scope = self.scopes.pop().unwrap_or_default();
+
+                self.at(released);
+                if reached_here == 0 {
+                    self.be.builder.build_unreachable().expect("sealing a diverging handler");
+                    return self.join(merge, reached, slot, &result_ty);
+                }
+                for cleanup in scope.into_iter().rev() {
+                    self.release(cleanup);
+                }
+                self.br(merge);
+                reached += 1;
+                return self.join(merge, reached, slot, &result_ty);
+            }
+
             // Released first, by id, because after this there is no handle on
             // it: the arm binds nothing — a `_` has no name to bind under —
             // so this is the only place the error can be let go of.

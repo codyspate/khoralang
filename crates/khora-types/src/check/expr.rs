@@ -1084,6 +1084,24 @@ impl<'a> Checker<'a> {
         let before = self.demanded.len();
         let value = self.infer(inner);
 
+        // **What the operand can raise, read before the arms are looked at.**
+        // An arm that names a constructor carries its own type; an arm that
+        // *binds* has only this to be typed by, and the row is already on the
+        // demand stack because the operand has just been inferred.
+        let mut raised: Vec<(String, Type)> = Vec::new();
+        for demand in &self.demanded[before..] {
+            if demand.clause != Clause::Raises {
+                continue;
+            }
+            if let Type::Row { fields, .. } = &demand.row {
+                for (label, ty) in fields {
+                    if !raised.iter().any(|(seen, _)| seen == label) {
+                        raised.push((label.clone(), ty.clone()));
+                    }
+                }
+            }
+        }
+
         // Each arm is matched against its own error type rather than against
         // one scrutinee, which is the other way this differs from `match`.
         let mut caught: Vec<String> = Vec::new();
@@ -1097,8 +1115,38 @@ impl<'a> Checker<'a> {
                 }
                 _ => None,
             };
-            if owner.is_none() && matches!(self.body.pat(arm.pat), Pat::Wildcard) {
+            // **A binding catches everything a `_` does, and names it.** The
+            // failure is one value; the only question a bare name raises is
+            // what its type should be, and when the operand raises a single
+            // type there is exactly one answer. Turning a nine-variant
+            // `EvalError` into one `Refused` was nine identical arms without
+            // this, which is the shape the Guide's own boundary-translation
+            // recipe asks for and the one that did not scale.
+            let binds = matches!(self.body.pat(arm.pat), Pat::Bind(_));
+            if owner.is_none() && binds && raised.len() != 1 {
+                let named: Vec<&str> = raised.iter().map(|(l, _)| l.as_str()).collect();
+                let complaint = if raised.is_empty() {
+                    "this `catch` arm binds the failure, but the operand raises \
+                     nothing for it to bind"
+                        .to_string()
+                } else {
+                    format!(
+                        "this `catch` arm binds the failure, but the operand can raise \
+                         more than one type ({}), so there is no single type to give the \
+                         binding. Name a constructor, or use `_` to handle them all \
+                         without looking",
+                        named.join(", ")
+                    )
+                };
+                self.error(complaint, self.body.range(arm.body));
+                continue;
+            }
+            if owner.is_none() && (binds || matches!(self.body.pat(arm.pat), Pat::Wildcard)) {
                 everything = true;
+                if let Some((_, only)) = raised.first().filter(|_| binds) {
+                    let only = only.clone();
+                    self.bind_pattern(arm.pat, &only);
+                }
                 if let Some(guard) = arm.guard {
                     self.expect(guard, &Type::Bool, "a match guard");
                 }

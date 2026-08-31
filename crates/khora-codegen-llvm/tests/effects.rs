@@ -464,6 +464,79 @@ fn fetch(n: Int) -> Int raises DbError + ModelError {
 }
 ";
 
+/// A `catch` arm may bind the failure instead of naming a constructor.
+///
+/// Four documentation pages said it could and the checker refused it, while
+/// accepting `_` -- so `catch` had the arm that throws the failure away and
+/// not the one that reads it. The cost is not cosmetic: folding a nine-variant
+/// error into one answer meant nine identical arms, which is exactly the
+/// boundary-translation recipe the Guide holds up.
+///
+/// A binding takes everything, like `_`, and is typed by the operand's row.
+#[test]
+fn a_catch_arm_may_bind_the_failure() {
+    let ran = run(
+        "catch_binding",
+        &format!(
+            "{FALLIBLE}
+fn describe(n: Int) -> Int {{
+  halve(n)! catch {{
+    trouble => match trouble {{
+      DbError::Timeout => 0 - 1,
+      DbError::Refused => 0 - 2,
+    }},
+  }}
+}}
+fn main() -> Int {{
+  print(describe(8));
+  print(describe(7));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "4\n-2\n");
+    assert_eq!(ran.code, Some(0));
+}
+
+/// And the error it bound is released, rather than leaking because nothing
+/// named it.
+///
+/// A `_` arm releases by id, since it has no handle. A binding owns the value
+/// the way a `match` arm owns its scrutinee, so it takes the same route -- and
+/// the count at the end is what says so. The payload is a `Node`, because an
+/// error with nothing in it would leak nothing and prove nothing.
+#[test]
+fn a_bound_failure_is_released() {
+    let ran = run(
+        "catch_binding_released",
+        &format!(
+            "{FALLIBLE}
+pub type Heavy = | Carrying(node: Node);
+
+fn burden(n: Int) -> Int raises Heavy {{
+  if n > 0 {{ raise Heavy::Carrying(Node::Of(n)) }} else {{ n }}
+}}
+
+fn weigh(n: Int) -> Int {{
+  burden(n)! catch {{
+    trouble => match trouble {{ Heavy::Carrying(node) => match node {{ Node::Of(v) => v }} }},
+  }}
+}}
+
+fn main() -> Int {{
+  print(weigh(5));
+  print(weigh(0));
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "5\n0\n0\n", "the caught error was released");
+    assert_eq!(ran.code, Some(0));
+}
+
 /// Half a row. `ModelError` is handled here and gone from the signature;
 /// `DbError` is not named, so it leaves through the same `!` it always did.
 #[test]
