@@ -51,9 +51,9 @@ impl Entry {
   /// The JSON a client sees.
   fn as_json(self) -> Json {
     let fields = Map::new();
-    Map::insert(fields, "id", Json::Number(Int::to_float(self.id)));
+    Map::insert(fields, "id", Json::of_int(self.id));
     Map::insert(fields, "account", Json::Text(self.account));
-    Map::insert(fields, "amount", Json::Number(Int::to_float(self.amount)));
+    Map::insert(fields, "amount", Json::of_int(self.amount));
     Map::insert(fields, "memo", Json::Text(self.memo));
     Json::Object(fields)
   }
@@ -262,20 +262,22 @@ fn create(pool: Pool, tracer: Tracer, request: Request) -> Response {
 fn posted(document: Json) -> Option<Entry> {
   match Json::field(document, "account") {
     Option::Some(Json::Text(account)) => match Json::field(document, "amount") {
-      Option::Some(Json::Number(amount)) => {
-        let memo = match Json::field(document, "memo") {
-          Option::Some(Json::Text(written)) => written,
-          Option::Some(_) => "",
-          Option::None => "",
-        };
-        Option::Some({
-            id: 0,
-            account: account,
-            amount: Float::to_int(amount),
-            memo: memo,
-          })
+      // **`Json::integer`, not a `Float` and back.** A ledger amount is in
+      // minor units, so `Float::to_int(amount)` was the whole of #142 sitting
+      // in the reference application: an entry above 2^53 posted the wrong
+      // number, quietly, in the example that exists to show money being
+      // handled properly.
+      Option::Some(written) => match Json::integer(written) {
+        Option::None => Option::None,
+        Option::Some(amount) => {
+          let memo = match Json::field(document, "memo") {
+            Option::Some(Json::Text(written)) => written,
+            Option::Some(_) => "",
+            Option::None => "",
+          };
+          Option::Some({ id: 0, account: account, amount: amount, memo: memo })
+        },
       },
-      Option::Some(_) => Option::None,
       Option::None => Option::None,
     },
     Option::Some(_) => Option::None,
@@ -365,7 +367,7 @@ fn answered(account: String, rows: List<Row>) -> Response {
   };
   let fields = Map::new();
   Map::insert(fields, "account", Json::Text(account));
-  Map::insert(fields, "balance", Json::Number(Int::to_float(total)));
+  Map::insert(fields, "balance", Json::of_int(total));
   Json::Object(fields) |> Response::json(200, _)
 }
 

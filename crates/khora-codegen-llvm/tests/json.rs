@@ -86,6 +86,12 @@ fn shown(text: String) -> String {
     Result::Err(why) => \"at \" + Int::to_string(why.at) + \": expected \" + why.expected,
   }
 }
+
+/// The value, or `Json::Null` when it will not parse. For a test that asks a
+/// value a question rather than printing it.
+fn parsed(text: String) -> Json {
+  match parse(text) { Result::Ok(value) => value, Result::Err(_) => Json::Null }
+}
 ";
 
 /// The scalars, out and back.
@@ -99,7 +105,7 @@ fn main() -> Int {{
   print(encode(Json::Null));
   print(encode(Json::Bool(true)));
   print(encode(Json::Bool(false)));
-  print(encode(Json::Number(1.5)));
+  print(encode(Json::of_float(1.5)));
   print(encode(Json::Text(\"khora\")));
   print(shown(\"null\"));
   print(shown(\"true\"));
@@ -142,7 +148,55 @@ fn main() -> Int {{
 "
         ),
     );
-    assert_eq!(out, "0\n42\n-42\n3.25\n-0.5\n1000\n150\n100\n1.5\n0\n");
+    // **The token comes back as it went in**, which is what changed: `1e3`
+    // used to re-encode as `1000` because the parser had turned it into a
+    // `Float` and the encoder printed the float. Every one of these is still
+    // accepted and still means the same number; the difference is that the
+    // document's own spelling survives a round trip. Roadmap #142.
+    assert_eq!(out, "0\n42\n-42\n3.25\n-0.5\n1e3\n1.5e2\n1E+2\n1500e-3\n0\n");
+}
+
+/// A sixty-four-bit integer survives, and so does a decimal's last place.
+///
+/// **The bug this file used to demonstrate.** `Number` was a `Float`, so
+/// `9007199254740993` parsed to `9007199254740992` -- off by one, quietly, on
+/// an ordinary identifier -- and `0.1` was the nearest double from the moment
+/// it was read. `std/json.kh` carried a paragraph telling people not to put
+/// money or an identifier through it.
+///
+/// Both directions: the digits survive parsing, `Json::integer` gets them back
+/// exactly, and `Int::to_json` writes them without a `Float` in between.
+#[test]
+fn a_sixty_four_bit_integer_survives_the_round_trip() {
+    let out = run(
+        "json_exact",
+        &format!(
+            "{HEAD}
+fn main() -> Int {{
+  print(shown(\"9007199254740993\"));
+  print(shown(\"-9007199254740993\"));
+  print(shown(\"0.1\"));
+  print(shown(\"10.10\"));
+  print(encode(Int::to_json(9007199254740993)));
+  print(match Json::integer(parsed(\"9007199254740993\")) {{
+    Option::Some(whole) => Int::to_string(whole),
+    Option::None => \"none\",
+  }});
+  print(match Json::literal(parsed(\"10.10\")) {{
+    Option::Some(text) => text,
+    Option::None => \"none\",
+  }});
+  khora_print_int(khora_live_count());
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        "9007199254740993\n-9007199254740993\n0.1\n10.10\n\
+         9007199254740993\n9007199254740993\n10.10\n0\n"
+    );
 }
 
 /// Every escape the format has, in both directions. The `\u00XX` form is what

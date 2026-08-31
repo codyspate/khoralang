@@ -27,7 +27,7 @@ which is exactly the input nobody tests with.
 pub type Json =
   | Null
   | Bool(value: Bool)
-  | Number(value: Float)
+  | Number(literal: String)
   | Text(value: String)
   | Array(items: List<Json>)
   | Object(fields: Map<String, Json>);
@@ -35,28 +35,29 @@ pub type Json =
 
 A JSON value.
 
-**`Number` is a `Float`, and that loses information the format does not.**
-RFC 8259 §6 admits a number of arbitrary precision; what it does is *warn*
-that implementations commonly use IEEE 754 doubles and that anything
-outside the range of an exact integer double may not survive a round trip
-between two of them. This parser is one of those implementations, so:
+**`Number` carries the token's text, not a `Float`.** RFC 8259 §6 admits a
+number of arbitrary precision; what it *warns* is that implementations
+commonly use IEEE 754 doubles and that anything outside the range of an
+exact integer double may not survive a round trip between two of them. This
+parser used to be one of those implementations:
 
     parse("{\"big\": 9007199254740993}")   ->   9007199254740992
 
-Off by one, quietly, on an ordinary sixty-four-bit identifier. A decimal is
-worse in kind and less visible: `10.10` becomes the nearest double and is
-never exactly recoverable, which matters in the language that gives
-`Decimal` a 128-bit significand for money and whose configuration reader
-refuses exponent notation on the grounds that a number arriving as `1e-3`
-has been through a float somewhere.
+Off by one, quietly, on an ordinary sixty-four-bit identifier — and worse in
+kind on a decimal, where `10.10` became the nearest double and was never
+exactly recoverable again. In the language that gives `Decimal` a 128-bit
+significand for money, and whose configuration reader refuses exponent
+notation on the grounds that a number arriving as `1e-3` has been through a
+float somewhere, that was the wrong default. Roadmap #142.
 
-**Do not read money or an identifier out of JSON through this yet.** The
-fix is for `Number` to carry the token's text and for each accessor to
-parse from it — `Int::of_string`, `Decimal::of_string` — which is what
-`std::config` does and why `std::config` is exact. Roadmap #142.
+So the parser stores what it read and each accessor decides what to make of
+it: `Json::integer` goes through `Int::of_string` and is exact,
+`Json::number` goes through a `Float` and inherits the format's usual limit,
+and `Json::literal` hands over the text for anything else — `Decimal` most
+of all, which `std::json` cannot import without a cycle.
 
-A caller who wants an `Int` asks for one with `Float::to_int`, and inherits
-the limit above.
+Encoding writes the literal back, so a document that round-trips through
+this keeps every digit it arrived with.
 
 ### JsonError
 
@@ -178,11 +179,47 @@ field was for.
 pub fn number(self) -> Option<Float>
 ```
 
-The number here, or `None` if this is something else.
+The number here as a `Float`, or `None` if this is something else.
 
 **No coercion**, as with `text`: the string `"3"` is not a number, and a
 library that read it as one would hide the day a client started quoting
 its integers.
+
+A `Float` holds about fifteen significant digits, so this is the lossy
+reading and it is lossy by choice rather than by accident — the document's
+own text is still there. `integer` for an identifier or a count, `literal`
+for money.
+
+#### integer
+
+```khora
+pub fn integer(self) -> Option<Int>
+```
+
+The number here as an `Int`, exactly, or `None`.
+
+**This is the accessor an identifier wants.** `9007199254740993` through
+`number` is `9007199254740992`; through here it is itself, because the
+digits never went near a `Float`.
+
+`None` for a number no `Int` can hold, and for one that is not whole.
+
+A whole number *written* as `1.0` or `1e3` is still whole, and those go
+through a `Float` to be read — which is how they were read before, so
+nothing that decoded yesterday stops decoding today.
+
+#### literal
+
+```khora
+pub fn literal(self) -> Option<String>
+```
+
+The number here as the document wrote it, or `None`.
+
+For everything the two above cannot answer, and `Decimal` is the reason
+there has to be one: money must not go through a `Float`, and `std::json`
+cannot import `std::decimal` without a cycle. So the text comes out and
+`Decimal::of_string` takes it from there.
 
 #### boolean
 
@@ -200,6 +237,26 @@ pub fn items(self) -> Option<List<Json>>
 
 The elements, if this is an array. `None` for anything else, including an
 object — a JSON array and a JSON object are different things.
+
+#### of_int
+
+```khora
+pub fn of_int(value: Int) -> Json
+```
+
+A number from an `Int`, with every digit kept.
+
+`Json::Number` takes text, and text is easy to get wrong — a caller
+writing `Json::Number(Int::to_string(n))` is one `Float::to_string` away
+from the bug this replaced. These two are the way to make one.
+
+#### of_float
+
+```khora
+pub fn of_float(value: Float) -> Json
+```
+
+A number from a `Float`, in its shortest round-tripping form.
 
 #### is_null
 
@@ -348,6 +405,10 @@ impl ToJson for Int
 ```khora
 fn to_json(self) -> Json
 ```
+
+**The digits, not a `Float`.** This was `Json::Number(Int::to_float(self))`,
+so an identifier above 2^53 was rounded on the way *out* as well as on the
+way in. Roadmap #142.
 
 ### FromJson for Int
 

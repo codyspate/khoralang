@@ -47,19 +47,20 @@ nothing about the environment, a socket or a file.
 booleans, lists, records, nothing. Reading the environment produces one;
 parsing JSON produces one; so does walking a query result.
 
-**Its numbers carry text, not a `Float`, and this is the one place the design
-cannot reuse what exists.** `std::json`'s `Json` is the same shape and its
-`Number` case holds a `Float`, which means `9007199254740993` parses back as
-`9007199254740992` and `10.10` can never be recovered exactly — measured, and
-filed as #142. A schema library whose `Decimal` decoder routed every amount
-through a double would rebuild, inside itself, the exact class of bug it exists
-to prevent. So `Value::Number` holds the token's text and each numeric schema
-parses from it with `Int::of_string` or `Decimal::of_string`, which is what
-`std::config` already does and why `std::config` is exact.
+**Its numbers carry text, not a `Float`.** A schema library whose `Decimal`
+decoder routed every amount through a double would rebuild, inside itself, the
+exact class of bug it exists to prevent: `9007199254740993` parses back as
+`9007199254740992` and `10.10` can never be recovered exactly. So
+`Value::Number` holds the token's text and each numeric schema parses from it
+with `Int::of_string` or `Decimal::of_string`, which is what `std::config`
+already does and why `std::config` is exact.
 
-If #142 lands first, `Json` and `Value` converge and one of them can go. If it
-does not, `Value` stands alone and the JSON source parses text itself. Either
-way this library does not inherit the lossy one.
+This was written when `std::json`'s `Number` was a `Float` and the paragraph
+above it argued that `Value` could not be built on `Json` for that reason. #142
+has since landed and `Json::Number` carries its token too, so the two trees
+agree about what a number is. They remain separate types on a different
+argument: a `Value` is what *any* source produces — the environment, a query
+result, a JSON document — and JSON is one of them.
 
 Decoding is then one function over the two:
 

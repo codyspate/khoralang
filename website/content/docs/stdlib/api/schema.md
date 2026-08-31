@@ -54,21 +54,25 @@ pub type Raw =
 
 A value as a source handed it over, before anything has been asked of it.
 
-A record's fields are `Pair`s rather than a type of this module's own.
+A record's fields are `Pair`s rather than a type of this module's own,
+which is the better API and was once also a workaround. Declaring an
+`Entry` here broke `Show` for a program that had one of its own, and the
+reason recorded at the time -- that a record type resolves by its field
+names -- was wrong. An impl was found by the head of its type as a bare
+name, so two modules that each declared an `Entry` shared one. Errata 62
+has the real account; the `Pair` here is a preference now, not a dodge.
 
-**A record type is resolved by the set of its field names**, so a
-`{ key: String, value: Raw }` declared here *is* `std::core::Pair` as far
-as trait resolution is concerned -- and declaring the twin broke `Show` for
-every program that used a `Map`, at link time, with a message naming
-neither type. Roadmap #143.
-
-**A number is its text, and that is not an oversight.** `std::json`'s
-`Number` holds a `Float`, which means `9007199254740993` comes back as
-`9007199254740992` and `10.10` is never exactly recoverable -- so a schema
+**A number is its text, and that is not an oversight.** A `Float` holds
+about fifteen significant digits, so `9007199254740993` comes back one
+short of itself and `10.10` is never exactly recoverable -- and a schema
 that decoded a `Decimal` through one would rebuild, inside the library
 meant to prevent that class of thing, the exact bug it exists to prevent.
 Keeping the token lets [`whole`] and [`exact`] parse it the way
-`std::config` does, which is why `std::config` is exact. Roadmap #142.
+`std::config` does, which is why `std::config` is exact.
+
+`std::json` keeps its numbers the same way since #142, so the two trees no
+longer disagree about what a number is. They are still separate types: a
+`Raw` is what *any* source produces, and JSON is one source.
 
 ### Segment
 

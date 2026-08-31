@@ -18,32 +18,33 @@ import std::core::{Array, List, Map, Option, Pair, Result, Show};
 
 /// A JSON value.
 ///
-/// **`Number` is a `Float`, and that loses information the format does not.**
-/// RFC 8259 §6 admits a number of arbitrary precision; what it does is *warn*
-/// that implementations commonly use IEEE 754 doubles and that anything
-/// outside the range of an exact integer double may not survive a round trip
-/// between two of them. This parser is one of those implementations, so:
+/// **`Number` carries the token's text, not a `Float`.** RFC 8259 §6 admits a
+/// number of arbitrary precision; what it *warns* is that implementations
+/// commonly use IEEE 754 doubles and that anything outside the range of an
+/// exact integer double may not survive a round trip between two of them. This
+/// parser used to be one of those implementations:
 ///
 ///     parse("{\"big\": 9007199254740993}")   ->   9007199254740992
 ///
-/// Off by one, quietly, on an ordinary sixty-four-bit identifier. A decimal is
-/// worse in kind and less visible: `10.10` becomes the nearest double and is
-/// never exactly recoverable, which matters in the language that gives
-/// `Decimal` a 128-bit significand for money and whose configuration reader
-/// refuses exponent notation on the grounds that a number arriving as `1e-3`
-/// has been through a float somewhere.
+/// Off by one, quietly, on an ordinary sixty-four-bit identifier — and worse in
+/// kind on a decimal, where `10.10` became the nearest double and was never
+/// exactly recoverable again. In the language that gives `Decimal` a 128-bit
+/// significand for money, and whose configuration reader refuses exponent
+/// notation on the grounds that a number arriving as `1e-3` has been through a
+/// float somewhere, that was the wrong default. Roadmap #142.
 ///
-/// **Do not read money or an identifier out of JSON through this yet.** The
-/// fix is for `Number` to carry the token's text and for each accessor to
-/// parse from it — `Int::of_string`, `Decimal::of_string` — which is what
-/// `std::config` does and why `std::config` is exact. Roadmap #142.
+/// So the parser stores what it read and each accessor decides what to make of
+/// it: `Json::integer` goes through `Int::of_string` and is exact,
+/// `Json::number` goes through a `Float` and inherits the format's usual limit,
+/// and `Json::literal` hands over the text for anything else — `Decimal` most
+/// of all, which `std::json` cannot import without a cycle.
 ///
-/// A caller who wants an `Int` asks for one with `Float::to_int`, and inherits
-/// the limit above.
+/// Encoding writes the literal back, so a document that round-trips through
+/// this keeps every digit it arrived with.
 pub type Json =
   | Null
   | Bool(value: Bool)
-  | Number(value: Float)
+  | Number(literal: String)
   | Text(value: String)
   | Array(items: List<Json>)
   | Object(fields: Map<String, Json>);
@@ -144,34 +145,30 @@ impl FromJson for Bool {
 }
 
 impl ToJson for Float {
-  fn to_json(self) -> Json { Json::Number(self) }
+  fn to_json(self) -> Json { Json::of_float(self) }
 }
 
 impl FromJson for Float {
   fn from_json(value: Json) -> Float raises DecodeError {
-    match value {
-      Json::Number(number) => number,
-      other => raise wrong(other, "number"),
+    match Json::number(value) {
+      Option::Some(number) => number,
+      Option::None => raise wrong(value, "number"),
     }
   }
 }
 
 impl ToJson for Int {
-  fn to_json(self) -> Json { Json::Number(Int::to_float(self)) }
+  /// **The digits, not a `Float`.** This was `Json::Number(Int::to_float(self))`,
+  /// so an identifier above 2^53 was rounded on the way *out* as well as on the
+  /// way in. Roadmap #142.
+  fn to_json(self) -> Json { Json::of_int(self) }
 }
 
 impl FromJson for Int {
   fn from_json(value: Json) -> Int raises DecodeError {
-    match value {
-      // The float's shortest round-tripping text has neither a fraction nor
-      // an exponent exactly when it is an integer `Int::of_string` can hold.
-      // Parsing that text also refuses overflow instead of relying on the
-      // clamping semantics of `Float::to_int`.
-      Json::Number(number) => match Int::of_string(Float::to_string(number)) {
-        Option::Some(whole) => whole,
-        Option::None => raise wrong(Json::Number(number), "whole number in the range of Int"),
-      },
-      other => raise wrong(other, "whole number in the range of Int"),
+    match Json::integer(value) {
+      Option::Some(whole) => whole,
+      Option::None => raise wrong(value, "whole number in the range of Int"),
     }
   }
 }
@@ -366,13 +363,49 @@ impl Json {
     match self { Json::Text(value) => Option::Some(value), _ => Option::None }
   }
 
-  /// The number here, or `None` if this is something else.
+  /// The number here as a `Float`, or `None` if this is something else.
   ///
   /// **No coercion**, as with `text`: the string `"3"` is not a number, and a
   /// library that read it as one would hide the day a client started quoting
   /// its integers.
+  ///
+  /// A `Float` holds about fifteen significant digits, so this is the lossy
+  /// reading and it is lossy by choice rather than by accident — the document's
+  /// own text is still there. `integer` for an identifier or a count, `literal`
+  /// for money.
   pub fn number(self) -> Option<Float> {
-    match self { Json::Number(value) => Option::Some(value), _ => Option::None }
+    match self { Json::Number(literal) => Option::Some(float_of(literal)), _ => Option::None }
+  }
+
+  /// The number here as an `Int`, exactly, or `None`.
+  ///
+  /// **This is the accessor an identifier wants.** `9007199254740993` through
+  /// `number` is `9007199254740992`; through here it is itself, because the
+  /// digits never went near a `Float`.
+  ///
+  /// `None` for a number no `Int` can hold, and for one that is not whole.
+  ///
+  /// A whole number *written* as `1.0` or `1e3` is still whole, and those go
+  /// through a `Float` to be read — which is how they were read before, so
+  /// nothing that decoded yesterday stops decoding today.
+  pub fn integer(self) -> Option<Int> {
+    match self {
+      Json::Number(literal) => match Int::of_string(literal) {
+        Option::Some(whole) => Option::Some(whole),
+        Option::None => Int::of_string(Float::to_string(float_of(literal))),
+      },
+      _ => Option::None,
+    }
+  }
+
+  /// The number here as the document wrote it, or `None`.
+  ///
+  /// For everything the two above cannot answer, and `Decimal` is the reason
+  /// there has to be one: money must not go through a `Float`, and `std::json`
+  /// cannot import `std::decimal` without a cycle. So the text comes out and
+  /// `Decimal::of_string` takes it from there.
+  pub fn literal(self) -> Option<String> {
+    match self { Json::Number(literal) => Option::Some(literal), _ => Option::None }
   }
 
   /// The boolean here, or `None`.
@@ -385,6 +418,16 @@ impl Json {
   pub fn items(self) -> Option<List<Json>> {
     match self { Json::Array(items) => Option::Some(items), _ => Option::None }
   }
+
+  /// A number from an `Int`, with every digit kept.
+  ///
+  /// `Json::Number` takes text, and text is easy to get wrong — a caller
+  /// writing `Json::Number(Int::to_string(n))` is one `Float::to_string` away
+  /// from the bug this replaced. These two are the way to make one.
+  pub fn of_int(value: Int) -> Json { Json::Number(Int::to_string(value)) }
+
+  /// A number from a `Float`, in its shortest round-tripping form.
+  pub fn of_float(value: Float) -> Json { Json::Number(Float::to_string(value)) }
 
   /// Whether this is `null`, which is a question rather than a value.
   ///
@@ -451,7 +494,9 @@ pub fn encode(value: Json) -> String {
   match value {
     Json::Null => "null",
     Json::Bool(flag) => if flag { "true" } else { "false" },
-    Json::Number(number) => Float::to_string(number),
+    // The token as it arrived. A document that round-trips through here
+    // keeps every digit, which is the whole of #142.
+    Json::Number(literal) => literal,
     Json::Text(text) => quote(text),
     Json::Array(items) => "[" + encoded_items(items, "") + "]",
     Json::Object(fields) => "{" + encoded_fields(sorted_fields(fields), "") + "}",
@@ -818,28 +863,114 @@ fn four_bytes(first: Int, second: Int, third: Int, fourth: Int) -> String {
 /// A number: an optional sign, digits, an optional fraction, an optional
 /// exponent.
 ///
-/// Accumulated as a `Float` throughout, including the whole part. An `Int`
-/// accumulator would be exact for small numbers and **stop the program** on a
-/// long one, because `*` traps on overflow — and a parser that dies on input
-/// it was handed is not a parser. A float saturates to infinity instead, which
-/// is what the format says a number too large to represent becomes.
+/// **Scanned rather than accumulated.** This used to build a `Float` as it
+/// walked, which made the parser the place where `9007199254740993` became
+/// `9007199254740992` and `10.10` became a number nothing could recover. Now
+/// it finds where the token ends and slices it, so the document's own digits
+/// are what `Json::Number` holds and each accessor decides what to make of
+/// them. Roadmap #142.
+///
+/// The grammar is unchanged and so is what it refuses: a leading `+`, a bare
+/// `.5`, a trailing `1.`, an `e` with no digits after it.
 fn number_at(text: String, at: Int) -> Result<Value, JsonError> {
   let negative = U8::to_int(String::byte(text, at)) == 45;
   let start = if negative { at + 1 } else { at };
-  let whole = digits_at(text, start, 0.0);
-  if whole.at == start {
+  let whole = digits_end(text, start);
+  if whole == start {
     Result::Err({ at: start, expected: "a digit" })
   } else {
-    match fraction_at(text, whole.at, whole.number) {
+    match fraction_end(text, whole) {
       Result::Err(why) => Result::Err(why),
-      Result::Ok(with_fraction) => match exponent_at(text, with_fraction.at, with_fraction.number) {
+      Result::Ok(after_fraction) => match exponent_end(text, after_fraction) {
         Result::Err(why) => Result::Err(why),
         Result::Ok(done) => Result::Ok({
-            json: Json::Number(if negative { 0.0 - done.number } else { done.number }),
-            at: done.at,
+            json: Json::Number(String::slice(text, at, done)),
+            at: done,
           }),
       },
     }
+  }
+}
+
+/// Where the run of digits starting at `at` ends. `at` itself if there is none.
+fn digits_end(text: String, at: Int) -> Int {
+  if at >= String::byte_length(text) {
+    at
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    if byte >= 48 && byte <= 57 { digits_end(text, at + 1) } else { at }
+  }
+}
+
+/// Past `.` and the digits after it, or `at` when there is no point.
+///
+/// `1.` is refused. JSON's grammar requires a digit after the point, and
+/// accepting it would mean this parser reads documents that others reject —
+/// which is worse than strictness, because the difference shows up at the far
+/// end of a pipeline.
+fn fraction_end(text: String, at: Int) -> Result<Int, JsonError> {
+  if at < String::byte_length(text) && U8::to_int(String::byte(text, at)) == 46 {
+    let found = digits_end(text, at + 1);
+    if found == at + 1 {
+      Result::Err({ at: at + 1, expected: "a digit after the decimal point" })
+    } else {
+      Result::Ok(found)
+    }
+  } else {
+    Result::Ok(at)
+  }
+}
+
+/// Past `e`, its sign and its digits, or `at` when there is no exponent.
+fn exponent_end(text: String, at: Int) -> Result<Int, JsonError> {
+  if at >= String::byte_length(text) {
+    Result::Ok(at)
+  } else {
+    let marker = U8::to_int(String::byte(text, at));
+    if marker != 101 && marker != 69 {
+      Result::Ok(at)
+    } else {
+      let signed = sign_end(text, at + 1);
+      let found = digits_end(text, signed);
+      if found == signed {
+        Result::Err({ at: signed, expected: "a digit in the exponent" })
+      } else {
+        Result::Ok(found)
+      }
+    }
+  }
+}
+
+/// Past a `+` or `-`, or `at` when there is neither.
+fn sign_end(text: String, at: Int) -> Int {
+  if at >= String::byte_length(text) {
+    at
+  } else {
+    let byte = U8::to_int(String::byte(text, at));
+    if byte == 45 || byte == 43 { at + 1 } else { at }
+  }
+}
+
+/// A number literal as a `Float`, for the accessors that want one.
+///
+/// **The lossy reading, kept in one place.** The literal is known-good — it got
+/// here by being scanned — so the failure arms below cannot fire and answer
+/// zero rather than inventing an error nobody could act on.
+///
+/// This is `Float::of_string` in all but name and would be better as one in
+/// `std::core`. It is here because `std::json` is where the need is and a
+/// number parser in `core` is a decision worth making on its own evidence.
+fn float_of(literal: String) -> Float {
+  let negative = String::byte_length(literal) > 0 && U8::to_int(String::byte(literal, 0)) == 45;
+  let start = if negative { 1 } else { 0 };
+  let whole = digits_at(literal, start, 0.0);
+  match fraction_at(literal, whole.at, whole.number) {
+    Result::Err(_) => 0.0,
+    Result::Ok(with_fraction) => match exponent_at(literal, with_fraction.at, with_fraction.number)
+    {
+      Result::Err(_) => 0.0,
+      Result::Ok(done) => if negative { 0.0 - done.number } else { done.number },
+    },
   }
 }
 

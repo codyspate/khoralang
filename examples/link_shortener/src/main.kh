@@ -56,8 +56,8 @@ impl Link {
     let fields = Map::new();
     Map::insert(fields, "code", Json::Text(self.code));
     Map::insert(fields, "url", Json::Text(self.url));
-    Map::insert(fields, "hits", Json::Number(Int::to_float(self.hits)));
-    Map::insert(fields, "created", Json::Number(Int::to_float(self.created)));
+    Map::insert(fields, "hits", Json::of_int(self.hits));
+    Map::insert(fields, "created", Json::of_int(self.created));
     Json::Object(fields)
   }
 }
@@ -222,9 +222,9 @@ fn health(store: Store, _request: Request) -> Response
   Map::insert(
     fields,
     "uptime_ms",
-    Json::Number(Int::to_float(clock.monotonic_millis() - store.started)),
+    Json::of_int(clock.monotonic_millis() - store.started),
   );
-  Map::insert(fields, "links", Json::Number(Int::to_float(Dict::size(Shared::get(store.links)))));
+  Map::insert(fields, "links", Json::of_int(Dict::size(Shared::get(store.links))));
   Response::json(200, Json::Object(fields))
 }
 

@@ -73,9 +73,11 @@ only the message decides whether to expose it.
 `Decimal::of_string` and `0.0725` stays `0.0725`. A price read through a double
 is the wrong price.
 
-This is the one thing that could not be built on `std::json`'s `Json`, whose
-`Number` is a `Float` — `9007199254740993` comes back one short. See the note
-on that type before reading money out of JSON.
+`std::json` works the same way: `Json::Number` carries the token's text, and
+`Json::integer` reads it with `Int::of_string`, so `9007199254740993` comes back
+as itself. Use `Json::number` when a `Float` is what you want and the fifteen
+significant digits are enough; use `Json::literal` when you want to hand the
+text to `Decimal::of_string` yourself.
 
 ## Ask what a configuration needs, without running it
 
