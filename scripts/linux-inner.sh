@@ -77,11 +77,20 @@ kept=/tmp/khora-rt-failure.log
 rm -f "$kept"
 run=1
 while [ "$run" -le "$REPEATS" ]; do
-    /tmp/khora-rt-under-test > /tmp/khora-rt-run.log 2>&1
-    # Read immediately. Taken any later it is the status of the test asking
-    # whether a failure has already been kept, which is 0 or 1 and never the
-    # thing that crashed.
-    status=$?
+    # **`|| status=$?`, and this is the whole of why #108 was never diagnosed.**
+    # `set -e` is on. A bare `cmd > log` that exits non-zero ends the shell
+    # *there*, so the `status=$?` below never ran and neither did any of the
+    # reporting under it -- the run that crashed took the script down with it
+    # and the log ended at the `say` line above with nothing after it. Every
+    # careful thing this loop does with its evidence was unreachable from the
+    # only path that produces any. Consuming the failure with `||` is what
+    # exempts it, and the status inside is the one that matters.
+    #
+    # It is the third time this file has lost a message to `set -e`, and the
+    # other two have comments above them saying so. This one was hiding the
+    # race the loop exists to catch.
+    status=0
+    /tmp/khora-rt-under-test > /tmp/khora-rt-run.log 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         failures=$((failures + 1))
         if [ ! -f "$kept" ]; then
