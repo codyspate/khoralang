@@ -1001,16 +1001,29 @@ pub(crate) fn disagreement(outer: (&Type, &Type), inner: (&Type, &Type)) -> Stri
         //     expected `Fiber<(), Oops>`, found `Fiber<(), { Oops: Oops }>`
         //
         // Two types that print almost the same, and the answer -- `Fiber<(),
-        // { Oops }>` -- appears nowhere in `std` or the reference, both of
-        // which only ever show a row *variable*, which needs no braces. It
+        // { Oops: Oops }>` -- appears nowhere in `std` or the reference, both
+        // of which only ever show a row *variable*, which needs no braces. It
         // cost somebody a quarter of an hour, and the declaration
         // `Shared<Option<Fiber<(), NotifyError>>>` had type-checked happily on
         // the way: a field nothing can inhabit, accepted in silence.
+        //
+        // **And the hint used to be wrong, which is worse than none.** It said
+        // to write `{ Oops }`, and `{ Oops }` parses as a row whose *tail* is
+        // `Oops` -- printed back as `{ | Oops }` -- so following the advice
+        // produced the same error again, word for word, about a different
+        // type. A row's entries are labelled, and for an error row the label
+        // is the type's own name: `{ Oops: Oops }`.
+        //
+        // The old message also claimed this was "the way an error row is
+        // written everywhere else", which the comment above already says it is
+        // not. A `raises` clause takes the bare name; only a type argument
+        // needs the braces, which is exactly why nobody has one to copy.
         (written, Type::Row { .. }) if !matches!(written, Type::Row { .. }) => {
             format!(
-                "; `{written}` is a type and a row belongs here — write it \
-                 `{{ {written} }}`, the way an error row is written everywhere \
-                 else",
+                "; `{written}` is a type and a row belongs here. A row's entries are \
+                 labelled, and an error row labels each type with its own name — write \
+                 it `{{ {written}: {written} }}`. The bare name is right in a `raises` \
+                 clause and only a type argument needs the braces",
             )
         }
         _ => format!("; `{}` does not match `{}`", inner.0, inner.1),

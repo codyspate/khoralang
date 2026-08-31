@@ -108,6 +108,15 @@ pub struct ImplDef {
     /// The impl's own type parameters, which are what make `impl<A> Eq for
     /// Option<A>` cover every `A` without being a blanket impl.
     pub generics: Vec<String>,
+    /// What each of those parameters must itself implement.
+    ///
+    /// **Kept, because the impl is only as good as these.**
+    /// `impl<A: Show, E: Show> Show for Result<A, E>` says a `Result` can be
+    /// shown *when its two halves can*, and dropping the condition made
+    /// `Result<Int, UserError>` satisfy `Show` for a `UserError` that has
+    /// none. The checker passed and monomorphisation found it, which is the
+    /// check/build split roadmap 14.30 exists to close.
+    pub bounds: Vec<(String, Vec<String>)>,
     pub methods: Vec<String>,
     pub assoc_types: Vec<(String, Type)>,
     pub range: TextRange,
@@ -223,8 +232,41 @@ impl Traits {
     }
 
     /// Whether `ty` implements `trait_name`, following supertraits.
+    ///
+    /// **The impl's own bounds are part of the answer.** Finding
+    /// `impl<A: Show, E: Show> Show for Result<A, E>` by its head says a
+    /// `Result` *can* be shown; whether this one can depends on what is in it.
+    /// Without the second half, `Result<Int, UserError>` satisfied `Show` for a
+    /// `UserError` that had none, `khora check` passed, and the build failed at
+    /// the far end with `Show::show has no body` -- a message about the trait
+    /// rather than about the type, pointing at no line in particular.
     pub fn satisfies(&self, trait_name: &str, ty: &Type) -> bool {
-        self.find(trait_name, ty).is_some()
+        self.satisfied_within(trait_name, ty, 0)
+    }
+
+    /// The same question, with a depth to stop a cycle.
+    ///
+    /// A well-formed program cannot loop here -- each step is a *smaller* type,
+    /// since a bound is on a parameter of the head just matched -- but a
+    /// malformed one should get an error rather than a stack overflow, and this
+    /// runs on every hole in every file.
+    fn satisfied_within(&self, trait_name: &str, ty: &Type, depth: usize) -> bool {
+        const DEEPEST: usize = 32;
+        let Some(found) = self.find(trait_name, ty) else { return false };
+        if depth >= DEEPEST || found.bounds.is_empty() {
+            return true;
+        }
+        let bindings = bind_parameters(&found.self_type, ty, &found.generics);
+        found.bounds.iter().all(|(parameter, wanted)| {
+            let Some(actual) = bindings.get(parameter.as_str()) else { return true };
+            wanted.iter().all(|w| match actual {
+                // Not settled, still rigid, or downstream of an error already
+                // reported: the caller's own `satisfies` answers for these, and
+                // guessing here would blame the wrong expression.
+                Type::Unknown | Type::Var(_) | Type::Never | Type::Param(_) => true,
+                settled => self.satisfied_within(w, settled, depth + 1),
+            })
+        })
     }
 
     /// A method `ty` declares for itself, if it has one by that name.
@@ -346,10 +388,21 @@ pub fn collect(source: &ast::SourceFile, homes: &crate::TypeHomes) -> Traits {
                         Some((name, type_of_syntax(a.definition().as_ref(), &generics, homes)))
                     })
                     .collect();
+                let bounds: Vec<(String, Vec<String>)> = i
+                    .type_params()
+                    .iter()
+                    .flat_map(|p| p.params())
+                    .filter_map(|g| {
+                        let name = g.name()?.ident()?;
+                        let wanted = bound_names(g.bounds().as_ref());
+                        (!wanted.is_empty()).then_some((name, wanted))
+                    })
+                    .collect();
                 out.impls.push(ImplDef {
                     trait_name,
                     self_type,
                     generics,
+                    bounds,
                     methods,
                     assoc_types,
                     range: i.syntax().text_range(),
@@ -452,6 +505,30 @@ pub fn bound_names(bounds: Option<&ast::TypeBounds>) -> Vec<String> {
     bounds
         .map(|b| b.types().filter_map(|t| written_head(&t)).collect())
         .unwrap_or_default()
+}
+
+/// What an impl's parameters stand for, given the type it was found for.
+///
+/// `Result<A, E>` against `Result<Int, UserError>` gives `A = Int`,
+/// `E = UserError`. Positional and shallow, which is all a nominal resolution
+/// needs: the head has already matched, so only the arguments are in question.
+fn bind_parameters<'a>(
+    pattern: &Type,
+    concrete: &'a Type,
+    generics: &[String],
+) -> std::collections::HashMap<String, &'a Type> {
+    let mut out = std::collections::HashMap::new();
+    let (Type::Adt { args: from, .. }, Type::Adt { args: to, .. }) = (pattern, concrete) else {
+        return out;
+    };
+    for (slot, value) in from.iter().zip(to) {
+        if let Type::Param(name) = slot {
+            if generics.iter().any(|g| g == name) {
+                out.insert(name.clone(), value);
+            }
+        }
+    }
+    out
 }
 
 /// The head name of a written type: `Option` for `Option<Int>`.

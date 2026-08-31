@@ -936,14 +936,35 @@ fn a_type_where_a_row_belongs_is_told_to_use_braces() {
         "module m;\n\
          pub type Oops = | Bad;\n\
          pub type Holder<A, 'er> = { value: A };\n\
-         fn f(h: Holder<Int, { Oops }>) -> Holder<Int, Oops> { h }\n",
+         fn f(h: Holder<Int, { Oops: Oops }>) -> Holder<Int, Oops> { h }\n",
     );
     assert!(
         found.iter().any(|e| e.contains("is a type and a row belongs here")),
         "the mismatch must say which is which: {found:?}"
     );
     assert!(
-        found.iter().any(|e| e.contains("write it `{ Oops }`")),
+        found.iter().any(|e| e.contains("write it `{ Oops: Oops }`")),
         "and show the spelling: {found:?}"
     );
+}
+
+/// And the spelling it shows has to be the one that works.
+///
+/// **This test is the reason the hint was wrong for so long.** The one above
+/// asserted the message said `{ Oops }`, so the message said `{ Oops }`, and
+/// nothing anywhere checked that `{ Oops }` meant what the sentence claimed.
+/// It does not: a row's entries are labelled, so `{ Oops }` parses as a row
+/// whose *tail* is `Oops` and prints back as `{ | Oops }` -- following the
+/// advice produced the same error again, word for word, about a different
+/// type. A hint nobody can act on is worse than none, because it costs the
+/// reader the time to try it.
+#[test]
+fn the_spelling_the_hint_shows_is_accepted() {
+    let found = errors(
+        "module m;\n\
+         pub type Oops = | Bad;\n\
+         pub type Holder<A, 'er> = { value: A };\n\
+         fn f(h: Holder<Int, { Oops: Oops }>) -> Holder<Int, { Oops: Oops }> { h }\n",
+    );
+    assert!(found.is_empty(), "the hint's own spelling must type-check: {found:?}");
 }

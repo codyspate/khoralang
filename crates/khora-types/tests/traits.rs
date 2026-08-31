@@ -1058,3 +1058,57 @@ fn a_bound_message_names_the_function_the_way_it_is_written() {
         "no message may carry a `#`-prefixed key: {found:?}"
     );
 }
+
+// --- an impl's own bounds --------------------------------------------------
+
+/// A conditional impl only applies when its condition holds.
+///
+/// **`check` said yes and the build said no**, which is the split roadmap
+/// 14.30 exists to close. `Traits::find` matched
+/// `impl<A: Show, E: Show> Show for Result<A, E>` on the head name `Result`
+/// and stopped, so `Result<Int, Oops>` satisfied `Show` for an `Oops` that had
+/// none. Monomorphisation found it at the far end and said
+/// `Show::show has no body, so there is nothing to call` -- a message about
+/// the trait rather than the type, pointing at no useful line.
+const CONDITIONAL: &str = "module m;
+pub trait Show { fn show(self) -> String; }
+pub type Result<A, E> = | Ok(A) | Err(E);
+impl Show for Int { fn show(self) -> String { \"n\" } }
+impl<A: Show, E: Show> Show for Result<A, E> {
+  fn show(self) -> String { match self { Result::Ok(_v) => \"ok\", Result::Err(_e) => \"err\" } }
+}
+pub type Oops = | Bad;
+pub type Fine = | Good;
+impl Show for Fine { fn show(self) -> String { \"fine\" } }
+";
+
+#[test]
+fn a_conditional_impl_needs_its_condition() {
+    assert_reports(
+        &format!("{CONDITIONAL}fn f(r: Result<Int, Oops>) -> String {{ Show::show(r) }}\n"),
+        "Show",
+    );
+}
+
+/// And applies when it does hold, which is the half a stricter check could
+/// break.
+#[test]
+fn a_conditional_impl_applies_when_it_holds() {
+    assert_clean(&format!(
+        "{CONDITIONAL}fn f(r: Result<Int, Fine>) -> String {{ Show::show(r) }}\n"
+    ));
+}
+
+/// Nested, because the check has to recurse rather than look one level down.
+#[test]
+fn a_conditional_impl_looks_all_the_way_down() {
+    assert_reports(
+        &format!(
+            "{CONDITIONAL}fn f(r: Result<Int, Result<Int, Oops>>) -> String {{ Show::show(r) }}\n"
+        ),
+        "Show",
+    );
+    assert_clean(&format!(
+        "{CONDITIONAL}fn f(r: Result<Int, Result<Int, Fine>>) -> String {{ Show::show(r) }}\n"
+    ));
+}
