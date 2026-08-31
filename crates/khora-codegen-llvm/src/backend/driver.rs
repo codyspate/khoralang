@@ -468,7 +468,16 @@ fn merged_types(db: &dyn Db, files: &[SourceFile]) -> TypeMap {
             out.traits.traits.entry(name.clone()).or_insert_with(|| def.clone());
         }
         for imp in &map.traits.impls {
-            if !out.traits.impls.iter().any(|o| o.trait_name == imp.trait_name && o.head() == imp.head())
+            // By the *type*, not by its name. Two modules may each declare an
+            // `Entry`, and deduplicating on the name kept one impl and dropped
+            // the other -- so the call that needed the dropped one resolved to
+            // the trait's bodyless method. Errata 62, and the same shape as
+            // the variant rule above it.
+            if !out
+                .traits
+                .impls
+                .iter()
+                .any(|o| o.trait_name == imp.trait_name && o.target() == imp.target())
             {
                 out.traits.impls.push(imp.clone());
             }

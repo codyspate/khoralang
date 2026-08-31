@@ -2202,3 +2202,87 @@ rather than inventing a `build/` next to somebody's scratch file.
 Nobody was wrong to add `examples/**/src/*.pdb`; each addition fixed the
 `git status` in front of them. What nobody did was ask why the file existed, and
 the answer had been sitting in the file for four revisions.
+
+## 62. Two modules, one type name, and the impl that went missing
+
+`examples/ledger_service` stopped building when a record called `Entry` was
+added to `std::schema` -- a module it does not import and never mentions:
+
+```
+error: `Show::show` has no body, so there is nothing to call. Give it one, or
+       write `extern fn` if it is a C symbol to be found at link time
+   --> examples/ledger_service/src/main.kh:459:1
+    |
+459 |
+    | ^
+```
+
+Line 459 is the blank line at the end of the file. `khora check` passed.
+
+The first diagnosis, written down at the time, was that record types resolve
+*structurally* -- `std::core::Pair<K, V>` is `{ key: K, value: V }` and the new
+`Entry` was `{ key: String, value: Raw }`, so it looked as though the field set
+had picked the impl. That was wrong, and every attempt to reproduce it from
+that description compiled and ran correctly. `ledger_service` declares an
+`Entry` of its own. The collision was the **name**.
+
+### What actually happened
+
+An impl was identified by the head of its self type, as a bare string:
+
+```rust
+pub fn find(&self, trait_name: &str, ty: &Type) -> Option<&ImplDef> {
+    let head = head_of(ty)?;
+    self.impls.iter().find(|i| i.trait_name == trait_name && i.head() == Some(head))
+}
+```
+
+`head_of` gives `"Entry"` for both. Three places did the same thing, and each
+was wrong in its own way:
+
+1. **The whole-program merge** deduplicated impls on `(trait, head)`, so the
+   second `Show#Entry` was dropped before anything could look for it.
+2. **The search** returned the first impl whose head *spelled* the same. Its
+   parameters then failed to match the receiver, selection returned `None`, and
+   the call was emitted against the trait's own bodyless method -- which is the
+   message above.
+3. **The method key** is `Trait#Head::method` and names no module, so both
+   impls record a body under `Show#Entry::show`. Even with the right impl
+   chosen, the search for its body took whichever unit came first: after (1)
+   and (2) were fixed, the program compiled and printed `demo::store`'s answer
+   for a `demo::main::Entry`. A wrong answer is worse than the failure it
+   replaced, which is why fixing two of the three would have been the wrong
+   place to stop.
+
+The fix gives a type its full identity -- `ImplDef::target()` is the head *and*
+the module that declared it -- and gives the body search the module selection
+already worked out. The search prefers an impl whose self type actually matches
+the receiver and falls back to the old by-name answer when none does, so a
+receiver carrying no home resolves exactly as before.
+
+### Why the corpus never caught it
+
+A generic is what makes it visible. `List::shown` lives in `std::core`, is
+compiled once per type it is used at, and resolves the impl through the whole
+program -- which is the table the merge had pruned. Both same-named types have
+to exist, both have to have impls, and the call has to go through a generic in
+a third module that knows neither. The regression test in
+`crates/khora-codegen-llvm/tests/modules.rs` is built to that shape, and was
+checked against the old behaviour twice: once for the missing body, and once
+for the wrong answer.
+
+### What generalises
+
+**A name is not a type, and the compiler said so in a comment.**
+`ImplDef::head`'s own documentation reads "resolution is nominal, so this is a
+name and never a shape" -- which is true and beside the point. Nominal
+resolution needs the *whole* name, and a bare head is half of one. The rule the
+rest of the compiler already follows is written above the variant merge in
+`merged_types`, five lines from one of the three sites: *keyed by the
+declaration, not by the spelling*. Errata 46 learned it for variants and it did
+not travel to impls.
+
+**And a diagnosis nobody could reproduce was a diagnosis nobody had.** The
+structural-fields story survived a commit message and a roadmap entry because
+it explained the symptom. It took four failed reproductions to notice that none
+of them reproduced anything.

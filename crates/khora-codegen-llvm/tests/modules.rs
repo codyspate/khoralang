@@ -449,3 +449,82 @@ fn main() -> Int {
     assert_eq!(ran.stdout, "19\n0\n", "12 + 7, and nothing left alive: {}", ran.stdout);
     assert_eq!(ran.code, Some(0));
 }
+
+/// Two modules each declare an `Entry`, and each implements `Show` for its own.
+///
+/// **An impl belongs to a type, and a type is a name *and* where it lives.**
+/// Everything that deduplicated, merged or searched impls did it by the head's
+/// spelling alone, so the second `Show#Entry` was dropped at the whole-program
+/// merge and the search handed back the first one whatever the receiver was.
+/// Its parameters then failed to match, selection gave up, and the call came
+/// out as the trait's own bodyless `Show::show` -- reported as
+/// ``Show::show` has no body` against a blank line, in a program that had type
+/// checked. Errata 62.
+///
+/// The trait lives in a third module, which is the shape the bug was found in:
+/// `Show` is `std::core`'s, `Entry` is `std::schema`'s, and the application
+/// that broke had an `Entry` of its own and never mentioned `std::schema`.
+/// Both impls are used, so a fix that resolves one and breaks the other fails
+/// this rather than passing it.
+#[test]
+fn two_modules_may_each_declare_a_type_of_the_same_name() {
+    let ran = run(
+        "same_name_impls",
+        &[
+            (
+                "shows",
+                "module demo::shows;
+pub trait Show { fn show(self) -> String; }
+
+/// Generic, so it is compiled once per type it is used at -- and each of those
+/// types' impls lives in a module this one has never heard of.
+pub fn shown<A: Show>(value: A) -> String { Show::show(value) }
+",
+            ),
+            (
+                "store",
+                "module demo::store;
+import demo::shows::{Show, shown};
+
+pub type Entry = { key: String, value: Int };
+
+impl Show for Entry {
+  fn show(self) -> String { \"store \" + self.key }
+}
+
+pub fn describe() -> String {
+  let mine: Entry = { key: \"b\", value: 2 };
+  shown(mine)
+}
+",
+            ),
+            (
+                "main",
+                "module demo::main;
+import demo::shows::{Show, shown};
+import demo::store::{describe};
+
+fn print(value: String);
+
+/// The same name, a different module, a different impl.
+pub type Entry = { key: String, value: Int };
+
+impl Show for Entry {
+  fn show(self) -> String { \"main \" + self.key }
+}
+
+pub fn main() -> Int {
+  let here: Entry = { key: \"a\", value: 1 };
+  print(shown(here));
+  print(describe());
+  0
+}
+",
+            ),
+        ],
+    );
+    assert_eq!(ran.stdout, "main a
+store b
+", "each impl belongs to its own type");
+    assert_eq!(ran.code, Some(0));
+}

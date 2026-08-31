@@ -164,10 +164,19 @@ pub fn select_impl(types: &TypeMap, instance: &Instance) -> Option<Instance> {
         .collect();
     args.extend(instance.args.iter().skip(1).cloned());
 
-    // The module is the mention's; the caller replaces it with whichever
-    // module actually defines the impl.
+    // **The module is the type's, when the type has one.** A method key is
+    // `Trait#Head::method` and the head is a bare name, so two modules that
+    // each declare an `Entry` record two bodies under `Show#Entry::show` --
+    // and the search for one of them took whichever unit came first. The
+    // program then ran `demo::store`'s `show` on a `demo::main::Entry`.
+    //
+    // An impl is written beside the type it is for, which is what makes the
+    // type's home the right hint. It is a *hint*: `defining` falls back to its
+    // old search when no unit there has the body, so an impl written somewhere
+    // else still resolves the way it always did. Errata 62.
+    let module = traits::home_of(&imp.self_type).unwrap_or_else(|| instance.module.clone());
     Some(Instance {
-        module: instance.module.clone(),
+        module,
         function: traits::method_key(trait_name, &head, method),
         args,
     })
@@ -377,14 +386,14 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
                 function: callee.clone(),
                 args: resolved.clone(),
             };
-            let (name, args) = match select_impl_in(&whole, unit.types, &mention) {
-                Some(chosen) => (chosen.function, chosen.args),
-                None => (callee.clone(), resolved),
+            let (name, args, wrote_it) = match select_impl_in(&whole, unit.types, &mention) {
+                Some(chosen) => (chosen.function, chosen.args, Some(chosen.module)),
+                None => (callee.clone(), resolved, None),
             };
 
             // Which module defines it decides the symbol, and a name reached
             // through an import is defined somewhere this file never parsed.
-            match defining(&units, index, &name) {
+            match defining_in(&units, index, &name, wrote_it.as_ref()) {
                 Some((home, original)) => {
                     let target =
                         Instance { module: units[home].module.clone(), function: original, args };
@@ -408,6 +417,30 @@ fn walk(db: &dyn Db, files: &[SourceFile]) -> Instances {
     // Deterministic order: the same source must produce the same object file.
     out.instances.sort_by_key(|(i, _)| i.symbol());
     out
+}
+
+/// [`defining`], with the module that wrote the impl as a first guess.
+///
+/// **A method key does not name a module, and two modules may answer to it.**
+/// `Show#Entry::show` is the key for `impl Show for Entry` wherever `Entry` was
+/// declared, so a program with two `Entry`s has two bodies under one name and
+/// the search below returns whichever unit is earlier in the list. Selection
+/// had already worked out *which* impl this call wants; this is how that
+/// answer survives the lookup. Errata 62.
+fn defining_in(
+    units: &[Unit<'_>],
+    from: usize,
+    name: &str,
+    wrote_it: Option<&ModulePath>,
+) -> Option<(usize, String)> {
+    if let Some(home) = wrote_it {
+        if let Some(index) = units.iter().position(|u| &u.module == home) {
+            if units[index].body(name).is_some() {
+                return Some((index, name.to_string()));
+            }
+        }
+    }
+    defining(units, from, name)
 }
 
 /// Which unit defines `name`, as seen from the unit at `from`, and what that

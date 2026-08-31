@@ -136,6 +136,24 @@ impl ImplDef {
     pub fn head(&self) -> Option<String> {
         head_of(&self.self_type)
     }
+
+    /// The type this impl is *for*: its name, and the module that declared it.
+    ///
+    /// **The head alone is not a type.** `impl Show for Entry` in two modules
+    /// is two impls for two types, and everything that deduplicated,
+    /// merged or searched impls by head treated them as one -- so a program
+    /// holding `std::schema::Entry` and its own `Entry` kept whichever was
+    /// seen first and lost the other. The one that survived did not match the
+    /// receiver, so the call fell back to the trait's own bodyless method and
+    /// the build ended with ``Show::show` has no body` pointing at a blank
+    /// line. Errata 62.
+    ///
+    /// `None` for a home nothing recorded, which is not a name collision but
+    /// the absence of information: a type with no home compares equal to
+    /// another with no home, which is the old behaviour and the right default.
+    pub fn target(&self) -> Option<(String, Option<khora_hir::ModulePath>)> {
+        Some((self.head()?, home_of(&self.self_type)))
+    }
 }
 
 /// The head constructor of a type, or `None` for one that has no name.
@@ -153,6 +171,20 @@ pub fn head_of(ty: &Type) -> Option<String> {
         // An application whose head is already a constructor names that
         // constructor; one whose head is still a variable names nothing yet.
         Type::Applied { head, .. } => head_of(head),
+        _ => None,
+    }
+}
+
+/// Which module declared the type at the head of `ty`, if it is one that
+/// carries a home.
+///
+/// Half of a type's identity. [`head_of`] is the other half, and on its own it
+/// is not enough: a program with two types named `Entry` has two, and an impl
+/// belongs to exactly one of them.
+pub fn home_of(ty: &Type) -> Option<khora_hir::ModulePath> {
+    match ty {
+        Type::Adt { home, .. } => home.clone(),
+        Type::Applied { head, .. } => home_of(head),
         _ => None,
     }
 }
@@ -208,9 +240,29 @@ impl Traits {
     /// which impl applies is not yet known.
     pub fn find(&self, trait_name: &str, ty: &Type) -> Option<&ImplDef> {
         let head = head_of(ty)?;
-        self.impls
+        let named = self
+            .impls
             .iter()
-            .find(|i| i.trait_name == trait_name && i.head().as_deref() == Some(head.as_str()))
+            .filter(|i| i.trait_name == trait_name && i.head().as_deref() == Some(head.as_str()));
+
+        // **The first impl whose type is the receiver's, not the first whose
+        // name is.** Two modules may each declare an `Entry`, and this used to
+        // hand back whichever was recorded first: the caller then failed to
+        // match its parameters against the receiver, gave up, and emitted a
+        // call to the trait's own bodyless method. Errata 62.
+        let mut fallback = None;
+        for imp in named {
+            let mut solved = std::collections::HashMap::new();
+            if crate::unify::match_params(&imp.self_type, ty, &imp.generics, &mut solved) {
+                return Some(imp);
+            }
+            // Kept in case nothing matches. A receiver carrying no home, or a
+            // self type this cannot line up with, is the case that resolved by
+            // name before and still should: refusing here would turn a working
+            // program into `has no body`, which is the failure being fixed.
+            fallback.get_or_insert(imp);
+        }
+        fallback
     }
 
     /// Every `type Name = Value` the impls in scope declare, in the shape the
@@ -822,7 +874,7 @@ pub fn check(
         // message has to say where the first is or it is not actionable.
         if let Some(first) = traits.impls[..i]
             .iter()
-            .find(|o| o.trait_name == imp.trait_name && o.head() == imp.head())
+            .find(|o| o.trait_name == imp.trait_name && o.target() == imp.target())
         {
             let what = imp.head().unwrap_or_else(|| "this type".to_string());
             errors.push(HirError {
