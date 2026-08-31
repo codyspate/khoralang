@@ -18,6 +18,7 @@ The current standard library includes APIs for:
 - the environment, in [`std::env`](/docs/stdlib/api/env/);
 - randomness, in [`std::random`](/docs/stdlib/api/random/);
 - clocks and sleeping, in [`std::clock`](/docs/stdlib/api/clock/);
+- describing and decoding untrusted input, in [`std::schema`](/docs/stdlib/api/schema/);
 - typed configuration, in [`std::config`](/docs/stdlib/api/config/);
 - retries and backoff schedules, in [`std::resilience`](/docs/stdlib/api/resilience/);
 - civil dates and offsets, in [`std::time`](/docs/stdlib/api/time/);
@@ -43,6 +44,8 @@ Three of those are new and easy to miss:
 `std::config` reads settings out of the environment, types them, and reports *every* bad key in one pass rather than one restart per key. See [the cookbook recipe](/docs/cookbook/configuration/).
 
 `std::resilience` holds `Schedule`, `retry`, `retry_while` and `repeat`, which used to be a bare attempt counter in `std::core`. See [Retrying a flaky call](/docs/cookbook/retrying/).
+
+`std::schema` describes the shape of a value once and decodes it from anywhere. It is the newest, and the one that changes how the others are meant to be used: a `Schema<Settings>` reads the same settings from the environment, from a request body or from a test fixture, because the description does not know where the bytes came from. See [Decode untrusted input](/docs/cookbook/decoding-input/).
 
 ## What belongs in `std`
 

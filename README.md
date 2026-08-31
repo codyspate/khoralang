@@ -164,11 +164,18 @@ different shape, kept in the suite so the layering stays true.
   content-addressed store means two packages with identical contents are one
   directory — but there is nothing to `khora publish` to, and no version
   solving, because every source names one exact thing.
-- **The language server answers two questions.** Diagnostics and hover.
-  Completion, rename and capability inlay hints are not written.
-- **The linter has two lints**, both deliberately narrow: an expression that
-  cannot do anything and is discarded, and a capability a body cannot be
-  using. Each declines the interesting cases rather than guess.
+- **The language server is the compiler's own queries.** Diagnostics, hover,
+  completion, go-to-definition, references, rename, document symbols, inlay
+  hints, code actions, signature help, semantic tokens and formatting — each
+  answered by the same query `khora check` uses, so the editor and the build
+  cannot disagree. What it does not do is anything cross-package, because
+  packages resolve by path.
+- **The linter has twelve lints**, each deliberately narrow and each declining
+  the interesting cases rather than guessing: `dangling-expression`,
+  `discarded-result`, `inconsistent-constructor`, `misplaced-main`,
+  `reference-cycle`, `undocumented-export`, `unknown-allow`, `unreachable-code`,
+  `unused-binding`, `unused-capability`, `unused-import`, `useless-allow`. Two
+  default to `allow`; the manifest raises them.
 
 ### Pinning a compiler
 
@@ -191,8 +198,9 @@ khora toolchain link 0.2.0 ./target/debug/khora
 khora toolchain which                     # what this directory would use, and why
 ```
 
-There is no `install`: nothing exists to download from yet. `link` registers a
-build you already have, which is what two checkouts of this repository need.
+`link` registers a build you already have, which is what two checkouts of this
+repository need. The installer at the top of this file fetches a release
+instead; `link` is for the build in your own `target/`.
 
 ### For an AI coding agent
 
@@ -356,7 +364,7 @@ docs/
   grammar.ebnf         the implemented grammar
   errata.md            where the specification was wrong, and what was done
 std/                   the standard library, written in Khora
-examples/              three reference applications
+examples/              four reference applications
 bench/                 four servers and a load generator; see bench/README.md
 scripts/
   setup-llvm.sh        installs LLVM 22.1.8 and writes .cargo/config.toml

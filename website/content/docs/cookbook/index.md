@@ -14,6 +14,7 @@ Start with the recipe closest to the problem you are solving:
 - [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) — register a job with a region before the first `!` after it, so a cancellation cannot drop work nobody knows the fiber was holding.
 - [Bound concurrent work](/docs/cookbook/bounded-concurrency/) — use `Fiber`, `Nursery`, and `bounded_nursery` to turn a concurrency limit into backpressure.
 - [Make resource cleanup cancellation-safe](/docs/cookbook/cancellation-safe-resources/) — pair `scoped` and `acquire` so cleanup runs on return, failure, and cancellation.
+- [Decode untrusted input](/docs/cookbook/decoding-input/) — describe a value's shape once with `std::schema`, decode it from anywhere, and report every bad field at once.
 - [Load application configuration](/docs/cookbook/configuration/) — read settings with `std::config`, report every bad key at once, and keep secrets out of the logs with `Redacted`.
 - [Retry a flaky call](/docs/cookbook/retrying/) — pick a `Schedule`, drive it with `retry_while`, and test the whole thing in under a millisecond.
 - [Test code that uses capabilities](/docs/cookbook/testing-capabilities/) — supply deterministic handlers without global mutation or test-only branches in application code.

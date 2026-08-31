@@ -55,6 +55,7 @@ pub type Raw =
 A value as a source handed it over, before anything has been asked of it.
 
 A record's fields are `Pair`s rather than a type of this module's own.
+
 **A record type is resolved by the set of its field names**, so a
 `{ key: String, value: Raw }` declared here *is* `std::core::Pair` as far
 as trait resolution is concerned -- and declaring the twin broke `Show` for
