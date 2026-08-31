@@ -37,6 +37,7 @@
 mod completion;
 mod definition;
 mod fixes;
+mod imports;
 mod hints;
 mod position;
 mod references;
@@ -610,6 +611,11 @@ impl Server {
             .unwrap_or_default();
 
         let mut out = Vec::new();
+        // **Titles already offered.** Two diagnostics on one line often name
+        // the same missing type -- `cannot resolve `List::length`` and
+        // ``[a, b, c]` builds a `List`` both do -- and the same action twice
+        // in the lightbulb menu reads as a bug in the editor.
+        let mut already: Vec<String> = Vec::new();
         for diagnostic in reported {
             let Some(range) = range_of(&diagnostic, index, self.encoding) else { continue };
             let message = diagnostic.get("message").and_then(Value::as_str).unwrap_or_default();
@@ -617,7 +623,23 @@ impl Server {
             let covered = text.get(usize::from(range.start())..usize::from(range.end()))?;
             let enclosing = enclosing_signature(&tree, range.start());
 
-            for fix in fixes::for_diagnostic(message, code, range, covered, enclosing.as_ref()) {
+            // **The import first**, because when a name is not in scope it is
+            // almost always the only fix anybody wants, and an editor offers
+            // the first action on the keystroke.
+            let mut offered = self.import_fixes(file, &tree, text, message);
+            offered.extend(fixes::for_diagnostic(
+                message,
+                code,
+                range,
+                covered,
+                enclosing.as_ref(),
+            ));
+
+            for fix in offered {
+                if already.iter().any(|seen| seen == &fix.title) {
+                    continue;
+                }
+                already.push(fix.title.clone());
                 out.push(json!({
                     "title": fix.title,
                     "kind": "quickfix",
@@ -635,6 +657,42 @@ impl Server {
             }
         }
         Some(Value::Array(out))
+    }
+
+    /// The imports that would bring a diagnostic's unresolved names into scope.
+    ///
+    /// One action per module that exports the name, because an ambiguous name
+    /// is the reader's decision and guessing it would be the wrong kind of
+    /// help. Nothing is offered when the name is already in scope, so an
+    /// unrelated diagnostic that happens to quote a familiar type costs a
+    /// lookup and adds no noise.
+    fn import_fixes(
+        &self,
+        file: SourceFile,
+        tree: &khora_syntax::SyntaxNode,
+        text: &str,
+        message: &str,
+    ) -> Vec<fixes::Fix> {
+        let names = imports::mentioned(message);
+        if names.is_empty() {
+            return Vec::new();
+        }
+        let here = khora_hir::module_api(&self.db, file)
+            .module
+            .as_ref()
+            .map(|m| m.to_string())
+            .unwrap_or_default();
+        let known: Vec<SourceFile> = self.files.values().copied().collect();
+
+        let mut out = Vec::new();
+        for name in names {
+            for module in imports::providers(&self.db, &known, &name, &here) {
+                if let Some(fix) = imports::edit(tree, text, &module, &name) {
+                    out.push(fix);
+                }
+            }
+        }
+        out
     }
 
     /// What each call costs, shown after the call.
