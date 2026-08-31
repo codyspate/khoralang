@@ -808,10 +808,19 @@ is the thing Rust's trait system cannot say.
 #### map
 
 ```khora
-fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>
+fn map<A, B, 'ef, 'er>(self: Self<A>, f: (A) -> B with 'ef raises 'er) -> Self<B> with 'ef raises 'er
 ```
 
 Every element replaced by `f` of it, in the same shape.
+
+**`f` may fail and may need capabilities**, and the rows say so rather
+than the signature quietly forbidding it. Without them the only way to
+map a fallible function over a container was to write the walk out by
+hand, which for a language whose headline is typed failure is the
+collection library and the failure system declining to compose.
+
+Variables, so nothing that maps a pure function has to change: they
+instantiate empty and the call site keeps its shape.
 
 ### Applicative
 
@@ -1029,7 +1038,7 @@ when producing it is expensive.
 #### unwrap_or_else
 
 ```khora
-pub fn unwrap_or_else(self, fallback: () -> A) -> A
+pub fn unwrap_or_else<'ef, 'er>(self, fallback: () -> A with 'ef raises 'er) -> A with 'ef raises 'er
 ```
 
 The value, or the result of calling `fallback`.
@@ -1050,7 +1059,7 @@ chain.
 #### and_then
 
 ```khora
-pub fn and_then<B>(self, f: (A) -> Option<B>) -> Option<B>
+pub fn and_then<B, 'ef, 'er>(self, f: (A) -> Option<B> with 'ef raises 'er) -> Option<B> with 'ef raises 'er
 ```
 
 The next step, when it can also come to nothing.
@@ -1067,7 +1076,7 @@ without this each is a `match` inside the previous one --
 #### filter
 
 ```khora
-pub fn filter(self, wanted: (A) -> Bool) -> Option<A>
+pub fn filter<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Option<A> with 'ef raises 'er
 ```
 
 The value if it is there *and* `wanted` says so, and nothing otherwise.
@@ -1121,7 +1130,7 @@ Discards the error, which is the one direction that cannot fail.
 #### map_err
 
 ```khora
-pub fn map_err<F>(self, f: (E) -> F) -> Result<A, F>
+pub fn map_err<F, 'ef, 'er>(self, f: (E) -> F with 'ef raises 'er) -> Result<A, F> with 'ef raises 'er
 ```
 
 Rewrites the error and leaves the value alone.
@@ -1133,7 +1142,7 @@ whatever was reached to answer it.
 #### map
 
 ```khora
-pub fn map<B>(self, f: (A) -> B) -> Result<B, E>
+pub fn map<B, 'ef, 'er>(self, f: (A) -> B with 'ef raises 'er) -> Result<B, E> with 'ef raises 'er
 ```
 
 Rewrites the value and leaves the error alone.
@@ -1149,7 +1158,7 @@ method.
 #### and_then
 
 ```khora
-pub fn and_then<B>(self, f: (A) -> Result<B, E>) -> Result<B, E>
+pub fn and_then<B, 'ef, 'er>(self, f: (A) -> Result<B, E> with 'ef raises 'er) -> Result<B, E> with 'ef raises 'er
 ```
 
 The next step, when it can fail the same way.
@@ -1463,7 +1472,7 @@ what `concat` in a loop does quadratically. This is the "at the end".
 #### fold
 
 ```khora
-pub fn fold<B>(self, start: B, step: (B, A) -> B) -> B
+pub fn fold<B, 'ef, 'er>(self, start: B, step: (B, A) -> B with 'ef raises 'er) -> B with 'ef raises 'er
 ```
 
 Combines every element into one value, left to right.
@@ -1474,7 +1483,7 @@ element. Summing is `fold(0, fn (a, b) => a + b)`.
 #### any
 
 ```khora
-pub fn any(self, wanted: (A) -> Bool) -> Bool
+pub fn any<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Bool with 'ef raises 'er
 ```
 
 Whether any element satisfies `wanted`.
@@ -1486,7 +1495,7 @@ Whether any element satisfies `wanted`.
 #### all
 
 ```khora
-pub fn all(self, wanted: (A) -> Bool) -> Bool
+pub fn all<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Bool with 'ef raises 'er
 ```
 
 Whether every element satisfies `wanted`. Stops at the first that does not.
@@ -1498,7 +1507,7 @@ asking the whole, and that fails at the empty case under any other rule.
 #### find
 
 ```khora
-pub fn find(self, wanted: (A) -> Bool) -> Option<A>
+pub fn find<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Option<A> with 'ef raises 'er
 ```
 
 The first element satisfying `wanted`, or nothing.
@@ -1542,7 +1551,7 @@ The last element, or nothing.
 #### filter
 
 ```khora
-pub fn filter(self, keep: (A) -> Bool) -> List<A>
+pub fn filter<'ef, 'er>(self, keep: (A) -> Bool with 'ef raises 'er) -> List<A> with 'ef raises 'er
 ```
 
 The elements `keep` accepts, in the order they were in.
@@ -1581,7 +1590,7 @@ crash, which is the most any sort can promise about a broken comparison.
 #### partition
 
 ```khora
-pub fn partition(self, wanted: (A) -> Bool) -> Parts<A>
+pub fn partition<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Parts<A> with 'ef raises 'er
 ```
 
 The elements `wanted` accepts and the ones it does not, in one walk.
@@ -1618,7 +1627,7 @@ impl<A> List<A>
 #### flat_map
 
 ```khora
-pub fn flat_map<B>(self, step: (A) -> List<B>) -> List<B>
+pub fn flat_map<B, 'ef, 'er>(self, step: (A) -> List<B> with 'ef raises 'er) -> List<B> with 'ef raises 'er
 ```
 
 Each element's list, laid end to end.
@@ -4688,7 +4697,7 @@ impl Functor for Option
 #### map
 
 ```khora
-fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B>
+fn map<A, B, 'ef, 'er>(self: Option<A>, f: (A) -> B with 'ef raises 'er) -> Option<B> with 'ef raises 'er
 ```
 
 ### Applicative for Option
@@ -4730,7 +4739,7 @@ impl Functor for List
 #### map
 
 ```khora
-fn map<A, B>(self: List<A>, f: (A) -> B) -> List<B>
+fn map<A, B, 'ef, 'er>(self: List<A>, f: (A) -> B with 'ef raises 'er) -> List<B> with 'ef raises 'er
 ```
 
 Each element through `f`, in order.

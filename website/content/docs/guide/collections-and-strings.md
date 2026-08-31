@@ -33,14 +33,16 @@ let doubled = numbers
   |> List::map(fn value => value * 2);
 ```
 
-An effectful or fallible function can be mapped directly because function types carry their own capability and failure rows:
+An effectful or fallible function can be mapped directly because function types carry their own capability and failure rows, and the combinators carry the caller's:
 
 ```khora
 let users = ids
-  |> List::map(fn id => load_user(id)!);
+  |> List::map(fn id => load_user(id)!)!;
 ```
 
-That form propagates the first `UserError`. To process every element and retain each failure as data, convert the failure channel with `attempt`:
+Two marks, and they are doing different jobs. The inner one is `load_user` failing; the outer one is `List::map` passing that failure on, which it can only do because its own signature says `raises 'er`. Every combinator that takes a function is written that way -- `fold`, `filter`, `find`, `any`, `all`, `partition`, `flat_map`, and the same on `Option` and `Result` -- so a fallible step never means leaving the chain to write the walk by hand. Mapping a *pure* function needs neither mark, because an empty row is what a variable takes when nothing fills it.
+
+That form propagates the first `UserError` and stops there. To process every element and retain each failure as data, convert the failure channel with `attempt`:
 
 ```khora
 let results = ids

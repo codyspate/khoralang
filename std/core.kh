@@ -413,8 +413,11 @@ impl<A> Option<A> {
   /// The closure is called only when there is nothing, which is the whole
   /// difference from `unwrap_or` — reach for this when producing the fallback
   /// costs something.
-  pub fn unwrap_or_else(self, fallback: () -> A) -> A {
-    match self { Option::Some(v) => v, Option::None => fallback() }
+  pub fn unwrap_or_else<'ef, 'er>(self, fallback: () -> A with 'ef raises 'er) -> A
+    with 'ef
+    raises 'er
+  {
+    match self { Option::Some(v) => v, Option::None => fallback()! }
   }
 
   /// Turns absence into a failure, which is how an `Option` joins a `raises`
@@ -433,8 +436,11 @@ impl<A> Option<A> {
   /// out of positional fields is one lookup that may fail per field, and
   /// without this each is a `match` inside the previous one --
   /// `examples/link_shortener` nested six deep before this existed.
-  pub fn and_then<B>(self, f: (A) -> Option<B>) -> Option<B> {
-    match self { Option::Some(v) => f(v), Option::None => Option::None }
+  pub fn and_then<B, 'ef, 'er>(self, f: (A) -> Option<B> with 'ef raises 'er) -> Option<B>
+    with 'ef
+    raises 'er
+  {
+    match self { Option::Some(v) => f(v)!, Option::None => Option::None }
   }
 
   /// The value if it is there *and* `wanted` says so, and nothing otherwise.
@@ -442,9 +448,12 @@ impl<A> Option<A> {
   /// The bridge from a predicate back into the chain: `find` gives an
   /// `Option`, and asking a second question about what it found should not
   /// mean leaving the chain to ask it.
-  pub fn filter(self, wanted: (A) -> Bool) -> Option<A> {
+  pub fn filter<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Option<A>
+    with 'ef
+    raises 'er
+  {
     match self {
-      Option::Some(v) => if wanted(v) { Option::Some(v) } else { Option::None },
+      Option::Some(v) => if wanted(v)! { Option::Some(v) } else { Option::None },
       Option::None => Option::None,
     }
   }
@@ -476,8 +485,11 @@ impl<A, E> Result<A, E> {
   /// What a function does at the edge of its own vocabulary: a caller should
   /// see the failure in terms of what *they* asked for, not in terms of
   /// whatever was reached to answer it.
-  pub fn map_err<F>(self, f: (E) -> F) -> Result<A, F> {
-    match self { Result::Ok(v) => Result::Ok(v), Result::Err(e) => Result::Err(f(e)) }
+  pub fn map_err<F, 'ef, 'er>(self, f: (E) -> F with 'ef raises 'er) -> Result<A, F>
+    with 'ef
+    raises 'er
+  {
+    match self { Result::Ok(v) => Result::Ok(v), Result::Err(e) => Result::Err(f(e)!) }
   }
 
   /// Rewrites the value and leaves the error alone.
@@ -489,8 +501,11 @@ impl<A, E> Result<A, E> {
   /// An `impl Functor for Result<_, E>` needs partial application of a type
   /// constructor, which this language does not have and does not need for one
   /// method.
-  pub fn map<B>(self, f: (A) -> B) -> Result<B, E> {
-    match self { Result::Ok(v) => Result::Ok(f(v)), Result::Err(e) => Result::Err(e) }
+  pub fn map<B, 'ef, 'er>(self, f: (A) -> B with 'ef raises 'er) -> Result<B, E>
+    with 'ef
+    raises 'er
+  {
+    match self { Result::Ok(v) => Result::Ok(f(v)!), Result::Err(e) => Result::Err(e) }
   }
 
   /// The next step, when it can fail the same way.
@@ -498,8 +513,11 @@ impl<A, E> Result<A, E> {
   /// The error type is shared, which is what makes this a chain rather than a
   /// pair of unrelated failures: a step that fails differently says so with
   /// `map_err` first, and the conversion is visible at the place it happens.
-  pub fn and_then<B>(self, f: (A) -> Result<B, E>) -> Result<B, E> {
-    match self { Result::Ok(v) => f(v), Result::Err(e) => Result::Err(e) }
+  pub fn and_then<B, 'ef, 'er>(self, f: (A) -> Result<B, E> with 'ef raises 'er) -> Result<B, E>
+    with 'ef
+    raises 'er
+  {
+    match self { Result::Ok(v) => f(v)!, Result::Err(e) => Result::Err(e) }
   }
 }
 
@@ -1053,14 +1071,17 @@ impl<A> List<A> {
   ///
   /// `step` is called with what has been accumulated so far and the next
   /// element. Summing is `fold(0, fn (a, b) => a + b)`.
-  pub fn fold<B>(self, start: B, step: (B, A) -> B) -> B {
+  pub fn fold<B, 'ef, 'er>(self, start: B, step: (B, A) -> B with 'ef raises 'er) -> B
+    with 'ef
+    raises 'er
+  {
     let mut carried = start;
     let mut rest = self;
     let mut walking = true;
     while walking {
       match rest {
         List::Nil => { walking = false; },
-        List::Cons(head, tail) => { carried = step(carried, head); rest = tail; },
+        List::Cons(head, tail) => { carried = step(carried, head)!; rest = tail; },
       }
     };
     carried
@@ -1071,7 +1092,10 @@ impl<A> List<A> {
   /// **Stops at the first one**, which is what makes it worth having over a
   /// `fold`: a fold visits everything, and the whole point of asking whether
   /// *any* element matches is that the answer often arrives early.
-  pub fn any(self, wanted: (A) -> Bool) -> Bool {
+  pub fn any<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Bool
+    with 'ef
+    raises 'er
+  {
     let mut found = false;
     let mut rest = self;
     let mut walking = true;
@@ -1079,7 +1103,7 @@ impl<A> List<A> {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) =>
-          if wanted(head) { found = true; walking = false; } else { rest = tail; },
+          if wanted(head)! { found = true; walking = false; } else { rest = tail; },
       }
     };
     found
@@ -1090,7 +1114,10 @@ impl<A> List<A> {
   /// True of the empty list, which is the convention that makes `all` compose:
   /// splitting a list in two and asking each half gives the same answer as
   /// asking the whole, and that fails at the empty case under any other rule.
-  pub fn all(self, wanted: (A) -> Bool) -> Bool {
+  pub fn all<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Bool
+    with 'ef
+    raises 'er
+  {
     let mut holds = true;
     let mut rest = self;
     let mut walking = true;
@@ -1098,14 +1125,17 @@ impl<A> List<A> {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) =>
-          if wanted(head) { rest = tail; } else { holds = false; walking = false; },
+          if wanted(head)! { rest = tail; } else { holds = false; walking = false; },
       }
     };
     holds
   }
 
   /// The first element satisfying `wanted`, or nothing.
-  pub fn find(self, wanted: (A) -> Bool) -> Option<A> {
+  pub fn find<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Option<A>
+    with 'ef
+    raises 'er
+  {
     let mut answer = Option::None;
     let mut rest = self;
     let mut walking = true;
@@ -1113,7 +1143,7 @@ impl<A> List<A> {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) =>
-          if wanted(head) { answer = Option::Some(head); walking = false; } else { rest = tail; },
+          if wanted(head)! { answer = Option::Some(head); walking = false; } else { rest = tail; },
       }
     };
     answer
@@ -1190,7 +1220,10 @@ impl<A> List<A> {
   ///
   /// `filter` then `map` is two walks; `fold` is one, and is what to reach for
   /// when that matters.
-  pub fn filter(self, keep: (A) -> Bool) -> List<A> {
+  pub fn filter<'ef, 'er>(self, keep: (A) -> Bool with 'ef raises 'er) -> List<A>
+    with 'ef
+    raises 'er
+  {
     let mut kept = List::Nil;
     let mut rest = self;
     let mut walking = true;
@@ -1198,7 +1231,7 @@ impl<A> List<A> {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) => {
-          if keep(head) { kept = List::Cons(head, kept); };
+          if keep(head)! { kept = List::Cons(head, kept); };
           rest = tail;
         },
       }
@@ -1292,7 +1325,10 @@ impl<A> List<A> {
   /// walks twice and calls the question twice per element -- which is wrong
   /// when the question is expensive and wrong in a different way when it is
   /// not pure. Both sides keep the order they were given.
-  pub fn partition(self, wanted: (A) -> Bool) -> Parts<A> {
+  pub fn partition<'ef, 'er>(self, wanted: (A) -> Bool with 'ef raises 'er) -> Parts<A>
+    with 'ef
+    raises 'er
+  {
     let mut kept = List::Nil;
     let mut rest = List::Nil;
     let mut walking = true;
@@ -1301,7 +1337,7 @@ impl<A> List<A> {
       match left {
         List::Nil => { walking = false; },
         List::Cons(head, tail) => {
-          if wanted(head) { kept = List::Cons(head, kept); } else { rest = List::Cons(head, rest); };
+          if wanted(head)! { kept = List::Cons(head, kept); } else { rest = List::Cons(head, rest); };
           left = tail;
         },
       }
@@ -1504,7 +1540,10 @@ impl<A> List<A> {
   /// `map` and then a flatten, written as one pass because the intermediate
   /// list of lists is the only thing the two-step version allocates that
   /// nobody wants.
-  pub fn flat_map<B>(self, step: (A) -> List<B>) -> List<B> {
+  pub fn flat_map<B, 'ef, 'er>(self, step: (A) -> List<B> with 'ef raises 'er) -> List<B>
+    with 'ef
+    raises 'er
+  {
     let mut out = List::Nil;
     let mut rest = self;
     let mut walking = true;
@@ -1514,7 +1553,7 @@ impl<A> List<A> {
         List::Cons(head, tail) => {
           // Reversed onto the accumulator, so the whole thing is reversed once
           // at the end rather than concatenated at every step.
-          out = List::reverse_onto(step(head), out);
+          out = List::reverse_onto(step(head)!, out);
           rest = tail;
         },
       }
@@ -1592,7 +1631,18 @@ impl<A> Iterator for List<A> {
 /// is the thing Rust's trait system cannot say.
 pub trait Functor {
   /// Every element replaced by `f` of it, in the same shape.
-  fn map<A, B>(self: Self<A>, f: (A) -> B) -> Self<B>;
+  ///
+  /// **`f` may fail and may need capabilities**, and the rows say so rather
+  /// than the signature quietly forbidding it. Without them the only way to
+  /// map a fallible function over a container was to write the walk out by
+  /// hand, which for a language whose headline is typed failure is the
+  /// collection library and the failure system declining to compose.
+  ///
+  /// Variables, so nothing that maps a pure function has to change: they
+  /// instantiate empty and the call site keeps its shape.
+  fn map<A, B, 'ef, 'er>(self: Self<A>, f: (A) -> B with 'ef raises 'er) -> Self<B>
+    with 'ef
+    raises 'er;
 }
 
 /// `pure` lifts a value; `map2` combines two containers. `map2` rather than
@@ -1624,9 +1674,12 @@ pub trait Traversable: Functor {
 }
 
 impl Functor for Option {
-  fn map<A, B>(self: Option<A>, f: (A) -> B) -> Option<B> {
+  fn map<A, B, 'ef, 'er>(self: Option<A>, f: (A) -> B with 'ef raises 'er) -> Option<B>
+    with 'ef
+    raises 'er
+  {
     match self {
-      Option::Some(v) => Option::Some(f(v)),
+      Option::Some(v) => Option::Some(f(v)!),
       Option::None => Option::None,
     }
   }
@@ -1668,14 +1721,17 @@ impl Functor for List {
   /// was and `f` is called in that order too. That matters when `f` has
   /// effects: `map` over a list of requests should make them in the order the
   /// list is in.
-  fn map<A, B>(self: List<A>, f: (A) -> B) -> List<B> {
+  fn map<A, B, 'ef, 'er>(self: List<A>, f: (A) -> B with 'ef raises 'er) -> List<B>
+    with 'ef
+    raises 'er
+  {
     let mut out = List::Nil;
     let mut rest = self;
     let mut walking = true;
     while walking {
       match rest {
         List::Nil => { walking = false; },
-        List::Cons(head, tail) => { out = List::Cons(f(head), out); rest = tail; },
+        List::Cons(head, tail) => { out = List::Cons(f(head)!, out); rest = tail; },
       }
     };
     List::reverse(out)
