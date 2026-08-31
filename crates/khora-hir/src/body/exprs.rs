@@ -379,10 +379,46 @@ impl<'a> Ctx<'a> {
             return self.lower_expr(e);
         }
 
-        let local = self.declare(only.clone(), false, range);
+        self.invented_capability(only, range)
+    }
+
+    /// The local standing for a capability this lambda takes as evidence.
+    ///
+    /// Reuses the one an earlier mention invented, and that is the whole of
+    /// the function. `declare` files a name in the innermost lexical scope, so
+    /// a first mention inside a nested block left scope with that block, the
+    /// next mention looked it up and found nothing, and the lambda came out
+    /// with two evidence entries for one capability object -- which the frame
+    /// then released twice:
+    ///
+    /// ```text
+    /// nursery(fn () => {
+    ///   { nursery.adopt(Fiber::spawn(..)); };
+    ///   nursery.adopt(Fiber::spawn(..));
+    /// });
+    /// ```
+    ///
+    /// A hundred percent `drop of an object whose refcount is already zero`,
+    /// debug and release. The nested block never had to run: `if false { .. }`
+    /// crashed too, because inventing the binding is something lowering does
+    /// and lowering visits both arms. Two mentions in the *same* scope were
+    /// always fine, which is why "spawn consumers, then spawn producers" was
+    /// the shape that found it.
+    fn invented_capability(&mut self, label: &str, range: TextRange) -> ExprId {
+        let known = self.lambda_evidence.last().and_then(|open| {
+            let (_, pat) = open.iter().find(|(l, _)| l == label)?;
+            match self.body.pat(*pat) {
+                Pat::Bind(local) => Some(*local),
+                _ => None,
+            }
+        });
+        if let Some(local) = known {
+            return self.add_expr(Expr::Local(local), range);
+        }
+        let local = self.declare(label.to_string(), false, range);
         let pat = self.add_pat(Pat::Bind(local), range);
         if let Some(open) = self.lambda_evidence.last_mut() {
-            open.push((only.clone(), pat));
+            open.push((label.to_string(), pat));
         }
         self.add_expr(Expr::Local(local), range)
     }
@@ -483,12 +519,7 @@ impl<'a> Ctx<'a> {
             // row to be resolved against later, so an unresolved name is what
             // it has always been.
             if !self.lambdas.is_empty() {
-                let local = self.declare(only.clone(), false, range);
-                let pat = self.add_pat(Pat::Bind(local), range);
-                if let Some(open) = self.lambda_evidence.last_mut() {
-                    open.push((only.clone(), pat));
-                }
-                return self.add_expr(Expr::Local(local), range);
+                return self.invented_capability(only, range);
             }
             self.error(format!("cannot find `{only}` in this scope"), range);
             return self.add_expr(Expr::Unresolved(only.clone()), range);

@@ -472,6 +472,55 @@ fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
     assert_eq!(ran.code, Some(0));
 }
 
+/// Two `adopt`s where the first is inside a nested block, which was a double
+/// free.
+///
+/// `nursery` here is an *invented* capability binding: the label is not in
+/// scope, so lowering declares a local for it and files it as the lambda's
+/// evidence. It declared one per mention, and `declare` files a name in the
+/// innermost lexical scope -- so the first mention's local left scope with the
+/// block, the second mention found nothing and invented another, and the frame
+/// released one capability object twice.
+///
+/// The nested block never had to run. `if false {{ .. }}` crashed just as
+/// reliably, because lowering visits both arms. Two mentions in the *same*
+/// scope were always fine, which is why the shape that found it was the
+/// ordinary one: spawn the consumers, then spawn the producers.
+#[test]
+fn a_capability_mentioned_in_a_nested_block_is_one_binding() {
+    let ran = run(
+        "nursery_nested_mention",
+        &format!(
+            "{NURSERY}
+fn first() -> () raises Oops {{ print(1); }}
+fn second() -> () raises Oops {{ print(2); }}
+
+fn scope(body: () -> () with {{ nursery: Nursery }}) -> () {{
+  let crew = Fibers::open();
+  body() with {{ nursery: handler for Nursery {{ adopt: fn f => Fibers::adopt(crew, f) }} }};
+  Fibers::wait(crew);
+}}
+
+fn work() -> () {{
+  scope(fn () => {{
+    {{ nursery.adopt(Fiber::spawn(fn () => first()!)); }};
+    nursery.adopt(Fiber::spawn(fn () => second()!));
+  }});
+  print(3);
+}}
+
+fn main() -> Int {{ work(); print(khora_live_count()); 0 }}
+"
+        ),
+    );
+    assert!(
+        ran.stdout == "1\n2\n3\n0\n" || ran.stdout == "2\n1\n3\n0\n",
+        "both children ran and nothing was left alive: {:?}",
+        ran.stdout
+    );
+    assert_eq!(ran.code, Some(0));
+}
+
 /// The failure path, and the whole reason a nursery is a value with a release
 /// rather than a pair of calls. A raise leaving the block cancels the children
 /// and waits — the answers they were computing are no longer wanted — and the
