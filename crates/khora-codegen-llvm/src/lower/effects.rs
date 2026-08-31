@@ -184,11 +184,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                     );
                 };
                 let shim = shim.as_global_value().as_pointer_value();
-                let slot = self
-                    .be
-                    .builder
-                    .build_alloca(self.be.ctx.i64_type(), "answer")
-                    .expect("somewhere for the answer");
+                let slot = self.entry_slot(self.be.ctx.i64_type().into(), "answer");
                 let modify = self.be.rt.shared_modify;
                 self.be
                     .builder
@@ -298,11 +294,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // to say -- the value, and whether there was one -- and a
                 // sentinel word would be a value some `A` could legitimately
                 // be.
-                let slot = self
-                    .be
-                    .builder
-                    .build_alloca(self.be.ctx.i64_type(), "received")
-                    .expect("a slot for the received word");
+                let slot = self.entry_slot(self.be.ctx.i64_type().into(), "received");
                 let receive = if name == "poll" {
                     self.be.rt.channel_poll
                 } else {
@@ -671,11 +663,7 @@ impl<'ctx> Lower<'_, 'ctx> {
                 // every other tagged call across this boundary uses one: two
                 // things come back and a 16-byte aggregate is a thing LLVM and
                 // rustc lay out separately.
-                let slot = self
-                    .be
-                    .builder
-                    .build_alloca(self.be.ctx.i64_type(), "answer")
-                    .expect("a slot for the joined word");
+                let slot = self.entry_slot(self.be.ctx.i64_type().into(), "answer");
                 let join = self.be.rt.fiber_join;
                 let which = self
                     .be

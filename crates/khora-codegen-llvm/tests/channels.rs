@@ -128,6 +128,58 @@ impl<A, 'r> Fiber<A, 'r> {
 impl<A, 'r> Share for Fiber<A, 'r> {}
 ";
 
+/// Draining a large channel costs no stack.
+///
+/// `Channel::poll` needs eight bytes for the word the runtime writes back, and
+/// took them with an `alloca` where the call was -- inside the caller's loop.
+/// An `alloca` is reclaimed when the function returns and at no other point,
+/// so an ordinary drain took another slot every turn and gave none back:
+///
+/// ```text
+/// khora: the stack ran out
+/// note: a function that recurses as deep as its input will do this
+/// ```
+///
+/// A hundred thousand died and thirty thousand did not, which is a stack
+/// budget divided by eight seen from the outside. There is no recursion in the
+/// program at all, so the note sent the reader looking for one in their own
+/// code -- and `docs/limitations/index.md` promises the opposite, that
+/// releasing a value costs no stack.
+///
+/// Two hundred thousand here: twice what used to fail, and quick, because the
+/// point is the slot and not the size.
+#[test]
+fn draining_a_large_channel_costs_no_stack() {
+    let ran = run(
+        "channel_drain_deep",
+        &format!(
+            "{PRELUDE}
+fn main() -> Int {{
+  let size = 200000;
+  let pipe: Channel<Int> = Channel::bounded(size);
+  let mut n = 0;
+  while n < size {{
+    Channel::send(pipe, n);
+    n = n + 1
+  }};
+
+  let mut drained = 0;
+  loop {{
+    match Channel::poll(pipe) {{
+      Option::None => break,
+      Option::Some(_) => drained = drained + 1,
+    }}
+  }};
+  print(drained);
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.stdout, "200000\n", "every value came back out: {:?}", ran.stdout);
+    assert_eq!(ran.code, Some(0));
+}
+
 /// Cancelling a fiber parked on an empty channel wakes it, and it unwinds.
 ///
 /// The receive is a cancellation point, so the match after it never runs: the

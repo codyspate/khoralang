@@ -663,8 +663,34 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// An `alloca` in the entry block, whatever block we are currently in.
+    ///
+    /// **Not a tidiness rule.** An `alloca` is reclaimed when the function
+    /// returns and at no other point, so one emitted where the code happens to
+    /// be -- inside a loop body -- takes another slot every iteration and gives
+    /// none back. `Channel::poll` needed eight bytes for the word the runtime
+    /// writes, took them in the loop, and a hundred thousand turns of an
+    /// ordinary drain ran a one-megabyte stack out:
+    ///
+    /// ```text
+    /// khora: the stack ran out
+    /// note: a function that recurses as deep as its input will do this
+    /// ```
+    ///
+    /// -- with no recursion anywhere in the program, and a note sending the
+    /// reader to look for some. Thirty thousand was fine, which is what a
+    /// budget divided by eight looks like from the outside.
+    ///
+    /// Anything that needs somewhere for a runtime call to write comes here.
     fn entry_slot(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
         let current = self.be.builder.get_insert_block();
+        // **Put back afterwards, and that is not housekeeping.** Pointing the
+        // builder *before an instruction* makes it adopt that instruction's
+        // debug location, and an entry-block `alloca` has none -- so coming
+        // here to make a slot cleared the location for everything emitted
+        // after it, and LLVM's verifier refuses a call with no `!dbg` in a
+        // function that has debug info. It fails the build rather than
+        // producing a wrong line, which is the good version of this mistake.
+        let location = self.be.builder.get_current_debug_location();
         let entry = self.function.get_first_basic_block().expect("an entry block");
         match entry.get_first_instruction() {
             Some(first) => self.be.builder.position_before(&first),
@@ -673,6 +699,10 @@ impl<'ctx> Lower<'_, 'ctx> {
         let slot = self.be.builder.build_alloca(ty, name).expect("a temporary slot");
         if let Some(block) = current {
             self.be.builder.position_at_end(block);
+        }
+        match location {
+            Some(location) => self.be.builder.set_current_debug_location(location),
+            None => self.be.builder.unset_current_debug_location(),
         }
         slot
     }

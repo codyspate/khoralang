@@ -163,13 +163,17 @@ impl std::fmt::Display for Miss {
         match self {
             Miss::NoEntry => f.write_str("nothing has been built with this key"),
             Miss::KeyMoved(others) => {
-                let held: Vec<&str> = others.iter().map(|k| &k[..12.min(k.len())]).collect();
+                // A few, not all of them: a cache in use holds thousands, and
+                // a screen of hexadecimal buries the sentence worth reading.
+                let held: Vec<&str> =
+                    others.iter().take(3).map(|k| &k[..12.min(k.len())]).collect();
                 let count = others.len();
+                let more = if count > held.len() { ", ..." } else { "" };
                 write!(
                     f,
-                    "the key moved. Nothing is stored under this one, but the \
-                     cache holds {count}: {}. `KHORA_CACHE_EXPLAIN=1` names \
-                     the input that changed",
+                    "the key moved. Nothing is stored under this one, and the \
+                     cache holds {count} other(s) ({}{more}). \
+                     `KHORA_CACHE_EXPLAIN=1` names the input that changed",
                     held.join(" ")
                 )
             }
