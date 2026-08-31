@@ -96,19 +96,29 @@ The test runner discovers `test` blocks in the package and reports failures thro
 ## Build a native executable
 
 ```bash
-khora build . --out hello
+khora build .
 ```
+
+The program goes in `build/`, named after the package, so nothing a build makes
+lands among your sources. `khora new` writes a `.gitignore` with `build/` in it
+for exactly that reason.
 
 Run it on macOS or Linux:
 
 ```bash
-./hello
+./build/hello_khora
 ```
 
 Or on Windows:
 
 ```powershell
-.\hello.exe
+.\build\hello_khora.exe
+```
+
+`--out` puts it somewhere else, under whatever name you give it:
+
+```bash
+khora build . --out dist/hello
 ```
 
 You should see:
@@ -120,7 +130,7 @@ Hello, Khora!
 For an optimized build, add `--release`:
 
 ```bash
-khora build . --release --out hello
+khora build . --release
 ```
 
 ## The everyday loop

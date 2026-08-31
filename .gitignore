@@ -6,36 +6,25 @@ Cargo.lock.bak
 # Built locally by editors/vscode/install.ps1
 *.vsix
 
-# What a compiled Khora program leaves beside its source, and what the link
-# shortener writes while it runs.
-examples/**/src/*.exe
-examples/**/src/*.o
-# Debug information, since 12.4: a PDB beside the executable on Windows, and
-# the IR dump `KHORA_EMIT_LLVM` asks for.
-examples/**/src/*.pdb
-examples/**/src/*.ll
+# Everything `khora build`, `khora test` and `khora bench` make: the
+# executable, its object file, a PDB on Windows, the `KHORA_EMIT_LLVM` dump.
+#
+# This was twenty lines. Output landed beside the source it came from, so every
+# kind of file, in every tree that gets built, had to be named here --
+# `examples/**/src/*.pdb`, `bench/**/src/*.o`, `**/khora-tests.exe.o` -- and
+# the list was still incomplete: `std/khora-tests.exe` reached a commit, 3.5 MB
+# of build output inside the standard library, because nothing here had named
+# it. A `.gitignore` that has to grow every time the compiler learns to emit
+# something is a compiler putting its output in the wrong place.
+build/
+
+# What the link shortener writes while it runs.
 examples/**/links.txt
 
-# The benchmark servers, built by hand rather than by cargo.
-bench/**/src/*.exe
-bench/**/src/*.o
-bench/**/src/*.pdb
-bench/**/src/*.ll
+# `bench/control_keepalive.exe`, the control server `bench/README.md` builds
+# with `rustc` rather than with `khora`.
 bench/*.exe
 bench/*.pdb
-
-# What `khora test` and `khora bench` leave beside the sources they compiled.
-# `std/khora-tests.exe` was committed — 3.5 MB of build output inside the
-# standard library — because these are written into the directory under test
-# and nothing here named them.
-**/khora-tests
-**/khora-tests.exe
-**/khora-tests.exe.o
-**/khora-tests.pdb
-**/khora-benches
-**/khora-benches.exe
-**/khora-benches.exe.o
-**/khora-benches.pdb
 
 # Written by `scripts/setup-llvm.sh`; `.cargo/config.toml.example` is the
 # template. It names an LLVM prefix and a Windows SDK version, both of which

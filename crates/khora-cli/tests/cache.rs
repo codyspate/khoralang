@@ -97,8 +97,11 @@ fn bytes(path: &Path) -> Vec<u8> {
 }
 
 /// Where `khora build .` puts an executable in these fixtures.
+///
+/// `build/` rather than `src/`, and the package's name rather than the entry
+/// file's: a build's output stopped landing beside the source it came from.
 fn artifact(w: &World) -> PathBuf {
-    w.project.join("src").join(format!("main{}", std::env::consts::EXE_SUFFIX))
+    w.project.join("build").join(format!("app{}", std::env::consts::EXE_SUFFIX))
 }
 
 #[test]
@@ -278,8 +281,7 @@ fn a_library_build_caches_its_header_too() {
     assert!(ok, "{}", w.story());
     assert!(second.contains("reused"), "{}", w.story());
 
-    let header = w.project.join("src").join("lib.h");
-    let header = if header.is_file() { header } else { w.project.join("src").join("main.h") };
+    let header = w.project.join("build").join("app.h");
     assert!(header.is_file(), "the header should come back with the library");
     assert!(
         std::fs::read_to_string(&header).expect("the header").contains("answer"),

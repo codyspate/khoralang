@@ -347,3 +347,48 @@ fn run_says_which_cwd_is_missing() {
     assert_ne!(code, Some(0), "{output}");
     assert!(output.contains("no-such-directory"), "the message should name it:\n{output}");
 }
+
+
+/// A build leaves nothing among the sources.
+///
+/// **The rule this checks was written down in a `.gitignore` for four
+/// revisions before anybody read it as a rule.** Output landed beside the
+/// source it came from -- `src/main.exe`, `src/main.exe.o`, `src/main.pdb` --
+/// so the first `git status` after a first build listed files nobody
+/// recognised, and the repository grew a pattern per kind of file per tree
+/// that gets built to hide them. Errata 61.
+///
+/// `run` and `build` are both here because they have to agree: they share a
+/// cache entry and an output, and a `run` with a path of its own would rebuild
+/// what `build` had just made.
+#[test]
+fn what_a_build_makes_goes_in_the_build_directory() {
+    let w = world(&returning(0));
+
+    let (code, output) = khora(&w, &w.project, &["build", "."]);
+    assert_eq!(code, Some(0), "{output}");
+
+    let program = w.project.join("build").join(format!("app{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        program.is_file(),
+        "the program should be in build/, named after the package:\n{output}"
+    );
+
+    // Named after the package rather than after the file holding `main`, which
+    // is the other half of the change: `build/app.exe`, not `build/main.exe`.
+    assert!(output.contains("app"), "the line should name what it built:\n{output}");
+
+    // Nothing beside the source. Anything but the `.kh` here is the bug.
+    let strays: Vec<String> = std::fs::read_dir(w.project.join("src"))
+        .expect("the source directory")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.ends_with(".kh"))
+        .collect();
+    assert!(strays.is_empty(), "a build left {strays:?} among the sources");
+
+    // And `run` finds the same file rather than building its own.
+    let (code, again) = khora(&w, &w.project, &["run", "."]);
+    assert_eq!(code, Some(0), "{again}");
+    assert!(again.contains("reused"), "run should have found what build made:\n{again}");
+}

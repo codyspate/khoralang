@@ -291,9 +291,7 @@ fn new_writes_a_gitignore_for_what_a_build_leaves() {
 
     let ignore = std::fs::read_to_string(root.join("tidy").join(".gitignore"))
         .expect("a .gitignore");
-    for pattern in ["src/*.exe", "src/*.o", "src/*.pdb", "src/*.ll"] {
-        assert!(ignore.contains(pattern), "{pattern} should be ignored:\n{ignore}");
-    }
+    assert!(ignore.contains("build/"), "the build directory should be ignored:\n{ignore}");
     // The source itself obviously must not be.
     assert!(!ignore.contains("*.kh"), "the source is the point:\n{ignore}");
 }

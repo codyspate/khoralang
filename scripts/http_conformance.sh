@@ -13,8 +13,9 @@ set -e
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-# `khora build` names its output with the host's executable extension, so a
-# compiled program is `main.exe` on Windows and `main` everywhere else.
+# `khora build` puts a package's program in the package's own `build/`, named
+# after the package and given the host's executable extension -- so this one is
+# `build/link_shortener.exe` on Windows and `build/link_shortener` elsewhere.
 built() {
     [ -x "$1.exe" ] && printf '%s\n' "$1.exe" || printf '%s\n' "$1"
 }
@@ -40,7 +41,7 @@ command -v curl > /dev/null || { echo "curl is needed for this check"; exit 1; }
 # so a conformance run neither reads a previous one's links nor leaves any.
 store=$(mktemp -d)/links.txt
 
-PORT=$port LINKS_FILE=$store "$(built ./examples/link_shortener/src/main)" > /dev/null 2>&1 &
+PORT=$port LINKS_FILE=$store "$(built ./examples/link_shortener/build/link_shortener)" > /dev/null 2>&1 &
 server=$!
 # shellcheck disable=SC2064
 trap "kill $server 2>/dev/null || true; rm -f '$store'" EXIT

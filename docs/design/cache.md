@@ -5,10 +5,10 @@ last time. Roadmap 14.17.
 
 ```
 $ khora build examples/core_demo
-built examples/core_demo/src/main.exe from 16 module(s) [debug]      12.1s
+built examples/core_demo/build/core_demo.exe from 16 module(s) [debug]      12.1s
 
 $ khora build examples/core_demo
-reused examples/core_demo/src/main.exe from the cache [c8560dc61c21, debug]   0.4s
+reused examples/core_demo/build/core_demo.exe from the cache [c8560dc61c21, debug]   0.4s
 ```
 
 ## Why this one is a proof and most are a bet

@@ -38,8 +38,9 @@ rm -f "$receipt" "$root/.khora-gate-fast"
 khora="./target/debug/khora.exe"
 [ -x "$khora" ] || khora="./target/debug/khora"
 
-# `khora build` names its output with the host's executable extension, so a
-# compiled program is `main.exe` on Windows and `main` everywhere else.
+# `khora build` puts a package's program in the package's own `build/`, named
+# after the package and given the host's executable extension -- so `core_demo`
+# is `build/core_demo.exe` on Windows and `build/core_demo` everywhere else.
 built() {
     [ -x "$1.exe" ] && printf '%s\n' "$1.exe" || printf '%s\n' "$1"
 }
@@ -153,7 +154,7 @@ fi
 rm -rf "$cached"
 
 step 'the reference applications that end on their own, run'
-"$(built ./examples/core_demo/src/main)" > /dev/null
+"$(built ./examples/core_demo/build/core_demo)" > /dev/null
 
 step 'an ordinary client gets ordinary answers'
 sh "$root/scripts/http_conformance.sh"

@@ -22,7 +22,7 @@ says how much of the library is the response rather than the request.
 ```bash
 cargo build -p khora-rt
 cargo run -p khora-cli --features llvm -- build bench/service
-./bench/service/src/main.exe &
+./bench/service/build/service.exe &
 python bench/load.py 18952 "service"
 ```
 

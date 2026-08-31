@@ -1347,12 +1347,9 @@ fn harness(
     compile: CompileHarness,
 ) -> Result<bool> {
     let (db, inputs, root) = load(path)?;
-    let target = inputs
-        .first()
-        .expect("at least one source")
-        .0
-        .with_file_name(name)
-        .with_extension(std::env::consts::EXE_EXTENSION);
+    let entry = &inputs.first().expect("at least one source").0;
+    let target = artifact(&output_dir(path, entry), name, std::env::consts::EXE_EXTENSION);
+    make_room_for(&target)?;
 
     if let Err(errors) = compile(&db as &dyn khora_db::Db, root, &target) {
         report_build_errors(&db, &inputs, &errors);
@@ -1435,10 +1432,10 @@ fn build(
         .or_else(|| inputs.iter().find(|(file, _, _)| mine(file)))
         .or_else(|| inputs.first())
         .expect("at least one source");
-    let target = out.map(|given| named_as_asked(given, lib)).unwrap_or_else(|| {
-        let stem = entry.0.file_stem().unwrap_or_default();
-        entry.0.with_file_name(stem).with_extension(library_extension(lib))
-    });
+    let target = out
+        .map(|given| named_as_asked(given, lib))
+        .unwrap_or_else(|| default_output(path, &entry.0, lib));
+    make_room_for(&target)?;
 
     // **Everything the output depends on**, which is the source plus the
     // toolchain that turns it into bytes. `cache::Cache` is where the argument
@@ -1564,6 +1561,87 @@ fn build(
             Ok(false)
         }
     }
+}
+
+/// Where an artifact goes when `--out` did not say, and what it is called.
+///
+/// **A build's output belongs in a directory of its own, not beside the source
+/// it came from.** `khora build .` wrote `src/main.exe`, `src/main.exe.o` and
+/// `src/main.pdb` into the same directory as `src/main.kh`, so the first
+/// `git status` after a first build listed three files nobody recognised
+/// sitting among the sources. The proof that this was wrong is that this
+/// repository's own `.gitignore` had grown thirty lines of patterns to hide
+/// them -- `examples/**/src/*.exe`, `bench/**/src/*.pdb`, `**/khora-tests.exe`
+/// -- and `khora new` scaffolded four more into every package it made. A tool
+/// that needs an ignore file to be usable has put its output in the wrong
+/// place; the ignore file is the bug report.
+///
+/// So: `<package>/build/<package name>` plus the platform's extension, and one
+/// directory to ignore or delete.
+///
+/// **Named after the package rather than after the file holding `main`.**
+/// `build/main.exe` names the entry point where the old path had to, because
+/// the file was the only thing there; a directory of its own can say what the
+/// program *is*. The stem is still the fallback for a source with no manifest
+/// above it.
+///
+/// **A loose file keeps its neighbour.** `khora build scratch.kh` outside any
+/// package writes `scratch.exe` beside it, the way every other compiler
+/// answers that, rather than inventing a `build/` next to somebody's scratch
+/// file. A directory named on the command line counts as a home even without a
+/// manifest, which is what keeps `khora test std` -- the standard library has
+/// no `khora.toml` -- out of the standard library's own source directory.
+#[cfg(feature = "llvm")]
+fn default_output(path: &Path, entry: &Path, lib: bool) -> PathBuf {
+    let dir = output_dir(path, entry);
+    let named = package_of(path)
+        .and_then(|root| package_name(&root))
+        .unwrap_or_else(|| entry.file_stem().unwrap_or_default().to_string_lossy().into_owned());
+    artifact(&dir, &named, library_extension(lib))
+}
+
+/// The directory [`default_output`] and the test harness write into.
+#[cfg(feature = "llvm")]
+fn output_dir(path: &Path, entry: &Path) -> PathBuf {
+    package_of(path)
+        .or_else(|| path.is_dir().then(|| path.to_path_buf()))
+        .map(|root| root.join("build"))
+        .unwrap_or_else(|| entry.parent().unwrap_or(Path::new(".")).to_path_buf())
+}
+
+/// `name` in `dir`, with `extension` if the platform has one.
+///
+/// Not `Path::with_extension`, which would eat everything after the last dot
+/// in a package called `acme.tools`.
+#[cfg(feature = "llvm")]
+fn artifact(dir: &Path, name: &str, extension: &str) -> PathBuf {
+    if extension.is_empty() {
+        dir.join(name)
+    } else {
+        dir.join(format!("{name}.{extension}"))
+    }
+}
+
+/// The name in `root`'s `[package]`, if it has one.
+#[cfg(feature = "llvm")]
+fn package_name(root: &Path) -> Option<String> {
+    let parsed = khora_manifest::Manifest::load(&root.join("khora.toml")).ok()?;
+    parsed.manifest.package.map(|package| package.name)
+}
+
+/// Creates the directory an artifact is about to be written into.
+///
+/// The linker will not make one, and neither will the cache when it places a
+/// hit -- so a first build into a fresh `build/` failed at the last step, with
+/// an error from `link.exe` about a path rather than anything a person could
+/// act on. `--out dist/hello` gets the same courtesy for the same reason.
+#[cfg(feature = "llvm")]
+fn make_room_for(target: &Path) -> Result<()> {
+    let Some(dir) = target.parent() else { return Ok(()) };
+    if dir.as_os_str().is_empty() || dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
 }
 
 /// What a shared library is called here, or an executable's extension.
@@ -1695,8 +1773,7 @@ fn executable_for(path: &Path) -> Result<PathBuf> {
         .find(|file| read(file).is_ok_and(|text| text.contains("fn main(")))
         .or_else(|| files.first())
         .with_context(|| format!("no `.kh` files under {}", path.display()))?;
-    let stem = entry.file_stem().unwrap_or_default();
-    Ok(entry.with_file_name(stem).with_extension(library_extension(false)))
+    Ok(default_output(path, entry, false))
 }
 
 /// `khora run`, in a build that cannot compile anything.

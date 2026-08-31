@@ -2148,3 +2148,57 @@ Nesting records instead of tuples works, and that is the workaround in
 distinguishes "you need an annotation" from "this should have worked" and asks
 for the second to be reported, which is the only reason this is written down
 rather than worked around in silence.
+
+## 61. Build output landed among the sources, and a `.gitignore` grew to hide it
+
+`khora build .` on a package wrote `src/main.exe` beside `src/main.kh`, along
+with `src/main.exe.o` and, on Windows, `src/main.pdb`. `khora test` and
+`khora bench` wrote `khora-tests.exe` and `khora-benches.exe` into whichever
+directory they had just compiled. So the first `git status` after a first build
+listed files nobody recognised, sitting in the directory a person keeps their
+program in.
+
+The evidence that this was wrong was already checked in. This repository's
+`.gitignore` had twenty lines naming those files:
+
+```
+examples/**/src/*.exe
+examples/**/src/*.o
+examples/**/src/*.pdb
+examples/**/src/*.ll
+bench/**/src/*.exe
+...
+**/khora-tests.exe.o
+**/khora-benches.pdb
+```
+
+one pattern per kind of file per tree that gets built, and `khora new`
+scaffolded four more of them into every package it created. The list was still
+incomplete: `std/khora-tests.exe` reached a commit — 3.5 MB of build output
+inside the standard library — because the standard library is not under
+`examples/` or `bench/` and nothing had named it.
+
+**An ignore file that has to grow every time the compiler learns to emit
+something is a compiler putting its output in the wrong place.** The patterns
+were not the fix; they were the bug report, written down four separate times by
+whoever hit it and never read as one thing.
+
+Output now goes to `<package>/build/`, named after the package rather than
+after the file holding `main` — `build/core_demo.exe`, not `src/main.exe`,
+because a directory of its own can say what the program *is* where the old path
+could only say where it came from. `khora new` writes a `.gitignore` with one
+line in it, and this repository's lost sixteen.
+
+Two rules keep the edges honest. A directory named on the command line counts
+as a home even when it has no manifest, which is what keeps `khora test std` —
+the standard library has no `khora.toml` — out of `std/`. And a loose file
+outside any package still gets its executable beside it: `khora build
+scratch.kh` writes `scratch.exe`, the way every other compiler answers that,
+rather than inventing a `build/` next to somebody's scratch file.
+
+### What generalises
+
+**A workaround that has to be repeated is a design defect with a paper trail.**
+Nobody was wrong to add `examples/**/src/*.pdb`; each addition fixed the
+`git status` in front of them. What nobody did was ask why the file existed, and
+the answer had been sitting in the file for four revisions.

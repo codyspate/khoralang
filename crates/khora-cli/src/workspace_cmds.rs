@@ -82,25 +82,23 @@ pub fn new(directory: &Path, library: bool) -> Result<()> {
         .with_context(|| format!("writing src/{file}"))?;
 
     // **What a build leaves beside the source, which nothing told anybody.**
-    // A compiled program lands in `src/` next to the `.kh` it came from, along
-    // with its object file and, on Windows, its debug information. Nothing
-    // documents that and nothing ignored it, so the first `git status` after a
-    // first build is three files nobody recognises -- and this repository
-    // itself carries the rules, worked out once by whoever hit it first.
+    // **One line, because the output has one home.** This used to be four
+    // patterns -- `src/*.exe`, `src/*.o`, `src/*.pdb`, `src/*.ll` -- naming
+    // the things a build left among the sources, and every one of them was a
+    // symptom rather than a rule: a compiled program landed in `src/` beside
+    // the `.kh` it came from, so the first `git status` after a first build
+    // listed files nobody recognised. `khora build` writes into `build/` now,
+    // and one directory is the whole of what a package does not track.
     //
-    // Written by the scaffold rather than documented, because a list of
-    // patterns is exactly the kind of thing that belongs in a file rather than
-    // in a paragraph somebody has to find and copy.
+    // Written by the scaffold rather than documented, because a rule about a
+    // directory belongs in a file rather than in a paragraph somebody has to
+    // find and copy.
     //
     // Not overwritten if one is already there: `khora new` refuses a directory
     // that is not empty, so there cannot be one -- but that is `new`'s rule to
     // change and not this line's to depend on.
-    let ignore = "# What a compiled Khora program leaves beside its source.\n\
-                  src/*.exe\n\
-                  src/*.o\n\
-                  src/*.pdb\n\
-                  # The IR dump `KHORA_EMIT_LLVM` asks for.\n\
-                  src/*.ll\n";
+    let ignore = "# Where `khora build`, `khora test` and `khora bench` put what they make.\n\
+                  build/\n";
     let ignore_path = directory.join(".gitignore");
     if !ignore_path.exists() {
         std::fs::write(&ignore_path, ignore)

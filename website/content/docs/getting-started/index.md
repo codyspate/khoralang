@@ -99,13 +99,18 @@ To get an executable you can hand to somebody:
 
 ```bash
 khora check .
-khora build . --out hello
-./hello
+khora build .
+./build/hello_khora
 ```
 
-On Windows the same two commands write `hello.exe`, and `.\hello.exe` runs it.
-`--out` takes the name you give it and adds the platform's extension if you did
-not.
+A build writes into the package's own `build/` directory, named after the
+package -- `build/hello_khora` here, and `build\hello_khora.exe` on Windows,
+where the same two commands run it as `.\build\hello_khora.exe`. Nothing
+lands among your sources, and `build/` is the one directory a package does not
+track.
+
+`--out` overrides the path, and adds the platform's extension if you did not
+write one.
 
 `khora check` is the fast feedback command: it parses and resolves your package, checks types and exhaustiveness, and reports diagnostics without producing an executable. `khora build` continues through native code generation and linking.
 
