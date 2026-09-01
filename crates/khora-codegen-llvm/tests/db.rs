@@ -39,7 +39,7 @@ fn run(name: &str, body: &str) -> String {
 fn run_with(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Eq, Fiber, List, Option, Result, Show, attempt, print}};
+import std::core::{{Eq, Fiber, List, Option, Result, Show, acquire, attempt, print, scoped}};
 import std::db::{{Cell, Db, DbError, Row, transaction}};
 
 /// A handler that says what it was told to do, as it is told.
@@ -274,6 +274,169 @@ fn worker() -> () raises Oops {{
   Fiber::wait(f);"#,
     );
     assert_eq!(out, "begin\ncommit\n7\n", "no rollback after a commit");
+}
+
+/// A handler whose `rollback` refuses, for the two tests about what that costs.
+///
+/// Separate from `recording` rather than a second flag on it, because a flag
+/// that is `false` in eight call sites and `true` in two reads as a handler
+/// with a mode and is really two handlers.
+const BRITTLE: &str = r#"
+/// Records, and refuses to roll back.
+fn brittle() -> Db {
+  handler for Db {
+    query: fn (_sql, _binds) => Result::Ok(List::Nil),
+    execute: fn (_sql, _binds) => Result::Ok(1),
+    begin: fn () => {
+      print("begin");
+      Result::Ok(())
+    },
+    commit: fn () => {
+      print("commit");
+      Result::Ok(())
+    },
+    rollback: fn () => {
+      print("rollback refused");
+      Result::Err(DbError::Rejected("the rollback failed too"))
+    },
+  }
+}
+"#;
+
+/// **A rollback that fails does not hide the reason it was needed.**
+///
+/// The policy is one line of `std::db` — `let _ = db.rollback()` — and the
+/// argument for it is in the comment above that line: a caller who sees
+/// `RolledBack` knows the transaction did not commit, which is the fact they
+/// have to act on, and the engine's complaint about the rollback is a second
+/// problem and a worse thing to report.
+///
+/// It is a deliberate discard, so it is worth a test: the failure that
+/// surfaces must be the body's, and swapping the two would be a one-character
+/// change that no other test here would notice.
+#[test]
+fn a_failing_rollback_does_not_hide_the_reason_for_it() {
+    let out = run_with(
+        "db_rollback_fails",
+        &format!(
+            r#"{CANCELLABLE}{BRITTLE}
+fn worker() -> () raises Oops {{
+  with {{ db: brittle() }} {{
+    let answer: Result<Int, DbError> = transaction(fn () => {{
+      mark()!;
+      Result::Err(DbError::Rejected("the body failed"))
+    }})!;
+    match answer {{
+      Result::Ok(_) => print("committed, which is wrong"),
+      Result::Err(problem) => print(problem.show()),
+    }}
+  }}
+}}
+"#
+        ),
+        r#"  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::wait(f);"#,
+    );
+    assert!(
+        out.contains("the body failed"),
+        "the body's reason must survive a rollback that also failed, got: {out:?}"
+    );
+    assert!(
+        !out.contains("the rollback failed too"),
+        "the rollback's own complaint must not be what the caller is told, got: {out:?}"
+    );
+}
+
+/// **On the cancellation path a failed rollback is told to nobody, and that is
+/// the gap rather than the policy.**
+///
+/// The error path above has somebody to tell: it returns `RolledBack` and the
+/// caller reads it. A cancelled fiber has no caller waiting for an answer, so
+/// `undo` discards the failure and the region ends. The connection then goes
+/// back to the pool having neither committed nor, as far as anyone knows,
+/// rolled back.
+///
+/// This test pins the behaviour as it is rather than asserting it is right:
+/// the rollback is *attempted* — the part that would be a real bug if it were
+/// missing — and the fiber ends quietly. Making the pool discard a connection
+/// whose rollback failed needs a way for a region finalizer to reach the lease
+/// that outlives it, which is #161 and not a comment change.
+#[test]
+fn a_failed_rollback_during_cancellation_is_currently_silent() {
+    let out = run_with(
+        "db_rollback_fails_cancelled",
+        &format!(
+            r#"{CANCELLABLE}{BRITTLE}
+fn worker() -> () raises Oops {{
+  with {{ db: brittle() }} {{
+    transaction(fn () => {{
+      khora_cancel();
+      mark()!;
+      Result::Ok(1)
+    }})!;
+    print("the transaction returned, which is wrong");
+  }}
+}}
+"#
+        ),
+        r#"  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::wait(f);
+  print("the parent carried on");"#,
+    );
+    assert_eq!(
+        out, "begin\nrollback refused\nthe parent carried on\n",
+        "the rollback must be attempted; that its failure goes nowhere is #161"
+    );
+}
+
+/// **A cancelled lease comes back to a connection that is not mid-transaction.**
+///
+/// This is the composition `packages/postgres` is built on and neither half
+/// tested: `with_db` registers the lease's return with a region it opens, and
+/// `transaction` registers its rollback with a region of its own, nested
+/// inside. The pool's correctness is entirely the claim that the inner
+/// finalizer runs first.
+///
+/// If it did not, a cancelled fiber would put a connection back in the idle
+/// channel with an open transaction on it, and the next borrower would inherit
+/// somebody else's uncommitted rows and locks. No engine reports that; it
+/// looks like the second query being wrong.
+///
+/// So the assertion is the order, not the presence: `rollback` before the
+/// lease goes back, on the cancellation path.
+#[test]
+fn a_cancelled_lease_is_returned_only_after_the_rollback() {
+    let out = run_with(
+        "db_lease_ordering",
+        &format!(
+            r#"{CANCELLABLE}
+fn worker() -> () raises Oops {{
+  with {{ db: recording(false) }} {{
+    // The two regions `with_db` and `transaction` open, in the order the pool
+    // opens them.
+    scoped(fn () => {{
+      acquire("connection", fn _back => print("lease returned"));
+      transaction(fn () => {{
+        db.execute("insert", List::Nil);
+        khora_cancel();
+        mark()!;
+        Result::Ok(1)
+      }})!;
+      print("the transaction returned, which is wrong");
+    }})!
+  }}
+}}
+"#
+        ),
+        r#"  let f = Fiber::spawn(fn () => worker()!);
+  Fiber::wait(f);
+  print("the parent carried on");"#,
+    );
+    assert_eq!(
+        out,
+        "begin\nexecute\nrollback\nlease returned\nthe parent carried on\n",
+        "a pooled connection must not go back holding an open transaction"
+    );
 }
 
 /// A body that fails rolls back exactly once, not once for the `match` and

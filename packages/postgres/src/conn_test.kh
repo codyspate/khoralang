@@ -1,0 +1,88 @@
+module postgres::conn_test;
+
+// **What a column's bytes become, and what they must never become.**
+//
+// The interesting cases here are all the same case: a value the server sent
+// exactly, arriving in a Khora program as something else. A `numeric` through
+// a float is the famous one — `std::json` shipped it until 13.11 — but a
+// `numeric` too wide for the significand, and an `int4` that is not one, are
+// the same mistake reached from the other side.
+//
+// `oid_to_cell` is pure, so none of this needs a server. That is the reason it
+// is a separate function rather than a branch inside the row decoder.
+
+import std::core::{Option, assert};
+import std::decimal::{Decimal};
+import std::db::{Cell};
+import postgres::conn::{oid_to_cell};
+
+/// The digits back out of a `Cell`, or a marker naming the variant that is not
+/// the one being asked about.
+///
+/// `std` has `assert(Bool)` and nothing else, so a comparison is the only way
+/// to say anything — see the note at the head of `wire_test.kh`. Rendering the
+/// wrong variant as its own name at least makes the debugger's line legible.
+fn shown(cell: Cell) -> String {
+  match cell {
+    Cell::Money(amount) => Decimal::show(amount),
+    Cell::Number(n) => "Number(" + Int::to_string(n) + ")",
+    Cell::Text(text) => "Text(" + text + ")",
+    Cell::Flag(flag) => if flag { "Flag(true)" } else { "Flag(false)" },
+    Cell::Null => "Null",
+  }
+}
+
+/// **A `numeric` is money, and the digits survive the trip.**
+///
+/// `2.50` rather than `2.5`: a `Decimal` carries its scale, and a money column
+/// that comes back having dropped a trailing zero has changed what the server
+/// said even though the two are numerically equal.
+test "a numeric column arrives as Money with its scale intact" {
+  assert(shown(oid_to_cell(1700, "2.50")) == "2.50");
+  assert(shown(oid_to_cell(1700, "-0.01")) == "-0.01");
+  assert(shown(oid_to_cell(1700, "0")) == "0");
+}
+
+/// **A `numeric` wider than the significand keeps its digits as text.**
+///
+/// This is the case that made the question look closed, on the argument that
+/// the only answers were a wrong number or a lost value. It is neither: the
+/// row still carries what the server sent, and a caller that knows what to do
+/// with forty digits can still do it.
+test "a numeric too wide for a Decimal stays Text rather than becoming wrong" {
+  let huge = "123456789012345678901234567890123456789012345.6789";
+  assert(shown(oid_to_cell(1700, huge)) == "Text(" + huge + ")");
+}
+
+/// **A float column is not a number.**
+///
+/// `float4` is 700 and `float8` is 701. `Cell` has no float variant by design
+/// and this is where that design is enforced: a binary float is not a value a
+/// database column can be read back out of exactly, so it stays as the digits
+/// the server chose to print.
+test "float columns stay Text, because Cell has no float" {
+  assert(shown(oid_to_cell(700, "0.1")) == "Text(0.1)");
+  assert(shown(oid_to_cell(701, "0.1")) == "Text(0.1)");
+}
+
+/// The integer types, and the fallback that keeps a wrong server honest.
+test "integer columns are Number, and a bad one is not guessed at" {
+  assert(shown(oid_to_cell(23, "42")) == "Number(42)");
+  assert(shown(oid_to_cell(20, "-9223372036854775808")) == "Number(-9223372036854775808)");
+  assert(shown(oid_to_cell(21, "7")) == "Number(7)");
+  // A server that says `int4` and sends something else is wrong, and a
+  // decoder that guessed would hide it.
+  assert(shown(oid_to_cell(23, "banana")) == "Text(banana)");
+}
+
+/// `bool` is one letter, and everything that is not `t` is false.
+test "a bool column is a Flag" {
+  assert(shown(oid_to_cell(16, "t")) == "Flag(true)");
+  assert(shown(oid_to_cell(16, "f")) == "Flag(false)");
+}
+
+/// Anything unrecognised is the server's own text, unchanged.
+test "an unknown oid keeps the bytes the server sent" {
+  assert(shown(oid_to_cell(25, "hello")) == "Text(hello)");
+  assert(shown(oid_to_cell(1114, "2026-09-01 12:00:00")) == "Text(2026-09-01 12:00:00)");
+}

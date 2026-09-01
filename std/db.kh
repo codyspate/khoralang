@@ -30,6 +30,15 @@ module std::db;
 //! the test beside this module is written against the promise rather than
 //! against any engine.
 //!
+//! **What the contract does not cover: a rollback that itself fails.** On the
+//! error path it is discarded on purpose -- the caller is told `RolledBack`
+//! with the body's reason, because the engine's complaint about the rollback
+//! is a second problem and a worse thing to report than the first. On the
+//! cancellation path the same discard happens with nobody to tell, so a
+//! connection can go back to a pool having neither committed nor, as far as
+//! anything here knows, rolled back. Both are tested; only the first is
+//! defensible. Roadmap #161.
+//!
 //! Database authority is carried by the capability row all the way through.
 //! Application code says `with { db: Db }`; `transaction` says the same thing.
 //! The concrete handler belongs at a composition boundary, not as a `Db`

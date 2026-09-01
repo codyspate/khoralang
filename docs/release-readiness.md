@@ -13,8 +13,14 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree on 2026-08-31, item by item, against what is in the
-repository rather than against the roadmap's account of itself. **124 of 222**,
+repository rather than against the roadmap's account of itself. **135 of 222**,
 and re-scored whenever a section moves.
+
+**A score is only as good as the reading behind it.** Section 3 was scored at
+2/6 by somebody who had not opened `crates/khora-codegen-llvm/tests/db.rs`, and
+two of its items were already satisfied. Section 15 was scored at 1/8 the day
+#149 wrote the seven files it asks for. Both were understatements, which is the
+safe direction for the rule below to fail in, and neither was a finding.
 
 An item is ticked only when it was checked. Where something is partly done it
 stays unticked and carries a **Left:** note saying what remains, because a
@@ -26,10 +32,10 @@ advertised, so no wasm deployment has to work.
 | --- | --- |
 | 1. Language and compiler correctness | 13 / 19 |
 | 2. Runtime soundness and structured concurrency | 9 / 16 |
-| 3. Resource, database and cancellation semantics | 2 / 6 |
+| 3. Resource, database and cancellation semantics | 4 / 6 |
 | 4. HTTP, overload and server behavior | 5 / 10 |
 | 5. Observability | 4 / 7 |
-| 6. Database ecosystem proof | 4 / 7 |
+| 6. Database ecosystem proof | 6 / 7 |
 | 7. Cross-compilation and deployment | 4 / 11 |
 | 8. FFI and C interoperability | 4 / 8 |
 | 9. Traps, debugging and production diagnosis | 3 / 7 |
@@ -38,7 +44,7 @@ advertised, so no wasm deployment has to work.
 | 12. Installation, toolchains and release artifacts | 6 / 9 |
 | 13. Package ecosystem | 2 / 7 |
 | 14. Supply chain and security | 4 / 7 |
-| 15. Compatibility, governance and contribution policy | 1 / 8 |
+| 15. Compatibility, governance and contribution policy | 8 / 8 |
 | 16. Public documentation | 44 / 46 |
 | 17. khoralang.com production documentation site | 2 / 12 |
 | 18. Reference applications and end-to-end proof | 3 / 6 |
@@ -52,14 +58,16 @@ same stage. Documentation (§16), tooling (§11) and the release machinery
 candidates, a docs site built from this tree, a generated standard-library
 reference the gate keeps honest. What is thin is everything that proves the
 product to somebody who is not the author: external validation (§19) has not
-started, governance and compatibility policy (§15) do not exist, and the
-public site's versioning and search (§17) are unbuilt.
+started and the public site's versioning and search (§17) are unbuilt. Governance
+and compatibility policy (§15) were the same kind of gap until #149, and are the
+cheapest section on this page to have left undone for as long as it was.
 
 The runtime and compiler sections in between are the ones to read carefully.
 They are not thin — they are *partly* proven, and the unproven parts are
-concentrated in the same place: the formal `unsafe` inventory (§2), database
-cancellation semantics (§3), and compiler performance at a scale the corpus
-does not reach (§10). The largest reference application is about 460 lines,
+concentrated in the same place: the formal `unsafe` inventory (§2), cancellation
+cleanup for files, sockets, TLS and processes (§3, where the database half is now
+done and the rest has no test at all), and compiler performance at a scale the
+corpus does not reach (§10). The largest reference application is about 460 lines,
 which is the single fact behind three separate unticked items.
 
 ---
@@ -123,10 +131,10 @@ Khora's runtime is part of the language contract. The release cannot rely on “
 ## 3. Resource, database and cancellation semantics
 
 - [x] `Region`/finalizer behavior is reliable under success, typed failure, cancellation and trap boundaries where cleanup is permitted.
-- [ ] `std::db::transaction` rolls back not only when its body returns an error but when its fiber is cancelled.
-- [ ] Transaction tests assert begin/commit/rollback ordering for success, typed failure, cancellation, commit failure and rollback failure policy.
-- [ ] Database cancellation does not leave a pooled connection holding an open transaction or locks.
-- [ ] File, socket, TLS and process resources have cancellation tests that prove cleanup rather than merely absence of a crash.
+- [x] `std::db::transaction` rolls back not only when its body returns an error but when its fiber is cancelled. **Done:** `a_cancelled_fiber_rolls_back_and_does_not_commit`. This was already true when the section was scored and was left unticked because it had not been looked at, which is the scoring rule working rather than a finding.
+- [x] Transaction tests assert begin/commit/rollback ordering for success, typed failure, cancellation, commit failure and rollback failure policy. **Done:** eleven cases in `crates/khora-codegen-llvm/tests/db.rs`, each asserting an exact transcript rather than a count, so any permutation fails. The rollback-failure policy — discard it, because the engine's complaint about a rollback is a worse thing to report than the reason the rollback was needed — was a deliberate `let _ =` with no test until now.
+- [ ] Database cancellation does not leave a pooled connection holding an open transaction or locks. **Left:** The ordering is proved — `a_cancelled_lease_is_returned_only_after_the_rollback` asserts the rollback reaches the engine before the lease reaches the idle channel, which is the whole of what `packages/postgres` relies on and was untested. What remains is the case where that rollback *fails*: nothing is told, and the connection is reused anyway. #161.
+- [ ] File, socket, TLS and process resources have cancellation tests that prove cleanup rather than merely absence of a crash. **Left:** Zero cancellation tests across all four. `std::fs` and `std::net::tls` do register releases, so only the proof is missing; sockets and processes register none. #161 has the reconnaissance.
 - [x] Bounded concurrency primitives are documented as the default way to protect externally driven resources. **Done:** `/docs/cookbook/bounded-concurrency`, and `bounded_nursery`'s own documentation.
 
 ---
@@ -167,8 +175,8 @@ The neutral `Db` capability is not enough by itself to prove the production data
 - [x] At least one production-grade database package exists; PostgreSQL is the preferred first proof. **Done:** `packages/postgres`, tested in the gate.
 - [x] The package exercises network I/O, pooling, query execution, result decoding, cancellation and transactions through public Khora APIs.
 - [x] Pool saturation is bounded and documented.
-- [ ] Database numeric types preserve exact values; `NUMERIC`/money-like values do not silently pass through `Float`. **Left:** Unverified for `NUMERIC`; #142 shows the same class of mistake was live in `std::json` until now.
-- [ ] Schema/type mismatches are visible rather than silently coerced.
+- [x] Database numeric types preserve exact values; `NUMERIC`/money-like values do not silently pass through `Float`. **Done:** `numeric` decodes to `Cell::Money(Decimal)` and `packages/postgres/src/conn_test.kh` holds the scale against a trailing zero, keeps a value too wide for the significand as the server's own digits rather than a truncation, and pins `float4`/`float8` as `Text` — `Cell` has no float variant and this is where that is enforced.
+- [x] Schema/type mismatches are visible rather than silently coerced. **Done:** `Cell::text`/`number`/`money`/`flag` answer `None` for the wrong variant rather than rendering it, tested by `cells_do_not_coerce`; and a column whose text does not match its OID stays `Text` instead of being guessed at, tested in `conn_test.kh`.
 - [ ] Connection and transaction failure behavior is tested under cancellation and network loss.
 - [x] A reference application uses the package rather than a test-only handler. **Done:** `examples/ledger_service` depends on `packages/postgres` and the gate builds it.
 
@@ -294,14 +302,14 @@ A large registry is not required, but dependency use must be coherent and reprod
 
 A `0.x` release may break. It may not be ambiguous about when and how it breaks.
 
-- [ ] A public compatibility policy defines guarantees for compiler releases, source syntax, `std`, lockfiles and packages before 1.0.
-- [ ] The policy states what 1.0 is waiting for.
-- [ ] Breaking releases provide migration notes.
-- [ ] The project defines how language changes are proposed and accepted.
+- [x] A public compatibility policy defines guarantees for compiler releases, source syntax, `std`, lockfiles and packages before 1.0. **Done:** `/docs/reference/compatibility`, with a table of what counts as breaking and what does not.
+- [x] The policy states what 1.0 is waiting for. **Done:** four things, none of them a feature — a bug-discovery rate that has flattened, the soundness review finished, the scheduler measured on Linux, and use by people who did not write it.
+- [x] Breaking releases provide migration notes. **Done:** `CHANGELOG.md` puts every breaking change under a **Breaking** heading before anything else and names the mechanical fix where one exists, and a change that made a program *silently wrong* is listed as breaking as well as fixed. Written down and applied to the entries that exist; no breaking release has yet exercised it.
+- [x] The project defines how language changes are proposed and accepted. **Done:** `CONTRIBUTING.md` § Before a change and § Governance — in the issue thread, before the code, recorded in `docs/roadmap.md` or a design document.
 - [x] The boundary between `std`, first-party packages and third-party ecosystem packages is documented. **Done:** `/docs/stdlib/index` and `std::trace`'s own argument; `docs/design/effect-survey.md` §3.2 is the rule.
-- [ ] `CONTRIBUTING.md` explains build/test expectations and the review path for compiler, runtime, stdlib and documentation changes. **Left:** No `CONTRIBUTING.md` in the repository.
-- [ ] Maintainer/governance responsibility is explicit even if one person remains final decision-maker.
-- [ ] The public project communicates a credible maintenance plan and does not imply organizational backing that does not exist.
+- [x] `CONTRIBUTING.md` explains build/test expectations and the review path for compiler, runtime, stdlib and documentation changes. **Done:** § Building it, § The gate — the whole 25-minute `scripts/baseline.sh` and what each step is for — and § Review, which names the four questions in the order they get asked.
+- [x] Maintainer/governance responsibility is explicit even if one person remains final decision-maker. **Done:** "One maintainer, final say, no committee", in `CONTRIBUTING.md` and on the compatibility page, with the undertaking that a change to that arrangement is written down before it is true elsewhere.
+- [x] The public project communicates a credible maintenance plan and does not imply organizational backing that does not exist. **Done:** the compatibility page states the bus factor plainly rather than dressing one person as a committee.
 
 ---
 

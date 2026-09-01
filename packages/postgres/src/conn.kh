@@ -479,14 +479,24 @@ fn oid_at(columns: List<Column>, index: Int) -> Int {
 
 /// A text value, as the `Cell` its column's type calls for.
 ///
-/// **Deliberately few.** `Number` for the integer types, `Flag` for `bool`,
-/// and `Text` for everything else — including `numeric`, which ought to be
-/// `Money` and is not: `Decimal::of_string` exists, and a `numeric` that fails
-/// to parse would have to become either a wrong number or a lost value, and
-/// neither is a decision to take quietly. `Text` keeps the server's own digits
-/// until 13.12 says what should happen to them.
+/// **Deliberately few.** `Number` for the integer types, `Money` for
+/// `numeric`, `Flag` for `bool`, and `Text` for everything else.
+///
+/// `numeric` was `Text` until 13.12, on the argument that a value which does
+/// not parse would have to become either a wrong number or a lost value. There
+/// is a third answer and `int4` was already using it four lines down: try, and
+/// keep the server's own digits when the answer is no. `Decimal::of_string`
+/// returns an `Option` and rejects a numeral too long for the significand
+/// rather than truncating it, which is exactly the case that made the question
+/// look closed — a `numeric` wider than a hundred and twenty-eight bits stays
+/// `Text` and loses nothing.
+///
+/// **`Float` appears nowhere in this function.** `float4` and `float8` are
+/// `Text` for the same reason `Cell` has no float variant: a `Money` that went
+/// through a binary float is a number that has already lost, and `std::json`
+/// shipped that exact mistake until 13.11.
 pub fn oid_to_cell(oid: Int, text: String) -> Cell {
-  // 16 bool, 20 int8, 21 int2, 23 int4.
+  // 16 bool, 20 int8, 21 int2, 23 int4, 1700 numeric.
   if oid == 16 {
     Cell::Flag(text == "t")
   } else if oid == 20 || oid == 21 || oid == 23 {
@@ -494,6 +504,13 @@ pub fn oid_to_cell(oid: Int, text: String) -> Cell {
       Option::Some(n) => Cell::Number(n),
       // A server that says `int4` and sends something that is not one is
       // wrong, and guessing would hide it.
+      Option::None => Cell::Text(text),
+    }
+  } else if oid == 1700 {
+    match Decimal::of_string(text) {
+      Option::Some(amount) => Cell::Money(amount),
+      // Not a wrong number and not a lost value: the digits the server sent,
+      // unchanged, for a caller that knows more than this function does.
       Option::None => Cell::Text(text),
     }
   } else {

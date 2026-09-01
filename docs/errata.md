@@ -2417,3 +2417,42 @@ everything, `true` satisfies every check, an empty row demands nothing — each 
 the value that makes the surrounding code agree, so the case nobody wrote is
 the case nobody hears about. Match exhaustively, or make the fallback the
 *bottom* rather than the top.
+
+## 65. Two sections of the readiness gate scored without reading the tree
+
+The gate was scored at 124 of 222 with a rule attached: *an item is ticked only
+when it was checked*, and a half-done item stays unticked with a note saying
+what remains. The rule is right. It was applied to two sections that had not
+been read.
+
+Section 3, resource and database semantics, was scored 2 of 6. Two of the four
+unticked items were already satisfied by `crates/khora-codegen-llvm/tests/db.rs`,
+a file the scoring pass never opened -- including the one that reads as the
+section's whole point, that a cancelled fiber rolls back. Section 15,
+compatibility and governance, was scored 1 of 8 on the same day #149 wrote
+`CONTRIBUTING.md`, `CHANGELOG.md` and the compatibility page, which between them
+satisfy seven of its eight items. The score was eleven points low.
+
+**Both failures were understatements**, which is the direction the rule is built
+to fail in and the reason it is worth keeping. An unticked item that turns out
+to be done costs an hour of rediscovery. A ticked item that turns out not to be
+done is the thing a release checklist exists to prevent, and it is discovered by
+a stranger.
+
+But the rule does not survive being read as *unticked is free*. "I have not
+checked" and "this is not done" render identically on the page, and a reader --
+including the author, three weeks later -- cannot tell them apart. The section
+summary said governance and compatibility policy *do not exist* at a moment when
+they were seven files in the repository, and that sentence was written from the
+scoreboard rather than from the tree.
+
+**A gate item that has not been looked at should say so**, in the same **Left:**
+note that a half-done item uses. `Left: not examined` is a different fact from
+`Left: the pool does not discard a connection whose rollback failed`, and only
+one of them is work.
+
+The sibling of errata 35, where a test runner reported three passes for a suite
+whose third test asserted `4 == 5`. That was a green result that measured
+nothing; this is a number that measured nothing. Both read as evidence, and the
+tell is the same in each: the thing being reported on was never actually
+consulted.
