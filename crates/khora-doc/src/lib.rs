@@ -395,6 +395,7 @@ fn is_primitive(name: &str) -> bool {
         "Int"
             | "Float"
             | "Bool"
+            | "Char"
             | "String"
             | "I8"
             | "I16"

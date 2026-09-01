@@ -164,6 +164,7 @@ pub fn head_of(ty: &Type) -> Option<String> {
         Type::Fixed(kind) => Some(kind.name()),
         Type::Ptr => Some("Ptr".to_string()),
         Type::Bool => Some("Bool".to_string()),
+        Type::Char => Some("Char".to_string()),
         Type::Str => Some("String".to_string()),
         Type::Unit => Some("()".to_string()),
         Type::Adt { name, .. } => Some(name.clone()),

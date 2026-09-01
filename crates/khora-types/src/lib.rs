@@ -128,6 +128,12 @@ pub enum Type {
     /// Lending a *buffer* — `Array<U8>`'s bytes — is the harder question, and
     /// this type deliberately does not answer it. `docs/design/ffi.md`.
     Ptr,
+    /// One Unicode scalar value.
+    ///
+    /// A scalar, thirty-two bits wide, and *not* a `String` of length one: a
+    /// `String` can be empty or a thousand characters, and a function that
+    /// takes a character should not have to decide what those mean.
+    Char,
     /// A user-declared variant type, with its type arguments.
     ///
     /// **`home` is what makes this an identity rather than a spelling.** Two
@@ -218,6 +224,7 @@ impl std::fmt::Display for Type {
             Type::Fixed(kind) => write!(f, "{}", kind.name()),
             Type::Float => write!(f, "Float"),
             Type::Bool => write!(f, "Bool"),
+            Type::Char => write!(f, "Char"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "()"),
             Type::Adt { name, args, .. } if args.is_empty() => write!(f, "{name}"),

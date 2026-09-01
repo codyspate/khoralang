@@ -998,6 +998,121 @@ has met those goes looking for this one. `Show for Bool` is written in
 terms of it rather than the other way round, so there is one place the
 two words are spelled.
 
+### Char
+
+```khora
+impl Char
+```
+
+One Unicode scalar value.
+
+**Not a `String` of length one.** A `String` can be empty or a thousand
+characters, so a function taking one has to decide what those mean; a
+`Char` cannot be either. It is thirty-two bits and lives in a register,
+which is the other half: scanning a string a character at a time through
+one-character `String`s allocates once per character.
+
+**A scalar value, which is not every number.** The range stops at
+`0x10FFFF` and the surrogates `0xD800` to `0xDFFF` are a hole in the middle
+of it -- they exist only to encode a pair in UTF-16 and are not characters.
+[`Char::from_code`] is checked for both.
+
+Written `'a'`, `'\n'`, `'\u{1F600}'`. The escapes are the string ones.
+
+#### code
+
+```khora
+pub fn code(self) -> Int
+```
+
+The code point, as an `Int`. Every `Char` has one, so this cannot fail.
+
+#### from_code
+
+```khora
+pub fn from_code(value: Int) -> Char
+```
+
+The character with this code point, or a stopped program.
+
+Stops rather than raises, for the reason every other narrowing conversion
+in this library does: a number that is not a character is a mistake in
+the program rather than a condition to handle, and `U8::of` sets the
+precedent. Check the range first if the number came from outside.
+
+#### to_string
+
+```khora
+pub fn to_string(self) -> String
+```
+
+This character as a one-character string.
+
+The UTF-8 encoding, written out here rather than asked of the runtime:
+four branches on the code point and `String::from_bytes` at the end, so
+the standard library's own text handling has no intrinsic under it that a
+reader cannot follow.
+
+#### utf8_length
+
+```khora
+pub fn utf8_length(self) -> Int
+```
+
+How many bytes this character takes in UTF-8: 1, 2, 3 or 4.
+
+#### is_digit
+
+```khora
+pub fn is_digit(self) -> Bool
+```
+
+`'0'` to `'9'`. ASCII only, and the name says so nowhere else, so:
+**this is not `Nd`**. Arabic-Indic and Devanagari digits are digits to
+Unicode and not to this, because a parser that accepted them would then
+have to decide what `Int::of_string` does with them.
+
+#### is_alpha
+
+```khora
+pub fn is_alpha(self) -> Bool
+```
+
+`'a'` to `'z'` and `'A'` to `'Z'`. ASCII only, for the reason on
+[`is_digit`].
+
+#### is_alphanumeric
+
+```khora
+pub fn is_alphanumeric(self) -> Bool
+```
+
+A letter or a digit, both in the ASCII sense above.
+
+#### is_whitespace
+
+```khora
+pub fn is_whitespace(self) -> Bool
+```
+
+Space, tab, newline, carriage return.
+
+#### to_upper
+
+```khora
+pub fn to_upper(self) -> Char
+```
+
+`'A'` for `'a'`, and everything else unchanged. ASCII only.
+
+#### to_lower
+
+```khora
+pub fn to_lower(self) -> Char
+```
+
+`'a'` for `'A'`, and everything else unchanged. ASCII only.
+
 ### Ordering
 
 ```khora
@@ -2157,6 +2272,92 @@ continuation byte at one end or the other.
 Indices outside the string are clamped rather than refused, because
 "the rest of it" is what every caller of `slice(i, byte_length(s))`
 means.
+
+#### is_char_boundary
+
+```khora
+pub fn is_char_boundary(self, at: Int) -> Bool
+```
+
+Whether `at` is where a character starts.
+
+**The question [`slice`] gives no way to ask, and it is the one that
+matters.** `slice` counts bytes and stops the program when the cut lands
+inside a character:
+
+```text
+khora: this slice cuts a character in half, so it is not a String
+```
+
+Which is right -- the alternative is a `String` that is not UTF-8 -- but
+until there was a way to *ask*, a program truncating text it did not
+write was one non-ASCII input from dying. `std::json` copes by reasoning
+that every byte it escapes is below 128; an application should not have
+to.
+
+The end of the string is a boundary, and so is 0. Anything outside is
+not.
+
+#### next_boundary
+
+```khora
+pub fn next_boundary(self, at: Int) -> Int
+```
+
+The first character boundary at or after `at`, or the string's length.
+
+For walking to a safe place to cut: `String::slice(s, 0, s |> next_boundary(20))`
+takes about twenty bytes and never lands in the middle of anything.
+
+#### previous_boundary
+
+```khora
+pub fn previous_boundary(self, at: Int) -> Int
+```
+
+The last character boundary at or before `at`, or 0.
+
+#### char_at
+
+```khora
+pub fn char_at(self, at: Int) -> Option<Char>
+```
+
+The character beginning at byte `at`, or `None`.
+
+`None` when `at` is outside the string or is not a boundary -- asking for
+the character in the middle of one has no answer, and inventing the
+replacement character would hide a caller that is stepping by the wrong
+amount.
+
+**Byte offsets, not character indices.** `char_at(s, 3)` is the character
+three *bytes* in, and `utf8_length` is how far to step for the next one.
+A character index would mean walking the string from the start for every
+access, which is the quadratic loop this signature refuses to hide.
+
+#### chars
+
+```khora
+pub fn chars(self) -> List<Char>
+```
+
+Every character, in order.
+
+Allocates a list as long as the string has characters, which is what
+makes it the convenient answer rather than the fast one. A scan that
+cares walks with [`char_at`] and [`Char::utf8_length`] and allocates
+nothing.
+
+#### char_length
+
+```khora
+pub fn char_length(self) -> Int
+```
+
+How many characters, which is not how many bytes.
+
+Walks the string, so it is `O(n)`. `byte_length` is the constant-time one
+and is what a buffer size wants.
 
 #### find
 
@@ -4378,6 +4579,67 @@ impl Show for Bool
 
 ```khora
 fn show(self) -> String
+```
+
+### Show for Char
+
+```khora
+impl Show for Char
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
+
+The character itself, with no quotes.
+
+`Show` is what a value looks like *to a reader*, and `'a'` printed inside
+a sentence should read `a`. The quoted form is how it is written in
+source, which is a different question and one nothing asks yet.
+
+### Eq for Char
+
+```khora
+impl Eq for Char
+```
+
+#### eq
+
+```khora
+fn eq(self, other: Char) -> Bool
+```
+
+### Ord for Char
+
+```khora
+impl Ord for Char
+```
+
+#### cmp
+
+```khora
+fn cmp(self, other: Char) -> Ordering
+```
+
+By code point, which is what `<` on characters means everywhere.
+
+**Not a collation order.** `'Z'` sorts before `'a'` because 90 is less
+than 97, and `'é'` sorts after both; a human-facing sort of names wants a
+locale and a library, and pretending this is one would be worse than not
+having it.
+
+### Hash for Char
+
+```khora
+impl Hash for Char
+```
+
+#### hash
+
+```khora
+fn hash(self) -> Int
 ```
 
 ### Show for String

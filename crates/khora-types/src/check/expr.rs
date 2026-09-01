@@ -36,6 +36,7 @@ impl<'a> Checker<'a> {
                 },
                 Literal::Float(_) => Type::Float,
                 Literal::Str(_) => Type::Str,
+                Literal::Char(_) => Type::Char,
                 Literal::Bool(_) => Type::Bool,
             },
             Expr::Local(local) => self.locals.get(&local).cloned().unwrap_or(Type::Unknown),

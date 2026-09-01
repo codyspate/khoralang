@@ -161,7 +161,10 @@ fn resolves(name: &str, in_scope: &HashSet<String>, homes: &crate::TypeHomes) ->
         let _ = owner;
         return true;
     }
-    matches!(name, "Int" | "I64" | "Float" | "Bool" | "String" | "Ptr" | "Unit" | "Never")
+    matches!(
+        name,
+        "Int" | "I64" | "Float" | "Bool" | "Char" | "String" | "Ptr" | "Unit" | "Never"
+    )
         || IntKind::parse(name).is_some()
         || in_scope.contains(name)
         || homes.of(name).is_some()

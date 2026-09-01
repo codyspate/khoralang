@@ -54,6 +54,12 @@ pub enum Literal {
     Int(String),
     Float(String),
     Str(String),
+    /// One Unicode scalar value, already unescaped.
+    ///
+    /// A `char` rather than the source text, because every reader of this
+    /// wants the value and none wants the spelling: `'\n'`, `'\u{41}'` and
+    /// `'A'` differ only in how they were written.
+    Char(char),
     Bool(bool),
 }
 
@@ -1233,6 +1239,16 @@ fn literal_of(node: &khora_syntax::SyntaxNode) -> Option<Literal> {
         INT_LIT => Literal::Int(text),
         FLOAT_LIT => Literal::Float(text),
         STRING_LIT => Literal::Str(unescape(&text)),
+        // The same unescaper the strings use, over what is between the
+        // quotes. The lexer has already refused anything that is not exactly
+        // one character, so `chars().next()` is the character and the
+        // fallback is unreachable for a program that parsed.
+        CHAR_LIT => Literal::Char(
+            unescape_inner(text.trim_start_matches('\'').trim_end_matches('\''))
+                .chars()
+                .next()
+                .unwrap_or('\u{FFFD}'),
+        ),
         // Interpolated literals do not come through here -- `lower_expr`
         // catches them first -- so the dedent for those is in `parts_of`.
         TRUE_KW => Literal::Bool(true),

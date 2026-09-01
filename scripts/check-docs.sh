@@ -104,9 +104,14 @@ where() {
 # stale multi-line example whose lines happen to parse one at a time. A list of
 # lexemes has no structure to get wrong; anything with a block in it does.
 lexemes() {
-    case "$(cat "$1")" in
-    *"{"* | *"}"*) return 1 ;;
-    esac
+    # **A brace that opens a block, not any brace.** A character literal such
+    # as the unicode escape has braces in it and no structure at all, and
+    # rejecting every brace turned the escape table into a failure. What this
+    # guards against is a multi-line *program* whose lines happen to parse one
+    # at a time, and one of those has a line ending in `{`.
+    if grep -qE '\{[[:space:]]*$|^[[:space:]]*\}' "$1"; then
+        return 1
+    fi
     one="$work/one.kh"
     sed '1,2d' "$1" | while IFS= read -r line; do
         [ -n "$(printf '%s' "$line" | tr -d ' \t')" ] || continue

@@ -169,6 +169,11 @@ impl<'a> Checker<'a> {
                     Literal::Int(n) => Ctor::Literal(n.clone()),
                     Literal::Float(n) => Ctor::Literal(n.clone()),
                     Literal::Str(s) => Ctor::Literal(format!("\"{s}\"")),
+                    // Quoted the way it was written, so two arms matching the
+                    // same character are the same constructor and two matching
+                    // different ones are not. `'a'` and `"a"` must not collide,
+                    // which is why the quote is part of the key.
+                    Literal::Char(c) => Ctor::Literal(format!("'{c}'")),
                 },
                 fields: Vec::new(),
             },

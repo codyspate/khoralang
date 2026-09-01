@@ -62,7 +62,7 @@ impl<'a> Checker<'a> {
     pub(super) fn names_a_type(&self, owner: &str) -> bool {
         self.types.adts.contains_key(owner)
             || crate::IntKind::parse(owner).is_some()
-            || matches!(owner, "Int" | "Float" | "Bool" | "String")
+            || matches!(owner, "Int" | "Float" | "Bool" | "Char" | "String")
             || self
                 .types
                 .traits

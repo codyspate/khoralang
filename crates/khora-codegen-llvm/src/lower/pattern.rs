@@ -686,6 +686,13 @@ impl<'ctx> Lower<'_, 'ctx> {
                 let expected = self.be.ctx.bool_type().const_int(expected as u64, false);
                 self.branch_on_equal(value.into_int_value(), expected, success, failure);
             }
+            // An integer comparison, like `Bool` and unlike `Str`: a `Char` is
+            // a scalar, so there is nothing to call and nothing to release.
+            Pat::Literal(Literal::Char(expected)) => {
+                let expected =
+                    self.be.ctx.i32_type().const_int(u64::from(expected as u32), false);
+                self.branch_on_equal(value.into_int_value(), expected, success, failure);
+            }
             // **A literal pattern is an equality test**, which is what D14
             // decided. It parsed, it type-checked, and then it failed here —
             // accepted through two phases and refused in the third, which is

@@ -150,6 +150,20 @@ Request -> Response
 
 The clauses belong to the arrow they follow.
 
+## `Char`
+
+One Unicode scalar value, thirty-two bits wide.
+
+```khora
+fn initial(name: String) -> Option<Char> { String::char_at(name, 0) }
+```
+
+**Not a `String` of length one.** A `String` can be empty or hold a thousand characters, so a function taking one has to decide what those mean; a `Char` cannot be either. It lives in a register, so scanning a string a character at a time allocates nothing.
+
+**A scalar value is not every 32-bit number.** The range stops at `0x10FFFF`, and the surrogates `0xD800` to `0xDFFF` are a hole in the middle of it — they exist only to encode a pair in UTF-16 and are not characters. `Char::from_code` stops the program on either, the way `U8::of` does on a number that does not fit.
+
+`Char::code` goes the other way and cannot fail.
+
 ## Failure rows
 
 `+` joins the failure types of a `raises` row:

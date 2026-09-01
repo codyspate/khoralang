@@ -61,6 +61,15 @@ it will behave differently now.
 
 ### Added
 
+- **A `Char` type, written `'a'`.** One Unicode scalar value in thirty-two bits,
+  with the string escapes and `Eq`, `Ord`, `Show`, `Hash`. `Char::code` and
+  `Char::from_code` cross to and from `Int`; `from_code` stops the program on a
+  surrogate or a number past `0x10FFFF`, because neither is a character.
+- **A character-boundary string API**: `String::is_char_boundary`,
+  `next_boundary`, `previous_boundary`, `char_at`, `chars` and `char_length`.
+  `String::slice` counts bytes and stops the program when a cut lands inside a
+  character; until now there was no way to *ask*, so a program truncating text
+  it did not write was one non-ASCII input from dying.
 - **`std::schema`**: a `Schema<A>` that describes a value and knows nothing
   about where the bytes came from, reporting every problem rather than the
   first. `std::config`'s types are its first client.

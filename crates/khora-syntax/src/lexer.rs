@@ -49,6 +49,27 @@ enum Tok {
 
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident,
+
+    /// `'a'`, and never `'ef`.
+    ///
+    /// **Exactly one character between the quotes, and that is what keeps a
+    /// row variable a row variable.** Both start with `'`, so the two patterns
+    /// compete at every apostrophe in the file and logos gives it to whichever
+    /// matches more: `'a'` is three characters and `'a` is two, so a char
+    /// literal wins; `'ef` has no closing quote, nothing matches three, and
+    /// the row variable wins.
+    ///
+    /// **The `*` version of this regex is a bug**, and an easy one to write.
+    /// `'(..)*'` over `<'a, 'b>` matches from the first apostrophe to the
+    /// second — six characters, longer than `'a` — and a generic list becomes
+    /// a character literal containing a comma. One character, not any number.
+    ///
+    /// The unicode escape is spelled out rather than left to `\\.` so that
+    /// `'\u{1F600}'` is one token; every other escape is two characters and
+    /// `\\.` covers them.
+    #[regex(r"'([^'\\\n]|\\u\{[0-9A-Fa-f]{1,6}\}|\\.)'")]
+    CharLit,
+
     #[regex(r"'[A-Za-z_][A-Za-z0-9_]*")]
     RowVar,
 
@@ -260,6 +281,7 @@ fn to_kind(tok: Tok, text: &str) -> SyntaxKind {
         Tok::IntLit => S::INT_LIT,
         Tok::DecimalLit => S::DECIMAL_LIT,
         Tok::StringLit => S::STRING_LIT,
+        Tok::CharLit => S::CHAR_LIT,
         Tok::RowVar => S::ROW_VAR,
         Tok::Ident => {
             if text == "_" {
@@ -364,5 +386,85 @@ impl<'a> LexedStr<'a> {
     /// Iterates `(kind, text)` pairs including trivia.
     pub fn iter(&self) -> impl Iterator<Item = (SyntaxKind, &'a str)> + '_ {
         (0..self.len()).map(|i| (self.kind(i), self.text(i)))
+    }
+}
+
+#[cfg(test)]
+mod char_lit_tests {
+    use super::*;
+
+    fn kinds(text: &str) -> Vec<SyntaxKind> {
+        let lexed = LexedStr::new(text);
+        (0..lexed.len())
+            .map(|i| lexed.kind(i))
+            .filter(|k| *k != SyntaxKind::WHITESPACE)
+            .collect()
+    }
+
+    /// The apostrophe belongs to two tokens and the tie is broken by length.
+    ///
+    /// `'a'` is three characters and the row variable `'a` is two, so logos
+    /// gives it to the literal; `'ef` has no closing quote, nothing matches
+    /// three characters, and the row variable wins.
+    #[test]
+    fn a_char_literal_and_a_row_variable_do_not_collide() {
+        for text in ["'a'", "'é'", "'\u{1F600}'"] {
+            assert_eq!(kinds(text), vec![SyntaxKind::CHAR_LIT], "lexing {text:?}");
+        }
+        for text in ["'ef", "'er", "'a"] {
+            assert_eq!(kinds(text), vec![SyntaxKind::ROW_VAR], "lexing {text:?}");
+        }
+    }
+
+    /// Every escape, spelled the way a program spells it.
+    #[test]
+    fn the_escapes_are_one_token_each() {
+        // `'\n'`, `'\''`, `'\\'` and `'\u{1F600}'` as a reader writes them.
+        for text in [r"'\n'", r"'\t'", r"'\''", r"'\\'", r"'\u{1F600}'", r"'\u{7}'"] {
+            assert_eq!(kinds(text), vec![SyntaxKind::CHAR_LIT], "lexing {text:?}");
+        }
+    }
+
+    /// A raw newline between the quotes is not a character literal.
+    ///
+    /// `'\n'` is four characters; an actual line break there is a mistake, and
+    /// letting the literal span it would swallow the rest of the program.
+    #[test]
+    fn a_literal_does_not_cross_a_line() {
+        assert_ne!(kinds("'\n'"), vec![SyntaxKind::CHAR_LIT]);
+    }
+
+    /// **The `*` version of this regex eats a generic list.**
+    ///
+    /// `<'a, 'b>` has two apostrophes on one line, and a greedy char literal
+    /// matches from the first to the second — six characters, longer than the
+    /// row variable — so the list becomes one character containing a comma.
+    /// Exactly one character between the quotes is what prevents it.
+    #[test]
+    fn a_list_of_row_variables_is_not_one_character() {
+        assert_eq!(
+            kinds("<'a, 'b>"),
+            vec![
+                SyntaxKind::LT,
+                SyntaxKind::ROW_VAR,
+                SyntaxKind::COMMA,
+                SyntaxKind::ROW_VAR,
+                SyntaxKind::GT
+            ]
+        );
+    }
+
+    /// And a `raises` row keeps its variables.
+    #[test]
+    fn a_raises_row_is_untouched() {
+        assert_eq!(
+            kinds("raises 'er + Boom"),
+            vec![
+                SyntaxKind::RAISES_KW,
+                SyntaxKind::ROW_VAR,
+                SyntaxKind::PLUS,
+                SyntaxKind::IDENT
+            ]
+        );
     }
 }

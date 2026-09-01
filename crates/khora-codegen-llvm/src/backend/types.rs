@@ -26,6 +26,12 @@ impl<'ctx> Backend<'ctx> {
             // `div`, `shr` and ordering comparison.
             Type::Fixed(kind) => Some(self.int_width(kind.bits.into()).into()),
             Type::Bool => Some(self.ctx.bool_type().into()),
+            // **Thirty-two bits, like every other language's `char`.** A
+            // Unicode scalar value needs twenty-one, and the two widths that
+            // fit are 32 and a packed 24 nothing has instructions for. It is
+            // an integer to LLVM, so equality and ordering come free and the
+            // FFI boundary sees a `uint32_t`.
+            Type::Char => Some(self.ctx.i32_type().into()),
             // A closure is a heap object holding its function pointer and its
             // captures, so a value of function type is a pointer to one. `Ptr`
             // is a pointer that is only a pointer: no header, no count.

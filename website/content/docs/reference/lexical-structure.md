@@ -19,6 +19,23 @@ _internal
 
 Hard keywords cannot be used as identifiers.
 
+## Character literals
+
+One Unicode scalar value between apostrophes:
+
+```khora
+'a'
+'é'
+'\n'
+'\u{1F600}'
+```
+
+The escapes are the string ones: `\n`, `\r`, `\t`, `\0`, `\\`, `\'`, `\"`, and `\u{...}` for a code point in hexadecimal.
+
+**Exactly one character.** `''` is not a literal and neither is `'ab'` — a `String` is what holds any number of characters.
+
+The apostrophe also begins a row variable, and the two are told apart by the closing quote: `'a'` is a character and `'a` is a row variable. A generic list such as `<'a, 'b>` is two row variables, not one character containing a comma.
+
 ## Row variables
 
 A row variable begins with `'` followed by an identifier:

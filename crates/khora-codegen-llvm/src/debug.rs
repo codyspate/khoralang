@@ -250,10 +250,12 @@ impl<'ctx> Debug<'ctx> {
         const UNSIGNED: u32 = 0x07;
         const FLOAT: u32 = 0x04;
         const BOOLEAN: u32 = 0x02;
+        const UTF: u32 = 0x10;
 
         let made = match ty {
             Type::Int => self.basic("Int", 64, SIGNED),
             Type::Bool => self.basic("Bool", 8, BOOLEAN),
+            Type::Char => self.basic("Char", 32, UTF),
             Type::Float => self.basic("Float", 64, FLOAT),
             Type::Fixed(kind) => {
                 let bits = u64::from(kind.bits);

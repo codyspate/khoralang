@@ -60,6 +60,19 @@ impl std::fmt::Display for Mismatch {
                 // modules may each declare an `Entry`, and a message that
                 // names both sides `Entry` says the two are identical when
                 // being different is the entire problem. See `Type::qualified`.
+                // **Two types that are equal and did not unify is this
+                // compiler's bug, not the program's.** Adding `Char` to the
+                // enum without adding it to the arm that says a scalar equals
+                // itself produced ``expected `Char`, found `Char``, and the
+                // hour after that was spent looking for the second `Char`.
+                // There was not one.
+                if expected == found {
+                    return write!(
+                        f,
+                        "the compiler could not match `{expected}` with itself, which is a \
+                         bug in the compiler rather than in this program -- please report it"
+                    );
+                }
                 let (left, right) = (expected.to_string(), found.to_string());
                 if left == right {
                     write!(f, "expected `{}`, found `{}`", expected.qualified(), found.qualified())
@@ -370,6 +383,7 @@ impl Unifier {
             | (Type::Float, Type::Float)
             | (Type::Ptr, Type::Ptr)
             | (Type::Bool, Type::Bool)
+            | (Type::Char, Type::Char)
             | (Type::Str, Type::Str)
             | (Type::Unit, Type::Unit) => Ok(()),
 
@@ -766,6 +780,7 @@ fn head_name(ty: &Type) -> Option<String> {
         Type::Fixed(kind) => Some(kind.name()),
         Type::Ptr => Some("Ptr".to_string()),
         Type::Bool => Some("Bool".to_string()),
+        Type::Char => Some("Char".to_string()),
         Type::Str => Some("String".to_string()),
         _ => None,
     }

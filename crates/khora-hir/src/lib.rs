@@ -153,9 +153,9 @@ pub enum TestKind {
 ///
 /// `I64` is here because it is a second spelling of `Int` rather than another
 /// type, so `I64::to_u8` has to resolve exactly as `Int::to_u8` does.
-pub const BUILTIN_TYPES: [&str; 13] = [
-    "Int", "Float", "Bool", "String", "Ptr", "U8", "U16", "U32", "U64", "I8", "I16", "I32",
-    "I64",
+pub const BUILTIN_TYPES: [&str; 14] = [
+    "Int", "Float", "Bool", "Char", "String", "Ptr", "U8", "U16", "U32", "U64", "I8", "I16",
+    "I32", "I64",
 ];
 
 /// What every test's key begins with. `#` cannot occur in a Khora identifier,
@@ -1184,7 +1184,7 @@ fn resolve_through_imports(
 /// dependency only runs the other way, for tests. `builtin_names_agree` over
 /// there fails if the two ever drift.
 pub fn is_builtin_type(name: &str) -> bool {
-    if matches!(name, "Int" | "Float" | "Bool" | "String" | "Ptr" | "Never") {
+    if matches!(name, "Int" | "Float" | "Bool" | "Char" | "String" | "Ptr" | "Never") {
         return true;
     }
     // `I8` through `U64`, and `I64`, which is `Int` spelled the other way.

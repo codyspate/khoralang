@@ -178,6 +178,80 @@ impl<'ctx> Lower<'_, 'ctx> {
     }
 
     /// Continues only if `ok`; otherwise stops the program saying `what`.
+    /// `Char::code` and `Char::from_code`, the two ways across the boundary.
+    ///
+    /// **A `Char` is a Unicode *scalar value*, which is not every 32-bit
+    /// number.** The range stops at `0x10FFFF`, and the surrogate block
+    /// `D800..=DFFF` is a hole in the middle of it — those code points exist
+    /// only to encode a pair in UTF-16 and are not characters. A `Char` holding
+    /// one would produce a `String` that is not UTF-8, which is the invariant
+    /// `String::from_bytes` traps on, one layer further away from the mistake.
+    ///
+    /// So `from_code` is checked and `code` is not: every `Char` is a number
+    /// and only some numbers are a `Char`.
+    pub(super) fn char_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[ExprId],
+        range: TextRange,
+    ) -> Flow<'ctx> {
+        let [only] = args else {
+            return self.fail(format!("`Char::{name}` takes one argument"), range);
+        };
+        let value = self.expr(*only)?.into_int_value();
+        let i64_type = self.be.ctx.i64_type();
+        let i32_type = self.be.ctx.i32_type();
+        match name {
+            // Widening, and every scalar value fits, so there is nothing to
+            // check. Zero-extended: a code point is not negative.
+            "code" => {
+                let wide = self
+                    .be
+                    .builder
+                    .build_int_z_extend_or_bit_cast(value, i64_type, "char.code")
+                    .expect("widening a Char to an Int");
+                Some(wide.into())
+            }
+            "of" | "from_code" => {
+                let b = &self.be.builder;
+                let top = i64_type.const_int(0x10_FFFF, false);
+                let low_surrogate = i64_type.const_int(0xD800, false);
+                let high_surrogate = i64_type.const_int(0xDFFF, false);
+                let zero = i64_type.const_zero();
+
+                let not_negative = b
+                    .build_int_compare(IntPredicate::SGE, value, zero, "char.low")
+                    .expect("range-checking a Char");
+                let in_range = b
+                    .build_int_compare(IntPredicate::SLE, value, top, "char.high")
+                    .expect("range-checking a Char");
+                let below = b
+                    .build_int_compare(IntPredicate::SLT, value, low_surrogate, "char.pre")
+                    .expect("range-checking a Char");
+                let above = b
+                    .build_int_compare(IntPredicate::SGT, value, high_surrogate, "char.post")
+                    .expect("range-checking a Char");
+                let outside_surrogates =
+                    b.build_or(below, above, "char.not.surrogate").expect("a Char check");
+                let bounded =
+                    b.build_and(not_negative, in_range, "char.bounded").expect("a Char check");
+                let ok = b.build_and(bounded, outside_surrogates, "char.ok").expect("a Char check");
+                self.guard(
+                    ok,
+                    "this is not a Unicode scalar value, so it is not a Char: the range is \
+                     0 to 0x10FFFF and the surrogates 0xD800 to 0xDFFF are not characters",
+                );
+                let narrow = self
+                    .be
+                    .builder
+                    .build_int_truncate_or_bit_cast(value, i32_type, "char.of")
+                    .expect("narrowing an Int to a Char");
+                Some(narrow.into())
+            }
+            _ => self.fail(format!("`Char::{name}` is not a character operation"), range),
+        }
+    }
+
     pub(super) fn guard(&mut self, ok: IntValue<'ctx>, what: &str) {
         let good = self.block("in.range");
         let bad = self.block("out.of.range");

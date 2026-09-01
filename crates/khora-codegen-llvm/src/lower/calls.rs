@@ -183,6 +183,9 @@ impl<'ctx> Lower<'_, 'ctx> {
         if let Some(shape) = int_owner(owner) {
             return Some(self.int_intrinsic(shape, owner, name, args, range));
         }
+        if owner == "Char" && matches!(name, "code" | "of" | "from_code") {
+            return Some(self.char_intrinsic(name, args, range));
+        }
         if owner == "String" && name == "with_data" {
             return Some(self.with_data(site, args, range));
         }

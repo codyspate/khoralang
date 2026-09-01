@@ -114,6 +114,12 @@ impl<'ctx> Lower<'_, 'ctx> {
                 Some(self.be.ctx.bool_type().const_int(value as u64, false).into())
             }
             Literal::Str(text) => self.string_literal(&text),
+            // The scalar value, not the bytes it would be in a string. `'é'`
+            // is one value of 233 rather than the two bytes UTF-8 writes it
+            // as, which is the whole reason the type exists.
+            Literal::Char(value) => {
+                Some(self.be.ctx.i32_type().const_int(u64::from(value as u32), false).into())
+            }
             Literal::Float(text) => {
                 let Ok(value) = text.parse::<f64>() else {
                     return self.fail(format!("`{text}` is not a number this target can hold"), range);

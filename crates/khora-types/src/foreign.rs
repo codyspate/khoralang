@@ -26,7 +26,11 @@ use crate::{Signature, Type};
 /// `docs/design/ffi.md` has the full contract.
 pub fn foreign_obstacle(ty: &Type) -> Option<&'static str> {
     match ty {
-        Type::Int | Type::Fixed(_) | Type::Float | Type::Bool | Type::Ptr => None,
+        // A `Char` is thirty-two bits of Unicode scalar value, which is
+        // `uint32_t` on the other side. It crosses for the same reason the
+        // fixed-width integers do: it is a number with a width, and the FFI
+        // rule is that only scalars and pointers cross.
+        Type::Int | Type::Fixed(_) | Type::Float | Type::Bool | Type::Ptr | Type::Char => None,
         Type::Str => Some(
             "a `String` is a reference-counted heap object with a header the C side knows \
              nothing about; pass its bytes and length instead",

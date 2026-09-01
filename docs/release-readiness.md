@@ -66,7 +66,7 @@ which is the single fact behind three separate unticked items.
 
 ## 1. Language and compiler correctness
 
-- [ ] Phase 12 is complete, including all implementation work that remains in its entries rather than only the currently landed subset. **Left:** #140's remainder is Phase-12-shaped: there is no `Char` type and no character-boundary string API.
+- [ ] Phase 12 is complete, including all implementation work that remains in its entries rather than only the currently landed subset. **Left:** #140's remainder is Phase-12-shaped: `khora run file.kh` runs the package's main, an unused *type* import warns nothing, and `src/bin` is enforced by a lint without multiple binaries being implemented.
 - [x] Every known silent-miscompile, silently ignored annotation, unresolved-name hole, and misleading diagnostic discovered during Phase 12 has either been fixed or promoted to a release-blocking issue. **Done:** #143 fixed (errata 62); #142 and #108 are tracked and listed under Known limitations.
 - [ ] The compiler rejects unresolved type names, unresolved trait bounds, contradictory annotations, and unsupported constructs at the source location that caused the problem. **Left:** An unresolved name renders identically to the real type — ``expected `X`, found `X``` beside "cannot find type `X`".
 - [x] Type inference and lowering have regression coverage for closures, generics, traits, effect rows, handlers, capabilities, higher-kinded types, ADTs, pattern matching and annotations. **Done:** 2,107 tests; `khora-types/tests` and `khora-codegen-llvm/tests` carry a file per feature.
@@ -75,7 +75,7 @@ which is the single fact behind three separate unticked items.
 - [x] The formatter is stable enough that a public project can use `khora fmt` in CI without routine semantic churn. **Done:** `khora fmt --check` runs over `std` and all ten corpus members in `scripts/baseline.sh`.
 - [ ] The linter's supported checks are documented, deterministic and free of known high-confidence false positives. **Left:** No public lint reference page. Levels are configurable in `khora.toml` and that table is undocumented outside this repository.
 - [x] The language's grammar, precedence and user-visible semantics have one canonical public reference. **Done:** `/docs/reference/grammar`, `/lexical-structure`, `/expressions`.
-- [ ] A `Char` type and a character-boundary string API exist, or their absence is recorded as a deliberate limitation with the byte-oriented alternative documented. **Left:** neither exists; `String` is byte-indexed and nothing names a character.
+- [x] A `Char` type and a character-boundary string API exist, or their absence is recorded as a deliberate limitation with the byte-oriented alternative documented. **Done:** `Char` is a builtin scalar written `'a'`; `is_char_boundary`, `next_boundary`, `previous_boundary`, `char_at`, `chars` and `char_length` are the API that makes `String::slice` safe to reach for.
 - [ ] `attempt` discharges a `raises` row holding more than one error type, or the one-type limit is documented and `catch` is presented as the way to handle a wider row. **Left:** `attempt<A, E, 'ef>` takes a single `E`, so a body raising `HttpError + ChildFailed` cannot go through the documented way to turn a failure into a value.
 - [ ] A diagnostic never renders two different types with the same text. **Left:** two same-named types from different modules both print as their bare name — ``expected `Entry`, found `Entry```.
 

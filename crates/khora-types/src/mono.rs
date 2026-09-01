@@ -78,6 +78,7 @@ fn mangle(ty: &Type) -> String {
         Type::Fixed(kind) => kind.name(),
         Type::Ptr => "Ptr".to_string(),
         Type::Bool => "Bool".to_string(),
+        Type::Char => "Char".to_string(),
         Type::Str => "String".to_string(),
         Type::Unit => "Unit".to_string(),
         // The module is part of the name here for the reason it is part of the

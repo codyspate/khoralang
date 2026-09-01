@@ -11,7 +11,7 @@ pub(super) fn pattern(p: &mut Parser<'_>) {
             p.bump(UNDERSCORE);
             m.complete(p, WILDCARD_PAT);
         }
-        INT_LIT | FLOAT_LIT | STRING_LIT | TRUE_KW | FALSE_KW => {
+        INT_LIT | FLOAT_LIT | STRING_LIT | CHAR_LIT | TRUE_KW | FALSE_KW => {
             let m = p.start();
             p.bump_any();
             m.complete(p, LITERAL_PAT);

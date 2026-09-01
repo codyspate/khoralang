@@ -654,7 +654,7 @@ pub fn type_map(db: &dyn Db, file: SourceFile) -> TypeMap {
 /// The list is short and closed: these are the types the language spells and
 /// no module declares, so no `import` line could ever bring one in.
 fn is_builtin_head(head: &str) -> bool {
-    matches!(head, "Int" | "Float" | "Bool" | "String" | "Ptr" | "()")
+    matches!(head, "Int" | "Float" | "Bool" | "Char" | "String" | "Ptr" | "()")
         || head.starts_with('I')
             && head[1..].parse::<u32>().is_ok()
         || head.starts_with('U')

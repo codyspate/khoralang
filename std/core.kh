@@ -124,6 +124,136 @@ impl Bool {
   pub fn to_string(self) -> String { if self { "true" } else { "false" } }
 }
 
+impl Show for Char {
+  /// The character itself, with no quotes.
+  ///
+  /// `Show` is what a value looks like *to a reader*, and `'a'` printed inside
+  /// a sentence should read `a`. The quoted form is how it is written in
+  /// source, which is a different question and one nothing asks yet.
+  fn show(self) -> String { Char::to_string(self) }
+}
+
+impl Eq for Char {
+  fn eq(self, other: Char) -> Bool { Char::code(self) == Char::code(other) }
+}
+
+impl Ord for Char {
+  /// By code point, which is what `<` on characters means everywhere.
+  ///
+  /// **Not a collation order.** `'Z'` sorts before `'a'` because 90 is less
+  /// than 97, and `'é'` sorts after both; a human-facing sort of names wants a
+  /// locale and a library, and pretending this is one would be worse than not
+  /// having it.
+  fn cmp(self, other: Char) -> Ordering { Int::cmp(Char::code(self), Char::code(other)) }
+}
+
+impl Hash for Char {
+  fn hash(self) -> Int { Char::code(self) }
+}
+
+/// One Unicode scalar value.
+///
+/// **Not a `String` of length one.** A `String` can be empty or a thousand
+/// characters, so a function taking one has to decide what those mean; a
+/// `Char` cannot be either. It is thirty-two bits and lives in a register,
+/// which is the other half: scanning a string a character at a time through
+/// one-character `String`s allocates once per character.
+///
+/// **A scalar value, which is not every number.** The range stops at
+/// `0x10FFFF` and the surrogates `0xD800` to `0xDFFF` are a hole in the middle
+/// of it -- they exist only to encode a pair in UTF-16 and are not characters.
+/// [`Char::from_code`] is checked for both.
+///
+/// Written `'a'`, `'\n'`, `'\u{1F600}'`. The escapes are the string ones.
+impl Char {
+  /// The code point, as an `Int`. Every `Char` has one, so this cannot fail.
+  pub fn code(self) -> Int;
+
+  /// The character with this code point, or a stopped program.
+  ///
+  /// Stops rather than raises, for the reason every other narrowing conversion
+  /// in this library does: a number that is not a character is a mistake in
+  /// the program rather than a condition to handle, and `U8::of` sets the
+  /// precedent. Check the range first if the number came from outside.
+  pub fn from_code(value: Int) -> Char;
+
+  /// This character as a one-character string.
+  ///
+  /// The UTF-8 encoding, written out here rather than asked of the runtime:
+  /// four branches on the code point and `String::from_bytes` at the end, so
+  /// the standard library's own text handling has no intrinsic under it that a
+  /// reader cannot follow.
+  pub fn to_string(self) -> String {
+    let code = Char::code(self);
+    if code < 128 {
+      let one: Array<U8> = Array::new(1, 0);
+      Array::set(one, 0, U8::of(code));
+      String::from_bytes(one)
+    } else if code < 2048 {
+      let two: Array<U8> = Array::new(2, 0);
+      Array::set(two, 0, U8::of(192 + code / 64));
+      Array::set(two, 1, U8::of(128 + code % 64));
+      String::from_bytes(two)
+    } else if code < 65536 {
+      let three: Array<U8> = Array::new(3, 0);
+      Array::set(three, 0, U8::of(224 + code / 4096));
+      Array::set(three, 1, U8::of(128 + (code / 64) % 64));
+      Array::set(three, 2, U8::of(128 + code % 64));
+      String::from_bytes(three)
+    } else {
+      let four: Array<U8> = Array::new(4, 0);
+      Array::set(four, 0, U8::of(240 + code / 262144));
+      Array::set(four, 1, U8::of(128 + (code / 4096) % 64));
+      Array::set(four, 2, U8::of(128 + (code / 64) % 64));
+      Array::set(four, 3, U8::of(128 + code % 64));
+      String::from_bytes(four)
+    }
+  }
+
+  /// How many bytes this character takes in UTF-8: 1, 2, 3 or 4.
+  pub fn utf8_length(self) -> Int {
+    let code = Char::code(self);
+    if code < 128 { 1 } else if code < 2048 { 2 } else if code < 65536 { 3 } else { 4 }
+  }
+
+  /// `'0'` to `'9'`. ASCII only, and the name says so nowhere else, so:
+  /// **this is not `Nd`**. Arabic-Indic and Devanagari digits are digits to
+  /// Unicode and not to this, because a parser that accepted them would then
+  /// have to decide what `Int::of_string` does with them.
+  pub fn is_digit(self) -> Bool {
+    let code = Char::code(self);
+    code >= 48 && code <= 57
+  }
+
+  /// `'a'` to `'z'` and `'A'` to `'Z'`. ASCII only, for the reason on
+  /// [`is_digit`].
+  pub fn is_alpha(self) -> Bool {
+    let code = Char::code(self);
+    (code >= 97 && code <= 122) || (code >= 65 && code <= 90)
+  }
+
+  /// A letter or a digit, both in the ASCII sense above.
+  pub fn is_alphanumeric(self) -> Bool { Char::is_alpha(self) || Char::is_digit(self) }
+
+  /// Space, tab, newline, carriage return.
+  pub fn is_whitespace(self) -> Bool {
+    let code = Char::code(self);
+    code == 32 || code == 9 || code == 10 || code == 13
+  }
+
+  /// `'A'` for `'a'`, and everything else unchanged. ASCII only.
+  pub fn to_upper(self) -> Char {
+    let code = Char::code(self);
+    if code >= 97 && code <= 122 { Char::from_code(code - 32) } else { self }
+  }
+
+  /// `'a'` for `'A'`, and everything else unchanged. ASCII only.
+  pub fn to_lower(self) -> Char {
+    let code = Char::code(self);
+    if code >= 65 && code <= 90 { Char::from_code(code + 32) } else { self }
+  }
+}
+
 impl Show for String {
   fn show(self) -> String { self }
 }
@@ -2298,6 +2428,142 @@ impl String {
   /// "the rest of it" is what every caller of `slice(i, byte_length(s))`
   /// means.
   pub fn slice(self, from: Int, to: Int) -> String;
+
+  /// Whether `at` is where a character starts.
+  ///
+  /// **The question [`slice`] gives no way to ask, and it is the one that
+  /// matters.** `slice` counts bytes and stops the program when the cut lands
+  /// inside a character:
+  ///
+  /// ```text
+  /// khora: this slice cuts a character in half, so it is not a String
+  /// ```
+  ///
+  /// Which is right -- the alternative is a `String` that is not UTF-8 -- but
+  /// until there was a way to *ask*, a program truncating text it did not
+  /// write was one non-ASCII input from dying. `std::json` copes by reasoning
+  /// that every byte it escapes is below 128; an application should not have
+  /// to.
+  ///
+  /// The end of the string is a boundary, and so is 0. Anything outside is
+  /// not.
+  pub fn is_char_boundary(self, at: Int) -> Bool {
+    if at == 0 || at == String::byte_length(self) {
+      true
+    } else if at < 0 || at > String::byte_length(self) {
+      false
+    } else {
+      // A continuation byte is `10xxxxxx`; every other byte begins one.
+      U8::to_int(String::byte(self, at)) / 64 != 2
+    }
+  }
+
+  /// The first character boundary at or after `at`, or the string's length.
+  ///
+  /// For walking to a safe place to cut: `String::slice(s, 0, s |> next_boundary(20))`
+  /// takes about twenty bytes and never lands in the middle of anything.
+  pub fn next_boundary(self, at: Int) -> Int {
+    let length = String::byte_length(self);
+    if at >= length {
+      length
+    } else if String::is_char_boundary(self, at) {
+      at
+    } else {
+      String::next_boundary(self, at + 1)
+    }
+  }
+
+  /// The last character boundary at or before `at`, or 0.
+  pub fn previous_boundary(self, at: Int) -> Int {
+    if at <= 0 {
+      0
+    } else if String::is_char_boundary(self, at) {
+      at
+    } else {
+      String::previous_boundary(self, at - 1)
+    }
+  }
+
+  /// The character beginning at byte `at`, or `None`.
+  ///
+  /// `None` when `at` is outside the string or is not a boundary -- asking for
+  /// the character in the middle of one has no answer, and inventing the
+  /// replacement character would hide a caller that is stepping by the wrong
+  /// amount.
+  ///
+  /// **Byte offsets, not character indices.** `char_at(s, 3)` is the character
+  /// three *bytes* in, and `utf8_length` is how far to step for the next one.
+  /// A character index would mean walking the string from the start for every
+  /// access, which is the quadratic loop this signature refuses to hide.
+  pub fn char_at(self, at: Int) -> Option<Char> {
+    let length = String::byte_length(self);
+    if at < 0 || at >= length || !String::is_char_boundary(self, at) {
+      Option::None
+    } else {
+      let lead = U8::to_int(String::byte(self, at));
+      if lead < 128 {
+        Option::Some(Char::from_code(lead))
+      } else if lead < 224 {
+        Option::Some(Char::from_code((lead - 192) * 64 + String::tail_byte(self, at + 1)))
+      } else if lead < 240 {
+        Option::Some(
+          Char::from_code(
+            (lead - 224) * 4096
+            + String::tail_byte(self, at + 1) * 64
+            + String::tail_byte(self, at + 2),
+          ),
+        )
+      } else {
+        Option::Some(
+          Char::from_code(
+            (lead - 240) * 262144
+            + String::tail_byte(self, at + 1) * 4096
+            + String::tail_byte(self, at + 2) * 64
+            + String::tail_byte(self, at + 3),
+          ),
+        )
+      }
+    }
+  }
+
+  /// The six payload bits of a continuation byte.
+  ///
+  /// Not `pub`: a caller with a byte offset into the middle of a character has
+  /// already gone wrong, and this is the one place that is on purpose.
+  fn tail_byte(self, at: Int) -> Int {
+    if at >= String::byte_length(self) { 0 } else { U8::to_int(String::byte(self, at)) % 64 }
+  }
+
+  /// Every character, in order.
+  ///
+  /// Allocates a list as long as the string has characters, which is what
+  /// makes it the convenient answer rather than the fast one. A scan that
+  /// cares walks with [`char_at`] and [`Char::utf8_length`] and allocates
+  /// nothing.
+  pub fn chars(self) -> List<Char> {
+    List::reverse(String::gather_chars(self, 0, List::Nil))
+  }
+
+  fn gather_chars(self, at: Int, so_far: List<Char>) -> List<Char> {
+    match String::char_at(self, at) {
+      Option::None => so_far,
+      Option::Some(c) =>
+        String::gather_chars(self, at + Char::utf8_length(c), List::Cons(c, so_far)),
+    }
+  }
+
+  /// How many characters, which is not how many bytes.
+  ///
+  /// Walks the string, so it is `O(n)`. `byte_length` is the constant-time one
+  /// and is what a buffer size wants.
+  pub fn char_length(self) -> Int { String::count_chars(self, 0, 0) }
+
+  fn count_chars(self, at: Int, so_far: Int) -> Int {
+    match String::char_at(self, at) {
+      Option::None => so_far,
+      Option::Some(c) => String::count_chars(self, at + Char::utf8_length(c), so_far + 1),
+    }
+  }
 
   /// Where `needle` first occurs at or after `from`, counting in bytes, or
   /// **-1** if it is nowhere.

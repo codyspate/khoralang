@@ -244,6 +244,7 @@ pub(crate) fn named_type(
         "Int" | "I64" => Type::Int,
         "Float" => Type::Float,
         "Bool" => Type::Bool,
+        "Char" => Type::Char,
         "String" => Type::Str,
         "Ptr" => Type::Ptr,
         // **The bottom type, and it was not reaching it.** `std::core` declares

@@ -19,6 +19,8 @@ pub enum SyntaxKind {
     /// `0.01d` -- an exact decimal. The language's only literal suffix.
     DECIMAL_LIT,
     STRING_LIT,
+    /// `'a'`, `'\n'`, `'\u{1F600}'` — one Unicode scalar value.
+    CHAR_LIT,
 
     // --- names ----------------------------------------------------------
     IDENT,
@@ -255,7 +257,10 @@ impl SyntaxKind {
     }
 
     pub fn is_literal(self) -> bool {
-        matches!(self, INT_LIT | FLOAT_LIT | DECIMAL_LIT | STRING_LIT | TRUE_KW | FALSE_KW)
+        matches!(
+            self,
+            INT_LIT | FLOAT_LIT | DECIMAL_LIT | STRING_LIT | CHAR_LIT | TRUE_KW | FALSE_KW
+        )
     }
 
     /// Reserved words that can begin a top-level declaration; used for error
