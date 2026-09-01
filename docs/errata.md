@@ -2597,3 +2597,50 @@ already satisfied and unticked: the search index has been built over all 100
 pages every time anybody ran `npm run build`, and the link checker has been
 failing CI on broken internal links since it was written. Both were discovered
 by running the build once.
+
+## 69. A capability offered to a closure was one it had to use
+
+    nursery(fn () => 1)
+
+    error: this argument: `nursery: Nursery` is required here but not provided
+
+The nursery is being provided. That is what `nursery` does. The body simply did
+not want one, and could not be passed.
+
+Every parameter written `with { 'ef | cap: Cap }` behaved this way -- `scoped`,
+`bounded_nursery`, and anything anybody else wrote. A row on a callback names
+what the callback *may* have; it was being read as what the callback *must*
+use.
+
+**The two rows were side by side and only one was right.** A lambda's type is
+built with a fresh variable for each row, solved after its body is checked. The
+error row was then deliberately opened:
+
+    // Left open, because what the body raises is a lower bound rather than the
+    // answer -- see `open_raises`. A closed row here is what made a mock that
+    // cannot fail unusable as an operation declared to fail.
+
+The capability row, four lines above, was not. So a mock that cannot fail was
+usable where something fallible was wanted, and a body that needs nothing was
+not usable where something was offered -- the same mistake, in the same
+function, with the argument against it written out beside it.
+
+Both are lower bounds. What a body raises is at least what its body raises; what
+it requires is at least what its body reaches for. In both cases the caller may
+have more, and in both cases the tail is what absorbs the difference.
+
+The fix is four lines and reuses the closing pass: a tail nothing ever widened
+becomes the empty row, so code generation sees exactly the row it always saw
+and only a body that is *offered* something extra ends up carrying it.
+
+**What hid it.** `nursery` is nearly always called with a body that adopts
+something, `scoped` with one that acquires something, and a `with { .. }`
+parameter is nearly always written by somebody who then uses the capability --
+so the failing case is the *degenerate* one, and degenerate cases are what
+nobody writes until they are building something else. It surfaced while trying
+to write a deadline, whose timer fiber wants a clock and whose nursery body
+wants nothing.
+
+The shape is errata 67's: two things each correct alone, and the bug in the
+case that needs both. Here it is narrower and worse -- two adjacent fields of
+one struct, one carrying the reasoning that the other needed.

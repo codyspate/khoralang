@@ -86,6 +86,46 @@ fn errors_with_std(program: &str) -> Vec<String> {
     khora_types::diagnostics(&db, mine).iter().map(|e| e.message.clone()).collect()
 }
 
+/// **A capability offered to a closure is not one it has to use.**
+///
+/// `nursery(fn () => 1)` was refused with ``nursery: Nursery is required here
+/// but not provided`` — about a nursery that was being provided, to a body
+/// that did not want it. Every parameter written `with { 'ef | cap: Cap }` had
+/// the same effect: a body needing nothing could not be passed where something
+/// was on offer.
+///
+/// The cause was that a lambda's capability row came out *closed*, so it could
+/// not absorb a label nobody asked for. The error row beside it has been left
+/// open since it was written, with a comment saying why — "a closed row here is
+/// what made a mock that cannot fail unusable as an operation declared to
+/// fail" — and the same sentence is true one field up.
+#[test]
+fn a_closure_need_not_use_the_capability_it_is_offered() {
+    for body in ["nursery(fn () => 1)!", "bounded_nursery(4, fn () => 1)!", "scoped(fn () => 1)!"] {
+        let found = errors_with_std(&format!(
+            "module program;\n\
+             import std::core::{{ChildFailed, Scope, bounded_nursery, nursery, scoped}};\n\
+             pub fn main() -> Int raises ChildFailed {{\n  {body}\n}}\n"
+        ));
+        assert!(found.is_empty(), "`{body}` should compile: {found:?}");
+    }
+}
+
+/// And the direction that must keep failing: a body that needs a capability
+/// nobody offers is still an error.
+///
+/// This is what opening the row could have broken. An open tail absorbs what
+/// the *caller* has; it does not invent one.
+#[test]
+fn a_closure_still_cannot_use_a_capability_nobody_has() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{Clock};\n\
+         pub fn main() -> () {\n  let f = fn () => clock.sleep(1);\n  f()\n}\n",
+    );
+    assert!(!found.is_empty(), "a capability nobody installed is still an error");
+}
+
 /// **A capability's type arrives without its name, and the message says so.**
 ///
 /// Importing `nursery` and not `Nursery` gave ``Nursery has no method

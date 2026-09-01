@@ -179,7 +179,9 @@ continue_parent();
 
 Cancelling a child does not cancel its parent.
 
-**There is no `timeout`, no `race` and no `select`.** A deadline on a piece of work is built from the pieces above — two fibers and a `Channel::dropping(1)` that the first one to finish sends into, with the loser detached rather than joined. [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) and [Bound concurrent work](/docs/cookbook/bounded-concurrency/) are the recipes nearest to it. `docs/limitations/` says the same and is the page to check before assuming an operation exists.
+**There is no `timeout`, no `race` and no `select`, and at present you cannot write one.** The shape a deadline wants — two fibers racing, the parent taking whichever finishes first off a channel — does not currently run concurrently: a parent blocked on `Channel::receive` serialises the fibers it spawned, so the "race" is decided by spawn order rather than by time. Two 2000 ms fibers take 4.8 seconds that way and 2.8 seconds when the parent waits on their handles instead.
+
+That is a bug rather than a design, and it is being fixed; this page will carry the recipe when it works, rather than describing one that does not. Until then, what does work is waiting on handles: [Take work off a queue safely](/docs/cookbook/taking-work-off-a-queue/) and [Bound concurrent work](/docs/cookbook/bounded-concurrency/) are the nearest recipes, and [known limitations](/docs/limitations/) is the page to check before assuming an operation exists.
 
 Cancellation is observed at cancellation points rather than between arbitrary source instructions. There are two:
 

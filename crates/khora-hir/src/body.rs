@@ -1070,6 +1070,41 @@ pub(crate) fn strip_indent(line: &str, common: usize) -> String {
     out
 }
 
+/// The source of every `${..}` hole in a string literal, as written.
+///
+/// **So that a caller can see the identifiers a literal uses.** A hole's
+/// contents are ordinary Khora, but they live inside one `STRING_LIT` token —
+/// so anything walking the token stream sees a string where a reader sees a
+/// call. `khora-lint` walked the token stream to decide which imports are used
+/// and therefore reported a name used only in a hole as never used, which is
+/// advice that breaks the program.
+///
+/// Takes the whole token including its delimiters, because that is what a
+/// caller holding a token has. A `"` and a backtick are both one byte and both
+/// produce the same token kind, so stripping one character from each end is
+/// the whole of the difference between them.
+///
+/// The brace counting and the string skipping are `split_interpolation`'s, not
+/// a second copy: `${f("}", x)}` ends where it should here for the same reason
+/// it does there.
+pub fn interpolation_holes(literal: &str) -> Vec<String> {
+    let body = literal
+        .char_indices()
+        .nth(1)
+        .map(|(start, _)| {
+            let end = literal.len().saturating_sub(literal.chars().last().map_or(0, char::len_utf8));
+            if end > start { &literal[start..end] } else { "" }
+        })
+        .unwrap_or("");
+    split_interpolation(body)
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Hole(piece) => Some(piece.text),
+            Part::Text(_) => None,
+        })
+        .collect()
+}
+
 /// Splits a literal's body into the text around its `${..}` holes.
 ///
 /// **Braces are counted, and strings inside are skipped**, so

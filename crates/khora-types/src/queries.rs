@@ -188,12 +188,13 @@ pub fn checked(db: &dyn Db, file: SourceFile) -> Checked {
             installed: Vec::new(),
             loops: Vec::new(),
             open_raises: Vec::new(),
+            open_requires: Vec::new(),
             hint: None,
             marked: Vec::new(),
             errors: Vec::new(),
         };
         checker.check_function();
-        checker.close_open_raises();
+        checker.close_open_rows();
         checker.check_bounds();
         checker.settle_projections();
         // After the projections, so that a scrutinee whose type came through

@@ -423,15 +423,34 @@ fn unused_imports(
     let text = file.text(db);
     let lexed = khora_syntax::LexedStr::new(text);
     let mut mentioned: Vec<&str> = Vec::new();
+    // **And every identifier inside a `${..}` hole**, which the loop above
+    // cannot see: a hole's contents are ordinary Khora living inside one
+    // `STRING_LIT`, so `"${quoted(c)}"` is a string to a token walk and a call
+    // to a reader. Three imports in `examples/khq` were used exactly once,
+    // each in a hole, and all three were reported as never used.
+    //
+    // Owned, because they are lexed out of a temporary rather than borrowed
+    // from the file. `used` checks both lists.
+    let mut in_holes: Vec<String> = Vec::new();
     for index in 0..lexed.len() {
-        if lexed.kind(index) != khora_syntax::SyntaxKind::IDENT {
-            continue;
-        }
         let at = lexed.range(index);
         if items.imports.iter().any(|import| import.range.contains_range(at)) {
             continue;
         }
-        mentioned.push(lexed.text(index));
+        match lexed.kind(index) {
+            khora_syntax::SyntaxKind::IDENT => mentioned.push(lexed.text(index)),
+            khora_syntax::SyntaxKind::STRING_LIT => {
+                for hole in khora_hir::body::interpolation_holes(lexed.text(index)) {
+                    let inner = khora_syntax::LexedStr::new(&hole);
+                    for i in 0..inner.len() {
+                        if inner.kind(i) == khora_syntax::SyntaxKind::IDENT {
+                            in_holes.push(inner.text(i).to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     // **A `for` loop uses two names it does not write.** It expands into a
@@ -513,6 +532,7 @@ fn unused_imports(
         let khora_hir::ImportKind::Named(names) = &import.kind else { continue };
         let used = |name: &khora_hir::ImportedName| {
             mentioned.contains(&name.alias.as_str())
+                || in_holes.iter().any(|seen| seen == &name.alias)
                 || in_types.iter().any(|seen| seen == &name.alias)
                 || through_methods.iter().any(|seen| seen == &name.alias)
         };

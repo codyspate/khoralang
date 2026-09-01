@@ -47,6 +47,18 @@ it will behave differently now.
 
 ### Fixed
 
+- **A capability offered to a closure is no longer one it has to use.**
+  `nursery(fn () => 1)` was refused with ``nursery: Nursery is required here but
+  not provided`` — about a nursery that was being provided. Every parameter
+  written `with { 'ef | cap: Cap }` behaved that way: a lambda's capability row
+  came out closed, so it could not absorb a label nobody asked for. The error
+  row beside it had been left open since it was written, for the same reason.
+  Errata 69.
+- **`unused-import` sees a name used inside a `${..}` hole.** The mention walk
+  is over the token stream, and a hole's contents live inside one string token —
+  so `"${quoted(c)}"` was a string to the lint and a call to everybody else.
+  Following the advice deleted an import the program needed.
+
 - **The documentation site had not built for a week.** `sync-docs.mjs` refuses
   a link written to a `.md` source file rather than to the route it renders as
   — a good check — but asked that before asking whether the link was external,

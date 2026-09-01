@@ -95,7 +95,9 @@ The practical consequence is that `attempt` handles a body raising exactly one t
 
 ## Concurrency combinators
 
-A fiber carries its answer and its failure row — `Fiber<A, 'er>`, with `join` re-raising what the child raised — and `Clock` can `sleep`. The combinators built on top of those do not exist yet: there is no `timeout`, no `race`, and no bounded parallel map. Write them by hand out of `Fiber`, `Channel` and a nursery in the meantime.
+A fiber carries its answer and its failure row — `Fiber<A, 'er>`, with `join` re-raising what the child raised — and `Clock` can `sleep`. The combinators built on top of those do not exist yet: there is no `timeout`, no `race`, and no bounded parallel map.
+
+**And writing one by hand does not currently work either.** A parent blocked on `Channel::receive` serialises the fibers it spawned — two 2000 ms fibers take 4.8 seconds that way against 2.8 when the parent waits on their handles — so the fan-in a race needs is decided by spawn order rather than by time. Waiting on handles is concurrent and is what to build on until that is fixed.
 
 `Channel` also has no `select` (waiting on the first of several) and no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
 

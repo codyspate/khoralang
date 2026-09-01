@@ -11,13 +11,28 @@
 use super::*;
 
 impl<'a> Checker<'a> {
-    /// Closes every lambda error row nothing ever asked to be wider.
+    /// Closes every lambda row nothing ever asked to be wider.
     ///
     /// Run once the body is checked. A tail still unsolved here was never
-    /// compared against anything, so the honest reading is "this raises exactly
-    /// what its body raises" — which is the closed empty row on the end.
-    pub(crate) fn close_open_raises(&mut self) {
-        for tail in std::mem::take(&mut self.open_raises) {
+    /// compared against anything, so the honest reading is "this raises and
+    /// requires exactly what its body does" — which is the closed empty row on
+    /// the end.
+    ///
+    /// **Both rows, for the same reason.** What a closure raises is a lower
+    /// bound: a mock that cannot fail is usable where an operation declared to
+    /// fail is wanted. What it *requires* is a lower bound too, and was not
+    /// treated as one — so a body that wanted nothing could not be passed
+    /// somewhere offering something, and `nursery(fn () => 1)` did not compile.
+    ///
+    /// Closing them here rather than leaving them open is what keeps code
+    /// generation seeing the same thing it always saw: a lambda nobody widened
+    /// gets the row its body produced, to the label.
+    pub(crate) fn close_open_rows(&mut self) {
+        let tails: Vec<Type> = std::mem::take(&mut self.open_raises)
+            .into_iter()
+            .chain(std::mem::take(&mut self.open_requires))
+            .collect();
+        for tail in tails {
             if matches!(self.unifier.shallow(&tail), Type::Var(_)) {
                 let _ = self.unifier.unify(&tail, &Type::empty_row());
             }

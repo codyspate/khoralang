@@ -143,6 +143,19 @@ pub(crate) struct Checker<'a> {
     /// fallible to the code generator, and every lambda returns a tagged pair
     /// for nothing.
     pub(crate) open_raises: Vec<Type>,
+    /// The same, for what a lambda *requires*.
+    ///
+    /// **A capability offered to a closure is not a capability it has to
+    /// use.** `nursery(fn () => 1)` was refused with ``nursery: Nursery is
+    /// required here but not provided``, which is exactly backwards: the
+    /// nursery is being provided and the body simply does not want it. The row
+    /// on the body came out closed, so it could not absorb a label nobody
+    /// asked for.
+    ///
+    /// Left open for the same reason the error row is, and closed the same way
+    /// by [`Checker::close_open_rows`]: what a body needs is a *lower* bound,
+    /// and a tail nothing ever widened is empty.
+    pub(crate) open_requires: Vec<Type>,
     /// The type the surrounding expression is asking for, when there is one.
     ///
     /// Only integer literals read it, and only to decide which integer they

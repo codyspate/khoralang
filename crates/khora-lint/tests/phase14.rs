@@ -179,6 +179,57 @@ fn a_type_reached_only_through_a_value_is_used() {
     assert!(found.is_empty(), "`Answer` is what makes `a.rows` work: {found:?}");
 }
 
+/// **A name used only inside a `${..}` hole is used.**
+///
+/// The mention walk is over the token stream, and a hole's contents live
+/// inside one `STRING_LIT` — so `"${used()}"` is a string to this lint and a
+/// call to everybody else. Three imports in `examples/khq` were each used
+/// exactly once, each in a hole, and all three were reported as never used.
+///
+/// Following that advice does not merely leave a warning behind: it deletes
+/// the import and the file stops compiling.
+#[test]
+fn a_name_used_only_in_an_interpolation_hole_is_used() {
+    let found = two(
+        LIB,
+        "module u;\n\nimport lib::{used};\n\n         pub fn main() -> Int {\n  let s = \"answer ${used()}\";\n  String::byte_length(s)\n}\n",
+    );
+    assert!(found.is_empty(), "the hole is a use: {found:?}");
+}
+
+/// And the direction that must keep working: a hole does not make every name
+/// in the statement used.
+///
+/// This is what the fix could easily have broken. The whole statement is
+/// skipped when *no* name in it is used — so before the fix, a lone import
+/// used only in a hole was silently quiet for the wrong reason, and a second
+/// name was needed to see the bug at all.
+#[test]
+fn a_hole_does_not_excuse_the_names_it_does_not_mention() {
+    let found = two(
+        LIB,
+        "module u;\n\nimport lib::{used, spare};\n\n         pub fn main() -> Int {\n  let s = \"answer ${used()}\";\n  String::byte_length(s)\n}\n",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("spare"), "{:?}", found[0]);
+}
+
+/// A name that appears inside a hole as a *string* is not a mention of it.
+///
+/// `"${used(\"spare\")}"` names `spare` nowhere: the inner literal is a
+/// `STRING_LIT` to the hole's own lexer, exactly as it is to the outer one.
+/// Matching on the text rather than on the tokens would have made this lint
+/// quiet about any import whose name is a common word.
+#[test]
+fn a_name_quoted_inside_a_hole_is_not_a_mention() {
+    let found = two(
+        LIB,
+        "module u;\n\nimport lib::{used, spare};\n\n         pub fn main() -> Int {\n  let s = \"${used()} spare\";\n  String::byte_length(s)\n}\n",
+    );
+    assert_eq!(found.len(), 1, "the word in the text is not a use: {found:?}");
+    assert!(found[0].message.contains("spare"), "{:?}", found[0]);
+}
+
 #[test]
 fn an_alias_is_judged_by_the_local_name() {
     let found = two(

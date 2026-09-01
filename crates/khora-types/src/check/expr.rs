@@ -362,6 +362,22 @@ impl<'a> Checker<'a> {
                     }
                     other => other,
                 };
+                // **Left open, for the reason the error row below is.** A
+                // closed row here cannot absorb a label the caller offers and
+                // the body does not want, so `nursery(fn () => 1)` was refused
+                // with ``nursery: Nursery is required here but not provided``
+                // -- about a nursery that was being provided. Every parameter
+                // written `with { 'ef | cap: Cap }` had the same effect: the
+                // capability was not offered to the callback, it was demanded
+                // of it.
+                let needs = match needs {
+                    Type::Row { fields, tail: None } => {
+                        let rest = self.unifier.fresh();
+                        self.open_requires.push(rest.clone());
+                        Type::row(fields, Some(rest))
+                    }
+                    already_open => already_open,
+                };
                 let _ = self.unifier.unify(&requires, &needs);
                 let mine = self.absorb_raises(before);
                 // Left open, because what the body raises is a lower bound
