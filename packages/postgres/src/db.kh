@@ -180,6 +180,25 @@ pub fn over(requests: Channel<Request>) -> Db {
     begin: fn () => ask_done(requests, Work::Begin),
     commit: fn () => ask_done(requests, Work::Commit),
     rollback: fn () => ask_done(requests, Work::Rollback),
+    // **Closing the request channel is the whole of it.**
+    //
+    // `std::db` calls this when a `ROLLBACK` did not arrive, which leaves a
+    // connection that may still be holding a transaction open. Closing the
+    // channel ends the serving fiber's receive loop, and `serve` closes the
+    // socket on its way out -- so the connection is gone rather than lent to
+    // somebody who would inherit uncommitted rows and locks.
+    //
+    // The pool is not told and does not have to be. `give_back` puts the
+    // channel back among the idle ones as usual; the next borrower's first
+    // `exchange` sends into a closed channel, gets no acceptance, and is
+    // answered `Disconnected`. A pool of `n` becomes a pool of `n - 1` and
+    // says so at the point somebody tries to use it, which is better than a
+    // pool of `n` where one of them is wrong.
+    //
+    // Reconnecting instead is what a mature pool does and is not 0.1.0's job:
+    // it needs a retry policy, a backoff, and a decision about what a caller
+    // sees while it happens. `Disconnected` is the honest answer until then.
+    broken: fn () => Channel::close(requests),
   }
 }
 

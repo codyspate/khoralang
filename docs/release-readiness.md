@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree on 2026-08-31, item by item, against what is in the
-repository rather than against the roadmap's account of itself. **151 of 222**,
+repository rather than against the roadmap's account of itself. **152 of 222**,
 and re-scored whenever a section moves.
 
 **A score is only as good as the reading behind it.** Section 3 was scored at
@@ -35,7 +35,7 @@ advertised, so no wasm deployment has to work.
 | --- | --- |
 | 1. Language and compiler correctness | 13 / 19 |
 | 2. Runtime soundness and structured concurrency | 9 / 16 |
-| 3. Resource, database and cancellation semantics | 4 / 6 |
+| 3. Resource, database and cancellation semantics | 5 / 6 |
 | 4. HTTP, overload and server behavior | 5 / 10 |
 | 5. Observability | 4 / 7 |
 | 6. Database ecosystem proof | 6 / 7 |
@@ -138,8 +138,8 @@ Khora's runtime is part of the language contract. The release cannot rely on “
 - [x] `Region`/finalizer behavior is reliable under success, typed failure, cancellation and trap boundaries where cleanup is permitted. **Done:** and `Region::open`'s own documentation now says *which* scope ends it — the enclosing block, established by experiment rather than by reading, because the difference between a lease that ends with the call and one that ends with the caller is what made a pool of `n` behave like a pool of `n` uses.
 - [x] `std::db::transaction` rolls back not only when its body returns an error but when its fiber is cancelled. **Done:** `a_cancelled_fiber_rolls_back_and_does_not_commit`. This was already true when the section was scored and was left unticked because it had not been looked at, which is the scoring rule working rather than a finding.
 - [x] Transaction tests assert begin/commit/rollback ordering for success, typed failure, cancellation, commit failure and rollback failure policy. **Done:** eleven cases in `crates/khora-codegen-llvm/tests/db.rs`, each asserting an exact transcript rather than a count, so any permutation fails. The rollback-failure policy — discard it, because the engine's complaint about a rollback is a worse thing to report than the reason the rollback was needed — was a deliberate `let _ =` with no test until now.
-- [ ] Database cancellation does not leave a pooled connection holding an open transaction or locks. **Left:** The ordering is proved — `a_cancelled_lease_is_returned_only_after_the_rollback` asserts the rollback reaches the engine before the lease reaches the idle channel, which is the whole of what `packages/postgres` relies on and was untested. What remains is the case where that rollback *fails*: nothing is told, and the connection is reused anyway. #161.
-- [ ] File, socket, TLS and process resources have cancellation tests that prove cleanup rather than merely absence of a crash. **Left:** Zero cancellation tests across all four. `std::fs` and `std::net::tls` do register releases, so only the proof is missing; sockets and processes register none. #161 has the reconnaissance.
+- [x] Database cancellation does not leave a pooled connection holding an open transaction or locks. **Done:** two halves. The ordering — `a_cancelled_lease_is_returned_only_after_the_rollback` asserts the rollback reaches the engine before the lease reaches the idle channel, which is the whole of what `packages/postgres` relies on. And the case where the rollback itself fails: `Db` gained a `broken` operation, `std::db` calls it from both the error path and the cancellation path, and the driver closes the request channel — so the serving fiber stops, the socket shuts, and the next borrower is answered `Disconnected` rather than handed somebody else's uncommitted rows.
+- [ ] File, socket, TLS and process resources have cancellation tests that prove cleanup rather than merely absence of a crash. **Left:** One of four, and writing it found that a second one does not hold. **Files are proved:** `a_cancelled_fiber_closes_the_file_it_was_reading` cancels a fiber mid-`fold_lines` and then *deletes* the file, which Windows refuses while a handle is open — cleanup rather than absence of a crash, which is what the item asks for. **Sockets leak**, which the same shape demonstrated: `std::net::socket` registers no release at all, so a cancelled fiber never closes its listener and the port stays bound. That is #167, and it is a bug rather than a missing test. TLS and process are unchecked; `std::process` was read and is safe for a reason its own comment does not give.
 - [x] Bounded concurrency primitives are documented as the default way to protect externally driven resources. **Done:** `/docs/cookbook/bounded-concurrency`, and `bounded_nursery`'s own documentation.
 
 ---

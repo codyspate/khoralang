@@ -30,14 +30,16 @@ module std::db;
 //! the test beside this module is written against the promise rather than
 //! against any engine.
 //!
-//! **What the contract does not cover: a rollback that itself fails.** On the
-//! error path it is discarded on purpose -- the caller is told `RolledBack`
-//! with the body's reason, because the engine's complaint about the rollback
-//! is a second problem and a worse thing to report than the first. On the
-//! cancellation path the same discard happens with nobody to tell, so a
-//! connection can go back to a pool having neither committed nor, as far as
-//! anything here knows, rolled back. Both are tested; only the first is
-//! defensible. Roadmap #161.
+//! **A rollback that itself fails is two facts, and they go to two places.**
+//! What the *caller* is told is `RolledBack` with the body's reason, because
+//! the engine's complaint about a rollback is a worse thing to report than the
+//! reason the rollback was needed. What the *handler* is told is `broken`,
+//! because a connection whose `ROLLBACK` did not arrive may still be holding a
+//! transaction open and is not one to lend out again.
+//!
+//! The second half is why `broken` is an operation rather than a return value:
+//! on the cancellation path there is no caller left to return anything to, and
+//! that is exactly the path where a connection goes back to a pool.
 //!
 //! Database authority is carried by the capability row all the way through.
 //! Application code says `with { db: Db }`; `transaction` says the same thing.
@@ -103,6 +105,24 @@ pub effect Db {
   commit: () -> Result<(), DbError>,
   /// Rolls the transaction in progress back.
   rollback: () -> Result<(), DbError>,
+  /// Says this connection's state is no longer known.
+  ///
+  /// **Called when a rollback fails**, and only then. A `ROLLBACK` that does
+  /// not arrive leaves a connection that may still be holding a transaction
+  /// open and rows locked, and there is no second thing to try: another
+  /// rollback would fail the same way, and asking the server what state it is
+  /// in needs a working connection to ask over.
+  ///
+  /// So the handler is told, because the handler *is* the connection and is
+  /// the only thing that can act. A pool stops lending it out. A single
+  /// connection may close it. A test counts it.
+  ///
+  /// **Answers nothing and cannot fail**, because it is called from a region
+  /// finalizer on the way out — including on the way out of a cancellation,
+  /// where there is no caller left to tell. A signal that could fail here
+  /// would need a handler for its own failure, and that handler would be this
+  /// one.
+  broken: () -> (),
 }
 
 /// Runs `body` in a transaction, committing on success and rolling back
@@ -206,7 +226,14 @@ fn guarded<A, 'ef, 'er>(
       // which is the fact they have to act on; the engine's complaint about
       // the rollback is a second problem and a worse thing to report.
       settled.done = true;
-      let _ = db.rollback();
+      // The caller is told `RolledBack` either way -- the engine's complaint
+      // about the rollback is a worse thing to report than the reason it was
+      // needed -- but the *connection* is a separate question, and the handler
+      // is told about it.
+      match db.rollback() {
+        Result::Ok(_) => (),
+        Result::Err(_why) => db.broken(),
+      };
       Result::Err(DbError::RolledBack(problem.show()))
     },
     // Settled *before* the commit is attempted, so a refused commit is
@@ -228,7 +255,18 @@ fn guarded<A, 'ef, 'er>(
 /// Reached on the way out of the region, which is every way out — including
 /// the cancellation that never touched a line of `guarded`.
 fn undo(settled: Settled) -> () with { db: Db } {
-  if settled.done { () } else { let _ = db.rollback(); () }
+  if settled.done {
+    ()
+  } else {
+    match db.rollback() {
+      Result::Ok(_) => (),
+      // **The path with nobody to tell.** A cancelled fiber has no caller
+      // waiting for an answer, so this is the only place the failure can go --
+      // and going nowhere is what let a connection return to a pool having
+      // neither committed nor, as far as anything knew, rolled back.
+      Result::Err(_why) => db.broken(),
+    }
+  }
 }
 
 impl Cell {

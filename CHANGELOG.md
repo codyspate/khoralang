@@ -14,6 +14,12 @@ it will behave differently now.
 
 ### Breaking
 
+- **`Db` has a sixth operation, `broken`.** Every handler must implement it —
+  `handler for Db { .. }` without it is a compile error naming the gap. It is
+  called when a `ROLLBACK` fails, which leaves a connection that may still hold
+  a transaction open, and the handler is the only thing that can act on that.
+  `packages/postgres` closes the connection; a test handler can count it.
+
 - **A `loop` with no `break` has type `Never`, not `()`.** It could not be the
   body of a function that returns something — `fn serve() -> Int { loop { .. } }`
   was a type error against a body that cannot return at all. A `loop` with a

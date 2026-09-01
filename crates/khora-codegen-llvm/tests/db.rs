@@ -67,6 +67,7 @@ fn recording(fails: Bool) -> Db {{
       print("rollback");
       Result::Ok(())
     }},
+    broken: fn () => print("broken"),
   }}
 }}
 
@@ -299,6 +300,7 @@ fn brittle() -> Db {
       print("rollback refused");
       Result::Err(DbError::Rejected("the rollback failed too"))
     },
+    broken: fn () => print("broken"),
   }
 }
 "#;
@@ -347,22 +349,23 @@ fn worker() -> () raises Oops {{
     );
 }
 
-/// **On the cancellation path a failed rollback is told to nobody, and that is
-/// the gap rather than the policy.**
+/// **On the cancellation path a failed rollback reaches the handler.**
 ///
-/// The error path above has somebody to tell: it returns `RolledBack` and the
-/// caller reads it. A cancelled fiber has no caller waiting for an answer, so
-/// `undo` discards the failure and the region ends. The connection then goes
-/// back to the pool having neither committed nor, as far as anyone knows,
-/// rolled back.
+/// The error path has somebody to tell: it returns `RolledBack` and the caller
+/// reads it. A cancelled fiber has no caller waiting for an answer, so the
+/// failure used to go nowhere — and the connection went back to a pool having
+/// neither committed nor, as far as anything knew, rolled back.
 ///
-/// This test pins the behaviour as it is rather than asserting it is right:
-/// the rollback is *attempted* — the part that would be a real bug if it were
-/// missing — and the fiber ends quietly. Making the pool discard a connection
-/// whose rollback failed needs a way for a region finalizer to reach the lease
-/// that outlives it, which is #161 and not a comment change.
+/// `broken` is where it goes now. The handler *is* the connection and is the
+/// only thing left that can act on it; `packages/postgres` closes the request
+/// channel, which ends the serving fiber and shuts the socket, so the next
+/// borrower is answered `Disconnected` rather than handed somebody else's
+/// uncommitted rows.
+///
+/// The transcript is the assertion: rollback attempted, rollback refused,
+/// handler told, and the parent carrying on.
 #[test]
-fn a_failed_rollback_during_cancellation_is_currently_silent() {
+fn a_failed_rollback_during_cancellation_tells_the_handler() {
     let out = run_with(
         "db_rollback_fails_cancelled",
         &format!(
@@ -384,8 +387,8 @@ fn worker() -> () raises Oops {{
   print("the parent carried on");"#,
     );
     assert_eq!(
-        out, "begin\nrollback refused\nthe parent carried on\n",
-        "the rollback must be attempted; that its failure goes nowhere is #161"
+        out, "begin\nrollback refused\nbroken\nthe parent carried on\n",
+        "a rollback that failed has to reach the handler as `broken`"
     );
 }
 
@@ -503,6 +506,7 @@ fn talkative() -> Db {{
       }};
       Result::Ok(())
     }},
+    broken: fn () => print("broken"),
   }}
 }}
 

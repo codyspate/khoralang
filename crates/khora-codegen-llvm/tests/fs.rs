@@ -69,6 +69,80 @@ extern fn khora_print_int(value: Int);
 extern fn khora_live_count() -> Int;
 ";
 
+/// **A cancelled fiber closes the file it was holding.**
+///
+/// Not "does not crash": the assertion is that Windows lets the file be
+/// *deleted* afterwards, which it refuses while a handle is open.
+///
+/// `fold_lines` is the shape that can be caught holding one. It opens the
+/// file, registers the close with a region, and calls the step once per line —
+/// so a cancellation set inside the step is taken at the fold's own loop
+/// back-edge, with the file still open. Nothing in the source says to close
+/// it; the region does, on a path `fold_lines` does not mention.
+///
+/// **The cancellation travels out on the row**, as it does in every test in
+/// `db.rs`, rather than being caught. A `catch` does not absorb one — it is a
+/// tagged return and not a raise — and a cancellation that reaches a fiber's
+/// *root* is a case the runtime declines with
+/// `a cancellation reached a fiber's root, which cannot absorb one yet`.
+/// Reaching the root is a different missing feature from the one under test.
+#[test]
+fn a_cancelled_fiber_closes_the_file_it_was_reading() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fs_cancel_closes");
+    let ran = run(
+        "fs_cancel_closes",
+        &format!(
+            "{HEAD}
+import std::core::{{Fiber}};
+
+extern fn khora_cancel();
+
+pub type Oops = | Bad;
+
+/// A fallible call, so that `!` is a cancellation point. It never fails.
+fn mark() -> Int raises Oops {{ 1 }}
+
+fn hold() -> () with {{ reads: FsRead, writes: FsWrite }} raises IoError + Oops {{
+  write_text(\"@DIR@/held.txt\", \"one\\ntwo\\nthree\\nfour\\n\")!;
+  let _ = fold_lines(\"@DIR@/held.txt\", 0, fn (n, _line) => {{
+    // Set on the first line. The step has no `!`, so the fold's own loop
+    // takes it -- with the file open.
+    khora_cancel();
+    n + 1
+  }})!;
+  // Not reached: the fold does not return once the cancellation is taken.
+  let _ = mark()!;
+  print(\"the fold returned, which is wrong\");
+}}
+
+pub fn main() -> Int {{
+  let f = Fiber::spawn(fn () => {{
+    with {{ reads: FsRead::real(), writes: FsWrite::real() }} {{ hold()! }}
+  }});
+  Fiber::wait(f);
+  print(\"the fiber settled\");
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.code, Some(0), "{}", ran.stdout);
+    assert!(ran.stdout.contains("the fiber settled"), "{}", ran.stdout);
+    assert!(
+        !ran.stdout.contains("which is wrong"),
+        "the fold should not have finished: {}",
+        ran.stdout
+    );
+
+    // **The proof.** A file with an open handle cannot be removed on Windows,
+    // so a removal that succeeds is a handle that was closed.
+    let held = dir.join("held.txt");
+    assert!(held.is_file(), "the program should have written it: {}", held.display());
+    std::fs::remove_file(&held).unwrap_or_else(|e| {
+        panic!("the file was still open after the fiber was cancelled: {e}")
+    });
+}
+
 /// Write a file and read it back, through the effect, with nothing left alive.
 #[test]
 fn a_file_written_by_khora_can_be_read_by_khora() {

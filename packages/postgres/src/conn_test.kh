@@ -11,7 +11,7 @@ module postgres::conn_test;
 // `oid_to_cell` is pure, so none of this needs a server. That is the reason it
 // is a separate function rather than a branch inside the row decoder.
 
-import std::core::{Option, assert};
+import std::core::{assert};
 import std::decimal::{Decimal};
 import std::db::{Cell};
 import postgres::conn::{oid_to_cell};

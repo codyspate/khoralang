@@ -35,14 +35,16 @@ cancelled. **A handler that cannot promise that is a broken handler**, and
 the test beside this module is written against the promise rather than
 against any engine.
 
-**What the contract does not cover: a rollback that itself fails.** On the
-error path it is discarded on purpose -- the caller is told `RolledBack`
-with the body's reason, because the engine's complaint about the rollback
-is a second problem and a worse thing to report than the first. On the
-cancellation path the same discard happens with nobody to tell, so a
-connection can go back to a pool having neither committed nor, as far as
-anything here knows, rolled back. Both are tested; only the first is
-defensible. Roadmap #161.
+**A rollback that itself fails is two facts, and they go to two places.**
+What the *caller* is told is `RolledBack` with the body's reason, because
+the engine's complaint about a rollback is a worse thing to report than the
+reason the rollback was needed. What the *handler* is told is `broken`,
+because a connection whose `ROLLBACK` did not arrive may still be holding a
+transaction open and is not one to lend out again.
+
+The second half is why `broken` is an operation rather than a return value:
+on the cancellation path there is no caller left to return anything to, and
+that is exactly the path where a connection goes back to a pool.
 
 Database authority is carried by the capability row all the way through.
 Application code says `with { db: Db }`; `transaction` says the same thing.
@@ -139,6 +141,7 @@ pub effect Db {
   begin: () -> Result<(), DbError>,
   commit: () -> Result<(), DbError>,
   rollback: () -> Result<(), DbError>,
+  broken: () -> (),
 }
 ```
 
@@ -186,6 +189,30 @@ rollback: () -> Result<(), DbError>
 ```
 
 Rolls the transaction in progress back.
+
+#### broken
+
+```khora
+broken: () ->()
+```
+
+Says this connection's state is no longer known.
+
+**Called when a rollback fails**, and only then. A `ROLLBACK` that does
+not arrive leaves a connection that may still be holding a transaction
+open and rows locked, and there is no second thing to try: another
+rollback would fail the same way, and asking the server what state it is
+in needs a working connection to ask over.
+
+So the handler is told, because the handler *is* the connection and is
+the only thing that can act. A pool stops lending it out. A single
+connection may close it. A test counts it.
+
+**Answers nothing and cannot fail**, because it is called from a region
+finalizer on the way out — including on the way out of a cancellation,
+where there is no caller left to tell. A signal that could fail here
+would need a handler for its own failure, and that handler would be this
+one.
 
 ## Methods
 
