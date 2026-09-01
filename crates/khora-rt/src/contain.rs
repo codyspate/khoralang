@@ -334,10 +334,51 @@ pub extern "C" fn khora_contain_enabled() -> i32 {
 mod tests {
     use super::*;
 
+    /// Held for the length of every test in this module.
+    ///
+    /// **The trap policy is one per process and these tests are many per
+    /// process.** `POLICY` is a global — a host sets it once at start-up,
+    /// which is the only shape the real thing has — and `cargo test` runs a
+    /// module's tests on parallel threads in one process. Each test here sets
+    /// it to `1`, does its work and sets it back to `0`, so one test's restore
+    /// lands in the middle of another's body.
+    ///
+    /// The window is between `begin` and `record`. `record` checks the global
+    /// first, deliberately, because that check is on the path of every
+    /// allocation in every program — so a policy flipped to `0` in that gap
+    /// makes both records no-op and the registry is empty where one entry was
+    /// expected:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: the one that was freed normally is gone
+    ///   left: Some(0)
+    ///  right: Some(1)
+    /// ```
+    ///
+    /// One run in fifteen, on Linux, for months. Roadmap #108 — and it was
+    /// only ever reportable because `scripts/check-linux.sh` was fixed to keep
+    /// the log of the run that failed rather than the run after it.
+    ///
+    /// A mutex rather than `#[serial]` or a nextest group: the contention is
+    /// between these six tests and nothing else, the fix should be visible in
+    /// the file that has the problem, and `cargo test` is what the Linux check
+    /// runs — a nextest-only answer would not have fixed it there.
+    static SOLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Takes [`SOLE`], surviving a previous test's panic.
+    ///
+    /// A poisoned mutex here means another test failed while holding it, which
+    /// is already being reported; refusing to run the rest on top of that
+    /// turns one failure into six.
+    fn alone() -> std::sync::MutexGuard<'static, ()> {
+        SOLE.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
     /// A guarded call that does not trap returns what the body returned, and
     /// leaves nothing behind.
     #[test]
     fn a_call_that_returns_normally_is_not_contained() {
+        let _sole = alone();
         khora_set_trap_policy(1);
         khora_clear_trap();
         extern "C" fn body(_: *mut u8) -> u64 {
@@ -353,6 +394,7 @@ mod tests {
     /// The default is the old behaviour, and `begin` says so by declining.
     #[test]
     fn containment_is_off_unless_asked_for() {
+        let _sole = alone();
         khora_set_trap_policy(0);
         assert!(!begin(), "the default policy collects nothing");
         assert!(!can_contain(), "and cannot contain");
@@ -361,6 +403,7 @@ mod tests {
     /// A spawn gives up on containing the call it happened in.
     #[test]
     fn a_spawn_disarms_the_registry() {
+        let _sole = alone();
         khora_set_trap_policy(1);
         assert!(begin(), "collecting");
         disarm();
@@ -376,6 +419,7 @@ mod tests {
     /// neither would show up as a failure anywhere near the cause.
     #[test]
     fn the_fast_path_flag_tracks_the_registry() {
+        let _sole = alone();
         let agrees = || {
             let flag = ACTIVE.with(|a| a.get());
             let has = REGISTRY.with(|r| r.borrow().is_some());
@@ -402,6 +446,7 @@ mod tests {
     /// What the registry records and forgets, without allocating a real object.
     #[test]
     fn a_freed_object_is_not_freed_twice() {
+        let _sole = alone();
         khora_set_trap_policy(1);
         assert!(begin());
         // Never dereferenced: what is under test is the bookkeeping, and a

@@ -2286,3 +2286,79 @@ not travel to impls.
 structural-fields story survived a commit message and a roadmap entry because
 it explained the symptom. It took four failed reproductions to notice that none
 of them reproduced anything.
+
+## 63. A flake blamed on Linux for months, which was about `cargo test`
+
+One run in fifteen of `scripts/check-linux.sh` failed, and only there:
+
+```
+---- contain::tests::a_freed_object_is_not_freed_twice stdout ----
+assertion `left == right` failed: the one that was freed normally is gone
+  left: Some(0)
+ right: Some(1)
+```
+
+Filed as #108 and carried for months as "the intermittent `khora-rt` failure in
+the Linux repeat loop", which is where the investigation kept starting and why
+it kept getting nowhere. The `poll` backend, the WSL2 kernel, the container's
+scheduler: none of them had anything to do with it.
+
+### What it actually was
+
+`POLICY` is one atomic for the whole process — a host asks for trap containment
+once at start-up, which is the only shape the real thing has. Six tests in
+`contain.rs` each set it to `1`, do their work and set it back to `0`. `cargo
+test` runs a module's tests on parallel threads **in one process**, so one
+test's restore lands in the middle of another's body.
+
+The window is between `begin` and `record`, and it is open because of a
+deliberate performance decision documented ten lines above it: `record` and
+`forget` check the global *first*, before the thread-local, because that check
+is on the path of every allocation in every program and reading a static costs
+a load and a branch never taken. It takes the hooks from 12% to 2.6%.
+
+So:
+
+```
+    thread A                          thread B
+    khora_set_trap_policy(1)
+    begin()            -> registry is Some(vec![])
+                                      khora_set_trap_policy(0)
+    record(a)          -> returns early
+    record(b)          -> returns early
+    forget(a)          -> returns early
+    len == 0, expected 1
+```
+
+`Some(0)` rather than `None` is the tell: `begin` had succeeded, so the
+registry existed and was empty. That is the only interleaving that produces
+those two numbers, and it can be read off the source without reproducing
+anything.
+
+### Why only Linux, and why that was a lie
+
+The Windows gate runs `cargo nextest`, which gives **each test its own
+process**. A global cannot be contended when there is one test in the process,
+so the race is unreachable there and always was. The Linux check runs plain
+`cargo test`. The platform in the bug's title was a proxy for the test runner,
+and nobody noticed because the two always varied together.
+
+Serializing the five tests with a mutex in the module fixes it. Not
+`#[serial]`, not a nextest group: the contention is between these tests and
+nothing else, the fix belongs in the file with the problem, and a nextest-only
+answer would not have fixed the runner that actually had it.
+
+### What generalises
+
+**A flake's title is a hypothesis, and it is usually the first thing anybody
+noticed rather than the cause.** "Intermittent, on Linux" was two observations
+glued together; the second was doing all the work in everybody's head and none
+of it in reality. The question that would have ended this months earlier is not
+"what is different about Linux" but "what is different about how Linux runs the
+tests".
+
+**And a test that could not report itself is a test that stays broken.** This
+became diagnosable in one step the moment `scripts/check-linux.sh` was fixed to
+keep the log of the run that *failed* rather than the run after it — a
+one-line change made for unrelated reasons a few hours earlier. The bug had
+been happening the whole time and had never once printed the assertion.
