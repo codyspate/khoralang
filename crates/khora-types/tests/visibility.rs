@@ -312,3 +312,48 @@ fn an_opaque_type_without_an_impl_is_still_refused_through_a_field() {
         "a type with no body and no assertion cannot be shared: {found:?}"
     );
 }
+/// A mismatch between two same-named types says which is which.
+///
+/// **`expected `Entry`, found `Entry`` is worse than saying nothing**: it tells
+/// a reader the two are identical when being different is the whole problem.
+/// `Type::qualified` existed for exactly this, with that sentence in its own
+/// doc comment, and nothing called it — the same shape as errata 62, where an
+/// impl was found by a bare head name.
+///
+/// Only when the short spelling collides. `expected `std::core::Option<Int>`,
+/// found `std::core::Option<String>`` is noise in the ordinary case, where the
+/// names already differ and the module is not what went wrong.
+#[test]
+fn a_mismatch_between_two_same_named_types_qualifies_both() {
+    let found = errors_in_user(
+        "module library;\n\
+         pub type Entry = { key: String };\n",
+        "module user;\n\
+         import library::{Entry as Theirs};\n\
+         pub type Entry = { key: String };\n\
+         fn take(entry: Entry) -> String { entry.key }\n\
+         pub fn main() -> String { let mine: Theirs = { key: \"a\" }; take(mine) }\n",
+    );
+    assert_eq!(found.len(), 1, "one mismatch: {found:?}");
+    assert!(
+        found[0].contains("expected `user::Entry`, found `library::Entry`"),
+        "both sides named apart, with `::` and not `ModulePath`'s dots: {found:?}"
+    );
+}
+
+/// And an ordinary mismatch is left alone.
+#[test]
+fn an_ordinary_mismatch_is_not_qualified() {
+    let found = errors_in_user(
+        "module library;\npub type Point = { x: Int };\n",
+        "module user;\n\
+         import library::{Point};\n\
+         fn take(n: Int) -> Int { n }\n\
+         pub fn main() -> Int { let p: Point = { x: 1 }; take(p) }\n",
+    );
+    assert_eq!(found.len(), 1, "one mismatch: {found:?}");
+    assert!(
+        found[0].contains("expected `Int`, found `Point`"),
+        "the short names already differ, so they are what is shown: {found:?}"
+    );
+}

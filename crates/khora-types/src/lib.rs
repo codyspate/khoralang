@@ -316,13 +316,17 @@ impl Type {
     /// Only [`Type::Adt`] has a module to add; everything else prints as it
     /// always does.
     pub fn qualified(&self) -> String {
+        // **`::`, not `ModulePath`'s `Display`**, which joins with dots. A
+        // message is read as source, and `demo.store::Entry` is not a path
+        // anybody could type. The same trap caught the editor's import writer.
+        let written = |home: &khora_hir::ModulePath| home.segments().join("::");
         match self {
             Type::Adt { name, home: Some(home), args } if args.is_empty() => {
-                format!("{home}::{name}")
+                format!("{}::{name}", written(home))
             }
             Type::Adt { name, home: Some(home), args } => {
                 let inner: Vec<String> = args.iter().map(|a| a.qualified()).collect();
-                format!("{home}::{name}<{}>", inner.join(", "))
+                format!("{}::{name}<{}>", written(home), inner.join(", "))
             }
             other => other.to_string(),
         }

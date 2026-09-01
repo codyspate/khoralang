@@ -56,7 +56,16 @@ impl std::fmt::Display for Mismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Mismatch::Types { expected, found } => {
-                write!(f, "expected `{expected}`, found `{found}`")
+                // **Qualified only when the plain spelling is the same.** Two
+                // modules may each declare an `Entry`, and a message that
+                // names both sides `Entry` says the two are identical when
+                // being different is the entire problem. See `Type::qualified`.
+                let (left, right) = (expected.to_string(), found.to_string());
+                if left == right {
+                    write!(f, "expected `{}`, found `{}`", expected.qualified(), found.qualified())
+                } else {
+                    write!(f, "expected `{left}`, found `{right}`")
+                }
             }
             Mismatch::Infinite { ty, .. } => {
                 write!(f, "this would make an infinite type, containing `{ty}`")

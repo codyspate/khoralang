@@ -75,6 +75,8 @@ WebAssembly also requires a host-appropriate standard-library/platform surface r
 
 Khora has not reached 1.0. Source compatibility across arbitrary development revisions is not promised. Pin the toolchain version for applications where reproducible builds matter, and review migration notes when deliberately moving between incompatible releases.
 
+[Compatibility and stability](/docs/reference/compatibility/) is the policy: what a `0.x` release promises, what counts as a breaking change, and the four things 1.0 is waiting for.
+
 ## Reporting a limitation
 
 If the documentation says something should work and the compiler disagrees, treat that as a bug in either the implementation or the docs.

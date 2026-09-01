@@ -61,6 +61,17 @@ pub const RUNNING: &str = match option_env!("KHORA_RELEASE") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
+/// What `khora --version` prints: the version, the commit, and the target.
+///
+/// **[`RUNNING`] alone is what a *pin* compares against and is deliberately
+/// just the version.** This is the other question — "which compiler is this,
+/// exactly?" — and a bug report needs its answer. Two builds of `0.1.0` from
+/// either side of a fix report the same `RUNNING`, and during a release
+/// candidate most reports come from people building the compiler themselves,
+/// where the version says almost nothing. `build.rs` assembles it, so a build
+/// with no `git` and no repository still gets the version and the target.
+pub const VERSION_LINE: &str = env!("KHORA_VERSION_LINE");
+
 /// Set to the version being run, so a shim cannot re-exec forever.
 ///
 /// A link pointing at the wrong binary, or a toolchain whose reported version

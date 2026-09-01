@@ -78,6 +78,19 @@ fi
 step 'clippy, all targets'
 cargo clippy --workspace --features llvm --all-targets -- -D warnings
 
+step 'and the build with no backend'
+# **The configuration nothing was checking.** Every step above passes
+# `--features llvm`, so the `#[cfg(not(feature = "llvm"))]` stubs are compiled
+# by nothing here -- and one of them drifted out of step with the function it
+# stands in for, which meant `cargo build -p khora-cli` did not compile for as
+# long as it took somebody to try it. That is the build `CONTRIBUTING.md`
+# recommends for work on the front end, because it is much faster.
+#
+# `check` rather than `clippy`: the lints have already run over the same code
+# with the feature on, and what is being asked here is whether it compiles at
+# all.
+cargo check --workspace --all-targets
+
 step 'no text a quoting slip mangled'
 # Cheap, and it catches a class nothing else does: a doc comment that is a
 # valid program and not English. `scripts/no-mangled-text.sh` names the three

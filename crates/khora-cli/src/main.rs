@@ -27,7 +27,10 @@ mod workspace_cmds;
 #[derive(Parser)]
 #[command(
     name = "khora",
-    version = khora_toolchain::RUNNING,
+    // The version *and* what it was built from. `RUNNING` is what a
+    // `[toolchain]` pin compares against and stays a bare version; this is
+    // what somebody pastes into a bug report. See `khora_toolchain`.
+    version = khora_toolchain::VERSION_LINE,
     about = "The Khora language toolchain"
 )]
 struct Cli {
@@ -703,6 +706,7 @@ fn check_one(paths: &[PathBuf]) -> Result<bool> {
     // Read once. A file outside any package gets the defaults, so `khora check
     // scratch.kh` works without a manifest.
     let levels = lint_levels(paths.first().map(PathBuf::as_path));
+    warn_about_unknown_lints(&levels);
 
     let mut total = 0usize;
     let mut warnings = 0usize;
@@ -840,6 +844,38 @@ fn lint_levels(start: Option<&Path>) -> std::collections::BTreeMap<String, LintL
         out.insert(name.clone(), lint.level);
     }
     out
+}
+
+/// Complains about a `[lints]` entry that names no lint.
+///
+/// **A typo here configured nothing and said nothing.** `no-such-lint = "deny"`
+/// in a manifest was read, stored and never consulted, so a project that
+/// believed it had turned something on had not — and the failure is silent in
+/// the direction that matters, because the setting a person writes down is the
+/// one they stop thinking about. `khora_lint::LINTS` exists for exactly this
+/// and nothing had ever asked it; the constant's own doc comment says it is
+/// "so that a manifest naming one that does not exist can be told what does".
+///
+/// A warning rather than an error. The manifest may be older or newer than the
+/// toolchain reading it, and refusing to check a package because a future
+/// release added a lint would make the toolchain pin harder to move than it
+/// needs to be.
+fn warn_about_unknown_lints(levels: &std::collections::BTreeMap<String, LintLevel>) {
+    let unknown: Vec<&str> = levels
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !khora_lint::LINTS.contains(name))
+        .collect();
+    if unknown.is_empty() {
+        return;
+    }
+    for name in &unknown {
+        eprintln!("warning: `{name}` in `[lints]` is not a lint, so it does nothing");
+    }
+    // Named once at the end rather than once per typo: the list is the same
+    // twelve names either way and repeating it is what makes a warning noise.
+    eprintln!("note: the lints are {}", khora_lint::LINTS.join(", "));
+    eprintln!();
 }
 
 /// Runs the MCP server over stdin and stdout.
@@ -1777,11 +1813,19 @@ fn executable_for(path: &Path) -> Result<PathBuf> {
 }
 
 /// `khora run`, in a build that cannot compile anything.
+///
+/// **The parameters have to match the real one even though none is read.** A
+/// stub that drifts is a build that only fails without the feature, which is
+/// the configuration nothing was checking: `--cwd` was added to the backend's
+/// `run_program` and not to this one, and `cargo build -p khora-cli` stopped
+/// compiling for as long as it took somebody to try it. `scripts/baseline.sh`
+/// now checks the workspace without the feature for exactly this.
 #[cfg(not(feature = "llvm"))]
 fn run_program(
     _path: &Path,
     _release: bool,
     _no_cache: bool,
+    _cwd: Option<&Path>,
     _args: &[String],
 ) -> Result<ExitCode> {
     anyhow::bail!(

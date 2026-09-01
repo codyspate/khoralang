@@ -40,6 +40,15 @@ Every language construct should have concrete Khora code here. If you know the n
 - [Traps](./traps/) — checked overflow, bounds failures, process-fatal behavior, backtraces, and exported-call containment.
 - [FFI](./ffi/) — importing with `extern fn`, exporting with `pub extern fn`, `Ptr`, borrowed buffers, and the C ABI boundary.
 
+## Working on a program
+
+- [Lints](./lints/) — the twelve checks `khora check` runs, their default levels, and how to set them in `[lints]`.
+- [Debugging a program](./debugging/) — backtraces, debug information, what a debugger can and cannot be relied on for.
+
+## The release itself
+
+- [Compatibility and stability](./compatibility/) — what `0.x` promises, what counts as a breaking change, and what 1.0 is waiting for.
+
 ## Exact library declarations
 
 Language syntax tells you how to express a call or type. Concrete library signatures live in the [Standard Library API reference](/docs/stdlib/api/core/), generated from the declarations shipped with the toolchain.
