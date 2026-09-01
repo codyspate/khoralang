@@ -58,7 +58,13 @@ impl<'a> Checker<'a> {
                         let detail = disagreement((&outer, &whole), (&inner, &got));
                         format!("{context}: {head}{detail}")
                     }
-                    other => format!("{context}: {other}"),
+                    other => {
+                        let note = one_error_type_note(
+                            &self.unifier.zonk(expected),
+                            &self.unifier.zonk(found),
+                        );
+                        format!("{context}: {other}{note}")
+                    }
                 };
                 self.error(message, range);
                 false
@@ -500,8 +506,10 @@ impl<'a> Checker<'a> {
             })
         })
     }
-}
-
+}
+
+
+
 /// Whether a type is decided all the way down.
 ///
 /// A type with a variable anywhere inside it is one inference has not finished
@@ -524,4 +532,45 @@ fn settled(ty: &Type) -> bool {
         }
         _ => true,
     }
+}
+
+/// The note for a callee that takes one error type being handed a row of two.
+///
+/// **`attempt` is the one this is for, and the message without it is a riddle.**
+/// `attempt<A, E, 'ef>(body: () -> A with 'ef raises E) -> Result<A, E>` takes
+/// a single `E`, so a body raising `HttpError + ChildFailed` fails to unify and
+/// says ``B` is not accounted for here` -- true, and no help at all to somebody
+/// who has never thought about how many types an error channel holds.
+///
+/// The limit is real rather than an oversight. `Result<A, E>` needs one `E`,
+/// and Khora has no anonymous sum to name "either of these two", so there is
+/// nothing for a two-type row to collapse into. `catch` is the answer because
+/// it matches per type and never has to name the union.
+///
+/// **Only when the expected side wants a bare type and the found side is a row
+/// of several.** A capability row that is short a label reaches the same arm
+/// and wants entirely different advice, and it is distinguishable: what it
+/// expects is itself a row.
+fn one_error_type_note(expected: &Type, found: &Type) -> String {
+    let (Type::Fn { raises: wanted, .. }, Type::Fn { raises: got, .. }) = (expected, found) else {
+        return String::new();
+    };
+    // A `raises E` is a row with one entry labelled by the error's own type
+    // name, so "wants one type" is a *closed row of one* rather than a bare
+    // type. An open row can still grow and is not this.
+    let Type::Row { fields: wants, tail: None } = &**wanted else { return String::new() };
+    if wants.len() != 1 {
+        return String::new();
+    }
+    let Type::Row { fields, .. } = &**got else { return String::new() };
+    if fields.len() < 2 {
+        return String::new();
+    }
+    let named: Vec<String> = fields.iter().map(|(_, ty)| format!("`{ty}`")).collect();
+    format!(
+        ". This takes one error type and the body raises {}; \
+         there is no type that means \"either of these\", so handle them with \
+         `catch` instead",
+        named.join(" and ")
+    )
 }

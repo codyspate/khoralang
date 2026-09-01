@@ -968,3 +968,60 @@ fn the_spelling_the_hint_shows_is_accepted() {
     );
     assert!(found.is_empty(), "the hint's own spelling must type-check: {found:?}");
 }
+/// A callee taking one error type, handed a body that raises two, says why.
+///
+/// **`` `B` is not accounted for here`` is true and is a riddle.** `attempt` is
+/// the callee this is for: `attempt<A, E, 'ef>` takes a single `E`, so a body
+/// raising `HttpError + ChildFailed` cannot go through the documented way to
+/// turn a failure into a value — and the message named a type without saying
+/// what about it was the problem or what to do instead.
+///
+/// The limit is real. `Result<A, E>` needs one `E` and Khora has no anonymous
+/// sum to name "either of these two", so `catch` — which matches per type and
+/// never names the union — is the answer rather than a workaround.
+#[test]
+fn one_error_type_handed_two_says_to_use_catch() {
+    assert_reports(
+        "module a;\n\
+         type A = Int;\n\
+         type B = Int;\n\
+         fn one<X, E, 'ef>(body: () -> X with 'ef raises E) -> X with 'ef raises E { body()! }\n\
+         fn both(n: Int) -> Int raises A + B {\n\
+           if n == 0 { let a: A = A(1); raise a } else { let b: B = B(2); raise b }\n\
+         }\n\
+         pub fn go() -> Int raises A + B { one(fn () => both(5)!)! }\n",
+        "handle them with `catch` instead",
+    );
+}
+
+/// A row of one is what it is for, and says nothing extra.
+#[test]
+fn one_error_type_handed_one_is_left_alone() {
+    assert_clean(
+        "module a;\n\
+         type A = Int;\n\
+         fn one<X, E, 'ef>(body: () -> X with 'ef raises E) -> X with 'ef raises E { body()! }\n\
+         fn just(n: Int) -> Int raises A { let a: A = A(1); raise a }\n\
+         pub fn go() -> Int raises A { one(fn () => just(5)!)! }\n",
+    );
+}
+
+/// And a capability row short a label reaches the same arm and must not get it.
+///
+/// The note distinguishes the two by what the *expected* side wants: one error
+/// type is a closed row of one, and a capability row is a row of its own.
+#[test]
+fn a_missing_capability_does_not_mention_catch() {
+    let found = errors(
+        "module a;\n\
+         pub effect Clock { now: () -> Int, }\n\
+         pub effect Log { note: (Int) -> (), }\n\
+         fn needs() -> Int with { clock: Clock, log: Log } { clock.now() }\n\
+         pub fn go() -> Int with { clock: Clock } { needs() }\n",
+    );
+    assert!(!found.is_empty(), "the missing capability is still reported");
+    assert!(
+        !found.iter().any(|e| e.contains("`catch`")),
+        "a capability is not a failure: {found:?}"
+    );
+}

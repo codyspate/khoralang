@@ -218,6 +218,27 @@ match result {
 }
 ```
 
+### One error type
+
+`E` is a type, not a row, so `attempt` handles a body that raises exactly one thing. A body raising two has nowhere to go through it:
+
+```text
+error: this argument: `Denied` is not accounted for here. This takes one error
+       type and the body raises `IoError` and `Denied`; there is no type that
+       means "either of these", so handle them with `catch` instead
+```
+
+This is a real limit rather than an oversight. `Result<A, E>` needs one `E`, and Khora has no anonymous sum type to name "either of these two" — so there is nothing for a two-type row to collapse into. Naming the union would mean declaring a type for every pair of failures a program happens to combine.
+
+Use [`catch`](#catch) for a wider row. It matches per type and never has to name the union:
+
+```khora
+let answer = fetch(url)! catch {
+  IoError::NotFound(_path) => fallback(),
+  Denied(_path) => refuse(),
+};
+```
+
 ## Collect per-item failures
 
 Propagating from inside `List::map` stops on the first failure:

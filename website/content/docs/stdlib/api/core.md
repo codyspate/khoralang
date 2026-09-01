@@ -5437,3 +5437,32 @@ This is also what makes retrying possible: a policy that runs a computation
 a second time has to be able to see that the first time did not work,
 without knowing what it was doing.
 
+**One error type, and that is a real limit.** `E` is a type rather than a
+row, so a body raising `IoError + Denied` has nowhere to go through here:
+
+```text
+error: this argument: `Denied` is not accounted for here. This takes one
+       error type and the body raises `IoError` and `Denied`; there is no
+       type that means "either of these", so handle them with `catch`
+       instead
+```
+
+The limit is not an oversight. `Result<A, E>` needs one `E`, and Khora has
+no anonymous sum to name "either of these two" — so there is nothing for a
+two-type row to collapse into. Naming a union would mean declaring a type
+for every pair of failures a program happens to combine, which is worse
+than the thing it fixes.
+
+`catch` is the answer, because it matches per type and never has to name
+the union:
+
+```khora
+let answer = fetch(url)! catch {
+  IoError::NotFound(_p) => fallback(),
+  Denied(_p) => refuse(),
+};
+```
+
+A row of *one* is what `attempt` is for, and it stays the shorter way to
+write it.
+
