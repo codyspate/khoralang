@@ -22,7 +22,7 @@ Every language construct should have concrete Khora code here. If you know the n
 
 ## Types and abstraction
 
-- [Types](./types/) — path, unit, tuple, record, mutable-field, variant, function, row, union, generic, literal, opaque, and `forall` types.
+- [Types](./types/) — path, unit, tuple, record, mutable-field, variant, function, row, generic, literal, opaque, and `forall` types.
 - [Generics](./generics/) — type parameters, bounds, const generics, row variables, higher-kinded use, explicit `forall`, and variance.
 - [Traits](./traits/) — trait declarations, supertraits, associated types, trait `impl`, inherent `impl`, bounds, and `derive(...)`.
 

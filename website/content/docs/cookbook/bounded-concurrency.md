@@ -15,7 +15,7 @@ This program has 1,000 jobs available but allows only 64 of them to be live chil
 ```khora
 module main;
 
-import std::core::{Fiber, Nursery, bounded_nursery, print};
+import std::core::{ChildFailed, Fiber, Nursery, bounded_nursery, print};
 
 fn handle(job: Int) -> () {
   print("processing job ${job}");
@@ -37,12 +37,14 @@ fn launch_jobs() -> ()
   }
 }
 
-pub fn main() {
-  bounded_nursery(64, launch_jobs)
+pub fn main() raises ChildFailed {
+  bounded_nursery(64, launch_jobs)!
 }
 ```
 
-`launch_jobs` requires a `Nursery` capability because it adopts children. `bounded_nursery(64, launch_jobs)` supplies that capability and does not return until all adopted children have finished.
+`launch_jobs` requires a `Nursery` capability because it adopts children. `bounded_nursery(64, launch_jobs)!` supplies that capability and does not return until all adopted children have finished.
+
+The `!` is there because a nursery raises [`ChildFailed`](/docs/guide/fibers-and-nurseries/#a-child-that-fails-is-the-nurserys-failure) when a child fails: the first failure cancels the siblings and the block's answer does not arrive.
 
 The important line is not the `Fiber::spawn`; it is the adoption:
 

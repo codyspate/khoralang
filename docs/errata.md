@@ -2362,3 +2362,58 @@ became diagnosable in one step the moment `scripts/check-linux.sh` was fixed to
 keep the log of the run that *failed* rather than the run after it — a
 one-line change made for unrelated reasons a few hours earlier. The bug had
 been happening the whole time and had never once printed the assertion.
+
+## 64. `_ => Type::Unknown`, for the third time
+
+`fn takes(xs: List<(Int)>)` accepted a `List<String>`. Parentheses round a type
+argument switched off the checking of that argument.
+
+`type_of_syntax` has an arm for each type form it understands and
+`_ => Type::Unknown` beneath them. `Unknown` unifies with everything, so a form
+with no arm did not fail — it agreed. Four forms had no arm: `Paren`, `Union`,
+`Variant` and `Forall`.
+
+```khora
+fn takes(xs: List<(Int)>) -> Int             // accepted a List<String>
+fn hold(r: Result<Int, A + B>) -> Int        // accepted a Result<Int, C>
+fn colour(x: | Red | Blue) -> Int            // `Red` and `Blue` undeclared,
+                                             // and nothing said so
+```
+
+The third is the worst: the unresolved-name walk never saw those names, because
+the type they were in had already become `Unknown`.
+
+### What it was hiding
+
+`Result<Int, A + B>` reads like a union type, and the language reference listed
+"union" among the type forms. There is no union type. `+` builds a row, which
+is what `raises` and `with` take; in a type argument there was nothing for it to
+mean, so it meant anything. A feature that was never implemented did not fail —
+it passed, and the documentation described it.
+
+### The fix
+
+`Paren` unwraps, because `(Int)` is `Int` and always was. The other three are
+reported by `crate::unresolved`, which walks the syntax and has the range the
+construct was written at — `type_of_syntax` returns a `Type` and has no channel
+to complain on, which is how they came to be silent in the first place.
+`Forall` is left alone: an effect operation carrying one is already reported as
+a type that was "never worked out".
+
+`docs/design/unions.md` records what a union would mean if it existed, and the
+decision that `+` is conjunction and `|` would be disjunction.
+
+### What generalises
+
+**Errata 60 wrote this down already**, about `_ => Type::Unknown` in two other
+matches: *"a permissive default is not a small bug, and it hides in the arm
+nobody wrote."* It said "twice now". This is the third, in a third match, and
+the lesson did not travel because it was recorded as a story about the two
+places rather than as a rule about the pattern.
+
+The rule, stated so it can travel: **a fallback arm that returns the identity
+of the lattice is a fallback arm that cannot fail.** `Unknown` unifies with
+everything, `true` satisfies every check, an empty row demands nothing — each is
+the value that makes the surrounding code agree, so the case nobody wrote is
+the case nobody hears about. Match exhaustively, or make the fallback the
+*bottom* rather than the top.

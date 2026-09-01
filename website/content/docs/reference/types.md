@@ -150,9 +150,9 @@ Request -> Response
 
 The clauses belong to the arrow they follow.
 
-## Failure unions
+## Failure rows
 
-`+` forms the union used by `raises` rows:
+`+` joins the failure types of a `raises` row:
 
 ```khora
 DbError + ValidationError + HttpError
@@ -167,6 +167,16 @@ fn serve() -> Response
   // ...
 }
 ```
+
+**Only in a `raises` or `with` clause.** `+` builds a row, and a row is what those two clauses take. Written anywhere else it is refused:
+
+```khora
+fn hold(r: Result<Int, A + B>) -> Int   // error
+```
+
+A `Result` holds one error type. Handle a wider row with [`catch`](/docs/reference/failures/#catch), which matches per type and never has to name a combined type.
+
+There is no union type — no way to write "an `Int` or a `String`" as the type of a value. `+` in a bound (`T: Eq + Show`) is the *other* meaning of the symbol and means the parameter implements both.
 
 ## Generic type arguments
 

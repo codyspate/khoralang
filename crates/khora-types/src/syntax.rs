@@ -195,6 +195,24 @@ pub(crate) fn type_of_syntax(ty: Option<&ast::Type>, generics: &[String], homes:
         // converter did not recognise became the one that agrees with
         // everything, so the signature passed by saying nothing.
         ast::Type::Record(_) => row_of_syntax(Some(ty), generics, homes),
+        // **Parentheses around a type mean grouping and nothing else.** This
+        // fell to the arm below, and `Unknown` agrees with everything -- so
+        // `fn f(xs: List<(Int)>)` accepted a `List<String>` and said nothing.
+        // A reader adding parentheses to a type is clarifying it, and what
+        // they got was the checking of that position switched off.
+        ast::Type::Paren(p) => type_of_syntax(p.inner().as_ref(), generics, homes),
+        // **`Unknown` is a permissive default and this is the third time.**
+        // Errata 60 named the shape -- "a permissive default is not a small
+        // bug, and it hides in the arm nobody wrote" -- about `_ =>
+        // Type::Unknown` in two other matches. What is left here is `Union`,
+        // `Variant` and `Forall` in a position that is not a row, and each is
+        // a construct with no meaning as a type argument rather than one whose
+        // meaning is "anything".
+        //
+        // Still `Unknown`, because this function has no channel to report on
+        // and inventing a nominal type here would produce a second, worse
+        // message. `crate::unresolved` walks the syntax and reports them at
+        // the range they were written, which is the only place that can.
         _ => Type::Unknown,
     }
 }

@@ -13,7 +13,7 @@ This service exposes `/health` and `/hello?name=...` and listens on port 8080:
 ```khora
 module main;
 
-import std::core::{Option, SharedFn};
+import std::core::{ChildFailed, Option, SharedFn};
 import std::net::http::{HttpError, Request, Response, Router};
 
 fn health(_request: Request) -> Response {
@@ -30,7 +30,7 @@ fn hello(request: Request) -> Response {
 }
 
 pub fn main()
-  raises HttpError
+  raises HttpError + ChildFailed
 {
   Router::new()
     |> Router::get("/health", SharedFn::of(health))

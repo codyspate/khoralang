@@ -74,9 +74,77 @@ pub(crate) fn unresolved_type_errors(db: &dyn Db, file: SourceFile) -> Vec<HirEr
                 range: path.text_range(),
             });
         }
+
+        found.extend(rows_written_as_types(&node));
     }
 
     found
+}
+
+/// A `+` union or an inline variant written where an ordinary type goes.
+///
+/// **Both became `Type::Unknown`, and `Unknown` agrees with everything.**
+/// `type_of_syntax` has an arm for each type it understands and `_ =>
+/// Type::Unknown` under them, so a construct it does not handle did not fail
+/// -- it switched off the checking of that position:
+///
+/// ```text
+/// fn hold(r: Result<Int, A + B>) -> Int    // accepted a Result<Int, C>
+/// fn colour(x: | Red | Blue) -> Int        // `Red` and `Blue` undeclared,
+///                                          // and nothing said so
+/// ```
+///
+/// Errata 60 named this shape twice already, about `_ => Type::Unknown` in two
+/// other matches: "a permissive default is not a small bug, and it hides in
+/// the arm nobody wrote". This is the third.
+///
+/// Reported here rather than fixed there because `type_of_syntax` returns a
+/// `Type` and has no channel to complain on, and because this walk has the
+/// range the construct was written at.
+///
+/// `Forall` is the fourth form in that arm and is left alone: an effect
+/// operation with one is already reported as a type that was "never worked
+/// out", so it is not silent.
+fn rows_written_as_types(node: &SyntaxNode) -> Vec<HirError> {
+    let mut found = Vec::new();
+    for written in node.descendants() {
+        match written.kind() {
+            // `+` builds a row, and a row is what `raises` and `with` take.
+            // Anywhere else there is nothing for it to mean.
+            SyntaxKind::UNION_TYPE if !inside_a_row(&written) => found.push(HirError {
+                message: "`+` builds a `raises` or `with` row, and this is not one. A \
+                          `Result` holds one error type; handle a wider row with `catch`, \
+                          which matches per type"
+                    .to_string(),
+                range: written.text_range(),
+            }),
+            // `| A | B` is how a type is *declared*, not how one is written.
+            SyntaxKind::VARIANT_TYPE if !inside_a_declaration(&written) => {
+                found.push(HirError {
+                    message: "a variant type is declared with `type Name = | A | B` and \
+                              then written by its name; it cannot be spelled out here"
+                        .to_string(),
+                    range: written.text_range(),
+                })
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Whether this sits under a `with` or `raises` clause, where a row belongs.
+fn inside_a_row(node: &SyntaxNode) -> bool {
+    node.ancestors()
+        .any(|a| matches!(a.kind(), SyntaxKind::WITH_CLAUSE | SyntaxKind::RAISES_CLAUSE))
+}
+
+/// Whether this is the definition of a `type` declaration, where a variant is
+/// exactly what belongs.
+fn inside_a_declaration(node: &SyntaxNode) -> bool {
+    node.parent().is_some_and(|parent| {
+        matches!(parent.kind(), SyntaxKind::TYPE_DECL | SyntaxKind::ASSOC_TYPE_DECL)
+    })
 }
 
 /// Whether a written type name names something.

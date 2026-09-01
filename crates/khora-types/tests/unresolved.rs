@@ -143,3 +143,83 @@ fn f() -> Int { let mut t = 0; for x in 1..3 { t = t + x }; t }
     let said = found.iter().filter(|e| e.contains("`for` needs `Step` and `Iterator`")).count();
     assert_eq!(said, 1, "said once, got {found:?}");
 }
+/// Parentheses around a type mean grouping, and used to mean "anything".
+///
+/// **`fn f(xs: List<(Int)>)` accepted a `List<String>`.** `type_of_syntax` has
+/// an arm per type form and `_ => Type::Unknown` under them, and `Unknown`
+/// unifies with everything — so a reader adding parentheses to clarify a type
+/// switched off the checking of that position instead. Errata 60 named this
+/// shape twice about two other matches; this is the third.
+#[test]
+fn parentheses_around_a_type_are_still_that_type() {
+    let found = errors(
+        "module m;\n\
+         pub type List<A> = | Nil | Cons(head: A, tail: List<A>);\n\
+         fn takes(xs: List<(Int)>) -> Int { 0 }\n\
+         pub fn go() -> Int { let words: List<String> = List::Nil; takes(words) }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("`Int` does not match `String`")),
+        "the parenthesised argument is still checked: {found:?}"
+    );
+}
+
+/// A `+` union written where a type goes is reported rather than ignored.
+///
+/// `+` builds a row, which is what `raises` and `with` take. In a type
+/// argument there is nothing for it to mean, and it used to mean "anything" —
+/// `Result<Int, A + B>` accepted a `Result<Int, C>` for a `C` in neither arm.
+#[test]
+fn a_union_written_as_a_type_argument_is_refused() {
+    let found = errors(
+        "module m;\n\
+         pub type Result<A, E> = | Ok(value: A) | Err(error: E);\n\
+         type A = Int;\n\
+         type B = Int;\n\
+         fn hold(r: Result<Int, A + B>) -> Int { 0 }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("builds a `raises` or `with` row")),
+        "the union is reported: {found:?}"
+    );
+}
+
+/// And a `raises` row is exactly where it does belong.
+#[test]
+fn a_union_in_a_raises_clause_is_left_alone() {
+    let found = errors(
+        "module m;\n\
+         type A = Int;\n\
+         type B = Int;\n\
+         fn fine() -> Int raises A + B { 1 }\n",
+    );
+    assert!(found.is_empty(), "a row where a row belongs: {found:?}");
+}
+
+/// An inline variant in a type position is reported, names and all.
+///
+/// The worst of the four, because nothing was checked at all: `Red` and `Blue`
+/// are undeclared and the unresolved-name walk never saw them, since the whole
+/// type had already become `Unknown`.
+#[test]
+fn a_variant_spelled_out_as_a_type_is_refused() {
+    let found = errors(
+        "module m;\n\
+         fn colour(x: | Red | Blue) -> Int { 0 }\n",
+    );
+    assert!(
+        found.iter().any(|e| e.contains("declared with `type Name = | A | B`")),
+        "the inline variant is reported: {found:?}"
+    );
+}
+
+/// And a `type` declaration is exactly where one does belong.
+#[test]
+fn a_variant_in_a_declaration_is_left_alone() {
+    let found = errors(
+        "module m;\n\
+         pub type Colour = | Red | Blue;\n\
+         fn colour(c: Colour) -> Int { 0 }\n",
+    );
+    assert!(found.is_empty(), "a variant where a variant belongs: {found:?}");
+}

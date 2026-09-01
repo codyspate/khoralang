@@ -13,7 +13,7 @@ This service accepts `POST /users` with a JSON body such as `{"name":"Ada"}` and
 ```khora
 module main;
 
-import std::core::{Result, SharedFn};
+import std::core::{ChildFailed, Result, SharedFn};
 import std::json::{DecodeError, FromJson, ToJson, decode, parse};
 import std::net::http::{HttpError, Request, Response, Router};
 
@@ -50,7 +50,7 @@ fn create_user(request: Request) -> Response {
 }
 
 pub fn main()
-  raises HttpError
+  raises HttpError + ChildFailed
 {
   Router::new()
     |> Router::post("/users", SharedFn::of(create_user))

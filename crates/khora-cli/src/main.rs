@@ -468,7 +468,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::Check { paths, since } => check(&paths, since.as_deref()),
         Command::Fmt { paths, check, since } => fmt(&paths, check, since.as_deref()),
         Command::Lex { path } => lex(&path).map(|()| true),
-        Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia).map(|()| true),
+        Command::Parse { path, no_trivia } => parse_cmd(&path, no_trivia),
         Command::Build { path, out, lib, release, no_cache } => {
             build(&path, out.as_deref(), lib, release, no_cache)
         }
@@ -2125,10 +2125,21 @@ fn lex(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn parse_cmd(path: &Path, no_trivia: bool) -> Result<()> {
+/// Answers whether the file parsed, so a script can act on it.
+///
+/// **It used to always succeed.** The tree it prints has the errors in it, so
+/// a person reading the output saw them — and `khora parse broken.kh` exited 0,
+/// which meant nothing driving it could tell. `scripts/check-docs.sh` runs this
+/// over every example on the website and was silently passing them all.
+///
+/// `check` and `build` both fail on a file that does not parse. A third command
+/// that reads the same file and disagrees about whether it is a program is a
+/// third answer to keep in step.
+fn parse_cmd(path: &Path, no_trivia: bool) -> Result<bool> {
     let text = read(path)?;
     let parse = khora_syntax::parse(&text);
     let tree = parse.debug_tree();
+    let clean = parse.errors().is_empty();
     if no_trivia {
         for line in tree.lines() {
             let trimmed = line.trim_start();
@@ -2143,7 +2154,7 @@ fn parse_cmd(path: &Path, no_trivia: bool) -> Result<()> {
     } else {
         print!("{tree}");
     }
-    Ok(())
+    Ok(clean)
 }
 
 fn read(path: &Path) -> Result<String> {

@@ -59,6 +59,14 @@ See the [Standard library](/docs/stdlib/) entry point for the generated referenc
 
 The reference HTTP implementation is intentionally not presented as every protocol feature a mature web framework might provide. The shipping documentation should be treated as the supported surface; unlisted body encodings, upgrades, protocol versions, or framework conveniences should not be assumed merely because the core server/client path exists.
 
+## Union types
+
+There is no way to write "an `Int` or a `String`" as the type of a value. `+` joins the failure types of a `raises` row and means nothing outside one; `T: Eq + Show` is the other meaning of the symbol, a trait bound, and works as it does in Rust.
+
+The practical consequence is that `attempt` handles a body raising exactly one type. Use [`catch`](/docs/reference/failures/#catch) for a wider row — it matches per type and never has to name a combined type.
+
+`docs/design/unions.md` in the repository records what a union would mean, what it would cost, and why existentials are not part of the same question.
+
 ## Concurrency combinators
 
 A fiber carries its answer and its failure row — `Fiber<A, 'er>`, with `join` re-raising what the child raised — and `Clock` can `sleep`. The combinators built on top of those do not exist yet: there is no `timeout`, no `race`, and no bounded parallel map. Write them by hand out of `Fiber`, `Channel` and a nursery in the meantime.
