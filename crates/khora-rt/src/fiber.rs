@@ -6,11 +6,16 @@
 //! tell which it has. This file is where the two meet, and
 //! `KHORA_FIBERS=scheduler` picks the coroutine.
 //!
-//! **Threads are the default, and the reason is a measurement**: `bench/service`
-//! answers 782,149 requests a second on threads against about 429,000 on the
-//! scheduler, on one machine in one sitting — the only kind of comparison
-//! `bench/README.md` says travels. Both paths are kept because a number is only
-//! worth having if it can be taken again.
+//! **Threads are the default, and it is decided rather than pending.** The
+//! argument, the numbers and the date are in `docs/design/fibers.md` under
+//! "Which one 0.1.0 ships". The short version: threads are ahead at the
+//! connection counts a service actually runs at, and the scheduler's
+//! compensating benefit -- fiber density -- is measured on Windows and open on
+//! Linux.
+//!
+//! **No numbers here.** There were, and the pair sat in this comment for
+//! months while the scheduler got meaningfully faster and nothing updated it.
+//! A measurement pasted into a comment is a measurement with no owner.
 //!
 //! **One thing a program can tell, on the scheduler.** A thread gets the
 //! operating system's stack — two megabytes on Linux, one on Windows — and a

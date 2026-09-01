@@ -59,6 +59,20 @@ See the [Standard library](/docs/stdlib/) entry point for the generated referenc
 
 The reference HTTP implementation is intentionally not presented as every protocol feature a mature web framework might provide. The shipping documentation should be treated as the supported surface; unlisted body encodings, upgrades, protocol versions, or framework conveniences should not be assumed merely because the core server/client path exists.
 
+## The fiber scheduler
+
+A fiber is an operating-system thread. The M:N scheduler — stackful coroutines on a worker pool — is built and is opt-in with `KHORA_FIBERS=scheduler`.
+
+It is not the default for 0.1.0 for three reasons, and one of them is a gap rather than a preference:
+
+- Threads are faster at the connection counts a service runs at.
+- The scheduler exists for fiber **density**, and that claim is measured on Windows only. Linux caps `vm.max_map_count` at 65530 and guard pages split mappings, so the "100,000 waiting fibers" figure has not been reproduced on the platform most deployments use.
+- It is the less-exercised path, and therefore the likelier home of the next runtime bug.
+
+A program cannot observe which implementation it has, so the default may change in a later release without any source change.
+
+**The published throughput figures do not measure the servers.** `bench/README.md` says so and `bench/compare.py` refuses to report a rate that is still climbing; on the machine used most recently, neither fiber implementation could be driven to a ceiling at all. Treat any requests-per-second number from this project as a measurement of its load generator until one is published with a ladder beside it.
+
 ## Characters and strings
 
 A `String` is UTF-8 and is indexed in **bytes**. `String::slice` stops the program if a cut lands inside a character, so ask first:

@@ -36,6 +36,7 @@ A pin that cannot be satisfied fails loudly. It never silently runs a different 
 | Diagnostic *wording* | No |
 | A new lint, or a lint's default level | No |
 | Compiler internals, IR, symbol names | No |
+| Which fiber implementation is the default | No — a program cannot observe it |
 | Anything under `docs/` in the repository | No |
 
 A new lint can make `khora check` report something it did not report before. That is deliberate and is not treated as breaking: a lint tells you about code that was already wrong. Set its level in `[lints]` if you disagree.
@@ -49,8 +50,8 @@ There is no editions mechanism, and there will not be one until something needs 
 1.0 means the surfaces in the table above stop changing without a major version. It is waiting on four things, none of which is a feature:
 
 1. **A bug-discovery rate that has flattened.** The honest signal is not a feature list; it is how often a session aimed at known issues turns up something new. Recent sessions have still produced silent-wrongness bugs in trait dispatch and structured concurrency. Until that stops, a stability promise would be a promise to keep bugs.
-2. **The formal soundness review finished.** `khora-rt` has roughly 180 `unsafe` blocks. Each needs the invariant that makes it sound written down and protected by a test or an argument. `docs/design/soundness.md` is where that lives and it is not complete.
-3. **A settled position on the scheduler.** Fibers are OS threads by default, with an M:N scheduler behind `KHORA_FIBERS=scheduler`. A program cannot tell which it has, which is the design — but the choice of default, and the I/O backends underneath it, are not a thing to change after promising stability.
+2. **The formal soundness review finished.** All 282 `unsafe` blocks now name the invariant that makes them sound, and a gate step keeps it that way. What is missing is the other half: which *test* protects each invariant. The load-bearing ones say so; most do not. `docs/design/soundness.md` is where that lives.
+3. **The scheduler measured on Linux.** Fibers are OS threads by default and the M:N scheduler is opt-in; that choice is settled for 0.1.0 and written up in `docs/design/fibers.md`. What is not settled is whether it should stay that way, and the missing evidence is the density claim on Linux — the reason the scheduler exists. The I/O backends underneath it (`poll` rather than epoll or IOCP) are the other half of that question.
 4. **Use by people who did not write it.** Nothing else substitutes for it, and it has not happened yet.
 
 The [known limitations](/docs/limitations/) page tracks the shorter-term version of the same list.

@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree on 2026-08-31, item by item, against what is in the
-repository rather than against the roadmap's account of itself. **123 of 222**,
+repository rather than against the roadmap's account of itself. **124 of 222**,
 and re-scored whenever a section moves.
 
 An item is ticked only when it was checked. Where something is partly done it
@@ -25,7 +25,7 @@ advertised, so no wasm deployment has to work.
 | Section | Done |
 | --- | --- |
 | 1. Language and compiler correctness | 13 / 19 |
-| 2. Runtime soundness and structured concurrency | 8 / 16 |
+| 2. Runtime soundness and structured concurrency | 9 / 16 |
 | 3. Resource, database and cancellation semantics | 2 / 6 |
 | 4. HTTP, overload and server behavior | 5 / 10 |
 | 5. Observability | 4 / 7 |
@@ -98,8 +98,8 @@ which is the single fact behind three separate unticked items.
 
 Khora's runtime is part of the language contract. The release cannot rely on “works in ordinary tests” for ownership, cancellation or fiber migration.
 
-- [ ] The M:N scheduler is a supported default runtime path rather than an experimental mode that ordinary users are expected to opt into manually. **Left:** Threads are the default; the scheduler is `KHORA_FIBERS=scheduler`. The choice is measured and deliberate, but it is an opt-in mode, which is what this item asks about.
-- [ ] The remaining scheduler/I/O work has been measured after Phase 12 and either completed or explicitly shown not to justify further architecture work before release.
+- [x] The M:N scheduler is a supported default runtime path rather than an experimental mode that ordinary users are expected to opt into manually. **Done, by settling the question rather than by switching the default:** threads are 0.1.0's default and the scheduler is a documented, supported opt-in. The argument, the measurements and their limits are in `docs/design/fibers.md`; the user-facing half is in `/docs/reference/concurrency` and `/docs/limitations`. A program cannot observe which it has, so this is not a compatibility commitment.
+- [ ] The remaining scheduler/I/O work has been measured after Phase 12 and either completed or explicitly shown not to justify further architecture work before release. **Left:** it cannot be measured yet -- #160. At 320 connections neither fiber implementation reaches a ceiling and the same configuration varies 1.85x between sittings, so no throughput claim about either is available.
 - [ ] Native scalable I/O backends are present for the platforms claimed as production-supported where the existing portable backend would otherwise impose a known scaling ceiling. **Left:** `WSAPoll` on Windows and `poll` elsewhere; no epoll/kqueue/IOCP backend.
 - [ ] The scheduler passes sustained soak and adversarial tests across supported platforms. **Left:** Soak tests exist (`khora-rt/src/soak.rs`) and pass, but #108 is an uncaught intermittent failure in the Linux repeat loop.
 - [x] Fiber cancellation always permits required finalizers/resource cleanup to run. **Done:** `tests/fibers.rs`: a cancelled fiber runs every finalizer and stops only itself.

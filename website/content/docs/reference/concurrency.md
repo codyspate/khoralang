@@ -100,6 +100,20 @@ fn run() -> () raises ChildFailed {
 
 When the body completes normally, `nursery` waits until every adopted child is finished. If the body leaves by failure or cancellation, releasing the nursery cancels children that are still running and waits for them before the scope is gone.
 
+### What a fiber is made of
+
+A fiber is an operating-system thread. There is a second implementation — stackful coroutines multiplexed onto a pool of workers — behind an environment variable:
+
+```bash
+KHORA_FIBERS=scheduler ./build/myapp
+```
+
+**A program cannot tell which it has.** `spawn`, `join`, `cancel` and the nursery mean the same thing under both, which is why the choice is a runtime setting and not a language one, and why the default can change in a later release without breaking anything.
+
+Threads are the default because they are faster at the connection counts a service actually runs at. The coroutine's advantage is *density*: a suspended fiber costs roughly 4 KB against a thread's 33 KB, which matters when tens of thousands are waiting at once rather than working. That measurement exists for Windows and not yet for Linux — see [known limitations](/docs/limitations/#the-fiber-scheduler).
+
+A thread also gets the operating system's stack, two megabytes on Linux and one on Windows; a coroutine gets one megabyte with a guard page. Deep recursion that was near the old limit may be over the new one, and the failure is a clean fault rather than corruption.
+
 ### A child that failed
 
 A nursery is a unit: the block asked for these fibers together, so one failing means the group's answer is not coming. The first failure cancels the siblings, every child is still waited for, and the nursery raises

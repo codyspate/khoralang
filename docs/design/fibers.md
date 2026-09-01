@@ -83,12 +83,80 @@ The state-machine transform is rejected outright rather than deferred. It is
 the one option that would have to be designed into the compiler now, and it
 buys speed at the cost of the property the language is *for*.
 
+### Which one 0.1.0 ships, and why it is threads
+
+**Both are built. Threads are the default; the scheduler is
+`KHORA_FIBERS=scheduler`.** A decision, not an unfinished migration -- and not
+the one this section expected to be writing, because the staging above assumed
+the coroutine would replace the thread as soon as it worked. It works.
+
+#### What could be measured, and what could not
+
+Taken 2026-09-01 on a sixteen-core Windows desktop, release build,
+`bench/service`, the load generator on the same machine.
+
+| connections | threads | scheduler |
+| --- | --- | --- |
+| 48 | 781k, 808k, 816k, 831k | 328k, 562k, 571k, 571k |
+| 160 | 948k, 1,760k | 971k, 1,010k |
+| 320 | 3,531k | 1,847k |
+
+**Only the first row is worth anything, and the reason is in the other two.**
+`bench/README.md` already says every figure it publishes is a measurement of
+the harness rather than of the servers, and `bench/compare.py` exists to refuse
+a rate that is still climbing. Neither implementation stops climbing here: at
+320 connections both are still rising roughly linearly, so no ceiling was found
+for either and no throughput comparison is available.
+
+Worse, the same configuration does not repeat. Threads at 160 connections gave
+948k in one sitting and 1,760k in the next -- **1.85x apart, same binary, same
+machine, minutes apart**. That spread is larger than several of the differences
+somebody might want to read off this table.
+
+What survives is the 48-connection row, where four sittings agree that threads
+are substantially ahead. That is the concurrency most services actually run at,
+and it is the only claim here that can be taken again.
+
+#### The decision
+
+1. **Threads win at the concurrency a service sees**, by the one measurement
+   that reproduces.
+2. **The scheduler's compensating benefit is unverified where it would be
+   claimed.** It exists for fiber *density* -- `scheduler.md` says throughput
+   was never the point -- and 100,000 suspended fibers at ~4.2 KB each was
+   measured on Windows. Linux caps `vm.max_map_count` at 65530 and guard pages
+   split mappings; `scheduler.md` records that as open.
+3. **It is the less-exercised path**, and #108 is the argument: an intermittent
+   failure sat in the runtime for months because one platform ran `cargo test`
+   and the other `nextest`. A second execution model with fewer users is where
+   the next one lives.
+
+**Nothing is given up by waiting.** A program cannot tell which it has -- this
+section's own premise -- so the default is not a compatibility commitment and
+can move in a patch release once Linux is measured and the harness can measure
+a ceiling.
+
+#### Two lessons, both about numbers
+
+**A measurement pasted into a comment is a measurement with no owner.**
+`fiber.rs` carried `782,149 against about 429,000` for months. The scheduler
+had got meaningfully faster in that time and the comment was the only place
+either figure lived, so nothing was checked against anything. The numbers are
+in this document now and the comment points here.
+
+**And the harness was already known to be the limit.** That is written in
+`bench/README.md` in a blockquote, above the figures it qualifies. It was
+rediscovered from scratch during this decision by somebody who had not read it
+-- which is the cost of a caveat living next to the numbers rather than in the
+tool that produces them. `bench/compare.py` is the tool; it is not what
+`fibers.md` or `fiber.rs` were quoting.
+
 ### What that costs while it is threads
 
 Fibers are worth roughly what a thread is worth: use them for concurrency, not
-as a data structure. A program that wants a hundred thousand of them is a
-program to write after the scheduler lands, and the roadmap should not pretend
-otherwise.
+as a data structure. A program that wants a hundred thousand of them wants
+`KHORA_FIBERS=scheduler`, and should measure the density claim on the platform
+it deploys to before relying on it.
 
 Nothing about the interface encourages the wrong thing, which is what makes the
 staging safe. There is no `spawn` per element of a list in any example, and the
