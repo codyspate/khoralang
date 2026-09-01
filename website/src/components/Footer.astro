@@ -1,0 +1,71 @@
+---
+/**
+ * Starlight's footer, plus what this build was made from.
+ *
+ * **A page that cannot say which commit produced it is a page nobody can
+ * check.** Somebody reading a reference page and finding it disagrees with
+ * their compiler has two explanations -- the docs are wrong, or the docs are
+ * older than the compiler -- and no way to tell them apart. The revision
+ * settles it in one click.
+ *
+ * `src/generated/build.js` is written by `scripts/sync-docs.mjs`, which runs
+ * before every build. It is not committed: a revision in the tree would be
+ * stale the moment it was written down, which is the failure this is for.
+ */
+import Default from '@astrojs/starlight/components/Footer.astro';
+import { build } from '../generated/build.js';
+
+const source = 'https://github.com/codyspate/khoralang';
+---
+
+<Default><slot /></Default>
+
+<p class="build-provenance">
+  {build.release && <span>Khora {build.release}</span>}
+  {build.short && (
+    <span>
+      built from
+      <a href={`${source}/commit/${build.revision}`}><code>{build.short}</code></a>
+    </span>
+  )}
+  {build.builtAt && <span>on {build.builtAt}</span>}
+  <span class="spacer"></span>
+  <a href="/docs/reference/compatibility/">Versioning</a>
+  <a href={`${source}/blob/main/SECURITY.md`}>Security</a>
+  <a href={`${source}/blob/main/CONTRIBUTING.md`}>Contributing</a>
+  <a href={`${source}/releases`}>Releases</a>
+  <a href={source}>Source</a>
+</p>
+
+<style>
+  .build-provenance {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem 0.75rem;
+    margin-block-start: 1.5rem;
+    padding-block-start: 1rem;
+    border-block-start: 1px solid var(--sl-color-hairline);
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+
+  .build-provenance code {
+    font-size: inherit;
+  }
+
+  .build-provenance a {
+    color: inherit;
+    text-decoration-color: var(--sl-color-gray-5);
+  }
+
+  .build-provenance a:hover {
+    color: var(--sl-color-white);
+  }
+
+  /* Pushes the links to the right where there is room, and lets them wrap
+     under the provenance where there is not. */
+  .spacer {
+    flex: 1 1 auto;
+  }
+</style>

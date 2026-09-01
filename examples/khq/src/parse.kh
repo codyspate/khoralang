@@ -1,0 +1,467 @@
+module khq::parse;
+
+//! Tokens to a [`Filter`].
+//!
+//! # Precedence climbing, one table, no ambiguity
+//!
+//! The grammar is small enough to write as recursive descent and awkward
+//! enough that the operator part is worth doing with a table. `Op::binding`
+//! in `khq::ast` is that table; this file reads it and never repeats it.
+//!
+//! The three levels above the operators are, loosest first:
+//!
+//!   pipeline  ::= comma ( `|` comma )*
+//!   comma     ::= operators ( `,` operators )*
+//!   operators ::= unary ( op unary )*        -- by `Op::binding`
+//!
+//! `|` binds loosest so `.a, .b | length` is `(.a, .b) | length` -- every
+//! value through the pipe -- which is jq's rule and the one that makes
+//! pipelines read left to right.
+//!
+//! # The parser holds an index, not a cursor
+//!
+//! A `List<Token>` and an `Int`. Backing up is subtraction, which the object
+//! parser needs when it has read a word and has to decide whether it was a
+//! bare key or the start of something longer. A mutable cursor would make that
+//! a question about what the cursor had already consumed.
+//!
+//! Because a `List` is a cons list, reaching an index walks -- so the tokens
+//! are copied into a `Vector` once, up front, and `Vector::at` is constant
+//! time. A parser that is quadratic in the length of the query is not a bug
+//! anybody would notice on a one-line query and is a bug on a generated one.
+
+import std::core::{Eq, List, Option, String, Vector};
+import khq::ast::{Entry, Filter, Lit, Op};
+import khq::diag::{Problem, Span, join, problem};
+import khq::lex::{Kind, Token, tokens};
+
+/// Where the parser is.
+///
+/// A record with a mutable field rather than a threaded index, because every
+/// production would otherwise return a pair and every caller would unpack it.
+/// The rule that keeps that honest is that nothing here backs up except
+/// `object_entry`, which is written to say so.
+type Cursor = {
+  tokens: Vector<Token>,
+  mut at: Int,
+};
+
+/// The query, parsed.
+///
+/// The whole text is scanned first, so a lexical error is reported before any
+/// parse error -- which is the right order, since a parse error caused by a
+/// mis-scanned token is a message about something the reader did not write.
+pub fn query(source: String) -> Filter raises Problem {
+  let scanned = tokens(source)!;
+  let cursor = { tokens: Vector::from_list(scanned), at: 0 };
+  let filter = pipeline(cursor)!;
+  let last = current(cursor);
+  if last.kind != Kind::End {
+    raise problem("${Kind::show(last.kind)} is not the end of a query", last.span)
+  };
+  filter
+}
+
+fn current(cursor: Cursor) -> Token {
+  Vector::at(cursor.tokens, cursor.at)
+}
+
+fn advance(cursor: Cursor) -> Token {
+  let token = current(cursor);
+  if token.kind != Kind::End {
+    cursor.at = cursor.at + 1;
+  };
+  token
+}
+
+/// Consumes a token of this kind, or says what was there instead.
+fn expect(cursor: Cursor, wanted: Kind, what: String) -> Token raises Problem {
+  let token = current(cursor);
+  if token.kind == wanted {
+    advance(cursor)
+  } else {
+    raise problem("expected ${what}, found ${Kind::show(token.kind)}", token.span)
+  }
+}
+
+/// Whether the next token is this one, consuming it if so.
+fn take(cursor: Cursor, wanted: Kind) -> Bool {
+  if current(cursor).kind == wanted {
+    advance(cursor);
+    true
+  } else {
+    false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The three levels
+// ---------------------------------------------------------------------------
+
+fn pipeline(cursor: Cursor) -> Filter raises Problem {
+  let mut left = comma(cursor)!;
+  while current(cursor).kind == Kind::Pipe {
+    advance(cursor);
+    let right = comma(cursor)!;
+    left = Filter::Pipe(left, right, join(Filter::span(left), Filter::span(right)));
+  };
+  left
+}
+
+fn comma(cursor: Cursor) -> Filter raises Problem {
+  let mut left = operators(cursor, 0)!;
+  while current(cursor).kind == Kind::Comma {
+    advance(cursor);
+    let right = operators(cursor, 0)!;
+    left = Filter::Both(left, right, join(Filter::span(left), Filter::span(right)));
+  };
+  left
+}
+
+/// Everything binding at least as tightly as `floor`.
+///
+/// The loop is the standard one: read a unary, then while the next token is an
+/// operator that binds at least `floor`, read the right-hand side at one level
+/// tighter. Every operator here is left-associative, so "one tighter" is
+/// `binding + 1` with no table of associativity beside it.
+fn operators(cursor: Cursor, floor: Int) -> Filter raises Problem {
+  let mut left = unary(cursor)!;
+  let mut going = true;
+  while going {
+    match operator_of(current(cursor).kind) {
+      Option::None => going = false,
+      Option::Some(op) => {
+        if Op::binding(op) < floor {
+          going = false;
+        } else {
+          advance(cursor);
+          let right = operators(cursor, Op::binding(op) + 1)!;
+          left = Filter::Binary(op, left, right, join(Filter::span(left), Filter::span(right)));
+        };
+      },
+    };
+  };
+  left
+}
+
+/// The operator a token stands for, if it is one.
+///
+/// `and` and `or` are words rather than punctuation, which is why this takes a
+/// `Kind` and not a byte: they have to be recognised here and be ordinary
+/// field names everywhere else.
+fn operator_of(kind: Kind) -> Option<Op> {
+  match kind {
+    Kind::Plus => Option::Some(Op::Add),
+    Kind::Minus => Option::Some(Op::Sub),
+    Kind::Star => Option::Some(Op::Mul),
+    Kind::Slash => Option::Some(Op::Div),
+    Kind::Percent => Option::Some(Op::Rem),
+    Kind::EqEq => Option::Some(Op::Eq),
+    Kind::BangEq => Option::Some(Op::Ne),
+    Kind::Less => Option::Some(Op::Lt),
+    Kind::LessEq => Option::Some(Op::Le),
+    Kind::Greater => Option::Some(Op::Gt),
+    Kind::GreaterEq => Option::Some(Op::Ge),
+    Kind::SlashSlash => Option::Some(Op::Alt),
+    Kind::Word(text) => if text == "and" {
+      Option::Some(Op::And)
+    } else if text == "or" {
+      Option::Some(Op::Or)
+    } else {
+      Option::None
+    },
+    _ => Option::None,
+  }
+}
+
+fn unary(cursor: Cursor) -> Filter raises Problem {
+  let token = current(cursor);
+  if token.kind == Kind::Minus {
+    advance(cursor);
+    let of = unary(cursor)!;
+    Filter::Negate(of, join(token.span, Filter::span(of)))
+  } else {
+    postfix(cursor)!
+  }
+}
+
+/// A primary, then every suffix that can follow one.
+///
+/// `.a.b[0]?` is a primary `.` and four suffixes. Writing it as a loop here
+/// rather than as recursion in `primary` is what keeps `.[]` from having to
+/// know whether it is the first thing in the query or the tenth.
+fn postfix(cursor: Cursor) -> Filter raises Problem {
+  let mut of = primary(cursor)!;
+  let mut going = true;
+  while going {
+    let token = current(cursor);
+    if token.kind == Kind::Dot {
+      advance(cursor);
+      of = after_dot(cursor, of, token.span)!;
+    } else if token.kind == Kind::OpenBracket {
+      of = bracket(cursor, of)!;
+    } else if token.kind == Kind::Question {
+      advance(cursor);
+      of = Filter::Optional(of, join(Filter::span(of), token.span));
+    } else {
+      going = false;
+    };
+  };
+  of
+}
+
+/// Whether `after` is written against `before` with no space between them.
+///
+/// **The whole of the rule that makes `if . then` parse.** A `.` followed by a
+/// word is a field access, and `then`, `else` and `end` are words -- so
+/// `if . then "yes" else "no" end` parsed as the field `.then` and the parser
+/// then wanted a `then` and found a string. The message was about a `then` the
+/// reader had written.
+///
+/// The lexer throws whitespace away, so by the time the parser sees them `.`
+/// and `then` look adjacent whatever was between them. The spans still know:
+/// `.then` has the word starting exactly where the dot ends, and `. then` does
+/// not. That is also the rule a person would state -- a path has no spaces in
+/// it -- rather than a list of words that may not follow a dot, which would
+/// have to grow every time the language gained a keyword and would stop
+/// `.then` from being a field name in somebody else's data.
+fn glued(before: Span, after: Span) -> Bool {
+  before.end == after.start
+}
+
+/// What follows a `.` that is not the first character of the query.
+fn after_dot(cursor: Cursor, of: Filter, dot: Span) -> Filter raises Problem {
+  let token = current(cursor);
+  match token.kind {
+    Kind::Word(name) if glued(dot, token.span) => {
+      advance(cursor);
+      Filter::Field(of, name, join(Filter::span(of), token.span))
+    },
+    Kind::Str(name) if glued(dot, token.span) => {
+      advance(cursor);
+      Filter::Field(of, name, join(Filter::span(of), token.span))
+    },
+    _ => raise problem(
+      "expected a field name after `.`, found ${Kind::show(token.kind)}",
+      token.span,
+    ),
+  }
+}
+
+/// `[...]` after something: an index, a slice, or an iteration.
+///
+/// The three are told apart by what is inside, and `[` `]` with nothing in it
+/// is the iteration -- which is why this cannot be folded into a general
+/// "parse an expression then expect `]`".
+fn bracket(cursor: Cursor, of: Filter) -> Filter raises Problem {
+  let open = expect(cursor, Kind::OpenBracket, "`[`")!;
+  if take(cursor, Kind::CloseBracket) {
+    Filter::Iterate(of, join(Filter::span(of), open.span))
+  } else if current(cursor).kind == Kind::Colon {
+    // `[:n]` -- from the beginning.
+    advance(cursor);
+    let upper = pipeline(cursor)!;
+    let close = expect(cursor, Kind::CloseBracket, "`]`")!;
+    Filter::Slice(of, List::Nil, List::Cons(upper, List::Nil), join(Filter::span(of), close.span))
+  } else {
+    let first = pipeline(cursor)!;
+    if take(cursor, Kind::Colon) {
+      if current(cursor).kind == Kind::CloseBracket {
+        // `[n:]` -- to the end.
+        let close = advance(cursor);
+        Filter::Slice(
+          of,
+          List::Cons(first, List::Nil),
+          List::Nil,
+          join(Filter::span(of), close.span),
+        )
+      } else {
+        let upper = pipeline(cursor)!;
+        let close = expect(cursor, Kind::CloseBracket, "`]`")!;
+        Filter::Slice(
+          of,
+          List::Cons(first, List::Nil),
+          List::Cons(upper, List::Nil),
+          join(Filter::span(of), close.span),
+        )
+      }
+    } else {
+      let close = expect(cursor, Kind::CloseBracket, "`]`")!;
+      Filter::Index(of, first, join(Filter::span(of), close.span))
+    }
+  }
+}
+
+fn primary(cursor: Cursor) -> Filter raises Problem {
+  let token = current(cursor);
+  match token.kind {
+    Kind::Dot => {
+      advance(cursor);
+      let identity = Filter::Identity(token.span);
+      // `.` on its own, `.name`, or `.[..]` -- and `postfix` handles the rest,
+      // so this only has to decide whether something is glued to this one.
+      let next = current(cursor);
+      match next.kind {
+        Kind::Word(name) if glued(token.span, next.span) => {
+          advance(cursor);
+          Filter::Field(identity, name, join(token.span, next.span))
+        },
+        Kind::Str(name) if glued(token.span, next.span) => {
+          advance(cursor);
+          Filter::Field(identity, name, join(token.span, next.span))
+        },
+        Kind::OpenBracket if glued(token.span, next.span) => bracket(cursor, identity)!,
+        _ => identity,
+      }
+    },
+    Kind::Num(literal) => {
+      advance(cursor);
+      Filter::Literal(Lit::Num(literal), token.span)
+    },
+    Kind::Str(text) => {
+      advance(cursor);
+      Filter::Literal(Lit::Str(text), token.span)
+    },
+    Kind::OpenParen => {
+      advance(cursor);
+      let inner = pipeline(cursor)!;
+      expect(cursor, Kind::CloseParen, "`)`")!;
+      inner
+    },
+    Kind::OpenBracket => {
+      advance(cursor);
+      if current(cursor).kind == Kind::CloseBracket {
+        let close = advance(cursor);
+        // `[]` is the empty array, which is `[empty]` and not an iteration:
+        // an iteration needs something to iterate and there is nothing here.
+        Filter::Collect(
+          Filter::Call("empty", List::Nil, token.span),
+          join(token.span, close.span),
+        )
+      } else {
+        let inner = pipeline(cursor)!;
+        let close = expect(cursor, Kind::CloseBracket, "`]`")!;
+        Filter::Collect(inner, join(token.span, close.span))
+      }
+    },
+    Kind::OpenBrace => object(cursor, token)!,
+    Kind::Word(name) => word(cursor, token, name)!,
+    _ => raise problem(
+      "${Kind::show(token.kind)} cannot start a filter",
+      token.span,
+    ),
+  }
+}
+
+/// A word: a literal, a keyword, or a function call.
+fn word(cursor: Cursor, token: Token, name: String) -> Filter raises Problem {
+  advance(cursor);
+  if name == "true" {
+    Filter::Literal(Lit::True, token.span)
+  } else if name == "false" {
+    Filter::Literal(Lit::False, token.span)
+  } else if name == "null" {
+    Filter::Literal(Lit::Null, token.span)
+  } else if name == "if" {
+    conditional(cursor, token)!
+  } else if name == "not" {
+    // Written as a word and parsed as a call of one argument, so `not` needs
+    // no place in the operator table and `.a | not` keeps working.
+    let of = unary(cursor)!;
+    Filter::Call("not", List::Cons(of, List::Nil), join(token.span, Filter::span(of)))
+  } else if current(cursor).kind == Kind::OpenParen {
+    call(cursor, token, name)!
+  } else {
+    Filter::Call(name, List::Nil, token.span)
+  }
+}
+
+fn call(cursor: Cursor, token: Token, name: String) -> Filter raises Problem {
+  expect(cursor, Kind::OpenParen, "`(`")!;
+  let args: Vector<Filter> = Vector::new();
+  // **`;` is not the separator here and `,` is.** jq separates arguments with
+  // `;` because `,` is an operator inside them. This language has the same
+  // problem and takes the other way out: an argument is parsed at the
+  // `operators` level, so a `,` ends it, and a filter that really wants a
+  // comma inside an argument parenthesises it.
+  let mut going = current(cursor).kind != Kind::CloseParen;
+  while going {
+    Vector::push(args, operators(cursor, 0)!);
+    going = take(cursor, Kind::Comma);
+  };
+  let close = expect(cursor, Kind::CloseParen, "`)`")!;
+  Filter::Call(name, Vector::to_list(args), join(token.span, close.span))
+}
+
+fn conditional(cursor: Cursor, token: Token) -> Filter raises Problem {
+  let condition = pipeline(cursor)!;
+  expect_word(cursor, "then")!;
+  let then_ = pipeline(cursor)!;
+  expect_word(cursor, "else")!;
+  let else_ = pipeline(cursor)!;
+  let end = expect_word(cursor, "end")!;
+  Filter::If(condition, then_, else_, join(token.span, end.span))
+}
+
+fn expect_word(cursor: Cursor, wanted: String) -> Token raises Problem {
+  expect(cursor, Kind::Word(wanted), "`${wanted}`")!
+}
+
+/// `{ a: f, "b": g, c }`.
+///
+/// The third form is the shorthand: `{ name }` means `{ name: .name }`, which
+/// is the case that makes object construction worth having at all.
+fn object(cursor: Cursor, open: Token) -> Filter raises Problem {
+  advance(cursor);
+  let entries: Vector<Entry> = Vector::new();
+  let mut going = current(cursor).kind != Kind::CloseBrace;
+  while going {
+    Vector::push(entries, object_entry(cursor)!);
+    going = take(cursor, Kind::Comma) && current(cursor).kind != Kind::CloseBrace;
+  };
+  let close = expect(cursor, Kind::CloseBrace, "`}`")!;
+  Filter::Object(Vector::to_list(entries), join(open.span, close.span))
+}
+
+fn object_entry(cursor: Cursor) -> Entry raises Problem {
+  let token = current(cursor);
+  match token.kind {
+    Kind::Word(name) => {
+      advance(cursor);
+      let key = Filter::Literal(Lit::Str(name), token.span);
+      if take(cursor, Kind::Colon) {
+        { key: key, value: operators(cursor, 0)! }
+      } else {
+        // The shorthand. Written out here rather than desugared later so that
+        // `--print-ast` shows what it means rather than what was typed.
+        {
+          key: key,
+          value: Filter::Field(Filter::Identity(token.span), name, token.span),
+        }
+      }
+    },
+    Kind::Str(name) => {
+      advance(cursor);
+      let key = Filter::Literal(Lit::Str(name), token.span);
+      if take(cursor, Kind::Colon) {
+        { key: key, value: operators(cursor, 0)! }
+      } else {
+        {
+          key: key,
+          value: Filter::Field(Filter::Identity(token.span), name, token.span),
+        }
+      }
+    },
+    Kind::OpenParen => {
+      advance(cursor);
+      let key = pipeline(cursor)!;
+      expect(cursor, Kind::CloseParen, "`)`")!;
+      expect(cursor, Kind::Colon, "`:` after a computed key")!;
+      { key: key, value: operators(cursor, 0)! }
+    },
+    _ => raise problem(
+      "expected a key, found ${Kind::show(token.kind)}",
+      token.span,
+    ),
+  }
+}

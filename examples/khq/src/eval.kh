@@ -1,0 +1,457 @@
+module khq::eval;
+
+//! Running a [`Filter`] over a value.
+//!
+//! # One value in, many values out
+//!
+//! Every filter is `Json -> List<Json>`. `khq::ast` argues for that shape; this
+//! is where it is spent, and it is spent almost entirely on `List::flat_map`.
+//!
+//! That is not an accident of style. "For each value the left side produced,
+//! run the right side and keep everything it produced" *is* `flat_map`, and
+//! every construct in this language is that sentence with different words:
+//! a pipe is `flat_map` over the left, a field access is `flat_map` returning
+//! one, an iteration is `flat_map` returning many, and `empty` is `flat_map`
+//! returning none. Written with an accumulator and a loop, each of those is
+//! five lines that look different from the others and are the same.
+//!
+//! `flat_map` takes a raising closure, which is what makes this possible at
+//! all: the failures below travel out of the closures and through the
+//! combinator without it knowing about them.
+//!
+//! # Errors are raised, not returned
+//!
+//! A filter that cannot be carried out -- `.name` on a number, `1 + "a"` --
+//! raises a [`Problem`] with the span of the filter that failed. It does not
+//! produce an empty stream, because "no values" and "that made no sense" are
+//! different answers, and a tool that confused them would print nothing at all
+//! for a query with a typo in it and look like it had worked.
+//!
+//! `?` is how a caller asks for the other behaviour, and it is the only place
+//! this module catches. `.name?` over a list of mixed values keeps the objects
+//! and drops the rest.
+//!
+//! # Nothing here changes its input
+//!
+//! `Map::insert` mutates, so every object built here starts from `Map::new`
+//! and every object *changed* here is copied first, by `khq::value::with_key`.
+//! A filter that edited its input in place would make `.a, .` answer
+//! differently depending on which side the evaluator reached first -- a flake
+//! in a program with no concurrency in it.
+
+import std::core::{Int, List, Map, Option, Ordering, Pair, Result, String, attempt};
+import std::json::{Json};
+import khq::ast::{Entry, Filter, Lit, Op};
+import khq::builtin::{apply};
+import khq::diag::{Problem, Span, problem};
+import khq::value::{as_float, as_int, at_key, compare, equal, of_float, of_int, sorted_keys, truthy, type_name, with_key};
+
+/// Every value `filter` produces from `input`.
+pub fn eval(filter: Filter, input: Json) -> List<Json> raises Problem {
+  match filter {
+    Filter::Identity(_s) => List::Cons(input, List::Nil),
+    Filter::Field(of, name, span) =>
+      List::map(eval(of, input)!, fn v => field_of(v, name, span)!)!,
+    Filter::Index(of, at, span) => List::flat_map(
+      eval(of, input)!,
+      fn v => List::map(eval(at, input)!, fn i => index_of(v, i, span)!)!,
+    )!,
+    Filter::Iterate(of, span) =>
+      List::flat_map(eval(of, input)!, fn v => elements_of(v, span)!)!,
+    Filter::Slice(of, from, to, span) => {
+      let start = bound(from, input, 0)!;
+      let stop = bound(to, input, 0 - 1)!;
+      List::map(eval(of, input)!, fn v => slice_of(v, start, stop, span)!)!
+    },
+    // **The whole language, in one line.** Everything the left side produced,
+    // each run through the right side, all of it concatenated.
+    Filter::Pipe(left, right, _s) =>
+      List::flat_map(eval(left, input)!, fn v => eval(right, v)!)!,
+    Filter::Both(left, right, _s) => List::concat(eval(left, input)!, eval(right, input)!),
+    Filter::Literal(value, _s) => List::Cons(of_literal(value), List::Nil),
+    Filter::Collect(of, _s) => List::Cons(Json::Array(eval(of, input)!), List::Nil),
+    Filter::Object(entries, _s) => object(entries, input)!,
+    Filter::Binary(op, left, right, span) => binary(op, left, right, input, span)!,
+    Filter::Negate(of, span) => List::map(eval(of, input)!, fn v => negate(v, span)!)!,
+    // **The evaluator is passed in.** `khq::builtin` needs to run a
+    // filter -- `map(.name)` runs its argument once per element -- and
+    // this module needs to call the builtins, so the two are mutually
+    // recursive. Khora refuses mutually importing modules and says to
+    // move what they share into a third, but what they share here is
+    // *this function*. Handing it over as a value is the other way to
+    // break the cycle, and it is the one that keeps the builtins in a
+    // file of their own.
+    Filter::Call(name, args, span) =>
+      apply(name, args, input, span, fn (f, v) => eval(f, v)!)!,
+    // **The only place a failure is swallowed**, which is why nothing else
+    // here does: `?` is the reader asking for it by name.
+    Filter::Optional(of, _s) => match attempt(fn () => eval(of, input)!) {
+      Result::Ok(values) => values,
+      Result::Err(_why) => List::Nil,
+    },
+    Filter::If(condition, then_, else_, _s) => List::flat_map(
+      eval(condition, input)!,
+      fn c => eval(if truthy(c) { then_ } else { else_ }, input)!,
+    )!,
+  }
+}
+
+fn of_literal(value: Lit) -> Json {
+  match value {
+    Lit::Null => Json::Null,
+    Lit::True => Json::Bool(true),
+    Lit::False => Json::Bool(false),
+    Lit::Num(literal) => Json::Number(literal),
+    Lit::Str(text) => Json::Text(text),
+  }
+}
+
+/// `.name` of one value.
+///
+/// **`null` has every field and they are all `null`.** That is what makes
+/// `.a.b.c` work over a document where `a` is sometimes missing, without a
+/// guard at every step. An array or a number does not: a field of one of those
+/// is a mistake about the shape of the data, and saying so is the reason this
+/// raises rather than answering `null` for everything.
+fn field_of(value: Json, name: String, span: Span) -> Json raises Problem {
+  match value {
+    Json::Object(fields) => at_key(fields, name),
+    Json::Null => Json::Null,
+    _ => raise problem(
+      "cannot look up `${name}` in ${type_name(value)}, which has no fields",
+      span,
+    ),
+  }
+}
+
+/// `.[i]` of one value.
+///
+/// A negative index counts from the end, so `.[-1]` is the last element. Out
+/// of range is `null` rather than a failure, for the reason a missing field
+/// is: a document shorter than expected is a thing to test for, not a thing to
+/// stop over.
+fn index_of(value: Json, at: Json, span: Span) -> Json raises Problem {
+  match value {
+    Json::Null => Json::Null,
+    Json::Array(items) => match at {
+      Json::Number(literal) => match as_int(literal) {
+        Option::None => raise problem("an array index has to be a whole number", span),
+        Option::Some(n) => {
+          let count = List::length(items);
+          let wanted = if n < 0 { count + n } else { n };
+          match List::nth(items, wanted) {
+            Option::Some(v) => v,
+            Option::None => Json::Null,
+          }
+        },
+      },
+      _ => raise problem("an array is indexed by a number, not by ${type_name(at)}", span),
+    },
+    Json::Object(fields) => match at {
+      Json::Text(key) => at_key(fields, key),
+      _ => raise problem("an object is indexed by a string, not by ${type_name(at)}", span),
+    },
+    _ => raise problem("cannot index ${type_name(value)}", span),
+  }
+}
+
+/// What `.[]` produces from one value.
+///
+/// An object gives its *values*, in sorted key order; `to_entries` is how to
+/// reach the keys. Sorted rather than in hash order, for the reason
+/// `khq::value::sorted_keys` gives: the same document has to produce the same
+/// output twice.
+fn elements_of(value: Json, span: Span) -> List<Json> raises Problem {
+  match value {
+    Json::Array(items) => items,
+    Json::Object(fields) => List::map(sorted_keys(fields), fn k => at_key(fields, k)),
+    _ => raise problem(
+      "cannot iterate ${type_name(value)}; `.[]` wants an array or an object",
+      span,
+    ),
+  }
+}
+
+/// One end of a slice, or the default when the query left it out.
+fn bound(given: List<Filter>, input: Json, fallback: Int) -> Int raises Problem {
+  match given {
+    List::Nil => fallback,
+    List::Cons(filter, _rest) => match List::head(eval(filter, input)!) {
+      Option::None => fallback,
+      Option::Some(value) => match value {
+        Json::Number(literal) => match as_int(literal) {
+          Option::Some(n) => n,
+          Option::None => raise problem(
+            "a slice bound has to be a whole number",
+            Filter::span(filter),
+          ),
+        },
+        _ => raise problem(
+          "a slice bound has to be a number, not ${type_name(value)}",
+          Filter::span(filter),
+        ),
+      },
+    },
+  }
+}
+
+/// `.[a:b]` of an array or a string.
+///
+/// `-1` for `to` means "the end", which is why that is the default rather than
+/// the length: the caller does not have to know the length to say so.
+fn slice_of(value: Json, from: Int, to: Int, span: Span) -> Json raises Problem {
+  match value {
+    Json::Null => Json::Null,
+    Json::Array(items) => {
+      let count = List::length(items);
+      let start = clamp(if from < 0 { count + from } else { from }, count);
+      let stop = if to == 0 - 1 {
+        count
+      } else {
+        clamp(if to < 0 { count + to } else { to }, count)
+      };
+      List::take(List::drop(items, start), if stop > start { stop - start } else { 0 })
+        |> Json::Array
+    },
+    Json::Text(text) => {
+      // **Byte offsets, moved outward to a boundary.** A slice landing inside
+      // a character would trap, so `.[0:1]` of `"é"` is the whole character
+      // rather than half of one. The alternative is a failure about an offset
+      // the reader did not choose.
+      let length = String::byte_length(text);
+      let raw_start = clamp(if from < 0 { length + from } else { from }, length);
+      let raw_stop = if to == 0 - 1 {
+        length
+      } else {
+        clamp(if to < 0 { length + to } else { to }, length)
+      };
+      let start = String::previous_boundary(text, raw_start);
+      let stop = String::next_boundary(text, raw_stop);
+      Json::Text(if start >= stop { "" } else { String::slice(text, start, stop) })
+    },
+    _ => raise problem("cannot slice ${type_name(value)}", span),
+  }
+}
+
+fn clamp(value: Int, limit: Int) -> Int {
+  if value < 0 {
+    0
+  } else if value > limit {
+    limit
+  } else {
+    value
+  }
+}
+
+/// `{ a: f, b: g }`.
+///
+/// **The product, not the pairing.** `{ a: (1, 2), b: 3 }` is two objects and
+/// `{ a: (1, 2), b: (3, 4) }` is four. That falls out of the model rather than
+/// being chosen: each entry produces a stream and an object needs one value
+/// from each, so the answer is every combination.
+///
+/// A fold, and the accumulator is the objects so far: for each entry, replace
+/// them with every one of them extended by every value the entry produced.
+fn object(entries: List<Entry>, input: Json) -> List<Json> raises Problem {
+  let empty: Map<String, Json> = Map::new();
+  List::fold(
+    entries,
+    List::Cons(Json::Object(empty), List::Nil),
+    fn (so_far, entry) => {
+      let keys = eval(entry.key, input)!;
+      let values = eval(entry.value, input)!;
+      List::flat_map(
+        so_far,
+        fn partial => List::flat_map(
+          keys,
+          fn k => {
+            let name = match k {
+              Json::Text(text) => text,
+              _ => raise problem(
+                "an object key has to be a string, not ${type_name(k)}",
+                Filter::span(entry.key),
+              ),
+            };
+            List::map(values, fn v => extended(partial, name, v))
+          },
+        )!,
+      )!
+    },
+  )!
+}
+
+/// One partial object with one more key on it.
+fn extended(partial: Json, name: String, value: Json) -> Json {
+  match partial {
+    Json::Object(fields) => Json::Object(with_key(fields, name, value)),
+    // Unreachable: the fold starts with an object and only ever produces one.
+    _ => partial,
+  }
+}
+
+/// A binary operator over every pair of values the two sides produce.
+fn binary(op: Op, left: Filter, right: Filter, input: Json, span: Span) -> List<Json>
+  raises Problem
+{
+  match op {
+    // **`//` is not a pairing.** It asks whether the left side produced any
+    // value that is neither `false` nor `null`, and reaches the right side
+    // only if it did not -- including when the left side *failed*, which is
+    // what makes `.a.b // "none"` work over documents where `a` is a number.
+    Op::Alt => {
+      let kept = match attempt(fn () => eval(left, input)!) {
+        Result::Ok(values) => List::filter(values, fn v => truthy(v)),
+        Result::Err(_why) => List::Nil,
+      };
+      match kept {
+        List::Nil => eval(right, input)!,
+        _ => kept,
+      }
+    },
+    _ => List::flat_map(
+      eval(left, input)!,
+      fn a => List::map(eval(right, input)!, fn b => operate(op, a, b, span)!)!,
+    )!,
+  }
+}
+
+fn operate(op: Op, left: Json, right: Json, span: Span) -> Json raises Problem {
+  match op {
+    Op::Eq => Json::Bool(equal(left, right)),
+    Op::Ne => Json::Bool(!equal(left, right)),
+    Op::Lt => Json::Bool(compare(left, right) == Ordering::Less),
+    Op::Le => Json::Bool(compare(left, right) != Ordering::Greater),
+    Op::Gt => Json::Bool(compare(left, right) == Ordering::Greater),
+    Op::Ge => Json::Bool(compare(left, right) != Ordering::Less),
+    Op::And => Json::Bool(truthy(left) && truthy(right)),
+    Op::Or => Json::Bool(truthy(left) || truthy(right)),
+    Op::Alt => left,
+    Op::Add => add(left, right, span)!,
+    Op::Sub => subtract(left, right, span)!,
+    _ => numbers(op, left, right, span)!,
+  }
+}
+
+/// `+`, which is four operations wearing one symbol.
+///
+/// It adds numbers, joins strings, concatenates arrays and merges objects,
+/// because those are the four things "put these together" means and a query
+/// language with four names for one idea is a language people look things up
+/// in. `null + x` is `x`, which is what makes `+` usable as the step of a fold
+/// over a list that might be empty.
+fn add(left: Json, right: Json, span: Span) -> Json raises Problem {
+  match left {
+    Json::Null => right,
+    Json::Number(a) => match right {
+      Json::Null => left,
+      Json::Number(b) => exact_or_float(Op::Add, a, b),
+      _ => raise mismatch(Op::Add, left, right, span),
+    },
+    Json::Text(a) => match right {
+      Json::Null => left,
+      Json::Text(b) => Json::Text(a + b),
+      _ => raise mismatch(Op::Add, left, right, span),
+    },
+    Json::Array(a) => match right {
+      Json::Null => left,
+      Json::Array(b) => Json::Array(List::concat(a, b)),
+      _ => raise mismatch(Op::Add, left, right, span),
+    },
+    Json::Object(a) => match right {
+      Json::Null => left,
+      // **The right side wins**, which makes `$defaults + $given` read the way
+      // it looks.
+      Json::Object(b) => Json::Object(
+        List::fold(Map::entries(b), a, fn (so_far, e) => with_key(so_far, e.key, e.value)),
+      ),
+      _ => raise mismatch(Op::Add, left, right, span),
+    },
+    _ => raise mismatch(Op::Add, left, right, span),
+  }
+}
+
+/// `-` subtracts numbers and removes elements from arrays.
+fn subtract(left: Json, right: Json, span: Span) -> Json raises Problem {
+  match left {
+    Json::Number(a) => match right {
+      Json::Number(b) => exact_or_float(Op::Sub, a, b),
+      _ => raise mismatch(Op::Sub, left, right, span),
+    },
+    Json::Array(a) => match right {
+      Json::Array(b) => Json::Array(List::filter(a, fn x => !List::any(b, fn y => equal(x, y)))),
+      _ => raise mismatch(Op::Sub, left, right, span),
+    },
+    _ => raise mismatch(Op::Sub, left, right, span),
+  }
+}
+
+fn numbers(op: Op, left: Json, right: Json, span: Span) -> Json raises Problem {
+  match left {
+    Json::Number(a) => match right {
+      Json::Number(b) => {
+        if (op == Op::Div || op == Op::Rem) && as_float(b) == 0.0 {
+          raise problem("division by zero", span)
+        };
+        exact_or_float(op, a, b)
+      },
+      _ => raise mismatch(op, left, right, span),
+    },
+    _ => raise mismatch(op, left, right, span),
+  }
+}
+
+/// **Integers when both sides are, floats otherwise.**
+///
+/// `khq::value`'s module documentation has the argument. The short version:
+/// a sum over a column of counts must stay exact however long the column is,
+/// and `0.1 + 0.2` must be allowed to be what binary floating point says it is
+/// rather than pretending otherwise.
+///
+/// Division is the exception in the other direction. `4 / 2` is `2`, but `1 / 3`
+/// is not an integer, so it goes through `Float` unless it comes out even.
+fn exact_or_float(op: Op, left: String, right: String) -> Json {
+  match as_int(left) {
+    Option::Some(a) => match as_int(right) {
+      Option::Some(b) => match op {
+        Op::Add => of_int(a + b),
+        Op::Sub => of_int(a - b),
+        Op::Mul => of_int(a * b),
+        Op::Rem => of_int(a % b),
+        Op::Div => if a % b == 0 { of_int(a / b) } else { float_op(op, left, right) },
+        _ => float_op(op, left, right),
+      },
+      Option::None => float_op(op, left, right),
+    },
+    Option::None => float_op(op, left, right),
+  }
+}
+
+fn float_op(op: Op, left: String, right: String) -> Json {
+  let a = as_float(left);
+  let b = as_float(right);
+  match op {
+    Op::Add => of_float(a + b),
+    Op::Sub => of_float(a - b),
+    Op::Mul => of_float(a * b),
+    Op::Div => of_float(a / b),
+    Op::Rem => of_float(a - b * Int::to_float(Float::to_int(a / b))),
+    _ => of_float(a),
+  }
+}
+
+fn mismatch(op: Op, left: Json, right: Json, span: Span) -> Problem {
+  problem(
+    "`${Op::spelling(op)}` cannot combine ${type_name(left)} and ${type_name(right)}",
+    span,
+  )
+}
+
+fn negate(value: Json, span: Span) -> Json raises Problem {
+  match value {
+    Json::Number(literal) => match as_int(literal) {
+      Option::Some(n) => of_int(0 - n),
+      Option::None => of_float(0.0 - as_float(literal)),
+    },
+    _ => raise problem("cannot negate ${type_name(value)}", span),
+  }
+}

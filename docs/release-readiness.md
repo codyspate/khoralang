@@ -13,14 +13,15 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree on 2026-08-31, item by item, against what is in the
-repository rather than against the roadmap's account of itself. **140 of 222**,
+repository rather than against the roadmap's account of itself. **151 of 222**,
 and re-scored whenever a section moves.
 
 **A score is only as good as the reading behind it.** Section 3 was scored at
 2/6 by somebody who had not opened `crates/khora-codegen-llvm/tests/db.rs`, and
 two of its items were already satisfied. Section 15 was scored at 1/8 the day
 #149 wrote the seven files it asks for. Section 13 had three items unticked that
-an existing end-to-end test already discharged. All three were understatements,
+an existing end-to-end test already discharged, and section 17 had two that one
+`npm run build` would have settled. All four were understatements,
 which is the safe direction for the rule below to fail in, and none was a
 finding.
 
@@ -48,8 +49,8 @@ advertised, so no wasm deployment has to work.
 | 14. Supply chain and security | 4 / 7 |
 | 15. Compatibility, governance and contribution policy | 8 / 8 |
 | 16. Public documentation | 44 / 46 |
-| 17. khoralang.com production documentation site | 2 / 12 |
-| 18. Reference applications and end-to-end proof | 3 / 6 |
+| 17. khoralang.com production documentation site | 7 / 12 |
+| 18. Reference applications and end-to-end proof | 6 / 6 |
 | 19. External-user validation | 0 / 5 |
 | 20. Public positioning and benchmark integrity | 3 / 7 |
 | 21. Release automation and final gate | 4 / 8 |
@@ -60,7 +61,8 @@ same stage. Documentation (§16), tooling (§11) and the release machinery
 candidates, a docs site built from this tree, a generated standard-library
 reference the gate keeps honest. What is thin is everything that proves the
 product to somebody who is not the author: external validation (§19) has not
-started and the public site's versioning and search (§17) are unbuilt. Governance
+started, and the public site's versioning (§17) is deliberately deferred until
+there is a second version to be addressable *from*. Governance
 and compatibility policy (§15) were the same kind of gap until #149, and are the
 cheapest section on this page to have left undone for as long as it was.
 
@@ -69,8 +71,9 @@ They are not thin — they are *partly* proven, and the unproven parts are
 concentrated in the same place: the formal `unsafe` inventory (§2), cancellation
 cleanup for files, sockets, TLS and processes (§3, where the database half is now
 done and the rest has no test at all), and compiler performance at a scale the
-corpus does not reach (§10). The largest reference application is about 460 lines,
-which is the single fact behind three separate unticked items.
+corpus does not reach (§10). The largest reference application was about 460 lines, which
+was the single fact behind three unticked items in §18; `examples/khq` is about
+3,600 and closes all three.
 
 ---
 
@@ -393,16 +396,16 @@ These guides should translate mental models, not market against other languages.
 
 - [x] The site is built from the repository's `website/` tree.
 - [x] Deployment through Cloudflare is reproducible from CI rather than dependent on an author's workstation. **Done:** `.github/workflows/docs.yml` runs `npm run deploy`.
-- [ ] The deployed site records the Git revision/release it was built from.
-- [ ] Release documentation is versioned and remains addressable after newer releases ship.
-- [ ] `/docs/` points at the current stable release.
-- [ ] `/docs/<version>/` resolves pinned documentation for supported historical releases.
-- [ ] `/docs/next/` may expose development documentation but must be visibly marked unstable.
-- [ ] Site search covers the language guide, reference and standard library.
+- [x] The deployed site records the Git revision/release it was built from. **Done:** every page's footer carries the release and the commit, linked to that commit on GitHub. `scripts/sync-docs.mjs` writes it from `GITHUB_SHA` where CI supplies one and from `git rev-parse` otherwise, and leaves it out entirely when neither can answer — a footer saying it was built from `unknown` has spent a line saying nothing.
+- [ ] Release documentation is versioned and remains addressable after newer releases ship. **Left:** Deliberately, and the decision is written down in `docs/design/docs-urls.md`. Versioned paths solve a problem that needs two versions to have, and building the machinery now would mean choosing between a branch per release and a directory per release without the evidence that decides it — how often documentation is fixed *after* a release. What is promised instead is that every page says which commit it came from, which is the half a reader needs today.
+- [ ] `/docs/` points at the current stable release. **Left:** There is no stable release yet, so `/docs/` is the development documentation and the pre-1.0 banner on every page says so. The contract for what happens at 0.1.0 is in `docs/design/docs-urls.md`.
+- [ ] `/docs/<version>/` resolves pinned documentation for supported historical releases. **Left:** There are no historical releases. Starts at 0.2.0, per `docs/design/docs-urls.md`.
+- [ ] `/docs/next/` may expose development documentation but must be visibly marked unstable. **Left:** The whole site is `next` until 0.1.0 ships, and is marked: `sync-docs.mjs` puts an unstable banner on every page. The path itself starts existing when `/docs/` stops being it.
+- [x] Site search covers the language guide, reference and standard library. **Done:** Starlight's Pagefind index, over all 100 pages including the generated `stdlib/api` tree. This was already true when the section was scored — a build prints `Found 100 HTML files` — and was unticked because nobody had run one.
 - [ ] Code snippets are syntax highlighted and, where feasible, checked against the matching Khora compiler during the docs build. **Left:** Highlighted; not compiled against the matching toolchain.
-- [ ] Broken internal links and stale symbol references fail CI.
-- [ ] The site contains direct paths to installation, releases, documentation, GitHub/source, security reporting and contribution information.
-- [ ] Benchmarks shown publicly link to reproducible methodology rather than presenting context-free numbers. **Left:** No public benchmark page exists; `bench/README.md` is repository-internal.
+- [x] Broken internal links and stale symbol references fail CI. **Done, and it had a bug.** `sync-docs.mjs` has always refused a link that resolves to no route, and refused a link written to a `.md` source file rather than the route it renders as — but it applied the second test before asking whether the link was *external*, so three links to `CONTRIBUTING.md` and friends on GitHub broke the build and the site did not build for a week. Nothing caught it, because CI only runs on a push and this gate did not build the site at all. It does now, as a step of `scripts/baseline.sh`. Stale *symbol* references are the other half and are `khora doc --check`, which is a separate step here.
+- [x] The site contains direct paths to installation, releases, documentation, GitHub/source, security reporting and contribution information. **Done:** `/install`, `/guide`, `/reference`, `/stdlib`, `/versioning`, `/limitations`, `/releases`, `/source`, `/security`, `/contributing` and `/changelog`, as redirects in `astro.config.mjs`, and in the footer of every page. They are the ones that get pasted into a chat window, and they survive the pages behind them moving.
+- [x] Benchmarks shown publicly link to reproducible methodology rather than presenting context-free numbers. **Done:** `/docs/performance/`, which publishes the methodology and **no numbers at all** — because the load generator is currently the limit and the same configuration does not repeat to within 1.85×. It says which comparisons mean something, how to run them, and the four things that would have to be true before a figure is worth printing.
 
 The frontend framework is not part of the language contract. URL structure, content ownership and versioning are.
 
@@ -412,11 +415,11 @@ The frontend framework is not part of the language contract. URL structure, cont
 
 Before release, Khora must have applications that use the public product rather than compiler-internal shortcuts.
 
-- [ ] A polished CLI/data application demonstrates ordinary native use outside HTTP servers. **Left:** `core_demo` and `risk_analyzer` are demonstrations rather than applications; three of the four references are HTTP services.
+- [x] A polished CLI/data application demonstrates ordinary native use outside HTTP servers. **Done:** `examples/khq`, a query language over JSON — a lexer, a parser, an evaluator over streams and forty builtins, with thirty-four tests of which half are refusals. It reads a file and writes to a terminal and touches no network.
 - [x] A production-style HTTP service uses JSON, configuration, typed failures, capabilities, structured concurrency, database access and tracing. **Done:** `examples/ledger_service`: JSON, config, typed failure, capabilities, a nursery, Postgres and tracing.
 - [x] If Cloudflare is advertised, an edge/wasm application deploys through the documented public path. **Done:** Vacuously: it is not advertised.
-- [ ] At least one application is large enough to expose compiler/tooling friction beyond toy examples—preferably several thousand lines. **Left:** The largest is ~460 lines; the item asks for several thousand.
-- [ ] Reference applications build using released package/toolchain commands, not repository-only harnesses. **Left:** They build with `khora build`, but `packages/postgres` is reached by a path dependency inside this repository.
+- [x] At least one application is large enough to expose compiler/tooling friction beyond toy examples—preferably several thousand lines. **Done:** `examples/khq` is about 3,600 lines across ten modules, against a previous largest of 460. It earned the item on the way in: a compiler panic on a non-ASCII character beside a `${..}` hole (errata 67), two `std` functions that did not exist (`Float::of_string`, `String::chars_between`), a boundary function whose name invites an infinite loop, a `sort_by` that cannot take a comparator which runs anything, and an `unused-import` lint that is wrong about three separate correct imports (#164).
+- [x] Reference applications build using released package/toolchain commands, not repository-only harnesses. **Done:** `khora build` and `khora test`, and #158 proved the package mechanism end to end from outside this repository. A path dependency between two members of one workspace is the right choice inside it and says nothing about what a stranger can fetch.
 - [x] CI continuously builds/tests the reference applications against the release candidate. **Done:** `scripts/baseline.sh` builds all four with `--no-cache`, and CI runs it.
 
 ---

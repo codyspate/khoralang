@@ -130,6 +130,28 @@ step 'the standard library reference matches the standard library'
 # hand, sometimes, is a page that is wrong at the moment somebody reads it.
 "$khora" doc std --out website/content/docs/stdlib/api --check
 
+step 'the documentation site assembles and its links resolve'
+# **The gate did not build the site, and the site was broken for a week.**
+# Three links to `CONTRIBUTING.md` and friends on GitHub were rejected by the
+# link checker -- correctly shaped, wrongly classified -- and `npm run build`
+# failed. Nothing here noticed, because this script covered every other tree in
+# the repository and not that one, and the CI workflow that would have caught it
+# only runs on a push.
+#
+# `sync-docs.mjs` rather than `npm run build`: it is plain Node with no
+# dependencies, so it needs no `npm install` and adds about a second. It is also
+# the part that broke -- it copies the content tree and refuses a link that does
+# not resolve. The Astro build proper stays in CI, where the dependencies live.
+if command -v node > /dev/null 2>&1; then
+    ( cd website && node scripts/sync-docs.mjs )
+else
+    # Loudly, not silently. A gate step that quietly skips is a gate with a
+    # hole, and this one is cheap enough that the only reason to skip it is a
+    # machine with no Node on it at all.
+    echo "!! node is not installed, so the documentation site was not checked" >&2
+    exit 1
+fi
+
 step 'the packages pass their own tests'
 # A package whose tests nobody runs is a package with no tests. `khora test`
 # compiles the `test` blocks into their own executable and runs it — the same
@@ -148,9 +170,16 @@ step 'every reference application builds'
 # a cached build would not actually be hiding anything -- but a gate that can
 # be satisfied by a lookup is a gate with a moving part, and this one is the
 # receipt everything else is measured against.
-for app in examples/core_demo examples/risk_analyzer examples/link_shortener examples/ledger_service; do
+for app in examples/core_demo examples/risk_analyzer examples/link_shortener \
+           examples/ledger_service examples/khq; do
     "$khora" build "$app" --no-cache
 done
+
+# **And `khq`'s own tests**, which are the only reference application that has
+# any. It is a query language, so what it means is a table of query, document
+# and answer -- and half of those are refusals, because a query language
+# producing nothing and looking like it worked is its whole failure mode.
+"$khora" test examples/khq
 
 step 'the build cache answers, and answers with the right bytes'
 # The claim 14.17 rests on, checked against the real corpus rather than a

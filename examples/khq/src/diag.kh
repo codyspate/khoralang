@@ -1,0 +1,199 @@
+module khq::diag;
+
+//! Where something went wrong in a query, and how to show it.
+//!
+//! **A span is two byte offsets, and the renderer is the only thing that turns
+//! them into a line and a column.** Carrying a line number from the lexer
+//! would mean every later stage that splits or joins a span has to keep it
+//! right, and the one place that needs it is the one place a query is printed
+//! back to somebody.
+//!
+//! Bytes rather than characters, because that is what `String::slice` takes
+//! and what `String::byte_length` counts. The renderer is where the difference
+//! matters and where the character API earns its place: a caret counted in
+//! bytes sits in the wrong column the first time somebody writes an accented
+//! letter in a string literal.
+//!
+//! **`String::chars_between` is here because of this file.** It did not exist;
+//! this module wrote it for itself, got it wrong -- `next_boundary` answers
+//! the boundary *at or after* an offset, so stepping with it never advances --
+//! and hung on the first query that had an error in it. It is in `std::core`
+//! now, with the loop that does not terminate written into its documentation.
+
+import std::core::{Char, List, Option, String};
+
+/// A half-open range of bytes in the query text.
+///
+/// `end` is exclusive, so an empty span at `at` is `{ start: at, end: at }` and
+/// its caret is one column wide rather than none.
+pub type Span = {
+  /// The first byte.
+  start: Int,
+  /// One past the last byte.
+  end: Int,
+};
+
+/// A span covering one byte offset.
+pub fn at(offset: Int) -> Span {
+  { start: offset, end: offset + 1 }
+}
+
+/// The smallest span covering both.
+///
+/// Used by the parser, where an expression's span is its first token's start
+/// and its last token's end and nothing in between has to be tracked.
+pub fn join(first: Span, second: Span) -> Span {
+  {
+    start: if first.start < second.start { first.start } else { second.start },
+    end: if first.end > second.end { first.end } else { second.end },
+  }
+}
+
+/// Something the query says that cannot be carried out.
+///
+/// **One type for the lexer, the parser and the evaluator.** They fail for
+/// different reasons and a reader does not care which stage was speaking: what
+/// they need is the sentence and the place. Keeping three types and three
+/// renderers would have produced three slightly different carets.
+pub type Problem = {
+  /// What went wrong, as a sentence.
+  message: String,
+  /// Where in the query, or `None` for a failure with no place — an
+  /// `error("...")` the query raised itself, which happened at a point in the
+  /// *data* rather than in the text.
+  where_: Option<Span>,
+};
+
+/// A problem at a place.
+pub fn problem(message: String, span: Span) -> Problem {
+  { message: message, where_: Option::Some(span) }
+}
+
+/// A problem with no place in the query text.
+pub fn bare(message: String) -> Problem {
+  { message: message, where_: Option::None }
+}
+
+/// A line and column, both counted from one.
+///
+/// The column is in **characters**, not bytes, which is the whole reason this
+/// is computed rather than carried: a caret under `"café"[3]` belongs under the
+/// `é` and not two columns past it.
+pub type Where = {
+  /// Which line, counted from one.
+  line: Int,
+  /// Which character in that line, counted from one.
+  column: Int,
+  /// The line's own text, without its newline.
+  text: String,
+};
+
+/// The line and column of a byte offset in `source`.
+///
+/// Walks from the start. A query is one line in nearly every case and a few
+/// hundred bytes in the worst, so an index would cost more to build than the
+/// walk costs to run.
+pub fn locate(source: String, offset: Int) -> Where {
+  let total = String::byte_length(source);
+  let stop = if offset > total { total } else { offset };
+  let start = line_start(source, stop, 0, 0);
+  {
+    line: line_number(source, stop, 0, 1),
+    column: String::chars_between(source, start, stop) + 1,
+    text: String::slice(source, start, line_end(source, stop)),
+  }
+}
+
+/// The byte offset just after the last newline at or before `stop`.
+fn line_start(source: String, stop: Int, at: Int, found: Int) -> Int {
+  if at >= stop {
+    found
+  } else if String::byte(source, at) == 10 {
+    line_start(source, stop, at + 1, at + 1)
+  } else {
+    line_start(source, stop, at + 1, found)
+  }
+}
+
+/// How many lines have ended before `stop`, plus one.
+fn line_number(source: String, stop: Int, at: Int, found: Int) -> Int {
+  if at >= stop {
+    found
+  } else if String::byte(source, at) == 10 {
+    line_number(source, stop, at + 1, found + 1)
+  } else {
+    line_number(source, stop, at + 1, found)
+  }
+}
+
+/// The byte offset of the newline at or after `from`, or the end of the text.
+fn line_end(source: String, from: Int) -> Int {
+  let total = String::byte_length(source);
+  let mut at = from;
+  while at < total && String::byte(source, at) != 10 {
+    at = at + 1;
+  };
+  at
+}
+
+/// The problem, the line it is on, and a caret under it.
+///
+/// ```text
+/// error: `lenght` is not a function
+///   |
+/// 1 | .users | lenght
+///   |          ^^^^^^
+/// ```
+///
+/// The gutter is as wide as the line number, so a query long enough to wrap
+/// still lines up. Nothing here is coloured: this goes to a terminal that may
+/// be a pipe, and a program that writes escape codes into a file somebody is
+/// reading later has decided something on their behalf.
+pub fn render(source: String, trouble: Problem) -> String {
+  match trouble.where_ {
+    Option::None => "error: ${trouble.message}",
+    Option::Some(span) => {
+      let place = locate(source, span.start);
+      let number = Int::to_string(place.line);
+      let gutter = String::repeat(" ", String::byte_length(number));
+      let caret = under(source, span, place.column);
+      "error: ${trouble.message}\n"
+      + "${gutter} |\n"
+      + "${number} | ${place.text}\n"
+      + "${gutter} | ${caret}"
+    },
+  }
+}
+
+/// The spaces and carets that go under a line.
+///
+/// The width is in characters, so a span over a multi-byte character is one
+/// caret and not three.
+fn under(source: String, span: Span, column: Int) -> String {
+  let width = String::chars_between(source, span.start, span.end);
+  String::repeat(" ", column - 1) + String::repeat("^", if width < 1 { 1 } else { width })
+}
+
+/// A character as it would be written in a message.
+///
+/// Quoted, and the ones that would not survive being printed spelled out. A
+/// message saying `unexpected ` with a tab in it is a message that has lost the
+/// thing it was about.
+pub fn quoted(c: Char) -> String {
+  if c == '\n' {
+    "a newline"
+  } else if c == '\t' {
+    "a tab"
+  } else if c == '\r' {
+    "a carriage return"
+  } else if Char::is_whitespace(c) {
+    "a space"
+  } else {
+    "`${Char::to_string(c)}`"
+  }
+}
+
+/// Every problem, one per line.
+pub fn render_all(source: String, troubles: List<Problem>) -> String {
+  String::join(List::map(troubles, fn t => render(source, t)), "\n\n")
+}

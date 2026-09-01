@@ -1,0 +1,316 @@
+module khq::value;
+
+//! What can be done to a `Json` that `std::json` does not do.
+//!
+//! # Why any of this is here
+//!
+//! `std::json` owns the shape of a JSON document and how it is written down.
+//! It does not order two documents, compare them, or add them, because those
+//! are questions with more than one defensible answer and a standard library
+//! that picked one would be picking for everybody. A query language has to
+//! pick, so it picks here.
+//!
+//! # Numbers
+//!
+//! `Json::Number` holds the text that was written, which is the decision
+//! `std::json` took so that `9007199254740993` survives being read. That
+//! leaves arithmetic with a choice, and the rule is:
+//!
+//! **Two numbers that are both integers are added as integers.** Anything else
+//! goes through `Float`.
+//!
+//! So `1 + 2` is `3` and not `3.0`, a sum over a column of counts stays exact
+//! however long the column is, and `0.1 + 0.2` is `0.30000000000000004`
+//! because that is what binary floating point is and pretending otherwise
+//! would be a different lie. A `Decimal` path was considered and left out: it
+//! would make `1 / 3` a failure rather than a number, and a query tool that
+//! refuses to divide is worse than one that is inexact where IEEE 754 is.
+//!
+//! # Order
+//!
+//! One total order over every value, because `sort` has to work on a mixed
+//! array and answering "these are not comparable" would make it a partial
+//! function on data somebody else produced. The order across types is
+//!
+//!     null < false < true < numbers < strings < arrays < objects
+//!
+//! which is jq's, and arbitrary in the same way any such order is. Within a
+//! type it is the obvious one, except objects: those compare by their sorted
+//! key lists first and by the values at those keys second, so that two objects
+//! with the same keys are ordered by their contents rather than by whichever
+//! bucket the hash landed in.
+
+import std::core::{Int, List, Map, Option, Ordering, Pair, String};
+import std::json::{Json};
+
+/// What a value's type is called, for messages and for the `type` builtin.
+pub fn type_name(value: Json) -> String {
+  match value {
+    Json::Null => "null",
+    Json::Bool(_b) => "boolean",
+    Json::Number(_n) => "number",
+    Json::Text(_t) => "string",
+    Json::Array(_a) => "array",
+    Json::Object(_o) => "object",
+  }
+}
+
+/// Where a value's type sits in the order across types.
+fn rank(value: Json) -> Int {
+  match value {
+    Json::Null => 0,
+    Json::Bool(b) => if b { 2 } else { 1 },
+    Json::Number(_n) => 3,
+    Json::Text(_t) => 4,
+    Json::Array(_a) => 5,
+    Json::Object(_o) => 6,
+  }
+}
+
+/// **Only `false` and `null` are false.** Everything else is true, including
+/// `0`, `""` and `[]`.
+///
+/// This is jq's rule and Ruby's, and it is the one that makes `select(.name)`
+/// mean "has a name" rather than "has a name that is not empty". A language
+/// where `0` is false makes `select(.count)` silently drop the zeroes, which is
+/// the kind of bug a query language should not be able to have.
+pub fn truthy(value: Json) -> Bool {
+  match value {
+    Json::Null => false,
+    Json::Bool(b) => b,
+    _ => true,
+  }
+}
+
+/// A number's value as a `Float`, for comparison and for inexact arithmetic.
+///
+/// A literal that will not parse is `0.0`. That cannot happen from a parsed
+/// document or from a parsed query -- both scanned the number before storing
+/// its text -- so this is the branch that exists to keep the function total
+/// rather than one anybody reaches.
+pub fn as_float(literal: String) -> Float {
+  match Float::of_string(literal) {
+    Option::Some(f) => f,
+    Option::None => 0.0,
+  }
+}
+
+/// The integer a literal names, if it names one exactly.
+///
+/// `1` is `Some(1)`; `1.0`, `1e3` and `1.5` are all `None`. **`1e3` on
+/// purpose**: it is written as a float and treating it as an integer would
+/// mean the exactness of a sum depended on how somebody spelled a number,
+/// which is worse than a rule that is occasionally surprising.
+pub fn as_int(literal: String) -> Option<Int> {
+  Int::of_string(literal)
+}
+
+/// Two values, in this program's order.
+pub fn compare(left: Json, right: Json) -> Ordering {
+  let a = rank(left);
+  let b = rank(right);
+  if a != b {
+    if a < b { Ordering::Less } else { Ordering::Greater }
+  } else {
+    match left {
+      Json::Number(x) => match right {
+        Json::Number(y) => compare_numbers(x, y),
+        _ => Ordering::Equal,
+      },
+      Json::Text(x) => match right {
+        Json::Text(y) => String::cmp(x, y),
+        _ => Ordering::Equal,
+      },
+      Json::Array(xs) => match right {
+        Json::Array(ys) => compare_lists(xs, ys),
+        _ => Ordering::Equal,
+      },
+      Json::Object(x) => match right {
+        Json::Object(y) => compare_objects(x, y),
+        _ => Ordering::Equal,
+      },
+      // `null`, `true` and `false` are already separated by their ranks.
+      _ => Ordering::Equal,
+    }
+  }
+}
+
+/// Two numbers.
+///
+/// Exactly when both are integers, and through `Float` otherwise. Comparing
+/// `9007199254740993` with `9007199254740992` as floats would call them equal,
+/// which is the whole reason the literal is kept.
+fn compare_numbers(left: String, right: String) -> Ordering {
+  match as_int(left) {
+    Option::Some(a) => match as_int(right) {
+      Option::Some(b) => Int::cmp(a, b),
+      Option::None => floats(as_float(left), as_float(right)),
+    },
+    Option::None => floats(as_float(left), as_float(right)),
+  }
+}
+
+/// Two floats, in order.
+///
+/// **`Float` has no `Ord` instance.** It is the only primitive without one,
+/// which is defensible -- `NaN` is not ordered against anything, so an `Ord`
+/// for `Float` would be a total order that is not one -- and inconvenient,
+/// because a query language has to put a mixed array in some order anyway.
+///
+/// So the comparison is written out rather than worked around silently. `NaN`
+/// cannot reach here: a number in a document or a query was scanned before it
+/// was stored, and neither grammar has a spelling for it.
+fn floats(left: Float, right: Float) -> Ordering {
+  if left < right {
+    Ordering::Less
+  } else if left > right {
+    Ordering::Greater
+  } else {
+    Ordering::Equal
+  }
+}
+
+/// Element by element, and a shorter array is less than a longer one that
+/// starts the same way.
+fn compare_lists(left: List<Json>, right: List<Json>) -> Ordering {
+  match left {
+    List::Nil => match right {
+      List::Nil => Ordering::Equal,
+      List::Cons(_h, _t) => Ordering::Less,
+    },
+    List::Cons(x, xs) => match right {
+      List::Nil => Ordering::Greater,
+      List::Cons(y, ys) => match compare(x, y) {
+        Ordering::Equal => compare_lists(xs, ys),
+        Ordering::Less => Ordering::Less,
+        Ordering::Greater => Ordering::Greater,
+      },
+    },
+  }
+}
+
+/// Keys first, then the values at those keys.
+///
+/// Comparing the key lists first is what makes `{a: 2}` less than `{b: 1}`:
+/// the question "which object is smaller" has to be answered without looking
+/// at the hash order, and the sorted keys are the only thing about an object
+/// that does not depend on it.
+fn compare_objects(left: Map<String, Json>, right: Map<String, Json>) -> Ordering {
+  let ks = sorted_keys(left);
+  let ls = sorted_keys(right);
+  match compare_strings(ks, ls) {
+    Ordering::Less => Ordering::Less,
+    Ordering::Greater => Ordering::Greater,
+    Ordering::Equal => compare_lists(
+      List::map(ks, fn k => at_key(left, k)),
+      List::map(ls, fn k => at_key(right, k)),
+    ),
+  }
+}
+
+fn compare_strings(left: List<String>, right: List<String>) -> Ordering {
+  match left {
+    List::Nil => match right {
+      List::Nil => Ordering::Equal,
+      List::Cons(_h, _t) => Ordering::Less,
+    },
+    List::Cons(x, xs) => match right {
+      List::Nil => Ordering::Greater,
+      List::Cons(y, ys) => match String::cmp(x, y) {
+        Ordering::Equal => compare_strings(xs, ys),
+        Ordering::Less => Ordering::Less,
+        Ordering::Greater => Ordering::Greater,
+      },
+    },
+  }
+}
+
+/// A key's value, or `null` if it is absent.
+///
+/// **`null` and absent are the same thing when reading**, which is JSON's own
+/// convention and jq's: `.missing` is `null` rather than an error, so a query
+/// over documents that do not all have the same fields does not have to guard
+/// every access. `has("missing")` is the question that tells them apart.
+pub fn at_key(fields: Map<String, Json>, key: String) -> Json {
+  match Map::get(fields, key) {
+    Option::Some(v) => v,
+    Option::None => Json::Null,
+  }
+}
+
+/// An object's keys, in order.
+///
+/// Sorted, always. A hash map has no order of its own, so a program that
+/// printed an object in bucket order would print the same document differently
+/// on two runs -- and a diff between two outputs of this tool would be noise.
+pub fn sorted_keys(fields: Map<String, Json>) -> List<String> {
+  List::sort(Map::keys(fields))
+}
+
+/// Two values that are the same value.
+pub fn equal(left: Json, right: Json) -> Bool {
+  match compare(left, right) {
+    Ordering::Equal => true,
+    _ => false,
+  }
+}
+
+/// An object with one key changed, leaving the original alone.
+///
+/// **A copy, because `Map::insert` mutates.** Every filter in this program is a
+/// function from a value to values, and a filter that changed its input would
+/// make `.a = 1, .` produce two different answers depending on which the
+/// evaluator asked for first.
+pub fn with_key(fields: Map<String, Json>, key: String, value: Json) -> Map<String, Json> {
+  let out: Map<String, Json> = Map::new();
+  List::fold(Map::entries(fields), (), fn (_a, e) => Map::insert(out, e.key, e.value));
+  Map::insert(out, key, value);
+  out
+}
+
+/// An object with one key removed.
+pub fn without_key(fields: Map<String, Json>, key: String) -> Map<String, Json> {
+  let out: Map<String, Json> = Map::new();
+  List::fold(
+    Map::entries(fields),
+    (),
+    fn (_a, e) => if e.key != key { Map::insert(out, e.key, e.value) } else { () },
+  );
+  out
+}
+
+/// An object built from key and value pairs, later keys winning.
+pub fn object_of(entries: List<Pair<String, Json>>) -> Json {
+  let out: Map<String, Json> = Map::new();
+  List::fold(entries, (), fn (_a, e) => Map::insert(out, e.key, e.value));
+  Json::Object(out)
+}
+
+/// An integer as a value.
+pub fn of_int(value: Int) -> Json {
+  Json::Number(Int::to_string(value))
+}
+
+/// A float as a value.
+///
+/// A float that is a whole number is written without its fraction, so
+/// `length / 2` over an even-length array gives `3` rather than `3.0`. The
+/// alternative is a tool whose output changes shape depending on arithmetic
+/// nobody asked to see.
+pub fn of_float(value: Float) -> Json {
+  // **`Float` has neither `floor` nor `abs`**, so the whole-number test is a
+  // round trip through `Int` -- which is also the conversion being guarded, so
+  // it tests exactly the thing it is about to do. `Float::to_int` clamps
+  // rather than trapping, and a clamped value does not come back equal.
+  let whole = Float::to_int(value);
+  if Int::to_float(whole) == value {
+    Json::Number(Int::to_string(whole))
+  } else {
+    Json::Number(Float::to_string(value))
+  }
+}
+
+/// A boolean as a value.
+pub fn of_bool(value: Bool) -> Json {
+  Json::Bool(value)
+}

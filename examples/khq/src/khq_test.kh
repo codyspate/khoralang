@@ -1,0 +1,238 @@
+module khq::khq_test;
+
+//! What the language means, pinned.
+//!
+//! Every test is a query, a document and the values it should produce, written
+//! as compact JSON so the expectation is one string and a failure names the
+//! query. `std` has `assert(Bool)` and nothing else — see the note at the head
+//! of `packages/postgres/src/wire_test.kh` — so a failure says "assertion
+//! failed" and the line, and the line is the query.
+//!
+//! **The half that matters most is the refusals.** A query language's failure
+//! mode is producing nothing and looking like it worked, so for every case
+//! that answers there is one that must not.
+
+import std::core::{List, Option, Result, String, assert, attempt};
+import std::json::{Json, parse};
+import khq::diag::{Problem, bare};
+import khq::eval::{eval};
+import khq::parse::{query};
+import khq::render::{Shape, render_all};
+
+/// The sample every test below runs against.
+const PEOPLE: String = "{\"users\":["
++ "{\"name\":\"Ada\",\"age\":36,\"city\":\"London\",\"tags\":[\"maths\",\"engines\"]},"
++ "{\"name\":\"Grace\",\"age\":45,\"city\":\"New York\",\"tags\":[\"compilers\"]},"
++ "{\"name\":\"Alan\",\"age\":29,\"city\":\"Cambridge\",\"tags\":[\"logic\",\"maths\"]}"
++ "]}";
+
+/// Everything `filter` produces from `document`, as compact JSON, one per line.
+fn run_on(document: String, filter: String) -> String {
+  match attempt(fn () => answered(document, filter)!) {
+    Result::Ok(text) => text,
+    Result::Err(trouble) => "error: ${trouble.message}",
+  }
+}
+
+fn answered(document: String, filter: String) -> String raises Problem {
+  let value = match parse(document) {
+    Result::Ok(v) => v,
+    Result::Err(_why) => raise bare("the test's own document is not JSON"),
+  };
+  render_all(eval(query(filter)!, value)!, Shape::Compact)
+}
+
+fn run(filter: String) -> String {
+  run_on(PEOPLE, filter)
+}
+
+/// Whether the query failed, which is what half of these are about.
+fn refused(filter: String) -> Bool {
+  String::starts_with(run(filter), "error: ")
+}
+
+// --- paths ------------------------------------------------------------------
+
+test "a path reaches into an object" {
+  assert(run(".users[0].name") == "\"Ada\"");
+  assert(run(".users[1].city") == "\"New York\"");
+}
+
+test "a missing field is null rather than a failure" {
+  assert(run(".nothing") == "null");
+  assert(run(".nothing.at.all") == "null");
+}
+
+test "a field of a number is a failure, because it is a mistake about the data" {
+  assert(refused(".users[0].age.name"));
+}
+
+test "an index counts from the end when it is negative" {
+  assert(run(".users[-1].name") == "\"Alan\"");
+  assert(run(".users[-3].name") == "\"Ada\"");
+}
+
+test "an index past the end is null" {
+  assert(run(".users[99]") == "null");
+}
+
+test "a slice takes a range" {
+  assert(run("[.users[1:] | .[].name]") == "[\"Grace\",\"Alan\"]");
+  assert(run("[.users[:1] | .[].name]") == "[\"Ada\"]");
+}
+
+// --- streams ----------------------------------------------------------------
+
+test "iteration produces one value per element" {
+  assert(run(".users[] | .name") == "\"Ada\"\n\"Grace\"\n\"Alan\"");
+}
+
+test "a comma produces both sides" {
+  assert(run("1, 2, 3") == "1\n2\n3");
+}
+
+test "empty produces nothing, and a pipe through it produces nothing" {
+  assert(run("empty") == "");
+  assert(run("empty | .name") == "");
+}
+
+test "select keeps or drops without either side knowing" {
+  assert(run(".users[] | select(.age > 30) | .name") == "\"Ada\"\n\"Grace\"");
+  assert(run(".users[] | select(.age > 100) | .name") == "");
+}
+
+test "an object construction is the product of its parts" {
+  assert(run("{a: (1, 2), b: 3}") == "{\"a\":1,\"b\":3}\n{\"a\":2,\"b\":3}");
+}
+
+// --- numbers ----------------------------------------------------------------
+
+test "an integer larger than a double survives arithmetic" {
+  // The whole reason `Json::Number` keeps its literal. Through a `Float` this
+  // is 9007199254740992.
+  assert(run("9007199254740993 + 0") == "9007199254740993");
+}
+
+test "two integers add as integers" {
+  assert(run("1 + 2") == "3");
+  assert(run("[.users[].age] | add") == "110");
+}
+
+test "a float is what binary floating point says it is" {
+  assert(run("0.1 + 0.2") == "0.30000000000000004");
+}
+
+test "division is exact when it comes out even and a float when it does not" {
+  assert(run("8 / 4") == "2");
+  assert(run("10 / 4") == "2.5");
+}
+
+test "division by zero is refused rather than infinite" {
+  assert(refused("1 / 0"));
+  assert(refused("1 % 0"));
+}
+
+// --- operators --------------------------------------------------------------
+
+test "precedence is what it looks like" {
+  assert(run("1 + 2 * 3") == "7");
+  assert(run("(1 + 2) * 3") == "9");
+}
+
+test "plus joins strings, arrays and objects" {
+  assert(run("\"a\" + \"b\"") == "\"ab\"");
+  assert(run("[1] + [2]") == "[1,2]");
+  assert(run("{a: 1} + {b: 2}") == "{\"a\":1,\"b\":2}");
+  // The right side wins.
+  assert(run("{a: 1} + {a: 2}") == "{\"a\":2}");
+}
+
+test "plus refuses to combine things that are not alike" {
+  assert(refused("1 + \"a\""));
+  assert(refused("[1] + {a: 1}"));
+}
+
+test "the alternative takes the right side when the left has nothing true" {
+  assert(run(".missing // \"none\"") == "\"none\"");
+  assert(run(".users[0].name // \"none\"") == "\"Ada\"");
+  // And when the left side *failed*, which is what makes it usable.
+  assert(run(".users[0].age.name // \"none\"") == "\"none\"");
+}
+
+test "only false and null are false" {
+  assert(run("[0, \"\", [], {}] | map(if . then \"yes\" else \"no\" end)")
+    == "[\"yes\",\"yes\",\"yes\",\"yes\"]");
+  assert(run("[false, null] | map(if . then \"yes\" else \"no\" end)") == "[\"no\",\"no\"]");
+}
+
+// --- builtins ---------------------------------------------------------------
+
+test "length knows what it is looking at" {
+  assert(run(".users | length") == "3");
+  assert(run("\"abc\" | length") == "3");
+  assert(run("-7 | length") == "7");
+  assert(refused("true | length"));
+}
+
+test "length counts characters and not bytes" {
+  assert(run_on("{\"s\":\"café\"}", ".s | length") == "4");
+}
+
+test "sort and unique put a mixed array in one order" {
+  assert(run("[3, 1, 2] | sort") == "[1,2,3]");
+  assert(run("[1, 1, 2] | unique") == "[1,2]");
+  // The order across types: null < false < true < numbers < strings.
+  assert(run("[\"a\", 1, null, true, false] | sort") == "[null,false,true,1,\"a\"]");
+}
+
+test "sort_by runs its filter once per element" {
+  assert(run(".users | sort_by(.age) | map(.name)") == "[\"Alan\",\"Ada\",\"Grace\"]");
+  assert(run(".users | sort_by(-.age) | map(.name)") == "[\"Grace\",\"Ada\",\"Alan\"]");
+}
+
+test "group_by gathers what shares a key" {
+  assert(run("[1, 2, 3, 4] | group_by(. % 2) | map(length)") == "[2,2]");
+}
+
+test "keys are sorted, so the same document prints the same way twice" {
+  assert(run(".users[0] | keys") == "[\"age\",\"city\",\"name\",\"tags\"]");
+}
+
+test "an unknown function names the nearest one" {
+  let said = run(".users | lenght");
+  assert(match String::index_of(said, "did you mean `length`") {
+      Option::Some(_at) => true,
+      Option::None => false,
+    });
+}
+
+test "a function given the wrong number of arguments says so" {
+  assert(refused(".users | length(1)"));
+  assert(refused(".users | map()"));
+}
+
+test "the question mark is the only thing that swallows a failure" {
+  assert(run("[.users[].age.name?]") == "[]");
+  assert(refused("[.users[].age.name]"));
+}
+
+// --- the parser -------------------------------------------------------------
+
+test "a query that does not finish is refused" {
+  assert(refused(".users["));
+  assert(refused(".users | "));
+  assert(refused("{a:"));
+}
+
+test "trailing input is refused rather than ignored" {
+  assert(refused(".users length"));
+}
+
+test "a string keeps its escapes" {
+  assert(run("\"a\\nb\"") == "\"a\\nb\"");
+  assert(run("\"\\u0041\"") == "\"A\"");
+}
+
+test "a surrogate escape is refused" {
+  assert(refused("\"\\ud800\""));
+}

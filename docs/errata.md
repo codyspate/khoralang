@@ -2557,3 +2557,43 @@ errata 43 is `\r\n` being four bytes. The lesson from that round was written
 into `std` as `String::char_at`, `String::next_boundary` and, this week,
 `String::chars_between` -- and the compiler that produced the lesson was still
 slicing by hand.
+
+## 68. The site had not built for a week, and the gate did not know
+
+`npm run build` in `website/` failed:
+
+    reference/debugging.md:65 -> https://github.com/codyspate/khoralang/blob/
+    main/docs/release-readiness.md (source filename is not a rendered route)
+
+The check is a good one. A link written to `../reference/traps.md` points at a
+file in the content tree rather than at the route it renders as, which works in
+an editor's preview and 404s on the site -- so `sync-docs.mjs` refuses it and
+the build stops.
+
+It asked in the wrong order. The `.md` test ran before the question of whether
+the link was *external*, so `https://github.com/.../CONTRIBUTING.md` -- a link
+to a file that is meant to be read as a file, and the correct thing to write --
+was rejected as a source filename. Three of those went in with 13.14 and 13.15.
+
+**Nothing caught it for a week, and that is the part worth writing down.**
+`scripts/baseline.sh` is twenty-odd steps and covers the compiler, the runtime,
+the standard library, the packages, the examples, the corpus's formatting, the
+generated API pages and the Linux runtime through WSL. It did not build the
+website. The GitHub workflow that would have caught it runs on a push, and this
+repository's commits are local until they are not.
+
+So the one tree that is *published to strangers* was the one tree with no local
+gate over it. The gate now runs `node website/scripts/sync-docs.mjs`, which is
+dependency-free -- plain Node, no `npm install` -- and is the part that broke.
+The Astro build proper stays in CI, where the dependencies live.
+
+The shape is errata 65's, one level up. That was about a scoring pass that did
+not read the tree; this is about a gate that did not include one. Both are the
+same question -- *what is not being looked at* -- and in both cases the answer
+was something everybody assumed somebody else was covering.
+
+A second thing fell out of building it. Two of section 17's twelve items were
+already satisfied and unticked: the search index has been built over all 100
+pages every time anybody ran `npm run build`, and the link checker has been
+failing CI on broken internal links since it was written. Both were discovered
+by running the build once.

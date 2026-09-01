@@ -47,6 +47,13 @@ it will behave differently now.
 
 ### Fixed
 
+- **The documentation site had not built for a week.** `sync-docs.mjs` refuses
+  a link written to a `.md` source file rather than to the route it renders as
+  — a good check — but asked that before asking whether the link was external,
+  so three links to `CONTRIBUTING.md` and friends on GitHub broke the build.
+  `scripts/baseline.sh` now assembles the site, which is why nothing caught it.
+  Errata 68.
+
 - **A non-ASCII character beside a `${..}` hole panicked the compiler.**
   `print("café ${n}")` ended in a Rust panic from `split_interpolation`, which
   copied the text around a literal's holes one byte at a time. A literal with
@@ -100,6 +107,19 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **`examples/khq`**, a query language over JSON: about 3,600 lines across ten
+  modules, with thirty-four tests. The largest Khora program written, and the
+  first to put weight on the language rather than demonstrate a feature. What
+  it found on the way is in errata 67 and Roadmap #164.
+- **Every documentation page says which commit it was built from**, linked to
+  that commit on GitHub, with the release beside it.
+- **Short paths on the site**: `/install`, `/guide`, `/reference`, `/stdlib`,
+  `/versioning`, `/limitations`, `/releases`, `/source`, `/security`,
+  `/contributing`, `/changelog`.
+- **`/docs/performance/`**, which publishes the benchmark methodology and no
+  numbers — the load generator is currently the limit and the same
+  configuration does not repeat to within 1.85×.
 
 - **`Float::of_string`.** `Float` was the only primitive with no way in from
   text. It existed privately in `std::json`, whose comment said it belonged in

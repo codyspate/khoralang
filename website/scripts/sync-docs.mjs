@@ -1,4 +1,5 @@
 import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -9,6 +10,78 @@ const collectionRoot = path.join(root, 'src', 'content', 'docs');
 const target = path.join(collectionRoot, 'docs');
 const unstableBanner =
   'Khora is unstable before v1. Syntax, standard-library APIs, and behavior may change before v1.';
+
+// --- what this build was made from ------------------------------------------
+//
+// A deployed page that cannot say which commit produced it is a page nobody
+// can check. Somebody reading `/docs/reference/traps/` and finding it disagrees
+// with their compiler has two candidate explanations and no way to tell them
+// apart; a revision in the footer settles it in one click.
+
+/// The commit this build came from, or `null` if nothing can say.
+///
+/// **CI first.** A checkout in a build container may be shallow or detached,
+/// so `git rev-parse HEAD` there is not reliably the commit being deployed.
+/// `GITHUB_SHA` is what the workflow was triggered on.
+///
+/// `null` rather than `"unknown"`: a footer that says it was built from
+/// nothing in particular has spent a line saying nothing. The component leaves
+/// the revision out instead.
+function revisionOf() {
+  const fromCi = process.env.GITHUB_SHA || process.env.CF_PAGES_COMMIT_SHA;
+  if (fromCi) return fromCi;
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/// The language release these pages describe.
+///
+/// From `khora.toml`, not from `package.json`: the site's own version is about
+/// the site, and what a reader wants is which *language* release they are
+/// reading about.
+async function releaseOf() {
+  try {
+    const manifest = await readFile(path.join(root, '..', 'khora.toml'), 'utf8');
+    const found = manifest.match(/^\s*version\s*=\s*"([^"]+)"/m);
+    return found ? found[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/// Writes what this build was made from, for the footer to read.
+///
+/// A module rather than JSON in `public/`, so that a page importing it fails
+/// the build when it is missing rather than rendering an empty footer.
+async function writeProvenance() {
+  const revision = revisionOf();
+  const release = await releaseOf();
+  const built = {
+    revision,
+    short: revision ? revision.slice(0, 12) : null,
+    release,
+    // To the minute. A second is precision this does not have -- two builds of
+    // one commit are the same site -- and a date alone would not tell two
+    // builds of one day apart.
+    builtAt: new Date().toISOString().slice(0, 16).replace('T', ' ') + 'Z',
+  };
+  const file = path.join(root, 'src', 'generated', 'build.js');
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(
+    file,
+    '// Written by scripts/sync-docs.mjs. Not edited by hand, not committed.\n'
+      + `export const build = ${JSON.stringify(built, null, 2)};\n`,
+    'utf8',
+  );
+  return built;
+}
 
 function lineAt(text, index) {
   return text.slice(0, index).split(/\r?\n/).length;
@@ -110,6 +183,16 @@ function linksIn(text) {
 
 function resolvedDocLink(url, fromFile) {
   const raw = url.trim().replace(/^<|>$/g, '');
+  // **External first.** The `.md` test below is about somebody linking to a
+  // source file in this tree instead of to the route it renders as -- a real
+  // mistake, and one worth failing the build over. It is not about
+  // `https://github.com/.../CONTRIBUTING.md`, which is a link to a file that
+  // is meant to be read as a file and is the correct thing to write.
+  //
+  // The order was the other way round, so three links added in 13.14 and 13.15
+  // broke `npm run build` and nothing noticed: the repository's own gate does
+  // not build the site, and CI only runs on a push.
+  if (isExternalUrl(raw) || raw.startsWith('//')) return null;
   if (/\.mdx?(?:[?#].*)?$/i.test(raw)) {
     return { error: 'source filename is not a rendered route' };
   }
@@ -320,4 +403,10 @@ async function enhanceGeneratedApi(dir) {
 await normalizeMarkdown(target);
 await enhanceGeneratedApi(path.join(target, 'stdlib', 'api'));
 
+const built = await writeProvenance();
 console.log(`Synced public docs: ${source} -> ${target}`);
+console.log(
+  built.short
+    ? `Built from ${built.short}${built.release ? ` (${built.release})` : ''} at ${built.builtAt}`
+    : 'No revision available; the footer will not claim one',
+);

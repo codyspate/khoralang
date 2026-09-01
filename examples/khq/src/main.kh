@@ -1,0 +1,167 @@
+module khq::main;
+
+//! `khq` — a query language over JSON.
+//!
+//! ```text
+//! khq '.users[] | select(.age > 30) | {name, city: .address.city}' people.json
+//! ```
+//!
+//! # What this is for
+//!
+//! It is a working tool, and it is a load-bearing test of the language. The
+//! shape — a lexer, a parser, a tree, an evaluator over streams and forty
+//! builtins — is the shape of a compiler, which is the thing Khora says it is
+//! for; and it is large enough that the friction it meets is real friction
+//! rather than the kind a fifty-line demonstration produces.
+//!
+//! What it found while being written is in this repository's `docs/errata.md`
+//! and in the roadmap. The short version: a compiler panic on a non-ASCII
+//! character beside a `${..}` hole, two functions `std` did not have, and a
+//! boundary function whose name invites an infinite loop.
+//!
+//! # What it does not do
+//!
+//! No variables (`$x`), no `def` for user functions, no `reduce` or `foreach`,
+//! no paths as values (`getpath`, `setpath`), no assignment (`.a = 1`), no
+//! regular expressions, no streaming of a document too large for memory. Each
+//! is absent because it would add machinery rather than exercise more of the
+//! language, except the last, which is absent because `std::json::parse` takes
+//! a `String`.
+
+import std::core::{List, Option, Result, Show, String, attempt, print};
+import std::env::{Env, EnvError};
+import std::fs::{FsRead, IoError, read_text};
+import std::json::{Json, JsonError, parse};
+import khq::diag::{Problem, Span, bare, render};
+import khq::ast::{Filter};
+import khq::eval::{eval};
+import khq::parse::{query};
+import khq::render::{Shape, render_all};
+
+/// What the command line asked for.
+type Asked = {
+  /// The query text.
+  filter: String,
+  /// The file to read, or `None` for the built-in sample.
+  file: Option<String>,
+  /// How to write the answers.
+  shape: Shape,
+  /// Print the parsed query and stop.
+  explain: Bool,
+};
+
+pub fn main() -> () raises EnvError {
+  with { env: Env::real(), reads: FsRead::real() } {
+    let args = List::drop(env.arguments()!, 1);
+    match plan(args) {
+      Option::None => usage(),
+      Option::Some(asked) => match attempt(fn () => answer(asked)!) {
+        Result::Ok(text) => print(text),
+        // **Every failure comes out here, in one shape.** A tool that reported
+        // a bad query one way, an unreadable file another and a malformed
+        // document a third would be three tools. `Problem` is what they all
+        // become, and `khq::diag::render` is the only thing that formats one.
+        Result::Err(trouble) => print(render(asked.filter, trouble)),
+      },
+    }
+  }
+}
+
+/// The arguments, understood.
+///
+/// **A flag is a flag anywhere.** `khq -c '.name' f.json` and
+/// `khq '.name' f.json -c` both work, because a person typing at a shell adds
+/// the flag they forgot to the end rather than retyping the line.
+fn plan(args: List<String>) -> Option<Asked> {
+  let flags = List::filter(args, fn a => String::starts_with(a, "-"));
+  let rest = List::filter(args, fn a => !String::starts_with(a, "-"));
+  match List::head(rest) {
+    Option::None => Option::None,
+    Option::Some(filter) => Option::Some(
+      {
+        filter: filter,
+        file: List::head(List::drop(rest, 1)),
+        shape: if has(flags, "-r") {
+          Shape::Raw
+        } else if has(flags, "-c") {
+          Shape::Compact
+        } else {
+          Shape::Indented
+        },
+        explain: has(flags, "--explain"),
+      },
+    ),
+  }
+}
+
+fn has(flags: List<String>, wanted: String) -> Bool {
+  List::any(flags, fn f => f == wanted)
+}
+
+/// The whole job: read, parse, run, render.
+fn answer(asked: Asked) -> String
+  with { reads: FsRead }
+  raises Problem
+{
+  let filter = query(asked.filter)!;
+  if asked.explain {
+    // The tree, as far as its span goes. A full `Show` for `Filter` would
+    // be a pretty-printer, which is a second renderer to keep in step with
+    // the parser; the span is what a reader checking precedence wants.
+    let where_ = Filter::span(filter);
+    "parsed, covering bytes ${Int::to_string(where_.start)}..${Int::to_string(where_.end)}"
+  } else {
+    let text = source(asked.file)!;
+    let document = match parse(text) {
+      Result::Ok(value) => value,
+      // The document's own error carries a byte offset into the *document*,
+      // which is not the text the caret is drawn against — so it becomes a
+      // problem with no place rather than one pointing at the wrong file.
+      Result::Err(why) => raise bare("the input is not JSON: ${why.expected} at byte ${Int::to_string(why.at)}"),
+    };
+    render_all(eval(filter, document)!, asked.shape)
+  }
+}
+
+/// The document, from a file or from the sample.
+///
+/// **A sample rather than standard input.** `std` has no way to read stdin
+/// yet, and a tool that could only be used with a file argument would be
+/// awkward to try — so `khq '.'` with no file works on something.
+fn source(file: Option<String>) -> String
+  with { reads: FsRead }
+  raises Problem
+{
+  match file {
+    Option::None => sample(),
+    Option::Some(path) => match attempt(fn () => read_text(path)!) {
+      Result::Ok(text) => text,
+      Result::Err(why) => raise bare("cannot read ${path}: ${Show::show(why)}"),
+    },
+  }
+}
+
+/// The document `khq` uses when it is given no file.
+fn sample() -> String {
+  "{\"users\":["
+  + "{\"name\":\"Ada\",\"age\":36,\"city\":\"London\",\"tags\":[\"maths\",\"engines\"]},"
+  + "{\"name\":\"Grace\",\"age\":45,\"city\":\"New York\",\"tags\":[\"compilers\"]},"
+  + "{\"name\":\"Alan\",\"age\":29,\"city\":\"Cambridge\",\"tags\":[\"logic\",\"maths\"]}"
+  + "]}"
+}
+
+fn usage() -> () {
+  print("khq — a query language over JSON");
+  print("");
+  print("  khq <filter> [file] [-c] [-r] [--explain]");
+  print("");
+  print("  -c         one line per value, for piping");
+  print("  -r         a string without its quotes");
+  print("  --explain  print the parsed query and stop");
+  print("");
+  print("With no file, a small sample document is used:");
+  print("");
+  print("  khq '.users[] | select(.age > 30) | .name'");
+  print("  khq '[.users[].age] | add / length'");
+  print("  khq '.users | group_by(.city) | map({city: .[0].city, n: length})'")
+}

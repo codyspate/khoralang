@@ -1,0 +1,520 @@
+module khq::lex;
+
+//! The query text, as tokens.
+//!
+//! # Bytes to walk, characters to report
+//!
+//! The scanner advances by *bytes*, because every token boundary in this
+//! language is an ASCII character and comparing a byte is one instruction.
+//! What it reports is *characters*, because a query is text somebody typed and
+//! `unexpected byte 195` is not a sentence about anything they wrote.
+//!
+//! The two meet in exactly two places: inside a string literal, where the
+//! scanner has to copy whatever is between the quotes without looking at it;
+//! and in `unexpected`, which reaches for `String::char_at` to name what it
+//! found. Everywhere else the byte is the character.
+//!
+//! **This is the shape a lexer wants**, and it is worth saying because the
+//! character API exists for it. Without `String::char_at` and
+//! `String::next_boundary` the choice is to decode every byte into a character
+//! -- which is slower and wrong, since a UTF-8 continuation byte is not a
+//! character -- or to slice blindly and trap in the middle of one.
+//!
+//! # No token stream, a token list
+//!
+//! The whole query is scanned before the parser starts. A query is a line or
+//! two, so nothing is saved by scanning lazily, and a parser holding an index
+//! into a `List` is far easier to write and to back up than one holding a
+//! scanner it must not run twice.
+
+import std::core::{Char, Eq, List, Option, Show, String, Vector};
+import khq::diag::{Problem, Span, at, problem, quoted};
+
+/// One token, and where it was.
+pub type Token = {
+  /// What it is.
+  kind: Kind,
+  /// Where it was written.
+  span: Span,
+};
+
+/// What a token is.
+///
+/// **Words are not keywords here.** `and`, `or`, `if`, `then`, `else`, `end`,
+/// `true`, `false` and `null` all arrive as `Word`, and the parser decides
+/// what they are from where they appear. That keeps `.length` working as a
+/// field access even though `length` is a function, which matters more in a
+/// query language than in a programming one: the field names belong to
+/// somebody else's data and this program does not get to reserve any of them.
+pub type Kind =
+  /// A bare word: a function name, a field name after `.`, or one of the
+  /// words the parser treats as keywords in the position they appear.
+  | Word(text: String)
+  /// A number, kept as its own text.
+  | Num(literal: String)
+  /// A string literal, with its escapes already resolved.
+  | Str(text: String)
+  | Dot
+  | Pipe
+  | Comma
+  | Colon
+  | Question
+  | OpenParen
+  | CloseParen
+  | OpenBracket
+  | CloseBracket
+  | OpenBrace
+  | CloseBrace
+  | Plus
+  | Minus
+  | Star
+  | Slash
+  | Percent
+  | EqEq
+  | BangEq
+  | Less
+  | LessEq
+  | Greater
+  | GreaterEq
+  /// `//`, the alternative operator.
+  | SlashSlash
+  /// The end of the query. **A real token**, so the parser never has to ask
+  /// whether there is another one before looking at it.
+  | End;
+
+impl Show for Kind {
+  /// How the token is written, for a message about finding one somewhere else.
+  fn show(self) -> String {
+    match self {
+      Kind::Word(text) => "`${text}`",
+      Kind::Num(literal) => "`${literal}`",
+      Kind::Str(_text) => "a string",
+      Kind::Dot => "`.`",
+      Kind::Pipe => "`|`",
+      Kind::Comma => "`,`",
+      Kind::Colon => "`:`",
+      Kind::Question => "`?`",
+      Kind::OpenParen => "`(`",
+      Kind::CloseParen => "`)`",
+      Kind::OpenBracket => "`[`",
+      Kind::CloseBracket => "`]`",
+      Kind::OpenBrace => "`{`",
+      Kind::CloseBrace => "`}`",
+      Kind::Plus => "`+`",
+      Kind::Minus => "`-`",
+      Kind::Star => "`*`",
+      Kind::Slash => "`/`",
+      Kind::Percent => "`%`",
+      Kind::EqEq => "`==`",
+      Kind::BangEq => "`!=`",
+      Kind::Less => "`<`",
+      Kind::LessEq => "`<=`",
+      Kind::Greater => "`>`",
+      Kind::GreaterEq => "`>=`",
+      Kind::SlashSlash => "`//`",
+      Kind::End => "the end of the query",
+    }
+  }
+}
+
+impl Eq for Kind {
+  /// Two tokens of the same shape.
+  ///
+  /// A `Word` is equal to a `Word` of the same text, which is what lets the
+  /// parser ask for `end` by value. The two payload cases compare their
+  /// payloads; the rest are equal when they are the same case.
+  fn eq(self, other: Kind) -> Bool {
+    match self {
+      Kind::Word(mine) => match other {
+        Kind::Word(theirs) => mine == theirs,
+        _ => false,
+      },
+      Kind::Num(mine) => match other {
+        Kind::Num(theirs) => mine == theirs,
+        _ => false,
+      },
+      Kind::Str(mine) => match other {
+        Kind::Str(theirs) => mine == theirs,
+        _ => false,
+      },
+      _ => Kind::rank(self) == Kind::rank(other) && Kind::rank(self) > 2,
+    }
+  }
+}
+
+impl Kind {
+  /// A number per case, so the punctuation cases can be compared without
+  /// twenty-three arms of `match` inside another twenty-three.
+  ///
+  /// The three cases with payloads are 0, 1 and 2 and are handled before this
+  /// is reached; `Eq` requires a rank above 2 so that two `Word`s never
+  /// compare equal by rank alone.
+  fn rank(self) -> Int {
+    match self {
+      Kind::Word(_t) => 0,
+      Kind::Num(_t) => 1,
+      Kind::Str(_t) => 2,
+      Kind::Dot => 3,
+      Kind::Pipe => 4,
+      Kind::Comma => 5,
+      Kind::Colon => 6,
+      Kind::Question => 7,
+      Kind::OpenParen => 8,
+      Kind::CloseParen => 9,
+      Kind::OpenBracket => 10,
+      Kind::CloseBracket => 11,
+      Kind::OpenBrace => 12,
+      Kind::CloseBrace => 13,
+      Kind::Plus => 14,
+      Kind::Minus => 15,
+      Kind::Star => 16,
+      Kind::Slash => 17,
+      Kind::Percent => 18,
+      Kind::EqEq => 19,
+      Kind::BangEq => 20,
+      Kind::Less => 21,
+      Kind::LessEq => 22,
+      Kind::Greater => 23,
+      Kind::GreaterEq => 24,
+      Kind::SlashSlash => 25,
+      Kind::End => 26,
+    }
+  }
+}
+
+/// Every token in `source`, ending with `End`.
+///
+/// Stops at the first thing it cannot read, because a lexer that guesses
+/// produces a parse error somewhere else about something the reader did not
+/// write.
+pub fn tokens(source: String) -> List<Token> raises Problem {
+  let out: Vector<Token> = Vector::new();
+  let total = String::byte_length(source);
+  let mut i = 0;
+  while i < total {
+    let b = String::byte(source, i);
+    if b == 32 || b == 9 || b == 10 || b == 13 {
+      i = i + 1;
+    } else if b == 35 {
+      // `#` to the end of the line. A query in a shell script wants comments
+      // as much as a program does, and this costs three lines.
+      i = to_end_of_line(source, i, total);
+    } else {
+      let scanned = one(source, i, total)!;
+      Vector::push(out, scanned.token);
+      i = scanned.next;
+    };
+  };
+  Vector::push(out, { kind: Kind::End, span: { start: total, end: total } });
+  Vector::to_list(out)
+}
+
+/// A token and where the scanner should carry on.
+type Scanned = {
+  token: Token,
+  next: Int,
+};
+
+fn to_end_of_line(source: String, from: Int, total: Int) -> Int {
+  let mut i = from;
+  while i < total && String::byte(source, i) != 10 {
+    i = i + 1;
+  };
+  i
+}
+
+/// One token starting at `i`, which is known not to be whitespace.
+fn one(source: String, i: Int, total: Int) -> Scanned raises Problem {
+  let b = String::byte(source, i);
+  if is_digit_byte(b) {
+    number(source, i, total)!
+  } else if is_word_start(b) {
+    word(source, i, total)
+  } else if b == 34 {
+    string(source, i, total)!
+  } else {
+    punctuation(source, i, total)!
+  }
+}
+
+fn is_digit_byte(b: U8) -> Bool { b >= 48 && b <= 57 }
+
+/// A word starts with a letter or an underscore.
+///
+/// **Not `Char::is_alpha`**, deliberately: a field name is reached with
+/// `."..."` when it is not an identifier, and letting the scanner accept every
+/// Unicode letter here would mean deciding what counts as one, which is a
+/// question with a different answer in every language. ASCII words and quoted
+/// anything-else is the smaller promise and the one this can keep.
+fn is_word_start(b: U8) -> Bool {
+  (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95
+}
+
+fn is_word_rest(b: U8) -> Bool { is_word_start(b) || is_digit_byte(b) }
+
+fn word(source: String, start: Int, total: Int) -> Scanned {
+  let mut i = start;
+  while i < total && is_word_rest(String::byte(source, i)) {
+    i = i + 1;
+  };
+  {
+    token: {
+      kind: Kind::Word(String::slice(source, start, i)),
+      span: { start: start, end: i },
+    },
+    next: i,
+  }
+}
+
+/// A JSON number, kept as the text that was written.
+///
+/// The shape is JSON's: an optional `-` is not scanned here (it is the `Minus`
+/// token, and the parser makes it a negation), then digits, then an optional
+/// fraction, then an optional exponent. Anything the shape does not allow ends
+/// the token rather than being absorbed, so `1.2.3` is two numbers and a parse
+/// error rather than a number nobody can explain.
+fn number(source: String, start: Int, total: Int) -> Scanned raises Problem {
+  let mut i = digits(source, start, total);
+  if i < total && String::byte(source, i) == 46 {
+    let after = digits(source, i + 1, total);
+    if after == i + 1 {
+      raise problem("a number needs a digit after its decimal point", at(i))
+    };
+    i = after;
+  };
+  if i < total && (String::byte(source, i) == 101 || String::byte(source, i) == 69) {
+    let mut j = i + 1;
+    if j < total && (String::byte(source, j) == 43 || String::byte(source, j) == 45) {
+      j = j + 1;
+    };
+    let after = digits(source, j, total);
+    if after == j {
+      raise problem("a number needs a digit after its exponent", at(i))
+    };
+    i = after;
+  };
+  {
+    token: {
+      kind: Kind::Num(String::slice(source, start, i)),
+      span: { start: start, end: i },
+    },
+    next: i,
+  }
+}
+
+/// The offset after a run of digits starting at `from`, which may be empty.
+fn digits(source: String, from: Int, total: Int) -> Int {
+  let mut i = from;
+  while i < total && is_digit_byte(String::byte(source, i)) {
+    i = i + 1;
+  };
+  i
+}
+
+/// A double-quoted string, with its escapes resolved.
+///
+/// **The bytes between the escapes are copied without being decoded.** A
+/// string literal may hold any UTF-8 and this program has no reason to look
+/// inside it -- so the scanner walks to the next byte that is a quote or a
+/// backslash, both of which are ASCII and so can never be part of a multi-byte
+/// character, and takes everything before it in one slice.
+fn string(source: String, start: Int, total: Int) -> Scanned raises Problem {
+  let out: Vector<String> = Vector::new();
+  let mut i = start + 1;
+  let mut plain = i;
+  let mut closed = false;
+  while !closed {
+    if i >= total {
+      raise problem("this string has no closing quote", { start: start, end: total })
+    };
+    let b = String::byte(source, i);
+    if b == 34 {
+      Vector::push(out, String::slice(source, plain, i));
+      i = i + 1;
+      closed = true;
+    } else if b == 92 {
+      Vector::push(out, String::slice(source, plain, i));
+      let e = escape(source, i, total)!;
+      Vector::push(out, e.text);
+      i = e.next;
+      plain = i;
+    } else {
+      i = i + 1;
+    };
+  };
+  {
+    token: {
+      kind: Kind::Str(String::join(Vector::to_list(out), "")),
+      span: { start: start, end: i },
+    },
+    next: i,
+  }
+}
+
+/// What an escape stands for, and where it ends.
+type Escaped = {
+  text: String,
+  next: Int,
+};
+
+/// One `\...` escape, starting at the backslash.
+fn escape(source: String, start: Int, total: Int) -> Escaped raises Problem {
+  if start + 1 >= total {
+    raise problem("this string ends in the middle of an escape", at(start))
+  };
+  let b = String::byte(source, start + 1);
+  if b == 110 {
+    { text: "\n", next: start + 2 }
+  } else if b == 116 {
+    { text: "\t", next: start + 2 }
+  } else if b == 114 {
+    { text: "\r", next: start + 2 }
+  } else if b == 34 {
+    { text: "\"", next: start + 2 }
+  } else if b == 92 {
+    { text: "\\", next: start + 2 }
+  } else if b == 47 {
+    { text: "/", next: start + 2 }
+  } else if b == 117 {
+    unicode_escape(source, start, total)!
+  } else {
+    raise problem(
+      "`\\${String::slice(source, start + 1, start + 2)}` is not an escape",
+      { start: start, end: start + 2 },
+    )
+  }
+}
+
+/// `\uXXXX`, which is JSON's escape and so is exactly four hexadecimal digits.
+///
+/// A surrogate is refused rather than paired. Pairing them would mean carrying
+/// a half through the loop above and deciding what an unpaired one means, and
+/// a query is typed by a person: the escape is here so that `é` works,
+/// not so that UTF-16 can be spelled out by hand.
+fn unicode_escape(source: String, start: Int, total: Int) -> Escaped raises Problem {
+  if start + 6 > total {
+    raise problem("`\\u` needs four hexadecimal digits", { start: start, end: total })
+  };
+  let mut value = 0;
+  let mut i = start + 2;
+  while i < start + 6 {
+    let d = hex_digit(source, i)!;
+    value = value * 16 + d;
+    i = i + 1;
+  };
+  if value >= 55296 && value <= 57343 {
+    raise problem(
+      "`\\u` names a surrogate, which is half of a character rather than one",
+      { start: start, end: start + 6 },
+    )
+  };
+  { text: Char::to_string(Char::from_code(value)), next: start + 6 }
+}
+
+fn hex_digit(source: String, at_: Int) -> Int raises Problem {
+  let b = U8::to_int(String::byte(source, at_));
+  if b >= 48 && b <= 57 {
+    b - 48
+  } else if b >= 97 && b <= 102 {
+    b - 87
+  } else if b >= 65 && b <= 70 {
+    b - 55
+  } else {
+    raise problem("`\\u` needs four hexadecimal digits", at(at_))
+  }
+}
+
+/// One or two characters of punctuation.
+///
+/// **The two-character ones are tried first**, which is the whole of the rule
+/// and the reason `<=` is not `<` followed by a parse error, and `//` is not a
+/// division by nothing.
+fn punctuation(source: String, i: Int, total: Int) -> Scanned raises Problem {
+  let b = String::byte(source, i);
+  let next = if i + 1 < total { String::byte(source, i + 1) } else { U8::of(0) };
+  let two = if b == 61 && next == 61 {
+    Option::Some(Kind::EqEq)
+  } else if b == 33 && next == 61 {
+    Option::Some(Kind::BangEq)
+  } else if b == 60 && next == 61 {
+    Option::Some(Kind::LessEq)
+  } else if b == 62 && next == 61 {
+    Option::Some(Kind::GreaterEq)
+  } else if b == 47 && next == 47 {
+    Option::Some(Kind::SlashSlash)
+  } else {
+    Option::None
+  };
+  match two {
+    Option::Some(kind) => {
+      { token: { kind: kind, span: { start: i, end: i + 2 } }, next: i + 2 }
+    },
+    Option::None => {
+      let kind = single(b);
+      match kind {
+        Option::None => raise unexpected(source, i),
+        Option::Some(k) => {
+          { token: { kind: k, span: { start: i, end: i + 1 } }, next: i + 1 }
+        },
+      }
+    },
+  }
+}
+
+fn single(b: U8) -> Option<Kind> {
+  if b == 46 {
+    Option::Some(Kind::Dot)
+  } else if b == 124 {
+    Option::Some(Kind::Pipe)
+  } else if b == 44 {
+    Option::Some(Kind::Comma)
+  } else if b == 58 {
+    Option::Some(Kind::Colon)
+  } else if b == 63 {
+    Option::Some(Kind::Question)
+  } else if b == 40 {
+    Option::Some(Kind::OpenParen)
+  } else if b == 41 {
+    Option::Some(Kind::CloseParen)
+  } else if b == 91 {
+    Option::Some(Kind::OpenBracket)
+  } else if b == 93 {
+    Option::Some(Kind::CloseBracket)
+  } else if b == 123 {
+    Option::Some(Kind::OpenBrace)
+  } else if b == 125 {
+    Option::Some(Kind::CloseBrace)
+  } else if b == 43 {
+    Option::Some(Kind::Plus)
+  } else if b == 45 {
+    Option::Some(Kind::Minus)
+  } else if b == 42 {
+    Option::Some(Kind::Star)
+  } else if b == 47 {
+    Option::Some(Kind::Slash)
+  } else if b == 37 {
+    Option::Some(Kind::Percent)
+  } else if b == 60 {
+    Option::Some(Kind::Less)
+  } else if b == 62 {
+    Option::Some(Kind::Greater)
+  } else {
+    Option::None
+  }
+}
+
+/// **The one place a byte becomes a character.**
+///
+/// The scanner got here because a byte matched nothing, and the byte may be
+/// the first of several. Naming it as a number would be about the encoding
+/// rather than about what somebody typed, and slicing one byte out of a
+/// multi-byte character would produce text that is not text.
+fn unexpected(source: String, i: Int) -> Problem {
+  match String::char_at(source, i) {
+    Option::None => problem("this is not valid UTF-8", at(i)),
+    Option::Some(c) => problem(
+      "${quoted(c)} does not mean anything here",
+      { start: i, end: i + Char::utf8_length(c) },
+    ),
+  }
+}

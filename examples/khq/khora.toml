@@ -1,0 +1,24 @@
+[package]
+name = "khq"
+version.workspace = true
+edition.workspace = true
+
+# What this program may reach outside itself.
+#
+# A file to read and the arguments naming it, and nothing else. No network, no
+# writes, no subprocesses -- a query tool that could do any of those would be a
+# query tool nobody should pipe an untrusted filter into.
+#
+# `read = ["."]` rather than a named file, because the file is whichever one
+# the caller names on the command line. That is the widest grant here and it is
+# still narrower than the program could take: a `khq` with no `[permissions]`
+# at all would be able to read anything.
+[permissions]
+env = []
+
+[permissions.fs]
+read = ["."]
+
+# The repository's formatter settings, from `[workspace.fmt]` in the root.
+[fmt]
+workspace = true

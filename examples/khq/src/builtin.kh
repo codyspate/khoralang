@@ -1,0 +1,903 @@
+module khq::builtin;
+
+//! The functions a query can call.
+//!
+//! # Why they are a `match` on a string and not a table
+//!
+//! A `Map<String, ...>` of builtins needs every one of them to have the same
+//! type, and they do not: `length` takes no filter argument, `select` takes
+//! one, `sort_by` takes one and calls it once per element. Making them uniform
+//! means a wrapper per function and a runtime check that the wrapper was given
+//! the right number of arguments -- which is the check the `match` below does
+//! anyway, in the arm that already knows the answer.
+//!
+//! So the dispatch is a `match`, `expected` is the one place that says how
+//! many arguments each takes, and an unknown name is reported with the
+//! closest spelling to it.
+//!
+//! # Arguments are filters, not values
+//!
+//! `map(.name)` passes `.name` unevaluated, because `map` has to run it once
+//! per element with a different input each time. That is the whole reason a
+//! query language needs its own call convention rather than evaluating
+//! arguments first: `select(.age > 30)` is a filter, not a boolean.
+
+import std::core::{Char, Int, List, Map, Option, Pair, Parts, String};
+import std::json::{Json, encode};
+import khq::ast::{Filter};
+import khq::diag::{Problem, Span, problem};
+import khq::value::{as_float, as_int, at_key, compare, equal, object_of, of_float, of_int, sorted_keys, truthy, type_name, without_key};
+
+/// Runs the builtin called `name`.
+pub fn apply(
+  name: String,
+  args: List<Filter>,
+  input: Json,
+  span: Span,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> List<Json>
+  raises Problem
+{
+  let given = List::length(args);
+  match expected(name) {
+    Option::None => raise unknown(name, span),
+    Option::Some(wanted) => {
+      if given != wanted {
+        raise problem(
+          "`${name}` takes ${Int::to_string(wanted)} argument(s), and was given "
+          + "${Int::to_string(given)}",
+          span,
+        )
+      };
+      dispatch(name, args, input, span, run)!
+    },
+  }
+}
+
+/// How many arguments each builtin takes, and the list of what exists.
+///
+/// **One place, so `apply` cannot disagree with `dispatch`.** The first version
+/// checked the count inside each arm and two of them were wrong in opposite
+/// directions.
+fn expected(name: String) -> Option<Int> {
+  if name == "length"
+  || name == "keys"
+  || name == "values"
+  || name == "type"
+  || name == "add"
+  || name == "empty"
+  || name == "not"
+  || name == "sort"
+  || name == "unique"
+  || name == "reverse"
+  || name == "first"
+  || name == "last"
+  || name == "min"
+  || name == "max"
+  || name == "flatten"
+  || name == "to_entries"
+  || name == "from_entries"
+  || name == "tostring"
+  || name == "tonumber"
+  || name == "floor"
+  || name == "abs"
+  || name == "ascii_downcase"
+  || name == "ascii_upcase"
+  || name == "paths"
+  {
+    Option::Some(0)
+  } else if name == "select"
+  || name == "map"
+  || name == "has"
+  || name == "contains"
+  || name == "sort_by"
+  || name == "group_by"
+  || name == "any"
+  || name == "all"
+  || name == "join"
+  || name == "split"
+  || name == "startswith"
+  || name == "endswith"
+  || name == "error"
+  || name == "range"
+  || name == "del"
+  || name == "with_entries"
+  {
+    Option::Some(1)
+  } else {
+    Option::None
+  }
+}
+
+/// Every builtin's name, for the "did you mean" in [`unknown`].
+fn names() -> List<String> {
+  List::Cons(
+    "length",
+    List::Cons(
+      "keys",
+      List::Cons(
+        "values",
+        List::Cons(
+          "type",
+          List::Cons(
+            "add",
+            List::Cons(
+              "empty",
+              List::Cons(
+                "not",
+                List::Cons(
+                  "sort",
+                  List::Cons(
+                    "unique",
+                    List::Cons(
+                      "reverse",
+                      List::Cons(
+                        "first",
+                        List::Cons(
+                          "last",
+                          List::Cons(
+                            "min",
+                            List::Cons(
+                              "max",
+                              List::Cons(
+                                "flatten",
+                                List::Cons(
+                                  "to_entries",
+                                  List::Cons(
+                                    "from_entries",
+                                    List::Cons(
+                                      "tostring",
+                                      List::Cons(
+                                        "tonumber",
+                                        List::Cons(
+                                          "floor",
+                                          List::Cons(
+                                            "abs",
+                                            List::Cons(
+                                              "ascii_downcase",
+                                              List::Cons(
+                                                "ascii_upcase",
+                                                List::Cons(
+                                                  "paths",
+                                                  List::Cons(
+                                                    "select",
+                                                    List::Cons(
+                                                      "map",
+                                                      List::Cons(
+                                                        "has",
+                                                        List::Cons(
+                                                          "contains",
+                                                          List::Cons(
+                                                            "sort_by",
+                                                            List::Cons(
+                                                              "group_by",
+                                                              List::Cons(
+                                                                "any",
+                                                                List::Cons(
+                                                                  "all",
+                                                                  List::Cons(
+                                                                    "join",
+                                                                    List::Cons(
+                                                                      "split",
+                                                                      List::Cons(
+                                                                        "startswith",
+                                                                        List::Cons(
+                                                                          "endswith",
+                                                                          List::Cons(
+                                                                            "error",
+                                                                            List::Cons(
+                                                                              "range",
+                                                                              List::Cons(
+                                                                                "del",
+                                                                                List::Cons(
+                                                                                  "with_entries",
+                                                                                  List::Nil,
+                                                                                ),
+                                                                              ),
+                                                                            ),
+                                                                          ),
+                                                                        ),
+                                                                      ),
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  )
+}
+
+/// A name that is not a builtin, with the nearest one that is.
+///
+/// **Worth the edit distance.** A query language's function names are the
+/// whole of its vocabulary and a reader has nowhere to look them up mid-shell-
+/// pipeline. `lenght` is the mistake everybody makes.
+fn unknown(name: String, span: Span) -> Problem {
+  let near = List::filter(names(), fn n => close(n, name));
+  match near {
+    List::Nil => problem("`${name}` is not a function", span),
+    List::Cons(suggestion, _rest) =>
+      problem("`${name}` is not a function; did you mean `${suggestion}`?", span),
+  }
+}
+
+/// Whether two names are within one edit of each other.
+///
+/// A cheap approximation: same length and at most two differing positions
+/// (which catches a transposition and a typo), or a length difference of one
+/// with the shorter a subsequence of the longer.
+fn close(candidate: String, written: String) -> Bool {
+  let a = String::byte_length(candidate);
+  let b = String::byte_length(written);
+  if a == b {
+    differences(candidate, written) <= 2
+  } else if a == b + 1 || b == a + 1 {
+    let shorter = if a < b { candidate } else { written };
+    let longer = if a < b { written } else { candidate };
+    dropping_one_matches(longer, shorter)
+  } else {
+    false
+  }
+}
+
+fn differences(left: String, right: String) -> Int {
+  let mut at = 0;
+  let mut found = 0;
+  while at < String::byte_length(left) {
+    if String::byte(left, at) != String::byte(right, at) {
+      found = found + 1;
+    };
+    at = at + 1;
+  };
+  found
+}
+
+/// Whether removing one byte from `longer` gives `shorter`.
+fn dropping_one_matches(longer: String, shorter: String) -> Bool {
+  let mut skip = 0;
+  let mut found = false;
+  while skip <= String::byte_length(shorter) && !found {
+    let without = String::slice(longer, 0, skip) + String::slice(longer, skip + 1, String::byte_length(longer));
+    if without == shorter {
+      found = true;
+    };
+    skip = skip + 1;
+  };
+  found
+}
+
+// ---------------------------------------------------------------------------
+// The builtins
+// ---------------------------------------------------------------------------
+
+fn dispatch(
+  name: String,
+  args: List<Filter>,
+  input: Json,
+  span: Span,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> List<Json>
+  raises Problem
+{
+  if name == "empty" {
+    List::Nil
+  } else if name == "error" {
+    raise raised(arg(args), input, span, run)!
+  } else if name == "select" {
+    // **`empty` or the value**, which is the pattern the whole model exists
+    // for: a filter that answers "no values" composes with a pipe without
+    // either side knowing it filtered.
+    List::flat_map(
+      run(arg(args), input)!,
+      fn c => if truthy(c) { List::Cons(input, List::Nil) } else { List::Nil },
+    )!
+  } else if name == "map" {
+    let f = arg(args);
+    match input {
+      Json::Array(items) =>
+        one(Json::Array(List::flat_map(items, fn item => run(f, item)!)!)),
+      _ => raise wanted("map", "an array", input, span),
+    }
+  } else if name == "range" {
+    let count = whole(arg(args), input, span, run)!;
+    let mut out = List::Nil;
+    let mut n = count - 1;
+    while n >= 0 {
+      out = List::Cons(of_int(n), out);
+      n = n - 1;
+    };
+    out
+  } else {
+    one(single(name, args, input, span, run)!)
+  }
+}
+
+/// The builtins that produce exactly one value.
+///
+/// Separate from [`run`] because most of them do, and a function whose every
+/// arm ends in `one(..)` is one that should have been returning a value.
+fn single(
+  name: String,
+  args: List<Filter>,
+  input: Json,
+  span: Span,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> Json
+  raises Problem
+{
+  if name == "length" {
+    length_of(input, span)!
+  } else if name == "type" {
+    Json::Text(type_name(input))
+  } else if name == "not" {
+    Json::Bool(!truthy(first_value(arg(args), input, run)!))
+  } else if name == "keys" {
+    match input {
+      Json::Object(fields) => Json::Array(List::map(sorted_keys(fields), fn k => Json::Text(k))),
+      Json::Array(items) => Json::Array(indices(List::length(items))),
+      _ => raise wanted("keys", "an object or an array", input, span),
+    }
+  } else if name == "values" {
+    match input {
+      Json::Object(fields) => Json::Array(List::map(sorted_keys(fields), fn k => at_key(fields, k))),
+      Json::Array(items) => Json::Array(items),
+      _ => raise wanted("values", "an object or an array", input, span),
+    }
+  } else if name == "add" {
+    match input {
+      Json::Array(items) => List::fold(items, Json::Null, fn (a, b) => added(a, b)),
+      _ => raise wanted("add", "an array", input, span),
+    }
+  } else if name == "sort" {
+    match input {
+      Json::Array(items) => Json::Array(List::sort_by(items, fn (a, b) => compare(a, b))),
+      _ => raise wanted("sort", "an array", input, span),
+    }
+  } else if name == "unique" {
+    match input {
+      Json::Array(items) => Json::Array(distinct(List::sort_by(items, fn (a, b) => compare(a, b)))),
+      _ => raise wanted("unique", "an array", input, span),
+    }
+  } else if name == "reverse" {
+    match input {
+      Json::Array(items) => Json::Array(List::reverse(items)),
+      Json::Text(text) => Json::Text(String::join(List::map(List::reverse(String::chars(text)), fn c => Char::to_string(c)), "")),
+      _ => raise wanted("reverse", "an array or a string", input, span),
+    }
+  } else if name == "first" {
+    match input {
+      Json::Array(items) => match List::head(items) {
+        Option::Some(v) => v,
+        Option::None => Json::Null,
+      },
+      _ => raise wanted("first", "an array", input, span),
+    }
+  } else if name == "last" {
+    match input {
+      Json::Array(items) => match List::last(items) {
+        Option::Some(v) => v,
+        Option::None => Json::Null,
+      },
+      _ => raise wanted("last", "an array", input, span),
+    }
+  } else if name == "min" || name == "max" {
+    extreme(name, input, span)!
+  } else if name == "flatten" {
+    match input {
+      Json::Array(items) => Json::Array(
+        List::flat_map(
+          items,
+          fn item => match item {
+            Json::Array(inner) => inner,
+            _ => List::Cons(item, List::Nil),
+          },
+        )!,
+      ),
+      _ => raise wanted("flatten", "an array", input, span),
+    }
+  } else if name == "to_entries" {
+    match input {
+      Json::Object(fields) => Json::Array(
+        List::map(
+          sorted_keys(fields),
+          fn k => object_of(
+            List::Cons(
+              { key: "key", value: Json::Text(k) },
+              List::Cons({ key: "value", value: at_key(fields, k) }, List::Nil),
+            ),
+          ),
+        ),
+      ),
+      _ => raise wanted("to_entries", "an object", input, span),
+    }
+  } else if name == "from_entries" {
+    from_entries(input, span)!
+  } else if name == "tostring" {
+    match input {
+      Json::Text(text) => Json::Text(text),
+      _ => Json::Text(encode(input)),
+    }
+  } else if name == "tonumber" {
+    match input {
+      Json::Number(_n) => input,
+      Json::Text(text) => match Float::of_string(text) {
+        Option::Some(_f) => Json::Number(text),
+        Option::None => raise problem("`${text}` is not a number", span),
+      },
+      _ => raise wanted("tonumber", "a number or a string", input, span),
+    }
+  } else if name == "floor" || name == "abs" {
+    rounded(name, input, span)!
+  } else if name == "ascii_downcase" || name == "ascii_upcase" {
+    match input {
+      Json::Text(text) => Json::Text(
+        String::join(
+          List::map(
+            String::chars(text),
+            fn c => Char::to_string(if name == "ascii_downcase" { Char::to_lower(c) } else { Char::to_upper(c) }),
+          ),
+          "",
+        ),
+      ),
+      _ => raise wanted(name, "a string", input, span),
+    }
+  } else if name == "paths" {
+    Json::Array(paths_of(input, List::Nil))
+  } else {
+    with_argument(name, args, input, span, run)!
+  }
+}
+
+/// The one-argument builtins that produce one value.
+fn with_argument(
+  name: String,
+  args: List<Filter>,
+  input: Json,
+  span: Span,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> Json
+  raises Problem
+{
+  let f = arg(args);
+  if name == "has" {
+    let key = first_value(f, input, run)!;
+    match input {
+      Json::Object(fields) => match key {
+        Json::Text(text) => Json::Bool(Map::holds(fields, text)),
+        _ => raise problem("`has` on an object wants a string", span),
+      },
+      Json::Array(items) => match key {
+        Json::Number(literal) => match as_int(literal) {
+          Option::Some(n) => Json::Bool(n >= 0 && n < List::length(items)),
+          Option::None => raise problem("`has` on an array wants a whole number", span),
+        },
+        _ => raise problem("`has` on an array wants a number", span),
+      },
+      _ => raise wanted("has", "an object or an array", input, span),
+    }
+  } else if name == "contains" {
+    Json::Bool(contains(input, first_value(f, input, run)!))
+  } else if name == "sort_by" {
+    match input {
+      Json::Array(items) => Json::Array(by_key(items, f, run)!),
+      _ => raise wanted("sort_by", "an array", input, span),
+    }
+  } else if name == "group_by" {
+    match input {
+      Json::Array(items) => grouped(items, f, run)!,
+      _ => raise wanted("group_by", "an array", input, span),
+    }
+  } else if name == "any" || name == "all" {
+    match input {
+      Json::Array(items) => {
+        let hits = List::filter(items, fn item => truthy(first_value(f, item, run)!))!;
+        Json::Bool(
+          if name == "any" {
+            !List::is_empty(hits)
+          } else {
+            List::length(hits) == List::length(items)
+          },
+        )
+      },
+      _ => raise wanted(name, "an array", input, span),
+    }
+  } else if name == "join" {
+    match input {
+      Json::Array(items) => match first_value(f, input, run)! {
+        Json::Text(sep) => Json::Text(String::join(List::map(items, fn i => as_text(i)), sep)),
+        _ => raise problem("`join` wants a string to join with", span),
+      },
+      _ => raise wanted("join", "an array", input, span),
+    }
+  } else if name == "split" {
+    match input {
+      Json::Text(text) => match first_value(f, input, run)! {
+        Json::Text(sep) => Json::Array(List::map(String::split(text, sep), fn p => Json::Text(p))),
+        _ => raise problem("`split` wants a string to split on", span),
+      },
+      _ => raise wanted("split", "a string", input, span),
+    }
+  } else if name == "startswith" || name == "endswith" {
+    match input {
+      Json::Text(text) => match first_value(f, input, run)! {
+        Json::Text(part) => Json::Bool(
+          if name == "startswith" {
+            String::starts_with(text, part)
+          } else {
+            String::ends_with(text, part)
+          },
+        ),
+        _ => raise problem("`${name}` wants a string", span),
+      },
+      _ => raise wanted(name, "a string", input, span),
+    }
+  } else if name == "del" {
+    match input {
+      Json::Object(fields) => match first_value(f, input, run)! {
+        Json::Text(key) => Json::Object(without_key(fields, key)),
+        _ => raise problem("`del` wants a string", span),
+      },
+      _ => raise wanted("del", "an object", input, span),
+    }
+  } else if name == "with_entries" {
+    with_entries(input, f, span, run)!
+  } else {
+    raise problem("`${name}` is not a function", span)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The pieces each of those needs
+// ---------------------------------------------------------------------------
+
+fn one(value: Json) -> List<Json> {
+  List::Cons(value, List::Nil)
+}
+
+/// The first argument, or `.` when there is none.
+///
+/// The arity check in `apply` has already run, so a caller reaching here for
+/// an argument has one.
+fn arg(args: List<Filter>) -> Filter {
+  match List::head(args) {
+    Option::Some(f) => f,
+    Option::None => Filter::Identity({ start: 0, end: 0 }),
+  }
+}
+
+/// The first value a filter produces, or `null`.
+///
+/// For the arguments that are a value rather than a filter -- the separator
+/// for `join`, the key for `has`. A filter producing several there is a query
+/// that means something the function cannot do, and taking the first is what
+/// jq does.
+fn first_value(f: Filter, input: Json,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> Json raises Problem {
+  match run(f, input)! {
+    List::Cons(v, _rest) => v,
+    List::Nil => Json::Null,
+  }
+}
+
+fn key_of(f: Filter, item: Json,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> Json raises Problem {
+  first_value(f, item, run)!
+}
+
+fn whole(f: Filter, input: Json, span: Span,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> Int raises Problem {
+  match first_value(f, input, run)! {
+    Json::Number(literal) => match as_int(literal) {
+      Option::Some(n) => n,
+      Option::None => raise problem("expected a whole number", span),
+    },
+    other => raise problem("expected a number, found ${type_name(other)}", span),
+  }
+}
+
+fn raised(f: Filter, input: Json, span: Span,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> Problem raises Problem {
+  match first_value(f, input, run)! {
+    Json::Text(message) => problem(message, span),
+    other => problem(encode(other), span),
+  }
+}
+
+fn wanted(name: String, shape: String, input: Json, span: Span) -> Problem {
+  problem("`${name}` wants ${shape}, and this is ${type_name(input)}", span)
+}
+
+fn length_of(input: Json, span: Span) -> Json raises Problem {
+  match input {
+    Json::Null => of_int(0),
+    Json::Array(items) => of_int(List::length(items)),
+    Json::Object(fields) => of_int(Map::len(fields)),
+    Json::Text(text) => of_int(String::char_length(text)),
+    // **A number's length is itself, without its sign.** jq's rule, and it is
+    // the one that makes `map(length)` work over a mixed array instead of
+    // failing on the first number in it.
+    Json::Number(literal) => match as_int(literal) {
+      Option::Some(n) => of_int(if n < 0 { 0 - n } else { n }),
+      Option::None => {
+        let f = as_float(literal);
+        of_float(if f < 0.0 { 0.0 - f } else { f })
+      },
+    },
+    Json::Bool(_b) => raise problem("a boolean has no length", span),
+  }
+}
+
+fn indices(count: Int) -> List<Json> {
+  let mut out = List::Nil;
+  let mut n = count - 1;
+  while n >= 0 {
+    out = List::Cons(of_int(n), out);
+    n = n - 1;
+  };
+  out
+}
+
+fn added(left: Json, right: Json) -> Json {
+  match left {
+    Json::Null => right,
+    Json::Number(a) => match right {
+      Json::Number(b) => match as_int(a) {
+        Option::Some(x) => match as_int(b) {
+          Option::Some(y) => of_int(x + y),
+          Option::None => of_float(as_float(a) + as_float(b)),
+        },
+        Option::None => of_float(as_float(a) + as_float(b)),
+      },
+      _ => left,
+    },
+    Json::Text(a) => match right {
+      Json::Text(b) => Json::Text(a + b),
+      _ => left,
+    },
+    Json::Array(a) => match right {
+      Json::Array(b) => Json::Array(List::concat(a, b)),
+      _ => left,
+    },
+    _ => left,
+  }
+}
+
+fn distinct(sorted: List<Json>) -> List<Json> {
+  match sorted {
+    List::Nil => List::Nil,
+    List::Cons(head, rest) => List::Cons(
+      head,
+      distinct(List::filter(rest, fn v => !equal(v, head))),
+    ),
+  }
+}
+
+fn extreme(name: String, input: Json, span: Span) -> Json raises Problem {
+  match input {
+    Json::Array(items) => match List::head(List::sort_by(items, fn (a, b) => compare(a, b))) {
+      Option::None => Json::Null,
+      Option::Some(smallest) => if name == "min" {
+        smallest
+      } else {
+        match List::last(List::sort_by(items, fn (a, b) => compare(a, b))) {
+          Option::Some(largest) => largest,
+          Option::None => Json::Null,
+        }
+      },
+    },
+    _ => raise wanted(name, "an array", input, span),
+  }
+}
+
+fn rounded(name: String, input: Json, span: Span) -> Json raises Problem {
+  match input {
+    Json::Number(literal) => match as_int(literal) {
+      Option::Some(n) => if name == "abs" && n < 0 { of_int(0 - n) } else { of_int(n) },
+      Option::None => {
+        let f = as_float(literal);
+        if name == "abs" {
+          of_float(if f < 0.0 { 0.0 - f } else { f })
+        } else {
+          // Toward negative infinity, which is what `floor` means and is not
+          // what `Float::to_int` does for a negative number.
+          let truncated = Float::to_int(f);
+          of_int(if Int::to_float(truncated) > f { truncated - 1 } else { truncated })
+        }
+      },
+    },
+    _ => raise wanted(name, "a number", input, span),
+  }
+}
+
+fn as_text(value: Json) -> String {
+  match value {
+    Json::Text(text) => text,
+    _ => encode(value),
+  }
+}
+
+fn contains(haystack: Json, needle: Json) -> Bool {
+  match haystack {
+    Json::Text(a) => match needle {
+      Json::Text(b) => match String::index_of(a, b) {
+        Option::Some(_at) => true,
+        Option::None => false,
+      },
+      _ => false,
+    },
+    Json::Array(items) => match needle {
+      Json::Array(wanted) => List::all(wanted, fn w => List::any(items, fn i => contains(i, w))),
+      _ => List::any(items, fn i => equal(i, needle)),
+    },
+    _ => equal(haystack, needle),
+  }
+}
+
+fn from_entries(input: Json, span: Span) -> Json raises Problem {
+  match input {
+    Json::Array(items) => object_of(
+      List::map(
+        items,
+        fn item => match item {
+          Json::Object(fields) => {
+            key: as_text(at_key(fields, "key")),
+            value: at_key(fields, "value"),
+          },
+          _ => { key: as_text(item), value: Json::Null },
+        },
+      ),
+    ),
+    _ => raise wanted("from_entries", "an array", input, span),
+  }
+}
+
+fn with_entries(input: Json, f: Filter, span: Span,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> Json raises Problem {
+  match input {
+    Json::Object(fields) => object_of(
+      List::map(
+        sorted_keys(fields),
+        fn k => {
+          let entry = object_of(
+            List::Cons(
+              { key: "key", value: Json::Text(k) },
+              List::Cons({ key: "value", value: at_key(fields, k) }, List::Nil),
+            ),
+          );
+          match first_value(f, entry, run)! {
+            Json::Object(changed) => {
+              key: as_text(at_key(changed, "key")),
+              value: at_key(changed, "value"),
+            },
+            _ => { key: k, value: at_key(fields, k) },
+          }
+        },
+      )!,
+    ),
+    _ => raise wanted("with_entries", "an object", input, span),
+  }
+}
+
+fn grouped(
+  items: List<Json>,
+  f: Filter,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> Json
+  raises Problem
+{
+  Json::Array(runs(keyed(items, f, run)!))
+}
+
+/// **Each element's sort key, computed once.**
+///
+/// `List::sort_by` takes `(A, A) -> Ordering` with no effect row on it, so a
+/// comparator that runs a filter -- which is what `sort_by(.age)` is -- cannot
+/// be handed to it. Every other combinator taking a closure grew a row in
+/// Khora's #136 and this one did not, so this is the shape that works.
+///
+/// It is also the shape to want. jq re-runs the filter at every comparison,
+/// which is `n log n` evaluations of an expression that could not have changed;
+/// this is `n`.
+fn keyed(
+  items: List<Json>,
+  f: Filter,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> List<Keyed>
+  raises Problem
+{
+  let decorated = List::map(items, fn item => { sort_key: key_of(f, item, run)!, item: item })!;
+  List::sort_by(decorated, fn (a, b) => compare(a.sort_key, b.sort_key))
+}
+
+/// One element beside the key it sorts by.
+type Keyed = {
+  sort_key: Json,
+  item: Json,
+};
+
+/// The elements of `items`, ordered by what `f` produces for each.
+fn by_key(
+  items: List<Json>,
+  f: Filter,
+  run: (Filter, Json) -> List<Json> raises Problem,
+) -> List<Json>
+  raises Problem
+{
+  List::map(keyed(items, f, run)!, fn k => k.item)
+}
+
+/// Consecutive elements with the same key, each run as one array.
+fn runs(sorted: List<Keyed>) -> List<Json> {
+  match sorted {
+    List::Nil => List::Nil,
+    List::Cons(head, _rest) => {
+      let parts = List::partition(sorted, fn k => equal(k.sort_key, head.sort_key));
+      List::Cons(Json::Array(List::map(parts.kept, fn k => k.item)), runs(parts.rest))
+    },
+  }
+}
+
+/// The paths inside an array, with each element's index in front of them.
+fn indexed_paths(items: List<Json>, prefix: List<Json>, at: Int) -> List<Json> {
+  match items {
+    List::Nil => List::Nil,
+    List::Cons(item, rest) => {
+      let here = List::concat(prefix, List::Cons(of_int(at), List::Nil));
+      List::concat(
+        List::Cons(Json::Array(here), paths_of(item, here)),
+        indexed_paths(rest, prefix, at + 1),
+      )
+    },
+  }
+}
+
+/// Every path to a leaf, as an array of keys and indices.
+fn paths_of(value: Json, prefix: List<Json>) -> List<Json> {
+  match value {
+    Json::Object(fields) => List::flat_map(
+      sorted_keys(fields),
+      fn k => {
+        let here = List::concat(prefix, List::Cons(Json::Text(k), List::Nil));
+        List::Cons(Json::Array(here), paths_of(at_key(fields, k), here))
+      },
+    ),
+    // **The index cannot be a counter in the closure.** A captured `mut`
+    // binding is captured by value, so the assignment would be invisible
+    // outside -- which the compiler says rather than letting it be wrong. The
+    // index is walked explicitly instead.
+    Json::Array(items) => indexed_paths(items, prefix, 0),
+    _ => List::Nil,
+  }
+}

@@ -1,0 +1,205 @@
+module khq::ast;
+
+//! What a query is, once it has been read.
+//!
+//! # A filter is a function from one value to many
+//!
+//! This is the one idea the whole program is built on, and it is worth stating
+//! before the tree that expresses it. A filter does not take a value and give
+//! back a value. It takes a value and gives back a **stream** of values, which
+//! may be empty.
+//!
+//! `.name` gives one. `.[]` gives one per element. `empty` gives none.
+//! `1, 2, 3` gives three. Everything else follows from composing those: a pipe
+//! runs its right-hand side once per value the left produced and concatenates
+//! the results, so `.[] | .name` over three objects gives three names and over
+//! an empty array gives nothing at all -- without either side knowing which
+//! case it is in.
+//!
+//! The alternative is a filter that returns one value and a separate notion of
+//! iteration, and then `select` needs a way to say "no value" that is not
+//! `null`, and `.[] | select(..)` needs to know it is inside an iteration. jq
+//! settled this question in 2012 and the answer travels.
+//!
+//! # Spans on every node
+//!
+//! Every filter carries the span it was written at, because the evaluator
+//! reports failures against the *query* and not against the data: a `.name`
+//! applied to a number is a mistake at a place somebody can point at.
+
+import std::core::{Eq, List, Show, String};
+import khq::diag::{Span};
+
+/// A filter, which is a query or a part of one.
+pub type Filter =
+  /// `.` -- the value itself.
+  | Identity(span: Span)
+  /// `.name` or `.["name"]` applied to what came before.
+  | Field(of: Filter, name: String, span: Span)
+  /// `.[n]` -- one element, counted from zero, or from the end if negative.
+  | Index(of: Filter, at: Filter, span: Span)
+  /// `.[]` -- every element of an array, or every value of an object.
+  | Iterate(of: Filter, span: Span)
+  /// `.[a:b]` -- a slice of an array or a string.
+  | Slice(of: Filter, from: List<Filter>, to: List<Filter>, span: Span)
+  /// `a | b` -- `b` applied to each value `a` produced.
+  | Pipe(left: Filter, right: Filter, span: Span)
+  /// `a, b` -- everything `a` produces, then everything `b` produces.
+  | Both(left: Filter, right: Filter, span: Span)
+  /// A literal: a number, a string, `true`, `false` or `null`.
+  | Literal(value: Lit, span: Span)
+  /// `[ f ]` -- everything `f` produces, gathered into one array.
+  | Collect(of: Filter, span: Span)
+  /// `{ a: f, b }` -- an object built from what its parts produce.
+  | Object(entries: List<Entry>, span: Span)
+  /// A binary operator: arithmetic, comparison, `and`, `or`, `//`.
+  | Binary(op: Op, left: Filter, right: Filter, span: Span)
+  /// `-f`.
+  | Negate(of: Filter, span: Span)
+  /// A built-in function, with the arguments it was given.
+  | Call(name: String, args: List<Filter>, span: Span)
+  /// `f?` -- the values `f` produces, or none if it failed.
+  | Optional(of: Filter, span: Span)
+  /// `if c then a else b end`.
+  | If(condition: Filter, then_: Filter, else_: Filter, span: Span);
+
+/// One `key: value` of an object construction.
+///
+/// The key is a filter rather than a string because `{ (.k): .v }` is worth
+/// having and because `{ "a": 1 }` and `{ a: 1 }` then need no separate case.
+pub type Entry = {
+  /// What the key is.
+  key: Filter,
+  /// What the value is.
+  value: Filter,
+};
+
+/// A literal value written in the query.
+///
+/// **A number is its text.** The same decision `std::json` took in 13.11 and
+/// for the same reason: `9007199254740993` typed into a query is a number
+/// somebody meant, and a `Float` on the way in loses it before anything has
+/// had a chance to ask what it was for.
+pub type Lit =
+  | Null
+  | True
+  | False
+  | Num(literal: String)
+  | Str(text: String);
+
+/// A binary operator.
+pub type Op =
+  | Add
+  | Sub
+  | Mul
+  | Div
+  | Rem
+  | Eq
+  | Ne
+  | Lt
+  | Le
+  | Gt
+  | Ge
+  | And
+  | Or
+  /// `//` -- the left side's values, or the right side's if it produced none
+  /// or only `false` and `null`.
+  | Alt;
+
+impl Eq for Op {
+  /// Two operators that are the same operator.
+  ///
+  /// By spelling, because every operator has one and no two share it. A
+  /// `match` of fourteen arms each containing fourteen arms is the
+  /// alternative, and it is the same function written two hundred times.
+  fn eq(self, other: Op) -> Bool {
+    Op::spelling(self) == Op::spelling(other)
+  }
+}
+
+impl Op {
+  /// How the operator is written.
+  pub fn spelling(self) -> String {
+    match self {
+      Op::Add => "+",
+      Op::Sub => "-",
+      Op::Mul => "*",
+      Op::Div => "/",
+      Op::Rem => "%",
+      Op::Eq => "==",
+      Op::Ne => "!=",
+      Op::Lt => "<",
+      Op::Le => "<=",
+      Op::Gt => ">",
+      Op::Ge => ">=",
+      Op::And => "and",
+      Op::Or => "or",
+      Op::Alt => "//",
+    }
+  }
+
+  /// How tightly it binds. Higher wins.
+  ///
+  /// The table, loosest first: `//`, `or`, `and`, comparison, `+ -`, `* / %`.
+  /// Comparison does not chain -- `a < b < c` is a parse error rather than
+  /// something clever -- so every level here is left-associative and the
+  /// parser needs no second table for associativity.
+  pub fn binding(self) -> Int {
+    match self {
+      Op::Alt => 1,
+      Op::Or => 2,
+      Op::And => 3,
+      Op::Eq => 4,
+      Op::Ne => 4,
+      Op::Lt => 4,
+      Op::Le => 4,
+      Op::Gt => 4,
+      Op::Ge => 4,
+      Op::Add => 5,
+      Op::Sub => 5,
+      Op::Mul => 6,
+      Op::Div => 6,
+      Op::Rem => 6,
+    }
+  }
+}
+
+impl Filter {
+  /// Where this filter was written.
+  pub fn span(self) -> Span {
+    match self {
+      Filter::Identity(s) => s,
+      Filter::Field(_of, _name, s) => s,
+      Filter::Index(_of, _at, s) => s,
+      Filter::Iterate(_of, s) => s,
+      Filter::Slice(_of, _from, _to, s) => s,
+      Filter::Pipe(_l, _r, s) => s,
+      Filter::Both(_l, _r, s) => s,
+      Filter::Literal(_v, s) => s,
+      Filter::Collect(_of, s) => s,
+      Filter::Object(_e, s) => s,
+      Filter::Binary(_op, _l, _r, s) => s,
+      Filter::Negate(_of, s) => s,
+      Filter::Call(_name, _args, s) => s,
+      Filter::Optional(_of, s) => s,
+      Filter::If(_c, _t, _e, s) => s,
+    }
+  }
+}
+
+impl Show for Lit {
+  /// The literal as it would be written back.
+  ///
+  /// A number keeps its own text, so `1e3` prints as `1e3`. `--print-ast`
+  /// is the only caller, and a round trip that quietly normalised numbers
+  /// would hide exactly the thing that decision was taken to protect.
+  fn show(self) -> String {
+    match self {
+      Lit::Null => "null",
+      Lit::True => "true",
+      Lit::False => "false",
+      Lit::Num(text) => text,
+      Lit::Str(text) => "\"${text}\"",
+    }
+  }
+}

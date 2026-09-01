@@ -1,0 +1,171 @@
+module khq::render;
+
+//! Values, written out.
+//!
+//! Three shapes, because three questions get asked of a tool like this and
+//! they want different answers.
+//!
+//! **Indented** is the default and is for reading. **Compact** is one line per
+//! value and is for piping into something else. **Raw** unwraps a string, so
+//! `.name` gives `Ada` rather than `"Ada"` -- which is what a shell script
+//! wants and is the difference between a tool you can use in a pipeline and
+//! one you have to unquote afterwards.
+//!
+//! # Keys are sorted, always
+//!
+//! `Json::Object` is a hash map and has no order of its own. Printing in
+//! bucket order would mean the same document prints differently on two runs of
+//! the same binary, and a diff between two outputs would be noise. Sorted is
+//! the only stable choice that needs no extra state.
+//!
+//! `std::json::encode` exists and is what `tostring` uses; it does not indent
+//! and does not sort, which is why this is here rather than a call to it.
+
+import std::core::{Int, List, String, Vector};
+import std::json::{Json};
+import khq::value::{at_key, sorted_keys};
+
+/// How a value should be written.
+pub type Shape =
+  /// Indented over several lines, for reading.
+  | Indented
+  /// One line, for piping.
+  | Compact
+  /// One line, and a string without its quotes.
+  | Raw;
+
+/// One value, in the shape asked for.
+pub fn render(value: Json, shape: Shape) -> String {
+  match shape {
+    Shape::Indented => laid_out(value, 0),
+    Shape::Compact => compact(value),
+    Shape::Raw => match value {
+      Json::Text(text) => text,
+      _ => compact(value),
+    },
+  }
+}
+
+/// Every value, one per line.
+pub fn render_all(values: List<Json>, shape: Shape) -> String {
+  String::join(List::map(values, fn v => render(v, shape)), "\n")
+}
+
+/// Two spaces per level, and no trailing space on an empty container.
+fn laid_out(value: Json, depth: Int) -> String {
+  match value {
+    Json::Array(items) => match items {
+      List::Nil => "[]",
+      _ => {
+        let inner = String::repeat("  ", depth + 1);
+        let parts = List::map(items, fn i => inner + laid_out(i, depth + 1));
+        "[\n" + String::join(parts, ",\n") + "\n" + String::repeat("  ", depth) + "]"
+      },
+    },
+    Json::Object(fields) => {
+      let keys = sorted_keys(fields);
+      match keys {
+        List::Nil => "{}",
+        _ => {
+          let inner = String::repeat("  ", depth + 1);
+          let parts = List::map(
+            keys,
+            fn k => inner + quoted(k) + ": " + laid_out(at_key(fields, k), depth + 1),
+          );
+          "{\n" + String::join(parts, ",\n") + "\n" + String::repeat("  ", depth) + "}"
+        },
+      }
+    },
+    _ => scalar(value),
+  }
+}
+
+fn compact(value: Json) -> String {
+  match value {
+    Json::Array(items) => "[" + String::join(List::map(items, fn i => compact(i)), ",") + "]",
+    Json::Object(fields) => {
+      let keys = sorted_keys(fields);
+      "{"
+      + String::join(
+        List::map(keys, fn k => quoted(k) + ":" + compact(at_key(fields, k))),
+        ",",
+      )
+      + "}"
+    },
+    _ => scalar(value),
+  }
+}
+
+/// The values that are not containers.
+///
+/// **A number is its own text.** `Json::Number` holds the literal that was
+/// written, so `1e3` comes back out as `1e3` and a sixty-four bit integer
+/// comes back as itself. Rendering through a `Float` here would undo the whole
+/// reason the literal is kept.
+fn scalar(value: Json) -> String {
+  match value {
+    Json::Null => "null",
+    Json::Bool(b) => if b { "true" } else { "false" },
+    Json::Number(literal) => literal,
+    Json::Text(text) => quoted(text),
+    // The containers are handled by the callers; this keeps the match total.
+    _ => "null",
+  }
+}
+
+/// A string, with the characters JSON requires escaped.
+///
+/// **Only the ones that must be.** A tool that escaped every non-ASCII
+/// character would turn a document of Japanese into a document of `\u` escapes
+/// -- valid, unreadable, and four times the size. The bytes above 0x7F are
+/// already UTF-8 and JSON says they may stay that way.
+fn quoted(text: String) -> String {
+  let out: Vector<String> = Vector::new();
+  Vector::push(out, "\"");
+  let mut at = 0;
+  let mut plain = 0;
+  let total = String::byte_length(text);
+  while at < total {
+    let b = U8::to_int(String::byte(text, at));
+    let escape = escaped(b);
+    if String::byte_length(escape) > 0 {
+      Vector::push(out, String::slice(text, plain, at));
+      Vector::push(out, escape);
+      plain = at + 1;
+    };
+    at = at + 1;
+  };
+  Vector::push(out, String::slice(text, plain, total));
+  Vector::push(out, "\"");
+  String::join(Vector::to_list(out), "")
+}
+
+/// What a byte has to be written as, or the empty string if it may stand.
+///
+/// The control characters below 0x20 have to go somewhere, and the ones
+/// without a short name become `\u00XX`.
+fn escaped(b: Int) -> String {
+  if b == 34 {
+    "\\\""
+  } else if b == 92 {
+    "\\\\"
+  } else if b == 10 {
+    "\\n"
+  } else if b == 13 {
+    "\\r"
+  } else if b == 9 {
+    "\\t"
+  } else if b == 8 {
+    "\\b"
+  } else if b == 12 {
+    "\\f"
+  } else if b < 32 {
+    "\\u00" + hex(b / 16) + hex(b % 16)
+  } else {
+    ""
+  }
+}
+
+fn hex(digit: Int) -> String {
+  String::slice("0123456789abcdef", digit, digit + 1)
+}

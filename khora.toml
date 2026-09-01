@@ -60,7 +60,7 @@ indent-width = 2
 [workspace.policy]
 network = ["ledger_service", "link_shortener", "risk_analyzer"]
 env = ["ledger_service", "link_shortener", "risk_analyzer"]
-fs = ["link_shortener", "risk_analyzer"]
+fs = ["khq", "link_shortener", "risk_analyzer"]
 extern = []
 
 # The two lints that are off by default, on for this repository.
