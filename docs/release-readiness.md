@@ -13,8 +13,8 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree on 2026-08-31, item by item, against what is in the
-repository rather than against the roadmap's account of itself. **119 of
-222.**
+repository rather than against the roadmap's account of itself. **123 of 222**,
+and re-scored whenever a section moves.
 
 An item is ticked only when it was checked. Where something is partly done it
 stays unticked and carries a **Left:** note saying what remains, because a
@@ -24,8 +24,8 @@ advertised, so no wasm deployment has to work.
 
 | Section | Done |
 | --- | --- |
-| 1. Language and compiler correctness | 12 / 19 |
-| 2. Runtime soundness and structured concurrency | 5 / 16 |
+| 1. Language and compiler correctness | 13 / 19 |
+| 2. Runtime soundness and structured concurrency | 8 / 16 |
 | 3. Resource, database and cancellation semantics | 2 / 6 |
 | 4. HTTP, overload and server behavior | 5 / 10 |
 | 5. Observability | 4 / 7 |
@@ -111,10 +111,10 @@ Khora's runtime is part of the language contract. The release cannot rely on “
 
 ### Formal unsafe/soundness review
 
-- [ ] Every `unsafe` block and `unsafe impl` in the runtime/compiler boundary is inventoried. **Left:** Roadmap 13.6 began it; `khora-rt` alone has ~180 `unsafe` blocks and there is no inventory document.
-- [ ] Each inventory entry names the invariant that makes it sound and the test or argument that protects the invariant.
-- [ ] `unsafe impl Send for Task` and equivalent cross-thread/coroutine state are reviewed explicitly.
-- [ ] TLS/thread-local state is audited under fiber migration. No thread-local address may survive across a suspension unless the design explicitly proves it safe.
+- [x] Every `unsafe` block and `unsafe impl` in the runtime/compiler boundary is inventoried. **Done:** 282 blocks, every one carrying an argument, and `scripts/no-bare-unsafe.sh` in the gate so the count cannot drift -- it was 41 short when this was measured, having been 28 short at the audit that wrote `docs/design/soundness.md`.
+- [ ] Each inventory entry names the invariant that makes it sound and the test or argument that protects the invariant. **Left:** every block now names its invariant; what is not systematic is the second half -- *which test* protects it. The load-bearing ones say so (`#[inline(never)]` on `current::running` names the test that caught its removal); most do not.
+- [x] `unsafe impl Send for Task` and equivalent cross-thread/coroutine state are reviewed explicitly. **Done:** three impls -- `Task`, `Migrating`, `Handed` -- each reviewed in `docs/design/soundness.md`, with the residual obligation on Rust bodies named.
+- [x] TLS/thread-local state is audited under fiber migration. No thread-local address may survive across a suspension unless the design explicitly proves it safe. **Done:** 46 `.with(..)` closures in `khora-rt`, none containing a suspension, so no reference outlives one; `CURRENT` is the one read by address and is held by `#[inline(never)]` plus the switch's memory clobber, with the test that caught its removal named.
 - [ ] FFI pointers, callbacks and thread-affine handles have a documented lifetime/thread rule.
 - [x] Sanitizer and dynamic-analysis coverage appropriate to the implementation is run before release; unsupported analyses and their blind spots are documented. **Done:** `scripts/tsan.sh` under WSL2; the blind spots are recorded in the script's own header.
 

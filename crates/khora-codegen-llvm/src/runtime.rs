@@ -571,6 +571,14 @@ pub fn element_pointer<'ctx>(
     let offset = builder
         .build_int_add(scaled, i64t.const_int(FIELD_OFFSET + base, false), "field.offset")
         .expect("offsetting past the header");
+    // SAFETY: **the obligation is the generated program's, not this
+    // function's**, which is what makes it different from every other `unsafe`
+    // in this repository. An `inbounds` GEP that leaves the object is undefined
+    // behaviour *in the program being compiled*, and nothing a Rust reader can
+    // see here discharges it -- what does is the bounds check emitted before
+    // this address is used. Delete that check and this compiler still builds,
+    // still passes its own tests, and starts emitting programs that read off
+    // the end of a string. `docs/design/soundness.md`.
     unsafe {
         builder
             .build_in_bounds_gep(ctx.i8_type(), object, &[offset], "element.ptr")

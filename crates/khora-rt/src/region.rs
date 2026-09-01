@@ -175,6 +175,8 @@ pub unsafe extern "C" fn khora_region_release(region: *mut u8) {
     if region.is_null() {
         return;
     }
+    // SAFETY: the caller guarantees a live region, so it has a field's worth
+    // of space past the header. Computing the address reads nothing.
     let slot = unsafe { region.add(KHORA_FIELD_OFFSET).cast::<*mut Finalizers>() };
     // SAFETY: the caller guarantees a live region; the field holds what
     // `khora_region_open` wrote, and nothing else reads it after this.

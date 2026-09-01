@@ -13,13 +13,19 @@ run the scheduler's, which is recorded below rather than glossed over.
 
 ## The surface
 
-| | |
-| --- | --- |
-| `unsafe` blocks | 179 (146 in `khora-rt`, 33 in the code generator) |
-| C symbols exported to generated code | 100 — 61 `unsafe fn`, 39 safe |
-| `unsafe impl Send` | 3, all in `khora-rt` |
-| Thread-locals | 6 |
-| Places a fiber suspends from Rust | 4 |
+| | | |
+| --- | --- | --- |
+| `unsafe` blocks | **282** | 179 at the first audit |
+| — with an argument | **282** | 138 at the first audit, 241 before this pass |
+| C symbols exported to generated code | 100 | 61 `unsafe fn`, 39 safe |
+| `unsafe impl Send` | 3 | all in `khora-rt` |
+| Thread-locals | 9 | 6 at the first audit |
+| Places a fiber suspends from Rust | 4 | |
+
+The block count grew by a hundred and the *annotated* count by rather more,
+which is the useful half: the first audit left 41 blocks with nothing saying
+why they were sound and nothing was watching the number. It is now a gate
+step — see below — so the second column of this table cannot drift again.
 
 Everything outside `khora-rt` and `khora-codegen-llvm` is safe Rust; the two
 `unsafe` mentions elsewhere are in comments.
@@ -71,6 +77,79 @@ week before this audit — drop glue was cached by a type's *printed* name, and 
 program importing both `std::net::http`'s `Request` and `postgres::db`'s got
 one routine for two layouts. `khora_shared_open` and `khora_channel_open` take
 the same argument and both say so; this was the outlier.
+
+## Every block has an argument, and a script says so
+
+`scripts/no-bare-unsafe.sh`, in `scripts/baseline.sh`.
+
+**The first audit annotated 179 blocks by hand and recorded that 28 had no
+note. The number was 41 when it was next counted**, because nothing was
+checking and every block written since had started life unannotated. Counting
+by hand once produces a number; it does not produce a property.
+
+A block is covered two ways:
+
+- **A `// SAFETY:` note above it, inside the same item.** The window stops at
+  the enclosing `fn`, which matters: a fixed window of N lines reaches the note
+  on the *previous* function when a block sits near the top of a short one. The
+  first version of the script did exactly that, and a bare `unsafe { *p }`
+  appended to `heap.rs` came back covered.
+- **A blanket note, spelled `SAFETY, for`,** covering every block after it in
+  the file. `channel.rs`'s tests open a handle, use it and release it inside one
+  function, twenty-three times; the argument is identical every time and writing
+  it out twenty-three times is how the load-bearing note stops being read. The
+  distinct wording is deliberate — a reader typing `SAFETY, for` is making a
+  claim about a *run* of blocks and should know it.
+
+Two blanket notes exist, both over test code. Everything in library code is
+annotated individually.
+
+**What this does not check** is whether an argument is *true*. It checks that
+one was written, which is the difference between a reviewer being able to
+disagree with it and there being nothing to disagree with.
+
+## Thread-locals under fiber migration
+
+**The rule**: no thread-local address may survive a suspension. A fiber that
+parks may be resumed on another worker, and a reference into this thread's copy
+of a `thread_local!` then points at the wrong thread's data.
+
+Two mechanisms, and both were checked rather than assumed.
+
+**`LocalKey::with` hands out a reference that dies with its closure**, so the
+question reduces to whether any `.with(..)` closure contains a suspension.
+Forty-six closures in `khora-rt`; none does. A reference cannot outlive a
+closure that never yields.
+
+**The one thread-local read by address is `CURRENT`**, and it is protected by
+`#[inline(never)]` on the four functions that touch it. Not inlining moves the
+address computation into the callee, where it runs on the thread actually
+executing; the stack switch's inline assembly clobbers memory, so the *value*
+cannot be carried across a suspension either. `current.rs` has the argument in
+full.
+
+That one is load-bearing and deleting the attribute compiles, passes clippy,
+and reintroduces a fiber reading another fiber's cancellation flag — which is
+how it was found. `a_fiber_keeps_its_identity_across_workers` is the test, and
+it failed `left: 30, right: 28` as soon as migration became common.
+
+## `unsafe impl Send`
+
+Three, all in `khora-rt`, and each carries its argument at the impl.
+
+- **`Task`** — a fiber's stack moving between workers. The argument has three
+  legs: reference counts are atomic whenever a program can spawn, so moving a
+  stack cannot race a count; what may cross *into* a fiber is `Share`, checked
+  by the type checker; and foreign code is excluded by policy rather than by
+  types, because `scheduler.md` §8 forbids suspending inside an `extern` call.
+  The residual obligation is on Rust bodies in this crate: anything held across
+  a `suspend()` must be `Send`. Captures are already checked — `Task::new`
+  requires a `Send` closure — but a local created inside the body and held
+  across a suspension is not.
+- **`Migrating`** — the same argument, inside the test that exercises it.
+- **`Handed`** — a Khora pointer being moved to another fiber. Sound because
+  reference counts are atomic and a spawned closure is *handed over* rather
+  than shared: the caller gives up its reference at the `spawn`.
 
 ## What is now enforced rather than believed
 

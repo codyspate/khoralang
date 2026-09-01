@@ -97,6 +97,9 @@ step 'no text a quoting slip mangled'
 # that reached `main` before it existed.
 sh "$root/scripts/no-mangled-text.sh"
 
+step 'every unsafe block has an argument'
+sh "$root/scripts/no-bare-unsafe.sh"
+
 step 'no doc comment on the wrong item'
 # The sibling of the check above, and the same kind of defect: an edit produces
 # something valid that says the wrong thing. Twenty-seven doc comments in this

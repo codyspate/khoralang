@@ -482,6 +482,12 @@ fn printing_accepts_the_edges_of_every_type_it_supports() {
 
 // --- string comparison -----------------------------------------------------
 
+// SAFETY, for the `khora_str_eq` calls below: each pointer is into a byte
+// literal with static lifetime and each length is that literal's own, so the
+// bytes are readable for the whole call and outlive it. A null pointer with a
+// zero length is the one other shape, and the function's contract admits it --
+// `empty_strings_are_equal_even_when_null` is the test that says so.
+
 /// Two equal strings are usually two separate allocations, so comparing them
 /// has to look at the bytes.
 #[test]

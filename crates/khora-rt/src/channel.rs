@@ -228,6 +228,8 @@ fn stopping() -> bool {
 /// `handle` must be live, and `value` a live object owned by the caller.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool {
+    // SAFETY: `handle` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(channel) = (unsafe { channel_of(handle) }) else {
         fatal("sending on a channel that has already been released");
     };
@@ -318,6 +320,8 @@ pub unsafe extern "C" fn khora_channel_send(handle: *mut u8, value: u64) -> bool
 /// `handle` must be live and `out` a writable word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -> bool {
+    // SAFETY: `handle` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(channel) = (unsafe { channel_of(handle) }) else {
         fatal("receiving on a channel that has already been released");
     };
@@ -374,6 +378,8 @@ pub unsafe extern "C" fn khora_channel_receive(handle: *mut u8, out: *mut u64) -
 /// `handle` must be a live object from [`khora_channel_open`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
+    // SAFETY: `handle` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(channel) = (unsafe { channel_of(handle) }) else { return };
     let (senders, receivers) = {
         let mut state = channel.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -406,6 +412,8 @@ pub unsafe extern "C" fn khora_channel_close(handle: *mut u8) {
 /// `handle` must be live and `out` a writable word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_channel_poll(handle: *mut u8, out: *mut u64) -> bool {
+    // SAFETY: `handle` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(channel) = (unsafe { channel_of(handle) }) else {
         fatal("polling a channel that has already been released");
     };
@@ -432,6 +440,8 @@ pub unsafe extern "C" fn khora_channel_poll(handle: *mut u8, out: *mut u64) -> b
 /// `handle` must be a live object from [`khora_channel_open`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_channel_depth(handle: *mut u8) -> i64 {
+    // SAFETY: `handle` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(channel) = (unsafe { channel_of(handle) }) else { return 0 };
     channel.state.lock().unwrap_or_else(|e| e.into_inner()).items.len() as i64
 }

@@ -127,6 +127,8 @@ pub unsafe extern "C" fn khora_shared_open(
 /// `cell` must be a live object from [`khora_shared_open`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_shared_get(cell: *mut u8) -> u64 {
+    // SAFETY: `cell` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(held) = (unsafe { held_of(cell) }) else {
         fatal("reading a shared cell that has already been released");
     };
@@ -150,6 +152,8 @@ pub unsafe extern "C" fn khora_shared_get(cell: *mut u8) -> u64 {
 /// `cell` must be live, and `value` a live object owned by the caller.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn khora_shared_set(cell: *mut u8, value: u64) {
+    // SAFETY: `cell` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(held) = (unsafe { held_of(cell) }) else {
         fatal("writing a shared cell that has already been released");
     };
@@ -200,6 +204,8 @@ pub unsafe extern "C" fn khora_shared_update(
     change: *mut u8,
     call: Change,
 ) -> u64 {
+    // SAFETY: `cell` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(held) = (unsafe { held_of(cell) }) else {
         fatal("updating a shared cell that has already been released");
     };
@@ -268,6 +274,8 @@ pub unsafe extern "C" fn khora_shared_modify(
     call: Modify,
     answer: *mut u64,
 ) -> u64 {
+    // SAFETY: `cell` is live, which is this function's own documented
+    // precondition and the one thing a C caller can get wrong.
     let Some(held) = (unsafe { held_of(cell) }) else {
         fatal("updating a shared cell that has already been released");
     };

@@ -556,6 +556,12 @@ fn a_long_soak_over_many_seeds() {
         // The child test reads these on entry. Setting them here rather than
         // threading a parameter keeps one implementation of the soak rather
         // than two.
+        //
+        // SAFETY: `set_var` is unsafe because the environment is process-global
+        // and a concurrent reader in another thread is a data race. Here the
+        // soak's own thread is the only one running -- the round it is about to
+        // start has not spawned yet, and the previous one has been joined -- so
+        // there is no reader to race with.
         unsafe {
             std::env::set_var("KHORA_SOAK_SEED", seed.to_string());
             std::env::set_var("KHORA_SOAK_ROUNDS", "400");
