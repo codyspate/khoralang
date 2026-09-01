@@ -234,6 +234,23 @@ pub struct Traits {
 }
 
 impl Traits {
+    /// Whether this file knows anything at all about a type's methods.
+    ///
+    /// **The question is "did anything arrive", not "is there such a method".**
+    /// A type can reach a file without its name: `nursery(..)` installs a
+    /// capability whose type comes from `std::core`'s signature, and nothing
+    /// about `Nursery` has to be imported for that call to check. Calling an
+    /// operation on it is another matter, because a trait's methods need the
+    /// trait in scope -- so a lookup that finds nothing means one of two
+    /// unrelated things, and only this tells them apart. Nothing here at all
+    /// is a missing import; a head that is here without the method is a
+    /// spelling mistake.
+    pub fn knows(&self, head: &str) -> bool {
+        self.impls.iter().any(|i| i.head().as_deref() == Some(head))
+            || self.inherent.iter().any(|i| i.head == head)
+            || self.traits.contains_key(head)
+    }
+
     /// The impl of `trait_name` covering `ty`, if one exists.
     ///
     /// Matching is on the head constructor: `impl<A> Eq for Option<A>` answers

@@ -650,6 +650,90 @@ fn a_missing_outer_constructor_is_still_caught() {
     );
 }
 
+/// **A `loop` with no `break` is `Never`, so it can be the body of a function
+/// that returns something.**
+///
+/// The comment this replaced said "an infinite loop and a loop that just stops
+/// both produce `()`", which reads as one case and is two. A loop with a bare
+/// `break` finishes and produces nothing — `()` is right. A loop with no
+/// `break` at all does not finish, so there is no value for `()` to be the type
+/// of, and calling it `()` made `fn f() -> Int { loop { .. } }` a type error
+/// against a body that cannot return at all.
+///
+/// The same mistake #127 fixed for a diverging branch, left behind in the one
+/// construct whose whole purpose is not to end. A server's accept loop and a
+/// supervisor's restart loop are both written this way.
+#[test]
+fn a_loop_with_no_break_can_be_a_function_that_returns_something() {
+    assert_clean(
+        "module m;\n\
+         extern fn tick() -> ();\n\
+         fn forever() -> Int {\n  \
+           loop {\n    \
+             tick();\n  \
+           }\n\
+         }\n",
+    );
+}
+
+/// And the direction that must keep failing.
+///
+/// A bare `break` is still a way out, so the loop finishes and produces `()`.
+/// If it did not fail, the fix above would be "call every loop `Never`", which
+/// would accept a function that returns while promising an `Int`.
+#[test]
+fn a_loop_with_a_bare_break_is_still_unit() {
+    let db = KhoraDatabase::new();
+    let found = errors(
+        &db,
+        "module m;\n\
+         extern fn tick() -> ();\n\
+         fn stops() -> Int {\n  \
+           loop {\n    \
+             tick();\n    \
+             break;\n  \
+           }\n\
+         }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("has type `()`")),
+        "a loop that can end does not return an `Int`: {found:?}"
+    );
+}
+
+/// A `break` carrying a value still decides the loop's type.
+#[test]
+fn a_loop_takes_the_type_its_breaks_carry() {
+    assert_clean(
+        "module m;\n\
+         fn answers() -> Int {\n  \
+           loop {\n    \
+             break 42;\n  \
+           }\n\
+         }\n",
+    );
+}
+
+/// And two `break`s carrying different types still disagree.
+#[test]
+fn breaks_carrying_different_types_still_disagree() {
+    let db = KhoraDatabase::new();
+    let found = errors(
+        &db,
+        "module m;\n\
+         fn muddled() -> Int {\n  \
+           loop {\n    \
+             break 42;\n    \
+             break \"no\";\n  \
+           }\n\
+         }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`break` values disagree")),
+        "the second `break` has to be reported: {found:?}"
+    );
+}
+
 /// **A branch that cannot return discharges against a type the caller chose.**
 ///
 /// `Never` is the bottom type and the solver has always treated it as one —

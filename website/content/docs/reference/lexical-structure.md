@@ -97,7 +97,14 @@ false
 "say \"hello\""
 ```
 
-Strings contain Unicode text. Backslash introduces escapes.
+Strings contain Unicode text. The escapes are `\n`, `\r`, `\t`, `\0`, `\\`, `\'`, `\"`, and `\u{...}` for a code point in hexadecimal:
+
+```khora
+"caf\u{e9}"        // café
+"snowman \u{2603}"  // snowman ☃
+```
+
+`\u{...}` takes one to six hexadecimal digits. A code point that is not a character — a surrogate, or anything above `10FFFF` — is refused at compile time rather than producing a string that is not UTF-8.
 
 ## String interpolation
 

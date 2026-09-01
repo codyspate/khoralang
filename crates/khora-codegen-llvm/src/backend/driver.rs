@@ -308,8 +308,8 @@ pub(super) fn build(
                 backend.error(
                     format!(
                         "`main` is declared in more than one module here ({}), so which of \
-                         them runs would be an accident. A package has one entry point, in \
-                         `src/main.kh`; another program wants its own file",
+                         them runs would be an accident. A package builds one program, from \
+                         `src/main.kh`; a second program is a package of its own",
                         named.join(", ")
                     ),
                     TextRange::empty(0.into()),

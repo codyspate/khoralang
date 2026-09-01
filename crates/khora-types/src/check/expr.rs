@@ -115,19 +115,34 @@ impl<'a> Checker<'a> {
                 // worked out", because `Unknown` unifies with everything and so
                 // `let n: Bool = loop { break 1 };` was accepted.
                 let answer = self.unifier.fresh();
-                self.loops.push((answer.clone(), false));
+                self.loops.push((answer.clone(), false, false));
                 self.infer(body);
-                let (answer, carried) = self.loops.pop().expect("just pushed");
-                // Nothing broke with a value, so there is no value: an infinite
-                // loop and a loop that just stops both produce `()`.
-                if carried { answer } else { Type::Unit }
+                let (answer, carried, broke) = self.loops.pop().expect("just pushed");
+                match (carried, broke) {
+                    // What the `break`s carry.
+                    (true, _) => answer,
+                    // A `break` with no value: the loop ends and produces
+                    // nothing.
+                    (false, true) => Type::Unit,
+                    // **No way out, so no value.** `Never` discharges any type,
+                    // which is what lets a `loop` be the whole body of a
+                    // function that returns something and never returns.
+                    (false, false) => Type::Never,
+                }
             }
             Expr::Break(value) => {
+                // **Recorded whether or not it carries anything.** A bare
+                // `break` is still a way out, and a loop that has one finishes
+                // -- which is the difference between `()` and `Never`.
+                //
+                // A `break` outside a loop is reported by HIR lowering, which
+                // knows the nesting; nothing to add here.
+                if let Some(last) = self.loops.last_mut() {
+                    last.2 = true;
+                }
                 if let Some(v) = value {
                     let carried = self.infer(v);
-                    // A `break` outside a loop is reported by HIR lowering,
-                    // which knows the nesting; nothing to add here.
-                    if let Some((answer, _)) = self.loops.last().cloned() {
+                    if let Some((answer, _, _)) = self.loops.last().cloned() {
                         self.require(&answer, &carried, "`break` values disagree", range);
                         if let Some(last) = self.loops.last_mut() {
                             last.1 = true;

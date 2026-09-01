@@ -201,8 +201,27 @@ let response = SharedFn::call(callback, request);
 
 Use `SharedFn` when a callback must be stored inside another shareable value, such as a router or callback table.
 
+## `Fiber<A, 'er>`
+
+A fiber handle is shareable, so one fiber can hold another's and act on it:
+
+```khora
+pub fn main() -> () {
+  let worker = Fiber::spawn(fn () => slowly());
+  // The handle crosses, so a second fiber can stop the first.
+  let watcher = Fiber::spawn(fn () => Fiber::cancel(worker));
+  Fiber::wait(watcher);
+  Fiber::wait(worker);
+  print("both settled")
+}
+```
+
+**This is what a supervisor is made of**, and what a deadline would be made of: there is no `timeout` or `race` in `std` (see [Concurrency](/docs/reference/concurrency/)), so anything of that shape is written from a handle one fiber holds and another cancels.
+
+What constrains it is the answer rather than the handle: `Fiber::join` requires `A: Share`, because the value was computed on another fiber and has to be safe to hold from this one. `Fiber::wait` has no such bound, because it does not hand the answer back.
+
 ## Choosing the boundary
 
-Use `Shared<A>` when several fibers coordinate around **one evolving value**. Use `Channel<A>` when a value or unit of work is **handed to one receiver**, especially when backpressure matters. Use `SharedFn` when a **callback itself** must cross the sharing boundary.
+Use `Shared<A>` when several fibers coordinate around **one evolving value**. Use `Channel<A>` when a value or unit of work is **handed to one receiver**, especially when backpressure matters. Use `SharedFn` when a **callback itself** must cross the sharing boundary. A `Fiber<A, 'er>` handle crosses too, which is what lets one fiber cancel or wait on another.
 
 See [Concurrency](/docs/reference/concurrency/) for fiber and nursery lifetime rules and [Memory and resources](/docs/reference/memory-and-resources/) for structured cleanup.

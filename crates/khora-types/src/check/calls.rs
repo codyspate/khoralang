@@ -98,6 +98,37 @@ impl<'a> Checker<'a> {
         self.apply(Some(callee), args, hint, range)
     }
 
+    /// Why a call's callee is not a function.
+    ///
+    /// **The interesting case is a capability with a function's name.**
+    /// `fn f() -> () with { nursery: Nursery }` binds `nursery` in the body,
+    /// and it shadows `std::core`'s `nursery` exactly as any other binding of
+    /// that name would. So the body's `nursery(..)` calls the capability,
+    /// which is a record of operations and not a function, and the message
+    /// said only ``Nursery` is not a function` -- true, unhelpful, and about a
+    /// type the reader never wrote.
+    ///
+    /// The guide warns about this for lambdas. It happens for a declared
+    /// capability row too, and it happens to the names most likely to collide,
+    /// because a capability is usually called after the function that installs
+    /// it.
+    fn not_callable(&self, callee: Option<ExprId>, zonked: &Type) -> String {
+        let named = callee.and_then(|id| match self.body.expr(id) {
+            khora_hir::body::Expr::Local(local) => Some(self.body.local(*local).name.clone()),
+            _ => None,
+        });
+        let head = traits::head_of(zonked);
+        let is_effect = head.as_deref().is_some_and(|h| self.types.effects.contains(h));
+        match (named, is_effect) {
+            (Some(name), true) => format!(
+                "`{name}` here is the capability this function requires, of type `{zonked}`, \
+                 and it shadows any function of the same name. Call one of its operations \
+                 (`{name}.something(..)`), or give the capability another name"
+            ),
+            _ => format!("`{zonked}` is not a function, so it cannot be called"),
+        }
+    }
+
     /// Checks a call whose callee is an ordinary value of function type.
     ///
     /// This is also where a call is charged to the enclosing function. The
@@ -127,7 +158,7 @@ impl<'a> Checker<'a> {
             // became reachable the moment functions became values.
             if !matches!(callee_ty, Type::Unknown | Type::Var(_) | Type::Never) {
                 let zonked = self.unifier.zonk(&callee_ty);
-                self.error(format!("`{zonked}` is not a function, so it cannot be called"), range);
+                self.error(self.not_callable(callee, &zonked), range);
             }
             return Type::Unknown;
         };
@@ -176,6 +207,43 @@ impl<'a> Checker<'a> {
             Expr::Local(local) => self.body.local(*local).name.clone(),
             Expr::Field { name, .. } => name.clone(),
             _ => "this call".to_string(),
+        }
+    }
+
+    /// Why a method was not found, which is two different situations.
+    ///
+    /// ``Nursery has no method `adopt` `` was said to somebody who had
+    /// imported `nursery` and not `Nursery`, and it is false twice over:
+    /// `Nursery` has that operation, and nothing was misspelled. The
+    /// capability's *type* arrived from `std::core`'s signature without
+    /// anybody naming it, and a trait's methods need the trait in scope --
+    /// Rust's rule, and a defensible one, but not one the message mentioned.
+    ///
+    /// So: nothing known about the head at all means nothing was imported and
+    /// the fix is an import line. A head that is known without this method is
+    /// a spelling mistake, and the original message is right about it.
+    fn no_such_method(&self, self_ty: &Type, method: &str) -> String {
+        let head = traits::head_of(self_ty);
+        // **An effect is imported into `effects`, not into the trait table**,
+        // so asking the traits alone said `Nursery` was unimported when it was
+        // right there and `adpot` was a spelling mistake. Both halves, or the
+        // message is wrong in exactly the case it was written for.
+        let unimported = head.as_deref().is_some_and(|h| {
+            !self.types.traits.knows(h) && !self.types.effects.contains(h)
+        });
+        match (unimported, head, traits::home_of(self_ty)) {
+            (true, Some(name), Some(home)) => format!(
+                "`{name}` is not imported here, so `{method}` cannot be found. Write \
+                 `import {}::{{{name}}};` — a capability arrives with its type without \
+                 the name being in scope, and calling a method on it needs the name",
+                home.segments().join("::")
+            ),
+            (true, Some(name), None) => format!(
+                "`{name}` is not imported here, so `{method}` cannot be found — a \
+                 capability arrives with its type without the name being in scope, and \
+                 calling a method on it needs the name"
+            ),
+            _ => format!("`{self_ty}` has no method `{method}`"),
         }
     }
 
@@ -249,7 +317,7 @@ impl<'a> Checker<'a> {
                 for arg in args {
                     self.infer(*arg);
                 }
-                self.error(format!("`{self_ty}` has no method `{method}`"), range);
+                self.error(self.no_such_method(&self_ty, method), range);
                 return Some(Type::Unknown);
             }
             Err(traits::MethodError::NotImplemented(owners)) => {

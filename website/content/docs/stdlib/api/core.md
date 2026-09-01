@@ -1837,6 +1837,24 @@ A new region with nothing deferred into it.
 `scoped` calls. Opening one by hand means being responsible for the
 binding that ends it.
 
+**The region ends with the block the binding is in**, not with the
+function and not at the next statement. So
+
+```khora
+{
+  let region = Region::open();
+  Region::defer(region, fn () => print("released"));
+  work();
+};
+```
+
+releases before the statement after the block, on every way out of it
+including a cancellation. Putting the `let` at the top of a function
+therefore holds everything until the function returns, which is the
+difference between a lease that ends with the call and one that ends with
+the caller -- `packages/postgres` had exactly that bug, and a pool of `n`
+behaved like a pool of `n` uses.
+
 #### defer
 
 ```khora

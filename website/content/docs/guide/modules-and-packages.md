@@ -79,6 +79,22 @@ print(Int::to_string(response.status));
 
 That keeps `Response::text` visibly different from `response.status`.
 
+### Fields need the type imported
+
+Importing a function that *returns* a record is not enough to read the record's fields. The type has to be in scope too:
+
+```khora
+// Not enough: `origin()` is callable, but `.x` is not readable.
+import shapes::{origin};
+
+// Both.
+import shapes::{Point, origin};
+```
+
+The rule is that a field is looked up on a type, and a type the file cannot name is a type it knows nothing about — including what fields it has. The compiler says so directly (``Point is not in scope here, so nothing is known about its fields``), but it is easier to import the pair from the start.
+
+The same applies to a trait's methods and to an effect's operations: a capability can arrive in your function without its type being named anywhere, and calling an operation on it needs the effect imported.
+
 ## Public declarations with `pub`
 
 Top-level declarations are module-private unless marked `pub`:

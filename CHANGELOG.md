@@ -14,6 +14,14 @@ it will behave differently now.
 
 ### Breaking
 
+- **A `loop` with no `break` has type `Never`, not `()`.** It could not be the
+  body of a function that returns something — `fn serve() -> Int { loop { .. } }`
+  was a type error against a body that cannot return at all. A `loop` with a
+  bare `break` is still `()`, and one whose `break`s carry a value is still
+  their type. Widening a type is not usually breaking; this is listed because a
+  program that relied on a `loop` being `()` in a value position now sees
+  `Never` unify with whatever is around it.
+
 - **A JSON number keeps its token's text.** `Json::Number` holds a `String`
   rather than a `Float`. `Json::number` still answers a `Float`, `Json::integer`
   is new and exact, and `Json::literal` hands over the text for
@@ -38,6 +46,15 @@ it will behave differently now.
   language change; it is a `[lints]` default nobody else inherits.
 
 ### Fixed
+
+- **`khora check` and `khora build` disagreed about `src/bin/`.** The
+  `misplaced-main` lint exempted it, the lint's own message recommended putting
+  a second program there, and the backend compiled every `main` it found into
+  one program and refused — so `check` passed on the layout the message
+  suggested and `build` then failed with the error the message was trying to
+  help with. All three now say the same true thing: a package builds one
+  program, and a second is a package of its own. Multiple binaries per package
+  is Roadmap #162.
 
 - **A new project's first build no longer reports a key that moved.** The build
   cache is one directory for the whole machine, and a miss was classified by
@@ -115,6 +132,15 @@ it will behave differently now.
 - **`CONTRIBUTING.md`, this file, and a public compatibility policy.**
 
 ### Changed
+
+- **A capability whose type is not imported says so.** Importing `nursery` and
+  not `Nursery` gave ``Nursery has no method `adopt` ``, which is false twice
+  over. The message now names the import to write. A misspelled method on a
+  type that *is* imported is still reported as a misspelling.
+- **A capability that shadows a function of the same name says which is
+  which.** `fn f() -> () with { nursery: Nursery }` binds `nursery` in the
+  body, so the body's `nursery(..)` calls the capability; the message was
+  ``Nursery is not a function``, about a type the reader never wrote.
 
 - **`/docs/guide/modules-and-packages` shows a dependency**, rather than
   describing one: `git`, `rev` and `subdir`, what `khora install` does that

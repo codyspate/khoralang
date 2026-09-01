@@ -111,6 +111,20 @@ Open failure row:
 raises 'er
 ```
 
+## A row variable on an ordinary function
+
+`raises 'er` is usually seen on a higher-order signature, where the row belongs to a closure the caller supplies. It belongs on an ordinary function too, and there it means something worth having a name for:
+
+```khora
+fn nap<'er>(ms: Int) -> () with { clock: Clock } raises 'er {
+  clock.sleep(ms)!
+}
+```
+
+**A helper with no failure of its own that is still a cancellation point.** The `!` inside is what makes it one; the `'er` is what lets it sit inside a caller that raises anything at all without widening that caller's row. Written `raises Never` it would be a helper nobody could call from a fallible function without a discharge; written with a concrete error it would invent a failure it does not have.
+
+Any helper that waits — on a clock, a channel, a lock — wants this signature.
+
 ## Effects on function types
 
 ```khora

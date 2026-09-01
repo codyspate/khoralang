@@ -118,11 +118,18 @@ pub(crate) struct Checker<'a> {
     pub(crate) installed: Vec<String>,
     /// The loops currently being inferred, innermost last.
     ///
-    /// Each holds the type its `break`s agree on and whether any `break`
-    /// carried a value at all. A loop nobody breaks out of with a value
-    /// produces `()`; one that does produces what they carry, and two `break`s
-    /// carrying different types is a mismatch reported at the second.
-    pub(crate) loops: Vec<(Type, bool)>,
+    /// Each holds the type its `break`s agree on, whether any `break` carried a
+    /// value, and whether there was a `break` at all. Two `break`s carrying
+    /// different types is a mismatch reported at the second.
+    ///
+    /// **Three outcomes, not two.** A `break` with a value gives what the
+    /// breaks carry; a `break` without one gives `()`; and *no `break`* gives
+    /// `Never`, because a loop with no way out does not finish and so has no
+    /// value to be of any type. The last was `()` here, which made
+    /// `fn f() -> Int { loop { .. } }` a type error against a body that cannot
+    /// return at all -- the same mistake #127 fixed for a diverging branch,
+    /// left behind in the one construct whose whole purpose is not to end.
+    pub(crate) loops: Vec<(Type, bool, bool)>,
     /// The open tail of every lambda's inferred `raises` row, in the order the
     /// lambdas were seen.
     ///

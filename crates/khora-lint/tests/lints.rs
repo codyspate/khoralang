@@ -64,14 +64,29 @@ fn a_main_outside_an_entry_point_is_reported() {
     assert_eq!(names(&found), vec![khora_lint::MISPLACED_MAIN], "{found:?}");
 }
 
-/// `src/main.kh` is the program, and `src/bin/anything.kh` is one of several.
+/// `src/main.kh` is the program, and it is the only one.
 #[test]
 fn an_entry_point_is_not_reported() {
     let db = KhoraDatabase::new();
     assert!(lint_at(&db, "app/src/main.kh", PROGRAM).is_empty(), "src/main.kh is the program");
+}
+
+/// **`src/bin/` is reported, because it does not work.**
+///
+/// This exempted it, the lint's message recommended it, and the backend
+/// compiled every `main` it found into one program and refused -- so `khora
+/// check` passed on the layout the message suggested and `khora build` then
+/// failed with the error the message was trying to help with. A package builds
+/// one program; the lint says so where the layout disagrees.
+#[test]
+fn a_main_under_src_bin_is_reported_because_it_does_not_work() {
+    let db = KhoraDatabase::new();
+    let found = lint_at(&db, "app/src/bin/tool.kh", PROGRAM);
+    assert_eq!(names(&found), vec![khora_lint::MISPLACED_MAIN], "{found:?}");
     assert!(
-        lint_at(&db, "app/src/bin/tool.kh", PROGRAM).is_empty(),
-        "src/bin holds the others"
+        !found[0].message.contains("src/bin"),
+        "and it must not send them back to `src/bin`: {}",
+        found[0].message
     );
 }
 

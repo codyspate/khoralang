@@ -274,9 +274,16 @@ fn line_of(starts: &[u32], offset: u32) -> usize {
 /// Reports a `main` in a file that is not an entry point.
 ///
 /// The rule is the layout's, so it is asked of the path rather than the tree:
-/// `src/main.kh` is the program, and `src/bin/anything.kh` is one of several.
-/// Anywhere else under `src` and the function is either dead or the program's
-/// real entry point hiding in a file nobody would look in.
+/// `src/main.kh` is the program, and anywhere else under `src` the function is
+/// either dead or the program's real entry point hiding in a file nobody would
+/// look in.
+///
+/// **`src/bin/` was allowed here and is not a thing.** The lint, its message
+/// and the backend disagreed three ways: this exempted `src/bin/*.kh`, the
+/// message told people to put a second program there, and the backend compiled
+/// every `main` it found into one program and refused. So `khora check` passed
+/// on the layout the message recommended and `khora build` then failed with the
+/// error the message was trying to help with. A package builds one program.
 fn misplaced_main(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
     let path = file.path(db);
     let parts: Vec<String> =
@@ -286,11 +293,7 @@ fn misplaced_main(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
     // the wrong place would be worse than saying nothing.
     let Some(src) = parts.iter().rposition(|part| part == "src") else { return };
     let after: &[String] = &parts[src + 1..];
-    let allowed = match after {
-        [only] => only == "main.kh",
-        [folder, _file] => folder == "bin",
-        _ => false,
-    };
+    let allowed = matches!(after, [only] if only == "main.kh");
     if allowed {
         return;
     }
@@ -303,7 +306,7 @@ fn misplaced_main(db: &dyn Db, file: SourceFile, out: &mut Vec<Finding>) {
         out.push(Finding {
             lint: MISPLACED_MAIN,
             message: "`main` is the program's entry point and belongs in `src/main.kh`. \
-                      A package with more than one program puts each under `src/bin/`"
+                      A package builds one program; a second one is a package of its own"
                 .to_string(),
             range: found,
         });

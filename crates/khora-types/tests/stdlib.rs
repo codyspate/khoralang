@@ -61,6 +61,122 @@ fn errors_under(dirs: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+/// Every diagnostic from one program compiled together with `std`.
+///
+/// The messages below are about a capability, and a capability only exists
+/// because `std::core` declares the effect — so unlike the rest of the
+/// type-checker's tests these cannot be a single file with nothing behind it.
+fn errors_with_std(program: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    sources(&std_dir(), &mut paths);
+    paths.sort();
+
+    let db = KhoraDatabase::new();
+    let mut files: Vec<SourceFile> = paths
+        .iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(p).expect("the sources should be readable");
+            SourceFile::new(&db, p.clone(), text)
+        })
+        .collect();
+    let mine = SourceFile::new(&db, PathBuf::from("program.kh"), program.to_string());
+    files.push(mine);
+    SourceRoot::new(&db, files);
+
+    khora_types::diagnostics(&db, mine).iter().map(|e| e.message.clone()).collect()
+}
+
+/// **A capability's type arrives without its name, and the message says so.**
+///
+/// Importing `nursery` and not `Nursery` gave ``Nursery has no method
+/// `adopt` ``, which is false twice: `Nursery` has that operation, and nothing
+/// was misspelled. A trait's methods need the trait in scope — Rust's rule,
+/// and a defensible one — but a capability is the case where the type can
+/// reach a file without anybody naming it, so the reader has no reason to
+/// suspect an import.
+#[test]
+fn a_capability_whose_type_is_unimported_says_to_import_it() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{ChildFailed, Fiber, nursery, print};\n\
+         pub fn main() -> () raises ChildFailed {\n  \
+           nursery(fn () => {\n    \
+             nursery.adopt(Fiber::spawn(fn () => print(\"child\")));\n  \
+           })!;\n\
+         }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`Nursery` is not imported here")
+            && m.contains("import std::core::{Nursery};")),
+        "the fix is an import and the message should write it out: {found:?}"
+    );
+}
+
+/// And the same program with the import checks, so the advice is true.
+#[test]
+fn the_import_the_message_names_is_the_one_that_works() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{ChildFailed, Fiber, Nursery, nursery, print};\n\
+         pub fn main() -> () raises ChildFailed {\n  \
+           nursery(fn () => {\n    \
+             nursery.adopt(Fiber::spawn(fn () => print(\"child\")));\n  \
+           })!;\n\
+         }\n",
+    );
+    assert!(found.is_empty(), "the message's own advice must compile: {found:?}");
+}
+
+/// **The direction that must keep failing.** A real misspelling on a type that
+/// *is* imported is not an import problem.
+///
+/// This caught the first version, which asked the trait table alone — an effect
+/// is imported into `effects` and not into the traits, so it reported `Nursery`
+/// as unimported when it was right there and `adpot` was the mistake.
+#[test]
+fn a_misspelled_operation_is_still_a_misspelling() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{ChildFailed, Fiber, Nursery, nursery, print};\n\
+         pub fn main() -> () raises ChildFailed {\n  \
+           nursery(fn () => {\n    \
+             nursery.adpot(Fiber::spawn(fn () => print(\"child\")));\n  \
+           })!;\n\
+         }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`Nursery` has no method `adpot`")),
+        "a typo is a typo: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|m| m.contains("is not imported here")),
+        "and it must not be blamed on an import: {found:?}"
+    );
+}
+
+/// **A capability shadows a function of the same name**, which is worth saying
+/// because the names most likely to collide are exactly the ones that do: a
+/// capability is usually called after the function that installs it.
+///
+/// ``Nursery is not a function`` was true, unhelpful, and about a type the
+/// reader never wrote.
+#[test]
+fn a_capability_shadowing_a_function_says_which_is_which() {
+    let found = errors_with_std(
+        "module program;\n\
+         import std::core::{Nursery, nursery, print};\n\
+         fn f() -> () with { nursery: Nursery } {\n  \
+           nursery(fn _n => print(\"inside\"));\n\
+         }\n\
+         pub fn main() -> () { print(\"hi\") }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`nursery` here is the capability")
+            && m.contains("shadows any function of the same name")),
+        "the message should name the binding, not just its type: {found:?}"
+    );
+}
+
 #[test]
 fn the_standard_library_type_checks() {
     let found = errors_under(&[std_dir()]);

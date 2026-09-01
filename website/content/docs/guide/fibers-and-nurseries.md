@@ -15,7 +15,7 @@ There is no `async`/`await` version of the language. A fiber may suspend on I/O,
 ```khora
 fn run_one() -> () {
   let count = Fiber::join(Fiber::spawn(fn () => tally(rows)));
-  print(Int::to_string(count))
+  print("counted ${count}")
 }
 ```
 
@@ -28,7 +28,7 @@ fn run_query(id: Int) -> () {
     DbError::Timeout => Row::empty(),
     DbError::Missing(_id) => Row::empty(),
   };
-  print(Int::to_string(row.total))
+  print("total ${row.total}")
 }
 ```
 
@@ -38,10 +38,30 @@ A spawned closure may capture ordinary shareable values from its environment:
 
 ```khora
 fn print_double(value: Int) -> () {
-  let worker = Fiber::spawn(fn () => print(Int::to_string(value * 2)));
+  let worker = Fiber::spawn(fn () => print("${value * 2}"));
   Fiber::join(worker)
 }
 ```
+
+### Fan out and collect the answers
+
+A nursery runs children for their effects and gives back nothing. When you want
+the *answers*, spawn the fibers and `join_all` them:
+
+```khora
+fn totals(ids: List<Int>) -> List<Row> raises DbError {
+  let workers = List::map(ids, fn id => Fiber::spawn(fn () => load(id)!));
+  join_all(workers)!
+}
+```
+
+Answers arrive in handle order rather than completion order, which is what
+lines them up against the requests that produced them. If one child fails,
+`join_all` raises its failure and the rest are cancelled and waited for before
+it returns — so a fan-out where one branch fails is a raise, not a leak.
+
+If you want the fastest answer first rather than all of them in order, you
+wanted a channel.
 
 The core handle API is:
 

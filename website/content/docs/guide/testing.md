@@ -124,6 +124,8 @@ KHORA_PROFILE=release khora bench .
 
 `khora bench` prints which profile it used above the results, so a number pasted into an issue carries that with it. A small integer loop differs by about a factor of two between the two; code the optimizer can see through differs by much more.
 
+**And some workloads differ by nothing measurable.** Code whose time goes on allocation, reference counting or I/O spends it in the runtime, which is compiled once and the same either way. If a release build buys you nothing, that is information about where the time is going rather than a sign the profile did not take.
+
 ## Test failure and cancellation paths
 
 Khora's strongest guarantees matter when control flow does not return normally. Tests for resources, transactions, and concurrent code should include successful completion, typed failure, cancellation where applicable, and the cleanup or rollback behavior required on those paths.
