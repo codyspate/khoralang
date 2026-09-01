@@ -126,6 +126,12 @@ it will behave differently now.
 
 ### Added
 
+- **A package's other programs go in `src/bin/`.** One file per program, each
+  built with the package's modules and not with the others, each named after
+  its file: `src/bin/backfill.kh` becomes `build/backfill.exe` beside
+  `build/<package>.exe`. `khora build .` builds all of them; `khora run .` runs
+  the package's own and names the others when there is no `src/main.kh`.
+
 - **`examples/khq`**, a query language over JSON: about 3,600 lines across ten
   modules, with thirty-four tests. The largest Khora program written, and the
   first to put weight on the language rather than demonstrate a feature. What

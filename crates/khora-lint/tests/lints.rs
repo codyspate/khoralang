@@ -71,23 +71,36 @@ fn an_entry_point_is_not_reported() {
     assert!(lint_at(&db, "app/src/main.kh", PROGRAM).is_empty(), "src/main.kh is the program");
 }
 
-/// **`src/bin/` is reported, because it does not work.**
+/// **`src/bin/` is where a package's other programs go.**
 ///
-/// This exempted it, the lint's message recommended it, and the backend
-/// compiled every `main` it found into one program and refused -- so `khora
-/// check` passed on the layout the message suggested and `khora build` then
-/// failed with the error the message was trying to help with. A package builds
-/// one program; the lint says so where the layout disagrees.
+/// For a while it was exempted here, recommended by the lint's own message,
+/// and refused by the backend — which compiled every `main` it found into one
+/// program. So `khora check` passed on the layout the message suggested and
+/// `khora build` then failed with the error the message was trying to help
+/// with. The exemption was withdrawn until the layout was real.
+///
+/// It is real now: `walk` leaves `src/bin` out of the package's own
+/// compilation, each file in it is built with the package's modules and not
+/// with the other programs, and `khora build` on a package builds all of them.
 #[test]
-fn a_main_under_src_bin_is_reported_because_it_does_not_work() {
+fn a_main_under_src_bin_is_one_of_the_packages_programs() {
     let db = KhoraDatabase::new();
-    let found = lint_at(&db, "app/src/bin/tool.kh", PROGRAM);
-    assert_eq!(names(&found), vec![khora_lint::MISPLACED_MAIN], "{found:?}");
     assert!(
-        !found[0].message.contains("src/bin"),
-        "and it must not send them back to `src/bin`: {}",
-        found[0].message
+        lint_at(&db, "app/src/bin/tool.kh", PROGRAM).is_empty(),
+        "`src/bin` holds the other programs"
     );
+}
+
+/// And anywhere else under `src` is still a `main` nobody will run.
+///
+/// `src/bin/deep/tool.kh` included: one file per program is the rule, because
+/// a program that needs several modules is a package, and the shape that makes
+/// that clear is the one that does not almost work.
+#[test]
+fn a_main_deeper_than_src_bin_is_still_reported() {
+    let db = KhoraDatabase::new();
+    let found = lint_at(&db, "app/src/bin/deep/tool.kh", PROGRAM);
+    assert_eq!(names(&found), vec![khora_lint::MISPLACED_MAIN], "{found:?}");
 }
 
 /// A loose file has no layout to disagree with.

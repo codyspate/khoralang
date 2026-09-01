@@ -688,7 +688,30 @@ fn over_members(
 fn check_one(paths: &[PathBuf]) -> Result<bool> {
     report_manifest_warnings(paths.first().map(PathBuf::as_path));
 
-    let files = collect_sources(paths)?;
+    let mut files = collect_sources(paths)?;
+
+    // **And the programs in `src/bin`, which the walk leaves out.**
+    //
+    // `walk` skips that directory so a *build* gets one entry point; a check
+    // that inherited the skip would pass on a `src/bin` program that does not
+    // parse, and `khora build` would then fail on it. That is a check/build
+    // split, which is the shape this repository has fixed twice and reopened
+    // once — here, by the commit that made `src/bin` real.
+    //
+    // One compilation rather than one per program: they are distinct modules
+    // sharing the package's, so nothing in it is ambiguous, and the only thing
+    // a combined check cannot see is a whole-program question like two `main`s
+    // in one program — which is the backend's, and is what `build` reports.
+    for root in paths {
+        if let Some(package) = root.is_dir().then(|| package_of(root)).flatten() {
+            for program in binaries(&package) {
+                if !files.iter().any(|f| same_file(f, &program)) {
+                    files.push(program);
+                }
+            }
+        }
+    }
+
     if files.is_empty() {
         anyhow::bail!("no `.kh` files found");
     }
@@ -1431,6 +1454,44 @@ fn build(
     no_cache: bool,
 ) -> Result<bool> {
     one_program(path, "build")?;
+
+    // **A package with a `src/bin` builds every program in it.**
+    //
+    // Cargo's rule, and the one that makes the directory worth having: a
+    // maintenance program that is only built when somebody remembers to name
+    // it is a maintenance program that has not compiled in six months. `--out`
+    // names one file and so cannot mean all of them; `--lib` is about the
+    // package's own interface and has nothing to do with its programs.
+    //
+    // Each is its own compilation. They share the package's modules and not
+    // each other's, which is what stops two `main`s from meeting.
+    if out.is_none() && !lib && path.is_dir() {
+        if let Some(root) = package_of(path) {
+            let others = binaries(&root);
+            if !others.is_empty() {
+                let mut every = true;
+                if root.join("src").join("main.kh").is_file() {
+                    every &= build_one(path, None, lib, release, no_cache)?;
+                }
+                for program in others {
+                    every &= build_one(&program, None, lib, release, no_cache)?;
+                }
+                return Ok(every);
+            }
+        }
+    }
+    build_one(path, out, lib, release, no_cache)
+}
+
+/// One program, which is what `build` was before `src/bin`.
+#[cfg(feature = "llvm")]
+fn build_one(
+    path: &Path,
+    out: Option<&Path>,
+    lib: bool,
+    release: bool,
+    no_cache: bool,
+) -> Result<bool> {
     let (db, inputs, root) = load(path)?;
 
     // `--release` wins over the variable, and the variable is how everything
@@ -1640,10 +1701,31 @@ fn build(
 #[cfg(feature = "llvm")]
 fn default_output(path: &Path, entry: &Path, lib: bool) -> PathBuf {
     let dir = output_dir(path, entry);
-    let named = package_of(path)
-        .and_then(|root| package_name(&root))
-        .unwrap_or_else(|| entry.file_stem().unwrap_or_default().to_string_lossy().into_owned());
+    let stem = || entry.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    // **A program in `src/bin` is named after its file, not its package.**
+    // That is the whole of what the directory is for: `src/bin/backfill.kh`
+    // is `build/backfill.exe`, beside the package's own `build/<package>.exe`,
+    // and two of them do not collide.
+    //
+    // Asked of `path` -- what the caller named -- rather than of `entry`,
+    // which is *found* by looking for `fn main(` among files whose paths are
+    // compared against the package root by prefix. That comparison is between
+    // two spellings of the same place and answers no when they differ, which
+    // is a fallback the old naming survived and this one would not.
+    let named = if in_bin_dir(path) {
+        path.file_stem().unwrap_or_default().to_string_lossy().into_owned()
+    } else if in_bin_dir(entry) {
+        stem()
+    } else {
+        package_of(path).and_then(|root| package_name(&root)).unwrap_or_else(stem)
+    };
     artifact(&dir, &named, library_extension(lib))
+}
+
+/// Whether `file` is one of a package's `src/bin` programs.
+#[cfg(feature = "llvm")]
+fn in_bin_dir(file: &Path) -> bool {
+    file.parent().is_some_and(is_bin_dir)
 }
 
 /// The directory [`default_output`] and the test harness write into.
@@ -1745,6 +1827,7 @@ fn run_program(
     args: &[String],
 ) -> Result<ExitCode> {
     one_program(path, "run")?;
+    which_program(path)?;
     let target = executable_for(path)?;
     if !build(path, Some(&target), false, release, no_cache)? {
         // `build` has already said what was wrong, at the offending line.
@@ -1804,6 +1887,39 @@ fn one_program(path: &Path, verb: &str) -> Result<()> {
     anyhow::bail!(
         "this is a workspace root, so there is no one program to {verb}. Name a member: {}",
         names.join(", ")
+    )
+}
+
+/// Refuses a package that has programs but not a default one.
+///
+/// **`run` takes one program and a package may hold several.** With a
+/// `src/main.kh` that is the one; without it, running "the package" is a
+/// question with two answers and the failure otherwise arrives from the
+/// backend as ``this program has no `main` function``, pointing at whichever
+/// module sorted first — which is true and is about the wrong thing, since the
+/// package plainly has two programs in `src/bin`.
+#[cfg(feature = "llvm")]
+fn which_program(path: &Path) -> Result<()> {
+    if !path.is_dir() {
+        return Ok(());
+    }
+    let Some(root) = package_of(path) else { return Ok(()) };
+    if root.join("src").join("main.kh").is_file() {
+        return Ok(());
+    }
+    let others = binaries(&root);
+    if others.is_empty() {
+        return Ok(());
+    }
+    let named: Vec<String> = others
+        .iter()
+        .map(|p| format!("khora run {}", p.display()))
+        .collect();
+    anyhow::bail!(
+        "this package has no `src/main.kh`, so there is no one program to run. \
+         It has {}: {}",
+        if others.len() == 1 { "one other".to_string() } else { format!("{} others", others.len()) },
+        named.join(", ")
     )
 }
 
@@ -1963,7 +2079,13 @@ fn render_list(patterns: &[String]) -> String {
 /// file inside one; both have to answer with the directory, because that is
 /// what decides which sources belong to the thing being built rather than to
 /// the standard library or a dependency.
-#[cfg(feature = "llvm")]
+///
+/// **Not gated on the backend**, because `check` asks it too: a package's
+/// `src/bin` programs are left out of the walk so that a *build* gets one
+/// entry point, and `check` has to put them back or it passes on a program
+/// that does not compile. Gating it made `cargo check` without `--features
+/// llvm` fail, which is the configuration the gate has a step for and the
+/// reason that step exists.
 fn package_of(path: &Path) -> Option<PathBuf> {
     if path.is_dir() {
         let manifest = path.join("khora.toml");
@@ -2222,6 +2344,25 @@ fn collect_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 
     if let Some(std_dir) = khora_db::standard_library() {
         gather(&std_dir, &mut out)?;
+    }
+
+    // **A program in `src/bin` leaves the package's own `main` behind.**
+    //
+    // The gather above pulled in the whole package, because a program is more
+    // than its entry file -- and `src/main.kh` is not part of *this* program,
+    // it is a different one. Leaving it in put two `main`s in one compilation,
+    // which is the error this directory exists to avoid and which the backend
+    // duly reported against the file the user had just named.
+    //
+    // Only for a `src/bin` entry: the package's own build excludes the bin
+    // directory in `walk`, so the exclusion runs one way each.
+    if roots.iter().any(|r| r.is_file() && r.parent().is_some_and(is_bin_dir)) {
+        let mains: Vec<PathBuf> = roots
+            .iter()
+            .filter(|r| r.is_file())
+            .filter_map(|r| r.parent()?.parent()?.parent().map(|root| root.join("src").join("main.kh")))
+            .collect();
+        out.retain(|file| !mains.iter().any(|m| same_file(file, m)));
     }
 
     // Sorted *and* deduplicated by canonical path, because the same file
@@ -2791,6 +2932,47 @@ fn nearest_manifest(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Whether two paths name the same file.
+///
+/// By canonical path where both exist, and by the paths themselves otherwise —
+/// a `src/main.kh` that is not there cannot be canonicalized and also cannot be
+/// in the list being filtered.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Whether `dir` is a package's `src/bin`.
+///
+/// By position rather than by name: a directory called `bin` three levels down
+/// inside somebody's data is not this, and the one that is has a manifest two
+/// levels up.
+fn is_bin_dir(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n == "bin")
+        && dir.parent().is_some_and(|src| src.file_name().is_some_and(|n| n == "src"))
+        && dir.parent().and_then(Path::parent).is_some_and(|root| root.join("khora.toml").is_file())
+}
+
+/// The programs in a package's `src/bin`, sorted, or nothing if it has none.
+///
+/// **One program per file, named after the file.** `src/bin/backfill.kh`
+/// becomes `build/backfill.exe`. A directory inside `src/bin` is not looked
+/// into: a program that needs several modules is a package, and the shape that
+/// makes that clear is the one that does not almost work.
+pub(crate) fn binaries(package: &Path) -> Vec<PathBuf> {
+    let dir = package.join("src").join("bin");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "kh"))
+        .collect();
+    out.sort();
+    out
+}
+
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
@@ -2810,6 +2992,15 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             // time by the member loop rather than by walking the root, and a
             // dependency arrives as its own `gather` call.
             if path.join("khora.toml").is_file() {
+                continue;
+            }
+            // **`src/bin` is not part of the package's own compilation.**
+            // Each file in it is a program of its own, built with the
+            // package's modules but not with the others -- so a walk that
+            // swept them in would put every `main` in the package into one
+            // program, which is the state this directory exists to leave.
+            // `binaries` lists them and `sources_for` puts exactly one back.
+            if is_bin_dir(&path) {
                 continue;
             }
             walk(&path, out)?;

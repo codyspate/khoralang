@@ -79,6 +79,42 @@ print(Int::to_string(response.status));
 
 That keeps `Response::text` visibly different from `response.status`.
 
+### A package's other programs
+
+`src/main.kh` is the package's program. A package that needs more than one — a
+migration, a backfill, a one-off report — puts each in its own file under
+`src/bin/`:
+
+```text
+myapp/
+  khora.toml
+  src/
+    main.kh          -> build/myapp.exe
+    shared.kh        the modules both use
+    bin/
+      backfill.kh    -> build/backfill.exe
+      report.kh      -> build/report.exe
+```
+
+`khora build .` builds all of them. Each is its own compilation: it gets the
+package's modules and **not** the other programs, which is what stops two
+`main` functions from meeting. A program is named after its file, so
+`src/bin/backfill.kh` is `build/backfill.exe`.
+
+One file per program. A program that needs several modules of its own is a
+package, and that is the shape to reach for rather than a directory inside
+`src/bin`.
+
+`khora run .` runs the package's own program. To run one of the others, name
+it:
+
+```bash
+khora run src/bin/backfill.kh
+```
+
+A package with no `src/main.kh` has no default program, and `khora run .` says
+which ones it has instead of reporting that it has none.
+
 ### Fields need the type imported
 
 Importing a function that *returns* a record is not enough to read the record's fields. The type has to be in scope too:
