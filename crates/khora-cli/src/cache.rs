@@ -139,15 +139,34 @@ pub enum Miss {
     /// Nothing has been built with this key, and nothing has been built at all.
     ///
     /// The ordinary first build, and the only miss worth staying quiet about.
-    NoEntry,
-    /// Nothing has been built with this key, but the cache holds other keys.
     ///
-    /// **Split out from `NoEntry` because the two look identical and mean
-    /// opposite things.** An empty cache is a first build. A cache holding
-    /// somebody else's key, on a tree that has not changed, means the key
-    /// moved between one build and the next -- which is the interesting
-    /// failure and was invisible while both were called `NoEntry`.
-    KeyMoved(Vec<String>),
+    /// **This target, not this machine.** The first version asked whether the
+    /// *cache* was empty, which is a question about everything anybody has ever
+    /// built here. A second project on the same machine therefore reported its
+    /// first build as a key that had moved, and every word of that message was
+    /// false: nothing had moved, no input had changed, and the three keys it
+    /// listed belonged to somebody else. It was found by depending on
+    /// `packages/postgres` from outside the repository -- the first thing a new
+    /// user does, and the first thing they would have seen.
+    NoEntry,
+    /// This target built before under a different key.
+    ///
+    /// **The interesting failure**, and the reason the variant exists: a tree
+    /// that has not changed should produce the key it produced last time, so a
+    /// key that moved anyway means an input moved that nobody meant to move.
+    /// The previous key is carried rather than a sample of unrelated ones,
+    /// because "yours was X and is now Y" is a question `KHORA_CACHE_EXPLAIN`
+    /// can answer and "somebody has built 1751 other things" is not.
+    KeyMoved {
+        /// What this target built under last time.
+        previous: String,
+    },
+    /// This target built before under this same key, and the entry is gone.
+    ///
+    /// Not an anomaly -- `khora cache --clear`, or a pruned or moved cache
+    /// directory -- but worth saying, because the alternative is a rebuild that
+    /// looks unexplained to somebody who expected a hit.
+    Evicted,
     /// The entry is there and does not record what it holds.
     NoRecord,
     /// The entry records an artifact it does not have.
@@ -162,21 +181,16 @@ impl std::fmt::Display for Miss {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Miss::NoEntry => f.write_str("nothing has been built with this key"),
-            Miss::KeyMoved(others) => {
-                // A few, not all of them: a cache in use holds thousands, and
-                // a screen of hexadecimal buries the sentence worth reading.
-                let held: Vec<&str> =
-                    others.iter().take(3).map(|k| &k[..12.min(k.len())]).collect();
-                let count = others.len();
-                let more = if count > held.len() { ", ..." } else { "" };
-                write!(
-                    f,
-                    "the key moved. Nothing is stored under this one, and the \
-                     cache holds {count} other(s) ({}{more}). \
-                     `KHORA_CACHE_EXPLAIN=1` names the input that changed",
-                    held.join(" ")
-                )
-            }
+            Miss::KeyMoved { previous } => write!(
+                f,
+                "the key moved. This target last built under {}, and nothing is \
+                 stored under the key it has now. `KHORA_CACHE_EXPLAIN=1` names \
+                 the input that changed",
+                &previous[..12.min(previous.len())]
+            ),
+            Miss::Evicted => f.write_str(
+                "the entry for this key is gone, though this target built under it before",
+            ),
             Miss::NoRecord => f.write_str("the entry does not say what it holds"),
             Miss::NoArtifact => f.write_str("the entry has no artifact"),
             Miss::Unreadable(why) => write!(f, "the artifact could not be read: {why}"),
@@ -296,13 +310,16 @@ impl Cache {
     /// rename is atomic so a half-written entry should not exist, but "should
     /// not" is what a cache says right before it hands somebody a truncated
     /// binary, and the check costs milliseconds against a build.
-    pub fn lookup(&self, key: &str) -> Result<Hit, Miss> {
+    pub fn lookup(&self, key: &str, target: &Path) -> Result<Hit, Miss> {
         let entry = self.root.join("build").join(key);
         if !entry.is_dir() {
-            // Which of the two it is decides whether anything is wrong, so it
+            // Which of the three it is decides whether anything is wrong, so it
             // is worked out here rather than left to the reader.
-            let others = self.keys();
-            return Err(if others.is_empty() { Miss::NoEntry } else { Miss::KeyMoved(others) });
+            return Err(match self.last_key(target) {
+                None => Miss::NoEntry,
+                Some(previous) if previous == key => Miss::Evicted,
+                Some(previous) => Miss::KeyMoved { previous },
+            });
         }
         let artifact = entry.join("artifact");
         let Ok(recorded) = std::fs::read_to_string(entry.join("artifact.sha256")) else {
@@ -327,6 +344,45 @@ impl Cache {
     /// Whether `KHORA_CACHE_EXPLAIN` asked for the key and the verdict.
     pub fn explaining() -> bool {
         std::env::var_os("KHORA_CACHE_EXPLAIN").is_some_and(|value| value != "0")
+    }
+
+    /// Where this target's last key is recorded.
+    ///
+    /// **Absolute, always.** A relative `build/app.exe` means a different file
+    /// in every directory it is typed in, and two projects sharing that spelling
+    /// would share a marker -- which is the collision this whole marker exists
+    /// to stop, reintroduced one level down. `std::path::absolute` does not
+    /// require the file to exist, which matters because on a first build it
+    /// does not.
+    fn marker(&self, target: &Path) -> PathBuf {
+        let full = std::path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
+        let mut hasher = Sha256::new();
+        hasher.update(full.to_string_lossy().as_bytes());
+        self.root.join("targets").join(format!("{:x}", hasher.finalize()))
+    }
+
+    /// The key this target last built under, if it has built before.
+    ///
+    /// An unreadable or absent marker is `None`, which reports a first build.
+    /// Being wrong in that direction costs a message nobody sees; being wrong
+    /// in the other prints an alarm about a machine that is working.
+    fn last_key(&self, target: &Path) -> Option<String> {
+        let text = std::fs::read_to_string(self.marker(target)).ok()?;
+        let key = text.trim().to_string();
+        if key.is_empty() { None } else { Some(key) }
+    }
+
+    /// Records that `target` built under `key`.
+    ///
+    /// Best-effort: a marker that cannot be written costs the *next* build a
+    /// message, and nothing else. It is not worth failing a build that
+    /// succeeded.
+    pub fn remember(&self, target: &Path, key: &str) {
+        let marker = self.marker(target);
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(marker, key);
     }
 
     /// Records a freshly built artifact under `key`.

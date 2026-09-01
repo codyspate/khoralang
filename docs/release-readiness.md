@@ -13,14 +13,16 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree on 2026-08-31, item by item, against what is in the
-repository rather than against the roadmap's account of itself. **135 of 222**,
+repository rather than against the roadmap's account of itself. **140 of 222**,
 and re-scored whenever a section moves.
 
 **A score is only as good as the reading behind it.** Section 3 was scored at
 2/6 by somebody who had not opened `crates/khora-codegen-llvm/tests/db.rs`, and
 two of its items were already satisfied. Section 15 was scored at 1/8 the day
-#149 wrote the seven files it asks for. Both were understatements, which is the
-safe direction for the rule below to fail in, and neither was a finding.
+#149 wrote the seven files it asks for. Section 13 had three items unticked that
+an existing end-to-end test already discharged. All three were understatements,
+which is the safe direction for the rule below to fail in, and none was a
+finding.
 
 An item is ticked only when it was checked. Where something is partly done it
 stays unticked and carries a **Left:** note saying what remains, because a
@@ -42,7 +44,7 @@ advertised, so no wasm deployment has to work.
 | 10. Compiler performance and scale | 1 / 6 |
 | 11. Tooling and editor experience | 6 / 10 |
 | 12. Installation, toolchains and release artifacts | 6 / 9 |
-| 13. Package ecosystem | 2 / 7 |
+| 13. Package ecosystem | 7 / 7 |
 | 14. Supply chain and security | 4 / 7 |
 | 15. Compatibility, governance and contribution policy | 8 / 8 |
 | 16. Public documentation | 44 / 46 |
@@ -277,11 +279,11 @@ A target is “supported” only when the toolchain produces something users can
 A large registry is not required, but dependency use must be coherent and reproducible.
 
 - [x] Public documentation explains dependency declarations, exact resolution behavior, lockfiles and the content-addressed store. **Done:** `/docs/guide/modules-and-packages`.
-- [ ] A developer can consume a third-party package without repository-specific manual setup.
-- [ ] The policy for source packages versus binary artifacts is explicit.
-- [ ] Version/compatibility expectations for packages are documented even if full version solving is deferred.
-- [ ] The first-party packages used by reference applications are published/consumable through the same mechanism available to users. **Left:** `packages/postgres` is consumed by a path dependency inside this repository.
-- [ ] Package integrity is verified from the lockfile/store as documented.
+- [x] A developer can consume a third-party package without repository-specific manual setup. **Done:** `a_package_from_a_git_repository_is_resolved_compiled_and_run` fetches a package from a repository outside the build, compiles the application against it and runs it — a generic, a method and an impl of a `std` trait all crossing the boundary. `khora build` resolves what it needs, so there is no fetch step to remember, and `khora install <url>` writes the manifest entry after checking the package's real name and whether it offers itself at all.
+- [x] The policy for source packages versus binary artifacts is explicit. **Done:** `/docs/guide/modules-and-packages` — dependencies are source, fetched and compiled, and there are no binary artifacts to publish or to trust.
+- [x] Version/compatibility expectations for packages are documented even if full version solving is deferred. **Done:** the same page says there is no registry, so `version = "…"` has nothing to resolve against; `git` for what you did not write and `path` for what you did; and a branch name resolves to the commit it pointed at, so `rev = "main"` is a convenience when the dependency is added rather than a moving target afterwards.
+- [x] The first-party packages used by reference applications are published/consumable through the same mechanism available to users. **Done:** `packages/postgres` was consumed from a project outside this repository by `git` + `subdir`, compiled and run. `a_package_in_a_subdirectory_of_a_larger_repository_compiles_and_runs` keeps that shape honest — a package three directories inside a checkout whose root is a different, unpublished package, which is this repository's layout and most repositories that hold a library. The earlier note read the reference application's path dependency as evidence about the mechanism; inside one repository a path dependency is the correct choice, and it says nothing about whether a user can fetch the package.
+- [x] Package integrity is verified from the lockfile/store as documented. **Done:** every resolution hashes what arrived and refuses the build if it disagrees with the lockfile — `resolve.rs`, tested by the tampering case in `khora-pkg`'s own tests, and now said on the guide page so that "as documented" is true as well.
 - [x] If no public registry exists at first release, that limitation and the supported git/package workflow are prominent rather than hidden. **Done:** `/docs/limitations` — "Package ecosystem".
 
 ---

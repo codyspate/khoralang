@@ -124,9 +124,63 @@ Khora does not have a mutable global binding. Shared evolving state is explicit 
 
 ## Dependencies and lockfiles
 
-Package dependencies are source dependencies. Git dependencies resolve to exact revisions, and `khora.lock` records the resolved content with a digest so the same package graph can be reproduced later.
+Package dependencies are source dependencies: Khora fetches and compiles the package's source, and there are no binary artifacts to publish or trust. Declare one in `[dependencies]`:
+
+```toml
+[dependencies]
+# From a git repository, at a branch, tag or commit.
+postgres = { git = "https://github.com/codyspate/khoralang", rev = "main", subdir = "packages/postgres" }
+
+# From a directory on this machine, for a package you are also editing.
+shared = { path = "../shared" }
+```
+
+`subdir` is for a repository that holds more than the one package — a git URL names a repository, and the two are only the same thing in the simplest layout.
+
+There is no registry yet, so `version = "..."` has nothing to resolve against. Use `git` for anything you did not write and `path` for anything you did.
+
+`khora build` resolves what it needs, so there is no fetch step to remember. To add a dependency without editing the manifest by hand:
+
+```bash
+khora install https://github.com/codyspate/khoralang --subdir packages/postgres
+```
+
+That finds out the package's real name and whether it offers itself at all *before* writing the entry — two things you cannot check by typing a line into `[dependencies]`. `--rev` takes a branch, tag or commit and defaults to `main`. With no URL, `khora install` fetches and locks whatever the manifest already declares, which is the command to run after cloning a project.
+
+`khora why <package>` explains what pulled something in, and `khora graph` draws the whole thing.
+
+### The lockfile
+
+Resolution writes `khora.lock`, and a locked build never asks the network again:
+
+```toml
+[[package]]
+name = "postgres"
+source = "git"
+url = "https://github.com/codyspate/khoralang"
+revision = "0fcf6d65a2cf8c1b1636da586ed47839152c315c"
+path = "packages/postgres"
+checksum = "001bf5bf28448ba94bd6c08d2a8a3c55535692be5c61113fbfd94df74ff1ff55"
+```
+
+A branch name resolves to the commit it pointed at, and the commit is what is recorded — so `rev = "main"` is a convenience at the moment you add the dependency, not a moving target afterwards.
+
+**The checksum is verified, not just recorded.** Every resolution hashes what arrived and compares it against the lockfile. If the same commit id ever produces different bytes, the build stops and says so rather than compiling what turned up.
 
 Commit the lockfile for applications and other projects where reproducible builds matter. When a dependency is intentionally updated, review the lockfile change like any other dependency change.
+
+### Publishing a package
+
+A package is consumable when its manifest says so:
+
+```toml
+[package]
+name = "postgres"
+version = "0.1.0"
+publish = true
+```
+
+**Absent means no.** Publishing here is passive — a pushed repository is already fetchable — so the marker records an intention rather than granting a permission. What it prevents is depending on somebody's application, or their unfinished experiment, because it happened to sit in a repository you fetched.
 
 ## Toolchain pinning
 

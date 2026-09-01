@@ -85,6 +85,28 @@ fn khora(w: &World, args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// [`khora`], somewhere other than `w.project`.
+///
+/// Only the test with two projects in one home needs it, and that test is the
+/// whole reason the cache's miss classification is a per-target question
+/// rather than a per-machine one.
+fn khora_in(w: &World, cwd: &Path, args: &[&str]) -> (bool, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_khora"));
+    if let Some(pinned) = pinned::runtime() {
+        command.env("KHORA_RT_LIB", pinned);
+    }
+    let out = command
+        .args(args)
+        .current_dir(cwd)
+        .env("KHORA_HOME", &w.home)
+        .output()
+        .expect("could not run `khora`");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    w.story.borrow_mut().push_str(&text);
+    (out.status.success(), text)
+}
+
 /// Builds, and says whether the cache answered.
 fn build(w: &World, extra: &[&str]) -> (bool, String) {
     let mut args = vec!["build", "."];
@@ -115,6 +137,86 @@ fn a_second_build_of_the_same_thing_is_reused() {
     let (ok, second) = build(&w, &[]);
     assert!(ok, "{}", w.story());
     assert!(second.contains("reused"), "{}", w.story());
+}
+
+/// **A second project's first build says nothing about a key that moved.**
+///
+/// The cache is one directory for the whole machine, and the miss used to be
+/// classified by asking whether that directory was empty. So the first build
+/// of a second project -- the ordinary case for anyone who has built anything
+/// before -- opened with `the key moved. Nothing is stored under this one, and
+/// the cache holds 1751 other(s)`, in which nothing had moved, no input had
+/// changed, and the keys listed belonged to somebody else.
+///
+/// Found by depending on `packages/postgres` from a project outside this
+/// repository, which is the first thing a new user does.
+#[test]
+fn a_new_project_on_a_used_cache_is_a_quiet_first_build() {
+    let w = world(&source(1));
+    let (ok, first) = build(&w, &[]);
+    assert!(ok, "{}", w.story());
+    assert!(first.contains("built"), "{}", w.story());
+
+    // A second project, its own directory and manifest, the same `KHORA_HOME`.
+    let other = w.project.parent().expect("a parent").join("other");
+    std::fs::create_dir_all(other.join("src")).expect("a src directory");
+    std::fs::write(
+        other.join("khora.toml"),
+        "[package]\nname = \"other\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("a manifest");
+    std::fs::write(
+        other.join("src").join("main.kh"),
+        "module other::main;\n\npub fn main() -> Int {\n  2\n}\n",
+    )
+    .expect("a source file");
+
+    let (ok, output) = khora_in(&w, &other, &["build", "."]);
+    assert!(ok, "{output}");
+    assert!(output.contains("built"), "it still has to build: {output}");
+    assert!(
+        !output.contains("cache miss"),
+        "a project's first build must not report a miss it cannot have had:\n{output}"
+    );
+}
+
+/// The other half of the same change: a key that really did move still says so,
+/// and names what this target built under before.
+///
+/// Without this the fix above is indistinguishable from deleting the message.
+#[test]
+fn a_key_that_moves_on_one_target_still_reports_it() {
+    let w = world(&source(1));
+    build(&w, &[]);
+
+    std::fs::write(w.project.join("src").join("main.kh"), source(2)).expect("an edit");
+    let (ok, output) = build(&w, &[]);
+    assert!(ok, "{output}");
+    assert!(
+        output.contains("the key moved") && output.contains("last built under"),
+        "an edited target's key moved and the message should name the old key:\n{output}"
+    );
+}
+
+/// A cleared cache is its own case, and not an anomaly.
+///
+/// It reads as one otherwise: the key is right, the target has built under it,
+/// and there is simply nothing there. Saying `the key moved` would send
+/// somebody looking for an input that changed, and none did.
+#[test]
+fn an_emptied_cache_says_the_entry_is_gone_rather_than_that_the_key_moved() {
+    let w = world(&source(1));
+    build(&w, &[]);
+
+    let (ok, _) = khora(&w, &["cache", "--clear"]);
+    assert!(ok, "{}", w.story());
+
+    let (ok, output) = build(&w, &[]);
+    assert!(ok, "{output}");
+    assert!(
+        output.contains("the entry for this key is gone"),
+        "an emptied cache is eviction, not a key that moved:\n{output}"
+    );
 }
 
 #[test]

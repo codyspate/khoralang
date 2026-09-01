@@ -1515,7 +1515,7 @@ fn build(
     }
     if !no_cache {
         if let (Some(store), Some(key)) = (&store, &key) {
-            match store.lookup(key) {
+            match store.lookup(key, &target) {
                 Ok(hit) => match cache::Cache::place(&hit, &target) {
                     Ok(()) => {
                         println!(
@@ -1536,13 +1536,19 @@ fn build(
                 },
                 Err(miss) => {
                     // **An ordinary miss is silent; an anomalous one is not.**
-                    // `NoEntry` is the first build of anything and is what the
+                    // `NoEntry` is this target's first build and is what the
                     // cache is supposed to say most of the time, so printing it
-                    // would be noise on every clean checkout. The other four
-                    // all mean something went wrong -- an entry that does not
-                    // say what it holds, one whose artifact is missing or
-                    // unreadable, one whose artifact is not what was recorded
-                    // -- and each is rare enough that saying so costs nothing.
+                    // would be noise on every clean checkout. The others all
+                    // mean something happened worth knowing -- the key moved on
+                    // a target that had one, the entry was evicted, an entry
+                    // that does not say what it holds, one whose artifact is
+                    // missing or unreadable, one whose artifact is not what was
+                    // recorded -- and each is rare enough that saying so costs
+                    // nothing.
+                    //
+                    // `NoEntry` used to mean *the cache is empty*, which made
+                    // every new project on a used machine open with an alarm
+                    // about a key that had moved. See `cache::Miss::NoEntry`.
                     //
                     // This is the line that was missing. A flaky test said
                     // `built` where it expected `reused`, and the reason was
@@ -1586,6 +1592,10 @@ fn build(
             }
             if let (Some(store), Some(key)) = (&store, &key) {
                 let header = lib.then(|| target.with_extension("h"));
+                // Before the store, and unconditionally: a target that
+                // built is a target that has a key, whether or not the
+                // artifact could be copied into the cache afterwards.
+                store.remember(&target, key);
                 if let Err(why) = store.store(key, &target, header.as_deref()) {
                     eprintln!("khora: the build worked and did not go into the cache: {why:#}");
                 }

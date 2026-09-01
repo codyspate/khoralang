@@ -2418,11 +2418,11 @@ the value that makes the surrounding code agree, so the case nobody wrote is
 the case nobody hears about. Match exhaustively, or make the fallback the
 *bottom* rather than the top.
 
-## 65. Two sections of the readiness gate scored without reading the tree
+## 65. Three sections of the readiness gate scored without reading the tree
 
 The gate was scored at 124 of 222 with a rule attached: *an item is ticked only
 when it was checked*, and a half-done item stays unticked with a note saying
-what remains. The rule is right. It was applied to two sections that had not
+what remains. The rule is right. It was applied to three sections that had not
 been read.
 
 Section 3, resource and database semantics, was scored 2 of 6. Two of the four
@@ -2431,9 +2431,13 @@ a file the scoring pass never opened -- including the one that reads as the
 section's whole point, that a cancelled fiber rolls back. Section 15,
 compatibility and governance, was scored 1 of 8 on the same day #149 wrote
 `CONTRIBUTING.md`, `CHANGELOG.md` and the compatibility page, which between them
-satisfy seven of its eight items. The score was eleven points low.
+satisfy seven of its eight items. Section 13, the package ecosystem, had three
+items unticked that one end-to-end test already discharged -- a package fetched
+from a repository outside the build, compiled and run -- and a fourth whose
+**Left:** note read a monorepo's path dependency as evidence about what a
+stranger could fetch. The score was sixteen points low across the three.
 
-**Both failures were understatements**, which is the direction the rule is built
+**All three failures were understatements**, which is the direction the rule is built
 to fail in and the reason it is worth keeping. An unticked item that turns out
 to be done costs an hour of rediscovery. A ticked item that turns out not to be
 done is the thing a release checklist exists to prevent, and it is discovered by
@@ -2451,8 +2455,65 @@ note that a half-done item uses. `Left: not examined` is a different fact from
 `Left: the pool does not discard a connection whose rollback failed`, and only
 one of them is work.
 
+And a **Left:** note is a claim like any other. Section 13's said the driver was
+"consumed by a path dependency inside this repository", which is true and is not
+about the question the item asks. Inside one repository a path dependency is the
+right choice; whether a stranger can fetch the package is a different question,
+and it took ten minutes to answer by writing a manifest in a temporary directory
+and running `khora build`.
+
 The sibling of errata 35, where a test runner reported three passes for a suite
 whose third test asserted `4 == 5`. That was a green result that measured
 nothing; this is a number that measured nothing. Both read as evidence, and the
 tell is the same in each: the thing being reported on was never actually
 consulted.
+
+## 66. Every new project opened with an alarm about a key that had moved
+
+Building a small program that depended on `packages/postgres`, from a directory
+outside this repository, printed this before anything else:
+
+    khora: cache miss, the key moved. Nothing is stored under this one, and the
+    cache holds 1751 other(s) (000aa701c41e 002b70e6f6f0 005159a236ab, ...).
+    `KHORA_CACHE_EXPLAIN=1` names the input that changed
+
+Every clause of it was false. Nothing had moved, no input had changed, and the
+1751 keys belonged to other projects. It was the first build of a new project,
+which is the one case the message was written to stay quiet about.
+
+**The variant existed for a good reason and asked the wrong question.** A
+flaky test had already shown that "nothing is stored under this key" means two
+opposite things -- an ordinary first build, or a key that moved on a tree
+nobody changed -- and that while both were reported the same way, the second
+was reachable only by setting an environment variable that changed the timing
+of the thing being measured. So the two were split. The discriminator chosen
+was *is the cache empty*.
+
+But the cache is one directory for the whole machine. "Is the cache empty" is a
+question about everything anybody has ever built here, and the question worth
+asking is about the target in front of you. They agree exactly once: on the
+first build on a fresh machine. From the second project onwards -- which
+includes every user who tried an example before starting their own program --
+the alarming branch is the one that fires, always.
+
+The fix is to ask the question that was meant: the cache records the key each
+target last built under, and a target with no record is a first build. That
+also makes the message worth reading when it does fire, because it can name the
+key this target had before instead of three unrelated ones; and it splits off a
+third case that had been hiding inside the second, where the key is right and
+the entry is simply gone, which is `khora cache --clear` and not an anomaly at
+all.
+
+**A near-miss worth recording.** The obvious marker is keyed by the target
+path, and the obvious target path is the one on the command line -- which is
+usually relative. `build/app.exe` names a different file in every directory it
+is typed in, so two projects would have shared a marker: the collision being
+fixed, reintroduced one level down. The marker is keyed by the absolute path.
+
+The general shape is errata 46's, and 62's: **a proxy that is correct in the
+case it was tested on and answers a different question everywhere else.** The
+proxy here was cheap and available and nearly right, and "nearly right" for a
+cache means the alarm fires on the users who have least idea whether to worry.
+
+It was found by using the product from outside, which is section 19 of the
+readiness gate and the one thing on it nobody in this repository can do.

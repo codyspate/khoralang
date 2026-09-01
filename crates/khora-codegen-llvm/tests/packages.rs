@@ -187,6 +187,80 @@ fn a_package_from_a_git_repository_is_resolved_compiled_and_run() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "tally(42)");
 }
 
+/// **A package inside a repository that is mostly something else.**
+///
+/// The shape of this repository, and of most repositories that end up holding
+/// a library: `packages/postgres` sits in a checkout whose root manifest is a
+/// different package entirely. `khora-pkg`'s own tests prove `subdir`
+/// *resolves*; what is proved here is that the thing it resolves to compiles
+/// and runs, which is the question a user is actually asking.
+///
+/// The root package is deliberately not the dependency and deliberately not
+/// `publish`ed, so a resolver that ignored `subdir` and took the checkout root
+/// would fail rather than quietly compile the wrong package.
+#[test]
+fn a_package_in_a_subdirectory_of_a_larger_repository_compiles_and_runs() {
+    harness::ensure_runtime();
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+
+    let repo = tmp.path().join("monorepo");
+    // The root: not the package, and not offered.
+    write(
+        &repo.join("khora.toml"),
+        "[package]\nname = \"monorepo\"\nversion = \"0.1.0\"\n",
+    );
+    write(&repo.join("src").join("monorepo.kh"), "module monorepo::monorepo;\n");
+    // The package, three directories down.
+    let inner = repo.join("packages").join("tally");
+    write(
+        &inner.join("khora.toml"),
+        "[package]\nname = \"tally\"\nversion = \"0.1.0\"\npublish = true\n",
+    );
+    write(&inner.join("src").join("tally.kh"), PACKAGE);
+    git(&["init", "--quiet", "-b", "main"], &repo);
+    git(&["add", "-A"], &repo);
+    git(&["commit", "--quiet", "-m", "a repository with a package in it"], &repo);
+    let url = format!("file:///{}", repo.display().to_string().replace('\\', "/"));
+
+    let app = tmp.path().join("app");
+    write(
+        &app.join("khora.toml"),
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\ntally = {{ git = \"{url}\", rev = \"main\", \
+             subdir = \"packages/tally\" }}\n"
+        ),
+    );
+    write(&app.join("src").join("main.kh"), APP);
+
+    let store = khora_pkg::Store::at(tmp.path().join("store")).expect("a store");
+    let resolution =
+        khora_pkg::resolve(&app.join("khora.toml"), &store, false).expect("resolution");
+
+    let locked = resolution.lockfile.get("tally").expect("a locked entry");
+    assert_eq!(
+        locked.path.as_deref(),
+        Some("packages/tally"),
+        "the lockfile has to record which package in the repository this is"
+    );
+
+    let mut directories = resolution.directories();
+    directories.push(app.clone());
+
+    let db = KhoraDatabase::new();
+    let files = sources(&db, &directories);
+    let root = SourceRoot::new(&db, files);
+    let exe = tmp.path().join(if cfg!(windows) { "program.exe" } else { "program" });
+    if let Err(errors) = khora_codegen_llvm::compile(&db, root, &exe) {
+        let messages: Vec<String> = errors.into_iter().map(|e| e.message).collect();
+        panic!("compiling against a subdirectory dependency failed:\n  {}", messages.join("\n  "));
+    }
+
+    let out = Command::new(&exe).output().expect("running the program");
+    assert!(out.status.success(), "the program failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "tally(42)");
+}
+
 /// The lockfile is the point, so a second build must use it rather than ask
 /// the repository again.
 ///

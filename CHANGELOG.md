@@ -39,6 +39,23 @@ it will behave differently now.
 
 ### Fixed
 
+- **A new project's first build no longer reports a key that moved.** The build
+  cache is one directory for the whole machine, and a miss was classified by
+  asking whether that directory was empty — so the first build of a *second*
+  project opened with `the key moved. Nothing is stored under this one, and the
+  cache holds 1751 other(s)`, in which nothing had moved, no input had changed,
+  and the keys listed belonged to somebody else. The question is now asked about
+  the target being built. A key that really did move still says so, and names
+  what the target built under before; an emptied cache says the entry is gone
+  rather than blaming an input. Errata 66.
+- **A `numeric` column arrives as `Money`.** `postgres`'s decoder mapped
+  `numeric` to `Text` because a value that failed to parse would have had to
+  become a wrong number or a lost value. `Decimal::of_string` answers an
+  `Option` and refuses a numeral too wide for the significand, so neither is
+  needed: it parses or the server's own digits are kept. `float4` and `float8`
+  stay `Text` — `Cell` has no float variant, for the same reason `std::json`
+  stopped using one.
+
 - **Two modules may each declare a type of the same name.** An impl was
   identified by its type's head as a bare string, so the second `Show#Entry`
   was dropped at the whole-program merge, the search returned the wrong one,
@@ -60,6 +77,18 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **The rollback-failure policy is tested, and its one gap is written down.**
+  `std::db` discards a failed rollback on purpose: the caller is told
+  `RolledBack` with the body's reason, because the engine's complaint about a
+  rollback is a worse thing to report than the reason it was needed. On the
+  cancellation path there is no caller to tell, so a connection can return to a
+  pool having neither committed nor, as far as anything knows, rolled back.
+  Named in `std::db`'s module documentation.
+- **A pooled connection is proved to come back rolled back.** `with_db` opens a
+  region for the lease and `transaction` opens one for the rollback inside it;
+  the whole of the pool's correctness is that the inner finalizer runs first.
+  Asserted now as an ordered transcript.
 
 - **A `Char` type, written `'a'`.** One Unicode scalar value in thirty-two bits,
   with the string escapes and `Eq`, `Ord`, `Show`, `Hash`. `Char::code` and
@@ -86,6 +115,11 @@ it will behave differently now.
 - **`CONTRIBUTING.md`, this file, and a public compatibility policy.**
 
 ### Changed
+
+- **`/docs/guide/modules-and-packages` shows a dependency**, rather than
+  describing one: `git`, `rev` and `subdir`, what `khora install` does that
+  editing the manifest cannot, a real lockfile entry, that the checksum is
+  verified rather than only recorded, and what `publish` means.
 
 - **An impl's bounds are part of whether it applies.** Finding
   `impl<A: Show> Show for Result<A, E>` by its head said a `Result` *can* be
