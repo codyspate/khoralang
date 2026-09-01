@@ -603,7 +603,6 @@ fn byte_text(value: Int) -> String {
 /// use, and the parser never mixes them up.
 type Value = { json: Json, at: Int };
 type Scanned = { text: String, at: Int };
-type Floated = { number: Float, at: Int };
 type Items = { items: List<Json>, at: Int };
 type Fields = { fields: Map<String, Json>, at: Int };
 
@@ -954,114 +953,17 @@ fn sign_end(text: String, at: Int) -> Int {
 /// A number literal as a `Float`, for the accessors that want one.
 ///
 /// **The lossy reading, kept in one place.** The literal is known-good — it got
-/// here by being scanned — so the failure arms below cannot fire and answer
-/// zero rather than inventing an error nobody could act on.
+/// here by being scanned — so the `None` below cannot fire and answers zero
+/// rather than inventing an error nobody could act on.
 ///
-/// This is `Float::of_string` in all but name and would be better as one in
-/// `std::core`. It is here because `std::json` is where the need is and a
-/// number parser in `core` is a decision worth making on its own evidence.
+/// This used to be a number parser of its own, with a comment saying it was
+/// `Float::of_string` in all but name and belonged in `std::core` as soon as
+/// something other than this module needed one. `examples/khq` needed one, so
+/// it is there now and this is the one line that is left.
 fn float_of(literal: String) -> Float {
-  let negative = String::byte_length(literal) > 0 && U8::to_int(String::byte(literal, 0)) == 45;
-  let start = if negative { 1 } else { 0 };
-  let whole = digits_at(literal, start, 0.0);
-  match fraction_at(literal, whole.at, whole.number) {
-    Result::Err(_) => 0.0,
-    Result::Ok(with_fraction) => match exponent_at(literal, with_fraction.at, with_fraction.number)
-    {
-      Result::Err(_) => 0.0,
-      Result::Ok(done) => if negative { 0.0 - done.number } else { done.number },
-    },
-  }
-}
-
-fn digits_at(text: String, at: Int, acc: Float) -> Floated {
-  if at >= String::byte_length(text) {
-    { number: acc, at: at }
-  } else {
-    let byte = U8::to_int(String::byte(text, at));
-    if byte >= 48 && byte <= 57 {
-      digits_at(text, at + 1, acc * 10.0 + Int::to_float(byte - 48))
-    } else {
-      { number: acc, at: at }
-    }
-  }
-}
-
-/// `.` followed by at least one digit, or nothing at all.
-///
-/// `1.` is refused. JSON's grammar requires a digit after the point, and
-/// accepting it would mean this parser reads documents that others reject —
-/// which is worse than strictness, because the difference shows up at the far
-/// end of a pipeline.
-fn fraction_at(text: String, at: Int, whole: Float) -> Result<Floated, JsonError> {
-  if at < String::byte_length(text) && U8::to_int(String::byte(text, at)) == 46 {
-    let found = digits_at(text, at + 1, 0.0);
-    if found.at == at + 1 {
-      Result::Err({ at: at + 1, expected: "a digit after the decimal point" })
-    } else {
-      let places = found.at - (at + 1);
-      Result::Ok({ number: whole + found.number / power_of_ten(places), at: found.at })
-    }
-  } else {
-    Result::Ok({ number: whole, at: at })
-  }
-}
-
-fn exponent_at(text: String, at: Int, mantissa: Float) -> Result<Floated, JsonError> {
-  if at >= String::byte_length(text) {
-    Result::Ok({ number: mantissa, at: at })
-  } else {
-    let marker = U8::to_int(String::byte(text, at));
-    if marker != 101 && marker != 69 {
-      Result::Ok({ number: mantissa, at: at })
-    } else {
-      let sign = sign_at(text, at + 1);
-      let found = digits_at(text, sign.at, 0.0);
-      if found.at == sign.at {
-        Result::Err({ at: sign.at, expected: "a digit in the exponent" })
-      } else {
-        // `to_int` clamps rather than trapping, so `1e999999999999999999` is a
-        // large exponent rather than a stopped program.
-        let places = Float::to_int(found.number);
-        let scale = power_of_ten(places);
-        Result::Ok({
-            number: if sign.number < 0.0 { mantissa / scale } else { mantissa * scale },
-            at: found.at,
-          })
-      }
-    }
-  }
-}
-
-/// `+`, `-`, or neither. `-1.0` and `1.0` stand for the sign so that the
-/// caller can branch on a number rather than on a `Bool` it has to name.
-fn sign_at(text: String, at: Int) -> Floated {
-  if at >= String::byte_length(text) {
-    { number: 1.0, at: at }
-  } else {
-    let byte = U8::to_int(String::byte(text, at));
-    if byte == 45 {
-      { number: 0.0 - 1.0, at: at + 1 }
-    } else if byte == 43 {
-      { number: 1.0, at: at + 1 }
-    } else {
-      { number: 1.0, at: at }
-    }
-  }
-}
-
-/// Ten to the `n`, saturating.
-///
-/// Capped at 400 because a double runs out at about 1e308 and every exponent
-/// past that is the same infinity — without the cap a document could ask this
-/// to recurse a billion times.
-fn power_of_ten(n: Int) -> Float {
-  if n <= 0 {
-    1.0
-  } else if n > 400 {
-    power_of_ten(400)
-  } else {
-    10.0 * power_of_ten(n - 1)
+  match Float::of_string(literal) {
+    Option::Some(value) => value,
+    Option::None => 0.0,
   }
 }
 

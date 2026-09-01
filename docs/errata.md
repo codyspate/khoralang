@@ -2517,3 +2517,43 @@ cache means the alarm fires on the users who have least idea whether to worry.
 
 It was found by using the product from outside, which is section 19 of the
 readiness gate and the one thing on it nobody in this repository can do.
+
+## 67. A character and a hole, each fine alone
+
+    print("caf\u{e9} ${n}")
+
+    thread 'khora' panicked at crates/khora-hir/src/body.rs:1124:
+    end byte index 4 is not a char boundary; it is inside '\u{e9}'
+
+`split_interpolation` scans a literal's body for `${` and copies the text
+between the holes. The scan is over bytes, which is right: `$`, `{`, `}`, `\`
+and `"` are all ASCII and can never be part of a multi-byte character, so
+finding a hole cannot go wrong. The *copy* was over bytes too:
+
+    text.push_str(&body[i..i + 1]);
+
+and slicing one byte out of a `str` panics on anything wider.
+
+**Both halves were tested and neither test could fail.** A literal with no hole
+never reaches this function -- it is only called when there is interpolation to
+split -- so every test of non-ASCII text went down a different path and passed.
+Every test of interpolation used ASCII text around the holes and passed. The
+bug lives exactly in the intersection, and the intersection is
+`print("caf\u{e9} ${n}")`, which is the first line of the first program that
+wants to print an accented word.
+
+The escape branch had the same bug one byte over. `&body[i..i + 2]` assumes the
+backslash and what follows it are two bytes, and what follows it need not be.
+
+**The shape to look for is a function reached by only one of two features.**
+Coverage says this function was covered; it was, by inputs that could not
+exercise the line that was wrong. Errata 35's test runner reported passes for a
+suite whose third test asserted `4 == 5`, and this is the same thing from the
+other side -- there, a green result that measured nothing; here, a green result
+that measured something else.
+
+It is also not the first time this repository has counted the wrong unit:
+errata 43 is `\r\n` being four bytes. The lesson from that round was written
+into `std` as `String::char_at`, `String::next_boundary` and, this week,
+`String::chars_between` -- and the compiler that produced the lesson was still
+slicing by hand.

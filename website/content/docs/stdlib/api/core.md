@@ -2327,6 +2327,25 @@ The first character boundary at or after `at`, or the string's length.
 For walking to a safe place to cut: `String::slice(s, 0, s |> next_boundary(20))`
 takes about twenty bytes and never lands in the middle of anything.
 
+**At or after, so it does not advance.** Given an offset that is already
+a boundary this answers that offset, which means
+
+```khora
+while at < stop {
+  at = String::next_boundary(s, at);   // never ends
+}
+```
+
+is an infinite loop on every string. To step a character at a time, pass
+`at + 1` — or better, ask `char_at` and add `Char::utf8_length`, which
+says what it is doing.
+
+The name is the trap: `next` reads as *after*. It is kept because the
+behaviour is the one a cut wants — rounding an arbitrary offset outward
+to something safe — and because `String::chars_between` and
+`String::chars` are the two loops most callers actually want, and both
+are here already.
+
 #### previous_boundary
 
 ```khora
@@ -2334,6 +2353,10 @@ pub fn previous_boundary(self, at: Int) -> Int
 ```
 
 The last character boundary at or before `at`, or 0.
+
+**At or before**, like its sibling: on a boundary it answers where it
+already is. See `next_boundary` for what that costs a caller who steps
+with it.
 
 #### char_at
 
@@ -2376,6 +2399,24 @@ How many characters, which is not how many bytes.
 
 Walks the string, so it is `O(n)`. `byte_length` is the constant-time one
 and is what a buffer size wants.
+
+#### chars_between
+
+```khora
+pub fn chars_between(self, start: Int, end: Int) -> Int
+```
+
+How many characters lie between two byte offsets.
+
+**What a caret needs.** A tool reporting on text somebody else wrote
+places the caret by counting the characters before the span and draws it
+by counting the characters inside it, and `char_length` counts a whole
+string while `byte_length` counts the wrong unit. `examples/khq` wrote
+this for itself before it was here.
+
+`start` is rounded down to a boundary and `end` up, so a range that
+splits a character counts it once rather than trapping. A caller who
+wants to know whether it split one has `is_char_boundary`.
 
 #### find
 
@@ -2752,6 +2793,39 @@ answers, so it gets a different function when somebody needs one.
 
 A number too large for an `Int` clamps to the nearest end, and a `NaN` is
 zero. Undefined behaviour is the alternative and is not one.
+
+#### of_string
+
+```khora
+pub fn of_string(text: String) -> Option<Float>
+```
+
+The number `text` names, or `None` if it does not name one.
+
+**The shape is JSON's**, which is also what a person writes: an optional
+`-`, digits, an optional `.` and digits, an optional `e` or `E` with an
+optional sign and digits. No `+` in front, no underscores, no spaces, no
+hexadecimal, no `inf` and no `nan` — a parser that accepts more than the
+caller expected is how a configuration value ends up meaning something
+nobody wrote, and the two names are worse than that because they are
+values arithmetic cannot get back out of.
+
+An `Option` for `Int::of_string`'s reason: the text came from outside, and
+somebody typing it wrong is a thing to answer rather than to stop the
+program over.
+
+**This existed already, privately, in `std::json`.** Its comment said so:
+*"This is `Float::of_string` in all but name and would be better as one in
+`std::core`. It is here because `std::json` is where the need is and a
+number parser in `core` is a decision worth making on its own evidence."*
+The evidence arrived as `examples/khq`, which has to read the numbers in a
+query and could not, and which found in the same hour that `Float` is the
+only primitive with no way in from text — `Int` and `Decimal` both have
+one.
+
+Inexact by construction, and that is the type rather than this function:
+`0.1` is not a binary fraction and never will be. `Decimal::of_string` is
+the one to reach for when the digits have to survive.
 
 ### Int
 

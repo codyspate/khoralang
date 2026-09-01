@@ -114,6 +114,43 @@ fn main() -> Int {{
 /// literal ends at the quote inside `${..}` and everything after it lexes as
 /// code — which arrives as `expected )` pointing at nothing to do with strings.
 #[test]
+fn text_beside_a_hole_may_be_any_character() {
+    // **The compiler used to panic here**, in `split_interpolation`, which
+    // copied the text around the holes one *byte* at a time:
+    //
+    //     end byte index 4 is not a char boundary; it is inside 'é'
+    //
+    // A literal with no hole never reaches that function, so `"café"` was
+    // always fine and every test of non-ASCII text passed. It needed a
+    // non-ASCII character *and* an interpolation in the same literal, which is
+    // what `print("café ${n}")` is — the first line of the first program that
+    // met it.
+    //
+    // Two, three and four byte characters, before a hole and after one, and a
+    // hole with characters on both sides.
+    let ran = run(
+        "interp_non_ascii",
+        &format!(
+            "{PRELUDE}
+fn main() -> Int {{
+  print(\"café ${{\"one\"}}\");
+  print(\"${{\"two\"}} café\");
+  print(\"snowman ☃ ${{\"three\"}} and 日本語 ${{\"four\"}}\");
+  print(\"🎉${{twice(\"5\")}}🎉\");
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(ran.code, Some(0));
+    assert_eq!(
+        ran.stdout,
+        "café one\ntwo café\nsnowman ☃ three and 日本語 four\n🎉55🎉\n",
+        "the text around a hole has to survive being copied"
+    );
+}
+
+#[test]
 fn a_hole_may_contain_a_string() {
     let ran = run(
         "interp_nested_string",

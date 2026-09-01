@@ -70,6 +70,92 @@ fn run(name: &str, body: &str) -> String {
     String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
 }
 
+/// **`chars_between` counts characters, and it advances.**
+///
+/// The first version was
+///
+/// ```khora
+/// while at < stop { at = String::next_boundary(self, at); .. }
+/// ```
+///
+/// which never ends, because `next_boundary` answers the boundary *at or
+/// after* an offset and so answers where it already is. It was written by the
+/// person who wrote `next_boundary`, it compiled, and it hung on the first
+/// string with an accented letter in it — so the loop is what this pins, not
+/// only the arithmetic.
+#[test]
+fn chars_between_counts_characters_and_terminates() {
+    let out = run(
+        "chars_between",
+        r#"pub fn main() -> Int {
+  let s = "café au lait";
+  // "café" is five bytes and four characters.
+  print(Int::to_string(String::chars_between(s, 0, 5)));
+  print(Int::to_string(String::chars_between(s, 0, String::byte_length(s))));
+  print(Int::to_string(String::char_length(s)));
+  // An empty range, and one that starts past the end.
+  print(Int::to_string(String::chars_between(s, 3, 3)));
+  print(Int::to_string(String::chars_between(s, 0, 0)));
+  // Ends that are not boundaries: `é` is bytes 3..5, so a range ending
+  // inside it counts it rather than trapping or looping.
+  print(Int::to_string(String::chars_between(s, 0, 4)));
+  // Past the end is clamped.
+  print(Int::to_string(String::chars_between(s, 0, 9999)));
+  0
+}
+"#,
+    );
+    assert_eq!(out, "4\n12\n12\n0\n0\n4\n12\n");
+}
+
+/// **`Float::of_string` reads what a person writes and refuses the rest.**
+///
+/// It lived privately in `std::json` with a comment saying it belonged in
+/// `core` as soon as something else needed one. `examples/khq` needed one.
+///
+/// Half of this is the refusals. A number parser that accepts more than the
+/// caller expected is how a configuration value ends up meaning something
+/// nobody wrote, and the shape here is JSON's exactly.
+#[test]
+fn a_float_can_be_read_from_text() {
+    let out = run(
+        "float_of_string",
+        r#"fn show(text: String) -> String {
+  match Float::of_string(text) {
+    Option::Some(v) => Float::to_string(v),
+    Option::None => "refused",
+  }
+}
+
+pub fn main() -> Int {
+  print(show("1"));
+  print(show("-2.5"));
+  print(show("1e3"));
+  print(show("1.5e-2"));
+  print(show("2E+2"));
+  print(show("0.125"));
+  print(show("1.2.3"));
+  print(show(""));
+  print(show("abc"));
+  print(show("1."));
+  print(show("1e"));
+  print(show("+1"));
+  print(show("1 2"));
+  print(show(" 1"));
+  print(show("1x"));
+  print(show("inf"));
+  0
+}
+"#,
+    );
+    assert_eq!(
+        out,
+        "1\n-2.5\n1000\n0.015\n200\n0.125\n\
+         refused\nrefused\nrefused\nrefused\nrefused\n\
+         refused\nrefused\nrefused\nrefused\nrefused\n"
+    );
+}
+
 /// The literal, its escapes, and what `Show` makes of it.
 #[test]
 fn a_character_is_written_between_apostrophes() {

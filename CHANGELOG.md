@@ -47,6 +47,12 @@ it will behave differently now.
 
 ### Fixed
 
+- **A non-ASCII character beside a `${..}` hole panicked the compiler.**
+  `print("café ${n}")` ended in a Rust panic from `split_interpolation`, which
+  copied the text around a literal's holes one byte at a time. A literal with
+  no hole never reaches that code, so plain non-ASCII strings were always fine
+  and it needed both in one literal. Errata 67.
+
 - **`khora check` and `khora build` disagreed about `src/bin/`.** The
   `misplaced-main` lint exempted it, the lint's own message recommended putting
   a second program there, and the backend compiled every `main` it found into
@@ -94,6 +100,14 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **`Float::of_string`.** `Float` was the only primitive with no way in from
+  text. It existed privately in `std::json`, whose comment said it belonged in
+  `core` as soon as a second caller appeared; `examples/khq` is that caller.
+  The shape is JSON's, so `+1`, `1.`, `1e`, `1 2` and `inf` are refused.
+- **`String::chars_between`.** How many characters lie between two byte
+  offsets — what a caret needs, and what neither `char_length` nor
+  `byte_length` could answer.
 
 - **The rollback-failure policy is tested, and its one gap is written down.**
   `std::db` discards a failed rollback on purpose: the caller is told

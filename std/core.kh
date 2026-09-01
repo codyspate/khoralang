@@ -2480,6 +2480,25 @@ impl String {
   ///
   /// For walking to a safe place to cut: `String::slice(s, 0, s |> next_boundary(20))`
   /// takes about twenty bytes and never lands in the middle of anything.
+  ///
+  /// **At or after, so it does not advance.** Given an offset that is already
+  /// a boundary this answers that offset, which means
+  ///
+  /// ```khora
+  /// while at < stop {
+  ///   at = String::next_boundary(s, at);   // never ends
+  /// }
+  /// ```
+  ///
+  /// is an infinite loop on every string. To step a character at a time, pass
+  /// `at + 1` — or better, ask `char_at` and add `Char::utf8_length`, which
+  /// says what it is doing.
+  ///
+  /// The name is the trap: `next` reads as *after*. It is kept because the
+  /// behaviour is the one a cut wants — rounding an arbitrary offset outward
+  /// to something safe — and because `String::chars_between` and
+  /// `String::chars` are the two loops most callers actually want, and both
+  /// are here already.
   pub fn next_boundary(self, at: Int) -> Int {
     let length = String::byte_length(self);
     if at >= length {
@@ -2492,6 +2511,10 @@ impl String {
   }
 
   /// The last character boundary at or before `at`, or 0.
+  ///
+  /// **At or before**, like its sibling: on a boundary it answers where it
+  /// already is. See `next_boundary` for what that costs a caller who steps
+  /// with it.
   pub fn previous_boundary(self, at: Int) -> Int {
     if at <= 0 {
       0
@@ -2575,6 +2598,35 @@ impl String {
   /// Walks the string, so it is `O(n)`. `byte_length` is the constant-time one
   /// and is what a buffer size wants.
   pub fn char_length(self) -> Int { String::count_chars(self, 0, 0) }
+
+  /// How many characters lie between two byte offsets.
+  ///
+  /// **What a caret needs.** A tool reporting on text somebody else wrote
+  /// places the caret by counting the characters before the span and draws it
+  /// by counting the characters inside it, and `char_length` counts a whole
+  /// string while `byte_length` counts the wrong unit. `examples/khq` wrote
+  /// this for itself before it was here.
+  ///
+  /// `start` is rounded down to a boundary and `end` up, so a range that
+  /// splits a character counts it once rather than trapping. A caller who
+  /// wants to know whether it split one has `is_char_boundary`.
+  pub fn chars_between(self, start: Int, end: Int) -> Int {
+    let total = String::byte_length(self);
+    let stop = if end > total { total } else { end };
+    let mut at = String::previous_boundary(self, if start < 0 { 0 } else { start });
+    let mut seen = 0;
+    while at < stop {
+      // **`at + 1`, not `at`.** `next_boundary` answers the boundary *at or
+      // after* an offset, so on a boundary it answers where it already is --
+      // and `at = next_boundary(self, at)` is an infinite loop. The first
+      // version of this function was that loop, written by the person who
+      // wrote `next_boundary`, and it hung on the first string with an
+      // accented letter in it.
+      at = String::next_boundary(self, at + 1);
+      seen = seen + 1;
+    };
+    seen
+  }
 
   fn count_chars(self, at: Int, so_far: Int) -> Int {
     match String::char_at(self, at) {
@@ -3080,6 +3132,17 @@ extern fn khora_float_text(value: Float, into: Ptr, capacity: Int) -> Int;
 /// error `std::decimal` exists to avoid.
 extern fn khora_float_fixed(value: Float, places: Int, into: Ptr, capacity: Int) -> Int;
 
+/// A partial number and where reading it stopped.
+///
+/// `Float::of_string`'s working, and nothing else's. An `at` of `-1` is the
+/// one signal it carries: a decimal point with no digit after it, which cannot
+/// be reported by stopping early because stopping early is what a *valid*
+/// number does at the end of its whole part.
+type Scanned = {
+  number: Float,
+  at: Int,
+};
+
 impl Float {
   /// The number, written out — `1.5`, `0.1`, `inf`.
   ///
@@ -3138,6 +3201,141 @@ impl Float {
   /// A number too large for an `Int` clamps to the nearest end, and a `NaN` is
   /// zero. Undefined behaviour is the alternative and is not one.
   pub fn to_int(self) -> Int;
+
+  /// The number `text` names, or `None` if it does not name one.
+  ///
+  /// **The shape is JSON's**, which is also what a person writes: an optional
+  /// `-`, digits, an optional `.` and digits, an optional `e` or `E` with an
+  /// optional sign and digits. No `+` in front, no underscores, no spaces, no
+  /// hexadecimal, no `inf` and no `nan` — a parser that accepts more than the
+  /// caller expected is how a configuration value ends up meaning something
+  /// nobody wrote, and the two names are worse than that because they are
+  /// values arithmetic cannot get back out of.
+  ///
+  /// An `Option` for `Int::of_string`'s reason: the text came from outside, and
+  /// somebody typing it wrong is a thing to answer rather than to stop the
+  /// program over.
+  ///
+  /// **This existed already, privately, in `std::json`.** Its comment said so:
+  /// *"This is `Float::of_string` in all but name and would be better as one in
+  /// `std::core`. It is here because `std::json` is where the need is and a
+  /// number parser in `core` is a decision worth making on its own evidence."*
+  /// The evidence arrived as `examples/khq`, which has to read the numbers in a
+  /// query and could not, and which found in the same hour that `Float` is the
+  /// only primitive with no way in from text — `Int` and `Decimal` both have
+  /// one.
+  ///
+  /// Inexact by construction, and that is the type rather than this function:
+  /// `0.1` is not a binary fraction and never will be. `Decimal::of_string` is
+  /// the one to reach for when the digits have to survive.
+  pub fn of_string(text: String) -> Option<Float> {
+    let length = String::byte_length(text);
+    if length == 0 {
+      Option::None
+    } else {
+      let negative = U8::to_int(String::byte(text, 0)) == 45;
+      let start = if negative { 1 } else { 0 };
+      match Float::scan(text, start, length) {
+        Option::None => Option::None,
+        Option::Some(value) => Option::Some(if negative { 0.0 - value } else { value }),
+      }
+    }
+  }
+
+  /// The unsigned part, or `None` if the whole of it is not a number.
+  ///
+  /// **Every stage has to consume everything it can and the last one has to
+  /// have reached the end.** Stopping early and answering with what was read
+  /// so far is how `"1.2.3"` becomes `1.2` and a document with a typo in it
+  /// gets a number nobody wrote.
+  fn scan(text: String, start: Int, length: Int) -> Option<Float> {
+    let whole = Float::digits(text, start, 0.0);
+    if whole.at == start {
+      Option::None
+    } else {
+      let after_point = if whole.at < length && U8::to_int(String::byte(text, whole.at)) == 46 {
+        let fraction = Float::digits(text, whole.at + 1, 0.0);
+        if fraction.at == whole.at + 1 {
+          { number: 0.0, at: 0 - 1 }
+        } else {
+          {
+            number: whole.number
+            + fraction.number / Float::power_of_ten(fraction.at - (whole.at + 1)),
+            at: fraction.at,
+          }
+        }
+      } else {
+        whole
+      };
+      if after_point.at < 0 {
+        Option::None
+      } else {
+        Float::exponent(text, after_point, length)
+      }
+    }
+  }
+
+  /// The `e` part, if there is one, and the check that nothing is left over.
+  fn exponent(text: String, so_far: Scanned, length: Int) -> Option<Float> {
+    if so_far.at >= length {
+      Option::Some(so_far.number)
+    } else {
+      let marker = U8::to_int(String::byte(text, so_far.at));
+      if marker != 101 && marker != 69 {
+        // Something that is not part of a number, before the end of the text.
+        Option::None
+      } else {
+        let signed = so_far.at + 1;
+        let down = signed < length && U8::to_int(String::byte(text, signed)) == 45;
+        let up = signed < length && U8::to_int(String::byte(text, signed)) == 43;
+        let from = if down || up { signed + 1 } else { signed };
+        let digits = Float::digits(text, from, 0.0);
+        if digits.at != length || digits.at == from {
+          Option::None
+        } else {
+          let scale = Float::power_of_ten(Float::to_int(digits.number));
+          Option::Some(if down { so_far.number / scale } else { so_far.number * scale })
+        }
+      }
+    }
+  }
+
+  /// A run of digits as a number, and where it stopped.
+  fn digits(text: String, at: Int, so_far: Float) -> Scanned {
+    if at >= String::byte_length(text) {
+      { number: so_far, at: at }
+    } else {
+      let byte = U8::to_int(String::byte(text, at));
+      if byte >= 48 && byte <= 57 {
+        Float::digits(text, at + 1, so_far * 10.0 + Int::to_float(byte - 48))
+      } else {
+        { number: so_far, at: at }
+      }
+    }
+  }
+
+  /// Ten to the `n`, for `n` at least zero.
+  ///
+  /// By repeated multiplication rather than by a table, because the table
+  /// would have to stop somewhere and the answer past its end would be wrong
+  /// rather than large.
+  ///
+  /// **Capped at 400 steps.** A double runs out at about `1e308` and every
+  /// exponent past that is the same infinity, so the cap changes no answer —
+  /// and without it `1e999999999`, which is nine bytes of a document somebody
+  /// else wrote, is a billion multiplications. The version of this that lived
+  /// in `std::json` had learned that already; it is written down here because
+  /// the lesson travelled with the code and the comment nearly did not.
+  fn power_of_ten(n: Int) -> Float {
+    let steps = if n > 400 { 400 } else { n };
+    let mut out = 1.0;
+    let mut left = steps;
+    while left > 0 {
+      out = out * 10.0;
+      left = left - 1;
+    };
+    out
+  }
 }
 
 /// The most negative `Int`, which has no literal.

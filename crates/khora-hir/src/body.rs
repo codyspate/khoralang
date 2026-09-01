@@ -1085,8 +1085,13 @@ fn split_interpolation(body: &str) -> Vec<Part> {
 
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            text.push_str(&body[i..i + 2]);
-            i += 2;
+            // The backslash is one byte; what it escapes may not be. A
+            // literal backslash before an accented letter is not useful,
+            // but it is writable, and slicing two bytes out of it is the
+            // same panic.
+            let escaped = char_at(body, i + 1);
+            text.push_str(&body[i..i + 1 + escaped]);
+            i += 1 + escaped;
             continue;
         }
         if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
@@ -1121,13 +1126,24 @@ fn split_interpolation(body: &str) -> Vec<Part> {
             text_at = i as u32;
             continue;
         }
-        text.push_str(&body[i..i + 1]);
-        i += 1;
+        let width = char_at(body, i);
+        text.push_str(&body[i..i + width]);
+        i += width;
     }
     if !text.is_empty() {
         parts.push(Part::Text(Piece { text, at: text_at }));
     }
     parts
+}
+
+/// How many bytes the character starting at `at` occupies.
+///
+/// `at` is always a character boundary: every branch of the scan above either
+/// steps over ASCII punctuation or steps by the width this returns. One byte
+/// for a `str` that has somehow run out, which the loop's own condition makes
+/// unreachable and which keeps this total rather than panicking a second way.
+fn char_at(body: &str, at: usize) -> usize {
+    body[at..].chars().next().map_or(1, char::len_utf8)
 }
 
 /// [`unescape`] for a body whose quotes are already off.
