@@ -392,8 +392,11 @@ fn resident_kb(pid: u32) -> Option<u64> {
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    // "name","pid","session","#","12,345 K"
-    let last = text.rsplit(',').next()?.trim().trim_matches('"');
+    // `"name","pid","session","#","4,468 K"` -- and **the memory field has a
+    // thousands comma inside it**, so splitting on the last comma returns
+    // `468 K"` and reports four and a half megabytes as 468 KB. The field
+    // separator is quote-comma-quote, which the number's own comma is not.
+    let last = text.rsplit(",\"").next()?.trim().trim_matches('"');
     let digits: String = last.chars().filter(char::is_ascii_digit).collect();
     digits.parse().ok()
 }

@@ -102,13 +102,21 @@ pub(super) fn build(
     stop: Stop,
     profile: Profile,
 ) -> Result<(), Vec<HirError>> {
+    let _whole = crate::timings::Whole::start();
+
     let files = root.files(db);
-    let mut diagnostics: Vec<HirError> = Vec::new();
-    for file in files {
-        diagnostics.extend(khora_types::diagnostics(db, *file).iter().cloned());
-    }
-    if !diagnostics.is_empty() {
-        return Err(diagnostics);
+    {
+        // Resolution and type checking, which salsa has usually already done
+        // for a `khora check` in the same process. On a cold build it has not,
+        // and this is where that shows.
+        let _phase = crate::timings::Phase::start("check");
+        let mut diagnostics: Vec<HirError> = Vec::new();
+        for file in files {
+            diagnostics.extend(khora_types::diagnostics(db, *file).iter().cloned());
+        }
+        if !diagnostics.is_empty() {
+            return Err(diagnostics);
+        }
     }
 
     let machine = target_machine(profile)?;
@@ -117,11 +125,15 @@ pub(super) fn build(
     // body, so every module's source has to be present at once. There is no
     // separate compilation to be had until D12 says what a compiled artifact
     // even is.
-    let mono = khora_types::mono::program_instances(db, root);
+    let mono = {
+        let _phase = crate::timings::Phase::start("monomorphize");
+        khora_types::mono::program_instances(db, root)
+    };
     if !mono.errors.is_empty() {
         return Err(mono.errors.clone());
     }
 
+    let _lowering = crate::timings::Phase::start("lower");
     let types = merged_types(db, files);
     let name = files
         .first()
@@ -349,6 +361,7 @@ pub(super) fn build(
     }
     backend.emit_pending_thunks();
     backend.emit_pending_drop_glue();
+    drop(_lowering);
 
     if !backend.errors.is_empty() {
         return Err(backend.errors);

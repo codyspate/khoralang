@@ -39,6 +39,7 @@ mod debug;
 mod lower;
 #[cfg(feature = "llvm")]
 mod runtime;
+mod timings;
 
 #[cfg(feature = "llvm")]
 pub use backend::{

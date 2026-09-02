@@ -51,3 +51,4 @@ bench/*.pdb
 # What `scripts/package.sh` assembles. Built on demand and published by the
 # release workflow; never committed.
 /dist/
+__pycache__/

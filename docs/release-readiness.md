@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **187 of 222**, and re-scored
+than against the roadmap's account of itself. **191 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -49,7 +49,7 @@ advertised, so no wasm deployment has to work.
 | 7. Cross-compilation and deployment | 11 / 11 |
 | 8. FFI and C interoperability | 4 / 8 |
 | 9. Traps, debugging and production diagnosis | 7 / 7 |
-| 10. Compiler performance and scale | 1 / 6 |
+| 10. Compiler performance and scale | 5 / 6 |
 | 11. Tooling and editor experience | 7 / 10 |
 | 12. Installation, toolchains and release artifacts | 6 / 9 |
 | 13. Package ecosystem | 7 / 7 |
@@ -158,7 +158,7 @@ Peak requests per second alone is not a release gate. A production runtime must 
 - [x] The HTTP server has a documented distinction between connection capacity and actively executing/request-processing capacity. **Done:** by saying that they are one number and why, rather than by inventing a second. An accepted connection is a fiber and that fiber is inside the handler for as long as the handler runs, so 256 is both the most connections served at once and the most handlers running at once. `http_native.kh` says so where the bound is written and `/docs/cookbook/http-service/` says it where somebody writing a server will meet it, with the measurement that matters: the server saturates by about 16 connections, so past that the bound governs queueing rather than capacity, and a handler waiting on something scarcer wants its own smaller bound rather than a lower connection limit.
 - [x] The current connection/nursery limits are intentionally tuned for scheduled fibers rather than inherited from the old OS-thread implementation. **Done:** measurable now, and measured. Throughput is flat from 16 connections to 128 -- 176k, 180k, 177k, 176k -- while median latency rises in proportion to the queue, 70us to 724us, which is a saturated server rather than one that has run out of capacity. The server saturates well below 256 connections, so the bound is not what limits throughput at any concurrency this rig can offer, and raising or lowering it would change queueing rather than capacity. 256 is now a number with a measurement behind it rather than an inherited one.
 - [x] Sustained overload tests cover at least 100%, 125% and 200% of sustainable offered load. **Done:** `khora-codegen-llvm/tests/load.rs`: overload, recovery and shutdown.
-- [x] Under overload, RSS remains bounded within the configured operating model. **Done:** `loadgen --watch-pid` samples the server's resident set through a run. `bench/service` peaks at 584 KB at 32 connections and *less* at 128, and every server measured -- Khora, Rust, Go, C#, Java, Node -- stays under a megabyte. Memory does not grow with connections, which is the property this item is about.
+- [x] Under overload, RSS remains bounded within the configured operating model. **Done:** `loadgen --watch-pid` samples the server's resident set through a run. `bench/service` peaks at **8.4 MB** at 32 connections and does not grow with connections, and the ladder from 16 to 128 is flat throughput with latency proportional to the queue, which is a saturated server rather than one losing ground. For scale: Go's `net/http` holds 21.8 MB doing the same work, Node 86.8 MB, Kestrel 240 MB and the JDK's server 699 MB. The first version of this measurement said 576 KB and was wrong -- `tasklist` prints memory with a thousands separator and the sampler split on the last comma -- which is errata 77's second half.
 - [x] Runnable queues and admission queues remain bounded or have explicitly documented limits. **Done:** `bounded_nursery` turns the ceiling into backpressure; the listening backlog absorbs the rest.
 - [x] Latency degrades predictably instead of entering overload collapse. **Done:** `overload_becomes_latency_rather_than_loss`.
 - [x] Controlled rejection uses appropriate HTTP semantics such as 503 for service saturation and 429 for policy/rate limits where relevant. **Done:** the server answers 503 under backpressure, and the whole of 5xx carries a real reason phrase — a service that answered 503 and put `HTTP/1.1 503 Unknown` on the wire is what put them there. 429 is available for a policy layer; there is no rate limiter in `std`, so the *where relevant* half is not relevant yet.
@@ -244,11 +244,11 @@ A target is “supported” only when the toolchain produces something users can
 
 ## 10. Compiler performance and scale
 
-- [ ] Build-time measurements use a release-built Khora compiler before public performance claims are made.
+- [x] Build-time measurements use a release-built Khora compiler before public performance claims are made. **Done, and enforced rather than remembered:** `scripts/compiler-perf.py` builds `khora` with `--release` on every run instead of using one it finds. The first version did use one it found, and the binary on the machine it was written on was four days old -- it failed to parse a character escape the current lexer accepts, and would otherwise have quietly produced build times for a compiler nobody has. It builds the release runtime archive too, because a release compiler with a debug runtime fails in the linker in a way that looks nothing like a missing build step.
 - [x] The corpus includes at least one substantially larger application than the current small reference programs. **Done:** #152. `examples/khq` is 3,643 lines across ten modules with 34 tests — a query language with a lexer, a parser, an evaluator, builtins and a renderer. It builds in the baseline and its tests run there.
-- [ ] Cold build time, warm/repeated developer workflow, peak compiler memory, monomorphization cost and link time are measured separately enough to identify regressions.
-- [ ] Whole-program monomorphization is tested at a size capable of exposing superlinear behavior.
-- [ ] A documented budget/regression baseline exists for future compiler changes.
+- [x] Cold build time, warm/repeated developer workflow, peak compiler memory, monomorphization cost and link time are measured separately enough to identify regressions. **Done:** `KHORA_TIMINGS=1` splits a build into check, monomorphize, lower, optimize, object and link, and `scripts/compiler-perf.py` reads them. For `examples/khq`, the largest program in the corpus: cold build 12.12s, warm 0.33s, check-only 0.60s, peak compiler memory 187 MB. The split is the finding -- **monomorphization is 8.0 of the 11.5 seconds**, with the object file 2.5 and the linker 0.5. A regression now points at a phase instead of at a total.
+- [x] Whole-program monomorphization is tested at a size capable of exposing superlinear behavior. **Done, and it is linear:** a generated package instantiating one generic at 10, 50, 200 and 400 distinct types -- a 40x range -- moves the monomorphize phase from 3,004 ms to 3,930 ms, which is 1.31x. The marginal cost is about 2.4 ms per instantiation on a fixed cost of about 3.0 seconds, and **the fixed cost is `std`**: every build monomorphizes the whole standard library whole-program before it reaches the program. That is why the totals looked flat until the phase was isolated, and it is the same finding as roadmap 14.35 from the other side.
+- [x] A documented budget/regression baseline exists for future compiler changes. **Done:** `docs/compiler-perf-baseline.json`, written by `compiler-perf.py --write-baseline` and compared by `--check`, which exits non-zero when cold, warm or check-only build time has moved by more than 1.5x. The tolerance is wide on purpose: this runs on whatever machine somebody has, and a gate that cries wolf is a gate that gets skipped, so it catches a doubling rather than a drift. It says so when the baseline was taken on a different platform rather than comparing wall-clock numbers across machines silently.
 - [x] Any public comparison to Rust/Go/another compiler uses equivalent workloads and records tool versions/hardware. **Done:** `bench/README.md` records hardware, versions and method, and says a number only travels within one sitting.
 
 ---

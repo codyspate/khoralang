@@ -169,6 +169,15 @@ it will behave differently now.
 
 ### Fixed
 
+- **The first table from the new benchmark rig had every memory figure wrong.**
+  `tasklist` on Windows prints a process's memory with a thousands separator,
+  and both samplers took the text after the last comma -- reading 468 KB from a
+  process using 4,468. Everything was understated by roughly ten times and the
+  biggest servers most, so the JDK's 699 MB was published as 948 KB. The field
+  separator is quote-comma-quote, which the number's own comma is not. The
+  corrected column is the one Khora leads: 8.4 MB against Go's 21.8, Node's
+  86.8, Kestrel's 240 and the JDK's 699. Errata 77.
+
 - **Every throughput figure this project published was two to twelve times too
   high.** `bench/load.py` ran one process per connection, each timing itself,
   and divided the total by the duration it was *asked* for rather than the one
@@ -181,9 +190,12 @@ it will behave differently now.
   `bench/loadgen.rs` and `bench/measure.py` replace `load.py` and `compare.py`;
   every published number has been retaken; `README.md`, `/docs/performance/`,
   `/docs/limitations/`, `bench/README.md` and `docs/design/fibers.md` are
-  corrected. `std::net::http` answers **174,360 req/s**, p50 156us, p99 543us,
-  peak RSS 576 KB, which is just under Go's `net/http` and a third under
-  Kestrel where this repository had claimed 10x Go and 6x Kestrel.
+  corrected. `std::net::http` answers **174,201 req/s**, p50 161us, p99 554us,
+  peak RSS **8.4 MB**, which is a little under Go's `net/http` and a third
+  under Kestrel on rate where this repository had claimed 10x Go and 6x
+  Kestrel -- and between three and eighty times less memory than any runtime
+  it was measured against, which is the column nobody had instrumented and
+  the one Khora is actually ahead on.
 
 - **The traps reference told people to set the wrong environment variable,
   and called a failed assertion a trap.** `RUST_BACKTRACE` is honoured but
@@ -304,6 +316,18 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **`KHORA_TIMINGS=1` says where a build's time went**, splitting it into
+  check, monomorphize, lower, optimize, object and link. The split is the
+  finding: for the largest program in the corpus, monomorphization is 8.0 of
+  the 11.5 seconds a cold build takes, the object file 2.5 and the linker 0.5.
+  `scripts/compiler-perf.py` reads those lines and measures cold build, warm
+  rebuild, check-only time, peak compiler memory and how monomorphization
+  scales; `--write-baseline` records them in `docs/compiler-perf-baseline.json`
+  and `--check` fails when one has moved by more than 1.5x. Monomorphization is
+  linear -- about 2.4 ms per instantiation over a 40x range -- on a fixed cost
+  of three seconds that is `std` being compiled whole-program before the build
+  reaches the program.
 
 - **Provenance, a toolchain bill of materials, and release notes, published
   with the archives.** Every release archive is attested with

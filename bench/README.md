@@ -71,52 +71,55 @@ sentence or they do not travel.**
 
 | | req/s | p50 | p99 | peak RSS | |
 | --- | --- | --- | --- | --- | --- |
-| C#, ASP.NET Core (Kestrel) | 268,397 | 101us | 252us | 976 KB | |
-| Khora `floor` | > 255,707 | 121us | 216us | 676 KB | generator still climbing |
-| Khora `render` | 241,064 | 127us | 245us | 608 KB | |
-| Rust control, thread per connection | 202,814 | 150us | 313us | 764 KB | |
-| Go, `net/http` | 188,869 | 103us | 1,385us | 992 KB | |
-| Khora, `std::net::http` | 174,360 | 156us | 543us | 576 KB | |
-| Java, JDK `HttpServer` | > 116,050 | 236us | 665us | 900 KB | ladder still climbing |
-| Node, `node:http` | 39,223 | 687us | 3,910us | 996 KB | spread 1.16x |
+| C#, ASP.NET Core (Kestrel) | 266,267 | 103us | 253us | 240 MB |  |
+| Khora `floor` | > 234,322 | 128us | 274us | 7.4 MB | generator still climbing |
+| Khora `render` | > 234,039 | 127us | 253us | 7.8 MB | generator still climbing |
+| Rust control, thread per connection | 202,182 | 150us | 319us | 5.5 MB |  |
+| Go, `net/http` | 185,670 | 102us | 1,538us | 21.8 MB |  |
+| Khora, `std::net::http` | 174,201 | 161us | 554us | 8.4 MB |  |
+| Java, JDK `HttpServer` | > 114,200 | 251us | 663us | 699 MB | ladder still climbing |
+| Node, `node:http` | 39,184 | 682us | 4,101us | 86.8 MB | spread 1.11x |
 
-Rows with a `>` are lower bounds and say why in the last column. `floor` is
-fast enough that the generator is still gaining when given more of the machine.
-Java's ladder was still climbing at 128 connections, which is a JIT that had
-not finished with the handler.
+Rows with a `>` are lower bounds and say why in the last column. `floor` and
+`render` are fast enough that the generator is still gaining when given more of
+the machine. Java's ladder was still climbing at 128 connections, which is a
+JIT that had not finished with the handler.
 
 ### What the differences say
 
-**`service` against `floor` is the library.** 174,360 against more than
-255,707: the whole of `std::net::http` -- request parsing, the header map, the
-router, response building -- costs about a third of the throughput of a socket
-loop that does none of it. `render` at 241,064 puts most of what is left in
-reading the request rather than writing the answer. These are the comparisons
-these servers were built for and they are the ones worth the most, because all
-three are the same language on the same runtime in the same sitting.
+**`service` against `floor` is the library.** 174,201 against more than
+234,322: the whole of `std::net::http` -- request parsing, the header map, the
+router, response building -- costs about a quarter of the throughput of a
+socket loop that does none of it. `render` sits with `floor`, which puts what
+is left in reading the request rather than writing the answer. These are the
+comparisons these servers were built for and they are worth the most, because
+all three are the same language on the same runtime in the same sitting.
 
 **`floor` against the Rust control is the runtime**, and the control is a
 thread per connection, which is not the fastest way to write this server in
 Rust. Read it as "the runtime is not what limits either of them" rather than as
 a win.
 
-**Against other languages, Khora's `Router` is mid-table.** It is about 8 per
-cent under Go's `net/http`, 35 per cent under Kestrel, roughly four times Node
-and comfortably ahead of the JDK's server. This repository previously claimed
-"at least 6x Kestrel and at least 10x Go" on the strength of the old rig; the
-truth is the other way round for both. Each peer is that language's *ordinary*
-server rather than a tuned one -- Node's is single-threaded by design and would
-be several times faster behind `cluster`, the JDK's is not what a Java service
-ships on, and `fasthttp` is faster than `net/http` -- so read the table as
-"what you get when you write the obvious thing".
+**Against other languages, Khora's `Router` is mid-table on throughput and
+first on memory by a wide margin.** It is about six per cent under Go's
+`net/http` and a third under Kestrel, roughly four times Node, and ahead of the
+JDK's server. It holds 8.4 MB doing it, against Go's 21.8, Node's 86.8,
+Kestrel's 240 and the JDK's 699 -- which is the "no VM and no tracing GC" claim
+showing up in the one number where it should. This repository previously
+claimed "at least 6x Kestrel and at least 10x Go" on throughput on the strength
+of the old rig; the truth is the other way round on rate, and the memory column
+is the part that was worth claiming all along.
+
+Each peer is that language's *ordinary* server rather than a tuned one --
+Node's is single-threaded by design and would be several times faster behind
+`cluster`, the JDK's is not what a Java service ships on, and `fasthttp` is
+faster than `net/http` -- so read the table as "what you get when you write the
+obvious thing".
 
 **Latency is not throughput.** Go answers the median request faster than Khora
-does (103us against 156us) and the slowest one much more slowly (1,385us
-against 543us). A server chosen on peak rate alone would have missed both.
-
-**Memory is flat.** Peak resident set is under a megabyte for every server
-here, and for Khora it does not grow with connections: `service` holds 584 KB
-at 32 connections and less at 128.
+does (102us against 161us) and the slowest one nearly three times more slowly
+(1,538us against 554us). A server chosen on peak rate alone would have missed
+both.
 
 ### The four conditions, checked
 
@@ -131,12 +134,12 @@ the default for that reason. Where a server is fast enough that this stops
 being true, the row is marked and the figure is a lower bound.
 
 **The ladder flattens.** From 16 connections to 128 the rate is level while
-median latency rises with concurrency -- `service` runs 176k, 180k, 177k, 176k.
+median latency rises with concurrency -- `service` runs 177k, 182k, 179k, 174k.
 Constant throughput with latency proportional to queueing is what a saturated
 server looks like, and it is the shape the old rig could never produce.
 
-**It repeats.** Spread across sittings is 1.03x to 1.05x for the servers that
-pass. The figure that disqualified the old rig was 1.85x.
+**It repeats.** Spread across sittings is 1.04x to 1.09x. The figure that
+disqualified the old rig was 1.85x.
 
 **The machine and the date are printed with the number** by `loadgen` itself,
 so a figure cannot be separated from its circumstances by being copied.

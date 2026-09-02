@@ -3042,41 +3042,74 @@ the generator is not what it is measuring.
 
 ### What the numbers actually are
 
-One sitting, 16-core Windows desktop, release builds, 32 connections, six-second
-runs, mean of five, every condition checked by the script that produced the
-table:
+One sitting, 16-core Windows desktop, release builds, 32 connections,
+six-second runs, mean of five, every condition checked by the script that
+produced the table:
 
 | | req/s | p50 | p99 | peak RSS | |
 | --- | --- | --- | --- | --- | --- |
-| C#, ASP.NET Core (Kestrel) | 268,397 | 101us | 252us | 976 KB | |
-| Khora `floor` | > 255,707 | 121us | 216us | 676 KB | generator still climbing |
-| Khora `render` | 241,064 | 127us | 245us | 608 KB | |
-| Rust control, thread per connection | 202,814 | 150us | 313us | 764 KB | |
-| Go, `net/http` | 188,869 | 103us | 1,385us | 992 KB | |
-| Khora, `std::net::http` | 174,360 | 156us | 543us | 576 KB | |
-| Java, JDK `HttpServer` | > 116,050 | 236us | 665us | 900 KB | ladder still climbing |
-| Node, `node:http` | 39,223 | 687us | 3,910us | 996 KB | spread 1.16x |
+| C#, ASP.NET Core (Kestrel) | 266,267 | 103us | 253us | 240 MB |  |
+| Khora `floor` | > 234,322 | 128us | 274us | 7.4 MB | generator still climbing |
+| Khora `render` | > 234,039 | 127us | 253us | 7.8 MB | generator still climbing |
+| Rust control, thread per connection | 202,182 | 150us | 319us | 5.5 MB |  |
+| Go, `net/http` | 185,670 | 102us | 1,538us | 21.8 MB |  |
+| Khora, `std::net::http` | 174,201 | 161us | 554us | 8.4 MB |  |
+| Java, JDK `HttpServer` | > 114,200 | 251us | 663us | 699 MB | ladder still climbing |
+| Node, `node:http` | 39,184 | 682us | 4,101us | 86.8 MB | spread 1.11x |
 
 **The correction is not only to the magnitudes.** `bench/README.md` concluded
 from the old rig that Khora's `Router` was "at least 6x Kestrel and at least
 10x Go's `net/http`". Measured against a generator that is not the thing being
-measured, it is **below** both: about 8 per cent under Go's standard library
-and 35 per cent under Kestrel. It is roughly four times Node and, on this
-machine, comfortably ahead of the JDK's server. That is a respectable place for
-a young standard library to be and it is nowhere near where this repository
-said it was.
+measured, it is **below** both on rate: about six per cent under Go's standard
+library and a third under Kestrel. It is roughly four times Node and ahead of
+the JDK's server.
 
-Two rows are lower bounds and are marked. `floor` is fast enough that the
-generator is still gaining when it is given more of the machine, so its true
-figure is above 255,707. Java's ladder was still climbing at 128 connections,
-which is a JIT that had not finished compiling the handler.
+What the old rig never measured at all is the column that turns out to be
+Khora's: **8.4 MB against Go's 21.8, Node's 86.8, Kestrel's 240 and the JDK's
+699.** Between three and eighty times less memory than the runtimes it answers
+as fast as. The claim worth making was in the row nobody had instrumented.
+
+Rows marked in the last column are lower bounds. `floor` and `render` are fast
+enough that the generator is still gaining when it is given more of the
+machine. Java's ladder was still climbing at 128 connections, which is a JIT
+that had not finished compiling the handler.
 
 The narrower comparisons the servers were built for survive and are worth more
 than the cross-language row: `service` against `floor` is the library, so the
 whole of `std::net::http` -- parse, header map, route match, render -- costs
-about a third of the throughput of a socket loop that does none of it. Peak
-resident memory is under a megabyte everywhere and does not grow with
-connections.
+about a quarter of the throughput of a socket loop that does none of it.
+
+### And then the replacement got the memory column wrong
+
+The first table published from the new rig said Khora's server peaked at
+**576 KB**, and every other server under a megabyte too. That was a parsing
+bug in the new tool, committed and published before anybody looked at the
+numbers and asked whether they were plausible. A JVM does not run a web server
+in 900 KB.
+
+`tasklist` on Windows prints a process's memory with a thousands separator in
+it:
+
+```text
+"control_keepalive.exe","48988","Console","1","4,468 K"
+```
+
+The sampler took the text after the last comma, which is `468 K"`, and read
+468 KB from a process using 4,468. Everything was divided by roughly ten and
+the error grew with the number, so the biggest servers were understated most:
+the JDK's 699 MB was being reported as 948 KB.
+
+The field separator in that line is quote-comma-quote, which the number's own
+comma is not, and splitting on that reads it correctly. Both the Rust sampler
+and the Python one had the same bug, written the same way an hour apart.
+
+Two things are worth keeping from it. **A number nobody sanity-checked is a
+number nobody checked**: the throughput figures were verified against a server
+that counted its own answers, and the memory figures were not verified against
+anything, so the one that was wrong was the one nobody had an oracle for. And
+the corrected column is the interesting one -- it is where Khora is actually
+ahead -- which is a reminder that the measurement least worth trusting is
+often the one nobody expected to care about.
 
 ### The lesson that generalises
 

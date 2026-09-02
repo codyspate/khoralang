@@ -1,0 +1,84 @@
+{
+  "platform": "win32",
+  "cores": 16,
+  "cold": {
+    "seconds": 12.123,
+    "peak_rss_kb": 192480,
+    "phases": {
+      "check": 236.388,
+      "monomorphize": 7989.351,
+      "lower": 229.632,
+      "object": 2512.528,
+      "link": 475.329,
+      "total": 11516.928
+    }
+  },
+  "warm": {
+    "seconds": 0.327,
+    "peak_rss_kb": 22292,
+    "phases": {}
+  },
+  "check": {
+    "seconds": 0.599,
+    "peak_rss_kb": 18348,
+    "phases": {}
+  },
+  "scaling": [
+    {
+      "instantiations": 10,
+      "seconds": 5.408,
+      "peak_rss_kb": 130980,
+      "phases": {
+        "check": 127.797,
+        "monomorphize": 3003.46,
+        "lower": 117.849,
+        "object": 1398.578,
+        "link": 442.437,
+        "total": 5131.479
+      },
+      "ms_each": 540.8
+    },
+    {
+      "instantiations": 50,
+      "seconds": 5.71,
+      "peak_rss_kb": 133644,
+      "phases": {
+        "check": 127.26,
+        "monomorphize": 3073.448,
+        "lower": 157.317,
+        "object": 1398.74,
+        "link": 386.675,
+        "total": 5183.009
+      },
+      "ms_each": 114.2
+    },
+    {
+      "instantiations": 200,
+      "seconds": 6.27,
+      "peak_rss_kb": 146588,
+      "phases": {
+        "check": 138.953,
+        "monomorphize": 3349.103,
+        "lower": 177.431,
+        "object": 1558.889,
+        "link": 393.014,
+        "total": 5662.745
+      },
+      "ms_each": 31.35
+    },
+    {
+      "instantiations": 400,
+      "seconds": 7.178,
+      "peak_rss_kb": 167880,
+      "phases": {
+        "check": 147.987,
+        "monomorphize": 3930.424,
+        "lower": 188.956,
+        "object": 1882.769,
+        "link": 424.511,
+        "total": 6625.859
+      },
+      "ms_each": 17.945
+    }
+  ]
+}

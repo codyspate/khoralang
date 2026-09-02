@@ -547,6 +547,7 @@ impl<'ctx> Backend<'ctx> {
         // hand to the assembler. It costs a walk of the module on a build that
         // has already spent longer optimizing it.
         if let Some(pipeline) = profile.pipeline() {
+            let _phase = crate::timings::Phase::start("optimize");
             let options = PassBuilderOptions::create();
             self.module.run_passes(pipeline, machine, options).map_err(|e| {
                 vec![backend_error(format!(
@@ -566,10 +567,14 @@ impl<'ctx> Backend<'ctx> {
         }
 
         let object = with_suffix(out, ".o");
-        machine
-            .write_to_file(&self.module, FileType::Object, &object)
-            .map_err(|e| vec![backend_error(format!("writing {}: {e}", object.display()))])?;
+        {
+            let _phase = crate::timings::Phase::start("object");
+            machine
+                .write_to_file(&self.module, FileType::Object, &object)
+                .map_err(|e| vec![backend_error(format!("writing {}: {e}", object.display()))])?;
+        }
 
+        let _phase = crate::timings::Phase::start("link");
         toolchain::link_with_runtime(&[&object], out, library, &self.c_exports, profile)
             .map_err(|e| vec![backend_error(e)])
     }

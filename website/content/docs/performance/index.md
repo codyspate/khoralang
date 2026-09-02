@@ -6,10 +6,11 @@ sidebar:
 ---
 
 **Khora's HTTP server answers about 174,000 requests a second on a 16-core
-desktop, which puts it just below Go's standard library and well below
-Kestrel.** This page says what that measures, what it does not, how to run it
-yourself, and why every figure published here before September 2026 was between
-two and twelve times too high.
+desktop, in 8.4 MB of memory.** That is a little under Go's standard library
+on rate and between three and eighty times less memory than any of the
+runtimes it is measured against. This page says what that measures, what it
+does not, how to run it yourself, and why every figure published here before
+September 2026 was between two and twelve times too high.
 
 A benchmark number without the ladder that produced it is unfalsifiable, and an
 unfalsifiable number in a language's marketing makes every other claim in the
@@ -48,25 +49,27 @@ travel with that sentence or they do not travel.**
 
 | | req/s | p50 | p99 | peak RSS |
 | --- | --- | --- | --- | --- |
-| C#, ASP.NET Core (Kestrel) | 268,397 | 101us | 252us | 976 KB |
-| Khora `floor` | > 255,707 | 121us | 216us | 676 KB |
-| Khora `render` | 241,064 | 127us | 245us | 608 KB |
-| Rust, thread per connection | 202,814 | 150us | 313us | 764 KB |
-| Go, `net/http` | 188,869 | 103us | 1,385us | 992 KB |
-| **Khora, `std::net::http`** | **174,360** | **156us** | **543us** | **576 KB** |
-| Java, JDK `HttpServer` | > 116,050 | 236us | 665us | 900 KB |
-| Node, `node:http` | 39,223 | 687us | 3,910us | 996 KB |
+| C#, ASP.NET Core (Kestrel) | 266,267 | 103us | 253us | 240 MB |
+| Khora `floor` | > 234,322 | 128us | 274us | 7.4 MB |
+| Khora `render` | > 234,039 | 127us | 253us | 7.8 MB |
+| Rust control, thread per connection | 202,182 | 150us | 319us | 5.5 MB |
+| Go, `net/http` | 185,670 | 102us | 1,538us | 21.8 MB |
+| Khora, `std::net::http` | 174,201 | 161us | 554us | 8.4 MB |
+| Java, JDK `HttpServer` | > 114,200 | 251us | 663us | 699 MB |
+| Node, `node:http` | 39,184 | 682us | 4,101us | 86.8 MB |
 
-Rows with a `>` are lower bounds: `floor` is fast enough that the generator was
-still gaining when given more of the machine, and Java's rate was still
-climbing at the top of the ladder, which is a JIT that had not finished with
-the handler.
+`floor` and `render` are lower bounds: they are fast enough that the generator
+was still gaining when given more of the machine. Java's is one too, because
+its rate was still climbing at the top of the ladder, which is a JIT that had
+not finished with the handler.
 
-**Khora's HTTP server is mid-table, and that is the honest headline.** It is
-about eight per cent under Go's standard library, about a third under Kestrel,
-roughly four times Node, and ahead of the JDK's server. For a standard library
-this young that is a reasonable place to be, and it is well short of what this
-project used to claim.
+**Khora's HTTP server is mid-table on throughput and first on memory, and both
+halves of that are the headline.** It is about six per cent under Go's standard
+library and a third under Kestrel on requests a second. It does it in 8.4 MB,
+against Go's 21.8, Node's 86.8, Kestrel's 240 and the JDK's 699 -- between
+three and eighty times less than the runtimes it is answering as fast as. That
+is what "no VM and no tracing GC" is worth, in the one column where the claim
+can be checked.
 
 Each peer is that language's *ordinary* server, not a tuned one. Node's is
 single-threaded by design and would be several times faster behind `cluster`;
@@ -77,10 +80,6 @@ the JDK's is not what a Java service ships on; `fasthttp` is faster than
 and the slowest one nearly three times more slowly. A server chosen on peak
 rate alone would have missed both halves of that.
 
-**Memory is flat and small.** Peak resident set stays under a megabyte for
-every server measured, and for Khora it does not grow with connections: the
-router holds 576 KB at 32 connections and less at 128.
-
 ### The comparisons worth the most
 
 The cross-language row is the one people look at and the one that says least,
@@ -88,12 +87,12 @@ because eight runtimes differ in eight ways at once. The Khora rows differ in
 one thing at a time and are what the servers were built for:
 
 `service` against `floor` is **the library**: the whole of `std::net::http` --
-parse, header map, route match, render -- costs about a third of the throughput
-of a socket loop that does none of it. `render` between them puts most of what
-is left in reading the request rather than writing the answer. `floor` against
-the Rust control is **the runtime**, and the control is a thread per connection,
-which is not the fastest way to write it in Rust, so read that pair as "the
-runtime is not what limits either" rather than as a win.
+parse, header map, route match, render -- costs about a quarter of the
+throughput of a socket loop that does none of it. `render` sits with `floor`,
+which puts what is left in reading the request rather than writing the answer.
+`floor` against the Rust control is **the runtime**, and the control is a
+thread per connection, which is not the fastest way to write it in Rust, so
+read that pair as "the runtime is not what limits either" rather than as a win.
 
 ## What was published before this, and why it was wrong
 

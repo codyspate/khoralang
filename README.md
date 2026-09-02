@@ -279,19 +279,21 @@ build, 32 connections, six-second runs, mean of five:
 
 | | |
 | --- | --- |
-| throughput | 174,360 req/s |
-| median latency | 156us |
-| 99th percentile | 543us |
-| peak resident memory | 576 KB |
+| throughput | 174,201 req/s |
+| median latency | 161us |
+| 99th percentile | 554us |
+| peak resident memory | 8.4 MB |
 
-That is just under Go's `net/http` on the same machine in the same sitting
-(188,869), about a third under ASP.NET Core on Kestrel (268,397), roughly four
-times Node's `node:http` (39,223), and ahead of the JDK's `HttpServer`. Mid-table,
-which is a reasonable place for a standard library this young to be.
+On the same machine in the same sitting: Go's `net/http` answers 185,670 in
+21.8 MB, ASP.NET Core on Kestrel 266,267 in 240 MB, the JDK's `HttpServer` more
+than 114,200 in 699 MB, and Node's `node:http` 39,184 in 86.8 MB. **Mid-table
+on rate, and between three and eighty times less memory than any of them** --
+which is what "no VM, no tracing GC" is worth in the one column where it can be
+checked.
 
 The comparison worth more than the cross-language row is `service` against
 `floor`: the whole of `std::net::http` — parse, header map, route match, render
-— costs about a third of the throughput of a Khora socket loop that does none
+— costs about a quarter of the throughput of a Khora socket loop that does none
 of it, and both are the same language on the same runtime in the same sitting.
 
 **Every throughput figure this project published before September 2026 was two
