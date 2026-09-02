@@ -197,6 +197,15 @@ it will behave differently now.
 
 ### Added
 
+- **`derive(Decode)` and `derive(Encode)`.** The declaration is the schema:
+  a record reads its fields under their names, a variant reads a bare string
+  for a payload-free case and an object tagged with `type` for the rest, a
+  newtype is transparent, a generic type bounds its parameters by the trait,
+  and a type that mentions itself needs nothing written, because a derived
+  schema is built when it is first read. A field whose type has no `Decode`
+  is refused at the derive line, and so is a case whose payload has no field
+  names, because the wire needs a key. `Encode` is the mirror, and a record
+  holding a `Redacted` derives `Decode` and refuses `Encode`.
 - **`std::schema` reaches a schema through the type.** `Decode` is the trait
   whose one function is `schema() -> Schema<Self>`; `std` implements it for
   its own types and a program implements it for a record or a variant with

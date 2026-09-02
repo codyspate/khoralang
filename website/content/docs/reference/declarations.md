@@ -111,7 +111,7 @@ pub type Point = {
 };
 ```
 
-The syntax accepts a comma-separated list of trait names and an optional trailing comma. The compiler-supported derivable traits are `Eq`, `Ord`, `Show`, `Hash`, `ToJson`, and `FromJson`.
+The syntax accepts a comma-separated list of trait names and an optional trailing comma. The compiler-supported derivable traits are `Eq`, `Ord`, `Show`, `Hash`, `ToJson`, `FromJson`, `Decode` and `Encode`.
 
 The trait must be in scope, so `derive(Show)` needs `Show` imported from
 `std::core`. Derive where the implementation follows from the fields, and write
@@ -123,9 +123,10 @@ impl is sometimes the point:
 
 - `List<A>` has `Show` and `Eq` when `A` does, so a record holding a list
   derives both, and `ToJson`/`FromJson` from `std::json` on the same terms.
-- `Redacted<A>` has `Show` — it prints `<redacted>` — and deliberately no
-  `ToJson`. A record holding a secret stays printable and refuses to serialise,
-  so the build stops rather than the payload leaking. It has no `Eq` either:
+- `Redacted<A>` has `Show` — it prints `<redacted>` — and `Decode`, and
+  deliberately no `ToJson` and no `Encode`. A record holding a secret stays
+  printable and readable, and refuses to serialise, so the build stops rather
+  than the payload leaking. It has no `Eq` either:
   comparing two secrets byte by byte is how a timing side channel gets written
   by somebody who was not writing one.
 

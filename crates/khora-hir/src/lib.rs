@@ -889,6 +889,17 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             ],
         );
     }
+    // A derived schema reaches everything as `Schema::..`, `Fields::..`,
+    // `Raw::..`, `List::..` and `Decode::schema()`, never by a bare name: a
+    // bare name resolves to the deriving file's own item before an imported
+    // one, so a companion called `field` would be captured, silently, by a
+    // function of that name in the file. Three type names cannot be.
+    if derives_trait(db, file, "Decode") {
+        bring_derive_companions(db, graph, file, &mut out, "Decode", &["Schema", "Fields", "List"]);
+    }
+    if derives_trait(db, file, "Encode") {
+        bring_derive_companions(db, graph, file, &mut out, "Encode", &["Raw", "List"]);
+    }
 
     out
 }

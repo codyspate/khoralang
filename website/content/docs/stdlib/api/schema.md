@@ -319,6 +319,14 @@ bridge out.
 impl Raw
 ```
 
+#### entry
+
+```khora
+pub fn entry(key: String, value: Raw) -> Pair<String, Raw>
+```
+
+One entry of a record: what a generated encoder writes a field as.
+
 #### field
 
 ```khora

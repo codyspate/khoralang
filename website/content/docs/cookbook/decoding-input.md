@@ -216,10 +216,10 @@ struct2("host", string(), "port", port(), listen)
 Beyond five fields, nest a record rather than reaching for a wider combinator —
 which is usually what the shape of the data was telling you anyway.
 
-`derive(Schema)` will remove the assembler entirely by generating it from the
-type. It is not shipped yet; [the schema design
-note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md) records why it is required rather than a
-convenience.
+`derive(Decode)` removes the assembler entirely by generating the schema from
+the type, and is what most records want; the assembler is for a record that
+needs something the declaration cannot say, such as the refined port above.
+[The schemas page](/docs/stdlib/schema/) has the derive.
 
 ## See also
 

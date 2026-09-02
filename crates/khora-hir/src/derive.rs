@@ -42,11 +42,12 @@ use crate::HirError;
 
 /// The traits the compiler knows how to write.
 ///
-/// Six, and not extensible. Every one of them is *structural* — the answer is
+/// Eight, and not extensible. Every one of them is *structural* — the answer is
 /// determined by the fields and nothing else — which is the property that makes
 /// generating the code better than writing it. A trait whose implementation is
 /// a decision (`Default`, `Iterator`) has nothing here to generate.
-pub const DERIVABLE: [&str; 6] = ["Eq", "Ord", "Show", "Hash", "ToJson", "FromJson"];
+pub const DERIVABLE: [&str; 8] =
+    ["Eq", "Ord", "Show", "Hash", "ToJson", "FromJson", "Decode", "Encode"];
 
 /// The prime the derived `Hash` reduces by at every step.
 ///
@@ -108,6 +109,8 @@ pub fn method_of(trait_name: &str) -> &'static str {
         "Hash" => "hash",
         "ToJson" => "to_json",
         "FromJson" => "from_json",
+        "Decode" => "schema",
+        "Encode" => "encode",
         _ => "",
     }
 }
@@ -189,6 +192,27 @@ struct Case {
     /// generated annotations so the checker never has to infer a generic
     /// decoder's result backwards through a constructor.
     field_types: Vec<String>,
+    /// Payload names, when the author gave them; empty for a positional
+    /// payload. A schema keys a payload by its names on the wire, so a case
+    /// without them cannot derive one.
+    field_names: Vec<String>,
+}
+
+/// Whether a variant is a wrapper around one value: one case, one positional
+/// payload. `type UserId = Int` is read as exactly this, and so is
+/// `| Of(Int)` written out. A schema for one is the inner value's schema
+/// with the constructor applied, and it writes the inner value bare.
+fn is_newtype(cases: &[Case]) -> bool {
+    cases.len() == 1 && cases[0].arity == 1 && cases[0].field_names.is_empty()
+}
+
+/// The first case a schema cannot key, if any: a positional payload in a
+/// variant that is not a newtype.
+fn unkeyed_case(cases: &[Case]) -> Option<&Case> {
+    if is_newtype(cases) {
+        return None;
+    }
+    cases.iter().find(|case| case.arity > 0 && case.field_names.is_empty())
 }
 
 /// Expands every `derive` in a source file. Pure, so it can be tested without
@@ -245,6 +269,24 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
 
         let is_record = matches!(shape, Shape::Record(_, _));
         for trait_name in wanted {
+            // A schema keys a payload by its field names on the wire, and a
+            // name the type did not declare is not the compiler's to invent.
+            if trait_name == "Decode" || trait_name == "Encode" {
+                if let Shape::Variant(cases) = &shape {
+                    if let Some(case) = unkeyed_case(cases) {
+                        errors.push(HirError {
+                            message: format!(
+                                "`derive({trait_name})` cannot write `{type_name}`: the payload \
+                                 of `{}` has no field names, and the wire needs a key for each. \
+                                 Name them, as in `{}(name: Type)`, or write the impl by hand",
+                                case.name, case.name
+                            ),
+                            range: at,
+                        });
+                        continue;
+                    }
+                }
+            }
             text.push_str(&write_impl(&trait_name, &type_name, &params, &shape));
             text.push('\n');
             impls.push(DerivedImpl {
@@ -336,11 +378,18 @@ fn shape_of(
                 let Some(name) = case.name().and_then(|n| n.ident()) else {
                     continue;
                 };
+                let mut field_names: Vec<String> = Vec::new();
                 let field_types: Vec<String> = if let Some(list) = case.fields() {
-                    list.fields()
-                        .filter_map(|field| field.ty())
-                        .map(|ty| ty.syntax().text().to_string())
-                        .collect()
+                    let mut types = Vec::new();
+                    for field in list.fields() {
+                        let Some(ty) = field.ty() else { continue };
+                        let Some(label) = field.name().and_then(|n| n.ident()) else {
+                            continue;
+                        };
+                        field_names.push(label);
+                        types.push(ty.syntax().text().to_string());
+                    }
+                    types
                 } else if let Some(list) = case.tuple_fields() {
                     list.types()
                         .map(|ty| ty.syntax().text().to_string())
@@ -352,6 +401,7 @@ fn shape_of(
                     name,
                     arity: field_types.len(),
                     field_types,
+                    field_names,
                 });
             }
             if cases.is_empty() {
@@ -372,6 +422,7 @@ fn shape_of(
             name: type_name.to_string(),
             arity: 1,
             field_types: vec![wrapped.syntax().text().to_string()],
+            field_names: Vec::new(),
         }])),
     }
 }
@@ -490,6 +541,20 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
             "fn from_json(value: Json) -> {self_type} raises DecodeError {{ {} }}",
             variant_from_json(type_name, cases)
         ),
+        ("Decode", Shape::Record(fields, field_types)) => format!(
+            "fn schema() -> Schema<{self_type}> {{ {} }}",
+            record_decode(type_name, &self_type, fields, field_types)
+        ),
+        ("Decode", Shape::Variant(cases)) => format!(
+            "fn schema() -> Schema<{self_type}> {{ {} }}",
+            variant_decode(type_name, cases)
+        ),
+        ("Encode", Shape::Record(fields, _)) => {
+            format!("fn encode(self) -> Raw {{ {} }}", record_encode(fields))
+        }
+        ("Encode", Shape::Variant(cases)) => {
+            format!("fn encode(self) -> Raw {{ {} }}", variant_encode(type_name, cases))
+        }
         _ => unreachable!("`{trait_name}` is not derivable and should have been refused"),
     };
 
@@ -799,6 +864,162 @@ fn variant_to_json(type_name: &str, cases: &[Case]) -> String {
                 "{pattern} => {{ {bindings} variant(\"{}\", {}) }}",
                 case.name,
                 cons_chain(fields)
+            )
+        })
+        .collect();
+    format!("match self {{ {} }}", arms.join(", "))
+}
+
+/// `Fields::zip(a, Fields::zip(b, c))` — the fields of a record, nested to
+/// the right so that `tuple_pattern` takes them apart. One field is itself.
+fn zip_chain(items: impl IntoIterator<Item = String>) -> String {
+    let items: Vec<String> = items.into_iter().collect();
+    let Some((last, front)) = items.split_last() else {
+        return "Fields::none()".to_string();
+    };
+    front
+        .iter()
+        .rev()
+        .fold(last.clone(), |rest, item| format!("Fields::zip({item}, {rest})"))
+}
+
+/// `(a0, (a1, a2))` — the pattern that takes a `zip_chain` of `n` apart.
+fn tuple_pattern(n: usize) -> String {
+    (0..n.saturating_sub(1))
+        .rev()
+        .fold(format!("a{}", n.saturating_sub(1)), |rest, i| format!("(a{i}, {rest})"))
+}
+
+/// `let s0: Schema<Int> = Decode::schema(); ..` — one schema per field, chosen
+/// by the annotation.
+///
+/// **The annotation is how the impl is selected**, because this pass runs
+/// before anything knows what a type is: the field's type is written into a
+/// `let` exactly as the author wrote it, and the checker picks the impl from
+/// it, through a generic impl or a bound as the case may be.
+fn schema_bindings<'a>(prefix: &str, types: impl IntoIterator<Item = &'a String>) -> String {
+    types
+        .into_iter()
+        .enumerate()
+        .map(|(i, ty)| format!("let {prefix}{i}: Schema<{ty}> = Decode::schema();"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A record's schema: every field read under its own name, zipped into a
+/// tuple, and the tuple taken apart into the record.
+///
+/// **Everything sits inside `Schema::lazy`**, so that constructing the schema
+/// never recurses: a type that mentions itself, directly or through another,
+/// gets a shape and a decoder with nothing written by the author. The built
+/// literal is annotated because two records with the same labels would
+/// otherwise leave it ambiguous.
+fn record_decode(
+    type_name: &str,
+    self_type: &str,
+    fields: &[String],
+    field_types: &[String],
+) -> String {
+    let bindings = schema_bindings("s", field_types);
+    let chain = zip_chain(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(i, field)| format!("Fields::of(\"{field}\", s{i})")),
+    );
+    let literal = fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| format!("{field}: a{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let assemble = match fields.len() {
+        0 => format!("fn _u => {{ let built: {self_type} = {{}}; built }}"),
+        1 => format!("fn a0 => {{ let built: {self_type} = {{ {literal} }}; built }}"),
+        n => format!(
+            "fn t => {{ let {} = t; let built: {self_type} = {{ {literal} }}; built }}",
+            tuple_pattern(n)
+        ),
+    };
+    format!(
+        "Schema::lazy(\"{type_name}\", fn () => {{ {bindings} \
+         Schema::record(Fields::map({chain}, {assemble})) }})"
+    )
+}
+
+/// A variant's schema: one `Schema::case` per case, keyed by its payload's
+/// names; a newtype is the inner schema with the constructor applied.
+fn variant_decode(type_name: &str, cases: &[Case]) -> String {
+    if is_newtype(cases) {
+        let case = &cases[0];
+        return format!(
+            "Schema::lazy(\"{type_name}\", fn () => {{ let s0: Schema<{}> = Decode::schema(); \
+             Schema::map(s0, fn a0 => {type_name}::{}(a0)) }})",
+            case.field_types[0], case.name
+        );
+    }
+    let mut bindings = Vec::new();
+    let mut written = Vec::new();
+    for (c, case) in cases.iter().enumerate() {
+        bindings.push(schema_bindings(&format!("s{c}_"), &case.field_types));
+        let fields = zip_chain(
+            case.field_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| format!("Fields::of(\"{name}\", s{c}_{i})")),
+        );
+        let make = match case.arity {
+            0 => format!("fn _u => {type_name}::{}", case.name),
+            1 => format!("fn a0 => {type_name}::{}(a0)", case.name),
+            n => {
+                let arguments = (0..n).map(|i| format!("a{i}")).collect::<Vec<_>>().join(", ");
+                format!(
+                    "fn t => {{ let {} = t; {type_name}::{}({arguments}) }}",
+                    tuple_pattern(n),
+                    case.name
+                )
+            }
+        };
+        written.push(format!("Schema::case(\"{}\", {fields}, {make})", case.name));
+    }
+    format!(
+        "Schema::lazy(\"{type_name}\", fn () => {{ {} Schema::cases({}) }})",
+        bindings.join(" "),
+        cons_chain(written)
+    )
+}
+
+/// A record on the wire: its fields, under their own names.
+fn record_encode(fields: &[String]) -> String {
+    let entries = fields
+        .iter()
+        .map(|field| format!("Raw::entry(\"{field}\", self.{field}.encode())"));
+    format!("Raw::Record({})", cons_chain(entries))
+}
+
+/// A variant on the wire: a payload-free case is its name as text, and a
+/// payload case is a record whose first key is `type`. A newtype writes the
+/// inner value bare.
+fn variant_encode(type_name: &str, cases: &[Case]) -> String {
+    if is_newtype(cases) {
+        return format!("match self {{ {type_name}::{}(a0) => a0.encode() }}", cases[0].name);
+    }
+    let arms: Vec<String> = cases
+        .iter()
+        .map(|case| {
+            let pattern = case_pattern(type_name, case, "a");
+            if case.arity == 0 {
+                return format!("{pattern} => Raw::Text(\"{}\")", case.name);
+            }
+            let tag = format!("Raw::entry(\"type\", Raw::Text(\"{}\"))", case.name);
+            let payload = case
+                .field_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| format!("Raw::entry(\"{name}\", a{i}.encode())"));
+            format!(
+                "{pattern} => Raw::Record({})",
+                cons_chain(std::iter::once(tag).chain(payload))
             )
         })
         .collect();

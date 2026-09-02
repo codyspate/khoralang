@@ -84,10 +84,10 @@ pub type Raw =
   | Record(fields: List<Pair<String, Raw>>)
   | Denied;
 
-/// One entry of a record, for the walks below.
-fn entry(key: String, value: Raw) -> Pair<String, Raw> { { key: key, value: value } }
-
 impl Raw {
+  /// One entry of a record: what a generated encoder writes a field as.
+  pub fn entry(key: String, value: Raw) -> Pair<String, Raw> { { key: key, value: value } }
+
   /// The field of a record, or [`Raw::Absent`].
   ///
   /// Absent rather than an `Option`, so that a missing field and a field
@@ -137,7 +137,7 @@ impl Raw {
       },
       Json::Object(_fields) => {
         let converted = List::fold(Json::entries(document), List::Nil, fn (acc, field) =>
-          List::Cons(entry(field.name, Raw::of_json(field.value)), acc));
+          List::Cons(Raw::entry(field.name, Raw::of_json(field.value)), acc));
         Raw::Record(List::reverse(converted))
       },
     }
@@ -176,7 +176,7 @@ impl Raw {
   /// the headers.
   pub fn of_map(text: Map<String, String>) -> Raw {
     let converted = List::fold(Map::entries(text), List::Nil, fn (acc, field) =>
-      List::Cons(entry(field.key, Raw::Untyped(field.value)), acc));
+      List::Cons(Raw::entry(field.key, Raw::Untyped(field.value)), acc));
     Raw::Record(List::reverse(converted))
   }
 
@@ -201,7 +201,7 @@ impl Raw {
               Option::Some(at) => {
                 let name = flag_name(String::slice(flag, 0, at));
                 let value = String::slice(flag, at + 1, String::byte_length(flag));
-                fields = List::Cons(entry(name, Raw::Untyped(value)), fields);
+                fields = List::Cons(Raw::entry(name, Raw::Untyped(value)), fields);
                 rest = tail;
               },
               Option::None => {
@@ -209,15 +209,15 @@ impl Raw {
                 match tail {
                   List::Cons(next, after) => {
                     if String::starts_with(next, "--") {
-                      fields = List::Cons(entry(name, Raw::Bool(true)), fields);
+                      fields = List::Cons(Raw::entry(name, Raw::Bool(true)), fields);
                       rest = tail;
                     } else {
-                      fields = List::Cons(entry(name, Raw::Untyped(next)), fields);
+                      fields = List::Cons(Raw::entry(name, Raw::Untyped(next)), fields);
                       rest = after;
                     }
                   },
                   List::Nil => {
-                    fields = List::Cons(entry(name, Raw::Bool(true)), fields);
+                    fields = List::Cons(Raw::entry(name, Raw::Bool(true)), fields);
                     rest = tail;
                   },
                 }
@@ -232,7 +232,7 @@ impl Raw {
     };
     let with_positional = match positional {
       List::Nil => fields,
-      some => List::Cons(entry("arguments", Raw::Sequence(List::reverse(some))), fields),
+      some => List::Cons(Raw::entry("arguments", Raw::Sequence(List::reverse(some))), fields),
     };
     Raw::Record(List::reverse(with_positional))
   }
@@ -1156,7 +1156,7 @@ pub fn renamed<A>(inner: Schema<A>, wire: String, field: String) -> Schema<A> {
       let read = match value {
         Raw::Record(entries) => {
           let moved = List::map(entries, fn e =>
-            if e.key == wire { entry(field, e.value) } else { e });
+            if e.key == wire { Raw::entry(field, e.value) } else { e });
           (inner.read)(path, Raw::Record(moved))
         },
         other => (inner.read)(path, other),
@@ -1502,7 +1502,7 @@ impl<A: Encode> Encode for Vector<A> {
 impl<V: Encode> Encode for Dict<String, V> {
   fn encode(self) -> Raw {
     let entries = List::fold(Dict::entries(self), List::Nil, fn (acc, pair) =>
-      List::Cons(entry(pair.key, pair.value.encode()), acc));
+      List::Cons(Raw::entry(pair.key, pair.value.encode()), acc));
     Raw::Record(List::reverse(entries))
   }
 }
@@ -1510,7 +1510,7 @@ impl<V: Encode> Encode for Dict<String, V> {
 impl<V: Encode> Encode for Map<String, V> {
   fn encode(self) -> Raw {
     let entries = List::fold(Map::entries(self), List::Nil, fn (acc, pair) =>
-      List::Cons(entry(pair.key, pair.value.encode()), acc));
+      List::Cons(Raw::entry(pair.key, pair.value.encode()), acc));
     Raw::Record(List::reverse(entries))
   }
 }
@@ -1524,7 +1524,7 @@ impl<V: Encode> Encode for Map<String, V> {
 impl Encode for Rejection {
   fn encode(self) -> Raw {
     Raw::Record(List::Cons(
-        entry("path", Raw::Text(Rejection::at(self))),
-        List::Cons(entry("message", Raw::Text(Rejection::describe(self))), List::Nil)))
+        Raw::entry("path", Raw::Text(Rejection::at(self))),
+        List::Cons(Raw::entry("message", Raw::Text(Rejection::describe(self))), List::Nil)))
   }
 }

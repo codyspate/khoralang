@@ -197,20 +197,54 @@ public should be a whole number, and is "not a number"
 token should be a whole number
 ```
 
+## The declaration is the schema
+
+Effect writes the schema and recovers the type, because TypeScript erases
+types. Khora's compiler holds every declaration, so the direction reverses:
+`derive(Decode)` writes the schema from the type.
+
+```khora
+derive(Show, Decode, Encode)
+pub type Mode = | Local | Remote(url: String);
+
+derive(Show, Decode)
+pub type Settings = {
+  listen: Listen,
+  password: Redacted<String>,
+  debug: Option<Bool>,
+  rate: Decimal,
+  tags: List<String>,
+  mode: Mode,
+};
+```
+
+Nothing describes the record a second time. Every customization is a type:
+`Option<A>` is optional, `List<A>` is a list, `Redacted<A>` is a secret whose
+failures never quote what they saw, `Decimal` is exact, a nested type is
+found through the trait — so `Listen` above may derive its schema or write
+one by hand with a refined port, and `Settings` picks up whichever it is. A
+variant derives to a bare string for a payload-free case and an object tagged
+with `type` for the rest; a newtype, `type UserId = Int`, is transparent; a
+type that mentions itself needs nothing written, because a derived schema is
+built when it is first read.
+
+Two things a derive refuses, at the `derive` line: a field whose type has no
+`Decode`, and a case whose payload has no field names, because the wire needs
+a key and a name the type did not declare is not the compiler's to invent.
+
 ## What it does not do yet
 
-**`derive(Schema)` is not built.** The spelling a reader reaches for —
+**A record literal of schemas.** The spelling a reader reaches for —
 
 ```khora
 struct({ port: int(), host: string() })
 ```
 
-— cannot be typed: its argument is a record of *schemas*, and the result would
-have to be a schema of the record of what they decode, which needs a type-level
-map Khora does not have. So something has to say how the pieces become the
-record, and today that is the function passed to `struct2` … `struct5`.
-Generating it from the type is the answer, [the schema design note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md) calls it a required part of
-the first version, and it has not landed.
+— is not a library function: its argument is a record of *schemas*, and the
+result would have to be a schema of the record of what they decode, which
+needs a type-level map Khora does not have. It will be a call the compiler
+rewrites before typing it. Until then the hand-written form is `struct2` …
+`struct5`, and most records need no hand-written form at all.
 
 **The assemblers stop at five fields.** `Schema::record` over `Fields` has no
 such limit — `Fields::zip` nests a tuple, however many fields there are — but

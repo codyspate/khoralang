@@ -324,3 +324,93 @@ fn the_standard_library_declares_what_it_promises() {
         assert!(text.contains(expected), "std/core.kh no longer declares `{expected}`");
     }
 }
+
+/// **`derive(Decode)` and `derive(Encode)` are ordinary impls.** A record, a
+/// variant, an enum, a newtype, a generic record and a type that mentions
+/// itself all derive; the generated text reaches everything as `Schema::..`,
+/// `Fields::..`, `Raw::..`, `List::..` and `Decode::schema()`, so a function
+/// in the deriving file called `field` or `schema` captures nothing.
+#[test]
+fn a_schema_derives_from_the_declaration() {
+    let found = errors_with_std(
+        "module m;\n\
+         import std::core::{List, Option, Redacted};\n\
+         import std::decimal::{Decimal};\n\
+         import std::schema::{Decode, Encode};\n\
+         fn field(key: String) -> String { key }\n\
+         fn schema() -> Int { 1 }\n\
+         derive(Decode, Encode)\n\
+         pub type Listen = { host: String, port: Int };\n\
+         derive(Decode, Encode)\n\
+         pub type Mode = | Local | Remote(url: String);\n\
+         derive(Decode, Encode)\n\
+         pub type Level = | Debug | Info;\n\
+         derive(Decode)\n\
+         pub type Settings = { listen: Listen, password: Redacted<String>, debug: Option<Bool>, \
+         rate: Decimal, tags: List<String>, mode: Mode };\n\
+         derive(Decode, Encode)\n\
+         pub type UserId = Int;\n\
+         derive(Decode, Encode)\n\
+         pub type Wrapper<A> = { value: A, count: Int };\n\
+         derive(Decode, Encode)\n\
+         pub type Tree = { label: String, children: List<Tree> };\n\
+         derive(Decode)\n\
+         pub type Branch = { leaves: List<Leaf> };\n\
+         derive(Decode)\n\
+         pub type Leaf = { back: Option<Branch>, name: String };\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// **A record holding a secret reads and does not write.** `derive(Decode)`
+/// is accepted because `Redacted` decodes, through `secret`; `derive(Encode)`
+/// is refused at the derive line by the per-field check, which is where the
+/// build should stop.
+#[test]
+fn a_secret_derives_decode_and_refuses_encode() {
+    let found = errors_with_std(
+        "module m;\n\
+         import std::core::{Redacted};\n\
+         import std::schema::{Decode, Encode};\n\
+         derive(Decode, Encode)\n\
+         pub type Leak = { password: Redacted<String> };\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("`derive(Encode)` needs every field to implement `Encode`")
+            && m.contains("`password`")
+            && m.contains("Redacted<String>")),
+        "{found:?}"
+    );
+    assert!(!found.iter().any(|m| m.contains("derive(Decode)")), "{found:?}");
+}
+
+/// A positional payload has no name to key the wire by, and the name is not
+/// the compiler's to invent.
+#[test]
+fn a_positional_payload_cannot_derive_a_schema() {
+    let found = errors_with_std(
+        "module m;\n\
+         import std::schema::{Decode};\n\
+         derive(Decode)\n\
+         pub type Figure = | Circle(Int) | Square(side: Int);\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(
+        found.iter().any(|m| m.contains("the payload of `Circle` has no field names")),
+        "{found:?}"
+    );
+}
+
+/// The hint names the trait's home, which is not `std::core` for every trait.
+#[test]
+fn a_missing_schema_import_names_std_schema() {
+    let found = errors_with_std(
+        "module m;\n\
+         derive(Decode)\n\
+         pub type Listen = { host: String };\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(found.iter().any(|m| m.contains("import it from `std::schema`")), "{found:?}");
+}

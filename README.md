@@ -128,7 +128,7 @@ Windows developer could see it.
 ### What the language has
 
 Algebraic data types, records and tuples, generics with higher-kinded types and
-const generics, traits with `derive(Eq, Ord, Show, Hash, ToJson, FromJson)`,
+const generics, traits with `derive(Eq, Ord, Show, Hash, ToJson, FromJson, Decode, Encode)`,
 closures, string interpolation, pattern matching with exhaustiveness and
 reachability, irrefutable destructuring in a `let`, `while`/`loop`/`for`,
 direct-style algebraic effects (`with` and `raises` rows, handlers, `!` at

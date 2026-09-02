@@ -37,9 +37,14 @@ fn program(name: &str, body: &str) -> (PathBuf, KhoraDatabase, SourceRoot) {
     let _ = std::fs::remove_file(&exe);
 
     let db = KhoraDatabase::new();
+    // `std::schema` and what it imports, so that a derived schema is what a
+    // program here derives rather than a name it cannot find.
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("json.kh"), std_source("json.kh")),
+        SourceFile::new(&db, dir.join("decimal.kh"), std_source("decimal.kh")),
+        SourceFile::new(&db, dir.join("time.kh"), std_source("time.kh")),
+        SourceFile::new(&db, dir.join("schema.kh"), std_source("schema.kh")),
         SourceFile::new(&db, dir.join("main.kh"), format!("{HEAD}\n{body}\n")),
     ];
     let root = SourceRoot::new(&db, files);
@@ -133,6 +138,35 @@ fn main() -> () { print("unreachable"); }"#,
     assert!(
         messages.iter().any(|m| m.contains("ToJson") && m.contains("Redacted")),
         "expected the derive to name the field it could not serialise, got {messages:?}"
+    );
+}
+
+/// **A record holding a secret reads, and does not write.** `derive(Decode)`
+/// is accepted, because `Redacted` decodes through `secret`; `derive(Encode)`
+/// on the same declaration is refused at the derive line, by the same
+/// per-field check, which is the reason encoding is a trait of its own and
+/// not a second half of the schema.
+#[test]
+fn a_record_holding_a_secret_derives_decode_and_refuses_encode() {
+    let messages = refused(
+        "redacted_encode",
+        r#"import std::schema::{Decode, Encode};
+
+derive(Decode, Encode)
+type Leak = {
+  password: Redacted<String>,
+};
+
+fn main() -> () { print("unreachable"); }"#,
+    );
+
+    assert!(
+        messages.iter().any(|m| m.contains("derive(Encode)") && m.contains("Redacted")),
+        "expected the derive to name the field it could not write, got {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|m| m.contains("derive(Decode)")),
+        "and the schema to derive without complaint: {messages:?}"
     );
 }
 

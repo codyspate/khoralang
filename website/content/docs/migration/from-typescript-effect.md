@@ -49,7 +49,7 @@ fn call<A, 'ef, 'er>(body: () -> A with 'ef raises 'er) -> A
 | --- | --- |
 | `Effect<A, E, R>` | a function's return type, `raises` row and `with` row |
 | `Effect.either` | [`attempt`](/docs/reference/failures/#attempt) |
-| `Redacted` | `std::core::Redacted` — same idea, and `Show`/`ToJson` make it a compile error rather than a convention |
+| `Redacted` | `std::core::Redacted` — same idea, and `Show`/`Encode` make it a compile error rather than a convention: a record holding one derives `Decode` and refuses `Encode`, where Effect's `Redacted` encodes the secret back out |
 | `Config` | [`std::config`](/docs/cookbook/configuration/) — but no `Config<A>` description type; see below |
 | `Schedule`, `retry`, `repeat` | [`std::resilience`](/docs/cookbook/retrying/) |
 | `Clock.sleep`, `TestClock` | `std::clock::Clock` — `sleep` is an operation on the capability, so a fake clock is a handler and needs no fork-or-deadlock caveat |

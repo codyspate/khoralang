@@ -106,10 +106,14 @@ pub fn derive_report(db: &dyn Db, file: SourceFile) -> DeriveReport {
                 .any(|i| &i.name == name && i.kind == khora_hir::ItemKind::Trait);
         let known = types.traits.traits.get(name);
         if !in_scope || known.is_none() {
-            let where_from = if khora_hir::derive::DERIVABLE.contains(&name.as_str()) {
-                "; import it from `std::core`"
-            } else {
-                ""
+            // Each derivable trait has a home, and the hint names it: the
+            // four in `std::core`, the JSON pair in `std::json`, and the
+            // schema pair in `std::schema`.
+            let where_from = match name.as_str() {
+                "Eq" | "Ord" | "Show" | "Hash" => "; import it from `std::core`",
+                "ToJson" | "FromJson" => "; import it from `std::json`",
+                "Decode" | "Encode" => "; import it from `std::schema`",
+                _ => "",
             };
             out.errors.push(HirError {
                 message: format!("`derive({name})` needs `{name}` in scope{where_from}"),

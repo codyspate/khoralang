@@ -731,3 +731,175 @@ fn main() -> Int {{
          {\"b\":1}\n"
     );
 }
+
+/// A program whose schemas the compiler wrote.
+const HEAD4: &str = "module main;
+
+import std::core::{List, Option, Pair, Redacted, Result, Show, Validated, print};
+import std::decimal::{Decimal};
+import std::json::{encode, parse};
+import std::schema::{Decode, Encode, Rejection, Schema, Shape, Raw, between, decode, int};
+
+derive(Show)
+pub type Port = Int;
+
+impl Decode for Port {
+  fn schema() -> Schema<Port> { Schema::map(between(int(), 1, 65535), fn n => Port(n)) }
+}
+
+impl Encode for Port {
+  fn encode(self) -> Raw { match self { Port(n) => n.encode() } }
+}
+
+derive(Show, Decode, Encode)
+pub type Listen = { host: String, port: Port };
+
+derive(Show, Decode, Encode)
+pub type Mode = | Local | Remote(url: String);
+
+derive(Show, Decode, Encode)
+pub type Level = | Debug | Info;
+
+derive(Show, Decode)
+pub type Settings = {
+  listen: Listen,
+  password: Redacted<String>,
+  debug: Option<Bool>,
+  rate: Decimal,
+  tags: List<String>,
+  mode: Mode,
+  level: Level,
+};
+
+derive(Show, Decode, Encode)
+pub type UserId = Int;
+
+derive(Show, Decode, Encode)
+pub type Wrapper<A> = { value: A, count: Int };
+
+derive(Show, Decode, Encode)
+pub type Tree = { label: String, children: List<Tree> };
+
+derive(Decode)
+pub type Branch = { leaves: List<Leaf> };
+
+derive(Decode)
+pub type Leaf = { back: Option<Branch>, name: String };
+
+fn leaves(b: Branch) -> Int { List::length(b.leaves) }
+
+fn written<A: Encode>(value: A) -> String { encode(Raw::to_json(value.encode())) }
+
+fn report(text: String) -> String {
+  match parse(text) {
+    Result::Err(_e) => \"not json\",
+    Result::Ok(document) =>
+      match Settings::schema().decode(Raw::of_json(document)) {
+        Validated::Valid(s) =>
+          \"${s.listen.host}:${s.listen.port} ${s.password} ${s.debug} ${s.rate} ${s.tags} ${s.mode} ${s.level}\",
+        Validated::Invalid(problems) => Rejection::report(problems),
+      },
+  }
+}
+";
+
+/// **The declaration is the schema.** A derived record reads its fields
+/// under their names, a nested derived type is found through the trait, a
+/// hand-written newtype's refinement is picked up, every problem is reported
+/// in declaration order, and the secret is never quoted.
+#[test]
+fn a_derived_schema_reads_the_declaration() {
+    let out = run(
+        "schema_derive_record",
+        &format!(
+            "{HEAD4}
+fn main() -> Int {{
+  print(report(`{{\"listen\": {{\"host\": \"localhost\", \"port\": 8080}}, \"password\": \"hunter2\", \"rate\": \"0.0725\", \"tags\": [\"a\", \"b\"], \"mode\": {{\"type\": \"Remote\", \"url\": \"https://x\"}}, \"level\": \"Info\"}}`));
+  print(report(`{{\"listen\": {{\"port\": 70000}}, \"password\": 42, \"debug\": \"maybe\", \"rate\": \"free\", \"tags\": [\"a\", 7], \"mode\": {{\"type\": \"Cloud\"}}, \"level\": \"Trace\"}}`));
+  print(\"${{Shape::keys(Settings::schema().shape)}}\");
+  print(\"${{Settings::schema().shape}}\");
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        "localhost:Port(8080) <redacted> None 0.0725 [a, b] Mode::Remote(https://x) Level::Info\n\
+         listen.host is not set\n\
+         listen.port must be between 1 and 65535\n\
+         password should be text\n\
+         debug should be true or false, and is \"maybe\"\n\
+         rate should be an exact decimal, and is \"free\"\n\
+         tags[1] should be text, and is 7\n\
+         mode.type should be one of `Local`, `Remote`, and is \"Cloud\"\n\
+         level should be one of `Debug`, `Info`, and is \"Trace\"\n\
+         [listen, password, debug, rate, tags, mode, level]\n\
+         Lazy(Settings)\n"
+    );
+}
+
+/// **A derived encoder writes what the derived schema reads**, for a record,
+/// a variant, an enum, a newtype and a generic record; a type that mentions
+/// itself, and two that mention each other, need nothing written.
+#[test]
+fn a_derived_encoder_round_trips() {
+    let out = run(
+        "schema_derive_encode",
+        &format!(
+            "{HEAD4}
+fn main() -> Int {{
+  print(written(Mode::Remote(\"u\")));
+  print(written(Mode::Local));
+  print(written(Level::Info));
+  let l: Listen = {{ host: \"h\", port: Port(1) }};
+  print(written(l));
+  print(written(UserId(7)));
+  let w: Wrapper<String> = {{ value: \"x\", count: 1 }};
+  print(written(w));
+  let id: Validated<UserId, Rejection> = decode(Raw::Number(\"7\"));
+  match Validated::to_result(id) {{
+    Result::Ok(v) => print(Show::show(v)),
+    Result::Err(problems) => print(Rejection::report(problems)),
+  }};
+  let wrapped: Validated<Wrapper<Int>, Rejection> =
+    decode(Raw::Record([Raw::entry(\"value\", Raw::Number(\"3\")), Raw::entry(\"count\", Raw::Number(\"2\"))]));
+  match Validated::to_result(wrapped) {{
+    Result::Ok(v) => print(Show::show(v)),
+    Result::Err(problems) => print(Rejection::report(problems)),
+  }};
+  match parse(`{{\"label\": \"r\", \"children\": [{{\"label\": \"c\", \"children\": []}}]}}`) {{
+    Result::Err(_e) => print(\"not json\"),
+    Result::Ok(document) =>
+      match Validated::to_result(Tree::schema().decode(Raw::of_json(document))) {{
+        Result::Ok(t) => print(written(t)),
+        Result::Err(problems) => print(Rejection::report(problems)),
+      }},
+  }};
+  match parse(`{{\"leaves\": [{{\"name\": \"a\", \"back\": {{\"leaves\": []}}}}, {{\"name\": \"b\"}}]}}`) {{
+    Result::Err(_e) => print(\"not json\"),
+    Result::Ok(document) =>
+      match Validated::to_result(Branch::schema().decode(Raw::of_json(document))) {{
+        Result::Ok(b) => print(\"${{leaves(b)}} leaves\"),
+        Result::Err(problems) => print(Rejection::report(problems)),
+      }},
+  }};
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        "{\"type\":\"Remote\",\"url\":\"u\"}\n\
+         \"Local\"\n\
+         \"Info\"\n\
+         {\"host\":\"h\",\"port\":1}\n\
+         7\n\
+         {\"count\":1,\"value\":\"x\"}\n\
+         UserId(7)\n\
+         Wrapper { value: 3, count: 2 }\n\
+         {\"children\":[{\"children\":[],\"label\":\"c\"}],\"label\":\"r\"}\n\
+         2 leaves\n"
+    );
+}
