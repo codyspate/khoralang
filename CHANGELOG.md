@@ -305,6 +305,19 @@ it will behave differently now.
 
 ### Added
 
+- **Provenance, a toolchain bill of materials, and release notes, published
+  with the archives.** Every release archive is attested with
+  `actions/attest-build-provenance`, so `gh attestation verify <file> --repo
+  <repo>` says which workflow at which commit produced those bytes; there is no
+  maintainer key to trust or to leak. `scripts/toolchain-sbom.py` renders the
+  compiler's own dependencies as CycloneDX 1.5 from `cargo metadata --locked`,
+  including the pinned LLVM and the Rust toolchain that built it, and it is
+  attached as `khora-<version>.cdx.json` with a checksum. `khora sbom` already
+  answered the same question for a Khora package. Release notes are cut from
+  this file by `scripts/release-notes.sh` rather than written twice, and a
+  version with no entry here stops the release instead of shipping a blank
+  body.
+
 - **A load generator that is not what it is measuring.** `bench/loadgen.rs` is
   a few threads each driving many non-blocking connections, instead of a thread
   or a process per connection. The change that mattered was not the language: a

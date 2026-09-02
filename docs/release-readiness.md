@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **176 of 222**, and re-scored
+than against the roadmap's account of itself. **179 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -53,14 +53,14 @@ advertised, so no wasm deployment has to work.
 | 11. Tooling and editor experience | 7 / 10 |
 | 12. Installation, toolchains and release artifacts | 6 / 9 |
 | 13. Package ecosystem | 7 / 7 |
-| 14. Supply chain and security | 4 / 7 |
+| 14. Supply chain and security | 6 / 7 |
 | 15. Compatibility, governance and contribution policy | 8 / 8 |
 | 16. Public documentation | 44 / 46 |
 | 17. khoralang.com production documentation site | 8 / 12 |
 | 18. Reference applications and end-to-end proof | 6 / 6 |
 | 19. External-user validation | 0 / 5 |
 | 20. Public positioning and benchmark integrity | 7 / 7 |
-| 21. Release automation and final gate | 4 / 8 |
+| 21. Release automation and final gate | 5 / 8 |
 
 **What the shape of this says.** The two halves of the product are not at the
 same stage. Documentation (§16), tooling (§11) and the release machinery
@@ -301,8 +301,8 @@ A large registry is not required, but dependency use must be coherent and reprod
 ## 14. Supply chain and security
 
 - [x] `SECURITY.md` defines how vulnerabilities should be reported privately.
-- [ ] Release artifacts have provenance/signing or the chosen equivalent appropriate to the release infrastructure.
-- [ ] An SBOM can be produced for the compiler/toolchain and, where practical, Khora application dependencies.
+- [x] Release artifacts have provenance/signing or the chosen equivalent appropriate to the release infrastructure. **Done:** `release.yml` attests every archive with `actions/attest-build-provenance`, signed by GitHub's OIDC identity for that workflow in this repository, so a downloader runs `gh attestation verify <file> --repo <repo>` and learns which workflow at which commit produced those exact bytes. There is no maintainer key to trust or to leak, which is the same reasoning that already keeps publication off a workstation. `/docs/getting-started/installation/` documents the check beside the checksum, and says what a checksum does not tell you.
+- [x] An SBOM can be produced for the compiler/toolchain and, where practical, Khora application dependencies. **Done:** both halves, in one format. `khora sbom` already rendered a package's resolution as CycloneDX 1.5; `scripts/toolchain-sbom.py` does the same for the compiler from `cargo metadata --locked` -- 192 components with versions and licences, plus the pinned LLVM and the Rust toolchain that built it, neither of which is a Cargo dependency and both of which are in the artifact. No timestamp and everything sorted, so two runs over an unchanged tree produce identical bytes, which is checked. `release.yml` attaches it as `khora-<version>.cdx.json` with a checksum, and attests it.
 - [x] Package hashes and lockfile guarantees are documented in security terms rather than only implementation terms. **Done:** `/docs/reference/modules-and-packages/` states the guarantee as a guarantee — *the checksum is verified, not merely recorded*. Every resolution hashes what arrived and compares it against the lockfile, and if the same commit id ever produces different bytes the build stops rather than compiling what turned up. It also says a branch name resolves to a commit and the commit is what is recorded, so `rev = "main"` is not a moving target.
 - [x] CI/release credentials and publication flow do not require a developer's local workstation to be the root of trust. **Done:** `release.yml` runs on tag and uploads with `gh`; nothing is published from a workstation.
 - [x] Dependencies used to build release artifacts are pinned/reproducible to the extent claimed. **Done:** Actions are pinned by commit SHA; LLVM is pinned to 22.1.8.
@@ -470,7 +470,7 @@ Private testing is not a separate product milestone, but public release requires
 - [x] Baseline/compiler tests, runtime stress, HTTP conformance, examples, docs links/snippets and package-resolution tests pass for the exact release candidate. **Done:** `scripts/baseline.sh`: 2,107 tests, conformance, corpus, packages, cache and the Linux runtime through WSL2.
 - [x] Release artifacts are produced by automation from the release tag.
 - [ ] Documentation deployed to `khoralang.com` is generated from that same release/tag.
-- [ ] Checksums/provenance/release notes are published together. **Left:** Checksums yes; provenance and release notes no.
+- [x] Checksums/provenance/release notes are published together. **Done:** all three in the job that uploads. Checksums were already there; provenance is the attestation above; the notes are cut from `CHANGELOG.md` by `scripts/release-notes.sh` rather than written a second time, and a version with no entry stops the release rather than shipping a blank body. Notes are applied only when nobody has written one, so an edited draft is a decision rather than something to overwrite.
 - [x] Known limitations are current and prominent. **Done:** `/docs/limitations`, linked from the docs index.
 - [ ] The release candidate has completed the external-user validation above.
 - [ ] This document has been scored against the release candidate itself, item by item, and re-scored at every subsequent candidate. **Left:** scored against the *tree*, item by item, in #173 — every open item checked against what is in the repository, with the compiler run where a claim could be run. That is the method the item asks for, applied to the wrong artifact: there is no final candidate yet, so what has been scored is `main`. Repeat against the tag. A gate nobody scores is a gate nobody passes or fails.

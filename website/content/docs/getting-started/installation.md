@@ -30,6 +30,48 @@ khora --version
 
 Then continue with [Getting Started](/docs/getting-started/) or [Your first Khora project](/docs/getting-started/first-project/).
 
+## Verify what you downloaded
+
+Every archive is published with a `.sha256` beside it, and the installer checks
+it. If you fetched an archive by hand, check it the same way:
+
+```bash
+sha256sum -c khora-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+```
+
+A checksum says the bytes are the ones that were published. It does not say who
+published them, and anybody who can replace the archive can replace the
+checksum next to it. For that, every archive also carries **build provenance**:
+a signed statement, made by GitHub during the release run, of which workflow in
+which repository at which commit produced that exact file.
+
+```bash
+gh attestation verify khora-0.1.0-x86_64-unknown-linux-gnu.tar.gz   --repo codyspate/khoralang
+```
+
+There is no maintainer key to trust and none to leak. The signing identity is
+the release workflow's own, which is also why nothing is published from
+anybody's workstation.
+
+## What is in the toolchain
+
+Each release includes a **bill of materials** as `khora-<version>.cdx.json`, in
+CycloneDX 1.5, listing every Rust crate compiled into the toolchain with its
+version and licence, the pinned LLVM, and the Rust toolchain that built it.
+Dependency scanners read it directly.
+
+That document is about the *compiler*. For the other question — what does the
+program I am building pull in — `khora sbom` renders the same format from your
+package's own resolution:
+
+```bash
+khora sbom --out my-app.cdx.json
+```
+
+It is rendered from the resolution rather than from a lockfile read off disk,
+so it describes what a build here would use. Pass `--locked` to refuse a stale
+lockfile instead of absorbing the difference.
+
 ## System linker requirement
 
 Khora compiles to native object code, so producing an executable requires the platform's linker, C runtime, and system libraries. You do **not** need to install LLVM separately; LLVM is linked into the Khora compiler rather than invoked as an external program.
