@@ -50,7 +50,7 @@ fn call<A, 'ef, 'er>(body: () -> A with 'ef raises 'er) -> A
 | `Effect<A, E, R>` | a function's return type, `raises` row and `with` row |
 | `Effect.either` | [`attempt`](/docs/reference/failures/#attempt) |
 | `Redacted` | `std::core::Redacted` — same idea, and `Show`/`Encode` make it a compile error rather than a convention: a record holding one derives `Decode` and refuses `Encode`, where Effect's `Redacted` encodes the secret back out |
-| `Config` | [`std::config`](/docs/cookbook/configuration/) — but no `Config<A>` description type; see below |
+| `Config` | [`std::config::read`](/docs/cookbook/configuration/) over a `Schema<A>`, which `derive(Decode)` writes from the type; see below |
 | `Schedule`, `retry`, `repeat` | [`std::resilience`](/docs/cookbook/retrying/) |
 | `Clock.sleep`, `TestClock` | `std::clock::Clock` — `sleep` is an operation on the capability, so a fake clock is a handler and needs no fork-or-deadlock caveat |
 | `Queue` with `dropping`/`sliding` | [`Channel::dropping` / `Channel::sliding`](/docs/reference/sharing/#what-a-full-channel-does) |
@@ -84,7 +84,7 @@ Built once, in the order written, by the ordinary rules of a binding. There is n
 
 The Effect version of typed configuration is a *description* — a value denoting "read `PORT` as an integer", interpreted later by a provider so a test can swap it. The whole description layer exists to defer the read.
 
-Khora's provider is the `Env` handler and it was already swappable, so `std::config`'s readers are plain functions whose row says they read from something. What the description bought — typed parsing, composition, error accumulation — comes from the return type instead: every reader answers `Validated`, and `map2` reports every bad key in one pass.
+Khora's provider is the `Env` handler and it was already swappable, so the description is not there to defer the read. It is there for reuse: `std::config::read(schema)` walks a `Schema<A>` — the same one that reads a JSON body — for the variables it needs, and answers `Validated`, so every bad key is reported in one pass and each is spelled as the variable it came from.
 
 ## Interruption is not only at effect boundaries
 

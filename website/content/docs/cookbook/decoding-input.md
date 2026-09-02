@@ -21,8 +21,8 @@ pub type Settings = {
 let settings = Settings::schema().decode(Raw::of_json(document));
 ```
 
-The alternative is what `std::config` does today, and reading its signature
-shows why it does not generalise:
+The alternative is a reader per source, and the signature of the one this
+library replaced shows why that does not generalise:
 
 ```khora
 pub fn string(name: String) -> Validated<String, ConfigError> with { env: Env }
@@ -31,7 +31,8 @@ pub fn string(name: String) -> Validated<String, ConfigError> with { env: Env }
 `string(name)` is not "this field is text". It is *go to the environment, fetch
 this variable, and give me the text or a reason* — the shape and the reading
 are one function. So a JSON body needs its own vocabulary, and so does a CLI
-argument, and so does a database row.
+argument, and so does a database row. Now `std::config::read(schema)` is one
+source among several, and the same `Settings` reads all of them.
 
 ## Every problem, not the first
 
@@ -220,9 +221,9 @@ it needs: [listen, password, rate, debug, mode]
 
 ## See also
 
-- [Load application configuration](/docs/cookbook/configuration/) — what
-  `std::config` does today, and still the shortest path for reading settings
-  out of the environment.
+- [Load application configuration](/docs/cookbook/configuration/) — the same
+  schema read out of the environment, with every problem spelled as the
+  variable it came from.
 - [Build a typed JSON API](/docs/cookbook/json-api/) — `std::json`'s own
   decoders, which are separate from this; `Raw::of_json` is the bridge from a
   parsed document to a schema.

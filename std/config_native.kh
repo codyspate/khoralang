@@ -1,201 +1,223 @@
 module std::config;
 
-import std::core::{Eq, List, Option, Redacted, Result, Show, Validated, attempt};
-import std::decimal::{Decimal};
+import std::core::{List, Option, Pair, Result, Validated, attempt};
 import std::env::{Env, EnvError};
+import std::schema::{Alternative, Named, Problem, Raw, Rejection, Schema, Segment, Shape};
 
-//! Settings read out of the environment, typed, and reported all at once.
+//! Settings read out of the environment, through a schema, and reported all
+//! at once.
 //!
-//! Three things, and the third is the one worth having:
-//!
-//! - **Typed.** `int("PORT")` gives an `Int` or says why it could not.
-//! - **Redacted.** `secret("DB_PASSWORD")` gives a `Redacted<String>`, which
-//!   cannot reach a log line or a JSON body -- see `std::core::Redacted`.
-//! - **Collected.** Every reader answers `Validated`, so `map2` reports *every*
-//!   missing key in one pass. The alternative is a person starting the service
-//!   five times to be told five things it knew the first time.
+//! The environment is a source like any other: a JSON body, a query string
+//! and a database row are all read by one `Schema<A>`, and so is this. What
+//! this module adds is the walk -- which variables a shape needs, and what to
+//! call them -- and the report, which spells a path the way a deployment
+//! does.
 //!
 //! ```khora
-//! derive(Show)
-//! type Settings = { host: String, port: Int };
+//! derive(Show, Decode)
+//! type Listen = { host: String, port: Int };
 //!
-//! fn settings() -> Validated<Settings, ConfigError> with { env: Env } {
-//!   Validated::map2(
-//!     or_default(string("HOST"), "0.0.0.0"),
-//!     int("PORT"),
-//!     fn (host, port) => { host: host, port: port },
-//!   )
+//! derive(Show, Decode)
+//! type Settings = { listen: Listen, password: Redacted<String>, debug: Option<Bool> };
+//!
+//! fn settings() -> Validated<Settings, Rejection> with { env: Env } {
+//!   read(Settings::schema())
 //! }
 //! ```
 //!
-//! ## Why there is no `Config<A>` description type
+//! reads `LISTEN_HOST`, `LISTEN_PORT`, `PASSWORD` and `DEBUG`, and answers
+//! every problem rather than the first: a person fixing a deployment wants
+//! the list, not one line of it per restart.
 //!
-//! The obvious port of this idea from a language with no effect rows is a
-//! *description*: a value denoting "read PORT as an integer", interpreted
-//! later by a provider, so that a test can swap the provider. The description
-//! layer exists entirely to defer the read.
+//! # How a shape becomes variable names
 //!
-//! **Khora's provider is the `Env` handler, and it is already swappable.** A
-//! test writes `with { env: handler for Env { .. } }` and these functions read
-//! from it, because the row says they read from something. So the description
-//! is ceremony: an AST, an interpreter for it, and a second way to spell every
-//! reader. What that layer bought -- typed parsing, composition, and error
-//! accumulation -- is bought here by the return type instead.
+//! A field is its name in upper case; a nested record's fields are joined
+//! to it with `_`, so `listen.port` is `LISTEN_PORT`. A list is one variable
+//! split on commas, `TAGS=a,b`. A variant is one variable holding the case,
+//! `MODE=Remote`, and its payload fields beside it, `MODE_URL`. A key given
+//! by `key("http_host", ..)` replaces the field's name in that scheme and
+//! nothing else. An optional nested record is present when any of its
+//! variables is.
 //!
-//! ## Why nothing here raises
+//! Every variable a shape needs is [`variables`], which is the question a
+//! deployment asks and a program should not have to be started to answer.
 //!
-//! `Env::variable` raises `EnvError` when the manifest does not grant a name,
-//! and every reader here catches it into `ConfigError::Denied`. Reading
-//! configuration is the one place where "tell me everything that is wrong" is
-//! the whole job, and a `raises` would stop at the first one -- which is
-//! exactly the behaviour this module exists to avoid. A denial is a
-//! configuration problem like any other, and it belongs in the same list.
+//! # Why every value arrives `Untyped`
+//!
+//! The environment cannot say whether `8080` was meant as a number, so it
+//! does not: every value is `Raw::Untyped`, which every primitive reads.
+//! Strictness is a fact about the source, and this source has none to offer.
+//!
+//! # Denied is not missing
+//!
+//! A variable the manifest does not grant is a different thing from one
+//! nobody set, and the fix is a line in `khora.toml` rather than a line in a
+//! deployment script. `Env::variable` raises for it; this catches the raise
+//! into `Raw::Denied`, which decodes as `Problem::Denied`, and [`report`]
+//! names the file.
 
-/// Why a setting could not be read.
+/// Reads the settings a schema describes, every problem reported.
 ///
-/// **Three cases, because they are three different jobs.** `Missing` is
-/// somebody's deployment script; `Malformed` is a typo in a value; `Denied` is
-/// a line in `khora.toml`. Collapsing them would send a reader to the wrong
-/// file, which is the failure `IoError::Denied` and `EnvError::Denied` were
-/// both added to avoid.
-derive(Eq, Show)
-pub type ConfigError =
-  | Missing(name: String)
-  | Malformed(name: String, wanted: String, found: String)
-  | Denied(name: String);
+/// The schema's shape decides which variables are read and what they are
+/// called; the schema's decoder decides what they mean. A record schema is
+/// what this is for: a bare `int()` at the top level has no name to read.
+pub fn read<A>(schema: Schema<A>) -> Validated<A, Rejection> with { env: Env } {
+  Schema::decode(schema, gather(schema.shape, List::Nil))
+}
 
-impl ConfigError {
-  /// One line a person can act on.
-  pub fn describe(self) -> String {
-    match self {
-      ConfigError::Missing(name) => "${name} is not set",
-      ConfigError::Malformed(name, wanted, found) =>
-        "${name} should be ${wanted}, and is `${found}`",
-      ConfigError::Denied(name) =>
-        "${name} is not granted -- add it to `[permissions] env` in khora.toml",
-    }
+/// The variables a shape needs, in the order they would be read.
+///
+/// `[LISTEN_HOST, LISTEN_PORT, PASSWORD, DEBUG]` for the settings above.
+pub fn variables(shape: Shape) -> List<String> {
+  List::reverse(names(shape, List::Nil, List::Nil))
+}
+
+/// One line a person can act on, with the path spelled as the variable it
+/// came from: `LISTEN_PORT should be a whole number, and is "eighty"`.
+pub fn describe(problem: Rejection) -> String {
+  let name = variable_of(problem.path);
+  match problem.problem {
+    Problem::Denied => name + " is not granted -- add it to `[permissions] env` in khora.toml",
+    _ => Rejection::describe_as(problem, name),
   }
 }
 
-/// Every reason, one per line, in the order they were read.
+/// Every reason, one per line, in the order they were found.
 ///
-/// What a service prints just before it stops, and the reason the whole module
-/// answers `Validated`: this list is allowed to have more than one thing in it.
-pub fn report(errors: List<ConfigError>) -> String {
-  match errors {
-    List::Nil => "",
-    List::Cons(head, tail) => match tail {
-      List::Nil => ConfigError::describe(head),
-      List::Cons(_h, _t) => ConfigError::describe(head) + "\n" + report(tail),
-    },
-  }
+/// What a service prints just before it stops, and the reason the whole
+/// module answers `Validated`: this list is allowed to have more than one
+/// thing in it.
+pub fn report(problems: List<Rejection>) -> String {
+  String::join(List::map(problems, fn problem => describe(problem)), "\n")
 }
 
-/// The variable's text, or why not.
+// ---------------------------------------------------------------------------
+// The walk
+// ---------------------------------------------------------------------------
+
+/// The variable for a path, innermost segment first: `LISTEN_PORT`.
+fn variable(prefix: List<String>) -> String {
+  String::upper(String::join(List::reverse(prefix), "_"))
+}
+
+/// The variable a rejection's path names.
+fn variable_of(path: List<Segment>) -> String {
+  List::fold(List::reverse(path), "", fn (acc, step) =>
+    match step {
+      Segment::Field(field) =>
+        if acc == "" { String::upper(field) } else { acc + "_" + String::upper(field) },
+      Segment::Index(at) => acc + "[" + Int::to_string(at) + "]",
+    })
+}
+
+/// One variable, as the source hands it over.
 ///
-/// Every other reader is this one plus a parse, so the denial is caught in one
-/// place and the shape of the answer is decided in one place.
-pub fn string(name: String) -> Validated<String, ConfigError> with { env: Env } {
-  // `attempt` rather than `catch`, because the denial has to survive as a
-  // *different* answer from "not set" and a `catch` that produced an `Option`
-  // would have thrown that away one line before the distinction is used.
+/// `attempt` rather than `catch`, because the denial has to survive as a
+/// *different* answer from "not set", and a `catch` that produced an
+/// `Option` would have thrown that away one line before the distinction is
+/// used.
+fn fetch(name: String) -> Raw with { env: Env } {
   let read: Result<Option<String>, EnvError> = attempt(fn () => env.variable(name)!);
   match read {
-    Result::Err(EnvError::Denied(denied)) => Validated::error(ConfigError::Denied(denied)),
-    Result::Ok(Option::Some(text)) => Validated::of(text),
-    Result::Ok(Option::None) => Validated::error(ConfigError::Missing(name)),
+    Result::Err(EnvError::Denied(_denied)) => Raw::Denied,
+    Result::Ok(Option::Some(text)) => Raw::Untyped(text),
+    Result::Ok(Option::None) => Raw::Absent,
   }
 }
 
-/// The variable as a whole number.
-pub fn int(name: String) -> Validated<Int, ConfigError> with { env: Env } {
-  Validated::and_then(string(name), fn text =>
-    match Int::of_string(text) {
-      Option::Some(number) => Validated::of(number),
-      Option::None => Validated::error(ConfigError::Malformed(name, "a whole number", text)),
-    })
+/// The wire key a field is read under: what `key` gave it, or its name.
+fn wire_of(field: Named) -> String {
+  Option::unwrap_or(Shape::wire_key(field.shape), field.name)
 }
 
-/// The variable as an exact decimal.
-///
-/// **This is the language for money and the config reader could not read
-/// any.** A rate, a threshold, a fee cap and a currency amount are all
-/// settings, and the three readers above are `Int`, `Bool` and `String` --
-/// so the only way to configure a rate was to read it as text and parse it
-/// again at the call site, or worse, to read it as an `Int` of basis points
-/// and hope everybody downstream remembered the scale.
-///
-/// Exponent notation is refused, the way `Decimal::of_string` refuses it: a
-/// number arriving as `1e-3` has been through a float somewhere, and a
-/// configuration file is exactly where that would go unnoticed.
-///
-/// **The scale is whatever was written.** `0.10` reads at two places and
-/// `0.1` at one, and they are the same number -- `Decimal`'s `Eq` says so --
-/// but a rate written to four places stays written to four, which is what
-/// makes a total built from it print the way the person who set it expected.
-pub fn decimal(name: String) -> Validated<Decimal, ConfigError> with { env: Env } {
-  Validated::and_then(string(name), fn text =>
-    match Decimal::of_string(text) {
-      Option::Some(number) => Validated::of(number),
-      Option::None => Validated::error(ConfigError::Malformed(name, "an exact decimal", text)),
-    })
-}
-
-/// The variable as a flag.
-///
-/// **`true`/`false`/`1`/`0`, and nothing else is a guess.** `yes`, `on`, `Y`
-/// and an empty string all mean "true" somewhere, and a config reader that
-/// accepts every one of them accepts a typo as a `false`. This one says so
-/// instead.
-pub fn bool(name: String) -> Validated<Bool, ConfigError> with { env: Env } {
-  Validated::and_then(string(name), fn text =>
-    if text.eq("true") || text.eq("1") {
-      Validated::of(true)
-    } else {
-      if text.eq("false") || text.eq("0") {
-        Validated::of(false)
-      } else {
-        Validated::error(ConfigError::Malformed(name, "`true` or `false`", text))
-      }
-    })
-}
-
-/// The variable, wrapped so it cannot be printed.
-///
-/// The one every password and API key should go through. What comes back has
-/// no `Encode` and shows as `<redacted>`, so a record holding it stays
-/// printable and serialisable-refusing -- `std::core::Redacted` has the whole
-/// argument.
-pub fn secret(name: String) -> Validated<Redacted<String>, ConfigError> with { env: Env } {
-  Validated::map(string(name), fn text => Redacted::of(text))
-}
-
-/// A fallback for a setting nobody set.
-///
-/// **Fires on `Missing` and on nothing else.** A value that is present and
-/// wrong must still fail: `PORT=eigthy` silently becoming `80` is the bug this
-/// module is for, and it is the one a fallback written the obvious way
-/// introduces. The distinction is only available because the error is
-/// structured rather than a string.
-pub fn or_default<A>(
-  inner: Validated<A, ConfigError>,
-  fallback: A,
-) -> Validated<A, ConfigError> {
-  match inner {
-    Validated::Valid(value) => Validated::Valid(value),
-    Validated::Invalid(errors) =>
-      if all_missing(errors) { Validated::Valid(fallback) } else { Validated::Invalid(errors) },
-  }
-}
-
-/// Whether every reason was "not set".
-fn all_missing(errors: List<ConfigError>) -> Bool {
-  match errors {
-    List::Nil => true,
-    List::Cons(head, tail) => match head {
-      ConfigError::Missing(_name) => all_missing(tail),
-      ConfigError::Malformed(_n, _w, _f) => false,
-      ConfigError::Denied(_name) => false,
+/// What the environment holds for a shape, at a prefix.
+fn gather(shape: Shape, prefix: List<String>) -> Raw with { env: Env } {
+  match shape {
+    Shape::Struct(fields) => {
+      let entries = List::fold(fields, List::Nil, fn (acc, field) => {
+          let wire = wire_of(field);
+          List::Cons(Raw::entry(wire, gather(field.shape, List::Cons(wire, prefix))), acc)
+        });
+      Raw::Record(List::reverse(entries))
     },
+    // The variable holds the case; a payload case's fields sit beside it.
+    // A tag naming no case stays a bare value, so the rejection is about
+    // the variable that holds it.
+    Shape::Cases(cases) =>
+      match fetch(variable(prefix)) {
+        Raw::Untyped(tag) =>
+          match List::find(cases, fn case => case.name == tag) {
+            Option::Some(chosen) =>
+              match chosen.fields {
+                List::Nil => Raw::Untyped(tag),
+                payload => {
+                  let entries = List::fold(payload, List::Nil, fn (acc, field) => {
+                      let wire = wire_of(field);
+                      List::Cons(Raw::entry(wire, gather(field.shape, List::Cons(wire, prefix))), acc)
+                    });
+                  Raw::Record(List::Cons(Raw::entry("type", Raw::Untyped(tag)), List::reverse(entries)))
+                },
+              },
+            Option::None => Raw::Untyped(tag),
+          },
+        other => other,
+      },
+    Shape::List(_of) =>
+      match fetch(variable(prefix)) {
+        Raw::Untyped(text) =>
+          Raw::Sequence(List::map(String::split(text, ","), fn piece => Raw::Untyped(piece))),
+        other => other,
+      },
+    Shape::Optional(inner) => without_empty(gather(inner, prefix)),
+    Shape::Default(inner) => without_empty(gather(inner, prefix)),
+    Shape::Nullable(inner) => gather(inner, prefix),
+    Shape::Keyed(_wire, inner) => gather(inner, prefix),
+    Shape::Refined(inner, _rule) => gather(inner, prefix),
+    Shape::Secret(inner) => gather(inner, prefix),
+    Shape::Closed(inner) => gather(inner, prefix),
+    Shape::Described(inner, _text) => gather(inner, prefix),
+    Shape::Lazy(_name, inner) => gather(inner(), prefix),
+    _ => fetch(variable(prefix)),
+  }
+}
+
+/// A record none of whose variables is set is not there, which is what lets
+/// an optional nested record be optional.
+fn without_empty(value: Raw) -> Raw {
+  if is_unset(value) { Raw::Absent } else { value }
+}
+
+fn is_unset(value: Raw) -> Bool {
+  match value {
+    Raw::Absent => true,
+    Raw::Record(entries) => List::all(entries, fn field => is_unset(field.value)),
+    _ => false,
+  }
+}
+
+/// The variables a shape reads, innermost-first onto `acc`.
+fn names(shape: Shape, prefix: List<String>, acc: List<String>) -> List<String> {
+  match shape {
+    Shape::Struct(fields) =>
+      List::fold(fields, acc, fn (so_far, field) => {
+          let wire = wire_of(field);
+          names(field.shape, List::Cons(wire, prefix), so_far)
+        }),
+    Shape::Cases(cases) =>
+      List::fold(cases, List::Cons(variable(prefix), acc), fn (so_far, case) =>
+        List::fold(case.fields, so_far, fn (inner, field) => {
+            let wire = wire_of(field);
+            names(field.shape, List::Cons(wire, prefix), inner)
+          })),
+    Shape::Optional(inner) => names(inner, prefix, acc),
+    Shape::Nullable(inner) => names(inner, prefix, acc),
+    Shape::Default(inner) => names(inner, prefix, acc),
+    Shape::Keyed(_wire, inner) => names(inner, prefix, acc),
+    Shape::Refined(inner, _rule) => names(inner, prefix, acc),
+    Shape::Secret(inner) => names(inner, prefix, acc),
+    Shape::Closed(inner) => names(inner, prefix, acc),
+    Shape::Described(inner, _text) => names(inner, prefix, acc),
+    Shape::Lazy(_name, inner) => names(inner(), prefix, acc),
+    _ => List::Cons(variable(prefix), acc),
   }
 }

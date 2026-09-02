@@ -13,8 +13,8 @@ Everything else in this section is reached through the generated
 
 ## The separation it is built on
 
-`std::config` reads settings well, and none of it is reusable. Its signature
-says why:
+A reader per source reads well, and none of it is reusable. The signature of
+the configuration reader this library replaced says why:
 
 ```khora
 pub fn string(name: String) -> Validated<String, ConfigError> with { env: Env }
@@ -273,6 +273,5 @@ vocabulary beside this one.
   its signature.
 - [Decode untrusted input](/docs/cookbook/decoding-input/) — the whole thing as
   a program, with its output.
-- [Load application configuration](/docs/cookbook/configuration/) — what
-  `std::config` does today, and still the shortest path for reading settings
-  out of the environment.
+- [Load application configuration](/docs/cookbook/configuration/) — the same
+  schema read out of the environment through `std::config::read`.

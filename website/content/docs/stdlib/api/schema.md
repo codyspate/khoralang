@@ -460,6 +460,16 @@ Text is written in double quotes and a number bare, so `port should be
 a whole number, and is "8080"` says what was wrong with it: `8080` is a
 whole number, and the problem was that it arrived as text.
 
+#### describe_as
+
+```khora
+pub fn describe_as(self, at: String) -> String
+```
+
+The same sentence, about `at` rather than the path as written: a source
+that spells a path its own way -- `LISTEN_PORT` for the environment --
+supplies the subject and keeps the rest.
+
 #### report
 
 ```khora

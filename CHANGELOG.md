@@ -14,6 +14,17 @@ it will behave differently now.
 
 ### Breaking
 
+- **`std::config` reads a schema.** `string`, `int`, `decimal`, `bool`,
+  `secret`, `or_default` and `ConfigError` are deleted; the module is
+  `read(schema) -> Validated<A, Rejection> with { env: Env }`, `variables(shape)`
+  for the names a deployment needs, and `report(problems)` with each path
+  spelled as the variable it came from. The shape decides the names: a
+  nested record's field is `LISTEN_PORT`, a list is split on commas, a
+  variant is `MODE` with its payload beside it as `MODE_URL`, and `key`
+  renames one segment. A denied variable is `Problem::Denied` and still
+  names the `[permissions] env` line to add. A record written once with
+  `derive(Decode)` now reads from the environment, a request body and a
+  test fixture alike.
 - **`std::json` no longer decodes; `std::schema` does.** `FromJson`,
   `ToJson`, `DecodeError`, `decode`, `field_as` and the `variant_*` helpers
   are deleted, and `derive(ToJson, FromJson)` is refused. The replacements

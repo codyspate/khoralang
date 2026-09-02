@@ -4,8 +4,7 @@
 //!
 //! Every test here installs a `handler for Env` rather than setting a real
 //! variable, which is the argument the module makes in its own header: the
-//! reason Khora needs no `Config<A>` description type is that the provider is
-//! already a capability, so a test can swap it. If these tests needed
+//! provider is a capability, so a test can swap it. If these tests needed
 //! `std::env::set_var` to exist, the argument would be wrong.
 
 mod harness;
@@ -26,13 +25,14 @@ fn std_source(name: &str) -> String {
 const HEAD: &str = r#"module demo::main;
 import std::core::{Eq, List, Option, Redacted, Result, Show, Validated, print};
 import std::env::{Env, EnvError};
-import std::config::{ConfigError, bool, decimal, int, or_default, report, secret, string};
+import std::config::{read, report, variables};
 import std::decimal::{Decimal};
+import std::schema::{Decode, Rejection, Schema, default, int, string, struct};
 
 /// An environment that holds exactly what a test says it does.
 ///
-/// `denied` is the list the manifest would have refused, so that
-/// `ConfigError::Denied` can be reached without a manifest.
+/// `denied` is the list the manifest would have refused, so that a denial can
+/// be reached without a manifest.
 fn fake(pairs: List<(String, String)>, denied: List<String>) -> Env {
   handler for Env {
     variable: fn name =>
@@ -62,12 +62,51 @@ fn lookup(pairs: List<(String, String)>, wanted: String) -> Option<String> {
   }
 }
 
-/// Whatever a reader answered, as one line.
-fn said<A>(answer: Validated<A, ConfigError>, shown: (A) -> String) -> String {
+/// Whatever a read answered, as one line -- or the report, one per line.
+fn said<A>(answer: Validated<A, Rejection>, shown: (A) -> String) -> String {
   match answer {
     Validated::Valid(value) => shown(value),
-    Validated::Invalid(errors) => report(errors),
+    Validated::Invalid(problems) => report(problems),
   }
+}
+
+derive(Show, Decode)
+pub type Listen = { host: String, port: Int };
+
+derive(Show, Decode)
+pub type Mode = | Local | Remote(url: String);
+
+derive(Show, Decode)
+pub type Settings = {
+  listen: Listen,
+  password: Redacted<String>,
+  debug: Option<Bool>,
+  region: String,
+  workers: Int,
+  tags: List<String>,
+  mode: Mode,
+};
+
+derive(Show, Decode)
+pub type Flags = { a: Bool, b: Bool, c: Bool };
+
+derive(Show, Decode)
+pub type Money = { rate: Decimal, fee_cap: Decimal, minimum: Decimal };
+
+derive(Show, Decode)
+pub type Spread = { spread: Decimal };
+
+derive(Show, Decode)
+pub type Keys = { secret_key: String };
+
+derive(Show, Decode)
+pub type Password = { db_password: Redacted<String> };
+
+derive(Show, Decode)
+pub type Nested = { primary: Listen, backup: Option<Listen> };
+
+fn shown_settings(s: Settings) -> String {
+  "${s.listen.host}:${s.listen.port} ${s.password} ${s.debug} ${s.region} x${s.workers} ${s.tags} ${s.mode}"
 }
 "#;
 
@@ -79,13 +118,17 @@ fn program(name: &str, body: &str) -> (PathBuf, KhoraDatabase, SourceRoot) {
     let _ = std::fs::remove_file(&exe);
 
     let db = KhoraDatabase::new();
+    // `std::config` is a source for `std::schema`, so the schema module and
+    // everything it imports come too.
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("permissions.kh"), std_source("permissions.kh")),
         SourceFile::new(&db, dir.join("grants.kh"), std_source("grants.kh")),
         SourceFile::new(&db, dir.join("env_native.kh"), std_source("env_native.kh")),
-        // `std::config` reads a `Decimal` now, so its module comes too.
         SourceFile::new(&db, dir.join("decimal.kh"), std_source("decimal.kh")),
+        SourceFile::new(&db, dir.join("json.kh"), std_source("json.kh")),
+        SourceFile::new(&db, dir.join("time.kh"), std_source("time.kh")),
+        SourceFile::new(&db, dir.join("schema.kh"), std_source("schema.kh")),
         SourceFile::new(&db, dir.join("config.kh"), std_source("config_native.kh")),
         SourceFile::new(&db, dir.join("main.kh"), format!("{HEAD}\n{body}\n")),
     ];
@@ -106,7 +149,7 @@ fn run(name: &str, body: &str) -> String {
 
 /// **Everything wrong, in one pass.**
 ///
-/// The whole reason the module answers `Validated` rather than `Result`: a
+/// The whole reason a read answers `Validated` rather than `Result`: a
 /// service that stops at the first missing key is a person running it once per
 /// key to be told what it knew the first time.
 #[test]
@@ -115,12 +158,7 @@ fn every_missing_setting_is_reported_together() {
         "config_all_at_once",
         r#"fn main() -> () {
   with { env: fake(List::Nil, List::Nil) } {
-    let both = Validated::map2(
-      string("HOST"),
-      int("PORT"),
-      fn (host, port) => host + ":" + Int::to_string(port),
-    );
-    print(said(both, fn (line) => line));
+    print(said(read(Listen::schema()), fn (l) => l.host));
   }
 }"#,
     );
@@ -137,27 +175,31 @@ fn a_default_covers_absence_and_not_a_typo() {
     let out = run(
         "config_default",
         r#"fn main() -> () {
+  let s: Schema<Listen> = struct({ host: default(string(), "0.0.0.0"), port: int() });
   with { env: fake(List::Cons(("PORT", "eighty"), List::Nil), List::Nil) } {
-    print(said(or_default(int("HOST_PORT"), 8080), Int::to_string));
-    print(said(or_default(int("PORT"), 8080), Int::to_string));
+    print(said(read(s), fn (l) => l.host + ":" + Int::to_string(l.port)));
+  };
+  with { env: fake(List::Cons(("PORT", "8080"), List::Nil), List::Nil) } {
+    print(said(read(s), fn (l) => l.host + ":" + Int::to_string(l.port)));
   }
 }"#,
     );
 
-    assert_eq!(out, "8080\nPORT should be a whole number, and is `eighty`\n");
+    assert_eq!(out, "PORT should be a whole number, and is \"eighty\"\n0.0.0.0:8080\n");
 }
 
 /// A denial is its own line, because the file to open is `khora.toml` rather
-/// than a deployment script.
+/// than a deployment script -- and a default does not cover it, because
+/// nobody asked for a fallback password.
 #[test]
 fn a_denied_variable_says_which_file_to_edit() {
     let out = run(
         "config_denied",
         r#"fn main() -> () {
   with { env: fake(List::Nil, List::Cons("SECRET_KEY", List::Nil)) } {
-    print(said(string("SECRET_KEY"), fn (line) => line));
-    // And a default does *not* cover it: nobody asked for a fallback password.
-    print(said(or_default(string("SECRET_KEY"), "fallback"), fn (line) => line));
+    print(said(read(Keys::schema()), fn (k) => k.secret_key));
+    let s: Schema<Keys> = struct({ secret_key: default(string(), "fallback") });
+    print(said(read(s), fn (k) => k.secret_key));
   }
 }"#,
     );
@@ -176,8 +218,8 @@ fn a_secret_read_from_the_environment_cannot_be_printed() {
         "config_secret",
         r#"fn main() -> () {
   with { env: fake(List::Cons(("DB_PASSWORD", "hunter2"), List::Nil), List::Nil) } {
-    print(said(secret("DB_PASSWORD"), fn (key) => key.show()));
-    print(said(secret("DB_PASSWORD"), fn (key) => Redacted::expose(key)));
+    print(said(read(Password::schema()), fn (p) => p.db_password.show()));
+    print(said(read(Password::schema()), fn (p) => Redacted::expose(p.db_password)));
   }
 }"#,
     );
@@ -192,155 +234,80 @@ fn a_flag_takes_four_spellings_and_refuses_the_rest() {
     let out = run(
         "config_boolean",
         r#"fn main() -> () {
-  let pairs = List::Cons(("A", "true"),
-              List::Cons(("B", "0"),
-              List::Cons(("C", "yes"), List::Nil)));
-  with { env: fake(pairs, List::Nil) } {
-    print(said(bool("A"), fn (flag) => flag.show()));
-    print(said(bool("B"), fn (flag) => flag.show()));
-    print(said(bool("C"), fn (flag) => flag.show()));
+  let bad = List::Cons(("A", "true"), List::Cons(("B", "0"), List::Cons(("C", "yes"), List::Nil)));
+  with { env: fake(bad, List::Nil) } {
+    print(said(read(Flags::schema()), fn (f) => "${f.a} ${f.b} ${f.c}"));
+  };
+  let good = List::Cons(("A", "true"), List::Cons(("B", "0"), List::Cons(("C", "false"), List::Nil)));
+  with { env: fake(good, List::Nil) } {
+    print(said(read(Flags::schema()), fn (f) => "${f.a} ${f.b} ${f.c}"));
   }
 }"#,
     );
 
-    assert_eq!(out, "true\nfalse\nC should be `true` or `false`, and is `yes`\n");
+    assert_eq!(out, "C should be true or false, and is \"yes\"\ntrue false false\n");
 }
 
-
-/// **`map2` stopped at two and a settings block has five keys.**
-///
-/// Building a record out of four or five validated fields meant nesting
-/// `map2` and carrying a tuple through it, or hand-rolling the accumulation —
-/// which two of the four review programs did, separately. `List::traverse`
-/// does the unbounded version and would have done the whole job, except that
-/// `Validated` is deliberately not an `Applicative`, so the one type in `std`
-/// built for accumulating errors cannot use it.
-///
-/// The point of all of them is the same as `map2`'s: **one pass**. A service
-/// that stops at the first missing key is a person running it once per key to
-/// be told what it knew the first time.
+/// **One shape, every variable.** A nested record is joined with `_`, a list
+/// is split on commas, a variant is its case with its payload beside it, and
+/// `variables` says all of that without reading anything.
 #[test]
-fn five_settings_are_reported_in_one_pass() {
+fn settings_come_from_one_shape() {
     let out = run(
-        "config_map5",
+        "config_shape",
         r#"fn main() -> () {
-  with { env: fake(List::Nil, List::Nil) } {
-    let all = Validated::map5(
-      string("HOST"),
-      int("PORT"),
-      string("REGION"),
-      int("WORKERS"),
-      bool("DEBUG"),
-      fn (host, port, region, workers, debug) =>
-        host + ":" + Int::to_string(port) + " " + region
-          + " x" + Int::to_string(workers) + " " + Bool::to_string(debug),
-    );
-    print(said(all, fn (line) => line));
+  let set = List::Cons(("LISTEN_HOST", "db.internal"),
+    List::Cons(("LISTEN_PORT", "5432"), List::Cons(("PASSWORD", "hunter2"),
+      List::Cons(("REGION", "eu-west"), List::Cons(("WORKERS", "4"),
+        List::Cons(("TAGS", "a,b"), List::Cons(("MODE", "Remote"),
+          List::Cons(("MODE_URL", "https://x"), List::Nil))))))));
+  with { env: fake(set, List::Nil) } {
+    print(said(read(Settings::schema()), shown_settings));
+  };
+  print("${variables(Settings::schema().shape)}");
+  let local = List::Cons(("LISTEN_HOST", "h"), List::Cons(("LISTEN_PORT", "1"),
+    List::Cons(("PASSWORD", "p"), List::Cons(("REGION", "r"), List::Cons(("WORKERS", "1"),
+      List::Cons(("TAGS", "one"), List::Cons(("MODE", "Cloud"), List::Nil)))))));
+  with { env: fake(local, List::Nil) } {
+    print(said(read(Settings::schema()), shown_settings));
   }
 }"#,
     );
 
     assert_eq!(
         out,
-        "HOST is not set\nPORT is not set\nREGION is not set\nWORKERS is not set\n\
-         DEBUG is not set\n"
+        "db.internal:5432 <redacted> None eu-west x4 [a, b] Mode::Remote(https://x)\n\
+         [LISTEN_HOST, LISTEN_PORT, PASSWORD, DEBUG, REGION, WORKERS, TAGS, MODE, MODE_URL]\n\
+         MODE should be one of `Local`, `Remote`, and is \"Cloud\"\n"
     );
 }
 
-/// **Left to right, whichever sides failed** — and the ones that succeeded do
-/// not appear.
-///
-/// The order is the argument order rather than the order the failures were
-/// noticed, because a reader is matching the list against the block they just
-/// wrote.
+/// **Declaration order, whichever variables are wrong** -- and the ones that
+/// were fine do not appear. A reader is matching the list against the record
+/// they just wrote.
 #[test]
 fn only_the_settings_that_are_wrong_are_reported() {
     let out = run(
-        "config_map5_partial",
+        "config_partial",
         r#"fn main() -> () {
-  let set = List::Cons(("HOST", "db.internal"),
-    List::Cons(("REGION", "eu-west"), List::Cons(("DEBUG", "true"), List::Nil)));
+  let set = List::Cons(("LISTEN_HOST", "db.internal"),
+    List::Cons(("REGION", "eu-west"), List::Cons(("DEBUG", "true"),
+      List::Cons(("MODE", "Local"), List::Nil))));
   with { env: fake(set, List::Nil) } {
-    // The second and fourth are missing; the first, third and fifth are not.
-    let all = Validated::map5(
-      string("HOST"),
-      int("PORT"),
-      string("REGION"),
-      int("WORKERS"),
-      bool("DEBUG"),
-      fn (host, port, region, workers, debug) =>
-        host + ":" + Int::to_string(port) + " " + region
-          + " x" + Int::to_string(workers) + " " + Bool::to_string(debug),
-    );
-    print(said(all, fn (line) => line));
-  }
-}"#,
-    );
-
-    assert_eq!(out, "PORT is not set\nWORKERS is not set\n");
-}
-
-/// `map3` and `map4`, and the case that has to work for either to be worth
-/// having: everything valid, and `f` run once with all of them.
-#[test]
-fn three_and_four_settings_come_together() {
-    let out = run(
-        "config_map34",
-        r#"fn main() -> () {
-  let set = List::Cons(("HOST", "db.internal"),
-    List::Cons(("PORT", "5432"), List::Cons(("REGION", "eu-west"),
-      List::Cons(("WORKERS", "4"), List::Nil))));
-  with { env: fake(set, List::Nil) } {
-    let three = Validated::map3(
-      string("HOST"),
-      int("PORT"),
-      string("REGION"),
-      fn (host, port, region) => host + ":" + Int::to_string(port) + " " + region,
-    );
-    print(said(three, fn (line) => line));
-
-    let four = Validated::map4(
-      string("HOST"),
-      int("PORT"),
-      string("REGION"),
-      int("WORKERS"),
-      fn (host, port, region, workers) =>
-        host + ":" + Int::to_string(port) + " " + region + " x" + Int::to_string(workers),
-    );
-    print(said(four, fn (line) => line));
-
-    // And the first of three missing, which is the arm that gathers the rest.
-    let missing = Validated::map3(
-      string("NOPE"),
-      int("PORT"),
-      string("ALSO_NOPE"),
-      fn (a, b, c) => a + Int::to_string(b) + c,
-    );
-    print(said(missing, fn (line) => line));
+    print(said(read(Settings::schema()), shown_settings));
   }
 }"#,
     );
 
     assert_eq!(
         out,
-        "db.internal:5432 eu-west\n\
-         db.internal:5432 eu-west x4\n\
-         NOPE is not set\nALSO_NOPE is not set\n"
+        "LISTEN_PORT is not set\nPASSWORD is not set\nWORKERS is not set\nTAGS is not set\n"
     );
 }
 
-
-/// **This is the language for money and the config reader could not read
-/// any.**
-///
-/// A rate, a threshold, a fee cap and a currency amount are all settings, and
-/// the readers were `Int`, `Bool` and `String` — so configuring a rate meant
-/// reading text and parsing it again at the call site, or reading an `Int` of
-/// basis points and hoping everybody downstream remembered the scale.
-///
-/// The scale is whatever was written: `0.10` reads at two places, which is
-/// what makes a total built from it print the way the person who set it
-/// expected.
+/// **This is the language for money and a setting can be one.** The scale is
+/// whatever was written: `1250.00` reads at two places, which is what makes a
+/// total built from it print the way the person who set it expected.
 #[test]
 fn a_rate_can_be_configured_exactly() {
     let out = run(
@@ -349,45 +316,70 @@ fn a_rate_can_be_configured_exactly() {
   let set = List::Cons(("RATE", "0.0125"),
     List::Cons(("FEE_CAP", "1250.00"), List::Cons(("MINIMUM", "-3"), List::Nil)));
   with { env: fake(set, List::Nil) } {
-    print(said(decimal("RATE"), Decimal::show));
-    print(said(decimal("FEE_CAP"), Decimal::show));
-    print(said(decimal("MINIMUM"), Decimal::show));
-    // Not set is the same shape as every other reader's.
-    print(said(decimal("SPREAD"), Decimal::show));
+    print(said(read(Money::schema()), fn (m) => "${m.rate} ${m.fee_cap} ${m.minimum}"));
+    print(said(read(Spread::schema()), fn (s) => "${s.spread}"));
   }
 }"#,
     );
 
-    assert_eq!(out, "0.0125\n1250.00\n-3\nSPREAD is not set\n");
+    assert_eq!(out, "0.0125 1250.00 -3\nSPREAD is not set\n");
 }
 
 /// **Exponent notation is refused**, the way `Decimal::of_string` refuses it:
 /// a number arriving as `1e-3` has been through a float somewhere, and a
-/// configuration file is exactly where that would go unnoticed.
-///
-/// A numeral too long to hold is the same answer, which is what keeps one bad
-/// line in one file from stopping the process.
+/// configuration file is exactly where that would go unnoticed. A numeral
+/// too long to hold is the same answer, which is what keeps one bad line in
+/// one file from stopping the process.
 #[test]
 fn a_decimal_setting_refuses_what_is_not_one() {
     let out = run(
         "config_decimal_bad",
-        r#"fn main() -> () {
+        r#"derive(Show, Decode)
+pub type Bad = { rate: Decimal, cap: Decimal, huge: Decimal };
+
+fn main() -> () {
   let set = List::Cons(("RATE", "1e-3"),
     List::Cons(("CAP", "twelve"), List::Cons(("HUGE",
       "99999999999999999999999999999999999999999999"), List::Nil)));
   with { env: fake(set, List::Nil) } {
-    print(said(decimal("RATE"), Decimal::show));
-    print(said(decimal("CAP"), Decimal::show));
-    print(said(decimal("HUGE"), Decimal::show));
+    print(said(read(Bad::schema()), fn (b) => "${b.rate}"));
   }
 }"#,
     );
 
     assert_eq!(
         out,
-        "RATE should be an exact decimal, and is `1e-3`\n\
-         CAP should be an exact decimal, and is `twelve`\n\
+        "RATE should be an exact decimal, and is \"1e-3\"\n\
+         CAP should be an exact decimal, and is \"twelve\"\n\
          HUGE should be an exact decimal, and is \
-         `99999999999999999999999999999999999999999999`\n"
+         \"99999999999999999999999999999999999999999999\"\n"
+    );
+}
+
+/// An optional nested record is there when any of its variables is, and then
+/// it is held to the whole of its shape.
+#[test]
+fn an_optional_nested_record_is_present_when_any_of_its_variables_is() {
+    let out = run(
+        "config_nested_optional",
+        r#"fn main() -> () {
+  let primary = List::Cons(("PRIMARY_HOST", "a"), List::Cons(("PRIMARY_PORT", "1"), List::Nil));
+  with { env: fake(primary, List::Nil) } {
+    print(said(read(Nested::schema()), fn (n) => "${n.primary.host} ${n.backup}"));
+  };
+  let half = List::Cons(("BACKUP_HOST", "b"), primary);
+  with { env: fake(half, List::Nil) } {
+    print(said(read(Nested::schema()), fn (n) => "${n.primary.host} ${n.backup}"));
+  };
+  let whole = List::Cons(("BACKUP_PORT", "2"), half);
+  with { env: fake(whole, List::Nil) } {
+    print(said(read(Nested::schema()), fn (n) => "${n.primary.host} ${n.backup}"));
+  }
+}"#,
+    );
+
+    assert_eq!(
+        out,
+        "a None\nBACKUP_PORT is not set\na Some(Listen { host: b, port: 2 })\n"
     );
 }

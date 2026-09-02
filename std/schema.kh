@@ -363,7 +363,13 @@ impl Rejection {
   /// a whole number, and is "8080"` says what was wrong with it: `8080` is a
   /// whole number, and the problem was that it arrived as text.
   pub fn describe(self) -> String {
-    let at = Rejection::at(self);
+    Rejection::describe_as(self, Rejection::at(self))
+  }
+
+  /// The same sentence, about `at` rather than the path as written: a source
+  /// that spells a path its own way -- `LISTEN_PORT` for the environment --
+  /// supplies the subject and keeps the rest.
+  pub fn describe_as(self, at: String) -> String {
     match self.problem {
       Problem::Missing => at + " is not set",
       Problem::Refused(rule) => at + " must " + Rule::describe(rule),
@@ -636,7 +642,14 @@ impl<A> Schema<A> {
         Raw::Untyped(name) => bare_case(cases, wanted, name, path, value),
         Raw::Record(_entries) => {
           let at = List::push(path, Segment::Field(tag));
-          match Raw::field(value, tag) {
+          // A tag is text whether or not the source could say so: the
+          // environment hands one over `Untyped`, and it names a case just
+          // the same.
+          let found = match Raw::field(value, tag) {
+            Raw::Untyped(name) => Raw::Text(name),
+            other => other,
+          };
+          match found {
             Raw::Absent =>
               Validated::error({ path: at, secret: false, problem: Problem::Missing }),
             Raw::Text(name) =>
