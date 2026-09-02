@@ -864,3 +864,39 @@ fn an_ordinary_unsolved_type_still_gets_the_general_message() {
     SourceRoot::new(&db, vec![file]);
     assert!(khora_types::check_file(&db, file).is_empty());
 }
+
+/// **The declared return type is the hint for the body root.** A literal in
+/// tail position decides which integer it is by what the function says it
+/// returns, the way `let b: U8 = 200` already did; before this the literal
+/// had settled on `Int` before anything mentioned `U8`.
+#[test]
+fn the_return_type_hints_the_body_root() {
+    assert_clean("module m;\nfn f() -> U8 { 200 }\n");
+    assert_reports("module m;\nfn f() -> U8 { 300 }\n", "does not fit in `U8`");
+}
+
+/// **A `return` inside a lambda leaves the lambda**, which is what lowering
+/// and code generation always did with it. The checker compared it with the
+/// enclosing function's return type, so a closure returning early from a
+/// body whose type was not the function's was refused for disagreeing with a
+/// signature it never answered to.
+#[test]
+fn a_return_inside_a_lambda_is_checked_against_the_lambda() {
+    assert_clean(
+        "module m;\nfn f() -> Int { let g = fn (b: Bool) => { if b { return \"early\"; }; \"late\" }; 0 }\n",
+    );
+    assert_reports(
+        "module m;\nfn f() -> Int { let g = fn (b: Bool) => { if b { return 1; }; \"late\" }; 0 }\n",
+        "this closure's body",
+    );
+}
+
+/// **A function type written as a `let` annotation is checked.** It was
+/// echoed as opaque and became `Unknown`, so `let g: (Int) -> Int = fn x =>
+/// \"s\"` checked clean and the annotation was a comment that was believed.
+#[test]
+fn a_function_typed_annotation_reaches_the_closure() {
+    assert_clean("module m;\nfn f() -> Int { let g: (Int) -> Int = fn x => x + 1; g(1) }\n");
+    assert_reports("module m;\nfn f() -> Int { let g: (Int) -> Int = fn x => \"s\"; 0 }\n", "expected `Int`, found `String`");
+    assert_reports("module m;\nfn f() -> String { let g: (Int) -> Int = fn x => x; g(1) }\n", "returns `String`");
+}

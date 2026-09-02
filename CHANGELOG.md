@@ -72,6 +72,29 @@ it will behave differently now.
 
 ### Fixed
 
+- **A function's declared return type reaches its body.** `fn f() -> U8 { 200 }`
+  was refused, because the literal had settled on `Int` before anything
+  mentioned `U8`, and a record literal in tail position had to be found by
+  its labels when two records shared them even though the signature had
+  already said which. The return type is now the hint for the body root, the
+  way an annotation is for a `let`. A mismatch is therefore reported where it
+  is: `fn f() -> Bool { id(1) }` says the argument `1` is not a `Bool` rather
+  than that the body is not.
+- **A `return` inside a closure returns from the closure.** Lowering and code
+  generation always treated it so; the checker compared it with the enclosing
+  function's return type, so `fn f() -> Int { let g = fn b => { if b { return
+  "early"; }; "late" }; .. }` was refused for a disagreement with a signature
+  the closure never answered to.
+- **A function type written as a `let` annotation is checked.** It was echoed
+  as opaque and became `Unknown`, so `let g: (Int) -> Int = fn x => "s";`
+  checked clean and the annotation was a comment that was believed. It now
+  reaches the closure as its expectation, and a closure that raises against an
+  annotation with no `raises` clause is refused, as it is against a parameter
+  written the same way. An annotation *with* a `with` or `raises` clause is
+  still not echoed.
+- **`Validated::zip`** is new: both values together as a pair, keeping both
+  sides' failures. `zip(a, zip(b, c))` is three values in a nested tuple, and
+  `let (x, (y, z)) = t;` takes it apart, however many there are.
 - **A capability offered to a closure is no longer one it has to use.**
   `nursery(fn () => 1)` was refused with ``nursery: Nursery is required here but
   not provided`` — about a nursery that was being provided. Every parameter

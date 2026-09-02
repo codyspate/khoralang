@@ -200,6 +200,7 @@ fn granted_project(name: &str) -> PathBuf {
 /// **The grant reaches the running program.** A path inside it is written and
 /// read back; a path outside it is refused, by the program itself, with the
 /// case that names the manifest rather than the disk.
+#[cfg(feature = "llvm")]
 #[test]
 fn a_path_outside_the_grant_is_refused_at_run_time() {
     let root = granted_project("perm_enforced");
@@ -228,6 +229,7 @@ fn a_path_outside_the_grant_is_refused_at_run_time() {
 /// **A manifest with no `[permissions]` grants everything**, which is the rule
 /// that keeps this from being a tax on starting. The same program, with the
 /// table removed, writes wherever it likes.
+#[cfg(feature = "llvm")]
 #[test]
 fn no_permissions_table_grants_everything() {
     let root = granted_project("perm_absent");
@@ -315,6 +317,7 @@ fn ran(root: &PathBuf) -> String {
 /// refusal -- the distinction `EnvError::Denied` exists for. `api.example.com`
 /// is granted, so it is *attempted*: it fails at the network, which is the
 /// right failure and a different one.
+#[cfg(feature = "llvm")]
 #[test]
 fn env_and_network_grants_are_enforced_at_run_time() {
     let text = ran(&narrowed_project(

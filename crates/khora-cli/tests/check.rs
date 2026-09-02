@@ -538,6 +538,11 @@ pub fn main() -> Int {
 ///
 /// `khora check` has always been right, because it asks each file for its own
 /// diagnostics. These pin that the other two agree with it.
+///
+/// `build` and `test` need the backend, so these three run only with it, as
+/// the whole of `run.rs` and `binaries.rs` do; without the gate the front-end
+/// tier ran them against a `khora` that could only say it had no backend.
+#[cfg(feature = "llvm")]
 #[test]
 fn a_build_error_names_the_file_it_is_in() {
     let files = &[("khora.toml", MANIFEST), ("src/first.kh", PADDING), ("src/main.kh", BROKEN_MAIN)];
@@ -550,6 +555,7 @@ fn a_build_error_names_the_file_it_is_in() {
 }
 
 /// The same for `khora test`, which is where it was found.
+#[cfg(feature = "llvm")]
 #[test]
 fn a_test_error_names_the_file_it_is_in() {
     let files = &[("khora.toml", MANIFEST), ("src/first.kh", PADDING), ("src/main.kh", BROKEN_MAIN)];
@@ -575,6 +581,7 @@ fn check_build_and_test_agree_about_where_an_error_is() {
 /// It said only that the test had failed -- no line, no values, no ordinal --
 /// so finding out which of six assertions it was meant deleting them one at a
 /// time until it passed. Somebody did exactly that.
+#[cfg(feature = "llvm")]
 #[test]
 fn a_failing_assertion_says_which_one_it_was() {
     let (ok, output) = command_on_package(

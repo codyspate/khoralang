@@ -27,11 +27,14 @@ fn a_lambda_has_a_function_type() {
     assert_clean("module m;\nfn f() -> (Int) -> Int { fn x => x + 1 }\n");
 }
 
+/// The return type reaches the lambda as its expectation, so the disagreement
+/// is reported where it is: at the body that answers `Int` to a signature
+/// that asked for `Bool`, rather than against the whole function.
 #[test]
 fn a_lambda_of_the_wrong_shape_is_rejected() {
     assert_reports(
         "module m;\nfn f() -> (Int) -> Bool { fn x => x + 1 }\n",
-        "returns `(Int) -> Bool`",
+        "this closure's body: expected `Bool`, found `Int`",
     );
 }
 

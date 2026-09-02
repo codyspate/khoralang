@@ -305,6 +305,16 @@ pub fn type_of_ref(
         TypeRef::Unit => Type::Unit,
         TypeRef::Const(value) => Type::Const(*value),
         TypeRef::Opaque => Type::Unknown,
+        // No clauses were written, so the rows are what a signature without
+        // clauses gets: closed and empty. A closure that raises against this
+        // annotation is refused, the same way it is refused against a
+        // parameter written the same way.
+        TypeRef::Fn { params, ret } => Type::Fn {
+            params: params.iter().map(|t| type_of_ref(t, generics, homes)).collect(),
+            ret: Box::new(type_of_ref(ret, generics, homes)),
+            requires: Box::new(Type::empty_row()),
+            raises: Box::new(Type::empty_row()),
+        },
         TypeRef::Tuple(items) => {
             let items: Vec<Type> = items.iter().map(|t| type_of_ref(t, generics, homes)).collect();
             if items.is_empty() { Type::Unit } else { Type::Tuple(items) }

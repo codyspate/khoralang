@@ -78,14 +78,15 @@ fn a_field_the_record_does_not_have_is_reported() {
 }
 
 /// Two records with the same labels cannot be told apart from the literal
-/// alone, and saying so beats guessing.
+/// alone, and saying so beats guessing. The literal has to be somewhere
+/// nothing names it: a declared return type or an annotation names it.
 #[test]
 fn an_ambiguous_literal_asks_which_type_it_is() {
     assert_reports(
         "module m;\n\
          pub type A = { v: Int };\n\
          pub type B = { v: Int };\n\
-         fn f() -> A { { v: 1 } }\n",
+         fn f() -> Int { let x = { v: 1 }; 0 }\n",
         "say which",
     );
 }
@@ -104,7 +105,7 @@ fn a_generic_record_takes_its_argument_from_the_literal() {
         "module m;\n\
          pub type Wrapper<A> = { value: A };\n\
          fn f() -> Wrapper<Bool> { { value: 1 } }\n",
-        "returns `Wrapper<Bool>`",
+        "field `value`: expected `Bool`, found `Int`",
     );
 }
 
@@ -513,4 +514,15 @@ fn a_handler_may_capture_a_cell() {
          pub fn make(c: Shared<Frozen>) -> Counting {{ \
          handler for Counting {{ tick: fn () => peek(c) }} }}\n"
     ));
+}
+
+/// Two records with the same labels, and the signature says which one the
+/// tail literal is. The label search is for a literal nothing has named; a
+/// declared return type has named it, and asking to annotate it as well was
+/// asking twice.
+#[test]
+fn a_tail_literal_is_resolved_by_the_return_type() {
+    assert_clean(
+        "module m;\npub type A = { host: String, port: Int };\npub type B = { host: String, port: Int };\nfn mk() -> B { { host: \"h\", port: 1 } }\n",
+    );
 }

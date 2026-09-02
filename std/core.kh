@@ -795,6 +795,17 @@ impl<A, E> Validated<A, E> {
     }
   }
 
+  /// Both values together, keeping both sides' failures.
+  ///
+  /// `map2` with the pair as its answer, and the one combinator that composes
+  /// without an arity: `zip(a, zip(b, c))` is three values in a nested tuple,
+  /// and `let (x, (y, z)) = t;` takes it apart, however many there are. It is
+  /// what a generated record decoder chains through, which is why there is
+  /// no `map6` and never will be.
+  pub fn zip<B>(self, other: Validated<B, E>) -> Validated<(A, B), E> {
+    Validated::map2(self, other, fn (a, b) => (a, b))
+  }
+
   /// Three together, keeping every side's failures.
   ///
   /// **`map2` stopped at two and a CSV row has five columns.** Building a

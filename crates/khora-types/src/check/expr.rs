@@ -159,7 +159,16 @@ impl<'a> Checker<'a> {
             // `khora_hir::body::Expr::Shown`.
             Expr::Shown(value) => self.shown(id, value, range),
             Expr::Return(value) => {
-                let expected = self.signature.ret.clone();
+                // **A `return` inside a lambda leaves the lambda.** Lowering
+                // and code generation have always treated it so; the checker
+                // compared it with the enclosing *function*'s return type, so
+                // a closure that returned early from a body whose type was not
+                // the function's was refused for disagreeing with a signature
+                // it never answered to.
+                let expected = match self.lambdas.last() {
+                    Some(Type::Fn { ret, .. }) => (**ret).clone(),
+                    _ => self.signature.ret.clone(),
+                };
                 match value {
                     Some(v) => {
                         self.expect(v, &expected, "this `return`");

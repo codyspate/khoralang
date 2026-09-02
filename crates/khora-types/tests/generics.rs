@@ -67,7 +67,9 @@ fn one_generic_function_serves_several_types() {
 fn a_call_result_is_the_instantiated_return_type() {
     assert_reports(
         "module m;\nfn id<A>(x: A) -> A { x }\nfn f() -> Bool { id(1) }\n",
-        "returns `Bool`, but its body has type `Int`",
+        // `A` is `Bool` from the return type before the argument is looked
+        // at, so the `1` is what disagrees.
+        "this argument: expected `Bool`, found `Int`",
     );
 }
 
@@ -76,7 +78,7 @@ fn a_generic_type_takes_its_argument_from_the_constructor() {
     assert_clean(&format!("{OPTION}fn f() -> Option<Int> {{ Option::Some(1) }}\n"));
     assert_reports(
         &format!("{OPTION}fn f() -> Option<Int> {{ Option::Some(true) }}\n"),
-        "has type `Option<Bool>`",
+        "this argument: expected `Int`, found `Bool`",
     );
 }
 

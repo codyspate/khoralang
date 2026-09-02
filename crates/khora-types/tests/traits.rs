@@ -632,7 +632,7 @@ fn a_trait_function_without_a_receiver_is_chosen_by_the_expected_type() {
 fn a_trait_function_still_checks_its_argument() {
     assert_reports(
         &format!("{PURE}fn f() -> Option<Bool> {{ Applicative::pure(1) }}\n"),
-        "returns `Option<Bool>`",
+        "this argument: expected `Bool`, found `Int`",
     );
 }
 

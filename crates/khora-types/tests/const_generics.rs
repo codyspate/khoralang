@@ -58,13 +58,16 @@ fn a_mismatched_shared_dimension_is_a_compile_error() {
     );
 }
 
+/// The declared return type reaches the call before its arguments do, the way
+/// a `let` annotation does, so the disagreement is reported against the
+/// argument whose dimension cannot be `9`.
 #[test]
 fn the_result_shape_follows_from_the_arguments() {
     assert_reports(
         &format!(
             "{MATRIX}fn f(a: Matrix<2, 3>, b: Matrix<3, 4>) -> Matrix<9, 9> {{ matmul(a, b) }}\n"
         ),
-        "returns `Matrix<9, 9>`",
+        "dimension `9` does not match `2`",
     );
 }
 
@@ -126,7 +129,9 @@ fn a_nested_mismatch_names_the_whole_type_first() {
             "{MATRIX}fn f(a: Matrix<2, 3>, b: Matrix<4, 5>) -> Matrix<2, 5> {{ matmul(a, b) }}
 "
         ),
-        "expected `Matrix<3, _>`, found `Matrix<4, 5>`; dimension `3` does not match `4`",
+        // `N` is `5` by the time the arguments are checked, because the
+        // declared return type reaches the call first.
+        "expected `Matrix<3, 5>`, found `Matrix<4, 5>`; dimension `3` does not match `4`",
     );
 }
 

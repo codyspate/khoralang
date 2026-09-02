@@ -331,6 +331,14 @@ pub enum TypeRef {
     Unit,
     /// A bare integer in type position: the `3` in `Matrix<3, 4>`.
     Const(i64),
+    /// `(Int, String) -> Bool`, with no `with` or `raises` clause.
+    ///
+    /// Carried so that `let f: (Int) -> Int = fn x => ..` reaches the lambda
+    /// as an expectation and is checked against it. Until it was, the
+    /// annotation became `Opaque` and `let f: (Int) -> Int = fn x => "s"`
+    /// checked clean: an annotation that is only a comment is worse than no
+    /// annotation, because it is believed.
+    Fn { params: Vec<TypeRef>, ret: Box<TypeRef> },
     /// A shape this echo does not carry — a function type with effect
     /// clauses, so far. Checked as `Unknown`, which is to say not checked,
     /// which is what every annotation used to get.
@@ -363,9 +371,24 @@ impl TypeRef {
                         .unwrap_or_default(),
                 }
             }
-            // A function type carries `with` and `raises` rows, and an echo of
-            // those is a second row interpreter. Left opaque until something
-            // needs it, which is honest rather than half-right.
+            // A function type's `with` and `raises` rows are not echoed: an
+            // echo of those is a second row interpreter. A function type
+            // *without* clauses is the common annotation on a closure, and it
+            // has nothing in it the echo cannot carry.
+            ast::Type::Fn(f) if f.with_clause().is_none() && f.raises_clause().is_none() => {
+                let params = match f.param_type() {
+                    Some(ast::Type::Tuple(t)) => {
+                        t.elements().map(|e| TypeRef::of_syntax(&e)).collect()
+                    }
+                    Some(ast::Type::Unit(_)) | None => Vec::new(),
+                    Some(ast::Type::Paren(p)) => {
+                        vec![p.inner().as_ref().map_or(TypeRef::Opaque, TypeRef::of_syntax)]
+                    }
+                    Some(other) => vec![TypeRef::of_syntax(&other)],
+                };
+                let ret = f.return_type().as_ref().map_or(TypeRef::Opaque, TypeRef::of_syntax);
+                TypeRef::Fn { params, ret: Box::new(ret) }
+            }
             ast::Type::Fn(_)
             | ast::Type::Record(_)
             | ast::Type::Union(_)

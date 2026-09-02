@@ -158,16 +158,19 @@ pub(crate) struct Checker<'a> {
     pub(crate) open_requires: Vec<Type>,
     /// The type the surrounding expression is asking for, when there is one.
     ///
-    /// Only integer literals read it, and only to decide which integer they
-    /// are: `let b: U8 = 65` has to work, and 65 alone is an `Int`. A *hint*,
-    /// not a demand — `require` still runs afterwards, so a wrong one changes
-    /// which error is reported and never whether one is.
+    /// Three things read it. An integer literal, to decide which integer it
+    /// is: `let b: U8 = 65` has to work, and 65 alone is an `Int`. A record
+    /// literal, to decide which record it is when two share its labels. A
+    /// lambda, to learn its parameter and result types before its body is
+    /// inferred. A *hint*, not a demand — `require` still runs afterwards, so
+    /// a wrong one changes which error is reported and never whether one is.
     ///
     /// Consumed by the first `infer` that sees it, and re-armed only where a
     /// type flows through unchanged: the branches of an `if`, the tail of a
-    /// block, the arms of a `match`. Anywhere else it leaks into a
-    /// subexpression that means something different — the `0` in `array[0]` is
-    /// an index, whatever the result is being used as.
+    /// block, the arms of a `match`, and the root of a function body, which
+    /// is what the declared return type describes. Anywhere else it leaks
+    /// into a subexpression that means something different — the `0` in
+    /// `array[0]` is an index, whatever the result is being used as.
     pub(crate) hint: Option<Type>,
     /// Calls written with `!`.
     ///
@@ -205,8 +208,15 @@ impl<'a> Checker<'a> {
         }
 
         let Some(root) = self.body.root else { return };
-        let actual = self.infer(root);
         let expected = self.signature.ret.clone();
+        // **The declared return type is what the body is for**, so it is the
+        // hint for the root the way an annotation is the hint for a `let`.
+        // Without it `fn f() -> U8 { 200 }` was refused, because the literal
+        // decided it was an `Int` before anything mentioned `U8`, and a record
+        // literal in tail position had to be found by its labels even though
+        // the signature had already said which record it was.
+        self.hint = Some(self.unifier.zonk(&expected));
+        let actual = self.infer(root);
         if let Err(why) = self.unifier.unify(&expected, &actual) {
             let expected = self.unifier.zonk(&expected);
             let actual = self.unifier.zonk(&actual);
