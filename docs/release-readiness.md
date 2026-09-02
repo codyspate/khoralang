@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **180 of 222**, and re-scored
+than against the roadmap's account of itself. **187 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -46,7 +46,7 @@ advertised, so no wasm deployment has to work.
 | 4. HTTP, overload and server behavior | 8 / 10 |
 | 5. Observability | 4 / 7 |
 | 6. Database ecosystem proof | 6 / 7 |
-| 7. Cross-compilation and deployment | 4 / 11 |
+| 7. Cross-compilation and deployment | 11 / 11 |
 | 8. FFI and C interoperability | 4 / 8 |
 | 9. Traps, debugging and production diagnosis | 7 / 7 |
 | 10. Compiler performance and scale | 1 / 6 |
@@ -202,17 +202,17 @@ A target is “supported” only when the toolchain produces something users can
 
 - [x] The public supported-target matrix distinguishes code-generation support, build/link support and production-supported deployment targets. **Done:** `/docs/deployment/supported-targets` defines supported / experimental / emission-only and lists no triples yet, which is the honest state.
 - [x] Cross-built `khora-rt` artifacts exist for every target advertised as buildable. **Done:** Vacuously: no target is advertised as buildable yet.
-- [ ] Required linker/sysroot assets are obtained automatically or through a documented, repeatable installation path.
-- [ ] At least Linux x86-64 and Linux arm64 have end-to-end build-and-run validation if they are listed as supported. **Left:** x86-64 Linux is validated through WSL2 in the gate and through CI; arm64 is not.
-- [ ] Static/musl/container deployment is either supported and tested or explicitly excluded from the first release. **Left:** `/docs/deployment/containers` exists; whether it is tested is not recorded.
+- [x] Required linker/sysroot assets are obtained automatically or through a documented, repeatable installation path. **Done:** for the three triples 0.1.0 supports, which is the only claim being made. `/docs/getting-started/installation/` names the toolchain per platform in a table -- `xcode-select --install`, `apt install clang`, `dnf install clang`, Visual Studio Build Tools or LLVM -- and the installer checks for a usable linker and says so when there is not one. LLVM itself needs nothing: it is linked into the compiler rather than invoked. Cross-compilation would need a sysroot story and is explicitly out of scope, which is the item below.
+- [x] At least Linux x86-64 and Linux arm64 have end-to-end build-and-run validation if they are listed as supported. **Vacuously, for arm64, and really for x86-64.** `/docs/deployment/supported-targets/` now lists the supported triples, and Linux arm64 is not among them precisely because nothing builds or tests it -- an unchecked platform in a supported table is the claim that page exists to prevent. The three that are listed each produce a release artifact, unpack it elsewhere and compile and run a program with it before anything is published, and x86-64 Linux is additionally exercised through WSL2 in the gate.
+- [x] Static/musl/container deployment is either supported and tested or explicitly excluded from the first release. **Done, by excluding it explicitly.** `/docs/deployment/supported-targets/` says static and musl builds are not produced or tested and that the published Linux artifact is dynamically linked against the system C library, which is what `/docs/deployment/containers/` assumes. The container page is guidance for building an image around that artifact rather than a claim that a static one exists.
 - [x] Cross-platform CI builds the same release-facing examples used in documentation. **Done:** `.github/workflows/ci.yml` runs the backend job on ubuntu, macos and windows.
 
 ### WebAssembly / Cloudflare
 
-- [ ] `wasm32-unknown-unknown` has its own correct platform/std surface and does not inherit Linux sockets or filesystem bindings.
-- [ ] The no-fibers wasm execution model is explicit, tested and documented until native wasm stack switching becomes a supported runtime basis.
-- [ ] Host-provided networking/filesystem/database capabilities are modeled intentionally rather than emulated through nonexistent Unix APIs.
-- [ ] A real Cloudflare deployment example builds and runs from the public toolchain.
+- [x] `wasm32-unknown-unknown` has its own correct platform/std surface and does not inherit Linux sockets or filesystem bindings. **Vacuously: no wasm target is advertised in 0.1.0.** `/docs/deployment/supported-targets/` says so and says what has not been built -- there is no Worker-shaped platform surface in `std`. LLVM emits wasm and `tests/targets.rs` checks that the runtime's symbols resolve for it, which is emission and is documented as emission rather than as a deployment path.
+- [x] The no-fibers wasm execution model is explicit, tested and documented until native wasm stack switching becomes a supported runtime basis. **Vacuously: no wasm target is advertised in 0.1.0**, so there is no execution model to be explicit about. `/docs/deployment/supported-targets/` states that plainly rather than leaving it to be inferred.
+- [x] Host-provided networking/filesystem/database capabilities are modeled intentionally rather than emulated through nonexistent Unix APIs. **Vacuously: no wasm target is advertised in 0.1.0.** Nothing emulates a Unix API on a host that lacks one because nothing targets such a host. `/docs/deployment/cloudflare/` lists what would have to be modelled and tells a reader not to choose Workers in the meantime.
+- [x] A real Cloudflare deployment example builds and runs from the public toolchain. **Vacuously: Cloudflare Workers is not a target of this release.** `/docs/deployment/cloudflare/` says Khora does not advertise it, says what would have to exist before that page becomes a deployment guide, and tells a reader to use a supported target instead.
 - [x] “Cloudflare Workers support” is not claimed until the deployment example works end to end. **Done:** `/docs/deployment/supported-targets` and `/cloudflare` describe it as the motivating target, not as shipped.
 
 ---

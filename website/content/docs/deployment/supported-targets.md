@@ -12,17 +12,32 @@ Khora's production documentation distinguishes three states clearly:
 
 The website must never describe emission-only support as deployable platform support.
 
-## Native targets
+## What 0.1.0 supports
 
-Windows, Linux, and macOS are exercised by the compiler/runtime test matrix. Cross-target support is being expanded so release builds can produce deployable artifacts without requiring the destination machine to compile them locally.
+Three triples, and they are exactly the ones the release workflow builds, packages, and then uses to compile a program before publishing:
 
-Exact supported triples will be listed here for each public release once the runtime, linker/sysroot, packaging, and CI story is complete for those triples.
+| triple | state |
+| --- | --- |
+| `x86_64-unknown-linux-gnu` | supported |
+| `x86_64-pc-windows-msvc` | supported |
+| `aarch64-apple-darwin` | supported |
+
+A release is not published unless each of them has produced an artifact, unpacked it somewhere else, and built and run a program with it. That test is the reason this list is short: it is what has actually been done, not what is expected to work.
+
+**Everything else is out of scope for this release**, which is a statement about what is promised rather than a prediction about what would happen if you tried:
+
+- **Linux arm64** is not built or tested by CI, so it is not listed. The compiler may well produce a working binary there; nobody has checked, and an unchecked platform in a supported table is the claim this page exists to prevent.
+- **Cross-compilation** — building a Linux artifact on a Mac, say — is not supported. The compiler can emit for another target, and `KHORA_TARGET` will verify its code generation, but the linker and sysroot story is unfinished, so a deployable artifact still means building on the platform it runs on.
+- **Static and musl builds** are not produced or tested. The published Linux artifact is dynamically linked against the system C library, which is what [Containers](/docs/deployment/containers/) assumes.
+- **WebAssembly, and Cloudflare Workers with it**, are not a target of this release. See below.
 
 ## WebAssembly
 
 WebAssembly is a distinct runtime environment, not Linux with a different object format. A wasm target must use a std/platform surface appropriate to its host and must not expose filesystem or socket APIs the host does not provide.
 
-Cloudflare Workers is the motivating first wasm deployment target. Its host-provided networking model and single-threaded isolate mean its runtime contract differs intentionally from native server targets.
+**No wasm target is advertised in 0.1.0**, so none of that has been built. `std` has no Worker-shaped platform surface, there is no no-fibers execution model to test, and no host-provided networking or storage capabilities are modelled. LLVM can emit wasm — the compiler's own tests check that the runtime's symbols resolve there — and that is emission, not a deployment path.
+
+Cloudflare Workers is the motivating first wasm deployment target, and its host-provided networking model and single-threaded isolate mean its runtime contract will differ intentionally from native server targets. [Cloudflare Workers](/docs/deployment/cloudflare/) says what would have to exist, and tells you not to choose it in the meantime.
 
 ## Release rule
 
