@@ -28,7 +28,9 @@ walked, so a deployment can ask which keys a configuration needs without
 starting the program.
 
 A record of two closures would have lost the second; a bare tree would have
-lost the first. The [design note](https://github.com/codyspate/khoralang/blob/main/[the schema design note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md)) has the argument in full.
+lost the first. [The schema design
+note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md)
+has the argument in full.
 
 ## Every problem, not the first
 

@@ -137,6 +137,7 @@ step 'the documentation is addressed to a reader'
 # none of it belongs on a page somebody reads to find out what a function does
 # — a repository path does not resolve from a browser, and "this used to trap"
 # is a claim about a version nobody can run. Errata 74.
+sh scripts/check-maintainer-notes.sh > /dev/null
 bash scripts/no-maintainer-notes.sh
 
 step 'the hand-written examples compile'

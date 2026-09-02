@@ -33,21 +33,27 @@ report() {
 }
 
 # A path into the repository, in backticks. A reader on the website cannot open
-# it. Either the sentence needs the substance inlined, or the path needs to be
-# a link to GitHub -- `docs/design/schema.md` becomes
-# `[the schema design note](https://github.com/.../docs/design/schema.md)`.
-report 'a repository path a website reader cannot open' \
-    "$(grep -rn '`docs/design/\|`docs/errata\|`docs/roadmap\|`crates/' "$pages" --include=*.md || true)"
+# it. Either the sentence needs the substance inlined, or the path needs to
+# become a link to GitHub.
+paths=$(grep -rn '`docs/design/\|`docs/errata\|`docs/roadmap\|`crates/' "$pages" --include=*.md || true)
+report 'a repository path a website reader cannot open' "$paths"
 
 # The errata and the roadmap are internal indexes. A number from either means
-# nothing to a reader and dates the page besides.
-report 'a reference to the errata or the roadmap by number' \
-    "$(grep -rniE '\berrata [0-9]+|roadmap #[0-9]+' "$pages" --include=*.md || true)"
+# nothing to a reader, and dates the page besides.
+indexes=$(grep -rniE '\berrata [0-9]+|roadmap #[0-9]+' "$pages" --include=*.md || true)
+report 'a reference to the errata or the roadmap by number' "$indexes"
 
 # Notes about the writing rather than about the subject.
-report 'a note about a previous version of the note' \
-    "$(grep -rniE 'took a second attempt|the note that stood here|used to be written here|this said that it was|nobody noticed' \
-        "$pages" --include=*.md || true)"
+selfref=$(grep -rniE 'took a second attempt|the note that stood here|used to be written here|this said that it was|nobody noticed' "$pages" --include=*.md || true)
+report 'a note about a previous version of the note' "$selfref"
+
+# A link inside a link. Turning a bare path into a link twice produces
+# `[the note](https://.../[the note](https://.../x.md))`, which renders as
+# visible punctuation around a dead anchor -- and reads, from the page, as
+# though nobody looked. The pass that fixed the paths above did exactly that
+# to one of them, and only a reader of the live site would have caught it.
+nested=$(grep -rn '](http[^)]*\[' "$pages" --include=*.md || true)
+report 'a Markdown link nested inside another link' "$nested"
 
 if [ "$fail" -eq 0 ]; then
     printf '  ok    the documentation is addressed to a reader\n'

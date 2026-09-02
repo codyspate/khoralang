@@ -2877,3 +2877,16 @@ because a checker that fails a correct page gets switched off.
 
 It found four more offenders the manual sweep had missed, in the same run that
 first passed.
+
+**And the fix broke a link, which only the rendered page showed.** The pass
+that turned bare paths into GitHub links ran over a file where one link had
+already been written by hand, so it linked the URL inside the link:
+
+    [the design note](https://.../blob/main/[the schema design note](https://.../schema.md))
+
+Every check stayed green. `khora doc --check` compared the page to the comment
+and they matched, because both were wrong together; the site built, because
+malformed Markdown is still Markdown; the link checker skips external URLs by
+design. What the page actually showed was a fragment of punctuation and a dead
+anchor, and the only way to see it was to fetch the deployed page and read it.
+That is now the fifth case the checker matches.
