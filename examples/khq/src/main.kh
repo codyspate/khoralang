@@ -108,8 +108,8 @@ fn answer(asked: Asked) -> String
     // The tree, as far as its span goes. A full `Show` for `Filter` would
     // be a pretty-printer, which is a second renderer to keep in step with
     // the parser; the span is what a reader checking precedence wants.
-    let where_ = Filter::span(filter);
-    "parsed, covering bytes ${Int::to_string(where_.start)}..${Int::to_string(where_.end)}"
+    let span = Filter::span(filter);
+    "parsed, covering bytes ${Int::to_string(span.start)}..${Int::to_string(span.end)}"
   } else {
     let text = source(asked.file)!;
     let document = match parse(text) {

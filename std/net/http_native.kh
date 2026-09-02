@@ -2129,11 +2129,11 @@ pub fn parse_url(text: String) -> Option<Url> {
         };
         match split_authority(authority, secure) {
           Option::None => Option::None,
-          Option::Some(where_) =>
+          Option::Some(endpoint) =>
             Option::Some({
                 secure: secure,
-                host: where_.host,
-                port: where_.port,
+                host: endpoint.host,
+                port: endpoint.port,
                 target: target,
               }),
         }

@@ -61,17 +61,17 @@ pub type Problem = {
   /// Where in the query, or `None` for a failure with no place — an
   /// `error("...")` the query raised itself, which happened at a point in the
   /// *data* rather than in the text.
-  where_: Option<Span>,
+  at: Option<Span>,
 };
 
 /// A problem at a place.
 pub fn problem(message: String, span: Span) -> Problem {
-  { message: message, where_: Option::Some(span) }
+  { message: message, at: Option::Some(span) }
 }
 
 /// A problem with no place in the query text.
 pub fn bare(message: String) -> Problem {
-  { message: message, where_: Option::None }
+  { message: message, at: Option::None }
 }
 
 /// A line and column, both counted from one.
@@ -150,7 +150,7 @@ fn line_end(source: String, from: Int) -> Int {
 /// be a pipe, and a program that writes escape codes into a file somebody is
 /// reading later has decided something on their behalf.
 pub fn render(source: String, trouble: Problem) -> String {
-  match trouble.where_ {
+  match trouble.at {
     Option::None => "error: ${trouble.message}",
     Option::Some(span) => {
       let place = locate(source, span.start);

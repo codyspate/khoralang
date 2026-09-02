@@ -411,8 +411,8 @@ fn unicode_escape(source: String, start: Int, total: Int) -> Escaped raises Prob
   { text: Char::to_string(Char::from_code(value)), next: start + 6 }
 }
 
-fn hex_digit(source: String, at_: Int) -> Int raises Problem {
-  let b = U8::to_int(String::byte(source, at_));
+fn hex_digit(source: String, index: Int) -> Int raises Problem {
+  let b = U8::to_int(String::byte(source, index));
   if b >= 48 && b <= 57 {
     b - 48
   } else if b >= 97 && b <= 102 {
@@ -420,7 +420,7 @@ fn hex_digit(source: String, at_: Int) -> Int raises Problem {
   } else if b >= 65 && b <= 70 {
     b - 55
   } else {
-    raise problem("`\\u` needs four hexadecimal digits", at(at_))
+    raise problem("`\\u` needs four hexadecimal digits", at(index))
   }
 }
 

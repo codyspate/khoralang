@@ -2890,3 +2890,45 @@ malformed Markdown is still Markdown; the link checker skips external URLs by
 design. What the page actually showed was a fragment of punctuation and a dead
 anchor, and the only way to see it was to fetch the deployed page and read it.
 That is now the fifth case the checker matches.
+
+## 75. Four trailing underscores, two of them for nothing
+
+A reader asked why `std::schema` had `pub fn where_(self) -> String`.
+
+`where` is not reserved in Khora. It is not a hard keyword, it is not one of
+the seven contextual keywords, and the string `"where"` does not appear in the
+lexer, the parser or the syntax crate. A four-line program declaring
+`pub fn where(self) -> String` compiles and both `At::where(a)` and `a.where()`
+run. The underscore was defending against nothing.
+
+Sweeping the `.kh` sources found four:
+
+| | why it was there |
+| --- | --- |
+| `where_` | nothing |
+| `then_` | nothing — `then` is not reserved either; it existed to match its neighbour |
+| `else_` | **real**: `else` is a hard keyword, and the parser answers `expected an identifier` for a field named `else` |
+| `at_` | **real**: it shadowed `khq`'s own `diag::at` |
+
+Two of the four were decoration. The two with a genuine constraint are the more
+interesting half, because the constraint was real and the response to it was
+still wrong: a name that has to be decorated to be legal is a name to replace,
+not a name to decorate. `then_`/`else_` became `when_true`/`when_false`, which
+reads better than either at the use site —
+`if truthy(c) { when_true } else { when_false }` — and `at_` became `index`,
+which is what it is.
+
+`Raw::Text_` and `Shape::Struct_` had gone the same way two commits earlier,
+for the same reason and found the same way: by asking what the underscore was
+for and getting no answer.
+
+**Where they come from.** Nobody sits down to name a field `then_`. One
+identifier collides for a real reason, the underscore fixes it in a second, and
+the next one gets an underscore because the neighbouring line has one. That is
+how `then_` was born, sitting beside a legitimate `else_`. The habit then
+travelled into `examples/khq`, which is a reference application — the thing a
+new reader copies from.
+
+There is no checker for this one. A trailing underscore is legal, sometimes
+warranted, and a grep for it lands on the two cases that are fine as often as
+the two that are not. What catches it is somebody reading the API and asking.

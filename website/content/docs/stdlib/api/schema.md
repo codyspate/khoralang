@@ -202,10 +202,10 @@ The step as it appears in a path: `.name` or `[3]`.
 impl Rejection
 ```
 
-#### where_
+#### at
 
 ```khora
-pub fn where_(self) -> String
+pub fn at(self) -> String
 ```
 
 Where this was, as a reader would write it: `listen.port`.

@@ -396,11 +396,11 @@ fn call(cursor: Cursor, token: Token, name: String) -> Filter raises Problem {
 fn conditional(cursor: Cursor, token: Token) -> Filter raises Problem {
   let condition = pipeline(cursor)!;
   expect_word(cursor, "then")!;
-  let then_ = pipeline(cursor)!;
+  let when_true = pipeline(cursor)!;
   expect_word(cursor, "else")!;
-  let else_ = pipeline(cursor)!;
+  let when_false = pipeline(cursor)!;
   let end = expect_word(cursor, "end")!;
-  Filter::If(condition, then_, else_, join(token.span, end.span))
+  Filter::If(condition, when_true, when_false, join(token.span, end.span))
 }
 
 fn expect_word(cursor: Cursor, wanted: String) -> Token raises Problem {

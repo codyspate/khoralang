@@ -61,7 +61,7 @@ pub type Filter =
   /// `f?` -- the values `f` produces, or none if it failed.
   | Optional(of: Filter, span: Span)
   /// `if c then a else b end`.
-  | If(condition: Filter, then_: Filter, else_: Filter, span: Span);
+  | If(condition: Filter, when_true: Filter, when_false: Filter, span: Span);
 
 /// One `key: value` of an object construction.
 ///

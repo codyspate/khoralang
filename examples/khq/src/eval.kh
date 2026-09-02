@@ -89,9 +89,9 @@ pub fn eval(filter: Filter, input: Json) -> List<Json> raises Problem {
       Result::Ok(values) => values,
       Result::Err(_why) => List::Nil,
     },
-    Filter::If(condition, then_, else_, _s) => List::flat_map(
+    Filter::If(condition, when_true, when_false, _s) => List::flat_map(
       eval(condition, input)!,
-      fn c => eval(if truthy(c) { then_ } else { else_ }, input)!,
+      fn c => eval(if truthy(c) { when_true } else { when_false }, input)!,
     )!,
   }
 }

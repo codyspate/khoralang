@@ -141,7 +141,7 @@ impl Rejection {
   /// the end of a `List` walks it, and a path is extended once per field at
   /// every depth; pushing is one cell and this runs only when something has
   /// gone wrong.
-  pub fn where_(self) -> String {
+  pub fn at(self) -> String {
     let outward = List::reverse(self.path);
     let written = List::fold(outward, "", fn (acc, step) => acc + Segment::write(step));
     if written == "" {
@@ -163,7 +163,7 @@ impl Rejection {
   /// message naming a password is a leak. The flag is set by [`secret`] and
   /// nothing else looks at it.
   pub fn describe(self) -> String {
-    let at = Rejection::where_(self);
+    let at = Rejection::at(self);
     match self.problem {
       Problem::Missing => at + " is not set",
       Problem::Refused(must) => at + " must be " + must,

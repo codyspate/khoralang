@@ -14,6 +14,13 @@ it will behave differently now.
 
 ### Breaking
 
+- **`Rejection::where_` is `Rejection::at`.** `where` is not a reserved word in
+  Khora — not a hard keyword, not a contextual one, not a token the lexer knows
+  — so the underscore was avoiding a collision that does not exist. It is `at`
+  rather than `where` because `where` is reserved in Rust, Haskell, SQL and C#
+  for roughly the clause Khora might one day want for trait bounds, and a name
+  that needs decorating to be legal is a name to replace.
+
 - **Every `std::schema` constructor is named after the type it answers.**
   `text` is `string`, `whole` is `int`, `exact` is `decimal`, `truth` is
   `bool`; `secret`, `optional`, `many`, `refine` and `struct2`..`struct5` are
