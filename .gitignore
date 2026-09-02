@@ -37,7 +37,7 @@ bench/*.pdb
 /.khora-gate-full
 /.khora-gate-fast
 
-# The peer servers `bench/compare.py` measures against, built by hand from
+# The peer servers `bench/measure.py` measures against, built by hand from
 # `bench/peers/`. Sources are tracked; binaries and build trees are not.
 /bench/peers/*.exe
 /bench/peers/*.class
@@ -46,7 +46,7 @@ bench/*.pdb
 /bench/*/src/release.exe
 /bench/*/src/release.exe.o
 /bench/*/src/release.pdb
-/bench/compare.json
+/bench/measure.json
 
 # What `scripts/package.sh` assembles. Built on demand and published by the
 # release workflow; never committed.

@@ -2973,3 +2973,118 @@ thing had to be a function. Three months of `struct5` came from that.
 The section is gone from the design, which now argues the opposite under *The
 record form*; `docs/design/schema-derive.md` is the decision record for the
 rewrite, and the reasoning above is there in full.
+
+## 77. The load generator multiplied one connection's rate by the number of connections
+
+Every throughput figure this project has ever recorded came from
+`bench/load.py`, and every one of them was wrong by between two and twelve
+times. The rig could not find a ceiling because it was not capable of finding
+one: the number it printed was, by construction, one connection's rate times
+the number of connections.
+
+`load.py` starts one process per connection, each running for `seconds` from
+the moment *it* starts, and then divides the total by `seconds`:
+
+```python
+counts = [out.get() for _ in running]
+total = sum(counts)
+print(f"{total / seconds:8.0f} req/s")
+```
+
+On Windows a `multiprocessing` child re-imports the interpreter, and forty-eight
+of them do not start at once. Asked for four seconds, the rig runs for
+fifty-two:
+
+| workers | wall clock | asked for | reported |
+| --- | --- | --- | --- |
+| 4 | 6.7 s | 4 s | 103,608 req/s |
+| 12 | 16.5 s | 4 s | 293,411 req/s |
+| 48 | 52.4 s | 4 s | 1,174,907 req/s |
+
+The workers barely overlap. Each gets a nearly idle server for its own four
+seconds, measures the single-connection rate -- 26,000 a second, which is what
+one Python process against this server does -- and the divisor stays at four.
+So the report is 26,000 times the worker count, three times over: 103k, 293k,
+1,175k are 4, 12 and 48 times one connection.
+
+**This is why no ceiling was ever found.** A rig whose output is proportional
+to its own worker count by construction cannot flatten. `bench/compare.py` was
+written to walk a ladder and refuse a rate that was still climbing, and it
+refused every time, and the conclusion drawn was that the client could not
+saturate the servers. The conclusion was drawn from the artifact. The same
+artifact explains the 1.85x spread between sittings that `docs/design/fibers.md`
+recorded as irreproducibility: process startup time is what varied.
+
+A server that counts what it answers settles it. During one 48-worker run
+reporting 1,184,214 req/s, the server logged between 51,000 and 152,000 a
+second, and served for fifty seconds rather than four.
+
+### What was actually slow
+
+The replacement, `bench/loadgen.rs`, was written as one thread per connection
+doing blocking reads, which is `load.py`'s shape in a faster language. It
+reported 7,900 requests a second on a connection where Python reported 26,631,
+and the reason is worth recording because it is not the one anybody guesses.
+
+The client's arithmetic was never the cost. A blocking read parks the thread
+and the kernel wakes it again when the answer arrives, and on this platform
+that pair costs about 120 microseconds -- on a round trip whose measured
+median is 29. The same connection with the socket in non-blocking mode,
+spinning on the read, answers 42,091 a second. Five times, from deleting the
+sleep.
+
+So the generator is now a handful of threads each driving many non-blocking
+connections in a round-robin loop: no thread per connection, and no sleeping.
+Eight threads is where its own rate stops changing -- 68k, 122k, 181k, 208k at
+one, two, four and eight, then 210k, 210k, 215k at twelve, sixteen and
+twenty-four -- which is the first time this project has been able to say that
+the generator is not what it is measuring.
+
+### What the numbers actually are
+
+One sitting, 16-core Windows desktop, release builds, 32 connections, six-second
+runs, mean of five, every condition checked by the script that produced the
+table:
+
+| | req/s | p50 | p99 | peak RSS | |
+| --- | --- | --- | --- | --- | --- |
+| C#, ASP.NET Core (Kestrel) | 268,397 | 101us | 252us | 976 KB | |
+| Khora `floor` | > 255,707 | 121us | 216us | 676 KB | generator still climbing |
+| Khora `render` | 241,064 | 127us | 245us | 608 KB | |
+| Rust control, thread per connection | 202,814 | 150us | 313us | 764 KB | |
+| Go, `net/http` | 188,869 | 103us | 1,385us | 992 KB | |
+| Khora, `std::net::http` | 174,360 | 156us | 543us | 576 KB | |
+| Java, JDK `HttpServer` | > 116,050 | 236us | 665us | 900 KB | ladder still climbing |
+| Node, `node:http` | 39,223 | 687us | 3,910us | 996 KB | spread 1.16x |
+
+**The correction is not only to the magnitudes.** `bench/README.md` concluded
+from the old rig that Khora's `Router` was "at least 6x Kestrel and at least
+10x Go's `net/http`". Measured against a generator that is not the thing being
+measured, it is **below** both: about 8 per cent under Go's standard library
+and 35 per cent under Kestrel. It is roughly four times Node and, on this
+machine, comfortably ahead of the JDK's server. That is a respectable place for
+a young standard library to be and it is nowhere near where this repository
+said it was.
+
+Two rows are lower bounds and are marked. `floor` is fast enough that the
+generator is still gaining when it is given more of the machine, so its true
+figure is above 255,707. Java's ladder was still climbing at 128 connections,
+which is a JIT that had not finished compiling the handler.
+
+The narrower comparisons the servers were built for survive and are worth more
+than the cross-language row: `service` against `floor` is the library, so the
+whole of `std::net::http` -- parse, header map, route match, render -- costs
+about a third of the throughput of a socket loop that does none of it. Peak
+resident memory is under a megabyte everywhere and does not grow with
+connections.
+
+### The lesson that generalises
+
+The rig had a ladder, a settling check and a refusal to report a climbing rate.
+It had every piece of measurement hygiene except an oracle. Nobody asked the
+server how many requests it had answered, and the server was the one component
+in the experiment that knew.
+
+A measurement of a system that the system itself can check should be checked
+against it. It took one twenty-line server with a counter in it to overturn
+three phases of recorded numbers.

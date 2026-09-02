@@ -274,38 +274,41 @@ commits on a red baseline — and a file on disk cannot be.
 
 ## Numbers
 
-**No requests-per-second figure for Khora is published, here or on the site.**
-Not modesty: the load generator in `bench/` runs on the same machine as the
-server it measures, and `bench/compare.py` established that it is the thing
-being measured. Pointed at the same server, the rig reports 747k requests a
-second at 48 client processes, 1.50M at 96 and 2.43M at 160. A rate that climbs
-with client concurrency is the client's rate.
+A `/health` route on `std::net::http`, on a 16-core Windows desktop, release
+build, 32 connections, six-second runs, mean of five:
 
-Two defects, both disqualifying on their own. **No ceiling was found**: at 320
-connections neither the threaded nor the scheduled runtime had flattened, so
-there is no server number to read off. **It does not repeat**: the same binary
-on the same machine minutes apart gave 948k and 1,760k, a spread of 1.85x,
-which is wider than most differences anybody would want to draw from the table.
+| | |
+| --- | --- |
+| throughput | 174,360 req/s |
+| median latency | 156us |
+| 99th percentile | 543us |
+| peak resident memory | 576 KB |
 
-What survives is narrower and still worth something. Within one sitting all the
-servers are throttled by the same client, so the *ratios* between them mean
-something even though the absolute rates do not. In one such sitting a Khora
-server stripped to accept-read-write-close, the same loop written straight in
-Rust, and the full `std::net::http` router landed within a factor of one and a
-half of each other, with the Rust control not on top. The honest reading is
-that the runtime is not what limits any of them, not that Khora beats Rust.
+That is just under Go's `net/http` on the same machine in the same sitting
+(188,869), about a third under ASP.NET Core on Kestrel (268,397), roughly four
+times Node's `node:http` (39,223), and ahead of the JDK's `HttpServer`. Mid-table,
+which is a reasonable place for a standard library this young to be.
 
-The parser's own numbers are microbenchmarks and do not have this problem,
-because nothing is driving them over a socket: an 80-byte HTTP request parse
-went from **2,440ns to 1,555ns** in phase 9, and a browser's fourteen-header
-request from 14,560ns to 7,345ns.
+The comparison worth more than the cross-language row is `service` against
+`floor`: the whole of `std::net::http` — parse, header map, route match, render
+— costs about a third of the throughput of a Khora socket loop that does none
+of it, and both are the same language on the same runtime in the same sitting.
 
-Four things have to be true before a throughput number is published: a
-generator that is not the bottleneck, a ladder where the rate flattens, the
-same configuration repeating far tighter than 1.85x, and the machine, profile
-and date printed beside the figure. `bench/README.md` has the servers, the
-rig and every measurement taken so far with its caveat attached, so the
-position is reproducible rather than asserted.
+**Every throughput figure this project published before September 2026 was two
+to twelve times too high**, including the ones that used to be in this section.
+The load generator ran one process per connection, each timing itself, and
+divided the total by the duration it was *asked* for rather than the one it
+took; the report was one connection's rate multiplied by the number of
+connections, which is why no ceiling was ever found. `docs/errata.md` 77 has the
+account, and `bench/measure.py` now checks the four conditions on
+`/docs/performance/` on every run and prints what failed instead of a number.
+
+Phase 9's parser numbers are microbenchmarks with no socket in them and are
+unaffected: an 80-byte HTTP request parse went from **2,440ns to 1,555ns**, and
+a browser's fourteen-header request from 14,560ns to 7,345ns.
+
+Anything quoting a number from this project should name its workload and its
+machine, because that is the only part of a benchmark that travels.
 
 ## Quickstart
 

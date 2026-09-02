@@ -71,7 +71,7 @@ It is not the default for 0.1.0 for three reasons, and one of them is a gap rath
 
 A program cannot observe which implementation it has, so the default may change in a later release without any source change.
 
-**The published throughput figures do not measure the servers.** `bench/README.md` says so and `bench/compare.py` refuses to report a rate that is still climbing; on the machine used most recently, neither fiber implementation could be driven to a ceiling at all. Treat any requests-per-second number from this project as a measurement of its load generator until one is published with a ladder beside it.
+**Throughput figures published before September 2026 were two to twelve times too high.** The load generator reported one connection's rate multiplied by the number of connections, which is why no ceiling was ever found. It has been replaced, the numbers have been retaken, and [Performance](/docs/performance/) carries them with the conditions they satisfy. Any requests-per-second number for Khora from an older document or post is wrong.
 
 ## Characters and strings
 

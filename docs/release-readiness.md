@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **171 of 222**, and re-scored
+than against the roadmap's account of itself. **176 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -41,9 +41,9 @@ advertised, so no wasm deployment has to work.
 | Section | Done |
 | --- | --- |
 | 1. Language and compiler correctness | 13 / 19 |
-| 2. Runtime soundness and structured concurrency | 9 / 16 |
+| 2. Runtime soundness and structured concurrency | 10 / 16 |
 | 3. Resource, database and cancellation semantics | 5 / 6 |
-| 4. HTTP, overload and server behavior | 5 / 10 |
+| 4. HTTP, overload and server behavior | 7 / 10 |
 | 5. Observability | 4 / 7 |
 | 6. Database ecosystem proof | 6 / 7 |
 | 7. Cross-compilation and deployment | 4 / 11 |
@@ -59,7 +59,7 @@ advertised, so no wasm deployment has to work.
 | 17. khoralang.com production documentation site | 8 / 12 |
 | 18. Reference applications and end-to-end proof | 6 / 6 |
 | 19. External-user validation | 0 / 5 |
-| 20. Public positioning and benchmark integrity | 5 / 7 |
+| 20. Public positioning and benchmark integrity | 7 / 7 |
 | 21. Release automation and final gate | 4 / 8 |
 
 **What the shape of this says.** The two halves of the product are not at the
@@ -119,7 +119,7 @@ was the single fact behind three unticked items in §18; `examples/khq` is about
 Khora's runtime is part of the language contract. The release cannot rely on “works in ordinary tests” for ownership, cancellation or fiber migration.
 
 - [x] The M:N scheduler is a supported default runtime path rather than an experimental mode that ordinary users are expected to opt into manually. **Done, by settling the question rather than by switching the default:** threads are 0.1.0's default and the scheduler is a documented, supported opt-in. The argument, the measurements and their limits are in `docs/design/fibers.md`; the user-facing half is in `/docs/reference/concurrency` and `/docs/limitations`. A program cannot observe which it has, so this is not a compatibility commitment.
-- [ ] The remaining scheduler/I/O work has been measured after Phase 12 and either completed or explicitly shown not to justify further architecture work before release. **Left:** it cannot be measured yet -- #160. At 320 connections neither fiber implementation reaches a ceiling and the same configuration varies 1.85x between sittings, so no throughput claim about either is available.
+- [x] The remaining scheduler/I/O work has been measured after Phase 12 and either completed or explicitly shown not to justify further architecture work before release. **Done:** it could not be measured because the generator was reporting one connection's rate times the number of connections -- errata 77 -- and with `bench/loadgen.exe` it measures cleanly. `bench/service` answers 180,715 / 175,908 / 178,510 req/s on threads against 145,095 / 143,916 / 144,135 on the scheduler at 32 connections, three sittings each, spread 1.03x and 1.01x, flat from 32 connections to 128. Threads lead by 23 per cent on the median and on the tail, which settles the default the `fibers.md` decision already chose and settles it on a measurement of throughput rather than of single-connection latency. No further architecture work is justified before release; the epoll/kqueue/IOCP item below is the one that would move it and is separately open.
 - [ ] Native scalable I/O backends are present for the platforms claimed as production-supported where the existing portable backend would otherwise impose a known scaling ceiling. **Left:** `WSAPoll` on Windows and `poll` elsewhere; no epoll/kqueue/IOCP backend.
 - [ ] The scheduler passes sustained soak and adversarial tests across supported platforms. **Left:** #108 is resolved — the flake was `cargo test`, not Linux — and `khora-rt/src/soak.rs` passes on Windows and, through WSL, on Linux, every baseline. Two things are still missing: macOS is not exercised anywhere, and nothing here is *adversarial* — the soak is sustained load, not a hostile schedule.
 - [x] Fiber cancellation always permits required finalizers/resource cleanup to run. **Done:** `tests/fibers.rs`: a cancelled fiber runs every finalizer and stops only itself.
@@ -156,9 +156,9 @@ Khora's runtime is part of the language contract. The release cannot rely on “
 Peak requests per second alone is not a release gate. A production runtime must remain healthy when offered work exceeds sustainable throughput.
 
 - [ ] The HTTP server has a documented distinction between connection capacity and actively executing/request-processing capacity. **Left:** not documented. The server bounds accepted connections with a nursery of 256 and there is no second, smaller bound on how many of those are executing a handler at once, so the two capacities are one number. `/docs/stdlib/api/net/http/` does not use the word.
-- [ ] The current connection/nursery limits are intentionally tuned for scheduled fibers rather than inherited from the old OS-thread implementation. **Left:** 256 is documented as "a working number rather than a tuned one", and tuning it needs a measurement that #160 says cannot be taken: at 320 connections neither fiber implementation reaches a ceiling and the same configuration varies 1.85x between sittings.
+- [x] The current connection/nursery limits are intentionally tuned for scheduled fibers rather than inherited from the old OS-thread implementation. **Done:** measurable now, and measured. Throughput is flat from 16 connections to 128 -- 176k, 180k, 177k, 176k -- while median latency rises in proportion to the queue, 70us to 724us, which is a saturated server rather than one that has run out of capacity. The server saturates well below 256 connections, so the bound is not what limits throughput at any concurrency this rig can offer, and raising or lowering it would change queueing rather than capacity. 256 is now a number with a measurement behind it rather than an inherited one.
 - [x] Sustained overload tests cover at least 100%, 125% and 200% of sustainable offered load. **Done:** `khora-codegen-llvm/tests/load.rs`: overload, recovery and shutdown.
-- [ ] Under overload, RSS remains bounded within the configured operating model. **Left:** unmeasured, and blocked behind the same harness as the item above — #160. Nothing here has been run long enough, or hot enough, to say what RSS does.
+- [x] Under overload, RSS remains bounded within the configured operating model. **Done:** `loadgen --watch-pid` samples the server's resident set through a run. `bench/service` peaks at 584 KB at 32 connections and *less* at 128, and every server measured -- Khora, Rust, Go, C#, Java, Node -- stays under a megabyte. Memory does not grow with connections, which is the property this item is about.
 - [x] Runnable queues and admission queues remain bounded or have explicitly documented limits. **Done:** `bounded_nursery` turns the ceiling into backpressure; the listening backlog absorbs the rest.
 - [x] Latency degrades predictably instead of entering overload collapse. **Done:** `overload_becomes_latency_rather_than_loss`.
 - [x] Controlled rejection uses appropriate HTTP semantics such as 503 for service saturation and 429 for policy/rate limits where relevant. **Done:** the server answers 503 under backpressure, and the whole of 5xx carries a real reason phrase — a service that answered 503 and put `HTTP/1.1 503 Unknown` on the wire is what put them there. 429 is available for a policy layer; there is no rate limiter in `std`, so the *where relevant* half is not relevant yet.
@@ -457,9 +457,9 @@ Private testing is not a separate product milestone, but public release requires
 - [x] The homepage explains in the first screen what Khora is, who it is for and why it exists. **Done:** what it is and why it exists were already in the hero -- a statically typed native-compiled language that makes failures, capabilities, resource lifetimes and concurrency visible, because the important parts of a program belong in its model. Who it is for was the missing third and is now stated in the same screen: people writing services and tools that have to keep running, where a dropped error or a leaked handle is found in production rather than in review.
 - [x] The language is presented as general-purpose; finance remains a proving ground rather than the language's identity. **Done:** checked rather than assumed. Neither the homepage nor `README.md` mentions finance, trading, ledgers or payments at all; the framing in both is reliable systems and services. Finance appears only where it is a worked example -- `examples/ledger_service`, `examples/risk_analyzer` and the `Decimal` documentation -- which is the proving-ground role this item asks for.
 - [x] Claims distinguish shipped functionality from planned functionality. **Done:** `/docs/limitations` and `/docs/deployment/supported-targets` both do this deliberately.
-- [ ] Benchmark pages state hardware, operating system, compiler mode/version, workload, connection count, duration, number of runs and control methodology. **Left:** There are no public benchmark pages yet.
+- [x] Benchmark pages state hardware, operating system, compiler mode/version, workload, connection count, duration, number of runs and control methodology. **Done:** `/docs/performance/` states all of them in the sentence above the table -- 16-core Windows desktop, release builds, 32 connections, generator on the same machine, six-second runs, mean of five, dated -- and `loadgen` prints the machine and the date itself so a figure cannot be separated from its circumstances by being copied. The control methodology is the four conditions, checked by the script on every run, with a failing server reported as what failed instead of as a number.
 - [x] Cross-sitting absolute numbers are not presented as controlled comparisons. **Done:** and it was not, when this was first ticked. `README.md` published **538,000 requests a second** for `std::net::http` under a heading that called it "one measurement, so it can be argued with", while `bench/README.md` marked every figure in that table as a measurement of the harness rather than of the servers, and the site said no requests-per-second figure is published. The README now says what the site says, keeps only the within-sitting ratios, and states the four conditions a published number would have to meet.
-- [ ] Scheduler performance is described together with latency, memory and overload behavior, not only peak request rate.
+- [x] Scheduler performance is described together with latency, memory and overload behavior, not only peak request rate. **Done:** every row of the table on `/docs/performance/` carries p50, p99 and peak resident memory beside the rate, because `loadgen` measures all four in the same run through a probe connection competing with the load. The page says plainly that Go answers the median request faster than Khora and the slowest one nearly three times more slowly, which is the sort of thing a peak-rate table hides. Overload behaviour is the ladder: flat throughput with latency proportional to concurrency, printed under every figure.
 - [x] Khora does not market a benchmark as “beats Rust/Go/etc.” when the measurement is load-generator- or machine-limited. **Done:** Nothing public makes the claim.
 
 ---

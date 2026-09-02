@@ -92,35 +92,45 @@ the coroutine would replace the thread as soon as it worked. It works.
 
 #### What could be measured, and what could not
 
-Taken 2026-09-01 on a sixteen-core Windows desktop, release build,
-`bench/service`, the load generator on the same machine.
+**The table that used to be here was retired on 2026-09-02**, along with every
+other throughput figure this project had recorded. `bench/load.py` reported one
+connection's rate multiplied by the number of connections -- it ran one process
+per connection, each timing itself, and divided the total by the duration it
+was *asked* for rather than the one it took. That is why neither implementation
+appeared to reach a ceiling: a rig whose output is proportional to its own
+worker count cannot flatten. It is also the 1.85x spread that was recorded here
+as irreproducibility, which was process startup time varying. `docs/errata.md`
+77 has the account.
 
-| connections | threads | scheduler |
-| --- | --- | --- |
-| 48 | 781k, 808k, 816k, 831k | 328k, 562k, 571k, 571k |
-| 160 | 948k, 1,760k | 971k, 1,010k |
-| 320 | 3,531k | 1,847k |
+Re-measured 2026-09-02 with `bench/loadgen.exe`, which is a few threads driving
+many non-blocking connections and whose own rate stops changing when it is
+given more of the machine. Sixteen-core Windows desktop, release build,
+`bench/service`, five-second runs:
 
-**Only the first row is worth anything, and the reason is in the other two.**
-`bench/README.md` already says every figure it publishes is a measurement of
-the harness rather than of the servers, and `bench/compare.py` exists to refuse
-a rate that is still climbing. Neither implementation stops climbing here: at
-320 connections both are still rising roughly linearly, so no ceiling was found
-for either and no throughput comparison is available.
+| | 32 connections | 128 connections | p99 at 32 |
+| --- | --- | --- | --- |
+| threads | 180,715 / 175,908 / 178,510 | 180,400 | 579us |
+| scheduler | 145,095 / 143,916 / 144,135 | 156,084 | 831us |
 
-Worse, the same configuration does not repeat. Threads at 160 connections gave
-948k in one sitting and 1,760k in the next -- **1.85x apart, same binary, same
-machine, minutes apart**. That spread is larger than several of the differences
-somebody might want to read off this table.
+Three sittings each, spread 1.03x and 1.01x. The rate is flat from 32
+connections to 128 for both, which is what a saturated server looks like and
+what the old rig could never show.
 
-What survives is the 48-connection row, where four sittings agree that threads
-are substantially ahead. That is the concurrency most services actually run at,
-and it is the only claim here that can be taken again.
+**Threads are about 23 per cent ahead at 32 connections and about 16 per cent
+ahead at 128**, on the median request as well as on the tail. The one place the
+scheduler is better is median latency at 128 connections, 524us against 668us,
+which is the density argument showing up where `scheduler.md` says it should.
+
+So the conclusion below survives the correction, but it was previously drawn
+from a measurement of something else. What the old rig actually compared was
+single-connection latency on a nearly idle server, because its workers barely
+overlapped -- not throughput at the concurrency a service sees. The claim and
+the evidence agree now; before, they only appeared to.
 
 #### The decision
 
-1. **Threads win at the concurrency a service sees**, by the one measurement
-   that reproduces.
+1. **Threads win at the concurrency a service sees**, by a measurement that
+   reproduces to within three per cent and that flattens across the ladder.
 2. **The scheduler's compensating benefit is unverified where it would be
    claimed.** It exists for fiber *density* -- `scheduler.md` says throughput
    was never the point -- and 100,000 suspended fibers at ~4.2 KB each was
@@ -144,12 +154,19 @@ had got meaningfully faster in that time and the comment was the only place
 either figure lived, so nothing was checked against anything. The numbers are
 in this document now and the comment points here.
 
-**And the harness was already known to be the limit.** That is written in
-`bench/README.md` in a blockquote, above the figures it qualifies. It was
+**And the harness was already suspected of being the limit.** That was written
+in `bench/README.md` in a blockquote, above the figures it qualified, and
 rediscovered from scratch during this decision by somebody who had not read it
 -- which is the cost of a caveat living next to the numbers rather than in the
-tool that produces them. `bench/compare.py` is the tool; it is not what
-`fibers.md` or `fiber.rs` were quoting.
+tool that produces them.
+
+The caveat was also too kind. It said the figures measured the harness, which
+was right, and left them in the table anyway. They were not merely
+harness-limited: they were one connection's rate times a constant, so they
+described the harness and nothing else. A caveat that lets a number stay is a
+number. `bench/measure.py` now checks the conditions on every run and prints
+what failed *instead of* a figure, which is the version of that lesson that
+cannot be skipped by not reading a paragraph.
 
 ### What that costs while it is threads
 

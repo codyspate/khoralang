@@ -169,6 +169,22 @@ it will behave differently now.
 
 ### Fixed
 
+- **Every throughput figure this project published was two to twelve times too
+  high.** `bench/load.py` ran one process per connection, each timing itself,
+  and divided the total by the duration it was *asked* for rather than the one
+  it took -- and forty-eight Python processes on Windows take fifty-two seconds
+  to get through a four-second run. The workers barely overlapped, each
+  measured a nearly idle server, and the report was one connection's rate
+  multiplied by the number of connections. A rig whose output is proportional
+  to its own worker count cannot flatten, which is why no ceiling was ever
+  found and why the spread between sittings looked like 1.85x. Errata 77.
+  `bench/loadgen.rs` and `bench/measure.py` replace `load.py` and `compare.py`;
+  every published number has been retaken; `README.md`, `/docs/performance/`,
+  `/docs/limitations/`, `bench/README.md` and `docs/design/fibers.md` are
+  corrected. `std::net::http` answers **174,360 req/s**, p50 156us, p99 543us,
+  peak RSS 576 KB, which is just under Go's `net/http` and a third under
+  Kestrel where this repository had claimed 10x Go and 6x Kestrel.
+
 - **The traps reference told people to set the wrong environment variable,
   and called a failed assertion a trap.** `RUST_BACKTRACE` is honoured but
   `KHORA_BACKTRACE` is the name the runtime's own note gives, and the
@@ -288,6 +304,19 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **A load generator that is not what it is measuring.** `bench/loadgen.rs` is
+  a few threads each driving many non-blocking connections, instead of a thread
+  or a process per connection. The change that mattered was not the language: a
+  blocking read parks the thread and the kernel wakes it on every response,
+  about 120 microseconds on a round trip whose median is 29, so the same
+  connection spinning on a non-blocking socket answers five times as many
+  requests. It reports latency percentiles from a probe connection competing
+  with the load, samples the server's resident memory with `--watch-pid`, and
+  prints the machine and the date beside the figure. `bench/measure.py` walks
+  the ladder, repeats the rung, checks all four conditions from
+  `/docs/performance/` and prints what failed instead of a number when one does
+  not hold.
 
 - **Server guidance for traps.** A trap in a request handler ends the server
   process, not the request: it does not unwind, so the `catch` the router

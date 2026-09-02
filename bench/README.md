@@ -20,185 +20,149 @@ says how much of the library is the response rather than the request.
 ## Running them
 
 ```bash
-cargo build -p khora-rt
+rustc -O -o bench/loadgen.exe bench/loadgen.rs
+rustc -O -o bench/control_keepalive.exe bench/control_keepalive.rs
 cargo run -p khora-cli --features llvm -- build bench/service
+KHORA_PROFILE=release python bench/measure.py
+```
+
+`measure.py` starts each server in turn, walks a ladder against it, repeats the
+chosen rung, and prints a table with the machine and the date on it. It reports
+what failed instead of a number when a run does not settle, which is the whole
+difference between it and what came before.
+
+One server on its own:
+
+```bash
 ./bench/service/build/service.exe &
-python bench/load.py 18952 "service"
+./bench/loadgen.exe --port 18952 --label service --connections 32 --seconds 5
 ```
 
 Ports are fixed so two of these cannot be measured at once by accident:
 `floor` 18950, `render` 18951, `service` 18952. The Rust controls take a port
-on the command line.
+on the command line. `--watch-pid` samples the server's resident memory while
+the run is under way.
 
-```bash
-rustc -O -o bench/control_keepalive.exe bench/control_keepalive.rs
-./bench/control_keepalive.exe 18953 &
-python bench/load.py 18953 "rust, keep-alive"
-```
+## Every number here was wrong until 2026-09-02
+
+`bench/load.py` produced every figure this file used to carry, and all of them
+were between two and twelve times too high. It ran one process per connection,
+each timing itself, and divided the total by the duration it was *asked* for
+rather than the one it took -- and on Windows forty-eight Python processes take
+fifty-two seconds to get through a four-second run. The workers barely
+overlapped, each measured a nearly idle server, and the report was one
+connection's rate multiplied by the number of connections.
+
+That is why no ceiling was ever found. A rig whose output is proportional to
+its own worker count cannot flatten, so the ladder in `compare.py` refused to
+settle every time and the conclusion drawn was that the client could not
+saturate the servers. The conclusion came from the artifact. `docs/errata.md`
+77 has the full account, including how a server that counts what it answers
+settled it in twenty lines.
+
+`load.py` and `compare.py` are gone. `loadgen.rs` and `measure.py` replace
+them.
 
 ## What was measured
 
-16-core Windows desktop, load generator on the same machine, 48 reused
-connections, five second runs, median of three. **These numbers travel with
-that sentence or they do not travel.**
+16-core Windows desktop, release builds, 32 connections, generator on the same
+machine, six-second runs, mean of five. **These numbers travel with that
+sentence or they do not travel.**
 
-> **Every figure below is a measurement of this harness, not of the servers.**
-> They were taken at 48 connections, and `bench/compare.py` later established
-> that 48 Python processes cannot drive any of these servers to its limit:
-> pointed at `floor`, the same rig reports 747k at 48 connections, 1.50M at 96
-> and 2.43M at 160. A rate that climbs with client concurrency is the client's
-> rate. The *ratios between the Khora tiers* still mean something, because all
-> three were throttled by the same client; the absolute numbers do not, and the
-> comparison against the Rust control means less than it looks.
->
-> `bench/compare.py` is the version that walks a ladder and refuses to report a
-> rate that is still climbing. See "Against other languages" below.
+| | req/s | p50 | p99 | peak RSS | |
+| --- | --- | --- | --- | --- | --- |
+| C#, ASP.NET Core (Kestrel) | 268,397 | 101us | 252us | 976 KB | |
+| Khora `floor` | > 255,707 | 121us | 216us | 676 KB | generator still climbing |
+| Khora `render` | 241,064 | 127us | 245us | 608 KB | |
+| Rust control, thread per connection | 202,814 | 150us | 313us | 764 KB | |
+| Go, `net/http` | 188,869 | 103us | 1,385us | 992 KB | |
+| Khora, `std::net::http` | 174,360 | 156us | 543us | 576 KB | |
+| Java, JDK `HttpServer` | > 116,050 | 236us | 665us | 900 KB | ladder still climbing |
+| Node, `node:http` | 39,223 | 687us | 3,910us | 996 KB | spread 1.16x |
 
-All four back to back in one sitting, after phase 9:
+Rows with a `>` are lower bounds and say why in the last column. `floor` is
+fast enough that the generator is still gaining when given more of the machine.
+Java's ladder was still climbing at 128 connections, which is a JIT that had
+not finished with the handler.
 
-| | req/s |
-| --- | --- |
-| Rust control, keep-alive | 560,000 |
-| Khora `floor` | 781,000 |
-| Khora `render` | 721,000 |
-| Khora `service` | 538,000 |
+### What the differences say
 
-Runs vary by up to eight per cent on an otherwise idle machine, so a difference
-smaller than that is noise. Every figure is the median of three; the `service`
-runs spanned 535k to 566k, and the Rust control's spanned 551k to 635k.
+**`service` against `floor` is the library.** 174,360 against more than
+255,707: the whole of `std::net::http` -- request parsing, the header map, the
+router, response building -- costs about a third of the throughput of a socket
+loop that does none of it. `render` at 241,064 puts most of what is left in
+reading the request rather than writing the answer. These are the comparisons
+these servers were built for and they are the ones worth the most, because all
+three are the same language on the same runtime in the same sitting.
 
-**Read the four together or not at all.** The Rust control measured 653,000 in
-an earlier sitting on the same machine and 560,000 in this one, which is well
-outside the eight per cent and is the machine rather than the program. That is
-the whole reason for running all four at once: the ratios within a sitting mean
-something and the absolute figures across sittings do not.
+**`floor` against the Rust control is the runtime**, and the control is a
+thread per connection, which is not the fastest way to write this server in
+Rust. Read it as "the runtime is not what limits either of them" rather than as
+a win.
 
-The set before phase 9 was 653k / 758k / 734k / 507k. `service` is the only one
-the phase could move — `floor` and `render` barely count references — and it
-moved from 507k to 538k against a control that was slower, so the honest claim
-is "the request parser got cheaper" and the size of it comes from
-`docs/design/reuse.md`, not from here.
+**Against other languages, Khora's `Router` is mid-table.** It is about 8 per
+cent under Go's `net/http`, 35 per cent under Kestrel, roughly four times Node
+and comfortably ahead of the JDK's server. This repository previously claimed
+"at least 6x Kestrel and at least 10x Go" on the strength of the old rig; the
+truth is the other way round for both. Each peer is that language's *ordinary*
+server rather than a tuned one -- Node's is single-threaded by design and would
+be several times faster behind `cluster`, the JDK's is not what a Java service
+ships on, and `fasthttp` is faster than `net/http` -- so read the table as
+"what you get when you write the obvious thing".
 
-## Phase 11's scheduler, measured the same way
+**Latency is not throughput.** Go answers the median request faster than Khora
+does (103us against 156us) and the slowest one much more slowly (1,385us
+against 543us). A server chosen on peak rate alone would have missed both.
 
-One sitting, one machine, `bench/service` only, 48 reused connections:
+**Memory is flat.** Peak resident set is under a megabyte for every server
+here, and for Khora it does not grow with connections: `service` holds 584 KB
+at 32 connections and less at 128.
 
-| | req/s | of threads |
-| --- | --- | --- |
-| fibers as threads (the default) | 816,963 | — |
-| fibers on the scheduler, idle workers polling (11I) | 513,500 | 63% |
-| — with a reactor thread instead (11H) | 429,000 | 55% |
-| — before the reactor could be woken at all (11G) | 59,965 | 7% |
+### The four conditions, checked
 
-The top two rows were taken minutes apart with nothing else changed, which is
-the only way this file allows a comparison to be made; the scheduler figure is
-the median of 512,770 and 514,221. The lower rows are earlier sittings and are
-kept for the shape of the progression rather than for their absolute values —
-the thread control itself read 782,149 in the 11H sitting and 816,963 here,
-which is the machine and not the program, and is why the third column matters
-more than the second.
+`/docs/performance/` sets out what would have to be true before a throughput
+number is published. `measure.py` checks all four and prints what failed
+instead of a number:
 
-Twelve times slower became 1.6 times slower in two steps: making one `poll`
-interruptible, then letting the worker that will run the fiber be the one that
-notices its socket. Threads remain the default; 63% is at the lower edge of the
-70–85% band `docs/design/scheduler.md` §10a set, not inside it.
+**The generator is not the bottleneck.** Its rate stops changing when given
+more of the machine -- against the control, 68k, 122k, 181k, 208k at one, two,
+four and eight threads, then flat at twelve, sixteen and twenty-four. Eight is
+the default for that reason. Where a server is fast enough that this stops
+being true, the row is marked and the figure is a lower bound.
 
-**What it is not.** Not correctness — `scripts/http_conformance.sh` passes on
-both, pipelining and header limits included — and not the cost of a fiber,
-since the sixteen compiled fiber tests run in the same time on both to within
-four per cent. It is the path from a socket becoming readable to the fiber that
-wanted it running again.
+**The ladder flattens.** From 16 connections to 128 the rate is level while
+median latency rises with concurrency -- `service` runs 176k, 180k, 177k, 176k.
+Constant throughput with latency proportional to queueing is what a saturated
+server looks like, and it is the shape the old rig could never produce.
 
-Two readings, and the second is the useful one.
+**It repeats.** Spread across sittings is 1.03x to 1.05x for the servers that
+pass. The figure that disqualified the old rig was 1.85x.
 
-**The runtime matches Rust.** `floor` measures above `control_keepalive`, and
-the honest reading of that is not that Khora is faster — both are close to what
-the load generator can drive, and a client and a server on sixteen shared cores
-is not a clean measurement of either. What it rules out is the runtime being
-the reason for anything below.
-
-**`std::net::http` costs the gap between 758k and 507k**, and rendering the
-response is about 24k of it. The rest is parsing the request.
+**The machine and the date are printed with the number** by `loadgen` itself,
+so a figure cannot be separated from its circumstances by being copied.
 
 ## Where the number came from
 
-Worth keeping, because the first three attempts to explain the gap were wrong.
-
-Connection reuse is worth **two orders of magnitude** and was measured first for
-that reason: 6,116 req/s on a fresh connection each time against 1.1M on one
-held open. Anything compared against a keep-alive benchmark without keep-alive
-is answering a different question.
-
-After that, `service` sat at 152,912 and three plausible culprits — fiber
-scheduling, nursery bookkeeping, map allocation — were each measured and each
-worth under one per cent. What it actually was:
-
-- **The runtime was compiled without optimisation** in every executable
-  `khora build` produced, because it was found beside a `target/debug`
-  compiler. Two and a half times, from three lines of `Cargo.toml`. Errata 45.
-- **`String::slice` was two allocations, two copies and a UTF-8 revalidation.**
-  As an intrinsic it is one allocation and one memcpy: 2,915ns to 80ns.
-- **`String::index_of` reached `memmem` through two heap-allocated closures.**
-  Going straight to the call: 500ns to 40ns.
-- **Splitting the header block was quadratic** in the number of headers,
-  because each line copied everything after it.
-
-Parsing an eighty-byte request went from 28,310ns to 3,600ns across those.
-
-The lesson worth carrying into the next round is in errata 45: a benchmark that
-is off by a constant factor *everywhere* is a configuration bug, not a code bug,
-and the way to see it is to measure one primitive against something whose cost
-is already known — one call to `memmem`.
+Phase 9's parser work is measured with `khora bench` rather than over a socket,
+so it is unaffected by any of the above: an 80-byte HTTP request parse went
+from 2,440ns to 1,555ns, and a browser's fourteen-header request from 14,560ns
+to 7,345ns.
 
 ## Against other languages
 
 `bench/peers/` holds the same `/health` route in Go, Node, C# and Java, each
 using that language's ordinary server rather than a hand-rolled socket loop,
 because the comparison worth making is against what a team would actually
-write. `python bench/compare.py` builds nothing and measures everything,
-walking 48, 96 and 160 connections per server.
+write. `measure.py` runs them alongside the Khora servers, so the table above
+is one sitting rather than several stitched together.
 
-One sitting, 16-core Windows desktop, load generator on the same machine,
-five-second runs, a discarded warm-up first. Khora built with `--release`.
-
-| | req/s | what it is |
-| --- | --- | --- |
-| Khora, `floor` | **> 2,433,000** | accept, read, write a fixed string. No parsing |
-| Rust, thread per connection | **> 2,129,000** | hand-rolled, no framework |
-| Khora, `render` | **> 2,354,000** | the floor plus response rendering |
-| Khora, `std::net::http` | **> 1,729,000** | a `Router`: accept, read, parse, route, render |
-| C#, ASP.NET Core minimal API | 264,000 | Kestrel |
-| Go, `net/http` | 159,000 | the standard library |
-| Java, JDK `HttpServer` | 133,000 | `com.sun.net.httpserver` |
-| Node, `node:http` | 27,000 | the standard library |
-
-**The four figures with a `>` are not measurements.** Each of those servers
-answered more the more connections it was offered — `std::net::http` reported
-519k, 1.06M and 1.73M across the ladder — which is the client running out of
-capacity, not the server. What they establish is a floor: Khora's HTTP server
-is somewhere above 1.7 million requests a second on this machine, and this rig
-cannot say where. The four without a `>` stopped moving, so those are the
-servers' own numbers.
-
-So the honest reading is **an order of magnitude, not a ratio**. Khora's
-`Router` — a full parse, route match and render, written in Khora — is at
-least 6× Kestrel and at least 10× Go's `net/http` here, and it is in the same
-class as a hand-rolled Rust server. How much more than 6× and 10× is a
-question this harness cannot answer.
-
-**What would answer it** is a second machine, or a load generator that is not
-the thing being measured. A first attempt at one in Go plateaued at 250k,
-which is *below* the Python rig it was meant to replace, so it measured itself
-instead; it is kept in `bench/peers/loadgen.go` with that written on it. Two
-machines is the real fix and is roadmap 13.23.
-
-### One thing the comparison did settle
-
-`--release` made no difference to `std::net::http`: 1.73M optimised against
-1.76M unoptimised, which is the same number twice. For this workload the time
-is in the kernel rather than in the generated code, so the profile has nothing
-to work on. That is worth knowing before anybody attributes a benchmark result
-to an optimiser.
+`--release` made no difference to `std::net::http` when that was last checked:
+1.73M optimised against 1.76M unoptimised under the old rig. Both figures are
+retired with the rig, but the *equality* between them is a ratio within one
+sitting, which is the one thing that rig could measure, so the conclusion
+stands: for this workload the time is in the kernel rather than in the
+generated code and the profile has nothing to work on. Worth knowing before
+anybody attributes a benchmark result to an optimiser.
 
 ### What these peers are not
 
@@ -208,6 +172,13 @@ what a Java service ships on, and Netty or Undertow would be far above it;
 `net/http` is Go's real answer and a specialised library like `fasthttp` is
 faster. Read the table as "what you get when you write the obvious thing",
 which is the comparison a team actually faces, not as a ranking of runtimes.
+
+### What a second machine would still buy
+
+The generator and the servers share sixteen cores, and two of the rows above
+are lower bounds because of it. A generator on its own machine would remove
+the last of the doubt and let `floor` be measured rather than bounded. Roadmap
+13.23.
 
 ## What these do not measure
 
