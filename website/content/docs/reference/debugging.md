@@ -1,7 +1,7 @@
 ---
 title: Debugging a program
 sidebar:
-  order: 18
+  order: 21
 ---
 
 Khora compiles to an ordinary native executable with ordinary debug information, so the tools you already have work on it. This page says which parts of that are tested and which are not, because "should work" and "is checked by CI" are different claims and only one of them is worth acting on.

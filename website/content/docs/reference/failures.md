@@ -1,10 +1,19 @@
 ---
 title: Failures
 sidebar:
-  order: 11
+  order: 12
 ---
 
 Recoverable failure is part of a Khora function type. `raises` declares the channel, `raise` creates a failure, postfix `!` propagates one, `catch` handles typed cases, and `attempt` converts the channel into `Result` data.
+
+The four pieces, at a glance:
+
+```text
+raise E                    create a typed failure
+foo()!                     allow E to propagate out of the current function
+foo()! catch { ... }       handle E here
+attempt(fn () => foo()!)   turn E into a Result<A, E> value
+```
 
 ## Declare a failure type
 
@@ -159,6 +168,17 @@ fn load_for_api(id: Id) -> User
 
 `UserError` no longer escapes `load_for_api`; callers see `ApiError`.
 
+A layer should usually not expose the failures of the layer beneath it, which
+makes this the ordinary boundary shape:
+
+```text
+infrastructure/domain failure
+          |  catch + raise
+application/API failure
+          |  catch
+response or other boundary value
+```
+
 ## Handle only part of a multi-type row
 
 ```khora
@@ -239,12 +259,36 @@ let answer = fetch(url)! catch {
 };
 ```
 
-## Collect per-item failures
+## Two marks, doing different jobs
 
-Propagating from inside `List::map` stops on the first failure:
+A fallible function can be mapped directly, because a function type carries its
+own capability and failure rows and the combinator carries the caller's:
 
 ```khora
-items |> List::map(fn item => process(item)!)
+let users = ids |> List::map(fn id => load_user(id)!)!;
+```
+
+The inner `!` is `load_user` failing. The outer one is `List::map` passing that
+failure on, which it can do only because its own signature ends `raises 'er`.
+Leaving the outer one off is an error naming both halves:
+
+```text
+error: `List::map` can leave this function, so the call needs `!`: write `List::map(..)!`
+error: `List::map` needs `Bad`, which this function does not raise
+```
+
+Every combinator that takes a function is written that way — `fold`, `filter`,
+`find`, `any`, `all`, `partition`, `flat_map`, and their counterparts on
+`Option` and `Result` — so a fallible step never means leaving the chain to
+write the walk by hand. Mapping a *pure* function needs neither mark: an empty
+row is what a row variable takes when nothing fills it.
+
+## Collect per-item failures
+
+Propagating from inside `List::map` stops at the first failure:
+
+```khora
+items |> List::map(fn item => process(item)!)!
 ```
 
 Convert each invocation with `attempt` to run all items and collect both successes and failures:
@@ -261,6 +305,36 @@ The result has the shape:
 ```khora
 List<Result<Output, ProcessError>>
 ```
+
+## When you want every reason, not the first
+
+`raises` stops at the first failure, which is right when the next step needs
+the last one's value. Validation is the other shape: the fields of a form, the
+keys of a configuration, the columns of a row do not depend on each other, and
+reporting them one restart at a time makes somebody run the program five times
+to be told five things it knew the first time.
+
+`Validated<A, E>` from `std::core` is that shape. `map2` runs its combiner only
+when both sides succeeded, and otherwise carries every error from both:
+
+```khora
+let settings = Validated::map2(
+  integer("PORT"),
+  string("HOST"),
+  fn (port, host) => { port: port, host: host },
+);
+```
+
+`and_then` is the fail-fast one, for a second step written in terms of the
+first's value — there is no second answer to collect when there is no first
+value to write it against.
+
+`to_result` collapses the whole thing into a `Result<A, List<E>>` when it is
+time to rejoin a `raises` chain. It keeps the list rather than the first error,
+because throwing the rest away at the boundary would undo the collecting.
+
+[Load application configuration](/docs/cookbook/configuration/) and
+[Schemas](/docs/stdlib/schema/) are both built on it.
 
 ## `Result::map_err`
 
@@ -312,6 +386,22 @@ For the same reason, `main` may not carry a `with { .. }` requirement: nothing
 calls it, so nothing could supply one. Install them in the body instead —
 `with { reads: FsRead::real() } { .. }`, as above. A `with` clause on `main` is
 refused at compile time.
+
+## Failure is part of the API
+
+A `raises` row is documentation the compiler checks. It answers, in the
+signature, a question many languages leave to prose: what normal failure
+conditions must a caller be prepared for?
+
+Keep the failure types meaningful at each boundary. A low-level package can
+expose precise operational failures, an application service can translate those
+into domain failures, and the outermost boundary can consume them into
+responses, exit codes or other protocol values.
+
+`with` and `raises` are the two halves of an effectful signature and are
+independent: `with` says what authority a computation needs,
+[Capabilities](./capabilities/) covers it, and `raises` says how its normal
+result may fail.
 
 ## Traps are separate
 

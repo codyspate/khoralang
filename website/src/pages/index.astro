@@ -16,7 +16,7 @@
     </a>
     <nav aria-label="Primary">
       <a href="/docs/">Docs</a>
-      <a href="/docs/guide/">Language guide</a>
+      <a href="/docs/reference/">Language reference</a>
       <a href="/docs/stdlib/">Standard library</a>
       <a class="github-link" href="https://github.com/codyspate/khoralang">GitHub</a>
     </nav>
@@ -64,19 +64,19 @@
         <h2>The important parts of a program belong in its model.</h2>
       </div>
       <div class="feature-grid">
-        <a class="feature-card" href="/docs/guide/effects-and-capabilities/">
+        <a class="feature-card" href="/docs/reference/capabilities/">
           <span class="feature-kicker">01</span>
           <h3>Capabilities, not hidden globals</h3>
           <p>External authority appears in <code>with</code> rows, so dependencies are reviewable without manually passing service objects everywhere.</p>
           <span class="feature-link">Capabilities →</span>
         </a>
-        <a class="feature-card" href="/docs/guide/errors-and-raises/">
+        <a class="feature-card" href="/docs/reference/failures/">
           <span class="feature-kicker">02</span>
           <h3>Typed failure without wrapper types</h3>
           <p>Recoverable errors live in <code>raises</code> rows while the code stays direct. Handle what you mean to handle and propagate the rest.</p>
           <span class="feature-link">Typed failure →</span>
         </a>
-        <a class="feature-card" href="/docs/guide/fibers-and-nurseries/">
+        <a class="feature-card" href="/docs/reference/concurrency/">
           <span class="feature-kicker">03</span>
           <h3>Structured concurrency by default</h3>
           <p>Fibers live inside lexical scopes, so cancellation, joining, and cleanup are part of the concurrency model rather than conventions.</p>
@@ -96,7 +96,7 @@
         <p class="eyebrow">Direct style, functional core</p>
         <h2>Functional ideas without a monadic surface.</h2>
         <p>Khora keeps algebraic data types, immutable values, typed effects, row polymorphism, and composable pipelines while presenting them in code that reads like ordinary application logic.</p>
-        <a class="text-link" href="/docs/guide/">Learn the language →</a>
+        <a class="text-link" href="/docs/reference/">Learn the language →</a>
       </div>
       <div class="pipeline-card" aria-label="Khora pipeline example">
         <span class="pipeline-label">transform a collection</span>
@@ -143,8 +143,8 @@
       </div>
       <div class="path-list">
         <a href="/docs/getting-started/"><span>01</span><strong>Build your first program</strong><small>Install Khora, create a project, build it, run it, and test it.</small><b>→</b></a>
-        <a href="/docs/guide/"><span>02</span><strong>Learn the language</strong><small>Work through values, types, pipelines, effects, resources, and concurrency.</small><b>→</b></a>
-        <a href="/docs/reference/"><span>03</span><strong>Look up exact behavior</strong><small>Use the language reference when you need precise syntax or semantics.</small><b>→</b></a>
+        <a href="/docs/reference/"><span>02</span><strong>Learn the language</strong><small>Work through values, types, pipelines, effects, resources, and concurrency — then use the same pages to look up exact behaviour.</small><b>→</b></a>
+        <a href="/docs/cookbook/"><span>03</span><strong>Build a real thing</strong><small>Whole recipes that run: an HTTP service, a database transaction, bounded concurrency, decoding untrusted input.</small><b>→</b></a>
         <a href="/docs/stdlib/"><span>04</span><strong>Find a standard API</strong><small>Browse the curated stdlib overview and generated API reference.</small><b>→</b></a>
       </div>
     </section>

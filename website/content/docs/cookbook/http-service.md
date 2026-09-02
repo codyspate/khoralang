@@ -73,7 +73,7 @@ Router::new()
 
 A handler should translate application outcomes into HTTP status codes and response bodies at the boundary. Domain functions below the handler can keep their own typed failures instead of knowing about status code 404 or 503.
 
-For typed request/response bodies, continue with [JSON API](/docs/cookbook/json-api/). For failure translation before the HTTP boundary, see [Typed failure with raises](/docs/guide/errors-and-raises/#translate-one-failure-into-another).
+For typed request/response bodies, continue with [JSON API](/docs/cookbook/json-api/). For failure translation before the HTTP boundary, see [Typed failure with raises](/docs/reference/failures/#translate-failure-types).
 
 ## Bound the resource that is actually constrained
 

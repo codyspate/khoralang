@@ -10,7 +10,7 @@ Welcome to the Khora documentation. This is the entry point for everything you n
 ## Start here
 
 - **[Getting started](/docs/getting-started/)** — install Khora, create a project, build it, run it, and test it.
-- **[Language guide](/docs/guide/)** — learn Khora through practical examples: values, functions, algebraic data types, pattern matching, pipelines, generics, traits, effects, capabilities, resources, and fibers.
+- **[Language Reference](/docs/reference/)** — every construct in one place: values, functions, algebraic data types, pattern matching, pipelines, generics, traits, effects, capabilities, resources, and fibers. It opens with a reading order for a first pass.
 - **[Language reference](/docs/reference/)** — precise syntax and semantic rules when you need an exact answer.
 - **[Standard library](/docs/stdlib/)** — curated overview plus generated API reference kept in sync with the source by `khora doc`.
 
@@ -34,4 +34,4 @@ khora lsp
 khora mcp
 ```
 
-If you are new to Khora, start with **Getting started**, then continue through the **Language guide**. Use the **Language reference** and **Standard library** when you need exact details.
+If you are new to Khora, start with **Getting started**, then read the **Language reference** in the order its first section gives. Use the **Standard library** for what ships with the toolchain, and the **Cookbook** for a whole task working end to end.

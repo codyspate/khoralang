@@ -1,7 +1,7 @@
 ---
 title: Grammar and precedence
 sidebar:
-  order: 12
+  order: 3
 ---
 
 This page summarizes the concrete grammar rules that most often matter when reading or writing Khora. Individual reference pages show the complete examples for each construct.

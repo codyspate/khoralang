@@ -377,9 +377,12 @@ record of what they decode, which needs a type-level map Khora does not
 have. Something must say how the pieces become the record, and here that is
 a function.
 
-`derive(Schema)` writes this for you and is what a reader should meet
-first; these are for a renamed key, a refinement, or a shape derivation
-cannot know. `docs/design/schema.md`.
+**`derive(Schema)` is not built yet, and this said that it was.** When it
+lands it will write this from the type, and these will be what is left for
+a renamed key, a refinement, or a shape derivation cannot know. Until then
+every record schema is one of these, written out. `docs/design/schema.md`
+records why it is a required part of the first version rather than a
+convenience.
 
 ### struct3
 

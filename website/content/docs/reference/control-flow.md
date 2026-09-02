@@ -126,6 +126,17 @@ error: this pattern takes a value apart into 2 pieces, but `Pair<String, Int>`
 import std::core::{Iterator, Step};
 ```
 
+A tuple is taken apart by pattern and never by position: there is no `pair.0`.
+Destructure it in the `for`, in a `let`, or in a match arm.
+
+```khora
+let point = (3, 4);
+let (x, y) = point;
+```
+
+Reach for a transform such as `List::map` when the result is another
+collection, and for `for` when the point is the body run once per element.
+
 ## `loop`
 
 ```khora
@@ -183,7 +194,9 @@ Return unit:
 return;
 ```
 
-A function normally returns its body's final expression; `return` is the explicit early-exit form.
+A function normally returns its body's final expression; `return` is the
+explicit early-exit form. Prefer the final expression where it stays clear, and
+`return` where an early exit is what makes the control flow readable.
 
 ## Typed failure control flow
 
@@ -208,7 +221,10 @@ load_user(id)! catch {
 }
 ```
 
-`raise`, `!`, and `catch` participate in typed failure rows rather than ordinary function return. See [Failures](./failures/).
+`raise` is not `return`. It leaves through the function's typed failure
+channel, which is a second exit the signature declares separately; `!`
+propagates that channel and `catch` handles it before it reaches the caller.
+See [Failures](./failures/).
 
 ## Capability installation as control scope
 

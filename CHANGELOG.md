@@ -199,6 +199,23 @@ it will behave differently now.
 
 ### Changed
 
+- **The Guide is gone; the Language Reference absorbed it.** Fourteen of the
+  Guide's fifteen pages were a second telling of a Reference page — the same
+  constructs, one register apart — and keeping both in step with a compiler
+  that is still moving was a standing cost that bought a reader nothing. Every
+  `/docs/guide/*` path redirects to the page that took its material, the
+  Reference's index opens with the reading order the Guide provided, and the
+  Cookbook, which never overlapped either, is untouched. `khora test` and
+  `khora bench` are now `/docs/reference/testing`, and packages, dependencies
+  and the lockfile are `/docs/reference/modules-and-packages`.
+
+- **`std::schema` and `std::decimal` have prose pages.** `/docs/stdlib/schema`
+  says what a `Schema` is and why it is a decoder and an untyped `Shape` in one
+  record, which the generated API page could show but not explain;
+  `/docs/stdlib/decimal` carries the arithmetic-by-method rule, what scale does
+  to a long chain, and why the significand is 128 bits. Both were reachable
+  only through a generated signature list before.
+
 - **A capability whose type is not imported says so.** Importing `nursery` and
   not `Nursery` gave ``Nursery has no method `adopt` ``, which is false twice
   over. The message now names the import to write. A misspelled method on a
@@ -208,7 +225,7 @@ it will behave differently now.
   body, so the body's `nursery(..)` calls the capability; the message was
   ``Nursery is not a function``, about a type the reader never wrote.
 
-- **`/docs/guide/modules-and-packages` shows a dependency**, rather than
+- **`/docs/reference/modules-and-packages` shows a dependency**, rather than
   describing one: `git`, `rev` and `subdir`, what `khora install` does that
   editing the manifest cannot, a real lockfile entry, that the checksum is
   verified rather than only recorded, and what `publish` means.

@@ -128,4 +128,4 @@ let session = create_session(42) with Production {
 
 The rest of `Production` remains unchanged while the clock binding is overridden for that expression.
 
-See [Effects and capabilities](/docs/guide/effects-and-capabilities/) for handler and context syntax, and [Testing and benchmarks](/docs/guide/testing/) for `test`, filtering, and CI commands.
+See [Effects and capabilities](/docs/reference/capabilities/) for handler and context syntax, and [Testing and benchmarks](/docs/reference/testing/) for `test`, filtering, and CI commands.

@@ -1,7 +1,7 @@
 ---
 title: Foreign function interface
 sidebar:
-  order: 24
+  order: 17
 ---
 
 Khora does not define a stable native Khora-to-Khora ABI. The stable interoperability boundary is the C ABI, expressed with `extern fn` and the opaque `Ptr` type.

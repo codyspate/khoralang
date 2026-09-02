@@ -1,7 +1,7 @@
 ---
 title: Traps
 sidebar:
-  order: 23
+  order: 16
 ---
 
 A trap is an unrecoverable programming error or violated invariant. Traps are intentionally separate from typed `raises` failures: they are not part of a function's failure row and cannot be handled with `catch`.

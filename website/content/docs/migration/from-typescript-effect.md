@@ -48,7 +48,7 @@ fn call<A, 'ef, 'er>(body: () -> A with 'ef raises 'er) -> A
 | Effect | Khora |
 | --- | --- |
 | `Effect<A, E, R>` | a function's return type, `raises` row and `with` row |
-| `Effect.either` | [`attempt`](/docs/guide/errors-and-raises/#collect-failures-as-values-with-attempt) |
+| `Effect.either` | [`attempt`](/docs/reference/failures/#attempt) |
 | `Redacted` | `std::core::Redacted` — same idea, and `Show`/`ToJson` make it a compile error rather than a convention |
 | `Config` | [`std::config`](/docs/cookbook/configuration/) — but no `Config<A>` description type; see below |
 | `Schedule`, `retry`, `repeat` | [`std::resilience`](/docs/cookbook/retrying/) |

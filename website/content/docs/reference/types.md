@@ -1,7 +1,7 @@
 ---
 title: Types
 sidebar:
-  order: 3
+  order: 7
 ---
 
 Khora is statically typed with inference for ordinary local expressions and explicit annotations where a boundary or ambiguity needs one.
@@ -78,6 +78,28 @@ Record fields may be explicitly mutable:
 ```
 
 A `mut` field can be assigned through a value of that record type; an ordinary field cannot.
+
+```khora
+let seen: Tally = { name: "hits", count: 0 };
+seen.count = seen.count + 1;
+```
+
+This is what in-place aggregation is written out of, and the fast shape for
+grouping by a small key — counters updated where they sit, rather than a new
+value per event:
+
+```khora
+let buckets: Array<Tally> = Array::from_fn(3, fn i => { name: "b${i}", count: 0 });
+Array::get(buckets, 1).count = Array::get(buckets, 1).count + 5;
+```
+
+`Array::from_fn` and not `Array::new`: `new` puts the *same* value in every
+cell, which is invisible for a record nobody can change and is one counter with
+three names the moment a field is `mut`. `from_fn` calls its function per cell.
+
+A record with a `mut` field cannot cross into a fiber. Two fibers writing one
+record is a data race, and the type says so; [Sharing](./sharing/) is what does
+cross.
 
 ## Variant types
 
@@ -298,15 +320,56 @@ The representation is not available to ordinary source using the type.
 
 ## Wrappers and named data
 
-Wrapper — a type of its own over an existing one, built with `UserId(1)` and
-opened with `match id { UserId(v) => v }`. Khora has no transparent alias; see
-[Wrapper types](/docs/guide/data-types/#wrapper-types):
+A type declaration over an existing type gives a domain name to a value, and
+gives it a type of its own:
 
 ```khora
 pub type UserId = Int;
+pub type OrderId = Int;
 ```
 
-Record:
+**These are distinct types, not other spellings of `Int`.** A `UserId` is not
+accepted where an `Int` is wanted, an `Int` is not accepted where a `UserId`
+is, and a `UserId` is not an `OrderId` — which is the reason to write one:
+
+```text
+error: this argument: expected `UserId`, found `OrderId`
+```
+
+Build one by calling the type's name, and open it by matching on it, the shape
+a Rust tuple struct has:
+
+```khora
+let id = UserId(1);
+
+fn number(id: UserId) -> Int {
+  match id { UserId(value) => value }
+}
+```
+
+`derive` applies as it does to anything else, and is usually wanted: without
+`Eq` and `Ord` a `UserId` cannot be a `Dict` key, and without `Show` it cannot
+go in a `${..}` hole.
+
+```khora
+derive(Eq, Ord, Show)
+pub type UserId = Int;
+```
+
+`Show` prints `UserId(1)`, not `UserId::UserId(1)` — the one case is the type.
+
+The underlying type may be anything, a generic one included, which is how a
+long type gets a short name:
+
+```khora
+pub type Books = Dict<Currency, Bucket>;
+```
+
+Khora has **no transparent alias**: no form meaning "another spelling of the
+same type". Where that is what is wanted, write the type out, or take the
+wrapper and the one `match` it costs.
+
+The other two ways a declaration names data, for comparison — a record:
 
 ```khora
 pub type User = {
@@ -315,7 +378,7 @@ pub type User = {
 };
 ```
 
-Variant:
+and a variant:
 
 ```khora
 pub type Lookup =

@@ -1,7 +1,7 @@
 ---
 title: Traits
 sidebar:
-  order: 8
+  order: 9
 ---
 
 Traits describe behavior that types can provide and generic code can require. Trait declarations, implementations, associated types, supertraits, and bounds all use the same statically checked type system.

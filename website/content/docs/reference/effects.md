@@ -1,7 +1,7 @@
 ---
 title: Effects and rows
 sidebar:
-  order: 9
+  order: 10
 ---
 
 Khora functions can carry two orthogonal row-polymorphic dimensions in addition to parameters and return values:
@@ -40,6 +40,13 @@ pub? effect Name<TypeParams>? {
 ```
 
 An effect name is the type of handlers implementing that effect.
+
+The `Clock` above is a stand-in cut down to one operation. The real one is
+[`std::clock::Clock`](/docs/stdlib/api/clock/): it lives in its own module
+rather than in `std::env`, and it has four operations, `sleep` among them.
+Waiting is an operation on the capability on purpose — a fake clock is
+`handler for Clock { sleep: fn _ms => (), .. }` and nothing else, so a test that
+exercises a retry loop finishes instantly.
 
 ### An operation may be generic in a row, but not in a type
 

@@ -12,7 +12,11 @@ Patterns appear in `match` and `catch` arms, local destructuring, `for` bindings
 _
 ```
 
-The wildcard matches a value without binding it.
+The wildcard matches a value without binding it. Prefer an explicit arm per
+variant where the cases mean different things: a wildcard earns its place when
+the remaining cases genuinely share a behaviour, and costs something when they
+do not, because it is the one arm a newly added variant will silently fall
+into.
 
 ## Binding identifier
 
@@ -104,7 +108,9 @@ match result {
 }
 ```
 
-The compiler checks exhaustiveness and unreachable arms.
+The compiler checks exhaustiveness and unreachable arms. Adding a variant to a
+type therefore turns every exhaustive match on it into a compile error, which
+is the list of places that need a decision about the new case.
 
 ## Match guards
 

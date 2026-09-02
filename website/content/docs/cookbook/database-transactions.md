@@ -176,4 +176,4 @@ with { db: recording_db() } {
 
 That is the intended Khora architecture: business functions advertise external authority in `with`, while concrete handlers are assembled at narrow boundaries.
 
-For exact `Db`, `Cell`, `DbError`, and `transaction` declarations, see the [database API reference](/docs/stdlib/api/db/). For the capability model itself, see [Effects and capabilities](/docs/guide/effects-and-capabilities/). For the cleanup mechanism underneath cancellation-safe transactions, see [Resources and regions](/docs/guide/resources-and-regions/).
+For exact `Db`, `Cell`, `DbError`, and `transaction` declarations, see the [database API reference](/docs/stdlib/api/db/). For the capability model itself, see [Effects and capabilities](/docs/reference/capabilities/). For the cleanup mechanism underneath cancellation-safe transactions, see [Resources and regions](/docs/reference/memory-and-resources/).

@@ -43,10 +43,16 @@ which is a fact this project does not have yet.
   GitHub. A reader whose compiler disagrees with a page can tell in one click
   whether the page is older than their compiler or the compiler is wrong.
 - The paths under `/docs/` are stable. A page that moves leaves a redirect.
+  The Guide's fifteen pages are the first test of that promise and they all
+  redirect: `/docs/guide/data-types` reaches `/docs/reference/types`, and so on
+  for the other fourteen. The `guidePages` map in `astro.config.mjs` is the
+  list, and a page removed in future joins it rather than replacing it.
 - The short paths — `/install`, `/guide`, `/reference`, `/stdlib`,
   `/versioning`, `/limitations`, `/releases`, `/source`, `/security`,
   `/contributing`, `/changelog` — are stable and are the ones to paste into a
-  chat window.
+  chat window. `/guide` outlived the section it was named for and now reaches
+  the Reference: a short path is a promise about where somebody lands, not
+  about what the destination is called.
 
 ### What is promised at the first release that is not the last
 

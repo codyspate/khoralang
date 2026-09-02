@@ -1,7 +1,7 @@
 ---
 title: Sharing
 sidebar:
-  order: 21
+  order: 14
 ---
 
 Khora keeps ordinary mutation fiber-local. A value may cross a fiber boundary only when its type is shareable, and coordinated mutation is expressed through synchronization types rather than by sharing an ordinary writable record or container.
@@ -61,7 +61,7 @@ Use `update` when the read and write must be one serialized transition:
 let after = Shared::update(count, fn n => n + 1);
 ```
 
-The `change` closure runs once while the cell is locked. Its type has no `raises` row and the operation must not suspend. Fallible, blocking, or otherwise suspension-capable work belongs outside the critical section:
+The `change` closure runs once while the cell is locked. Its type has no `raises` row and the operation must not suspend. Fallible, blocking, or otherwise suspension-capable work belongs outside the critical section, which keeps it small and stops external latency from turning into lock contention:
 
 ```khora
 let refreshed = fetch_value()!;

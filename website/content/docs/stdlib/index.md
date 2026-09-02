@@ -18,7 +18,7 @@ The current standard library includes APIs for:
 - the environment, in [`std::env`](/docs/stdlib/api/env/);
 - randomness, in [`std::random`](/docs/stdlib/api/random/);
 - clocks and sleeping, in [`std::clock`](/docs/stdlib/api/clock/);
-- describing and decoding untrusted input, in [`std::schema`](/docs/stdlib/api/schema/);
+- describing and decoding untrusted input, in [`std::schema`](/docs/stdlib/schema/);
 - typed configuration, in [`std::config`](/docs/stdlib/api/config/);
 - retries and backoff schedules, in [`std::resilience`](/docs/stdlib/api/resilience/);
 - civil dates and offsets, in [`std::time`](/docs/stdlib/api/time/);
@@ -45,7 +45,22 @@ Three of those are new and easy to miss:
 
 `std::resilience` holds `Schedule`, `retry`, `retry_while` and `repeat`, which used to be a bare attempt counter in `std::core`. See [Retrying a flaky call](/docs/cookbook/retrying/).
 
-`std::schema` describes the shape of a value once and decodes it from anywhere. It is the newest, and the one that changes how the others are meant to be used: a `Schema<Settings>` reads the same settings from the environment, from a request body or from a test fixture, because the description does not know where the bytes came from. See [Decode untrusted input](/docs/cookbook/decoding-input/).
+`std::schema` describes the shape of a value once and decodes it from anywhere. It is the newest, and the one that changes how the others are meant to be used: a `Schema<Settings>` reads the same settings from the environment, from a request body or from a test fixture, because the description does not know where the bytes came from. [Schemas](/docs/stdlib/schema/) is the model; [Decode untrusted input](/docs/cookbook/decoding-input/) is a program that runs.
+
+## Choosing a collection
+
+`List<A>` is a linked sequence, for ordered transformation and iteration.
+`Vector<A>` is a growable contiguous sequence, for accumulation and indexing.
+`Map<K, V>` is a mutable hash table; `Dict<K, V>` is a persistent ordered map.
+
+The language does not change with the choice: ordinary calls, methods,
+pipelines, lambdas, `for` and pattern matching work the same over all four. The
+operations themselves are in [`std::core`](/docs/stdlib/api/core/).
+
+The mutable ones — `Vector` and `Map` — stay fiber-local. Where several fibers
+need one evolving value, that is a `Shared` boundary or a capability, not a
+container passed around; [Sharing](/docs/reference/sharing/) says why wrapping
+the type name in a shareable record does not make it safe.
 
 ## What belongs in `std`
 
@@ -64,4 +79,4 @@ Two things the reference does not yet do, both tracked as roadmap 13.15:
 - **Examples are not compiled.** Code in a doc comment is prose today. Making ` ```khora ` blocks run as tests is the next slice, and until it lands an example can be wrong without anything noticing.
 - **There are no cross-links.** A signature mentioning `Decimal` names it but does not link to it.
 
-Use the Guide for concepts and this reference for exact declarations.
+Use the [Language Reference](/docs/reference/) for the language, this section for the library, and the generated pages beneath it for exact declarations.

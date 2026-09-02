@@ -1,7 +1,7 @@
 ---
 title: Declarations
 sidebar:
-  order: 1
+  order: 2
 ---
 
 This page lists the declaration forms accepted at module scope. Local bindings and expression forms are covered in [Expressions](./expressions/).
@@ -63,6 +63,9 @@ pub? const Pattern (: Type)? = Expr ;
 
 A module-level binding is a `const`, not a `let`. `const mut` is invalid; Khora has no mutable global binding.
 
+Reach for `const` for a genuine constant — a limit, a protocol value, a fixed
+default — and for `let` for a value computed while a function runs.
+
 ## Type declarations
 
 Alias or structural definition:
@@ -110,6 +113,22 @@ pub type Point = {
 
 The syntax accepts a comma-separated list of trait names and an optional trailing comma. The compiler-supported derivable traits are `Eq`, `Ord`, `Show`, `Hash`, `ToJson`, and `FromJson`.
 
+The trait must be in scope, so `derive(Show)` needs `Show` imported from
+`std::core`. Derive where the implementation follows from the fields, and write
+an `impl` where the behaviour is a domain decision rather than a structural
+consequence of the data.
+
+A field's type decides whether the derive is available at all, and a missing
+impl is sometimes the point:
+
+- `List<A>` has `Show` and `Eq` when `A` does, so a record holding a list
+  derives both, and `ToJson`/`FromJson` from `std::json` on the same terms.
+- `Redacted<A>` has `Show` — it prints `<redacted>` — and deliberately no
+  `ToJson`. A record holding a secret stays printable and refuses to serialise,
+  so the build stops rather than the payload leaking. It has no `Eq` either:
+  comparing two secrets byte by byte is how a timing side channel gets written
+  by somebody who was not writing one.
+
 ## Function declarations
 
 Definition:
@@ -144,6 +163,16 @@ pub? fn Name<TypeParams>? (Params) (-> Type)? EffectClause* (Block | ;)
 ```
 
 There is no `=` between a function signature and its block body, and a function definition has no semicolon after the block.
+
+The clauses are read in order. `pub fn load<A>(id: Id) -> A with { store: Store }
+raises StoreError` says: given an `Id` it produces an `A`, it requires a
+capability named `store` implementing `Store`, and it may fail with
+`StoreError`. The two rows are independent dimensions of the type — see
+[Capabilities](./capabilities/) and [Failures](./failures/).
+
+A public signature states both. A private helper can usually let the compiler
+infer them, and inference is why a row variable appears in a signature nobody
+wrote one into.
 
 ## External C functions
 

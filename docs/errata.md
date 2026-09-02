@@ -2644,3 +2644,126 @@ wants nothing.
 The shape is errata 67's: two things each correct alone, and the bug in the
 case that needs both. Here it is narrower and worse -- two adjacent fields of
 one struct, one carrying the reasoning that the other needed.
+
+## 70. The documentation was written twice, and the second copy went stale first
+
+`scripts/check-docs.sh` compiles every hand-written example in the tree, and it
+was compiling 580 of them. 155 belonged to the Guide, whose fifteen pages were
+a second telling of fifteen Reference pages: `guide/control-flow` against
+`reference/control-flow`, `guide/pattern-matching` against
+`reference/patterns`, `guide/shared-state` against `reference/sharing`, and so
+on for fourteen of the fifteen.
+
+That was deliberate. `reference/index.md` said so: *"The Reference is
+intentionally redundant with the Guide at the syntax level: a language
+construct should never exist only in prose or only in the parser."* The reason
+is a good one and it argues for the Reference being complete, which is a
+property a merge preserves. What it does not argue for is a second page per
+construct, kept in step by hand, against a compiler that is still moving.
+
+**What the merge measured.** Reading each pair to decide what was worth
+keeping produced a number: a 196-line Guide page on control flow yielded about
+five lines the Reference did not have. `guide/shared-state`, 184 lines, yielded
+one clause — `reference/sharing` was a strict superset of it, table of channel
+constructors included. The Guide's genuinely additive content across all
+fifteen pages was the *advice* — prefer the smallest bound, reach for `for`
+when the body is the point, keep slow work outside the critical section — plus
+two subjects with no Reference twin at all, testing and packages, which became
+Reference pages of their own.
+
+**And one of the two copies was wrong.** `reference/failures.md` showed
+
+    items |> List::map(fn item => process(item)!)
+
+with one mark where there must be two. The compiler says so in two errors, one
+naming the missing `!` and one naming the row, and the Guide's page had the
+paragraph explaining exactly that — inner mark for the closure failing, outer
+mark for `List::map` passing it on, which it can do only because its signature
+ends `raises 'er`. The explanation and the broken example had been sitting on
+two different pages for as long as both existed. Neither `check-docs.sh` nor
+anything else could catch it: the fragment parses, and being *parseable and
+wrong* is what that checker records as its own limit.
+
+Fifteen redirects, per `docs/design/docs-urls.md`. `/guide` still resolves and
+now reaches the Reference — a short path promises where somebody lands, not
+what the destination is called.
+
+## 71. The newest module was the one nothing introduced
+
+`std::schema` shipped in #141 with 27 public items, a 229-line cookbook recipe,
+and no page saying what a schema *is*. It was reachable as the seventeenth
+entry of a nested `api` group in the sidebar, behind a signature list.
+
+Looking for its front door found something worse. Its own doc comment said:
+
+    `derive(Schema)` writes this for you and is what a reader should meet
+    first; these are for a renamed key, a refinement, or a shape derivation
+    cannot know.
+
+`DERIVABLE` is `["Eq", "Ord", "Show", "Hash", "ToJson", "FromJson"]`. There is
+no `derive(Schema)`. `docs/design/schema.md` calls it *"the primary one, not a
+convenience"* and says it *"is required in the first version rather than
+optional"*, because without mapped types it is the only way to get a record
+schema without hand-writing an assembler per type. The library shipped without
+the half its own design document called required, and the doc comment
+described the finished state in the present tense — where it rendered, live, on
+the website.
+
+The cookbook page written at the same time got it right: *"`derive(Schema)`
+will remove the assembler entirely... It is not shipped yet."* So the project
+knew. The false tense is what happens when a doc comment is written from the
+design rather than from the code, and `khora doc --check` cannot help — it
+verifies that the page matches the comment, and the comment was the thing that
+was wrong.
+
+The tense is fixed and #170 tracks the feature. The prose page,
+`/docs/stdlib/schema`, says what exists.
+
+## 72. The baseline's receipt was a constant, and deleting a page proved it
+
+`scripts/tree-id.sh` names the content of the working tree in one line, so a
+receipt written at the end of a green baseline can be compared later and a
+pre-push hook can tell whether the tree being pushed is the tree that passed.
+It was:
+
+    names=$(git ls-files -z | git hash-object --stdin)
+    contents=$(git ls-files -z | xargs -0 git hash-object | git hash-object --stdin)
+
+Deleting fifteen tracked pages broke it, in the quietest possible way.
+`git ls-files` lists a file that is tracked, whether or not it is still on
+disk. `git hash-object` given a path that is gone prints `fatal: could not open
+... for reading` and **abandons the rest of that invocation** — and `xargs`
+hands it hundreds of paths at a time, so one missing file took the hashes of
+every path after it in the batch with it.
+
+Then the pipeline hid the wreckage. A shell pipeline's status is its *last*
+stage's, and the last stage was a `git hash-object --stdin` that succeeded on
+the truncated stream, so `set -e` had nothing to see. The `fatal:` went to
+stderr, one line, in the middle of a 300 KB log.
+
+**What it cost.** Not "a slightly wrong hash". Editing a completely unrelated
+tracked file left both halves of the receipt byte-identical:
+
+    current:  59fbc334... d3080fd7...
+    edited:   59fbc334... d3080fd7...
+    restored: 59fbc334... d3080fd7...
+
+The names hash never noticed either, because `ls-files` still listed the
+deleted paths. The check had stopped distinguishing trees and kept printing a
+line, which is the failure mode to fear: a check that goes silent gets noticed,
+and a check that keeps answering does not.
+
+**The fix reads no files.** The index already holds a hash per tracked path, so
+`git ls-files -s` covers names and staged content without opening anything, and
+one `git diff --binary` covers everything the working tree does differently —
+a deletion included, which is the case the old shape could not represent.
+`--no-color --no-ext-diff --no-textconv` so a machine with a differ configured
+agrees with one without.
+
+It is also about four times faster, which is beside the point.
+
+**What found it.** Not reading the script. The baseline printed `fatal:` and
+still exited 0, and the only reason that got chased is that the line named a
+file this commit had just deleted. The sensitivity suite that now exists —
+edit a file, delete a file, edit a file *while another is deleted* — is four
+cases the old version fails and every future version has to pass.

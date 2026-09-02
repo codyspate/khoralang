@@ -77,5 +77,5 @@ As with the language server, the client starts the process for you. You normally
 ## Next
 
 - [Your first Khora project](/docs/getting-started/first-project/) shows the command-line workflow the editor complements.
-- [Language Guide](/docs/guide/) teaches the language features the server is checking.
+- The [Language Reference](/docs/reference/) covers the language features the server is checking.
 - [Language Reference](/docs/reference/) is the lookup-oriented companion when you need exact syntax or semantics.

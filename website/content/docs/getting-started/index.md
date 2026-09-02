@@ -155,5 +155,5 @@ See [Editor setup](/docs/getting-started/editor/) for configuration and the comp
 
 - [Installation](/docs/getting-started/installation/) — toolchains, version pinning, source builds, and optional release candidates.
 - [Your first Khora project](/docs/getting-started/first-project/) — work through the normal package workflow.
-- [Language Guide](/docs/guide/) — learn Khora in a deliberate order, from values and functions through effects and structured concurrency.
+- [Language Reference](/docs/reference/) — every construct, one page per topic. Its first section is a reading order, from values and functions through effects and structured concurrency.
 - [Standard Library](/docs/stdlib/) — find the APIs available once you start building real programs.

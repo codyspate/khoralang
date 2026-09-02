@@ -1,7 +1,7 @@
 ---
 title: Generics
 sidebar:
-  order: 7
+  order: 8
 ---
 
 Khora supports type parameters, trait bounds, const parameters, row variables, higher-kinded use, explicit `forall`, and variance annotations.
@@ -74,7 +74,9 @@ General form:
 A: Trait + OtherTrait
 ```
 
-Each bound is a trait path.
+Each bound is a trait path. Ask for the smallest useful one: a function that
+needs only equality should bound on `Eq` and not on something broader, because
+the bound is what a caller has to satisfy.
 
 ## Const generic parameters
 
@@ -119,6 +121,11 @@ A row variable is introduced directly in the generic parameter list:
 ```
 
 Its spelling is arbitrary; the position where it is used determines whether it represents capability requirements, failures, or another row-shaped type.
+
+This is why an effectful or fallible function can be handed to an ordinary
+higher-order operation without a separate `traverse`-shaped API beside it: the
+combinator is polymorphic in the rows its argument carries, and passes them
+through to its own signature.
 
 ## Open record/capability rows
 
@@ -166,7 +173,10 @@ General form:
 forall<TypeParams>. Type
 ```
 
-Named generic declarations introduce their parameters directly and usually do not need explicit `forall`.
+Named generic declarations introduce their parameters directly and usually do
+not need explicit `forall`. It earns its place in an API that stores or accepts
+a polymorphic function *value*, where there is no declaration to hang the
+parameter on.
 
 ## Variance annotations
 
@@ -196,7 +206,7 @@ General forms:
 A
 ```
 
-Variance is written on the parameter declaration itself.
+Variance is written on the parameter declaration itself. Reach for it when designing a reusable abstraction whose subtype relationship depends on the parameter; an ordinary data type normally leaves it unmarked.
 
 ## Generic implementations
 

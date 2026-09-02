@@ -44,7 +44,7 @@ pub fn main() raises ChildFailed {
 
 `launch_jobs` requires a `Nursery` capability because it adopts children. `bounded_nursery(64, launch_jobs)!` supplies that capability and does not return until all adopted children have finished.
 
-The `!` is there because a nursery raises [`ChildFailed`](/docs/guide/fibers-and-nurseries/#a-child-that-fails-is-the-nurserys-failure) when a child fails: the first failure cancels the siblings and the block's answer does not arrive.
+The `!` is there because a nursery raises [`ChildFailed`](/docs/reference/concurrency/#a-child-that-failed) when a child fails: the first failure cancels the siblings and the block's answer does not arrive.
 
 The important line is not the `Fiber::spawn`; it is the adoption:
 
@@ -76,4 +76,4 @@ The nursery owns its adopted children. On normal return it waits for them. If th
 
 That ownership rule is why bounded concurrency remains structured rather than becoming a semaphore wrapped around detached tasks.
 
-See [Fibers and nurseries](/docs/guide/fibers-and-nurseries/) for the underlying concurrency model and the [Concurrency reference](/docs/reference/concurrency/) for exact signatures.
+See [Fibers and nurseries](/docs/reference/concurrency/) for the underlying concurrency model and the [Concurrency reference](/docs/reference/concurrency/) for exact signatures.

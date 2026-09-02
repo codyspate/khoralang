@@ -1,7 +1,7 @@
 ---
 title: Capabilities
 sidebar:
-  order: 10
+  order: 11
 ---
 
 Capabilities represent authority required by a computation. A function declares requirements with a `with` row; handlers satisfy those requirements for an expression or lexical block.
@@ -24,6 +24,11 @@ store: Store
 ```
 
 The label `store` is in scope in the function body.
+
+The call mirrors the declaration. The function writes `with { store: Store }`
+to say what it needs; the caller writes `with { store: memory_store }` to
+supply it. Read the first as *this function requires a capability named `store`
+implementing the `Store` effect*.
 
 ## Several capabilities
 
@@ -103,7 +108,10 @@ General form:
 with ContextRow Block
 ```
 
-Handlers lexically enclose the operations they serve.
+Handlers lexically enclose the operations they serve. That is a real
+consequence of direct style rather than a syntactic detail: the operation runs
+when the call is evaluated, inside the block, and not later through a deferred
+effect value that outlived its handler.
 
 ## Sequential bindings
 
@@ -176,7 +184,10 @@ with Production {
 }
 ```
 
-Entries written at the use site replace or extend the corresponding context row for that installation.
+Entries written at the use site replace or extend the corresponding context row
+for that installation. This is what makes a named production context usable
+from a test: install `Production` and override the one capability the test
+wants to control.
 
 ## Capability rows on function values
 

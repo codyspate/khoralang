@@ -1,7 +1,7 @@
 ---
 title: Lexical structure
 sidebar:
-  order: 2
+  order: 1
 ---
 
 Khora source is UTF-8 text. Whitespace and comments separate tokens where needed; the syntax tree retains trivia so formatting and documentation tools can preserve source faithfully.
@@ -80,7 +80,18 @@ Append `d` directly to the number for an exact `Decimal` literal:
 1.25e3d
 ```
 
-`d` is Khora's literal suffix; no whitespace may appear between the number and suffix.
+`d` is Khora's literal suffix; no whitespace may appear between the number and
+suffix. The module needs `import std::decimal::{Decimal};` for the literal to
+have a type. A fractional literal *without* the suffix is a `Float`:
+
+```khora
+let approximate = 0.1;
+let exact = 0.1d;
+```
+
+The distinction is visible in the source so a reader can tell whether an API
+does approximate binary arithmetic or exact decimal arithmetic.
+[Decimals](/docs/stdlib/decimal/) is the rest of it.
 
 ## Boolean literals
 
@@ -130,6 +141,10 @@ error: `Colour` has no `Show`, so it cannot go in a `${..}` hole. Write
 `Show` does not have to be imported to interpolate. The hole is the use, and
 the trait is never named in the source.
 
+Interpolation is for text a person will read. Where another program consumes
+the output, reach for a structured encoder such as `std::json` instead — a
+value that renders one way for a human is not a serialisation format.
+
 ## Backtick strings
 
 Backticks delimit multiline strings:
@@ -165,6 +180,14 @@ fn block() -> String {
 ```
 
 It is `"line one\n  indented\nline three"`. `indented` keeps two spaces because the common prefix was two, not four. A literal that should *end* with a newline needs a blank line before the closing backtick, and one that should start with a newline needs a blank line after the opening one.
+
+None of it applies when the content starts on the opening line, which is the
+form to reach for when the text must be taken exactly as written:
+
+```khora
+let raw = `first
+  second`;
+```
 
 ## Line comments
 

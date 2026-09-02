@@ -57,7 +57,7 @@ There are three ordinary language ideas here:
 - `test` declares a test that the package test runner can execute.
 - `import std::core::{...}` brings standard-library names into the module.
 
-The [Language Guide](/docs/guide/) goes deeper on each of these after you have the workflow running.
+The [Language Reference](/docs/reference/) goes deeper on each of these once the workflow is running.
 
 ## Check before building
 
@@ -83,7 +83,7 @@ In CI, check formatting without changing files:
 khora fmt . --check
 ```
 
-See [Values and functions](/docs/guide/values-and-functions/) for the core expression and function model.
+See [Values and functions](/docs/reference/expressions/) for the core expression and function model.
 
 ## Run the tests
 
@@ -91,7 +91,7 @@ See [Values and functions](/docs/guide/values-and-functions/) for the core expre
 khora test .
 ```
 
-The test runner discovers `test` blocks in the package and reports failures through the CLI. For testing patterns around capabilities, typed failure, and cancellation, see [Testing](/docs/guide/testing/).
+The test runner discovers `test` blocks in the package and reports failures through the CLI. For testing patterns around capabilities, typed failure, and cancellation, see [Testing](/docs/reference/testing/).
 
 ## Build a native executable
 
@@ -150,11 +150,11 @@ The language server uses the same compiler queries as `khora check`, so editor d
 
 A useful path from here is:
 
-1. [Values and functions](/docs/guide/values-and-functions/)
-2. [Data types](/docs/guide/data-types/)
-3. [Pattern matching](/docs/guide/pattern-matching/)
-4. [Pipelines](/docs/guide/pipelines/)
-5. [Errors and raises](/docs/guide/errors-and-raises/)
-6. [Effects and capabilities](/docs/guide/effects-and-capabilities/)
+1. [Expressions](/docs/reference/expressions/) — values, functions, lambdas, pipelines
+2. [Types](/docs/reference/types/) — records, variants, wrappers, generics
+3. [Patterns](/docs/reference/patterns/) — matching and destructuring
+4. [Failures](/docs/reference/failures/) — `raises`, `!`, `catch`, `attempt`
+5. [Capabilities](/docs/reference/capabilities/) — `effect`, `handler`, `with`, `context`
+6. [Concurrency](/docs/reference/concurrency/) — fibers, nurseries, cancellation
 
 For exact declarations while you work, browse the [Standard Library](/docs/stdlib/) reference.

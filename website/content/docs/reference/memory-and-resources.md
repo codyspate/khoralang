@@ -1,7 +1,7 @@
 ---
 title: Memory and resources
 sidebar:
-  order: 20
+  order: 13
 ---
 
 Khora manages ordinary memory automatically. Resource lifetimes that have external meaning—files, sockets, transactions, foreign handles—use explicit structured cleanup.
@@ -85,6 +85,11 @@ A named function is the normal argument to `scoped` when that function requires 
 
 ## Acquire and release
 
+Pass a *named* function to `scoped` where that function is the one receiving
+the `scope` capability. It keeps the capability passing explicit, and it is
+what lets row subtraction take `scope` back out of the caller's row.
+
+
 `acquire` registers a release operation and returns the acquired value:
 
 ```khora
@@ -128,7 +133,17 @@ The finalizer runs on the normal path, the explicit `return`, and when the `rais
 
 Cancellation uses the same structured unwind path. A pending cancellation observed at a cancellation point releases intervening regions and runs their finalizers before the fiber terminates.
 
-A `catch` handles failures in a `raises` row. Cancellation is not a failure variant and is not consumed by `catch`.
+A `catch` handles failures in a `raises` row. Cancellation is not a failure
+variant and is not consumed by `catch`.
+
+Cancellation is not an exception that can arrive between arbitrary
+instructions: a pending one is observed at a cancellation or failure
+propagation point, such as `!`. That is what keeps the code between two marked
+points readable as ordinary straight-line code, while still letting blocked or
+suspended work be woken so it can unwind and release what it holds.
+
+The invariant a resource abstraction should be built on is the short one: **if
+the scope ends, cleanup runs.**
 
 ## Resource APIs
 
@@ -143,5 +158,15 @@ fn with_resource<A, 'ef, 'er>(
 ```
 
 rather than returning an unmanaged handle that callers must remember to close on every path.
+
+A database transaction is this shape with a richer finalizer policy, and it
+belongs in the transaction abstraction rather than in every caller:
+
+- completing normally commits;
+- a typed failure rolls back;
+- cancellation rolls back before the connection returns to its pool.
+
+[Database transactions](/docs/cookbook/database-transactions/) is that policy
+written out.
 
 Foreign or thread-affine resources can impose rules beyond ordinary Khora values. See [FFI](/docs/reference/ffi/) for pointer and suspension constraints, [Concurrency](/docs/reference/concurrency/) for fiber lifetime rules, and [Sharing](/docs/reference/sharing/) for cross-fiber values.

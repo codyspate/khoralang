@@ -75,4 +75,4 @@ That is the key production rule: **do not rely on the line after the work to rel
 
 The same pattern underlies cancellation-safe transactions, pooled connections, sockets, files, permits, and tracing spans.
 
-See [Resources and regions](/docs/guide/resources-and-regions/) for `Region`, `Scope`, `scoped`, and `acquire`, and [Fibers and nurseries](/docs/guide/fibers-and-nurseries/) for cancellation behavior.
+See [Resources and regions](/docs/reference/memory-and-resources/) for `Region`, `Scope`, `scoped`, and `acquire`, and [Fibers and nurseries](/docs/reference/concurrency/) for cancellation behavior.

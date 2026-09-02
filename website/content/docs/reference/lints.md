@@ -1,7 +1,7 @@
 ---
 title: Lints
 sidebar:
-  order: 19
+  order: 20
 ---
 
 `khora check` runs twelve lints alongside type checking. They are part of the compiler rather than a separate tool, so the editor underlines what the command line reports and there is no second configuration to keep in step.

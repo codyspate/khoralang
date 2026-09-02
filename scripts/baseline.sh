@@ -244,6 +244,16 @@ else
     printf '\n=== skipping the Linux check: no wsl\n'
 fi
 
+step 'the receipt can tell two trees apart'
+# **It could not, for one whole commit.** `tree-id.sh` hashed every tracked
+# file by handing `git ls-files` to `git hash-object`, and a tracked file that
+# is no longer on disk makes that fatal and abandon the rest of its batch — so
+# a tree with any deletion in it hashed to the same line no matter what else
+# changed. The receipt kept answering and had stopped meaning anything. Errata
+# 72. This runs the four cases that catch it, the last of which is an edit made
+# while another file is deleted.
+sh "$root/scripts/check-tree-id.sh"
+
 # The receipt, last, after every step has passed. What it records is which
 # *tree* passed — `sh scripts/tree-id.sh` — so editing a file afterwards
 # invalidates it without anybody having to remember that it should.

@@ -17,9 +17,10 @@ The website may eventually also contain downloads, releases, benchmarks, ecosyst
 The public documentation is organized around these stable families:
 
 - `getting-started/` — installation and first project
-- `guide/` — task-oriented language guide
-- `reference/` — precise language semantics and syntax
-- `stdlib/` — standard-library API documentation
+- `reference/` — the language: every construct, one page per topic, ordered so
+  a straight read works. It absorbed the former `guide/`, whose pages redirect.
+- `stdlib/` — the standard library: prose pages for the modules that need one,
+  and generated API documentation beneath them
 - `cookbook/` — production patterns and examples
 - `migration/` — guides for developers coming from other ecosystems
 - `deployment/` — supported targets and deployment workflows

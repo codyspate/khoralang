@@ -68,6 +68,37 @@ An empty record is:
 
 A braced form beginning with `name:` is a record literal; an ordinary braced sequence is a block.
 
+## Record update
+
+`{ ..base, field: value }` builds a new record from an existing one. Every
+field not named comes from `base`:
+
+```khora
+let renamed = { ..user, name: "Grace" };
+```
+
+It is a **new record**: `user` is unchanged. What the syntax saves is writing
+out the fields that do not change, which starts to matter at more than a few:
+
+```khora
+fn applied(counts: Counts, event: Event) -> Counts {
+  match event {
+    Event::Created => { ..counts, created: counts.created + 1 },
+    Event::Deleted => { ..counts, deleted: counts.deleted + 1 },
+    Event::Expired => { ..counts, expired: counts.expired + 1 },
+  }
+}
+```
+
+The base comes first and appears once. A field named twice is an error rather
+than last-one-wins, so is a field the base's type does not have, and so is a
+base that is not a record. `{ ..base }` with nothing after it is `base`.
+
+A [`mut` field](./types/#record-types) is the other way to do this. The update
+produces a new value; assigning a `mut` field changes the one already held.
+Reach for the update where the old value still matters, and for `mut` where it
+does not.
+
 ## Tuple and unit expressions
 
 ```khora
@@ -138,6 +169,11 @@ General form:
 let mut? Pattern (: Type)? = Expr ;
 ```
 
+A binding is immutable unless it says `mut`, and a plain `let` cannot be
+assigned to later. `mut` is fiber-local mutation only: state that several
+fibers evolve is a `Shared` boundary instead, and
+[Sharing](./sharing/) says why.
+
 `let` is local. Module-level named expressions use `const`; see [Declarations](./declarations/#constants).
 
 ## Assignment
@@ -197,6 +233,8 @@ One `_` placeholder selects another argument position:
 value |> transform(a, _, b)
 ```
 
+A stage may contain at most one placeholder.
+
 Bare unary function:
 
 ```khora
@@ -207,6 +245,16 @@ Fallible stage:
 
 ```khora
 value |> parse! |> validate(config)!
+```
+
+A pipeline introduces no second error model: `!` still marks the exact call
+where a typed failure may leave the function, and `catch` still applies either
+to one stage or to the parenthesised pipeline as a whole.
+
+```khora
+let user = (raw |> parse! |> validate!) catch {
+  ParseError::Invalid(message) => User::invalid(message),
+};
 ```
 
 ## Flow lambda `||>`
@@ -228,7 +276,22 @@ items |> List::map(
 )
 ```
 
-It is equivalent in shape to `fn value => value |> ...`. Following `|>` stages belong to the flow lambda until grouping ends; parenthesize the flow expression when piping the function value itself.
+It is equivalent in shape to `fn value => value |> ...`, and infers its
+effects, failures and captures the same way.
+
+Following `|>` stages belong to the flow lambda until grouping ends, so piping
+the function value itself takes parentheses:
+
+```khora
+(||> normalize) |> apply_twice
+```
+
+`||>` is always unary. An anonymous function of several parameters is `fn`.
+A named function needs neither: `items |> List::map(normalize)`.
+
+Reach for a pipeline when the value moving through the expression is the thing
+to follow, and for an ordinary call when the operation itself is the point of
+the line.
 
 ## Operators and precedence
 

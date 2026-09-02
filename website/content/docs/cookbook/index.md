@@ -24,4 +24,4 @@ Start with the recipe closest to the problem you are solving:
 
 The examples use current Khora syntax and the public APIs shipped in `std`. They favor small complete modules over framework-style pseudocode. When a recipe depends on a provider outside `std`—for example a concrete PostgreSQL connection—it says so at the construction boundary instead of inventing a driver API.
 
-For exact declarations after you understand the pattern, use the [Standard Library API reference](/docs/stdlib/). For the language rules underneath the pattern, use the [Guide](/docs/guide/) or [Language Reference](/docs/reference/).
+For exact declarations after you understand the pattern, use the [Standard Library API reference](/docs/stdlib/). For the language rules underneath the pattern, use the [Language Reference](/docs/reference/).

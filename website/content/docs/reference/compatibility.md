@@ -1,7 +1,7 @@
 ---
 title: Compatibility and stability
 sidebar:
-  order: 20
+  order: 22
 ---
 
 Khora is `0.x`. It may break. This page says when, how you find out, and what 1.0 is waiting for — because "pre-1.0, anything can change" is not a policy, it is the absence of one.
