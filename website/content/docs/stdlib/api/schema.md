@@ -264,6 +264,53 @@ pub type Case<A> = {
 One case of a variant: its tag on the wire, the fields of its payload, and
 how the payload becomes the value. Built by [`Schema::case`].
 
+## Traits
+
+### Decode
+
+```khora
+pub trait Decode
+```
+
+A type that can be read from untrusted input.
+
+The schema for a type is a property of the type, so it is reached through
+the type: `Settings::schema()` for one that implements this, and
+`Decode::schema()` where the expected type says which. `std` implements it
+for its own types; a program's record or variant implements it with the
+constructors above.
+
+#### schema
+
+```khora
+fn schema() -> Schema<Self>
+```
+
+The schema for `Self`, chosen by the type the call is asked for.
+
+### Encode
+
+```khora
+pub trait Encode
+```
+
+A type with one representation on the wire.
+
+Kept apart from [`Decode`] rather than folded into the schema, because a
+secret has no representation on the wire: `Redacted` implements `Decode`,
+through [`secret`], and not this, so a record holding one reads and does
+not write, and the build says so rather than a round trip somewhere far
+away.
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+The value as a source would have produced it; [`Raw::to_json`] is the
+bridge out.
+
 ## Methods
 
 ### Raw
@@ -625,6 +672,405 @@ impl Show for Shape
 fn show(self) -> String
 ```
 
+### Decode for String
+
+```khora
+impl Decode for String
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<String>
+```
+
+### Decode for Int
+
+```khora
+impl Decode for Int
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Int>
+```
+
+### Decode for Float
+
+```khora
+impl Decode for Float
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Float>
+```
+
+### Decode for Bool
+
+```khora
+impl Decode for Bool
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Bool>
+```
+
+### Decode for Decimal
+
+```khora
+impl Decode for Decimal
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Decimal>
+```
+
+### Decode for Raw
+
+```khora
+impl Decode for Raw
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Raw>
+```
+
+### Decode for Json
+
+```khora
+impl Decode for Json
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Json>
+```
+
+### Decode for Date
+
+```khora
+impl Decode for Date
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Date>
+```
+
+### Decode for Time
+
+```khora
+impl Decode for Time
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Time>
+```
+
+### Decode for DateTime
+
+```khora
+impl Decode for DateTime
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<DateTime>
+```
+
+### Decode for Option<A>
+
+```khora
+impl<A: Decode> Decode for Option<A>
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Option<A>>
+```
+
+### Decode for List<A>
+
+```khora
+impl<A: Decode> Decode for List<A>
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<List<A>>
+```
+
+### Decode for Vector<A>
+
+```khora
+impl<A: Decode> Decode for Vector<A>
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Vector<A>>
+```
+
+### Decode for Redacted<A>
+
+```khora
+impl<A: Decode> Decode for Redacted<A>
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Redacted<A>>
+```
+
+### Decode for Dict<String, V>
+
+```khora
+impl<V: Decode> Decode for Dict<String, V>
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Dict<String, V>>
+```
+
+### Decode for Map<String, V>
+
+```khora
+impl<V: Decode> Decode for Map<String, V>
+```
+
+#### schema
+
+```khora
+fn schema() -> Schema<Map<String, V>>
+```
+
+### Encode for String
+
+```khora
+impl Encode for String
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Int
+
+```khora
+impl Encode for Int
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Float
+
+```khora
+impl Encode for Float
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Bool
+
+```khora
+impl Encode for Bool
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Decimal
+
+```khora
+impl Encode for Decimal
+```
+
+Written as text, because that is how money travels on most wires: every
+decimal library this audience has used writes it so, for the sake of
+JavaScript clients whose only number is a double, and [`decimal`] reads
+it back.
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Raw
+
+```khora
+impl Encode for Raw
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Json
+
+```khora
+impl Encode for Json
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Date
+
+```khora
+impl Encode for Date
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Time
+
+```khora
+impl Encode for Time
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for DateTime
+
+```khora
+impl Encode for DateTime
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Option<A>
+
+```khora
+impl<A: Encode> Encode for Option<A>
+```
+
+`None` is an absent key, and both an absent key and `null` read back as
+`None`.
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for List<A>
+
+```khora
+impl<A: Encode> Encode for List<A>
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Vector<A>
+
+```khora
+impl<A: Encode> Encode for Vector<A>
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Dict<String, V>
+
+```khora
+impl<V: Encode> Encode for Dict<String, V>
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Map<String, V>
+
+```khora
+impl<V: Encode> Encode for Map<String, V>
+```
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
+### Encode for Rejection
+
+```khora
+impl Encode for Rejection
+```
+
+A problem as a client reads it: where, and what.
+
+The one hand-written encoder over a type that holds a secret, and the
+reason it is safe is the reason [`Rejection::describe`] exists: the
+message never quotes a value that was under [`secret`], and nothing else
+of the rejection is written.
+
+#### encode
+
+```khora
+fn encode(self) -> Raw
+```
+
 ## Functions
 
 ### string
@@ -911,4 +1357,16 @@ pub fn struct5<A, B, C, D, E, F>(a_name: String, a: Schema<A>, b_name: String, b
 ```
 
 A record of five fields. See [`struct2`].
+
+### decode
+
+```khora
+pub fn decode<A: Decode>(from: Raw) -> Validated<A, Rejection>
+```
+
+Reads a value of the type the surrounding expression asks for.
+
+`let settings: Validated<Settings, Rejection> = decode(raw);` chooses the
+schema from the annotation; `Settings::schema().decode(raw)` is the same
+call with the type named.
 

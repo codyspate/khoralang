@@ -98,6 +98,41 @@ They compose in the obvious way, which is most of the point:
 between(int(), 1, 65535)
 ```
 
+## Reaching a schema through the type
+
+A type that can be read from untrusted input implements `Decode`, whose one
+function is `schema() -> Schema<Self>`. `std` implements it for its own
+types — `String`, `Int`, `Float`, `Bool`, `Decimal`, `Date`, `Time`,
+`DateTime`, `Option<A>`, `List<A>`, `Vector<A>`, `Dict<String, V>`,
+`Map<String, V>`, `Redacted<A>` (as `secret`), `Json` and `Raw` — and a
+program implements it for a record or a variant with the constructors above:
+
+```khora
+impl Decode for Listen {
+  fn schema() -> Schema<Listen> {
+    struct2("host", string(), "port", between(int(), 1, 65535), listen)
+  }
+}
+```
+
+Every schema that contains a `Listen` then reaches this one through the trait,
+which is the whole override story: write the impl for the type that needs
+something derivation cannot know, and composition does the rest. The schema is
+reached by name, `Listen::schema()`, or by the type the surrounding expression
+asks for:
+
+```khora
+let settings: Validated<Settings, Rejection> = decode(raw);
+```
+
+`Encode` is the other direction, `encode(self) -> Raw`, and `Raw::to_json` is
+the bridge out. It is a separate trait rather than a second half of the schema
+because a secret has no representation on the wire: `Redacted` implements
+`Decode` and not `Encode`, so a record holding one reads and does not write,
+and the build says so. `Rejection` implements `Encode`, so a list of problems
+is a response body a client can read: one object per problem, with its `path`
+and its `message`.
+
 ## Where a `Raw` comes from
 
 `Raw::of_json` turns a parsed document into one, and `Raw::to_json` turns one

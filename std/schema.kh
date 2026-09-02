@@ -1,8 +1,9 @@
 module std::schema;
 
-import std::core::{Dict, Eq, List, Map, Option, Ord, Ordering, Pair, Redacted, Result, Show, Validated};
+import std::core::{Dict, Eq, List, Map, Option, Ord, Ordering, Pair, Redacted, Result, Show, Validated, Vector};
 import std::decimal::{Decimal};
 import std::json::{Field, Json, member, object};
+import std::time::{Date, DateTime, Time};
 
 //! One description of a value's shape, used to decode untrusted input.
 //!
@@ -1299,4 +1300,231 @@ pub fn struct5<A, B, C, D, E, F>(
         ),
       ),
       fn t => { let (v, (w, (x, (y, z)))) = t; combine(v, w, x, y, z) }))
+}
+
+// ---------------------------------------------------------------------------
+// The traits
+// ---------------------------------------------------------------------------
+
+/// A type that can be read from untrusted input.
+///
+/// The schema for a type is a property of the type, so it is reached through
+/// the type: `Settings::schema()` for one that implements this, and
+/// `Decode::schema()` where the expected type says which. `std` implements it
+/// for its own types; a program's record or variant implements it with the
+/// constructors above.
+pub trait Decode {
+  /// The schema for `Self`, chosen by the type the call is asked for.
+  fn schema() -> Schema<Self>;
+}
+
+/// A type with one representation on the wire.
+///
+/// Kept apart from [`Decode`] rather than folded into the schema, because a
+/// secret has no representation on the wire: `Redacted` implements `Decode`,
+/// through [`secret`], and not this, so a record holding one reads and does
+/// not write, and the build says so rather than a round trip somewhere far
+/// away.
+pub trait Encode {
+  /// The value as a source would have produced it; [`Raw::to_json`] is the
+  /// bridge out.
+  fn encode(self) -> Raw;
+}
+
+/// Reads a value of the type the surrounding expression asks for.
+///
+/// `let settings: Validated<Settings, Rejection> = decode(raw);` chooses the
+/// schema from the annotation; `Settings::schema().decode(raw)` is the same
+/// call with the type named.
+pub fn decode<A: Decode>(from: Raw) -> Validated<A, Rejection> {
+  let schema: Schema<A> = Decode::schema();
+  Schema::decode(schema, from)
+}
+
+impl Decode for String {
+  fn schema() -> Schema<String> { string() }
+}
+
+impl Decode for Int {
+  fn schema() -> Schema<Int> { int() }
+}
+
+impl Decode for Float {
+  fn schema() -> Schema<Float> { float() }
+}
+
+impl Decode for Bool {
+  fn schema() -> Schema<Bool> { bool() }
+}
+
+impl Decode for Decimal {
+  fn schema() -> Schema<Decimal> { decimal() }
+}
+
+impl Decode for Raw {
+  fn schema() -> Schema<Raw> { any() }
+}
+
+impl Decode for Json {
+  fn schema() -> Schema<Json> { Schema::map(any(), fn raw => Raw::to_json(raw)) }
+}
+
+impl Decode for Date {
+  fn schema() -> Schema<Date> {
+    Schema::try_map(string(), "an ISO 8601 date", fn text => Date::of_string(text))
+  }
+}
+
+impl Decode for Time {
+  fn schema() -> Schema<Time> {
+    Schema::try_map(string(), "a time of day, as ISO 8601 writes it", fn text => Time::of_string(text))
+  }
+}
+
+impl Decode for DateTime {
+  fn schema() -> Schema<DateTime> {
+    Schema::try_map(string(), "an ISO 8601 date and time", fn text => DateTime::of_string(text))
+  }
+}
+
+impl<A: Decode> Decode for Option<A> {
+  fn schema() -> Schema<Option<A>> {
+    let inner: Schema<A> = Decode::schema();
+    optional(inner)
+  }
+}
+
+impl<A: Decode> Decode for List<A> {
+  fn schema() -> Schema<List<A>> {
+    let inner: Schema<A> = Decode::schema();
+    list(inner)
+  }
+}
+
+impl<A: Decode> Decode for Vector<A> {
+  fn schema() -> Schema<Vector<A>> {
+    let inner: Schema<A> = Decode::schema();
+    Schema::map(list(inner), fn items => Vector::from_list(items))
+  }
+}
+
+impl<A: Decode> Decode for Redacted<A> {
+  fn schema() -> Schema<Redacted<A>> {
+    let inner: Schema<A> = Decode::schema();
+    secret(inner)
+  }
+}
+
+impl<V: Decode> Decode for Dict<String, V> {
+  fn schema() -> Schema<Dict<String, V>> {
+    let inner: Schema<V> = Decode::schema();
+    dict(inner)
+  }
+}
+
+impl<V: Decode> Decode for Map<String, V> {
+  fn schema() -> Schema<Map<String, V>> {
+    let inner: Schema<V> = Decode::schema();
+    Schema::map(dict(inner), fn entries => {
+        let out: Map<String, V> = Map::new();
+        List::fold(Dict::entries(entries), (), fn (_u, pair) => Map::insert(out, pair.key, pair.value));
+        out
+      })
+  }
+}
+
+impl Encode for String {
+  fn encode(self) -> Raw { Raw::Text(self) }
+}
+
+impl Encode for Int {
+  fn encode(self) -> Raw { Raw::Number(Int::to_string(self)) }
+}
+
+impl Encode for Float {
+  fn encode(self) -> Raw { Raw::Number(Float::to_string(self)) }
+}
+
+impl Encode for Bool {
+  fn encode(self) -> Raw { Raw::Bool(self) }
+}
+
+/// Written as text, because that is how money travels on most wires: every
+/// decimal library this audience has used writes it so, for the sake of
+/// JavaScript clients whose only number is a double, and [`decimal`] reads
+/// it back.
+impl Encode for Decimal {
+  fn encode(self) -> Raw { Raw::Text(Show::show(self)) }
+}
+
+impl Encode for Raw {
+  fn encode(self) -> Raw { self }
+}
+
+impl Encode for Json {
+  fn encode(self) -> Raw { Raw::of_json(self) }
+}
+
+impl Encode for Date {
+  fn encode(self) -> Raw { Raw::Text(Show::show(self)) }
+}
+
+impl Encode for Time {
+  fn encode(self) -> Raw { Raw::Text(Show::show(self)) }
+}
+
+impl Encode for DateTime {
+  fn encode(self) -> Raw { Raw::Text(Show::show(self)) }
+}
+
+/// `None` is an absent key, and both an absent key and `null` read back as
+/// `None`.
+impl<A: Encode> Encode for Option<A> {
+  fn encode(self) -> Raw {
+    match self {
+      Option::Some(value) => value.encode(),
+      Option::None => Raw::Absent,
+    }
+  }
+}
+
+impl<A: Encode> Encode for List<A> {
+  fn encode(self) -> Raw {
+    let items = List::fold(self, List::Nil, fn (acc, item) => List::Cons(item.encode(), acc));
+    Raw::Sequence(List::reverse(items))
+  }
+}
+
+impl<A: Encode> Encode for Vector<A> {
+  fn encode(self) -> Raw { Vector::to_list(self).encode() }
+}
+
+impl<V: Encode> Encode for Dict<String, V> {
+  fn encode(self) -> Raw {
+    let entries = List::fold(Dict::entries(self), List::Nil, fn (acc, pair) =>
+      List::Cons(entry(pair.key, pair.value.encode()), acc));
+    Raw::Record(List::reverse(entries))
+  }
+}
+
+impl<V: Encode> Encode for Map<String, V> {
+  fn encode(self) -> Raw {
+    let entries = List::fold(Map::entries(self), List::Nil, fn (acc, pair) =>
+      List::Cons(entry(pair.key, pair.value.encode()), acc));
+    Raw::Record(List::reverse(entries))
+  }
+}
+
+/// A problem as a client reads it: where, and what.
+///
+/// The one hand-written encoder over a type that holds a secret, and the
+/// reason it is safe is the reason [`Rejection::describe`] exists: the
+/// message never quotes a value that was under [`secret`], and nothing else
+/// of the rejection is written.
+impl Encode for Rejection {
+  fn encode(self) -> Raw {
+    Raw::Record(List::Cons(
+        entry("path", Raw::Text(Rejection::at(self))),
+        List::Cons(entry("message", Raw::Text(Rejection::describe(self))), List::Nil)))
+  }
 }

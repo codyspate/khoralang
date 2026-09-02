@@ -422,7 +422,7 @@ fn main() -> Int {{
 #[test]
 fn keys_defaults_and_closed_records() {
     let out = run(
-        "schema_keys",
+        "schema_wire_keys",
         &format!(
             "{HEAD2}
 fn main() -> Int {{
@@ -609,5 +609,125 @@ fn main() -> Int {{
          depth 3\n\
          children[0].label should be text, and is 1; children[0].children is not set; \n\
          [label, children]\n"
+    );
+}
+
+/// A program that reaches its schemas through the traits.
+const HEAD3: &str = "module main;
+
+import std::core::{List, Option, Pair, Redacted, Result, Show, Validated, print};
+import std::decimal::{Decimal};
+import std::json::{encode};
+import std::schema::{Decode, Encode, Rejection, Schema, Shape, Raw, between, decode, int, list,
+                     string, struct2};
+import std::time::{Date};
+
+derive(Show)
+pub type Port = Int;
+
+impl Decode for Port {
+  fn schema() -> Schema<Port> { Schema::map(between(int(), 1, 65535), fn n => Port(n)) }
+}
+
+impl Encode for Port {
+  fn encode(self) -> Raw { match self { Port(n) => n.encode() } }
+}
+
+pub type Listen = { host: String, port: Port };
+
+fn listen(host: String, port: Port) -> Listen { { host: host, port: port } }
+
+impl Decode for Listen {
+  fn schema() -> Schema<Listen> { struct2(\"host\", string(), \"port\", Port::schema(), listen) }
+}
+
+impl Encode for Listen {
+  fn encode(self) -> Raw {
+    Raw::Record([entry(\"host\", self.host.encode()), entry(\"port\", self.port.encode())])
+  }
+}
+
+fn entry(key: String, value: Raw) -> Pair<String, Raw> { { key: key, value: value } }
+
+fn rec(entries: List<Pair<String, Raw>>) -> Raw { Raw::Record(entries) }
+
+fn problems<A>(v: Validated<A, Rejection>) -> String {
+  match Validated::to_result(v) {
+    Result::Ok(_a) => \"no problems\",
+    Result::Err(errors) =>
+      List::fold(errors, \"\", fn (acc, e) => acc + Rejection::describe(e) + \"; \"),
+  }
+}
+";
+
+/// **The schema is reached through the type.** `Decode::schema()` is chosen
+/// by an annotation, `Listen::schema()` by name, and `decode(raw)` by the
+/// type it is asked for; a hand-written newtype's refinement is picked up by
+/// every schema that contains it. `Encode` writes the same values back, and
+/// a list of rejections is a body a client can read.
+#[test]
+fn the_traits_are_selected_by_the_expected_type() {
+    let out = run(
+        "schema_traits",
+        &format!(
+            "{HEAD3}
+fn main() -> Int {{
+  let maybe: Schema<Option<Int>> = Decode::schema();
+  match Validated::to_result(Schema::decode(maybe, Raw::Null)) {{
+    Result::Ok(v) => print(\"${{v}}\"),
+    Result::Err(_e) => print(\"refused\"),
+  }};
+  print(\"${{Shape::keys(Listen::schema().shape)}}\");
+  let ok: Validated<Listen, Rejection> =
+    decode(rec([entry(\"host\", Raw::Text(\"h\")), entry(\"port\", Raw::Number(\"8080\"))]));
+  match Validated::to_result(ok) {{
+    Result::Ok(l) => {{
+      print(\"${{l.host}} ${{l.port}}\");
+      print(encode(Raw::to_json(l.encode())));
+    }},
+    Result::Err(errors) => print(Rejection::report(errors)),
+  }};
+  let bad: Validated<Listen, Rejection> =
+    decode(rec([entry(\"host\", Raw::Text(\"h\")), entry(\"port\", Raw::Number(\"70000\"))]));
+  match Validated::to_result(bad) {{
+    Result::Ok(_l) => print(\"decoded\"),
+    Result::Err(errors) => {{
+      print(Rejection::report(errors));
+      print(encode(Raw::to_json(errors.encode())));
+    }},
+  }};
+  let ports: Validated<List<Port>, Rejection> = decode(Raw::Sequence([Raw::Number(\"1\"), Raw::Number(\"0\")]));
+  print(problems(ports));
+  let day: Validated<Date, Rejection> = decode(Raw::Text(\"2026-09-02\"));
+  match Validated::to_result(day) {{
+    Result::Ok(d) => print(encode(Raw::to_json(d.encode()))),
+    Result::Err(errors) => print(Rejection::report(errors)),
+  }};
+  let late: Validated<Date, Rejection> = decode(Raw::Text(\"yesterday\"));
+  print(problems(late));
+  match Decimal::of_string(\"0.10\") {{
+    Option::Some(d) => print(encode(Raw::to_json(d.encode()))),
+    Option::None => print(\"no decimal\"),
+  }};
+  let none: Option<Int> = Option::None;
+  print(encode(Raw::to_json(Raw::Record([entry(\"a\", none.encode()), entry(\"b\", 1.encode())]))));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        "None\n\
+         [host, port]\n\
+         h Port(8080)\n\
+         {\"host\":\"h\",\"port\":8080}\n\
+         port must be between 1 and 65535\n\
+         [{\"message\":\"port must be between 1 and 65535\",\"path\":\"port\"}]\n\
+         [1] must be between 1 and 65535; \n\
+         \"2026-09-02\"\n\
+         the value should be an ISO 8601 date, and is \"yesterday\"; \n\
+         \"0.10\"\n\
+         {\"b\":1}\n"
     );
 }

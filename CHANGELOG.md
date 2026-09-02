@@ -197,6 +197,18 @@ it will behave differently now.
 
 ### Added
 
+- **`std::schema` reaches a schema through the type.** `Decode` is the trait
+  whose one function is `schema() -> Schema<Self>`; `std` implements it for
+  its own types and a program implements it for a record or a variant with
+  the constructors, and every schema that contains that type then finds the
+  impl through the trait. `Settings::schema()` names the type; `decode(raw)`
+  is chosen by the type the surrounding expression asks for. `Encode` is the
+  other direction, `encode(self) -> Raw`, kept apart from the schema because
+  a secret has no representation on the wire: `Redacted` implements `Decode`
+  and not `Encode`. `Rejection` implements `Encode`, so a list of problems is
+  a response body with a `path` and a `message` per problem. `Decimal` is
+  written as text, which is how money travels on most wires, and `None` is an
+  absent key.
 - **Every hand-written documentation example is compiled by the gate.** All 580
   blocks in the Guide, the Reference and the Cookbook, which nothing had ever
   compiled — 55 of them did not. Most were legitimate shapes the checker had to
