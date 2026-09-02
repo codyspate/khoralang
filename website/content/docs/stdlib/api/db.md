@@ -82,11 +82,18 @@ something that is genuinely a measurement needs one.
 
 ```khora
 pub type Row = {
+  columns: List<String>,
   cells: List<Cell>,
 };
 ```
 
-One row, in the order the query named its columns.
+One row: the columns the query named, and a cell under each.
+
+The names are what let a row be read through a schema -- `Entry::schema()`
+reads `id`, `account`, `amount` and `memo` by name -- and a driver that
+has them has no reason to drop them. A driver that genuinely does not
+(a bare `SELECT` with no description) leaves them empty, and
+[`Row::to_raw`] then hands over a sequence rather than a record.
 
 ### DbError
 
@@ -279,6 +286,50 @@ pub fn cell(self, index: Int) -> Option<Cell>
 ```
 
 The cell at `index`, or `None` past the end.
+
+#### named
+
+```khora
+pub fn named(self, name: String) -> Option<Cell>
+```
+
+The cell under `name`, or `None` when no column has it.
+
+#### to_raw
+
+```khora
+pub fn to_raw(self) -> Raw
+```
+
+The row as a source hands it over, keyed by column, for a schema to
+read.
+
+A `Number` and a `Money` become the token their digits spell, which
+both round-trip exactly, so `Raw` keeps one numeric representation.
+`Text` is text the column said was text, and is not read as a number.
+
+#### sequence
+
+```khora
+pub fn sequence(rows: List<Row>) -> Raw
+```
+
+Every row, in order, for `list(Entry::schema())` to read at once: a
+problem in the third row is reported as `[2].amount`.
+
+### Cell
+
+```khora
+impl Cell
+```
+
+#### to_raw
+
+```khora
+pub fn to_raw(self) -> Raw
+```
+
+The cell as a source hands it over.
 
 ## Trait implementations
 

@@ -451,7 +451,9 @@ fn data_row(m: Message, columns: List<Column>) -> Row {
     };
     i = i + 1
   };
-  { cells: to_list(cells) }
+  // The names come too: they are what a schema reads the row by, and the
+  // description had them all along.
+  { columns: List::map(columns, fn column => column.name), cells: to_list(cells) }
 }
 
 /// The type of column `index`, or text if the description is missing.

@@ -1,7 +1,8 @@
 module ledger_service::main;
 
-import std::core::{ChildFailed, Fibers, List, Map, Option, Result, SharedFn, Show, print};
+import std::core::{ChildFailed, Fibers, List, Map, Option, Result, SharedFn, Show, Validated, print};
 import std::db::{Cell, Db, DbError, Row, transaction};
+import std::schema::{Decode, Rejection, list};
 import std::clock::{Clock};
 import std::env::{Env, EnvError, variable_or};
 import std::json::{Json, JsonError, parse};
@@ -38,7 +39,10 @@ import postgres::pool::{Pool, open as open_pool, with_db};
 // What an entry is
 // ---------------------------------------------------------------------------
 
-derive(Show)
+/// **`Decode` is derived, and a query's rows are read through it** -- by
+/// column name, every problem reported, which is what replaced forty lines
+/// of matching cells by position and dropping the row that did not fit.
+derive(Show, Decode)
 pub type Entry = {
   id: Int,
   account: String,
@@ -63,10 +67,11 @@ impl Entry {
 // Reading a row
 // ---------------------------------------------------------------------------
 //
-// **Every cell is matched, and a surprise is a failure rather than a zero.**
-// A row that does not have the shape the query asked for means the schema and
-// this file disagree, and the useful thing to do about that is say so at the
-// edge — not to serve a plausible-looking entry with an amount of nothing.
+// **A surprise is a failure rather than a zero.** A row that does not have
+// the shape the query asked for means the database and this file disagree,
+// and the useful thing to do about that is say so at the edge — not to serve
+// a plausible-looking entry with an amount of nothing. `Entry` reads itself
+// through its derived schema; the one cell read by position is the balance.
 
 fn cell_at(cells: List<Cell>, index: Int) -> Option<Cell> {
   let mut rest = cells;
@@ -98,44 +103,14 @@ fn number_at(cells: List<Cell>, index: Int) -> Option<Int> {
   }
 }
 
-fn text_at(cells: List<Cell>, index: Int) -> Option<String> {
-  match cell_at(cells, index) {
-    Option::Some(Cell::Text(t)) => Option::Some(t),
-    Option::Some(_) => Option::None,
-    Option::None => Option::None,
-  }
-}
-
-fn entry_of(row: Row) -> Option<Entry> {
-  match number_at(row.cells, 0) {
-    Option::None => Option::None,
-    Option::Some(id) => match text_at(row.cells, 1) {
-      Option::None => Option::None,
-      Option::Some(account) => match number_at(row.cells, 2) {
-        Option::None => Option::None,
-        Option::Some(amount) => match text_at(row.cells, 3) {
-          Option::None => Option::None,
-          Option::Some(memo) =>
-            Option::Some({ id: id, account: account, amount: amount, memo: memo }),
-        },
-      },
-    },
-  }
-}
-
-/// Every row that had the shape asked for, in order.
+/// Every row, read by column name through `Entry`'s schema.
 ///
-/// A row that did not is dropped rather than failing the request, and the
-/// count is what says so: `entries` reports how many it read and how many it
-/// could use, and they differ exactly when the schema has moved.
-fn entries_of(rows: List<Row>) -> List<Entry> {
-  match rows {
-    List::Nil => List::Nil,
-    List::Cons(row, rest) => match entry_of(row) {
-      Option::Some(entry) => List::Cons(entry, entries_of(rest)),
-      Option::None => entries_of(rest),
-    },
-  }
+/// A row that does not fit fails the request with the row's index in the
+/// message, `[2].amount should be a whole number`, rather than being dropped:
+/// a database that has drifted from this file is a thing to know, and a
+/// listing that was quietly one entry short is how nobody knew.
+fn entries_of(rows: List<Row>) -> Validated<List<Entry>, Rejection> {
+  list(Entry::schema()).decode(Row::sequence(rows))
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +300,13 @@ fn listing(pool: Pool, tracer: Tracer, request: Request) -> Response {
         Result::Err(why) => refused(why),
         Result::Ok(inner) => match inner {
           Result::Err(why) => refused(why),
-          Result::Ok(rows) => rows |> (||> entries_of |> as_documents |> json_list),
+          Result::Ok(rows) =>
+            match entries_of(rows) {
+              Validated::Valid(entries) => entries |> as_documents |> json_list,
+              // The rows are the database's and the shape is this file's, so
+              // a disagreement is a server problem, said in full.
+              Validated::Invalid(problems) => Response::text(500, Rejection::report(problems)),
+            },
         },
       }
     },

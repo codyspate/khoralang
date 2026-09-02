@@ -848,7 +848,19 @@ pub(crate) fn import_types(
                 // And the bodies those fields reach, which are not in scope
                 // here but have to be *visible* -- see `TypeMap::reachable`.
                 let reached = reachable_from(exported, name);
-                map.reachable.extend(reached.bodies);
+                // **Once each.** A body reached through two imported types --
+                // or already in scope by name -- was appended twice, and the
+                // module exporting this map then handed both copies to
+                // whoever imported from it, which reached them through *its*
+                // imports and appended each copy again. Every hop along an
+                // import chain multiplied the list, and a package three hops
+                // from `std::schema` took forty seconds to check.
+                for body in reached.bodies {
+                    if map.reachable.contains(&body) || map.variants.contains(&body) {
+                        continue;
+                    }
+                    map.reachable.push(body);
+                }
                 for (name, parameters) in reached.generics {
                     map.reachable_adts.entry(name).or_insert(parameters);
                 }
@@ -918,11 +930,44 @@ pub(crate) fn import_types(
                     map.traits.impls.push(extra);
 
                     // The declaration too, or it is an impl of nothing.
-                    if let Some(def) = exported.traits.traits.get(&trait_name) {
-                        map.traits
+                    //
+                    // **And when the declaration is new here, every impl of
+                    // it the module has**, as importing the trait would have
+                    // brought. A trait that arrives this way -- `Encode`
+                    // riding in on `impl Encode for Rejection` because
+                    // `Rejection` was imported -- makes a bound `A: Encode`
+                    // strict, where a file that had never heard of the trait
+                    // was let through. Strict against one impl, `Json` was
+                    // refused as not implementing `Encode` although
+                    // `std::schema` implements it, in a file that imported
+                    // `Json` from `std::json`, which holds no such impl: an
+                    // impl travels with its trait or with its type, and this
+                    // one's type lives in a module that cannot name it.
+                    if !map.traits.traits.contains_key(&trait_name) {
+                        if let Some(def) = exported.traits.traits.get(&trait_name) {
+                            map.traits.traits.insert(trait_name.clone(), def.clone());
+                        }
+                        for sibling in exported
                             .traits
-                            .entry(trait_name.clone())
-                            .or_insert_with(|| def.clone());
+                            .impls
+                            .iter()
+                            .filter(|i| i.trait_name == trait_name)
+                        {
+                            let known = map.traits.impls.iter().any(|i| {
+                                i.trait_name == sibling.trait_name && i.head() == sibling.head()
+                            });
+                            if known {
+                                continue;
+                            }
+                            let mut sibling = sibling.clone();
+                            sibling.local = false;
+                            map.traits.impls.push(sibling);
+                        }
+                        for (key, signature) in &exported.signatures {
+                            if key.starts_with(&format!("{trait_name}#")) {
+                                map.signatures.entry(key.clone()).or_insert_with(|| signature.clone());
+                            }
+                        }
                     }
                     // And the methods, filed under `Trait#Head::method`.
                     // Without them the call resolves and then has no signature

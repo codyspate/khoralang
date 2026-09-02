@@ -14,6 +14,15 @@ it will behave differently now.
 
 ### Breaking
 
+- **`Row` carries its column names.** `std::db::Row` is
+  `{ columns: List<String>, cells: List<Cell> }`; every `Db` handler and test
+  double that builds a row supplies them, and `packages/postgres` passes on
+  the names it had been dropping. `Row::to_raw` is the row as a source hands
+  it over, keyed by column, and `Row::sequence` is every row at once, so
+  `list(Entry::schema()).decode(Row::sequence(rows))` reads a query's answer
+  through the same schema that reads a request body and reports a bad row
+  as `[2].amount should be a whole number` rather than dropping it.
+  `Row::named` reads one cell by column.
 - **`std::config` reads a schema.** `string`, `int`, `decimal`, `bool`,
   `secret`, `or_default` and `ConfigError` are deleted; the module is
   `read(schema) -> Validated<A, Rejection> with { env: Env }`, `variables(shape)`
@@ -140,6 +149,21 @@ it will behave differently now.
 
 ### Fixed
 
+- **Checking a package a few imports away from a large module no longer
+  takes a minute.** The bodies an imported type reaches were appended to a
+  file's view once per import that reached them, and a module exporting that
+  view handed every copy to whoever imported from it, so each hop along an
+  import chain multiplied the list. `packages/postgres`, three hops from
+  `std::schema` once `std::db` imported it, took forty-six seconds to check;
+  it takes one.
+- **An impl written apart from its type arrives with its trait.** `impl
+  Encode for Json` is written in `std::schema`, because `std::json` cannot
+  import it. A file that imported `Json` and, from `std::schema`, only a
+  type whose impl brought the trait `Encode` along was then refused
+  `Response::json(200, Json::Object(..))` for `Json` not implementing a
+  trait it implements: the bound had become strict against the one impl
+  that had arrived. A trait that arrives with an imported type now brings
+  the module's other impls of it, as importing the trait would have.
 - **A function's declared return type reaches its body.** `fn f() -> U8 { 200 }`
   was refused, because the literal had settled on `Int` before anything
   mentioned `U8`, and a record literal in tail position had to be found by

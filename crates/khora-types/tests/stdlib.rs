@@ -491,3 +491,28 @@ fn a_struct_literal_says_what_is_wrong_with_it() {
         );
     }
 }
+
+/// **An impl that lives apart from its type still arrives.** `impl Encode for
+/// Json` is written in `std::schema`, because `std::json` cannot import it;
+/// a file that imports `Json` and, from `std::schema`, only `Rejection`
+/// learns of `Encode` through `impl Encode for Rejection`, and that must
+/// bring the trait's other impls with it, or the bound on `Response::json`
+/// is strict against one impl and `Json` is refused as not implementing a
+/// trait it implements.
+#[test]
+fn a_trait_that_arrives_with_a_type_brings_its_other_impls() {
+    let found = errors_with_std(
+        "module m;\n\
+         import std::core::{List, Map, Show, Validated};\n\
+         import std::db::{Row};\n\
+         import std::json::{Json};\n\
+         import std::net::http::{Response};\n\
+         import std::schema::{Rejection, int, list};\n\
+         fn answer() -> Response { Response::json(200, Json::Object(Map::new())) }\n\
+         fn numbers(rows: List<Row>) -> Validated<List<Int>, Rejection> {\n\
+           list(int()).decode(Row::sequence(rows))\n\
+         }\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}

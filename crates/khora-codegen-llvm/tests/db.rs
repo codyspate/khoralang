@@ -39,8 +39,10 @@ fn run(name: &str, body: &str) -> String {
 fn run_with(name: &str, items: &str, body: &str) -> String {
     let main = format!(
         r#"module demo::main;
-import std::core::{{Eq, Fiber, List, Option, Result, Show, acquire, attempt, print, scoped}};
+import std::core::{{Eq, Fiber, List, Option, Result, Show, Validated, acquire, attempt, print, scoped}};
 import std::db::{{Cell, Db, DbError, Row, transaction}};
+import std::decimal::{{Decimal}};
+import std::schema::{{Decode, Raw, Rejection, list}};
 
 /// A handler that says what it was told to do, as it is told.
 ///
@@ -89,6 +91,11 @@ fn main() -> () {{
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("decimal.kh"), std_source("decimal.kh")),
+        // A row is read through a schema, so `std::schema` and what it
+        // imports come too.
+        SourceFile::new(&db, dir.join("json.kh"), std_source("json.kh")),
+        SourceFile::new(&db, dir.join("time.kh"), std_source("time.kh")),
+        SourceFile::new(&db, dir.join("schema.kh"), std_source("schema.kh")),
         SourceFile::new(&db, dir.join("db.kh"), std_source("db.kh")),
         SourceFile::new(&db, dir.join("main.kh"), main),
     ];
@@ -533,5 +540,55 @@ fn worker() -> () raises Oops {{
         out,
         "begin\nrolling back\nrolled back\nthe parent carried on\n",
         "a finalizer must run to its end even though the fiber is stopping"
+    );
+}
+
+/// **A row is read through a schema, by column name.** `Row::sequence` puts
+/// every row's problems on one report with the row's index in the path, so a
+/// query whose second row has drifted from the type says so rather than
+/// dropping it; a `Money` cell survives as the exact decimal it was.
+#[test]
+fn a_row_reads_through_its_column_names() {
+    let out = run_with(
+        "db_row_schema",
+        r#"derive(Show, Decode)
+pub type Entry = { id: Int, memo: String, amount: Decimal, paid: Bool };
+
+fn money(text: String) -> Cell {
+  match Decimal::of_string(text) {
+    Option::Some(d) => Cell::Money(d),
+    Option::None => Cell::Null,
+  }
+}
+
+fn row(cells: List<Cell>) -> Row {
+  { columns: ["id", "memo", "amount", "paid"], cells: cells }
+}
+
+fn shown(answer: Validated<List<Entry>, Rejection>) -> String {
+  match answer {
+    Validated::Valid(entries) =>
+      List::fold(entries, "", fn (acc, e) => acc + "${e.id} ${e.memo} ${e.amount} ${e.paid}; "),
+    Validated::Invalid(problems) => Rejection::report(problems),
+  }
+}"#,
+        r#"let good = row([Cell::Number(7), Cell::Text("x"), money("1.50"), Cell::Flag(true)]);
+  let bad = row([Cell::Text("no"), Cell::Null, money("2.00"), Cell::Flag(false)]);
+  print(shown(list(Entry::schema()).decode(Row::sequence(List::Cons(good, List::Nil)))));
+  print(shown(list(Entry::schema()).decode(Row::sequence(List::Cons(good, List::Cons(bad, List::Nil))))));
+  match Row::named(good, "memo") {
+    Option::Some(Cell::Text(text)) => print(text),
+    _ => print("no memo"),
+  };
+  let nameless: Row = { columns: List::Nil, cells: [Cell::Number(1)] };
+  print(Show::show(Row::to_raw(nameless)));"#,
+    );
+
+    assert_eq!(
+        out,
+        "7 x 1.50 true; \n\
+         [1].id should be a whole number, and is \"no\"\n[1].memo should be text, and is null\n\
+         x\n\
+         Raw::Sequence([Raw::Number(1)])\n"
     );
 }

@@ -53,8 +53,9 @@ module std::db;
 //! in return is that a finalizer running *because* of a cancellation is not
 //! itself cancelled — `khora-rt`'s `cancel::Shielded`.
 
-import std::core::{Eq, List, Option, Result, Scope, Show, acquire, scoped};
+import std::core::{Eq, List, Option, Pair, Result, Scope, Show, acquire, scoped};
 import std::decimal::{Decimal};
+import std::schema::{Raw};
 
 /// A value in a column, or bound to a parameter.
 ///
@@ -69,8 +70,15 @@ pub type Cell =
   | Money(Decimal)
   | Flag(Bool);
 
-/// One row, in the order the query named its columns.
+/// One row: the columns the query named, and a cell under each.
+///
+/// The names are what let a row be read through a schema -- `Entry::schema()`
+/// reads `id`, `account`, `amount` and `memo` by name -- and a driver that
+/// has them has no reason to drop them. A driver that genuinely does not
+/// (a bare `SELECT` with no description) leaves them empty, and
+/// [`Row::to_raw`] then hands over a sequence rather than a record.
 pub type Row = {
+  columns: List<String>,
   cells: List<Cell>,
 };
 
@@ -304,6 +312,91 @@ impl Row {
   /// The cell at `index`, or `None` past the end.
   pub fn cell(self, index: Int) -> Option<Cell> {
     nth(self.cells, index)
+  }
+
+  /// The cell under `name`, or `None` when no column has it.
+  pub fn named(self, name: String) -> Option<Cell> {
+    let mut names = self.columns;
+    let mut rest = self.cells;
+    let mut found: Option<Cell> = Option::None;
+    let mut walking = true;
+    while walking {
+      match names {
+        List::Nil => { walking = false; },
+        List::Cons(column, more_names) =>
+          match rest {
+            List::Nil => { walking = false; },
+            List::Cons(cell, more_cells) => {
+              if column == name {
+                found = Option::Some(cell);
+                walking = false;
+              } else {
+                names = more_names;
+                rest = more_cells;
+              }
+            },
+          },
+      }
+    };
+    found
+  }
+
+  /// The row as a source hands it over, keyed by column, for a schema to
+  /// read.
+  ///
+  /// A `Number` and a `Money` become the token their digits spell, which
+  /// both round-trip exactly, so `Raw` keeps one numeric representation.
+  /// `Text` is text the column said was text, and is not read as a number.
+  pub fn to_raw(self) -> Raw {
+    let values = List::fold(self.cells, List::Nil, fn (acc, cell) => List::Cons(Cell::to_raw(cell), acc));
+    let values = List::reverse(values);
+    match self.columns {
+      List::Nil => Raw::Sequence(values),
+      _ => Raw::Record(zip_columns(self.columns, values)),
+    }
+  }
+
+  /// Every row, in order, for `list(Entry::schema())` to read at once: a
+  /// problem in the third row is reported as `[2].amount`.
+  pub fn sequence(rows: List<Row>) -> Raw {
+    let raws = List::fold(rows, List::Nil, fn (acc, row) => List::Cons(Row::to_raw(row), acc));
+    Raw::Sequence(List::reverse(raws))
+  }
+}
+
+/// Columns and cells side by side, stopping at the shorter.
+fn zip_columns(columns: List<String>, values: List<Raw>) -> List<Pair<String, Raw>> {
+  let mut out = List::Nil;
+  let mut names = columns;
+  let mut rest = values;
+  let mut walking = true;
+  while walking {
+    match names {
+      List::Nil => { walking = false; },
+      List::Cons(name, more_names) =>
+        match rest {
+          List::Nil => { walking = false; },
+          List::Cons(value, more_values) => {
+            out = List::Cons(Raw::entry(name, value), out);
+            names = more_names;
+            rest = more_values;
+          },
+        },
+    }
+  };
+  List::reverse(out)
+}
+
+impl Cell {
+  /// The cell as a source hands it over.
+  pub fn to_raw(self) -> Raw {
+    match self {
+      Cell::Null => Raw::Null,
+      Cell::Text(text) => Raw::Text(text),
+      Cell::Number(n) => Raw::Number(Int::to_string(n)),
+      Cell::Money(d) => Raw::Number(Show::show(d)),
+      Cell::Flag(flag) => Raw::Bool(flag),
+    }
   }
 }
 
