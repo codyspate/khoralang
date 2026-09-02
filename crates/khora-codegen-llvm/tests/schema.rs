@@ -880,3 +880,38 @@ fn main() -> Int {{
          2 leaves\n"
     );
 }
+
+/// **The shape renders as the document a model is prompted with.** A derived
+/// type is a `$defs` entry and a `$ref`, a rule is its keyword, a secret is
+/// `writeOnly`, an optional field is left out of `required`, a decimal is a
+/// string, and a variant is an enum or a `oneOf` over the two forms the
+/// decoder reads. A type that mentions itself terminates on its own name.
+#[test]
+fn a_shape_renders_as_a_json_schema() {
+    let out = run(
+        "schema_json_schema",
+        &format!(
+            "{HEAD4}
+fn main() -> Int {{
+  print(encode(Shape::to_json_schema(Settings::schema().shape)));
+  print(encode(Shape::to_json_schema(Tree::schema().shape)));
+  print(encode(Shape::to_json_schema(Schema::closed(Listen::schema()).shape)));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        concat!(
+            "{\"$defs\":{",
+            "\"Level\":{\"enum\":[\"Debug\",\"Info\"]},",
+            "\"Listen\":{\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"maximum\":65535,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"host\",\"port\"],\"type\":\"object\"},",
+            "\"Mode\":{\"oneOf\":[{\"const\":\"Local\"},{\"properties\":{\"type\":{\"const\":\"Remote\"},\"url\":{\"type\":\"string\"}},\"required\":[\"type\",\"url\"],\"type\":\"object\"}]},",
+            "\"Settings\":{\"properties\":{\"debug\":{\"type\":\"boolean\"},\"level\":{\"$ref\":\"#/$defs/Level\"},\"listen\":{\"$ref\":\"#/$defs/Listen\"},\"mode\":{\"$ref\":\"#/$defs/Mode\"},\"password\":{\"type\":\"string\",\"writeOnly\":true},\"rate\":{\"description\":\"an exact decimal, every digit kept\",\"type\":\"string\"},\"tags\":{\"items\":{\"type\":\"string\"},\"type\":\"array\"}},\"required\":[\"listen\",\"password\",\"rate\",\"tags\",\"mode\",\"level\"],\"type\":\"object\"}",
+            "},\"$ref\":\"#/$defs/Settings\"}\n",
+            "{\"$defs\":{\"Tree\":{\"properties\":{\"children\":{\"items\":{\"$ref\":\"#/$defs/Tree\"},\"type\":\"array\"},\"label\":{\"type\":\"string\"}},\"required\":[\"label\",\"children\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Tree\"}\n",
+            "{\"$defs\":{\"Listen\":{\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"maximum\":65535,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"host\",\"port\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Listen\",\"additionalProperties\":false}\n",
+        )
+    );
+}

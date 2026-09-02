@@ -26,8 +26,9 @@ a provider.
 
 `extract` is the shape of the whole module. A caller writes
 `let report: Report = extract(prompt)!` and `LLMService` never learns that
-reports exist -- the handler answers `complete: Prompt -> String`, and
-`Extract` turns that string into the type the call site asked for.
+reports exist -- the handler answers `complete: Prompt -> String`, and the
+type's own schema, which `derive(Decode)` writes, describes the answer to
+the model and turns that string into the type the call site asked for.
 
 ## Types
 
@@ -151,7 +152,7 @@ pub type ModelError =
   | ContextLengthExceeded(max_tokens: Int)
   | RateLimited(retry_after_ms: Int)
   | InferenceEngineFailure(msg: String)
-  | SchemaExtractionError(details: String);
+  | SchemaExtractionError(problems: List<Rejection>);
 ```
 
 Why a model call did not produce an answer.
@@ -161,67 +162,16 @@ provider numbers its failures differently, and a `std` that picked one
 would be wrong for the second. `RateLimited` carries the wait because a
 caller can act on it; the rest carry text.
 
-## Traits
-
-### Extract
+#### SchemaExtractionError
 
 ```khora
-pub trait Extract
+| SchemaExtractionError(problems: List<Rejection>)
 ```
 
-A type a model can be asked to produce: how to describe it, and how to read
-the answer back.
-
-`Spec` is deliberately the type's own business — a JSON schema, a grammar, a
-set of examples — because `extract` only has to hand it over. `parse` is the
-other half, and was missing: something has to turn the model's text into a
-value, and before now nothing said what.
-
-#### Associated types
-
-##### Spec
-
-```khora
-type Spec;
-```
-
-How this type describes itself to a model — a JSON schema, a grammar, a
-set of examples. Its own business; `extract` only hands it over.
-
-#### Functions
-
-##### spec
-
-```khora
-fn spec() -> Self::Spec
-```
-
-The description. Called without a value, because there is not one yet:
-describing the answer is what comes before asking for it.
-
-##### described
-
-```khora
-fn described() -> String
-```
-
-The spec, as the words that reach the model.
-
-Separate from `spec` because `Spec` is any type at all and something has
-to turn it into text. `type Spec: Show` would say it in one place instead
-— it parses, and the bound does not reach a `Self::Spec` projection, so
-the projection is reported as not implementing `Show` however the trait
-is written. A gap worth closing; until it is, this is the honest spelling.
-
-##### parse
-
-```khora
-fn parse(text: String) -> Self raises ModelError
-```
-
-The answer, read back. `ModelError::SchemaExtractionError` when the text
-is not what the spec asked for, which is the ordinary case rather than an
-exceptional one — a model is allowed to be wrong.
+The model answered, and the answer was not the type asked for: every
+problem with it, the way a request body's problems are reported, because
+a model is allowed to be wrong and the ordinary case is that it is
+wrong in several places.
 
 ## Effects
 
@@ -362,7 +312,7 @@ package.
 ### extract
 
 ```khora
-pub fn extract<A: Extract>(prompt: Prompt) -> A with { ai: LLMService } raises ModelError
+pub fn extract<A: Decode>(prompt: Prompt) -> A with { ai: LLMService } raises ModelError
 ```
 
 A typed answer from the model.
@@ -372,6 +322,11 @@ reason `LLMService` does not have to know that reports exist. `A` is chosen
 by the caller, which is what makes this a function rather than an
 operation: a generic function is specialized at each call site, and a field
 of a handler cannot be.
+
+**The type's schema is the whole of the contract.** Its shape, rendered as
+a JSON Schema, is what the model is told to produce; its decoder is what
+reads the answer back, reporting every problem. A type that derives
+`Decode` needs nothing else to be extracted.
 
 ### embed
 

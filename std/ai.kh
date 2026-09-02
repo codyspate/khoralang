@@ -21,10 +21,13 @@ module std::ai;
 //!
 //! `extract` is the shape of the whole module. A caller writes
 //! `let report: Report = extract(prompt)!` and `LLMService` never learns that
-//! reports exist -- the handler answers `complete: Prompt -> String`, and
-//! `Extract` turns that string into the type the call site asked for.
+//! reports exist -- the handler answers `complete: Prompt -> String`, and the
+//! type's own schema, which `derive(Decode)` writes, describes the answer to
+//! the model and turns that string into the type the call site asked for.
 
-import std::core::{List, Option};
+import std::core::{List, Option, Redacted, Result, Validated};
+import std::json::{JsonError, encode, parse};
+import std::schema::{Decode, Problem, Raw, Rejection, Schema, Shape};
 
 /// Where a tensor's memory lives.
 ///
@@ -169,10 +172,8 @@ impl Prompt {
   }
 
   /// The prompt, with a description of what the answer should look like
-  /// appended. What `extract` puts between a caller's request and the model.
-  ///
-  /// `S: Show` because a spec has to reach the model as words, and `Show` is
-  /// how a type already says how it reads.
+  /// appended. What `extract` puts between a caller's request and the model:
+  /// the type's JSON Schema, as text.
   fn describing(self, spec: String) -> Prompt {
     Prompt::saying(self, "user", "Answer with exactly this shape: " + spec)
   }
@@ -188,36 +189,11 @@ pub type ModelError =
   | ContextLengthExceeded(max_tokens: Int)
   | RateLimited(retry_after_ms: Int)
   | InferenceEngineFailure(msg: String)
-  | SchemaExtractionError(details: String);
-
-/// A type a model can be asked to produce: how to describe it, and how to read
-/// the answer back.
-///
-/// `Spec` is deliberately the type's own business — a JSON schema, a grammar, a
-/// set of examples — because `extract` only has to hand it over. `parse` is the
-/// other half, and was missing: something has to turn the model's text into a
-/// value, and before now nothing said what.
-pub trait Extract {
-  /// How this type describes itself to a model — a JSON schema, a grammar, a
-  /// set of examples. Its own business; `extract` only hands it over.
-  type Spec;
-  /// The description. Called without a value, because there is not one yet:
-  /// describing the answer is what comes before asking for it.
-  fn spec() -> Self::Spec;
-
-  /// The spec, as the words that reach the model.
-  ///
-  /// Separate from `spec` because `Spec` is any type at all and something has
-  /// to turn it into text. `type Spec: Show` would say it in one place instead
-  /// — it parses, and the bound does not reach a `Self::Spec` projection, so
-  /// the projection is reported as not implementing `Show` however the trait
-  /// is written. A gap worth closing; until it is, this is the honest spelling.
-  fn described() -> String;
-  /// The answer, read back. `ModelError::SchemaExtractionError` when the text
-  /// is not what the spec asked for, which is the ordinary case rather than an
-  /// exceptional one — a model is allowed to be wrong.
-  fn parse(text: String) -> Self raises ModelError;
-}
+  /// The model answered, and the answer was not the type asked for: every
+  /// problem with it, the way a request body's problems are reported, because
+  /// a model is allowed to be wrong and the ordinary case is that it is
+  /// wrong in several places.
+  | SchemaExtractionError(problems: List<Rejection>);
 
 /// Inference is a capability, not a value: a function that classifies text
 /// declares `with { ai: LLMService }`, and the caller decides what serves it.
@@ -246,12 +222,34 @@ pub effect LLMService {
 /// by the caller, which is what makes this a function rather than an
 /// operation: a generic function is specialized at each call site, and a field
 /// of a handler cannot be.
-pub fn extract<A: Extract>(prompt: Prompt) -> A
+///
+/// **The type's schema is the whole of the contract.** Its shape, rendered as
+/// a JSON Schema, is what the model is told to produce; its decoder is what
+/// reads the answer back, reporting every problem. A type that derives
+/// `Decode` needs nothing else to be extracted.
+pub fn extract<A: Decode>(prompt: Prompt) -> A
   with { ai: LLMService }
   raises ModelError
 {
-  let described = Prompt::describing(prompt, A::described());
-  A::parse(ai.complete(described)!)!
+  let schema: Schema<A> = Decode::schema();
+  let described = Prompt::describing(prompt, encode(Shape::to_json_schema(schema.shape)));
+  let text = ai.complete(described)!;
+  match parse(text) {
+    Result::Err(why) => raise ModelError::SchemaExtractionError(List::Cons(not_json(why), List::Nil)),
+    Result::Ok(document) =>
+      match Schema::decode(schema, Raw::of_json(document)) {
+        Validated::Valid(answer) => answer,
+        Validated::Invalid(problems) => raise ModelError::SchemaExtractionError(problems),
+      },
+  }
+}
+
+/// The model's answer was not a document at all, said in the same shape as
+/// a document that was the wrong one.
+fn not_json(why: JsonError) -> Rejection {
+  let found = "text that stopped being JSON at byte " + Int::to_string(why.at) + ", where "
+  + why.expected + " was expected";
+  { path: List::Nil, secret: false, problem: Problem::Wrong("a JSON document", Redacted::of(found)) }
 }
 
 /// An embedding of a known width.

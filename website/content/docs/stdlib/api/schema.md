@@ -676,6 +676,28 @@ pub fn map<B>(self, f: (A) -> B) -> Fields<B>
 
 The same fields, assembled into something else -- the record, usually.
 
+### Shape
+
+```khora
+impl Shape
+```
+
+#### to_json_schema
+
+```khora
+pub fn to_json_schema(self) -> Json
+```
+
+The shape as a JSON Schema document, draft 2020-12: what a model is
+prompted with, and what an API is documented by.
+
+A `Lazy` shape is rendered once, under `$defs` by its name, and every
+mention after that is a `$ref`, which is what terminates a type that
+mentions itself. A rule renders as its keyword and its sentence. A
+`Decimal` renders as a string, which is what `Encode` writes and
+[`decimal`] reads. `required` leaves out an optional or defaulted field,
+and a secret is `writeOnly`.
+
 ## Trait implementations
 
 ### Show for Shape

@@ -2,8 +2,8 @@ module risk_analyzer::main;
 
 import std::core::{ChildFailed, Eq, List, Option, Scope, SharedFn, Show, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
-import std::ai::{Extract, LLMService, ModelError, Prompt, extract};
-import std::schema::{Encode};
+import std::ai::{LLMService, ModelError, Prompt, extract};
+import std::schema::{Decode, Encode};
 
 /// How bad it is, and why.
 ///
@@ -16,34 +16,25 @@ import std::schema::{Encode};
 /// It is still a trait rather than a builtin, and that part of the old comment
 /// stands: `==` reaches a trait so that a type gets to say what equality
 /// means. Deriving is a type saying "structurally", out loud, in one word.
-derive(Eq, Encode)
+derive(Eq, Decode, Encode)
 pub type RiskLevel =
   | Low
   | Moderate(reason: String)
   | Critical(action_required: String);
 
-/// `Encode` is derived too, so `Response::json` sends the report as JSON
-/// rather than as whatever `Show` printed.
-derive(Encode)
+/// **The declaration is the whole contract with the model.** `Decode` is what
+/// `extract` asks for: the schema it derives is rendered as a JSON Schema and
+/// put in the prompt, and reads the answer back, every problem reported.
+/// `Encode` is what `Response::json` asks for, so the report goes out as the
+/// JSON it is.
+derive(Decode, Encode)
 pub type AnalysisReport = {
   account_id: String,
   risk: RiskLevel,
   confidence: Float,
 };
 
-/// What the model is told to produce. `Extract` is how `ai.extract` learns to
-/// take a description and hand back the type it describes, without the effect
-/// declaration having to know about reports.
-pub type ReportSpec = {
-  fields: String,
-};
-
-impl Show for ReportSpec {
-  fn show(self) -> String { self.fields }
-}
-
-/// What the service sends back. JSON by hand, because there is no JSON module
-/// yet — and because `Show` is what `Response::json` asks for until there is.
+/// The report as a line of text, for a log.
 impl Show for AnalysisReport {
   fn show(self) -> String {
     "{\"account_id\": \"${self.account_id}\", \"risk\": \"${RiskLevel::show(self.risk)}\", \"confidence\": ${Int::to_string(self.confidence_percent())}}"
@@ -64,30 +55,6 @@ impl Show for RiskLevel {
       RiskLevel::Low => "low",
       RiskLevel::Moderate(reason) => "moderate: " + reason,
       RiskLevel::Critical(action) => "critical: " + action,
-    }
-  }
-}
-
-impl Extract for AnalysisReport {
-  type Spec = ReportSpec;
-  fn spec() -> ReportSpec {
-    { fields: "account_id: string, risk: low | moderate | critical, confidence: number" }
-  }
-
-  fn described() -> String { ReportSpec::show(AnalysisReport::spec()) }
-
-  /// Reading the answer back is the type's business too, for the same reason
-  /// describing it is: only `AnalysisReport` knows what one looks like. A real
-  /// one parses JSON; this is waiting for a JSON module.
-  fn parse(text: String) -> AnalysisReport raises ModelError {
-    if String::byte_length(text) == 0 {
-      raise ModelError::SchemaExtractionError("the model said nothing")
-    } else {
-      {
-        account_id: "acc_9921",
-        risk: RiskLevel::Critical("Immediate fund freeze"),
-        confidence: 0.98,
-      }
     }
   }
 }
@@ -177,7 +144,10 @@ const mock_ledger = handler for Ledger {
 /// fabricate a whole `AnalysisReport`, which tests the mock rather than the
 /// code under it.
 const mock_ai = handler for LLMService {
-  complete: fn _ => "a critical assessment",
+  // What a model answers when it is told the JSON Schema of an
+  // `AnalysisReport`: the document `extract` reads the report out of.
+  complete: fn _ =>
+  `{"account_id": "acc_9921", "risk": {"type": "Critical", "action_required": "Immediate fund freeze"}, "confidence": 0.98}`,
   embed_raw: fn _ => List::Nil,
 };
 

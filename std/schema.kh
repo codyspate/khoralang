@@ -1491,3 +1491,220 @@ impl Encode for Rejection {
         List::Cons(Raw::entry("message", Raw::Text(Rejection::describe(self))), List::Nil)))
   }
 }
+
+// ---------------------------------------------------------------------------
+// A document, from a shape
+// ---------------------------------------------------------------------------
+
+/// What a walk of a shape carries with it: the names already rendered under
+/// `$defs`, and the definitions themselves.
+type Rendering = { seen: List<String>, defs: List<Field> };
+
+impl Shape {
+  /// The shape as a JSON Schema document, draft 2020-12: what a model is
+  /// prompted with, and what an API is documented by.
+  ///
+  /// A `Lazy` shape is rendered once, under `$defs` by its name, and every
+  /// mention after that is a `$ref`, which is what terminates a type that
+  /// mentions itself. A rule renders as its keyword and its sentence. A
+  /// `Decimal` renders as a string, which is what `Encode` writes and
+  /// [`decimal`] reads. `required` leaves out an optional or defaulted field,
+  /// and a secret is `writeOnly`.
+  pub fn to_json_schema(self) -> Json {
+    let start: Rendering = { seen: List::Nil, defs: List::Nil };
+    let (document, rendering) = render(self, start);
+    match rendering.defs {
+      List::Nil => document,
+      defs => with_key(document, "$defs", object(List::reverse(defs))),
+    }
+  }
+}
+
+/// `{ "type": "string" }` and its kin.
+fn typed(kind: String) -> Json {
+  object(List::Cons(member("type", Json::Text(kind)), List::Nil))
+}
+
+/// `{ "$ref": "#/$defs/Name" }`.
+fn reference(name: String) -> Json {
+  object(List::Cons(member("$ref", Json::Text("#/$defs/" + name)), List::Nil))
+}
+
+/// The document with one more key. An object is a map, and the map is the
+/// document's own, so this writes in place.
+fn with_key(document: Json, key: String, value: Json) -> Json {
+  match document {
+    Json::Object(fields) => {
+      Map::insert(fields, key, value);
+      Json::Object(fields)
+    },
+    other => other,
+  }
+}
+
+fn render(shape: Shape, state: Rendering) -> (Json, Rendering) {
+  match shape {
+    Shape::Any => (object(List::Nil), state),
+    Shape::String => (typed("string"), state),
+    Shape::Int => (typed("integer"), state),
+    Shape::Float => (typed("number"), state),
+    Shape::Decimal =>
+      (with_key(typed("string"), "description", Json::Text("an exact decimal, every digit kept")), state),
+    Shape::Bool => (typed("boolean"), state),
+    Shape::List(of) => {
+      let (items, after) = render(of, state);
+      (with_key(typed("array"), "items", items), after)
+    },
+    Shape::Dict(of) => {
+      let (values, after) = render(of, state);
+      (with_key(typed("object"), "additionalProperties", values), after)
+    },
+    Shape::Struct(fields) => render_record(fields, Option::None, state),
+    Shape::Cases(cases) => render_cases(cases, state),
+    Shape::Optional(inner) => render(inner, state),
+    Shape::Nullable(inner) => {
+      let (one, after) = render(inner, state);
+      let either = Json::Array(List::Cons(one, List::Cons(typed("null"), List::Nil)));
+      (object(List::Cons(member("anyOf", either), List::Nil)), after)
+    },
+    Shape::Default(inner) => render(inner, state),
+    Shape::Keyed(_wire, inner) => render(inner, state),
+    Shape::Refined(inner, rule) => {
+      let (one, after) = render(inner, state);
+      (ruled(one, inner, rule), after)
+    },
+    Shape::Secret(inner) => {
+      let (one, after) = render(inner, state);
+      (with_key(one, "writeOnly", Json::Bool(true)), after)
+    },
+    Shape::Closed(inner) => {
+      let (one, after) = render(inner, state);
+      (with_key(one, "additionalProperties", Json::Bool(false)), after)
+    },
+    Shape::Described(inner, text) => {
+      let (one, after) = render(inner, state);
+      (with_key(one, "description", Json::Text(text)), after)
+    },
+    Shape::Lazy(name, inner) =>
+      if List::contains(state.seen, name) {
+        (reference(name), state)
+      } else {
+        let marked: Rendering = { seen: List::Cons(name, state.seen), defs: state.defs };
+        let (body, after) = render(inner(), marked);
+        let stored: Rendering = { seen: after.seen, defs: List::Cons(member(name, body), after.defs) };
+        (reference(name), stored)
+      },
+  }
+}
+
+/// Whether a field's value has to be there: not when it is optional or has a
+/// default, whatever wraps that.
+fn is_required(shape: Shape) -> Bool {
+  match shape {
+    Shape::Optional(_inner) => false,
+    Shape::Default(_inner) => false,
+    Shape::Keyed(_wire, inner) => is_required(inner),
+    Shape::Refined(inner, _rule) => is_required(inner),
+    Shape::Secret(inner) => is_required(inner),
+    Shape::Closed(inner) => is_required(inner),
+    Shape::Described(inner, _text) => is_required(inner),
+    _ => true,
+  }
+}
+
+/// An object with these properties, and `type` as the first of them when a
+/// case's tag is being described.
+fn render_record(fields: List<Named>, tag: Option<String>, state: Rendering) -> (Json, Rendering) {
+  let opening: (List<Field>, List<Json>) = match tag {
+    Option::None => (List::Nil, List::Nil),
+    Option::Some(name) => {
+      let constant = object(List::Cons(member("const", Json::Text(name)), List::Nil));
+      (List::Cons(member("type", constant), List::Nil), List::Cons(Json::Text("type"), List::Nil))
+    },
+  };
+  let (first_properties, first_required) = opening;
+  let start: (List<Field>, List<Json>, Rendering) = (first_properties, first_required, state);
+  let (properties, required, after) = List::fold(fields, start, fn (acc, field) => {
+      let (so_far, needed, rendering) = acc;
+      let (one, next) = render(field.shape, rendering);
+      let wire = Option::unwrap_or(Shape::wire_key(field.shape), field.name);
+      let needed_next = if is_required(field.shape) { List::Cons(Json::Text(wire), needed) } else { needed };
+      (List::Cons(member(wire, one), so_far), needed_next, next)
+    });
+  let document = with_key(typed("object"), "properties", object(List::reverse(properties)));
+  (with_key(document, "required", Json::Array(List::reverse(required))), after)
+}
+
+/// An enum when every case is payload-free; otherwise one alternative per
+/// case, a bare string for a payload-free case and an object tagged with
+/// `type` for the rest -- the two forms [`Schema::cases`] reads.
+fn render_cases(cases: List<Alternative>, state: Rendering) -> (Json, Rendering) {
+  if List::all(cases, fn case => List::is_empty(case.fields)) {
+    let names = List::map(cases, fn case => Json::Text(case.name));
+    (object(List::Cons(member("enum", Json::Array(names)), List::Nil)), state)
+  } else {
+    let start: (List<Json>, Rendering) = (List::Nil, state);
+    let (options, after) = List::fold(cases, start, fn (acc, case) => {
+        let (so_far, rendering) = acc;
+        match case.fields {
+          List::Nil => {
+            let bare = object(List::Cons(member("const", Json::Text(case.name)), List::Nil));
+            (List::Cons(bare, so_far), rendering)
+          },
+          payload => {
+            let (tagged, next) = render_record(payload, Option::Some(case.name), rendering);
+            (List::Cons(tagged, so_far), next)
+          },
+        }
+      });
+    (object(List::Cons(member("oneOf", Json::Array(List::reverse(options))), List::Nil)), after)
+  }
+}
+
+/// Whether a bound on this shape is a number a document can carry as one.
+fn numeric(shape: Shape) -> Bool {
+  match shape {
+    Shape::Int => true,
+    Shape::Float => true,
+    Shape::Keyed(_wire, inner) => numeric(inner),
+    Shape::Refined(inner, _rule) => numeric(inner),
+    Shape::Secret(inner) => numeric(inner),
+    Shape::Described(inner, _text) => numeric(inner),
+    Shape::Default(inner) => numeric(inner),
+    _ => false,
+  }
+}
+
+/// The document with a rule's keyword, or its sentence when there is no
+/// keyword for it -- a bound on a decimal, which the document carries as a
+/// string, is a sentence.
+fn ruled(document: Json, inner: Shape, rule: Rule) -> Json {
+  let sentence = Json::Text("must " + Rule::describe(rule));
+  match rule {
+    Rule::Between(low, high) =>
+      if numeric(inner) {
+        with_key(with_key(document, "minimum", Json::Number(low)), "maximum", Json::Number(high))
+      } else {
+        with_key(document, "description", sentence)
+      },
+    Rule::AtLeast(bound) =>
+      if numeric(inner) {
+        with_key(document, "minimum", Json::Number(bound))
+      } else {
+        with_key(document, "description", sentence)
+      },
+    Rule::AtMost(bound) =>
+      if numeric(inner) {
+        with_key(document, "maximum", Json::Number(bound))
+      } else {
+        with_key(document, "description", sentence)
+      },
+    Rule::MinLength(n) => with_key(document, "minLength", Json::of_int(n)),
+    Rule::MaxLength(n) => with_key(document, "maxLength", Json::of_int(n)),
+    Rule::MinItems(n) => with_key(document, "minItems", Json::of_int(n)),
+    Rule::MaxItems(n) => with_key(document, "maxItems", Json::of_int(n)),
+    Rule::OneOf(allowed) =>
+      with_key(document, "enum", Json::Array(List::map(allowed, fn a => Json::Text(a)))),
+    Rule::Custom(_must) => with_key(document, "description", sentence),
+  }
+}

@@ -14,6 +14,13 @@ it will behave differently now.
 
 ### Breaking
 
+- **`std::ai::Extract` is deleted; `extract` asks for `Decode`.** A type that
+  derives `Decode` is extracted with nothing else written: its shape,
+  rendered as a JSON Schema by the new `Shape::to_json_schema`, is what the
+  model is told to produce, and its decoder reads the answer back.
+  `ModelError::SchemaExtractionError` carries `List<Rejection>` -- every
+  problem with what the model said -- rather than a `String`. The
+  associated type `Spec`, `spec`, `described` and `parse` go with the trait.
 - **`Row` carries its column names.** `std::db::Row` is
   `{ columns: List<String>, cells: List<Cell> }`; every `Db` handler and test
   double that builds a row supplies them, and `packages/postgres` passes on
@@ -260,6 +267,13 @@ it will behave differently now.
 
 ### Added
 
+- **`Shape::to_json_schema`** renders a schema's shape as a JSON Schema
+  document, draft 2020-12: a derived type is a `$defs` entry and a `$ref`,
+  which is what terminates a type that mentions itself; a rule is its
+  keyword; a secret is `writeOnly`; an optional or defaulted field is left
+  out of `required`; a variant is an `enum` or a `oneOf` over the two forms
+  the decoder reads. What a model is prompted with, and what an API is
+  documented by.
 - **`derive(Decode)` and `derive(Encode)`.** The declaration is the schema:
   a record reads its fields under their names, a variant reads a bare string
   for a payload-free case and an object tagged with `type` for the rest, a
