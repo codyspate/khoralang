@@ -12,9 +12,16 @@ A section is complete only when its behavior is implemented, documented, tested,
 
 ## Current state
 
-Scored against the tree on 2026-08-31, item by item, against what is in the
-repository rather than against the roadmap's account of itself. **153 of 222**,
-and re-scored whenever a section moves.
+Scored against the tree, item by item, against what is in the repository rather
+than against the roadmap's account of itself. **165 of 222**, and re-scored
+whenever a section moves.
+
+**The number is counted, not typed.** `scripts/check-readiness.sh` counts the
+boxes and fails the baseline when this line disagrees with them. It said 153
+while the boxes said 150, for long enough that the wrong figure was quoted in a
+status report before anybody added them up. It understated in the other
+direction too: five items sat open whose `**Left:**` described conditions fixed
+commits earlier. Arithmetic is now checked; the annotations still need reading.
 
 **A score is only as good as the reading behind it.** Section 3 was scored at
 2/6 by somebody who had not opened `crates/khora-codegen-llvm/tests/db.rs`, and
@@ -79,18 +86,18 @@ was the single fact behind three unticked items in §18; `examples/khq` is about
 
 ## 1. Language and compiler correctness
 
-- [ ] Phase 12 is complete, including all implementation work that remains in its entries rather than only the currently landed subset. **Left:** #140's remainder is Phase-12-shaped: `khora run file.kh` runs the package's main, an unused *type* import warns nothing, and `src/bin` is enforced by a lint without multiple binaries being implemented.
+- [ ] Phase 12 is complete, including all implementation work that remains in its entries rather than only the currently landed subset. **Left:** two of #140's remainders are Phase-12-shaped and both still hold: `khora run src/a.kh` inside a package builds and runs the *package's* program rather than the file named, and an unused *type* import warns nothing. Multiple binaries per package landed in #162.
 - [x] Every known silent-miscompile, silently ignored annotation, unresolved-name hole, and misleading diagnostic discovered during Phase 12 has either been fixed or promoted to a release-blocking issue. **Done:** #143 fixed (errata 62); #142 and #108 are tracked and listed under Known limitations.
 - [ ] The compiler rejects unresolved type names, unresolved trait bounds, contradictory annotations, and unsupported constructs at the source location that caused the problem. **Left:** An unresolved name renders identically to the real type — ``expected `X`, found `X``` beside "cannot find type `X`".
 - [x] Type inference and lowering have regression coverage for closures, generics, traits, effect rows, handlers, capabilities, higher-kinded types, ADTs, pattern matching and annotations. **Done:** 2,107 tests; `khora-types/tests` and `khora-codegen-llvm/tests` carry a file per feature.
 - [x] Common invalid programs produce diagnostics that describe the programmer's problem rather than an internal compiler phase.
 - [x] A deliberate invalid-program corpus tests diagnostic text, ranges and recovery for common mistakes. **Done:** `crates/khora-diagnostics/tests` and `khora-codegen-llvm/tests/errors.rs`.
 - [x] The formatter is stable enough that a public project can use `khora fmt` in CI without routine semantic churn. **Done:** `khora fmt --check` runs over `std` and all ten corpus members in `scripts/baseline.sh`.
-- [ ] The linter's supported checks are documented, deterministic and free of known high-confidence false positives. **Left:** No public lint reference page. Levels are configurable in `khora.toml` and that table is undocumented outside this repository.
+- [x] The linter's supported checks are documented, deterministic and free of known high-confidence false positives. **Done:** `/docs/reference/lints/` lists all fifteen checks with a default level each, and documents the `[lints]` table that overrides them. The last known false positive was #164 — a name used only inside a `${}` hole — and it is fixed and tested.
 - [x] The language's grammar, precedence and user-visible semantics have one canonical public reference. **Done:** `/docs/reference/grammar`, `/lexical-structure`, `/expressions`.
 - [x] A `Char` type and a character-boundary string API exist, or their absence is recorded as a deliberate limitation with the byte-oriented alternative documented. **Done:** `Char` is a builtin scalar written `'a'`; `is_char_boundary`, `next_boundary`, `previous_boundary`, `char_at`, `chars` and `char_length` are the API that makes `String::slice` safe to reach for.
-- [ ] `attempt` discharges a `raises` row holding more than one error type, or the one-type limit is documented and `catch` is presented as the way to handle a wider row. **Left:** `attempt<A, E, 'ef>` takes a single `E`, so a body raising `HttpError + ChildFailed` cannot go through the documented way to turn a failure into a value.
-- [ ] A diagnostic never renders two different types with the same text. **Left:** two same-named types from different modules both print as their bare name — ``expected `Entry`, found `Entry```.
+- [x] `attempt` discharges a `raises` row holding more than one error type, or the one-type limit is documented and `catch` is presented as the way to handle a wider row. **Done:** the second half. `attempt` still takes one `E`, and `/docs/reference/failures/#one-error-type` says so, quotes the compiler's own message, explains that `Result<A, E>` needs one `E` and Khora has no anonymous sum type to collapse a two-type row into, and sends the reader to `catch` — which matches per type and never has to name the union.
+- [x] A diagnostic never renders two different types with the same text. **Done:** #148. Two modules each declaring an `Entry`, passed one to the other, now reports ``expected `audit::b::Entry`, found `audit::a::Entry``` — checked against the compiler for this re-score, not read off the task.
 
 ### Decimal
 
@@ -103,7 +110,7 @@ was the single fact behind three unticked items in §18; `examples/khq` is about
 
 - [x] `Date`, `Time`, `DateTime`, `Offset` and instant/clock concepts have public documentation that clearly separates wall time from an instant. **Done:** `/docs/stdlib/api/time`.
 - [x] The supported calendar range, overflow behavior and invalid-date behavior are specified.
-- [ ] Time-zone database support, if provided by a package rather than `std`, has a documented integration path and is not implied to be built into `std`. **Left:** No time-zone story is written down either way; `std::time` is offset-only and the page does not say what a zone would look like.
+- [x] Time-zone database support, if provided by a package rather than `std`, has a documented integration path and is not implied to be built into `std`. **Done:** `/docs/stdlib/api/time/` says the database is not in `std` and cannot be — it is a dataset that IANA cuts several times a year, and nothing behind the compatibility promise can move that often. The seam is named and typed: `std` owns `Offset`, and a package or the host owns the rules that produce one.
 
 ---
 
@@ -114,12 +121,12 @@ Khora's runtime is part of the language contract. The release cannot rely on “
 - [x] The M:N scheduler is a supported default runtime path rather than an experimental mode that ordinary users are expected to opt into manually. **Done, by settling the question rather than by switching the default:** threads are 0.1.0's default and the scheduler is a documented, supported opt-in. The argument, the measurements and their limits are in `docs/design/fibers.md`; the user-facing half is in `/docs/reference/concurrency` and `/docs/limitations`. A program cannot observe which it has, so this is not a compatibility commitment.
 - [ ] The remaining scheduler/I/O work has been measured after Phase 12 and either completed or explicitly shown not to justify further architecture work before release. **Left:** it cannot be measured yet -- #160. At 320 connections neither fiber implementation reaches a ceiling and the same configuration varies 1.85x between sittings, so no throughput claim about either is available.
 - [ ] Native scalable I/O backends are present for the platforms claimed as production-supported where the existing portable backend would otherwise impose a known scaling ceiling. **Left:** `WSAPoll` on Windows and `poll` elsewhere; no epoll/kqueue/IOCP backend.
-- [ ] The scheduler passes sustained soak and adversarial tests across supported platforms. **Left:** Soak tests exist (`khora-rt/src/soak.rs`) and pass, but #108 is an uncaught intermittent failure in the Linux repeat loop.
+- [ ] The scheduler passes sustained soak and adversarial tests across supported platforms. **Left:** #108 is resolved — the flake was `cargo test`, not Linux — and `khora-rt/src/soak.rs` passes on Windows and, through WSL, on Linux, every baseline. Two things are still missing: macOS is not exercised anywhere, and nothing here is *adversarial* — the soak is sustained load, not a hostile schedule.
 - [x] Fiber cancellation always permits required finalizers/resource cleanup to run. **Done:** `tests/fibers.rs`: a cancelled fiber runs every finalizer and stops only itself.
 - [x] Nursery semantics are complete: a failing child has the documented effect on siblings and the parent, with typed failure behavior tested. **Done:** #139: the first failure cancels the siblings, every child is waited for, and the nursery raises `ChildFailed`.
-- [ ] No language-visible behavior depends on a fiber staying on one OS thread unless the program explicitly enters a documented thread-affine FFI boundary.
+- [ ] No language-visible behavior depends on a fiber staying on one OS thread unless the program explicitly enters a documented thread-affine FFI boundary. **Left:** not assessed. The *rule* is written down — `/docs/reference/ffi/` lists what foreign code may not retain across a suspension, thread identity and thread-affine handles among it — and fibers are OS threads by default, so the M:N path is where this could bite. What would settle it is a test that migrates a fiber between workers and asserts that nothing observable changed.
 - [x] Safepoints and cancellation points remain distinct and are documented as such. **Done:** `/docs/reference/concurrency`; `a_loop_in_an_infallible_function_is_not_a_cancellation_point` pins it.
-- [ ] Every runnable `Task` has exactly one owner at every instant; wake tokens or backend state never create a second owner.
+- [ ] Every runnable `Task` has exactly one owner at every instant; wake tokens or backend state never create a second owner. **Left:** not assessed, and nothing in `scheduler.rs` or `coro.rs` states the invariant in those words or asserts it. What would settle it is the invariant written down where the ownership transfer happens, plus a debug assertion or a loom/TSan run that would fail if a wake token produced a second owner.
 - [x] Lost-wakeup regressions cover registration during backend wait, cancellation during I/O wait, injected runnable work while a worker is in the backend, and shutdown. **Done:** `khora-rt/src/scheduler.rs` tests cover all four.
 
 ### Formal unsafe/soundness review
@@ -128,7 +135,7 @@ Khora's runtime is part of the language contract. The release cannot rely on “
 - [ ] Each inventory entry names the invariant that makes it sound and the test or argument that protects the invariant. **Left:** every block now names its invariant; what is not systematic is the second half -- *which test* protects it. The load-bearing ones say so (`#[inline(never)]` on `current::running` names the test that caught its removal); most do not.
 - [x] `unsafe impl Send for Task` and equivalent cross-thread/coroutine state are reviewed explicitly. **Done:** three impls -- `Task`, `Migrating`, `Handed` -- each reviewed in `docs/design/soundness.md`, with the residual obligation on Rust bodies named.
 - [x] TLS/thread-local state is audited under fiber migration. No thread-local address may survive across a suspension unless the design explicitly proves it safe. **Done:** 46 `.with(..)` closures in `khora-rt`, none containing a suspension, so no reference outlives one; `CURRENT` is the one read by address and is held by `#[inline(never)]` plus the switch's memory clobber, with the test that caught its removal named.
-- [ ] FFI pointers, callbacks and thread-affine handles have a documented lifetime/thread rule.
+- [x] FFI pointers, callbacks and thread-affine handles have a documented lifetime/thread rule. **Done:** `/docs/reference/ffi/`. `Ptr` is an opaque foreign address; a buffer is lent for the duration of one call and must not be retained after the body returns; and *Blocking and suspension* names the four things foreign code may not carry across a Khora suspension — a thread-local address, native thread identity, borrowed errno-like state, and a thread-affine handle whose contract requires one OS thread. *Libraries may be called from several host threads* covers the other direction.
 - [x] Sanitizer and dynamic-analysis coverage appropriate to the implementation is run before release; unsupported analyses and their blind spots are documented. **Done:** `scripts/tsan.sh` under WSL2; the blind spots are recorded in the script's own header.
 
 ---
@@ -148,15 +155,15 @@ Khora's runtime is part of the language contract. The release cannot rely on “
 
 Peak requests per second alone is not a release gate. A production runtime must remain healthy when offered work exceeds sustainable throughput.
 
-- [ ] The HTTP server has a documented distinction between connection capacity and actively executing/request-processing capacity.
-- [ ] The current connection/nursery limits are intentionally tuned for scheduled fibers rather than inherited from the old OS-thread implementation. **Left:** 256 is documented as "a working number rather than a tuned one".
+- [ ] The HTTP server has a documented distinction between connection capacity and actively executing/request-processing capacity. **Left:** not documented. The server bounds accepted connections with a nursery of 256 and there is no second, smaller bound on how many of those are executing a handler at once, so the two capacities are one number. `/docs/stdlib/api/net/http/` does not use the word.
+- [ ] The current connection/nursery limits are intentionally tuned for scheduled fibers rather than inherited from the old OS-thread implementation. **Left:** 256 is documented as "a working number rather than a tuned one", and tuning it needs a measurement that #160 says cannot be taken: at 320 connections neither fiber implementation reaches a ceiling and the same configuration varies 1.85x between sittings.
 - [x] Sustained overload tests cover at least 100%, 125% and 200% of sustainable offered load. **Done:** `khora-codegen-llvm/tests/load.rs`: overload, recovery and shutdown.
-- [ ] Under overload, RSS remains bounded within the configured operating model.
+- [ ] Under overload, RSS remains bounded within the configured operating model. **Left:** unmeasured, and blocked behind the same harness as the item above — #160. Nothing here has been run long enough, or hot enough, to say what RSS does.
 - [x] Runnable queues and admission queues remain bounded or have explicitly documented limits. **Done:** `bounded_nursery` turns the ceiling into backpressure; the listening backlog absorbs the rest.
 - [x] Latency degrades predictably instead of entering overload collapse. **Done:** `overload_becomes_latency_rather_than_loss`.
-- [ ] Controlled rejection uses appropriate HTTP semantics such as 503 for service saturation and 429 for policy/rate limits where relevant.
+- [x] Controlled rejection uses appropriate HTTP semantics such as 503 for service saturation and 429 for policy/rate limits where relevant. **Done:** the server answers 503 under backpressure, and the whole of 5xx carries a real reason phrase — a service that answered 503 and put `HTTP/1.1 503 Unknown` on the wire is what put them there. 429 is available for a policy layer; there is no rate limiter in `std`, so the *where relevant* half is not relevant yet.
 - [x] The service recovers promptly after offered load falls. **Done:** `a_service_recovers_after_the_burst`.
-- [ ] Slow, half-open and maliciously quiet connections cannot occupy unbounded server resources.
+- [ ] Slow, half-open and maliciously quiet connections cannot occupy unbounded server resources. **Left:** true over plain HTTP and false over TLS, and `std::net::http` says so itself. `serve_connection` sets a 10-second receive deadline before reading, so a client that goes quiet has its socket closed rather than parking a fiber for the life of the process. `set_receive_timeout` takes a *socket*, and the TLS client hands back a session with the socket already inside it, so an `https` connection has no deadline at all.
 - [x] The supported HTTP feature set is documented honestly, including any remaining body-size, transfer-encoding, WebSocket or HTTP/2 limitations. **Done:** `/docs/limitations` names the HTTP surface limits.
 
 ---
@@ -167,8 +174,8 @@ Peak requests per second alone is not a release gate. A production runtime must 
 - [x] W3C `traceparent` parsing/formatting is covered by conformance-style tests.
 - [x] A no-op tracer remains cheap enough that disabled tracing is a viable production configuration. **Done:** `the_default_tracer_records_nothing_and_stays_out_of_the_way`.
 - [ ] At least one real exporter/integration exists, preferably OTLP/OpenTelemetry, outside `std`. **Left:** None. `std::trace` says explicitly that OTLP is not `std`'s job, and nothing outside `std` provides one.
-- [ ] A reference service demonstrates an incoming HTTP trace flowing through application work, spawned fibers and database operations with correct parent/child relationships.
-- [ ] Logging guidance explains how logs correlate with traces and fiber/request context.
+- [ ] A reference service demonstrates an incoming HTTP trace flowing through application work, spawned fibers and database operations with correct parent/child relationships. **Left:** two thirds of it. `examples/ledger_service` takes a `Tracer` through its handlers and wraps each database operation in `around_result` — `entries.create`, `entries.list` — so an incoming request does flow through application work into the database with a span around it. It spawns no fibers, so the part of the item that is actually about parent/child relationships across a `nursery` is undemonstrated.
+- [ ] Logging guidance explains how logs correlate with traces and fiber/request context. **Left:** nothing written. `/docs/cookbook/tracing/` covers spans and does not mention logs, and there is no logging capability in `std` for it to correlate with — so this needs a decision about what logging *is* here before it needs a page.
 - [x] Metrics/exporter responsibilities are clearly separated between `std` vocabulary/runtime context and external packages. **Done:** `/docs/stdlib/api/trace` — "Why this is `std`'s and the exporter is not".
 
 ---
@@ -182,7 +189,7 @@ The neutral `Db` capability is not enough by itself to prove the production data
 - [x] Pool saturation is bounded and documented.
 - [x] Database numeric types preserve exact values; `NUMERIC`/money-like values do not silently pass through `Float`. **Done:** `numeric` decodes to `Cell::Money(Decimal)` and `packages/postgres/src/conn_test.kh` holds the scale against a trailing zero, keeps a value too wide for the significand as the server's own digits rather than a truncation, and pins `float4`/`float8` as `Text` — `Cell` has no float variant and this is where that is enforced.
 - [x] Schema/type mismatches are visible rather than silently coerced. **Done:** `Cell::text`/`number`/`money`/`flag` answer `None` for the wrong variant rather than rendering it, tested by `cells_do_not_coerce`; and a column whose text does not match its OID stays `Text` instead of being guessed at, tested in `conn_test.kh`.
-- [ ] Connection and transaction failure behavior is tested under cancellation and network loss.
+- [ ] Connection and transaction failure behavior is tested under cancellation and network loss. **Left:** cancellation is covered thoroughly and network loss is not covered at all. `crates/khora-codegen-llvm/tests/db.rs` proves a cancelled fiber rolls back and does not commit, that a failing rollback does not hide the reason for it, that a failed rollback during cancellation reaches the handler, and that a cancelled lease returns only after the rollback. What no test does is drop the connection mid-transaction.
 - [x] A reference application uses the package rather than a test-only handler. **Done:** `examples/ledger_service` depends on `packages/postgres` and the gate builds it.
 
 SQLite or additional engines are useful but not required for the first public release if the package story and `Db` abstraction have already been validated by a serious driver.
@@ -214,10 +221,10 @@ A target is “supported” only when the toolchain produces something users can
 
 - [x] Phase 12's C export/import surface is complete enough for a small Khora library to be called from an ordinary C-compatible consumer. **Done:** `tests/exporting.rs` builds a C host with clang and runs it.
 - [x] The supported C ABI types and ownership rules are documented precisely. **Done:** `/docs/reference/ffi`; the "only scalars and pointers cross" rule is enforced in the backend.
-- [ ] Strings, buffers, records/structs and error results have an explicit allocation/freeing contract.
+- [x] Strings, buffers, records/structs and error results have an explicit allocation/freeing contract. **Done:** mostly by exclusion, which is a contract. `/docs/reference/ffi/` says the boundary carries C-compatible scalars and `Ptr` and nothing else — no Khora `String`, no algebraic data type, no record, no closure, no typed-failure return — so an exported function reports failure as a scalar status. Buffers are the one aggregate that crosses, caller-owned: C allocates and passes `(Ptr, capacity)`, Khora fills and returns a length. Neither side ever frees the other's memory.
 - [ ] Thread-affine foreign libraries are tested against fiber migration rules.
-- [ ] Blocking FFI calls have a documented interaction with the scheduler/blocking pool.
-- [ ] Foreign callbacks into Khora either have a supported contract or are explicitly unsupported.
+- [ ] Blocking FFI calls have a documented interaction with the scheduler/blocking pool. **Left:** the rule is written and cannot be obeyed. `/docs/reference/ffi/` says potentially blocking native work "must use an API/runtime boundary intended for blocking work rather than occupying a scheduler worker indefinitely", but no such boundary is reachable from Khora: `khora-rt/src/blocking.rs` is used by `std`'s own file, process and socket operations and exposes only counters — `khora_blocking_queued`, `active`, `ran`, `waited`. A Khora author calling a blocking C function has no way to follow the instruction.
+- [ ] Foreign callbacks into Khora either have a supported contract or are explicitly unsupported. **Left:** half of it is settled. A C caller entering Khora through `pub extern fn` has a contract — narrow types, not generic, no `raises`, and the trap-containment rules at the boundary — and Khora lending a pointer to a body for one call (`String::with_data`) is documented with the row-polymorphic signature that keeps the lifetime inside the call. What is unstated is C *retaining* a Khora function pointer and invoking it later: whether the runtime must already be initialised, what re-entrancy is allowed, and what the pointer's lifetime is.
 - [x] FFI failures cannot silently cross a boundary in an ABI-undefined representation. **Done:** `foreign_signature_obstacle` refuses at the call site with the rule quoted.
 - [x] At least one external-language integration test (for example Python, Node or a small C host) validates the public C surface. **Done:** `tests/exporting.rs` compiles and runs a C host against the exported surface.
 
@@ -226,7 +233,7 @@ A target is “supported” only when the toolchain produces something users can
 ## 9. Traps, debugging and production diagnosis
 
 - [x] Debug information is emitted for supported native targets with source file and line mappings. **Done:** DWARF line tables; `tests/debugging.rs`.
-- [ ] A documented LLDB/GDB workflow can set breakpoints and inspect ordinary Khora stack frames where supported. **Left:** No debugger page exists anywhere under `website/content/docs/`.
+- [x] A documented LLDB/GDB workflow can set breakpoints and inspect ordinary Khora stack frames where supported. **Done:** #151. `/docs/reference/debugging/` has six sections — backtraces, debug information, LLDB and GDB, printing, what changes when a fiber is involved, and how to report what you find — and the debugger section is a worked session rather than a description: `lldb ./build/myapp`, `breakpoint set --file main.kh --line 12`, `run`.
 - [x] Runtime traps identify the Khora source location that triggered them. **Done:** `a_bounds_failure_says_which_line_indexed`.
 - [ ] Stack traces are meaningful enough to diagnose a production failure rather than exposing only runtime/compiler internals.
 - [x] The policy for overflow, bounds failure and other unrecoverable bugs is explicitly documented. **Done:** `/docs/reference/traps`.
@@ -238,7 +245,7 @@ A target is “supported” only when the toolchain produces something users can
 ## 10. Compiler performance and scale
 
 - [ ] Build-time measurements use a release-built Khora compiler before public performance claims are made.
-- [ ] The corpus includes at least one substantially larger application than the current small reference programs. **Left:** The largest reference application is a few hundred lines; the item asks for several thousand.
+- [x] The corpus includes at least one substantially larger application than the current small reference programs. **Done:** #152. `examples/khq` is 3,643 lines across ten modules with 34 tests — a query language with a lexer, a parser, an evaluator, builtins and a renderer. It builds in the baseline and its tests run there.
 - [ ] Cold build time, warm/repeated developer workflow, peak compiler memory, monomorphization cost and link time are measured separately enough to identify regressions.
 - [ ] Whole-program monomorphization is tested at a size capable of exposing superlinear behavior.
 - [ ] A documented budget/regression baseline exists for future compiler changes.
@@ -255,9 +262,9 @@ A target is “supported” only when the toolchain produces something users can
 - [x] A maintained VS Code extension or an equivalently accessible editor integration exists for the first public audience. **Done:** `editors/vscode`, built by `.github/workflows/extension.yml`, tagged `vscode-v0.3.0`.
 - [ ] Syntax highlighting covers the complete current grammar. **Left:** Not audited against the grammar since the grammar last changed.
 - [x] The editor extension and compiler report their versions in bug reports/repro instructions. **Done:** The status bar runs `khora toolchain which` and shows the answering toolchain and its reason.
-- [ ] The language's MCP support is documented as optional tooling rather than required to write correct Khora.
-- [ ] `khora doc` works in an ordinary user package rather than only over `std`.
-- [ ] A package may declare more than one executable, or the `src/bin` convention the linter enforces is documented as the only supported shape. **Left:** `misplaced-main` enforces the convention and multiple binaries per package are not implemented.
+- [x] The language's MCP support is documented as optional tooling rather than required to write correct Khora. **Done:** `/docs/getting-started/editor/` puts it under *AI coding tools*, after the paragraph that says what an editor actually needs, and states outright that it is optional — the compiler and the language server behave identically whether or not an agent is connected.
+- [ ] `khora doc` works in an ordinary user package rather than only over `std`. **Left:** it runs and writes to the wrong place, destructively. `--out` defaults to `website/content/docs/stdlib/api` (`khora-cli/src/main.rs:171`), which is a path inside *this* repository, and the command clears the directory rather than writing only what it generated. Running it over a three-module scratch package from the repository root produced three pages there and removed all 21 checked-in `std` pages. For a user the default is meaningless; for anyone whose project has that layout it deletes their work. #174.
+- [x] A package may declare more than one executable, or the `src/bin` convention the linter enforces is documented as the only supported shape. **Done:** #162 implemented both halves. `khora build .` builds `src/main.kh` and every file under `src/bin/`, each as its own compilation so two `main`s never meet, and each named after its file. `khora run .` runs the package's own program and names the others when there is none. `misplaced-main` now allows `src/bin/*.kh`, and `/docs/reference/modules-and-packages/` documents the layout.
 
 ---
 
@@ -268,10 +275,10 @@ A target is “supported” only when the toolchain produces something users can
 - [ ] A tagged public release exists with an explicit semantic version such as `0.1.0`. **Left:** Three release candidates are tagged (`v0.1.0-rc.1` … `rc.3`); no final `v0.1.0`.
 - [x] Supported platforms have downloadable compiler/toolchain artifacts or a single documented automated installer. **Done:** `install.sh` / `install.ps1`; `.github/workflows/release.yml` packages on three OSes.
 - [x] Artifacts include checksums. **Done:** The installer verifies against the published checksum.
-- [ ] `khora --version` identifies the exact compiler release and enough build metadata for bug reports. **Left:** It prints `khora 0.1.0` and no build metadata — no commit, no date, no target triple.
+- [x] `khora --version` identifies the exact compiler release and enough build metadata for bug reports. **Done:** #150. It prints `khora 0.1.0 (6baa7df-dirty) x86_64-pc-windows-msvc` — version, the commit it was built from with a dirty marker when the tree was not clean, and the target triple.
 - [x] Projects can pin a compiler version and obtain it without manually linking a locally compiled checkout. **Done:** `[toolchain]` in `khora.toml`; the shim hands over before argument parsing.
 - [x] A missing pinned compiler fails loudly rather than silently substituting another version. **Done:** `khora toolchain which` reports it and the editor status bar shows it as a warning.
-- [ ] Release notes and a changelog describe breaking language/std/tooling changes. **Left:** No `CHANGELOG.md` in the repository.
+- [x] Release notes and a changelog describe breaking language/std/tooling changes. **Done:** #149. `CHANGELOG.md` groups by what a reader needs first — **Breaking**, then **Fixed**, then the rest — and says so at the top. A bug that produced a silently wrong answer is listed under Breaking as well as Fixed, because code written around it behaves differently now.
 - [x] The fresh-machine installation path is tested in CI or release validation. **Done:** `release.yml` compiles a program with the packaged artifact before attaching it.
 - [x] Installation instructions never require knowledge of the Rust implementation unless building Khora itself. **Done:** `/docs/getting-started/installation` mentions a linker and never Cargo.
 
@@ -296,7 +303,7 @@ A large registry is not required, but dependency use must be coherent and reprod
 - [x] `SECURITY.md` defines how vulnerabilities should be reported privately.
 - [ ] Release artifacts have provenance/signing or the chosen equivalent appropriate to the release infrastructure.
 - [ ] An SBOM can be produced for the compiler/toolchain and, where practical, Khora application dependencies.
-- [ ] Package hashes and lockfile guarantees are documented in security terms rather than only implementation terms.
+- [x] Package hashes and lockfile guarantees are documented in security terms rather than only implementation terms. **Done:** `/docs/reference/modules-and-packages/` states the guarantee as a guarantee — *the checksum is verified, not merely recorded*. Every resolution hashes what arrived and compares it against the lockfile, and if the same commit id ever produces different bytes the build stops rather than compiling what turned up. It also says a branch name resolves to a commit and the commit is what is recorded, so `rev = "main"` is not a moving target.
 - [x] CI/release credentials and publication flow do not require a developer's local workstation to be the root of trust. **Done:** `release.yml` runs on tag and uploads with `gh`; nothing is published from a workstation.
 - [x] Dependencies used to build release artifacts are pinned/reproducible to the extent claimed. **Done:** Actions are pinned by commit SHA; LLVM is pinned to 22.1.8.
 - [x] The `[permissions]` model is described accurately: compile-time authority control is not presented as a runtime sandbox unless a real sandbox is implemented. **Done:** `/docs/stdlib/api/permissions` says it is compile-time authority, not a sandbox.
@@ -371,7 +378,7 @@ step. `/docs/guide/*` redirects.
 - [x] Searchable API documentation exists for public `std` modules and exported symbols. **Done:** 21 generated pages under `/docs/stdlib/api/`.
 - [x] API docs are generated or validated from the source of the corresponding compiler release so they cannot drift silently. **Done:** `khora doc std --check` fails the gate when a page is stale.
 - [ ] Important APIs include examples, not only signatures. **Left:** Coverage is uneven; nothing checks that an exported item has an example.
-- [ ] The linter's checks have a public reference page listing each check, its default level and how to configure it in `khora.toml`.
+- [x] The linter's checks have a public reference page listing each check, its default level and how to configure it in `khora.toml`. **Done:** #151. `/docs/reference/lints/` — fifteen checks, a default level each, and the `[lints]` table that overrides them.
 
 ### Cookbook
 
@@ -466,7 +473,7 @@ Private testing is not a separate product milestone, but public release requires
 - [ ] Checksums/provenance/release notes are published together. **Left:** Checksums yes; provenance and release notes no.
 - [x] Known limitations are current and prominent. **Done:** `/docs/limitations`, linked from the docs index.
 - [ ] The release candidate has completed the external-user validation above.
-- [ ] This document has been scored against the release candidate itself, item by item, and re-scored at every subsequent candidate. A gate nobody scores is a gate nobody passes or fails.
+- [ ] This document has been scored against the release candidate itself, item by item, and re-scored at every subsequent candidate. **Left:** scored against the *tree*, item by item, in #173 — every open item checked against what is in the repository, with the compiler run where a claim could be run. That is the method the item asks for, applied to the wrong artifact: there is no final candidate yet, so what has been scored is `main`. Repeat against the tag. A gate nobody scores is a gate nobody passes or fails.
 
 ### Definition of public-release ready
 

@@ -59,6 +59,8 @@ The important part is always the same: the project root contains `khora.toml`, `
 
 Khora also exposes a compiler-backed MCP server. A coding agent can use it to ask the real Khora compiler about source instead of guessing syntax or type behavior.
 
+It is optional. Nothing about writing, building or testing correct Khora requires it, and the compiler and language server behave identically whether or not an agent is connected.
+
 A typical MCP client configuration is:
 
 ```json

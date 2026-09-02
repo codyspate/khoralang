@@ -130,6 +130,10 @@ step 'the standard library reference matches the standard library'
 # hand, sometimes, is a page that is wrong at the moment somebody reads it.
 "$khora" doc std --out website/content/docs/stdlib/api --check
 
+step 'the readiness tally agrees with its own boxes'
+# It said 153 while the boxes said 150. See the script.
+bash scripts/check-readiness.sh
+
 step 'the documentation is addressed to a reader'
 # **A doc comment is written by whoever just changed the code**, so it comes out
 # in their voice: what was wrong before, which attempt fixed it, which errata
