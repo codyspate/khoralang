@@ -1139,6 +1139,7 @@ pub fn string() -> Schema<String>
 Text, as it arrived.
 
 A number is not text: `{ "name": 42 }` is refused, as serde refuses it.
+
 A source that could not tell hands over [`Raw::Untyped`], which is read.
 
 ### int
