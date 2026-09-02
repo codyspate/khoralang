@@ -79,4 +79,17 @@ For typed request/response bodies, continue with [JSON API](/docs/cookbook/json-
 
 The router already owns request fibers. If a downstream resource has a smaller capacity—for example a database pool—bound concurrency around that work rather than treating the total number of HTTP connections as the same limit. See [Bounded concurrency](/docs/cookbook/bounded-concurrency/).
 
+## A trap in a handler ends the server
+
+The router turns a typed failure into a 500 rather than a dropped connection.
+It cannot do that for a trap. A checked overflow, an index outside an array or
+a division by zero does not unwind, so it never reaches the wrapper, and the
+process exits with status 134 taking every in-flight connection with it.
+
+The practical consequence is that request-shaped integers must be validated
+before they are used in arithmetic, which is what [Decoding
+input](/docs/cookbook/decoding-input/) is for, and that a service wants more
+than one process behind it. [Traps](/docs/reference/traps/#what-this-means-for-a-server)
+has the whole of it.
+
 For the complete router, request, response, and client surface, see the [HTTP API reference](/docs/stdlib/api/net/http/).

@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **166 of 222**, and re-scored
+than against the roadmap's account of itself. **169 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -48,7 +48,7 @@ advertised, so no wasm deployment has to work.
 | 6. Database ecosystem proof | 6 / 7 |
 | 7. Cross-compilation and deployment | 4 / 11 |
 | 8. FFI and C interoperability | 4 / 8 |
-| 9. Traps, debugging and production diagnosis | 3 / 7 |
+| 9. Traps, debugging and production diagnosis | 7 / 7 |
 | 10. Compiler performance and scale | 1 / 6 |
 | 11. Tooling and editor experience | 7 / 10 |
 | 12. Installation, toolchains and release artifacts | 6 / 9 |
@@ -235,10 +235,10 @@ A target is “supported” only when the toolchain produces something users can
 - [x] Debug information is emitted for supported native targets with source file and line mappings. **Done:** DWARF line tables; `tests/debugging.rs`.
 - [x] A documented LLDB/GDB workflow can set breakpoints and inspect ordinary Khora stack frames where supported. **Done:** #151. `/docs/reference/debugging/` has six sections — backtraces, debug information, LLDB and GDB, printing, what changes when a fiber is involved, and how to report what you find — and the debugger section is a worked session rather than a description: `lldb ./build/myapp`, `breakpoint set --file main.kh --line 12`, `run`.
 - [x] Runtime traps identify the Khora source location that triggered them. **Done:** `a_bounds_failure_says_which_line_indexed`.
-- [ ] Stack traces are meaningful enough to diagnose a production failure rather than exposing only runtime/compiler internals.
+- [x] Stack traces are meaningful enough to diagnose a production failure rather than exposing only runtime/compiler internals. **Done:** the runtime's own frames are trimmed from the top, so the first frame is the line in the program that trapped, and `the_runtimes_frames_are_not_at_the_top` in `tests/debugging.rs` holds it there. A trap with no backtrace prints the note that says how to get one, tested by `a_trap_without_the_switch_says_how_to_get_more`. What is exposed below `main` is the C runtime that started the process, and `/docs/reference/debugging/` says so rather than trimming what it cannot name.
 - [x] The policy for overflow, bounds failure and other unrecoverable bugs is explicitly documented. **Done:** `/docs/reference/traps`.
-- [ ] The Phase 12 trap-containment decision is complete: it is clear whether a trap terminates a fiber, a request boundary or the whole process, and why.
-- [ ] If some traps deliberately terminate the process, server guidance explains the operational consequence rather than pretending request isolation exists.
+- [x] The Phase 12 trap-containment decision is complete: it is clear whether a trap terminates a fiber, a request boundary or the whole process, and why. **Done:** the whole process, with one opt-in exception, and both halves are implemented and documented. `trap.rs` ends the process with status 134 from whichever fiber trapped; there is no catch in the scheduler and the nursery's failure policy handles raises rather than traps. The exception is the export boundary -- a C host may call `khora_set_trap_policy`, and containment disarms itself if the guarded call spawned a fiber, because a child may outlive the call and hold allocations it made. `docs/design/traps.md` argues the decision and `/docs/reference/traps/` states it.
+- [x] If some traps deliberately terminate the process, server guidance explains the operational consequence rather than pretending request isolation exists. **Done:** `/docs/reference/traps/#what-this-means-for-a-server` says plainly that a trap in a handler ends the server rather than the request, why the `catch` around a handler does not stop it, and what to do about it -- validate request-shaped integers at the boundary, run more than one process, and expect a restart. `/docs/cookbook/http-service/` carries the short form and links to it. `tests/traps_in_a_server.rs` holds the claim: a raise is a 500 and the server carries on, and a trap in the next handler ends the process with 134.
 
 ---
 

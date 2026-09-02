@@ -169,6 +169,15 @@ it will behave differently now.
 
 ### Fixed
 
+- **The traps reference told people to set the wrong environment variable,
+  and called a failed assertion a trap.** `RUST_BACKTRACE` is honoured but
+  `KHORA_BACKTRACE` is the name the runtime's own note gives, and the
+  reference named only the first. A failed `assert` reports its line and lets
+  the run continue: it prints no backtrace and does not end the process, so
+  listing it beside a checked overflow described something the runtime does
+  not do. Both pages say the same thing now, and the reference enumerates the
+  operations that trap rather than gesturing at them.
+
 - **Checking a package a few imports away from a large module no longer
   takes a minute.** The bodies an imported type reaches were appended to a
   file's view once per import that reached them, and a module exporting that
@@ -279,6 +288,16 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **Server guidance for traps.** A trap in a request handler ends the server
+  process, not the request: it does not unwind, so the `catch` the router
+  wraps a handler in never sees it. That was documented only as one sentence
+  in a section about C exports, while the code around a handler reads as
+  though a request-level safety net existed. `/docs/reference/traps/` now has
+  what it means for a service and what to do about it, the HTTP cookbook
+  carries the short form, and `tests/traps_in_a_server.rs` holds the claim
+  from both sides: a raise is a 500 and the server carries on, a trap in the
+  next handler ends it with status 134.
 
 - **A derived schema carries the type's `///`.** `derive(Decode)` reads the
   doc comment above the type and above each record field into

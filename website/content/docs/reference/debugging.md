@@ -10,7 +10,7 @@ Khora compiles to an ordinary native executable with ordinary debug information,
 
 This is the first thing to reach for and the part that is covered by tests.
 
-A trap — a checked overflow, an index outside its array, a failed assertion — prints the Khora source location that caused it:
+A trap — a checked overflow, an index outside its array, a division by zero — prints the Khora source location that caused it:
 
 ```text
 khora: Int addition overflowed
@@ -29,6 +29,12 @@ KHORA_BACKTRACE=1 ./build/myapp
 ```
 
 `RUST_BACKTRACE` is honoured too, so a machine that already exports it for everything is not asked twice.
+
+**A failed assertion is not a trap.** `assert` names the line that failed and
+the run carries on to the end, because a suite that stopped at the first
+failure would report one problem per run. It prints no backtrace and the
+process does not end with status 134. [Traps](/docs/reference/traps/) is the
+list of what does.
 
 **The runtime's own frames are not at the top.** The frames belonging to the backtrace machinery are trimmed, because the top of a backtrace is the part anybody reads first and six frames of library internals above the line that trapped make it useless. That trimming is tested.
 

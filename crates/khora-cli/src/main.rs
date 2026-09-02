@@ -2637,14 +2637,6 @@ fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
     }
 }
 
-/// A page per module, out of the comments already in the source.
-///
-/// **The output directory is owned by this command.** Everything it produces is
-/// a pure function of the input -- no timestamp, no version, no path from this
-/// machine -- and anything under `out` that this run did not produce is
-/// deleted. Both halves are needed for the same reason: a generated tree is
-/// only reviewable if regenerating it after no change produces no diff, and a
-/// page for a module somebody deleted is worse than no page at all.
 /// What to document and where to put it, when the command line said neither.
 ///
 /// **The defaults used to be this repository's own layout**: `std` for the
@@ -2699,6 +2691,17 @@ fn doc_output_for(path: &Path) -> Result<PathBuf> {
     Ok(base.join("docs").join("api"))
 }
 
+/// A page per module, out of the comments already in the source.
+///
+/// **Everything it produces is a pure function of the input** -- no timestamp,
+/// no version, no path from this machine -- because a generated tree is only
+/// reviewable if regenerating it after no change produces no diff.
+///
+/// **What it produced, it prunes.** A page for a module somebody deleted is
+/// worse than no page at all, so a page this command wrote and would no longer
+/// write is removed. What it did not write it leaves alone, and says so:
+/// the directory is somewhere a caller pointed it, not somewhere it owns.
+/// [`DOC_OWNED`] is how the two are told apart.
 fn doc(paths: &[PathBuf], out: &Path, check: bool) -> Result<bool> {
     let files = documentable(paths)?;
     if files.is_empty() {
