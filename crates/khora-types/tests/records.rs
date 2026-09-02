@@ -69,10 +69,16 @@ fn a_missing_field_is_reported() {
     );
 }
 
+/// The signature says which record the literal is, so the extra field is
+/// reported against it rather than by a search over every record's labels.
 #[test]
 fn a_field_the_record_does_not_have_is_reported() {
     assert_reports(
         &format!("{POINT}fn f() -> Point {{ {{ x: 1, y: 2, z: 3 }} }}\n"),
+        "`Point` has no field `z`",
+    );
+    assert_reports(
+        &format!("{POINT}fn f() -> Int {{ let p = {{ x: 1, y: 2, z: 3 }}; 0 }}\n"),
         "no record type has exactly the fields",
     );
 }

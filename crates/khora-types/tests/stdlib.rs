@@ -414,3 +414,80 @@ fn a_missing_schema_import_names_std_schema() {
     );
     assert!(found.iter().any(|m| m.contains("import it from `std::schema`")), "{found:?}");
 }
+
+/// The program every `struct` diagnostic is read against: two records with
+/// the same labels, so nothing can be found by its labels alone.
+const STRUCT_HEAD: &str = "module m;\n\
+    import std::core::{Option, Result, Validated};\n\
+    import std::schema::{Fields, Raw, Rejection, Schema, int, string, struct};\n\
+    pub type Listen = { host: String, port: Int };\n\
+    pub type Other = { host: String, port: Int };\n\
+    pub fn main() -> Int { 0 }\n";
+
+/// **`struct({ .. })` resolves the way a record literal does.** From the
+/// declared return type, from an annotation, from a parameter; and an alias
+/// of the import is still the rewrite.
+#[test]
+fn a_struct_literal_is_resolved_by_the_expected_type() {
+    let found = errors_with_std(&format!(
+        "{STRUCT_HEAD}\
+         fn by_return() -> Schema<Listen> {{ struct({{ host: string(), port: int() }}) }}\n\
+         fn by_annotation() -> Int {{ let s: Schema<Other> = struct({{ host: string(), port: int() }}); 0 }}\n\
+         fn take(s: Schema<Listen>) -> Int {{ 0 }}\n\
+         fn by_argument() -> Int {{ take(struct({{ host: string(), port: int() }})) }}\n"
+    ));
+    assert!(found.is_empty(), "{found:?}");
+
+    let aliased = errors_with_std(
+        "module m;\n\
+         import std::schema::{Schema, int, string, struct as record};\n\
+         pub type Listen = { host: String, port: Int };\n\
+         fn s() -> Schema<Listen> { record({ host: string(), port: int() }) }\n\
+         pub fn main() -> Int { 0 }\n",
+    );
+    assert!(aliased.is_empty(), "{aliased:?}");
+}
+
+/// Every way of getting it wrong has its own sentence, at the place that is
+/// wrong: a schema of the wrong type at the schema, a missing or extra field
+/// against the record the signature named, an ambiguous literal at the call.
+#[test]
+fn a_struct_literal_says_what_is_wrong_with_it() {
+    let cases: [(&str, &str); 7] = [
+        (
+            "fn f() -> Schema<Listen> { struct({ host: string(), port: string() }) }",
+            "field `port`: expected `Int`, found `String`",
+        ),
+        (
+            "fn f() -> Schema<Listen> { struct({ host: string() }) }",
+            "this `Listen` is missing `port`",
+        ),
+        (
+            "fn f() -> Schema<Listen> { struct({ host: string(), port: int(), debug: int() }) }",
+            "`Listen` has no field `debug`",
+        ),
+        (
+            "fn f() -> Int { let s = struct({ host: string(), port: int() }); 0 }",
+            "these fields fit `Listen` and `Other`",
+        ),
+        (
+            "fn f(fields: Fields<Listen>) -> Schema<Listen> { struct(fields) }",
+            "`struct` takes a record literal with one schema per field",
+        ),
+        (
+            "fn f(fields: Fields<Listen>) -> Schema<Listen> { fields |> struct }",
+            "cannot be piped into",
+        ),
+        (
+            "fn f() -> Schema<Listen> { struct({ host: string(), host: string() }) }",
+            "`host` is given twice in this `struct`",
+        ),
+    ];
+    for (program, needle) in cases {
+        let found = errors_with_std(&format!("{STRUCT_HEAD}{program}\n"));
+        assert!(
+            found.iter().any(|m| m.contains(needle)),
+            "expected {needle:?} for `{program}`, got {found:?}"
+        );
+    }
+}

@@ -868,6 +868,7 @@ mod desugar;
 mod exprs;
 mod lambda;
 mod patterns;
+mod schema;
 
 impl<'a> Ctx<'a> {
     fn add_expr(&mut self, expr: Expr, range: TextRange) -> ExprId {

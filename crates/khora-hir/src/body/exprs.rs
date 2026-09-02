@@ -99,6 +99,10 @@ impl<'a> Ctx<'a> {
                 self.add_expr(Expr::Field { base, name }, range)
             }
             ast::Expr::Call(e) => {
+                // `struct({ .. })` is not a call that runs; see `schema.rs`.
+                if self.is_schema_struct(e.callee().as_ref()) {
+                    return self.lower_struct_call(e, range);
+                }
                 let callee = match e.callee() {
                     Some(c) => self.lower_expr(&c),
                     None => self.add_expr(Expr::Missing, range),
@@ -729,6 +733,16 @@ impl<'a> Ctx<'a> {
 
         match &rhs {
             ast::Expr::Call(call) => {
+                // A pipeline builds its own call, so the `struct` rewrite in
+                // `lower_expr` never sees it; what it would have refused, this
+                // refuses the same way.
+                if self.is_schema_struct(call.callee().as_ref()) {
+                    return self.refuse_struct(
+                        "`struct` takes a record literal with one schema per field, such as \
+                         `struct({ host: string(), port: int() })`, and cannot be piped into",
+                        rhs.syntax().text_range(),
+                    );
+                }
                 let callee = match call.callee() {
                     Some(c) => self.lower_expr(&c),
                     None => self.add_expr(Expr::Missing, range),
@@ -773,6 +787,13 @@ impl<'a> Ctx<'a> {
             }
             // `x |> f` is `f(x)`.
             _ => {
+                if self.is_schema_struct(Some(&rhs)) {
+                    return self.refuse_struct(
+                        "`struct` takes a record literal with one schema per field, such as \
+                         `struct({ host: string(), port: int() })`, and cannot be piped into",
+                        rhs.syntax().text_range(),
+                    );
+                }
                 let callee = self.lower_expr(&rhs);
                 let call = self.add_call(Expr::Call { callee, args: vec![piped] }, range);
                 mark(self, call)

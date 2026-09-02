@@ -900,6 +900,17 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     if derives_trait(db, file, "Encode") {
         bring_derive_companions(db, graph, file, &mut out, "Encode", &["Raw", "List"]);
     }
+    // `struct({ .. })` is rewritten into `Schema::record` over `Fields`, so a
+    // file that imported `struct` needs both names, under whatever it called
+    // `struct`. See `body/schema.rs`.
+    if let Some(home) = out
+        .origins
+        .iter()
+        .find(|o| o.name == "struct" && o.module.segments() == ["std", "schema"])
+        .map(|o| o.module.clone())
+    {
+        bring_companions_from(db, graph, file, &mut out, home, &["Schema", "Fields"]);
+    }
 
     out
 }
@@ -932,6 +943,19 @@ fn bring_derive_companions(
     else {
         return;
     };
+    bring_companions_from(db, graph, file, scope, home, wanted);
+}
+
+/// The names `wanted`, as `home` declares or imports them, brought into
+/// `scope` unless the file already has them.
+fn bring_companions_from(
+    db: &dyn Db,
+    graph: &ModuleGraph,
+    file: SourceFile,
+    scope: &mut FileScope,
+    home: ModulePath,
+    wanted: &[&str],
+) {
     let Some(source) = graph.file(&home) else { return };
     // A module deriving a trait it declares itself already has every name in
     // hand, and asking for its own scope here would be a query cycle.

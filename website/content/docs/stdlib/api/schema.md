@@ -1331,40 +1331,36 @@ field `user_id`.
 For the one odd key in a record that is otherwise fine as declared. The
 rejection names the wire key.
 
-### struct2
+### struct
 
 ```khora
-pub fn struct2<A, B, C>(a_name: String, a: Schema<A>, b_name: String, b: Schema<B>, combine: (A, B) -> C) -> Schema<C>
+pub fn struct<A>(fields: Fields<A>) -> Schema<A>
 ```
 
-A record of two fields, assembled by `combine`.
+A record schema, from a record literal of schemas.
 
-What [`Schema::record`] over [`Fields`] spells with an arity: two fields
-zipped and mapped through the assembler. Beyond five, nest a record.
+`struct({ host: string(), port: between(int(), 1, 65535) })` is a
+`Schema<Listen>` when `Listen` is the record with those fields. Which
+record it is comes from the type the expression is asked for -- an
+annotation, a parameter, the declared return type -- or from the labels
+alone when only one record has them, the way it does for any record
+literal. A field whose schema decodes the wrong type is reported at that
+schema; a field the record does not have, or one it has and the literal
+does not, is reported at the call.
 
-### struct3
+**Not a function that runs.** Its argument is a record of *schemas* and
+its result a schema of the record they decode, and there is no type-level
+map from one to the other. A call to it is rewritten before it is typed,
+into [`Schema::record`] over [`Fields`] -- which is what a hand-written
+record schema is, and what a derived one is too. The declaration is here
+so the name can be imported and read about; a call with anything but a
+record literal, or a use of the name as a value, is refused.
 
-```khora
-pub fn struct3<A, B, C, D>(a_name: String, a: Schema<A>, b_name: String, b: Schema<B>, c_name: String, c: Schema<C>, combine: (A, B, C) -> D) -> Schema<D>
-```
-
-A record of three fields. See [`struct2`].
-
-### struct4
-
-```khora
-pub fn struct4<A, B, C, D, E>(a_name: String, a: Schema<A>, b_name: String, b: Schema<B>, c_name: String, c: Schema<C>, d_name: String, d: Schema<D>, combine: (A, B, C, D) -> E) -> Schema<E>
-```
-
-A record of four fields. See [`struct2`].
-
-### struct5
-
-```khora
-pub fn struct5<A, B, C, D, E, F>(a_name: String, a: Schema<A>, b_name: String, b: Schema<B>, c_name: String, c: Schema<C>, d_name: String, d: Schema<D>, e_name: String, e: Schema<E>, combine: (A, B, C, D, E) -> F) -> Schema<F>
-```
-
-A record of five fields. See [`struct2`].
+Most records need no literal at all: `derive(Decode)` writes the same
+thing from the declaration. The literal is for the record that needs
+something the declaration cannot say -- a refined port, a renamed key, a
+default -- and every schema that contains the record picks it up through
+the trait.
 
 ### decode
 

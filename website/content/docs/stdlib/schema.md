@@ -232,19 +232,31 @@ Two things a derive refuses, at the `derive` line: a field whose type has no
 `Decode`, and a case whose payload has no field names, because the wire needs
 a key and a name the type did not declare is not the compiler's to invent.
 
-## What it does not do yet
+## The record literal
 
-**A record literal of schemas.** The spelling a reader reaches for —
+The hand-written form is the record's own literal with a schema where each
+value would go:
 
 ```khora
-struct({ port: int(), host: string() })
+impl Decode for Listen {
+  fn schema() -> Schema<Listen> {
+    struct({ host: string(), port: between(int(), 1, 65535) })
+  }
+}
 ```
 
-— is not a library function: its argument is a record of *schemas*, and the
-result would have to be a schema of the record of what they decode, which
-needs a type-level map Khora does not have. It will be a call the compiler
-rewrites before typing it. Until then the hand-written form is `struct2` …
-`struct5`, and most records need no hand-written form at all.
+Which record it is comes from the type the expression is asked for — the
+declared return type here, an annotation or a parameter elsewhere — or from
+the labels alone when only one record has them, the way any record literal
+resolves. A field whose schema decodes the wrong type is reported at that
+schema; a field the record does not have is reported at the call.
+
+`struct` is not a function that runs. Its argument is a record of *schemas*
+and its result a schema of the record they decode, and there is no type-level
+map from one to the other; a call to it is rewritten before it is typed into
+`Schema::record` over `Fields`, which is what a derived schema is too. So it
+takes a record literal and nothing else, there is no arity, and a record with
+a hand-written schema is picked up by every schema that contains it.
 
 **The assemblers stop at five fields.** `Schema::record` over `Fields` has no
 such limit — `Fields::zip` nests a tuple, however many fields there are — but

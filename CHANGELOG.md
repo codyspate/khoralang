@@ -14,6 +14,18 @@ it will behave differently now.
 
 ### Breaking
 
+- **`struct2`..`struct5` are gone; a record schema is `struct({ .. })`.**
+  `struct({ host: string(), port: between(int(), 1, 65535) })` is a
+  `Schema<Listen>` when `Listen` is the record with those fields, decided
+  from the type the expression is asked for -- an annotation, a parameter,
+  the declared return type -- or from the labels alone, the way any record
+  literal is. It is not a function that runs: its argument is a record of
+  schemas and its result a schema of the record they decode, so a call to
+  it is rewritten before it is typed into `Schema::record` over `Fields`,
+  which is what the arity family had become. A call with anything but a
+  record literal is refused and says what to write; a field whose schema
+  decodes the wrong type is reported at that schema. There is no arity:
+  `Fields::zip` nests a tuple, however many fields there are.
 - **`std::schema`'s primitives are strict where the source could label the
   value.** `string()` no longer reads a `Raw::Number`, and `int()`, `float()`
   and `bool()` no longer read a `Raw::Text`: a JSON body with `"port": "8080"`

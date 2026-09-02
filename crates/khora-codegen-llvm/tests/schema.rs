@@ -59,11 +59,9 @@ const HEAD: &str = "module main;
 import std::core::{List, Option, Pair, Redacted, Result, Show, Validated, print};
 import std::decimal::{Decimal};
 import std::schema::{Rejection, Schema, Shape, Raw, bool, decimal, int, list, optional, refine,
-                     secret, string, struct2, struct3};
+                     secret, string, struct};
 
 pub type Listen = { host: String, port: Int };
-
-fn listen(host: String, port: Int) -> Listen { { host: host, port: port } }
 
 fn rec(entries: List<Pair<String, Raw>>) -> Raw { Raw::Record(entries) }
 
@@ -82,28 +80,16 @@ fn port() -> Schema<Int> {
 }
 
 fn listen_schema() -> Schema<Listen> {
-  struct2(\"host\", string(), \"port\", port(), listen)
+  struct({ host: string(), port: port() })
 }
 
 // Khora has no anonymous record type, so each shape a test combines into gets
-// a name and a constructor -- which is also what the combinator wants as its
-// assembler, so it reads better than a lambda would.
+// a name; the literal is checked against it, and needs no assembler.
 pub type Named_ = { listen: Listen, name: String };
-fn named_(listen: Listen, name: String) -> Named_ { { listen: listen, name: name } }
-
 pub type Money = { rate: Decimal, big: Int };
-fn money(rate: Decimal, big: Int) -> Money { { rate: rate, big: big } }
-
 pub type Tokens = { public: Int, token: Redacted<Int> };
-fn tokens(public: Int, token: Redacted<Int>) -> Tokens { { public: public, token: token } }
-
 pub type Words = { count: Int, phrase: Redacted<String> };
-fn words(count: Int, phrase: Redacted<String>) -> Words { { count: count, phrase: phrase } }
-
 pub type Settings = { listen: Listen, password: Redacted<String>, debug: Option<Bool> };
-fn settings(listen: Listen, password: Redacted<String>, debug: Option<Bool>) -> Settings {
-  { listen: listen, password: password, debug: debug }
-}
 ";
 
 /// A record decodes, and a nested one keeps its shape.
@@ -161,7 +147,7 @@ fn a_nested_path_is_written_the_way_it_is_read() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let outer = struct2(\"listen\", listen_schema(), \"name\", string(), named_);
+  let outer: Schema<Named_> = struct({{ listen: listen_schema(), name: string() }});
   let input = rec([field(\"listen\", rec([field(\"host\", Raw::Text(\"h\"))])),
                    field(\"name\", Raw::Text(\"svc\"))]);
   print(problems(Schema::decode(outer, input)));
@@ -189,7 +175,7 @@ fn a_decimal_is_exact() {
 fn main() -> Int {{
   let input = rec([field(\"rate\", Raw::Number(\"0.0725\")),
                    field(\"big\", Raw::Number(\"9007199254740993\"))]);
-  let s = struct2(\"rate\", decimal(), \"big\", int(), money);
+  let s: Schema<Money> = struct({{ rate: decimal(), big: int() }});
   match Validated::to_result(Schema::decode(s, input)) {{
     Result::Ok(v) => print(\"${{v.rate}} ${{v.big}}\"),
     Result::Err(_e) => print(\"refused\"),
@@ -219,7 +205,7 @@ fn a_secret_is_never_quoted_in_an_error() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let s = struct2(\"public\", int(), \"token\", secret(int()), tokens);
+  let s: Schema<Tokens> = struct({{ public: int(), token: secret(int()) }});
   let input = rec([field(\"public\", Raw::Text(\"not a number\")),
                    field(\"token\", Raw::Text(\"s3cr3t-value\"))]);
   print(problems(Schema::decode(s, input)));
@@ -245,9 +231,9 @@ fn a_secret_that_decodes_still_hides() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let s = struct2(\"public\", int(), \"token\", secret(string()), words);
-  let input = rec([field(\"public\", Raw::Number(\"1\")),
-                   field(\"token\", Raw::Text(\"s3cr3t-value\"))]);
+  let s: Schema<Words> = struct({{ count: int(), phrase: secret(string()) }});
+  let input = rec([field(\"count\", Raw::Number(\"1\")),
+                   field(\"phrase\", Raw::Text(\"s3cr3t-value\"))]);
   match Validated::to_result(Schema::decode(s, input)) {{
     Result::Ok(v) => print(\"${{v.count}} ${{v.phrase}}\"),
     Result::Err(_e) => print(\"refused\"),
@@ -272,8 +258,8 @@ fn the_shape_answers_which_keys_are_needed() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let s = struct3(\"listen\", listen_schema(), \"password\", secret(string()), \"debug\",
-                  optional(bool()), settings);
+  let s: Schema<Settings> =
+    struct({{ listen: listen_schema(), password: secret(string()), debug: optional(bool()) }});
   print(\"${{Shape::keys(s.shape)}}\");
   print(\"${{Shape::keys(listen_schema().shape)}}\");
   0
@@ -318,15 +304,12 @@ import std::decimal::{Decimal};
 import std::json::{encode, parse};
 import std::schema::{Case, Fields, Rejection, Schema, Shape, Raw, any, between, bool, decimal,
                      default, dict, int, key, list, min_length, non_empty, nullable, one_of,
-                     optional, refine, renamed, secret, string, struct2};
+                     optional, refine, renamed, secret, string, struct};
 
 derive(Show)
 pub type Listen = { host: String, port: Int };
 
-fn listen(host: String, port: Int) -> Listen { { host: host, port: port } }
-
 pub type Words = { count: Int, phrase: Redacted<String> };
-fn words(count: Int, phrase: Redacted<String>) -> Words { { count: count, phrase: phrase } }
 
 derive(Show)
 pub type Mode = | Local | Remote(url: String);
@@ -341,11 +324,7 @@ fn mode() -> Schema<Mode> {
 pub type Tree = { label: String, children: List<Tree> };
 
 fn tree() -> Schema<Tree> {
-  Schema::lazy(\"Tree\", fn () =>
-    struct2(\"label\", string(), \"children\", list(tree()), fn (l, c) => {
-      let built: Tree = { label: l, children: c };
-      built
-    }))
+  Schema::lazy(\"Tree\", fn () => struct({ label: string(), children: list(tree()) }))
 }
 
 fn depth(t: Tree) -> Int {
@@ -367,7 +346,7 @@ fn problems<A>(v: Validated<A, Rejection>) -> String {
   }
 }
 
-fn plain() -> Schema<Listen> { struct2(\"host\", string(), \"port\", int(), listen) }
+fn plain() -> Schema<Listen> { struct({ host: string(), port: int() }) }
 
 fn shown(v: Validated<Listen, Rejection>) -> String {
   match Validated::to_result(v) {
@@ -426,7 +405,7 @@ fn keys_defaults_and_closed_records() {
         &format!(
             "{HEAD2}
 fn main() -> Int {{
-  let s = struct2(\"host\", key(\"Host\", string()), \"port\", default(int(), 8080), listen);
+  let s: Schema<Listen> = struct({{ host: key(\"Host\", string()), port: default(int(), 8080) }});
   print(shown(Schema::decode(s, rec([field(\"Host\", Raw::Text(\"h\"))]))));
   print(shown(Schema::decode(s, rec([field(\"Host\", Raw::Text(\"h\")), field(\"port\", Raw::Null)]))));
   print(shown(Schema::decode(Schema::closed(s), rec([field(\"Host\", Raw::Text(\"h\")), field(\"verbose\", Raw::Bool(true))]))));
@@ -582,7 +561,7 @@ fn denied_reports_and_recursion() {
         &format!(
             "{HEAD2}
 fn main() -> Int {{
-  let s = struct2(\"count\", int(), \"phrase\", secret(string()), words);
+  let s: Schema<Words> = struct({{ count: int(), phrase: secret(string()) }});
   match Validated::to_result(Schema::decode(s, rec([field(\"count\", Raw::Denied), field(\"phrase\", Raw::Denied)]))) {{
     Result::Ok(_w) => print(\"decoded\"),
     Result::Err(errors) => print(Rejection::report(errors)),
@@ -619,7 +598,7 @@ import std::core::{List, Option, Pair, Redacted, Result, Show, Validated, print}
 import std::decimal::{Decimal};
 import std::json::{encode};
 import std::schema::{Decode, Encode, Rejection, Schema, Shape, Raw, between, decode, int, list,
-                     string, struct2};
+                     string, struct};
 import std::time::{Date};
 
 derive(Show)
@@ -635,10 +614,8 @@ impl Encode for Port {
 
 pub type Listen = { host: String, port: Port };
 
-fn listen(host: String, port: Port) -> Listen { { host: host, port: port } }
-
 impl Decode for Listen {
-  fn schema() -> Schema<Listen> { struct2(\"host\", string(), \"port\", Port::schema(), listen) }
+  fn schema() -> Schema<Listen> { struct({ host: string(), port: Port::schema() }) }
 }
 
 impl Encode for Listen {

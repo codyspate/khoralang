@@ -732,14 +732,17 @@ impl<'a> Checker<'a> {
         // write down, and this one is not inferring. The expected type already
         // decided which record it is; this only looks up what that record
         // holds.
+        //
+        // **And committed to, whether or not the labels cover it.** When the
+        // expected type names a record and the literal is short a field or
+        // has one too many, the answer is which field, against that record;
+        // falling back to the label search instead reported `these fields
+        // fit `Listen` and `Other`` about a literal the signature had already
+        // said was a `Listen`.
         if owner.is_none() {
             if let Some(expected) = hint.as_ref().map(|h| self.unifier.zonk(h)) {
                 if let Some(name) = traits::head_of(&expected) {
-                    let known = self
-                        .types
-                        .bodies_of(&name)
-                        .find(|v| v.name == name && covers(&v.labels, &written))
-                        .cloned();
+                    let known = self.types.bodies_of(&name).find(|v| v.name == name).cloned();
                     if let Some(record) = known {
                         return self.check_record_fields(&record, &expected, fields);
                     }
