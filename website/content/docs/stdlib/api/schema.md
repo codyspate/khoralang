@@ -388,9 +388,26 @@ pub fn of_arguments(arguments: List<String>) -> Raw
 Command-line arguments as a record.
 
 `--host x` and `--host=x` are a field named `host`; a bare `--verbose`
-is `true`; `-` in a flag is `_` in its name, so `--log-level` reaches a
-field called `log_level`; and anything that is not a flag is collected,
-in order, under `arguments`.
+is `true`; `-c` is a field named `c`; `-` in a flag is `_` in its name,
+so `--log-level` reaches a field called `log_level`; and anything that
+is not a flag is collected, in order, under `arguments`.
+
+Shape-blind, so a flag followed by a word takes it as its value:
+`-c .name` reads `c` as `.name`. [`Raw::of_arguments_for`] knows which
+flags are switches, and is the one a program with a schema wants.
+
+#### of_arguments_for
+
+```khora
+pub fn of_arguments_for(shape: Shape, arguments: List<String>) -> Raw
+```
+
+Command-line arguments as a record, read the way a shape says.
+
+The grammar of [`Raw::of_arguments`], except that a flag whose field is
+a `Bool` is a switch and never takes the word after it, so
+`khq -c .name file.json` reads `c` as `true` and `.name` as the first
+argument. The shape decides, because only the shape knows.
 
 ### Rule
 

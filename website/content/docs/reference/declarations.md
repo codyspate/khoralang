@@ -118,6 +118,11 @@ The trait must be in scope, so `derive(Show)` needs `Show` imported from
 an `impl` where the behaviour is a domain decision rather than a structural
 consequence of the data.
 
+`derive(Decode)` reads the `///` above the type and above each record field
+into the schema's descriptions, so a JSON Schema rendered from the type says
+what the comment says. The comment is the description; there is nothing to
+write a second time.
+
 A field's type decides whether the derive is available at all, and a missing
 impl is sometimes the point:
 

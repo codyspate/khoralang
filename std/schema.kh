@@ -183,10 +183,24 @@ impl Raw {
   /// Command-line arguments as a record.
   ///
   /// `--host x` and `--host=x` are a field named `host`; a bare `--verbose`
-  /// is `true`; `-` in a flag is `_` in its name, so `--log-level` reaches a
-  /// field called `log_level`; and anything that is not a flag is collected,
-  /// in order, under `arguments`.
+  /// is `true`; `-c` is a field named `c`; `-` in a flag is `_` in its name,
+  /// so `--log-level` reaches a field called `log_level`; and anything that
+  /// is not a flag is collected, in order, under `arguments`.
+  ///
+  /// Shape-blind, so a flag followed by a word takes it as its value:
+  /// `-c .name` reads `c` as `.name`. [`Raw::of_arguments_for`] knows which
+  /// flags are switches, and is the one a program with a schema wants.
   pub fn of_arguments(arguments: List<String>) -> Raw {
+    Raw::of_arguments_for(Shape::Any, arguments)
+  }
+
+  /// Command-line arguments as a record, read the way a shape says.
+  ///
+  /// The grammar of [`Raw::of_arguments`], except that a flag whose field is
+  /// a `Bool` is a switch and never takes the word after it, so
+  /// `khq -c .name file.json` reads `c` as `true` and `.name` as the first
+  /// argument. The shape decides, because only the shape knows.
+  pub fn of_arguments_for(shape: Shape, arguments: List<String>) -> Raw {
     let mut fields = List::Nil;
     let mut positional = List::Nil;
     let mut rest = arguments;
@@ -195,8 +209,8 @@ impl Raw {
       match rest {
         List::Nil => { walking = false; },
         List::Cons(head, tail) => {
-          if String::starts_with(head, "--") {
-            let flag = String::slice(head, 2, String::byte_length(head));
+          if is_flag(head) {
+            let flag = flag_text(head);
             match String::index_of(flag, "=") {
               Option::Some(at) => {
                 let name = flag_name(String::slice(flag, 0, at));
@@ -206,20 +220,25 @@ impl Raw {
               },
               Option::None => {
                 let name = flag_name(flag);
-                match tail {
-                  List::Cons(next, after) => {
-                    if String::starts_with(next, "--") {
+                if is_switch(shape, name) {
+                  fields = List::Cons(Raw::entry(name, Raw::Bool(true)), fields);
+                  rest = tail;
+                } else {
+                  match tail {
+                    List::Cons(next, after) => {
+                      if is_flag(next) {
+                        fields = List::Cons(Raw::entry(name, Raw::Bool(true)), fields);
+                        rest = tail;
+                      } else {
+                        fields = List::Cons(Raw::entry(name, Raw::Untyped(next)), fields);
+                        rest = after;
+                      }
+                    },
+                    List::Nil => {
                       fields = List::Cons(Raw::entry(name, Raw::Bool(true)), fields);
                       rest = tail;
-                    } else {
-                      fields = List::Cons(Raw::entry(name, Raw::Untyped(next)), fields);
-                      rest = after;
-                    }
-                  },
-                  List::Nil => {
-                    fields = List::Cons(Raw::entry(name, Raw::Bool(true)), fields);
-                    rest = tail;
-                  },
+                    },
+                  }
                 }
               },
             }
@@ -240,6 +259,49 @@ impl Raw {
 
 /// `log-level` is the flag; `log_level` is the field.
 fn flag_name(flag: String) -> String { String::replace(flag, "-", "_") }
+
+/// `--verbose` and `-c` are flags; `-` alone and a bare word are not.
+fn is_flag(argument: String) -> Bool {
+  String::starts_with(argument, "-") && String::byte_length(argument) > 1
+}
+
+/// The flag without its dashes.
+fn flag_text(argument: String) -> String {
+  let dashes = if String::starts_with(argument, "--") { 2 } else { 1 };
+  String::slice(argument, dashes, String::byte_length(argument))
+}
+
+/// Whether the field `name` of a record shape is a `Bool`, through whatever
+/// wraps it, so a flag for it takes no value.
+fn is_switch(shape: Shape, name: String) -> Bool {
+  match shape {
+    Shape::Struct(fields) =>
+      match List::find(fields, fn field => Option::unwrap_or(Shape::wire_key(field.shape), field.name) == name) {
+        Option::Some(field) => is_bool(field.shape),
+        Option::None => false,
+      },
+    Shape::Optional(inner) => is_switch(inner, name),
+    Shape::Nullable(inner) => is_switch(inner, name),
+    Shape::Default(inner) => is_switch(inner, name),
+    Shape::Refined(inner, _rule) => is_switch(inner, name),
+    Shape::Closed(inner) => is_switch(inner, name),
+    Shape::Described(inner, _text) => is_switch(inner, name),
+    Shape::Lazy(_name, inner) => is_switch(inner(), name),
+    _ => false,
+  }
+}
+
+fn is_bool(shape: Shape) -> Bool {
+  match shape {
+    Shape::Bool => true,
+    Shape::Optional(inner) => is_bool(inner),
+    Shape::Default(inner) => is_bool(inner),
+    Shape::Keyed(_wire, inner) => is_bool(inner),
+    Shape::Refined(inner, _rule) => is_bool(inner),
+    Shape::Described(inner, _text) => is_bool(inner),
+    _ => false,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Where it went wrong

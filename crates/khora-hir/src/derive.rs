@@ -172,8 +172,9 @@ pub fn derived(db: &dyn Db, file: SourceFile) -> Derived {
 enum Shape {
     /// A record's fields, in declaration order — which is also comparison
     /// order, because that is what every language does and what someone
-    /// reordering two fields expects to change.
-    Record(Vec<String>, Vec<String>),
+    /// reordering two fields expects to change. Names, types as written, and
+    /// each field's `///` joined into one string, empty when there is none.
+    Record(Vec<String>, Vec<String>, Vec<String>),
     /// A variant's cases, in declaration order — which decides which one is
     /// `Less`, again because that is the only ordering the reader can see.
     Variant(Vec<Case>),
@@ -263,8 +264,12 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
         let Some(params) = parameters_of(&t, &type_name, at, &mut errors) else {
             continue;
         };
+        // The type's own `///`, which a derived schema carries as its
+        // description: a rendered document and a model's prompt then say
+        // what the author already wrote.
+        let type_doc = khora_syntax::doc::doc_comment(t.syntax()).join("\n");
 
-        let is_record = matches!(shape, Shape::Record(_, _));
+        let is_record = matches!(shape, Shape::Record(_, _, _));
         for trait_name in wanted {
             // A schema keys a payload by its field names on the wire, and a
             // name the type did not declare is not the compiler's to invent.
@@ -284,7 +289,7 @@ pub fn expand(source: &ast::SourceFile) -> Derived {
                     }
                 }
             }
-            text.push_str(&write_impl(&trait_name, &type_name, &params, &shape));
+            text.push_str(&write_impl(&trait_name, &type_name, &params, &shape, &type_doc));
             text.push('\n');
             impls.push(DerivedImpl {
                 trait_name,
@@ -357,6 +362,7 @@ fn shape_of(
             }
             let mut fields = Vec::new();
             let mut field_types = Vec::new();
+            let mut field_docs = Vec::new();
             for field in r.fields() {
                 let Some(name) = field.name().and_then(|n| n.ident()) else {
                     continue;
@@ -366,8 +372,9 @@ fn shape_of(
                 };
                 fields.push(name);
                 field_types.push(ty.syntax().text().to_string());
+                field_docs.push(khora_syntax::doc::doc_comment(field.syntax()).join("\n"));
             }
-            Some(Shape::Record(fields, field_types))
+            Some(Shape::Record(fields, field_types, field_docs))
         }
         Some(ast::Type::Variant(v)) => {
             let mut cases = Vec::new();
@@ -462,7 +469,13 @@ fn parameters_of(
 }
 
 /// `impl<A: Eq> Eq for Box<A> { .. }` for one trait.
-fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shape) -> String {
+fn write_impl(
+    trait_name: &str,
+    type_name: &str,
+    params: &[String],
+    shape: &Shape,
+    type_doc: &str,
+) -> String {
     // Every parameter is bounded by the trait being derived, whether or not a
     // field uses it. Rust makes the same trade for the same reason: knowing
     // which parameters are *reachable* from a field means resolving the field
@@ -485,7 +498,7 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
     };
 
     let method = match (trait_name, shape) {
-        ("Eq", Shape::Record(fields, _)) => format!(
+        ("Eq", Shape::Record(fields, _, _)) => format!(
             "fn eq(self, other: {self_type}) -> Bool {{ {} }}",
             all_equal(&projections(fields))
         ),
@@ -493,7 +506,7 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
             "fn eq(self, other: {self_type}) -> Bool {{ {} }}",
             variant_eq(type_name, cases)
         ),
-        ("Ord", Shape::Record(fields, _)) => format!(
+        ("Ord", Shape::Record(fields, _, _)) => format!(
             "fn cmp(self, other: {self_type}) -> Ordering {{ {} }}",
             compare_in_turn(&projections(fields))
         ),
@@ -501,7 +514,7 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
             "fn cmp(self, other: {self_type}) -> Ordering {{ {} }}",
             variant_cmp(type_name, cases)
         ),
-        ("Hash", Shape::Record(fields, _)) => {
+        ("Hash", Shape::Record(fields, _, _)) => {
             let parts: Vec<String> = fields.iter().map(|f| format!("self.{f}.hash()")).collect();
             format!("fn hash(self) -> Int {{ {} }}", hash_mix(0, &parts))
         }
@@ -511,7 +524,7 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
                 variant_hash(type_name, cases)
             )
         }
-        ("Show", Shape::Record(fields, _)) => {
+        ("Show", Shape::Record(fields, _, _)) => {
             format!(
                 "fn show(self) -> String {{ {} }}",
                 record_show(type_name, fields)
@@ -523,15 +536,15 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
                 variant_show(type_name, cases)
             )
         }
-        ("Decode", Shape::Record(fields, field_types)) => format!(
+        ("Decode", Shape::Record(fields, field_types, field_docs)) => format!(
             "fn schema() -> Schema<{self_type}> {{ {} }}",
-            record_decode(type_name, &self_type, fields, field_types)
+            record_decode(type_name, &self_type, fields, field_types, field_docs, type_doc)
         ),
         ("Decode", Shape::Variant(cases)) => format!(
             "fn schema() -> Schema<{self_type}> {{ {} }}",
-            variant_decode(type_name, cases)
+            variant_decode(type_name, cases, type_doc)
         ),
-        ("Encode", Shape::Record(fields, _)) => {
+        ("Encode", Shape::Record(fields, _, _)) => {
             format!("fn encode(self) -> Raw {{ {} }}", record_encode(fields))
         }
         ("Encode", Shape::Variant(cases)) => {
@@ -826,13 +839,52 @@ fn tuple_pattern(n: usize) -> String {
 /// before anything knows what a type is: the field's type is written into a
 /// `let` exactly as the author wrote it, and the checker picks the impl from
 /// it, through a generic impl or a bound as the case may be.
-fn schema_bindings<'a>(prefix: &str, types: impl IntoIterator<Item = &'a String>) -> String {
+fn schema_bindings<'a>(
+    prefix: &str,
+    types: impl IntoIterator<Item = &'a String>,
+    docs: &[String],
+) -> String {
     types
         .into_iter()
         .enumerate()
-        .map(|(i, ty)| format!("let {prefix}{i}: Schema<{ty}> = Decode::schema();"))
+        .map(|(i, ty)| {
+            let schema = described("Decode::schema()", docs.get(i).map_or("", String::as_str));
+            format!("let {prefix}{i}: Schema<{ty}> = {schema};")
+        })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `schema`, carrying `doc` as its description when there is one.
+///
+/// **A `///` is the description.** What a rendered page says about a field
+/// is what a JSON Schema built from the type says about it, and what a model
+/// is told, with nothing written twice. An empty comment leaves the schema
+/// alone rather than describing it as nothing.
+fn described(schema: &str, doc: &str) -> String {
+    if doc.is_empty() {
+        return schema.to_string();
+    }
+    format!("Schema::described({schema}, {})", literal(doc))
+}
+
+/// `text` as a Khora string literal: the escapes the lexer reads, and `$`
+/// escaped so that a comment mentioning `${port}` is text, not interpolation.
+fn literal(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '$' => out.push_str("\\$"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// A record's schema: every field read under its own name, zipped into a
@@ -848,8 +900,10 @@ fn record_decode(
     self_type: &str,
     fields: &[String],
     field_types: &[String],
+    field_docs: &[String],
+    type_doc: &str,
 ) -> String {
-    let bindings = schema_bindings("s", field_types);
+    let bindings = schema_bindings("s", field_types, field_docs);
     let chain = zip_chain(
         fields
             .iter()
@@ -870,27 +924,33 @@ fn record_decode(
             tuple_pattern(n)
         ),
     };
-    format!(
-        "Schema::lazy(\"{type_name}\", fn () => {{ {bindings} \
-         Schema::record(Fields::map({chain}, {assemble})) }})"
+    described(
+        &format!(
+            "Schema::lazy(\"{type_name}\", fn () => {{ {bindings} \
+             Schema::record(Fields::map({chain}, {assemble})) }})"
+        ),
+        type_doc,
     )
 }
 
 /// A variant's schema: one `Schema::case` per case, keyed by its payload's
 /// names; a newtype is the inner schema with the constructor applied.
-fn variant_decode(type_name: &str, cases: &[Case]) -> String {
+fn variant_decode(type_name: &str, cases: &[Case], type_doc: &str) -> String {
     if is_newtype(cases) {
         let case = &cases[0];
-        return format!(
-            "Schema::lazy(\"{type_name}\", fn () => {{ let s0: Schema<{}> = Decode::schema(); \
-             Schema::map(s0, fn a0 => {type_name}::{}(a0)) }})",
-            case.field_types[0], case.name
+        return described(
+            &format!(
+                "Schema::lazy(\"{type_name}\", fn () => {{ let s0: Schema<{}> = Decode::schema(); \
+                 Schema::map(s0, fn a0 => {type_name}::{}(a0)) }})",
+                case.field_types[0], case.name
+            ),
+            type_doc,
         );
     }
     let mut bindings = Vec::new();
     let mut written = Vec::new();
     for (c, case) in cases.iter().enumerate() {
-        bindings.push(schema_bindings(&format!("s{c}_"), &case.field_types));
+        bindings.push(schema_bindings(&format!("s{c}_"), &case.field_types, &[]));
         let fields = zip_chain(
             case.field_names
                 .iter()
@@ -911,10 +971,13 @@ fn variant_decode(type_name: &str, cases: &[Case]) -> String {
         };
         written.push(format!("Schema::case(\"{}\", {fields}, {make})", case.name));
     }
-    format!(
-        "Schema::lazy(\"{type_name}\", fn () => {{ {} Schema::cases({}) }})",
-        bindings.join(" "),
-        cons_chain(written)
+    described(
+        &format!(
+            "Schema::lazy(\"{type_name}\", fn () => {{ {} Schema::cases({}) }})",
+            bindings.join(" "),
+            cons_chain(written)
+        ),
+        type_doc,
     )
 }
 

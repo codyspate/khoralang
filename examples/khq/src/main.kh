@@ -28,10 +28,11 @@ module khq::main;
 //! language, except the last, which is absent because `std::json::parse` takes
 //! a `String`.
 
-import std::core::{List, Option, Result, Show, String, attempt, print};
+import std::core::{List, Option, Result, Show, String, Validated, attempt, print};
 import std::env::{Env, EnvError};
 import std::fs::{FsRead, IoError, read_text};
 import std::json::{Json, JsonError, parse};
+import std::schema::{Raw, Schema, bool, default, list, string, struct};
 import khq::diag::{Problem, Span, bare, render};
 import khq::ast::{Filter};
 import khq::eval::{eval};
@@ -67,35 +68,59 @@ pub fn main() -> () raises EnvError {
   }
 }
 
+/// The command line as the shell hands it over: a switch is `true` when it
+/// was written, and whatever is not a flag is an argument, in order.
+type Line = {
+  r: Bool,
+  c: Bool,
+  explain: Bool,
+  arguments: List<String>,
+};
+
+/// The schema of a command line, which is the whole grammar of the flags.
+///
+/// **The shape says which flags are switches.** `-c` takes no value, and the
+/// only reason `khq -c '.name' f.json` does not read the query as the value
+/// of `-c` is that `Raw::of_arguments_for` asked this shape first. A flag
+/// grammar written by hand would say the same thing a second time.
+fn line() -> Schema<Line> {
+  struct({
+      r: default(bool(), false),
+      c: default(bool(), false),
+      explain: default(bool(), false),
+      arguments: default(list(string()), List::Nil),
+    })
+}
+
 /// The arguments, understood.
 ///
 /// **A flag is a flag anywhere.** `khq -c '.name' f.json` and
 /// `khq '.name' f.json -c` both work, because a person typing at a shell adds
-/// the flag they forgot to the end rather than retyping the line.
+/// the flag they forgot to the end rather than retyping the line. A line the
+/// schema rejects, or one with no query, is answered with the usage text.
 fn plan(args: List<String>) -> Option<Asked> {
-  let flags = List::filter(args, fn a => String::starts_with(a, "-"));
-  let rest = List::filter(args, fn a => !String::starts_with(a, "-"));
-  match List::head(rest) {
-    Option::None => Option::None,
-    Option::Some(filter) => Option::Some(
-      {
-        filter: filter,
-        file: List::head(List::drop(rest, 1)),
-        shape: if has(flags, "-r") {
-          Shape::Raw
-        } else if has(flags, "-c") {
-          Shape::Compact
-        } else {
-          Shape::Indented
+  let schema = line();
+  let read = schema.decode(Raw::of_arguments_for(schema.shape, args));
+  match Validated::to_result(read) {
+    Result::Err(_problems) => Option::None,
+    Result::Ok(line) => match List::head(line.arguments) {
+      Option::None => Option::None,
+      Option::Some(filter) => Option::Some(
+        {
+          filter: filter,
+          file: List::head(List::drop(line.arguments, 1)),
+          shape: if line.r {
+            Shape::Raw
+          } else if line.c {
+            Shape::Compact
+          } else {
+            Shape::Indented
+          },
+          explain: line.explain,
         },
-        explain: has(flags, "--explain"),
-      },
-    ),
+      ),
+    },
   }
-}
-
-fn has(flags: List<String>, wanted: String) -> Bool {
-  List::any(flags, fn f => f == wanted)
 }
 
 /// The whole job: read, parse, run, render.

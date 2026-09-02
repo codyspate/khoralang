@@ -11,6 +11,7 @@
 //! ```
 
 pub mod ast;
+pub mod doc;
 mod event;
 mod kind;
 mod lexer;

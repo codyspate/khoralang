@@ -915,3 +915,76 @@ fn main() -> Int {{
         )
     );
 }
+
+/// The `///` above a type and above each of its fields is the description
+/// in the JSON Schema, with nothing written twice.
+#[test]
+fn a_documented_type_describes_itself() {
+    let out = run(
+        "schema_documented",
+        &format!(
+            "{HEAD4}
+/// A place to listen.
+derive(Decode)
+pub type Where = {{
+  /// The host name, or an address.
+  host: String,
+  /// A port, as the OS numbers them.
+  port: Int,
+}};
+
+fn main() -> Int {{
+  print(encode(Shape::to_json_schema(Where::schema().shape)));
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(
+        out,
+        concat!(
+            "{\"$defs\":{\"Where\":{\"properties\":{",
+            "\"host\":{\"description\":\"The host name, or an address.\",\"type\":\"string\"},",
+            "\"port\":{\"description\":\"A port, as the OS numbers them.\",\"type\":\"integer\"}},",
+            "\"required\":[\"host\",\"port\"],\"type\":\"object\"}},",
+            "\"$ref\":\"#/$defs/Where\",\"description\":\"A place to listen.\"}\n",
+        )
+    );
+}
+
+/// A flag whose field is a `Bool` takes no value when the shape is asked,
+/// so `-c .name` is the switch and then the query; the shape-blind reading
+/// takes `.name` as the value of `c` and says so.
+#[test]
+fn a_switch_takes_no_value_when_the_shape_says_so() {
+    let out = run(
+        "schema_switches",
+        &format!(
+            "{HEAD2}
+type Line = {{ c: Bool, explain: Bool, arguments: List<String> }};
+
+fn main() -> Int {{
+  let line: Schema<Line> = struct({{
+    c: default(bool(), false),
+    explain: default(bool(), false),
+    arguments: default(list(string()), List::Nil),
+  }});
+  let args = List::Cons(\"-c\", List::Cons(\".name\", List::Cons(\"f.json\", List::Cons(\"--explain\", List::Nil))));
+  match Validated::to_result(line.decode(Raw::of_arguments_for(line.shape, args))) {{
+    Result::Ok(read) => print(
+      (if read.c {{ \"c\" }} else {{ \"-\" }}) + \" \" + (if read.explain {{ \"explain\" }} else {{ \"-\" }}) + \" \"
+        + Int::to_string(List::length(read.arguments)) + \" \" + Option::unwrap_or(List::head(read.arguments), \"?\")
+    ),
+    Result::Err(problems) => print(Rejection::report(problems)),
+  }};
+  match Validated::to_result(line.decode(Raw::of_arguments(args))) {{
+    Result::Ok(_read) => print(\"read\"),
+    Result::Err(problems) => print(Rejection::report(problems)),
+  }};
+  0
+}}
+"
+        ),
+    );
+    assert_eq!(out, "c explain 2 .name\nc should be true or false, and is \".name\"\n");
+}

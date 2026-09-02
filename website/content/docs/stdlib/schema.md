@@ -137,8 +137,13 @@ and its `message`.
 
 `Raw::of_json` turns a parsed document into one, and `Raw::to_json` turns one
 back, which is the one bridge in each direction. `Raw::of_map` takes a query
-string, the path parameters or the headers; `Raw::of_arguments` takes the
-command line, so `--port 8080` is a field named `port`.
+string, the path parameters or the headers; `Raw::of_arguments_for(shape, args)`
+takes the command line, so `--port 8080` is a field named `port`, `-c` is one
+named `c`, and whatever is not a flag is collected under `arguments`. It asks
+the shape which flags are switches: a field that is a `Bool` never takes the
+word after it, so `khq -c '.name' f.json` reads `c` as `true` and the query as
+the first argument. `Raw::of_arguments` is the same reading without a shape,
+for a program that has none in hand.
 
 A source that cannot label its values, which is every one of those but JSON,
 hands over `Raw::Untyped`, and every primitive reads it. A source that can
@@ -226,7 +231,9 @@ one by hand with a refined port, and `Settings` picks up whichever it is. A
 variant derives to a bare string for a payload-free case and an object tagged
 with `type` for the rest; a newtype, `type UserId = Int`, is transparent; a
 type that mentions itself needs nothing written, because a derived schema is
-built when it is first read.
+built when it is first read. The `///` above the type and above each field is
+carried along as the description, so the JSON Schema rendered from
+`Settings` says about `rate` what the comment next to `rate` says.
 
 Two things a derive refuses, at the `derive` line: a field whose type has no
 `Decode`, and a case whose payload has no field names, because the wire needs

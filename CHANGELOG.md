@@ -267,6 +267,19 @@ it will behave differently now.
 
 ### Added
 
+- **A derived schema carries the type's `///`.** `derive(Decode)` reads the
+  doc comment above the type and above each record field into
+  `Schema::described`, so the JSON Schema a model is prompted with, and the
+  one an API is documented by, say what the author already wrote next to
+  the field. The comment is the description; there is nothing to write
+  twice, and nothing to drift.
+- **`Raw::of_arguments_for(shape, arguments)`** reads a command line the
+  way a shape says: a flag whose field is a `Bool` is a switch and never
+  takes the word after it, so `khq -c '.name' f.json` reads `c` as `true`
+  and the query as the first argument. `-c` is a flag as well as `--c`.
+  `Raw::of_arguments` is the shape-blind reading, kept for a program without
+  a schema in hand. `khq` reads its flags through a schema now, which
+  deleted its hand-written flag grammar.
 - **`Shape::to_json_schema`** renders a schema's shape as a JSON Schema
   document, draft 2020-12: a derived type is a `$defs` entry and a `$ref`,
   which is what terminates a type that mentions itself; a rule is its
