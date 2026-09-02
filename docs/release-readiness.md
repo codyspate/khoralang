@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **169 of 222**, and re-scored
+than against the roadmap's account of itself. **171 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -59,7 +59,7 @@ advertised, so no wasm deployment has to work.
 | 17. khoralang.com production documentation site | 8 / 12 |
 | 18. Reference applications and end-to-end proof | 6 / 6 |
 | 19. External-user validation | 0 / 5 |
-| 20. Public positioning and benchmark integrity | 3 / 7 |
+| 20. Public positioning and benchmark integrity | 5 / 7 |
 | 21. Release automation and final gate | 4 / 8 |
 
 **What the shape of this says.** The two halves of the product are not at the
@@ -454,11 +454,11 @@ Private testing is not a separate product milestone, but public release requires
 
 ## 20. Public positioning and benchmark integrity
 
-- [ ] The homepage explains in the first screen what Khora is, who it is for and why it exists.
-- [ ] The language is presented as general-purpose; finance remains a proving ground rather than the language's identity.
+- [x] The homepage explains in the first screen what Khora is, who it is for and why it exists. **Done:** what it is and why it exists were already in the hero -- a statically typed native-compiled language that makes failures, capabilities, resource lifetimes and concurrency visible, because the important parts of a program belong in its model. Who it is for was the missing third and is now stated in the same screen: people writing services and tools that have to keep running, where a dropped error or a leaked handle is found in production rather than in review.
+- [x] The language is presented as general-purpose; finance remains a proving ground rather than the language's identity. **Done:** checked rather than assumed. Neither the homepage nor `README.md` mentions finance, trading, ledgers or payments at all; the framing in both is reliable systems and services. Finance appears only where it is a worked example -- `examples/ledger_service`, `examples/risk_analyzer` and the `Decimal` documentation -- which is the proving-ground role this item asks for.
 - [x] Claims distinguish shipped functionality from planned functionality. **Done:** `/docs/limitations` and `/docs/deployment/supported-targets` both do this deliberately.
 - [ ] Benchmark pages state hardware, operating system, compiler mode/version, workload, connection count, duration, number of runs and control methodology. **Left:** There are no public benchmark pages yet.
-- [x] Cross-sitting absolute numbers are not presented as controlled comparisons. **Done:** `bench/README.md` states the rule; nothing public contradicts it.
+- [x] Cross-sitting absolute numbers are not presented as controlled comparisons. **Done:** and it was not, when this was first ticked. `README.md` published **538,000 requests a second** for `std::net::http` under a heading that called it "one measurement, so it can be argued with", while `bench/README.md` marked every figure in that table as a measurement of the harness rather than of the servers, and the site said no requests-per-second figure is published. The README now says what the site says, keeps only the within-sitting ratios, and states the four conditions a published number would have to meet.
 - [ ] Scheduler performance is described together with latency, memory and overload behavior, not only peak request rate.
 - [x] Khora does not market a benchmark as “beats Rust/Go/etc.” when the measurement is load-generator- or machine-limited. **Done:** Nothing public makes the claim.
 
