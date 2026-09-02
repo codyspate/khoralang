@@ -75,21 +75,6 @@ variant per expectation would be a list of the parser's internals. The
 offset is in **bytes**, which is what `String::byte` counts and what a
 caller can slice with.
 
-### DecodeError
-
-```khora
-pub type DecodeError =
-  | At(path: List<String>, expected: String, found: String);
-```
-
-Why a JSON value could not become the type a caller asked for.
-
-Parsing and decoding are different failures. `JsonError` says the input was
-not JSON; this says valid JSON had the wrong shape. `path` runs from the
-outside in: `List::Cons("account", List::Cons("currency", List::Nil))`
-identifies `account.currency`. Keeping it structured means an HTTP layer
-can render it however its own API promises rather than scraping a message.
-
 ### Field
 
 ```khora
@@ -100,45 +85,6 @@ pub type Field = {
 ```
 
 One field of an object, in the order `entries` happened to find it.
-
-## Traits
-
-### ToJson
-
-```khora
-pub trait ToJson
-```
-
-A value that has one unambiguous JSON representation.
-
-#### to_json
-
-```khora
-fn to_json(self) -> Json
-```
-
-This value as JSON. Cannot fail: a type either has a representation or
-does not implement this.
-
-### FromJson
-
-```khora
-pub trait FromJson
-```
-
-A value that can be recovered from JSON, or explains where the shape
-stopped agreeing.
-
-A failure rather than an `Option`: absence and the wrong kind are different
-facts to an API client, and a nested field has to retain its path.
-
-#### from_json
-
-```khora
-fn from_json(value: Json) -> Self raises DecodeError
-```
-
-Reads a value back, or says where the shape stopped agreeing.
 
 ## Methods
 
@@ -298,178 +244,6 @@ order on every document whether or not anybody looks at it.
 
 ## Trait implementations
 
-### ToJson for Json
-
-```khora
-impl ToJson for Json
-```
-
-#### to_json
-
-```khora
-fn to_json(self) -> Json
-```
-
-### FromJson for Json
-
-```khora
-impl FromJson for Json
-```
-
-#### from_json
-
-```khora
-fn from_json(value: Json) -> Json raises DecodeError
-```
-
-### ToJson for String
-
-```khora
-impl ToJson for String
-```
-
-#### to_json
-
-```khora
-fn to_json(self) -> Json
-```
-
-### FromJson for String
-
-```khora
-impl FromJson for String
-```
-
-#### from_json
-
-```khora
-fn from_json(value: Json) -> String raises DecodeError
-```
-
-### ToJson for Bool
-
-```khora
-impl ToJson for Bool
-```
-
-#### to_json
-
-```khora
-fn to_json(self) -> Json
-```
-
-### FromJson for Bool
-
-```khora
-impl FromJson for Bool
-```
-
-#### from_json
-
-```khora
-fn from_json(value: Json) -> Bool raises DecodeError
-```
-
-### ToJson for Float
-
-```khora
-impl ToJson for Float
-```
-
-#### to_json
-
-```khora
-fn to_json(self) -> Json
-```
-
-### FromJson for Float
-
-```khora
-impl FromJson for Float
-```
-
-#### from_json
-
-```khora
-fn from_json(value: Json) -> Float raises DecodeError
-```
-
-### ToJson for Int
-
-```khora
-impl ToJson for Int
-```
-
-#### to_json
-
-```khora
-fn to_json(self) -> Json
-```
-
-**The digits, not a `Float`.** This was `Json::Number(Int::to_float(self))`,
-so an identifier above 2^53 was rounded on the way *out* as well as on the
-way in.
-
-### FromJson for Int
-
-```khora
-impl FromJson for Int
-```
-
-#### from_json
-
-```khora
-fn from_json(value: Json) -> Int raises DecodeError
-```
-
-### ToJson for Option<A>
-
-```khora
-impl<A: ToJson> ToJson for Option<A>
-```
-
-#### to_json
-
-```khora
-fn to_json(self) -> Json
-```
-
-### FromJson for Option<A>
-
-```khora
-impl<A: FromJson> FromJson for Option<A>
-```
-
-#### from_json
-
-```khora
-fn from_json(value: Json) -> Option<A> raises DecodeError
-```
-
-### ToJson for List<A>
-
-```khora
-impl<A: ToJson> ToJson for List<A>
-```
-
-#### to_json
-
-```khora
-fn to_json(self) -> Json
-```
-
-### FromJson for List<A>
-
-```khora
-impl<A: FromJson> FromJson for List<A>
-```
-
-#### from_json
-
-```khora
-fn from_json(value: Json) -> List<A> raises DecodeError
-```
-
 ### Show for Json
 
 ```khora
@@ -483,18 +257,6 @@ fn show(self) -> String
 ```
 
 ## Functions
-
-### decode
-
-```khora
-pub fn decode<A: FromJson>(value: Json) -> A raises DecodeError
-```
-
-Decodes as the type the surrounding expression asks for.
-
-This is also the bridge used by generic container implementations: `A` is
-a type parameter, while the trait function itself is selected from the
-expected return type.
 
 ### member
 
@@ -514,61 +276,8 @@ pub fn object(fields: List<Field>) -> Json
 Builds an object from fields in declaration order.
 
 The map intentionally forgets that order, as every other object built by
-this module does. This is exported because a derived impl lives in the
-module that declared its type; it is useful to handwritten encoders too.
-
-### field_as
-
-```khora
-pub fn field_as<A: FromJson>(value: Json, name: String) -> A raises DecodeError
-```
-
-Reads and decodes one required object field, retaining its path on failure.
-
-### variant
-
-```khora
-pub fn variant(case_name: String, fields: List<Json>) -> Json
-```
-
-The stable representation of a derived variant.
-
-Every case, including a payload-free one, is adjacent-tagged in the same
-shape: `{ "case": "Circle", "fields": [3] }`. Uniformity is more useful
-than saving two punctuation marks on a unit case, and positional fields
-work for both named and unnamed case payloads.
-
-### variant_case
-
-```khora
-pub fn variant_case(value: Json) -> String raises DecodeError
-```
-
-The case tag of a derived variant.
-
-### variant_arity
-
-```khora
-pub fn variant_arity(value: Json, expected: Int) ->() raises DecodeError
-```
-
-Checks the payload count before a generated constructor reads it.
-
-### variant_field
-
-```khora
-pub fn variant_field<A: FromJson>(value: Json, wanted: Int) -> A raises DecodeError
-```
-
-Decodes one positional payload of a derived variant.
-
-### unknown_variant
-
-```khora
-pub fn unknown_variant<A>(found: String, expected: String) -> A raises DecodeError
-```
-
-Reports a case tag no generated decoder recognizes.
+this module does. `Raw::to_json` in `std::schema` is built on it, and so
+is a handwritten encoder.
 
 ### encode
 

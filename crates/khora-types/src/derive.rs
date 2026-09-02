@@ -107,11 +107,9 @@ pub fn derive_report(db: &dyn Db, file: SourceFile) -> DeriveReport {
         let known = types.traits.traits.get(name);
         if !in_scope || known.is_none() {
             // Each derivable trait has a home, and the hint names it: the
-            // four in `std::core`, the JSON pair in `std::json`, and the
-            // schema pair in `std::schema`.
+            // four in `std::core` and the schema pair in `std::schema`.
             let where_from = match name.as_str() {
                 "Eq" | "Ord" | "Show" | "Hash" => "; import it from `std::core`",
-                "ToJson" | "FromJson" => "; import it from `std::json`",
                 "Decode" | "Encode" => "; import it from `std::schema`",
                 _ => "",
             };

@@ -857,38 +857,6 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
         }
     }
 
-    // Source-expanded JSON derives use these ordinary helpers. Pull them from
-    // the trait's declaring module, just as `Ord` above pulls `Ordering`, so
-    // the generated body does not depend on hidden hard-coded module paths.
-    if derives_trait(db, file, "ToJson") {
-        bring_derive_companions(
-            db,
-            graph,
-            file,
-            &mut out,
-            "ToJson",
-            &["Json", "Field", "List", "member", "object", "variant"],
-        );
-    }
-    if derives_trait(db, file, "FromJson") {
-        bring_derive_companions(
-            db,
-            graph,
-            file,
-            &mut out,
-            "FromJson",
-            &[
-                "Json",
-                "DecodeError",
-                "List",
-                "field_as",
-                "variant_case",
-                "variant_arity",
-                "variant_field",
-                "unknown_variant",
-            ],
-        );
-    }
     // A derived schema reaches everything as `Schema::..`, `Fields::..`,
     // `Raw::..`, `List::..` and `Decode::schema()`, never by a bare name: a
     // bare name resolves to the deriving file's own item before an imported
@@ -919,14 +887,14 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
 ///
 /// Same reasoning as `Ordering` above, and the same rule about where to look:
 /// from the module that declares the *trait*, so a program with its own
-/// `ToJson` gets its own helpers rather than `std::json`'s.
+/// `Decode` gets its own helpers rather than `std::schema`'s.
 ///
 /// Two places are searched there, because a generated body borrows its home
 /// module's whole vocabulary rather than only what that module declared:
-/// `object` and `member` are `std::json`'s own, while `List` is one
-/// `std::json` itself imported and a generated `List::Cons` chain needs it just
-/// as much. Looking through the home module's scope is what reaches the second
-/// kind without naming `std::core` here.
+/// `Schema` and `Fields` are `std::schema`'s own, while `List` is one
+/// `std::schema` itself imported and a generated `List::Cons` chain needs it
+/// just as much. Looking through the home module's scope is what reaches the
+/// second kind without naming `std::core` here.
 ///
 /// Nothing is brought that the file already has, so an author who imported
 /// `List` under an alias keeps their spelling and their alias.

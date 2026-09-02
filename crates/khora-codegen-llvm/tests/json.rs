@@ -35,9 +35,14 @@ fn run(name: &str, main: &str) -> String {
 
     let db = KhoraDatabase::new();
     let main_file = SourceFile::new(&db, dir.join("main.kh"), main.to_string());
+    // `std::schema` and what it imports, because decoding lives there now
+    // and a derived schema is what the round trips derive.
     let files = vec![
         SourceFile::new(&db, dir.join("core.kh"), std_source("core.kh")),
         SourceFile::new(&db, dir.join("json.kh"), std_source("json.kh")),
+        SourceFile::new(&db, dir.join("decimal.kh"), std_source("decimal.kh")),
+        SourceFile::new(&db, dir.join("time.kh"), std_source("time.kh")),
+        SourceFile::new(&db, dir.join("schema.kh"), std_source("schema.kh")),
         main_file,
     ];
     let root = SourceRoot::new(&db, files);
@@ -71,8 +76,9 @@ fn run(name: &str, main: &str) -> String {
 }
 
 const HEAD: &str = "module demo::main;
-import std::core::{List, Map, Option, Result};
-import std::json::{DecodeError, Field, FromJson, Json, JsonError, ToJson, decode, encode, parse};
+import std::core::{List, Map, Option, Result, Validated};
+import std::json::{Field, Json, JsonError, encode, parse};
+import std::schema::{Decode, Encode, Raw, Rejection, decode};
 
 fn print(value: String);
 extern fn khora_print_int(value: Int);
@@ -165,7 +171,7 @@ fn main() -> Int {{
 /// money or an identifier through it.
 ///
 /// Both directions: the digits survive parsing, `Json::integer` gets them back
-/// exactly, and `Int::to_json` writes them without a `Float` in between.
+/// exactly, and `Json::of_int` writes them without a `Float` in between.
 #[test]
 fn a_sixty_four_bit_integer_survives_the_round_trip() {
     let out = run(
@@ -177,7 +183,7 @@ fn main() -> Int {{
   print(shown(\"-9007199254740993\"));
   print(shown(\"0.1\"));
   print(shown(\"10.10\"));
-  print(encode(Int::to_json(9007199254740993)));
+  print(encode(Json::of_int(9007199254740993)));
   print(match Json::integer(parsed(\"9007199254740993\")) {{
     Option::Some(whole) => Int::to_string(whole),
     Option::None => \"none\",
@@ -427,29 +433,34 @@ fn a_record_derives_json_in_both_directions() {
         "json_derive_record",
         &format!(
             "{HEAD}
-derive(ToJson, FromJson)
+derive(Decode, Encode)
 type Account = {{ name: String, active: Bool, scores: List<Int>, note: Option<String> }};
 
 /// The round trip in its own scope, so the count below is about what the
 /// derived code *left behind* rather than what is still in scope. Counting
 /// beside live locals reports them as leaks, which is a test bug and not a
 /// finding.
-fn round_trip() -> () raises DecodeError {{
+fn round_trip() -> () {{
   let original: Account = {{
     name: \"ada\", active: true,
     scores: List::Cons(7, List::Cons(9, List::Nil)),
     note: Option::Some(\"kept\"),
   }};
-  let document = original.to_json();
-  let restored: Account = decode(document)!;
-  print(restored.name);
-  print(if restored.active {{ \"active\" }} else {{ \"inactive\" }});
-  khora_print_int(List::length(restored.scores));
-  print(restored.note.unwrap_or(\"missing\"))
+  let document = Raw::to_json(original.encode());
+  let restored: Validated<Account, Rejection> = decode(Raw::of_json(document));
+  match restored {{
+    Validated::Valid(back) => {{
+      print(back.name);
+      print(if back.active {{ \"active\" }} else {{ \"inactive\" }});
+      khora_print_int(List::length(back.scores));
+      print(back.note.unwrap_or(\"missing\"))
+    }},
+    Validated::Invalid(problems) => print(Rejection::report(problems)),
+  }}
 }}
 
-fn main() -> Int raises DecodeError {{
-  round_trip()!;
+fn main() -> Int {{
+  round_trip();
   khora_print_int(khora_live_count());
   0
 }}
@@ -459,16 +470,17 @@ fn main() -> Int raises DecodeError {{
     assert_eq!(out, "ada\nactive\n2\nkept\n0\n", "the trailing 0 is the live-object count");
 }
 
-/// Cases are adjacent-tagged uniformly, then recovered by tag and positional
-/// payload. A nullary case uses the same shape as one carrying values.
+/// A payload-free case is a bare string on the wire and a payload case is an
+/// object tagged with `type`; each is recovered by its tag and its named
+/// payload.
 #[test]
 fn a_variant_derives_json_in_both_directions() {
     let out = run(
         "json_derive_variant",
         &format!(
             "{HEAD}
-derive(ToJson, FromJson)
-type Shape = | Dot | Circle(radius: Int) | Label(String, Bool);
+derive(Decode, Encode)
+type Shape = | Dot | Circle(radius: Int) | Label(text: String, flag: Bool);
 
 fn describe(shape: Shape) -> String {{
   match shape {{
@@ -478,60 +490,60 @@ fn describe(shape: Shape) -> String {{
   }}
 }}
 
-/// Scoped for the reason the record's round trip is: the count belongs after
-/// the values, not beside them.
-fn round_trip() -> () raises DecodeError {{
-  let a: Shape = decode(Shape::Dot.to_json())!;
-  let b: Shape = decode(Shape::Circle(3).to_json())!;
-  let c: Shape = decode(Shape::Label(\"tag\", true).to_json())!;
-  print(describe(a));
-  print(describe(b));
-  print(describe(c))
+fn back(shape: Shape) -> String {{
+  let restored: Validated<Shape, Rejection> = decode(Raw::of_json(Raw::to_json(shape.encode())));
+  match restored {{
+    Validated::Valid(again) => describe(again),
+    Validated::Invalid(problems) => Rejection::report(problems),
+  }}
 }}
 
-fn main() -> Int raises DecodeError {{
-  round_trip()!;
+/// Scoped for the reason the record's round trip is: the count belongs after
+/// the values, not beside them.
+fn round_trip() -> () {{
+  print(back(Shape::Dot));
+  print(back(Shape::Circle(3)));
+  print(back(Shape::Label(\"tag\", true)));
+  print(encode(Raw::to_json(Shape::Dot.encode())));
+  print(encode(Raw::to_json(Shape::Circle(3).encode())))
+}}
+
+fn main() -> Int {{
+  round_trip();
   khora_print_int(khora_live_count());
   0
 }}
 "
         ),
     );
-    assert_eq!(out, "dot\ncircle 3\ntag yes\n0\n", "the trailing 0 is the live-object count");
+    assert_eq!(
+        out,
+        "dot\ncircle 3\ntag yes\n\"Dot\"\n{\"radius\":3,\"type\":\"Circle\"}\n0\n",
+        "the trailing 0 is the live-object count"
+    );
 }
 
-/// A decoder error retains the complete route to the value that disagreed.
-/// That is the difference between a useful API error and "invalid JSON".
+/// A rejection retains the complete route to the value that disagreed. That
+/// is the difference between a useful API error and "invalid JSON".
 #[test]
 fn a_derived_decode_names_the_nested_field() {
     let out = run(
         "json_derive_path",
         &format!(
             "{HEAD}
-derive(FromJson)
+derive(Decode)
 type Inner = {{ amount: Int }};
-derive(FromJson)
+derive(Decode)
 type Outer = {{ entry: Inner }};
-
-fn path_text(path: List<String>) -> String {{
-  match path {{
-    List::Nil => \"\",
-    List::Cons(head, List::Nil) => head,
-    List::Cons(head, tail) => head + \".\" + path_text(tail),
-  }}
-}}
 
 fn main() -> Int {{
   match parse(\"{{\\\"entry\\\":{{\\\"amount\\\":\\\"many\\\"}}}}\") {{
     Result::Err(_) => print(\"parse failed\"),
     Result::Ok(document) => {{
-      let _: Outer = decode(document)! catch {{
-        DecodeError::At(path, expected, found) => {{
-          print(path_text(path));
-          print(expected);
-          print(found);
-          {{ entry: {{ amount: 0 }} }}
-        }},
+      let read: Validated<Outer, Rejection> = decode(Raw::of_json(document));
+      match read {{
+        Validated::Valid(_outer) => print(\"decoded\"),
+        Validated::Invalid(problems) => print(Rejection::report(problems)),
       }};
     }},
   }};
@@ -541,12 +553,8 @@ fn main() -> Int {{
 "
         ),
     );
-    assert_eq!(
-        out,
-        "entry.amount\nwhole number in the range of Int\nstring\n0\n"
-    );
+    assert_eq!(out, "entry.amount should be a whole number, and is \"many\"\n0\n");
 }
-
 
 /// **The same document encodes the same way every time.**
 ///
@@ -572,14 +580,14 @@ fn an_encoded_object_is_in_a_stable_order() {
         "json_stable_order",
         &format!(
             "{HEAD}
-derive(ToJson)
+derive(Encode)
 type Money = {{ currency: String, amount: Int, note: String }};
 
 fn main() -> Int {{
   let m: Money = {{ currency: \"GBP\", amount: 1250, note: \"fee\" }};
-  print(encode(m.to_json()));
+  print(encode(Raw::to_json(m.encode())));
   // Twice, which is the half of the promise a single call cannot make.
-  print(encode(m.to_json()));
+  print(encode(Raw::to_json(m.encode())));
   // And through a parse, where the keys arrive in the document's order and
   // leave in this one.
   match parse(\"{{\\\"zebra\\\":1,\\\"apple\\\":2,\\\"mango\\\":3}}\") {{

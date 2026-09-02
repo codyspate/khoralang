@@ -5,7 +5,7 @@
 //! All three are ports of ideas from Effect-TS, and all three came out
 //! different in Khora because the type system can hold something TypeScript's
 //! cannot. `Redacted` there is a `toString` override, which a structured
-//! logger walks straight past; here it is a missing `ToJson` impl, which is a
+//! logger walks straight past; here it is a missing `Encode` impl, which is a
 //! build failure. That difference is the thing worth testing, so these tests
 //! check the *absence* of an instance as carefully as the presence of one.
 
@@ -26,7 +26,6 @@ fn std_source(name: &str) -> String {
 
 const HEAD: &str = "module demo::main;
 import std::core::{Eq, List, Redacted, Result, Show, Validated, print};
-import std::json::{Json, ToJson};
 ";
 
 fn program(name: &str, body: &str) -> (PathBuf, KhoraDatabase, SourceRoot) {
@@ -120,32 +119,12 @@ fn exposing_a_secret_gives_it_back() {
 /// **The build stops rather than serialising a secret.**
 ///
 /// This is the test that says why `Redacted` is a type and not a convention.
-/// `derive(ToJson)` walks the fields, finds no instance, and refuses — so a
+/// `derive(Encode)` walks the fields, finds no instance, and refuses — so a
 /// record that would have put a password in a response body cannot be written
-/// by accident, and the person who meant it writes `expose` instead.
-#[test]
-fn a_record_holding_a_secret_will_not_derive_to_json() {
-    let messages = refused(
-        "redacted_json",
-        r#"derive(ToJson)
-type Leak = {
-  password: Redacted<String>,
-};
-
-fn main() -> () { print("unreachable"); }"#,
-    );
-
-    assert!(
-        messages.iter().any(|m| m.contains("ToJson") && m.contains("Redacted")),
-        "expected the derive to name the field it could not serialise, got {messages:?}"
-    );
-}
-
-/// **A record holding a secret reads, and does not write.** `derive(Decode)`
-/// is accepted, because `Redacted` decodes through `secret`; `derive(Encode)`
-/// on the same declaration is refused at the derive line, by the same
-/// per-field check, which is the reason encoding is a trait of its own and
-/// not a second half of the schema.
+/// by accident, and the person who meant it writes `expose` instead. The same
+/// record derives `Decode`, because `Redacted` decodes through `secret`: it
+/// reads and does not write, which is the reason encoding is a trait of its
+/// own and not a second half of the schema.
 #[test]
 fn a_record_holding_a_secret_derives_decode_and_refuses_encode() {
     let messages = refused(

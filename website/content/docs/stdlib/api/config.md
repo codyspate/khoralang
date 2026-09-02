@@ -166,7 +166,7 @@ pub fn secret(name: String) -> Validated<Redacted<String>, ConfigError> with { e
 The variable, wrapped so it cannot be printed.
 
 The one every password and API key should go through. What comes back has
-no `ToJson` and shows as `<redacted>`, so a record holding it stays
+no `Encode` and shows as `<redacted>`, so a record holding it stays
 printable and serialisable-refusing -- `std::core::Redacted` has the whole
 argument.
 

@@ -200,14 +200,14 @@ This keeps the meaning of trait-provided behavior tied to explicit module import
 ## Deriving structural traits
 
 ```khora
-derive(Eq, Ord, Show, Hash, ToJson, FromJson, Decode, Encode)
+derive(Eq, Ord, Show, Hash, Decode, Encode)
 pub type User = {
   id: Int,
   name: String,
 };
 ```
 
-The compiler can derive those eight structural traits when every field supports the requested behavior. A `derive(...)` clause appears immediately before its `type` declaration. `Decode` and `Encode` are `std::schema`'s: the declaration is the schema, and `User::schema()` reads one from untrusted input.
+The compiler can derive those six structural traits when every field supports the requested behavior. A `derive(...)` clause appears immediately before its `type` declaration. `Decode` and `Encode` are `std::schema`'s: the declaration is the schema, and `User::schema()` reads one from untrusted input.
 
 ## Generic traits
 

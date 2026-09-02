@@ -1,4 +1,4 @@
-//! `derive(Eq, Ord, Show, Hash, ToJson, FromJson)`, expanded into ordinary
+//! `derive(Eq, Ord, Show, Hash, Decode, Encode)`, expanded into ordinary
 //! impls.
 //!
 //! # Why this is a source-to-source expansion
@@ -42,12 +42,11 @@ use crate::HirError;
 
 /// The traits the compiler knows how to write.
 ///
-/// Eight, and not extensible. Every one of them is *structural* — the answer is
+/// Six, and not extensible. Every one of them is *structural* — the answer is
 /// determined by the fields and nothing else — which is the property that makes
 /// generating the code better than writing it. A trait whose implementation is
 /// a decision (`Default`, `Iterator`) has nothing here to generate.
-pub const DERIVABLE: [&str; 8] =
-    ["Eq", "Ord", "Show", "Hash", "ToJson", "FromJson", "Decode", "Encode"];
+pub const DERIVABLE: [&str; 6] = ["Eq", "Ord", "Show", "Hash", "Decode", "Encode"];
 
 /// The prime the derived `Hash` reduces by at every step.
 ///
@@ -107,8 +106,6 @@ pub fn method_of(trait_name: &str) -> &'static str {
         "Ord" => "cmp",
         "Show" => "show",
         "Hash" => "hash",
-        "ToJson" => "to_json",
-        "FromJson" => "from_json",
         "Decode" => "schema",
         "Encode" => "encode",
         _ => "",
@@ -526,21 +523,6 @@ fn write_impl(trait_name: &str, type_name: &str, params: &[String], shape: &Shap
                 variant_show(type_name, cases)
             )
         }
-        ("ToJson", Shape::Record(fields, _)) => {
-            format!("fn to_json(self) -> Json {{ {} }}", record_to_json(fields))
-        }
-        ("ToJson", Shape::Variant(cases)) => format!(
-            "fn to_json(self) -> Json {{ {} }}",
-            variant_to_json(type_name, cases)
-        ),
-        ("FromJson", Shape::Record(fields, field_types)) => format!(
-            "fn from_json(value: Json) -> {self_type} raises DecodeError {{ {} }}",
-            record_from_json(fields, field_types)
-        ),
-        ("FromJson", Shape::Variant(cases)) => format!(
-            "fn from_json(value: Json) -> {self_type} raises DecodeError {{ {} }}",
-            variant_from_json(type_name, cases)
-        ),
         ("Decode", Shape::Record(fields, field_types)) => format!(
             "fn schema() -> Schema<{self_type}> {{ {} }}",
             record_decode(type_name, &self_type, fields, field_types)
@@ -817,59 +799,6 @@ fn cons_chain(items: impl IntoIterator<Item = String>) -> String {
         .fold("List::Nil".to_string(), |rest, item| format!("List::Cons({item}, {rest})"))
 }
 
-/// A record is its JSON object: declaration names become field names and the
-/// field values choose their own representation through `ToJson`.
-fn record_to_json(fields: &[String]) -> String {
-    let bindings = fields
-        .iter()
-        .map(|field| format!("let {field}: Json = self.{field}.to_json();"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let encoded = fields
-        .iter()
-        .map(|field| format!("member(\"{field}\", {field})"));
-    format!("{bindings} object({})", cons_chain(encoded))
-}
-
-/// Every record field is required. Unknown fields are deliberately ignored by
-/// `field_as`, which lets an older reader accept a document written by a newer
-/// producer that only added data.
-fn record_from_json(fields: &[String], field_types: &[String]) -> String {
-    let decoded: Vec<String> = fields
-        .iter()
-        .zip(field_types)
-        .map(|(field, ty)| format!("let {field}: {ty} = field_as(value, \"{field}\")!;"))
-        .collect();
-    let initialized = fields
-        .iter()
-        .map(|field| format!("{field}: {field}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{} {{ {initialized} }}", decoded.join(" "))
-}
-
-/// Variants use one adjacent-tag shape, including payload-free cases:
-/// `{ "case": "Circle", "fields": [3] }`.
-fn variant_to_json(type_name: &str, cases: &[Case]) -> String {
-    let arms: Vec<String> = cases
-        .iter()
-        .map(|case| {
-            let pattern = case_pattern(type_name, case, "a");
-            let bindings = (0..case.arity)
-                .map(|i| format!("let field{i}: Json = a{i}.to_json();"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let fields = (0..case.arity).map(|i| format!("field{i}"));
-            format!(
-                "{pattern} => {{ {bindings} variant(\"{}\", {}) }}",
-                case.name,
-                cons_chain(fields)
-            )
-        })
-        .collect();
-    format!("match self {{ {} }}", arms.join(", "))
-}
-
 /// `Fields::zip(a, Fields::zip(b, c))` — the fields of a record, nested to
 /// the right so that `tuple_pattern` takes them apart. One field is itself.
 fn zip_chain(items: impl IntoIterator<Item = String>) -> String {
@@ -1026,44 +955,3 @@ fn variant_encode(type_name: &str, cases: &[Case]) -> String {
     format!("match self {{ {} }}", arms.join(", "))
 }
 
-/// The tag decides the case, so this is a lookup keyed by a string.
-///
-/// **A `match` on the tag**, which is what it always wanted to be. It was an
-/// `if` chain for as long as matching a `String` literal parsed, type-checked
-/// and then failed in the backend — the same comparisons in a spelling that
-/// compiled. D14 decided that a literal pattern is an equality test, so the
-/// chain became the workaround it had always been described as.
-fn variant_from_json(type_name: &str, cases: &[Case]) -> String {
-    let expected = cases
-        .iter()
-        .map(|case| format!("`{}`", case.name))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let mut arms: Vec<String> = Vec::with_capacity(cases.len() + 1);
-    for case in cases {
-        let constructor = if case.arity == 0 {
-            format!("{type_name}::{}", case.name)
-        } else {
-            let fields: Vec<String> = case
-                .field_types
-                .iter()
-                .enumerate()
-                .map(|(i, ty)| format!("let field{i}: {ty} = variant_field(value, {i})!;"))
-                .collect();
-            let arguments =
-                (0..case.arity).map(|i| format!("field{i}")).collect::<Vec<_>>().join(", ");
-            format!("{} {type_name}::{}({arguments})", fields.join(" "), case.name)
-        };
-        arms.push(format!(
-            "\"{}\" => {{ variant_arity(value, {})!; {constructor} }}",
-            case.name, case.arity
-        ));
-    }
-    // A literal pattern does not make a `match` exhaustive, and this one is
-    // genuinely not: the tag came out of somebody else's JSON and may say
-    // anything at all. Naming what was expected is the whole value of the
-    // error, so the catch-all is where the message lives.
-    arms.push(format!("_ => unknown_variant(case, \"one of {expected}\")!"));
-    format!("let case = variant_case(value)!; match case {{ {} }}", arms.join(", "))
-}

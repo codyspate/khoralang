@@ -272,7 +272,7 @@ impl<'a> Ctx<'a> {
     /// time either sees one it is constructor calls, and everything that
     /// already works for those — inference, monomorphization, reference
     /// counting, reuse — works for this without being told. It is also
-    /// literally what `derive(ToJson)` was already emitting by hand.
+    /// literally what the JSON derive of the time was already emitting by hand.
     ///
     /// Every node carries the literal's own range, so a diagnostic points at
     /// the brackets somebody wrote rather than at a `Cons` nobody did.

@@ -85,7 +85,7 @@ clever one: it is a `Config` record in a structured log, or a `${}` in a
 message written while debugging something else, and no review catches it
 because nothing about the line looks wrong.
 
-**`Show` prints `<redacted>`, and there is no `ToJson`.** Those two
+**`Show` prints `<redacted>`, and there is no `Encode`.** Those two
 sentences are the whole design, and each is deliberate in a different
 direction:
 
@@ -94,10 +94,12 @@ direction:
   appear. A `Redacted` with no `Show` at all would look stricter and be
   worse: it makes the containing record unprintable, and the way people
   answer that is by not wrapping the secret.
-- *Without* `ToJson`, a record holding one does **not** derive `ToJson`,
+- *Without* `Encode`, a record holding one does **not** derive `Encode`,
   and the build stops. That is the right place to stop: a type that
   serialises a secret is a bug, and one that serialises `"<redacted>"` is a
-  payload that fails to round-trip somewhere further away.
+  payload that fails to round-trip somewhere further away. It still
+  derives `Decode`, because a secret arrives from somewhere: it reads, and
+  does not write.
 
 This is where a nominal type earns its keep. Elsewhere the same idea is a
 `toString` override, which any structured logger walks straight past

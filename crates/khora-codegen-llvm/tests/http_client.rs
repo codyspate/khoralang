@@ -515,7 +515,7 @@ fn greet(request: Request) -> Response {{
 
 fn echo(request: Request) -> Response {{
   Response::with_header(
-    Response::json(201, "{{\"got\":\"" + request.body + "\"}}"),
+    Response::text(201, "{{\"got\":\"" + request.body + "\"}}"),
     "X-Seen", "yes"
   )
 }}

@@ -14,6 +14,22 @@ it will behave differently now.
 
 ### Breaking
 
+- **`std::json` no longer decodes; `std::schema` does.** `FromJson`,
+  `ToJson`, `DecodeError`, `decode`, `field_as` and the `variant_*` helpers
+  are deleted, and `derive(ToJson, FromJson)` is refused. The replacements
+  are `derive(Decode, Encode)`, `Raw::of_json` in and `Raw::to_json` out; a
+  decode reports every problem as a `Rejection` rather than the first as a
+  `DecodeError`. `parse`, `encode`, `Json` and its accessors, `Field`,
+  `member` and `object` are unchanged. The variant wire format changes with
+  the derive: a payload-free case is a bare string and a payload case is an
+  object tagged with `type` and keyed by its payload names, where
+  `derive(ToJson)` wrote `{ "case": .., "fields": [..] }` for every case.
+- **`Response::json` takes `A: Encode` rather than `A: Show`.** It encodes
+  the body as JSON rather than printing it, so a derived record, a `Json`
+  built by hand and a list of `Rejection`s all serve, and a record holding a
+  `Redacted` cannot be sent. A pre-serialized `String` is now sent as a JSON
+  string; build the response with `Response::text` and its content type, or
+  `parse` the text first.
 - **`struct2`..`struct5` are gone; a record schema is `struct({ .. })`.**
   `struct({ host: string(), port: between(int(), 1, 65535) })` is a
   `Schema<Listen>` when `Listen` is the record with those fields, decided

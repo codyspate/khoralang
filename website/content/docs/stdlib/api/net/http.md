@@ -657,14 +657,15 @@ impl Response
 #### json
 
 ```khora
-pub fn json<A: Show>(status: Int, body: A) -> Response
+pub fn json<A: Encode>(status: Int, body: A) -> Response
 ```
 
-Serializes `body` and sends it with the given status.
+Encodes `body` as JSON and sends it with the given status.
 
-`A: Show` rather than a JSON encoder, because there is no JSON module yet
-and `Show` is the trait a type already uses to say how it reads. When
-there is one, this is where it goes and nothing above it changes.
+`A: Encode`, so a derived record, a `Json` built by hand and a list of
+`Rejection`s all serve: `Response::json(422, problems)` is the body a
+client reads a refused request from. A record holding a secret has no
+`Encode`, so it cannot be sent by accident.
 
 #### text
 

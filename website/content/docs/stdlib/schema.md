@@ -262,9 +262,10 @@ a hand-written schema is picked up by every schema that contains it.
 such limit — `Fields::zip` nests a tuple, however many fields there are — but
 nesting a record is usually what the shape of the data was telling you anyway.
 
-**`std::json` still has decoders of its own.** `Raw::of_json` is the bridge
-from a parsed document to a schema; `FromJson` and `ToJson` remain beside it
-for now.
+**`std::json` parses and prints, and does not decode.** `parse` turns text
+into a `Json` and `Raw::of_json` turns that into what a schema reads;
+`Raw::to_json` and `encode` are the way back. There is no second decoding
+vocabulary beside this one.
 
 ## See also
 

@@ -84,12 +84,15 @@ fn the_reference_application_serves_a_request() {
         answer.contains("Content-Type: application/json\r\n"),
         "the handler returned `Response::json`:\n{answer}"
     );
+    // The report is encoded through `Encode`, so the body is the JSON a
+    // client reads rather than what `Show` printed: keys sorted, and the
+    // variant tagged with `type` and keyed by its payload name.
     assert!(
-        answer.contains("\r\n\r\n{\"account_id\": \"acc_9921\""),
+        answer.contains("\r\n\r\n{\"account_id\":\"acc_9921\""),
         "the body is the report the model produced:\n{answer}"
     );
     assert!(
-        answer.contains("critical: Immediate fund freeze"),
+        answer.contains("\"risk\":{\"action_required\":\"Immediate fund freeze\",\"type\":\"Critical\"}"),
         "the risk level came through the whole stack:\n{answer}"
     );
 

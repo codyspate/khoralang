@@ -3,6 +3,7 @@ module risk_analyzer::main;
 import std::core::{ChildFailed, Eq, List, Option, Scope, SharedFn, Show, assert, print};
 import std::net::http::{HttpError, Request, Response, Router};
 import std::ai::{Extract, LLMService, ModelError, Prompt, extract};
+import std::schema::{Encode};
 
 /// How bad it is, and why.
 ///
@@ -15,12 +16,15 @@ import std::ai::{Extract, LLMService, ModelError, Prompt, extract};
 /// It is still a trait rather than a builtin, and that part of the old comment
 /// stands: `==` reaches a trait so that a type gets to say what equality
 /// means. Deriving is a type saying "structurally", out loud, in one word.
-derive(Eq)
+derive(Eq, Encode)
 pub type RiskLevel =
   | Low
   | Moderate(reason: String)
   | Critical(action_required: String);
 
+/// `Encode` is derived too, so `Response::json` sends the report as JSON
+/// rather than as whatever `Show` printed.
+derive(Encode)
 pub type AnalysisReport = {
   account_id: String,
   risk: RiskLevel,
