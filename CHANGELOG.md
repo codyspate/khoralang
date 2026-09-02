@@ -14,6 +14,35 @@ it will behave differently now.
 
 ### Breaking
 
+- **`std::schema`'s primitives are strict where the source could label the
+  value.** `string()` no longer reads a `Raw::Number`, and `int()`, `float()`
+  and `bool()` no longer read a `Raw::Text`: a JSON body with `"port": "8080"`
+  is refused, as serde and `encoding/json` refuse it. Text a source could not
+  label -- the environment, the command line, a query string -- arrives as the
+  new `Raw::Untyped`, which every primitive reads, so `PORT=8080` still
+  decodes. `decimal()` reads text as well as a number, because money travels
+  as a string on most wires. `bool()` reads `true`, `false`, `1` and `0` and
+  no longer `yes` or `no`.
+- **`Raw` has three new arms, `Null`, `Untyped` and `Denied`**, so every
+  exhaustive match over it gains three. A JSON `null` in a required field now
+  reads `rate should be a number, and is null` rather than `rate is not set`;
+  `optional` treats both as `None`, and `nullable` is the field that must be
+  present and may be `null`.
+- **A rejection quotes text in double quotes and writes a number bare.**
+  `port should be a whole number, and is "8080"` says the value arrived as
+  text; `and is 8080` says it did not. Before, both were written in
+  backticks and could not be told apart.
+- **`many` is `list`**, on the rule that a constructor is named after the type
+  it answers, and `Shape`'s arms follow every constructor one for one:
+  `Many` is `List`, `Maybe` is `Optional`, and the new arms are `Any`,
+  `Float`, `Dict`, `Cases`, `Nullable`, `Default`, `Keyed`, `Closed`,
+  `Described` and `Lazy`. `Shape::Refined` carries a structured `Rule` rather
+  than a sentence, and `Problem::Refused` carries the same. `Lazy` holds a
+  thunk, so `Shape` no longer derives `Show`; its `Show` is written by hand.
+- **`Problem` has two new arms.** `Unexpected` is a key a closed record did
+  not declare, produced only by `Schema::closed`; `Denied` is a value the
+  source was not granted, kept apart from `Missing` because the fix is in
+  `khora.toml`.
 - **`Rejection::where_` is `Rejection::at`.** `where` is not a reserved word in
   Khora — not a hard keyword, not a contextual one, not a token the lexer knows
   — so the underscore was avoiding a collision that does not exist. It is `at`
@@ -23,8 +52,8 @@ it will behave differently now.
 
 - **Every `std::schema` constructor is named after the type it answers.**
   `text` is `string`, `whole` is `int`, `exact` is `decimal`, `truth` is
-  `bool`; `secret`, `optional`, `many`, `refine` and `struct2`..`struct5` are
-  unchanged. `Shape`'s arms follow the constructors (`String`, `Int`,
+  `bool`; `secret`, `optional`, `refine` and `struct2`..`struct5` are
+  unchanged (`many` became `list` afterwards, above). `Shape`'s arms follow the constructors (`String`, `Int`,
   `Decimal`, `Bool`, and `Struct` without its trailing underscore) and `Raw`'s
   follow `std::json`'s (`Text`, `Number`, `Bool`). `std::config`'s `integer`
   and `boolean` are `int` and `bool` for the same reason, so `std` no longer

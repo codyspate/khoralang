@@ -8,15 +8,11 @@ description: "One description of a value's shape, used to decode untrusted input
 One description of a value's shape, used to decode untrusted input.
 
 **A schema describes a value. It does not know where the bytes came from.**
-That separation is the whole of the library. `std::config` reads settings
-well and none of it is reusable, because its `string(name)` is not "this
-field is text" -- it is *go to the environment, fetch this variable, and
-give me the text or a reason*. The shape and the reading are one function,
-so a JSON body, a CLI argument and a database row each need their own
-vocabulary or go without.
-
-Here a `Schema<A>` describes an `A` and a [`Raw`] is whatever a source
-produced, and `decode` is one function over the pair.
+That separation is the whole of the library. A `Schema<A>` describes an
+`A`; a [`Raw`] is whatever a source produced -- a JSON document, the
+environment, a query string, a database row; and `decode` is one function
+over the pair. The same `Schema<Settings>` reads a request body, a test
+fixture and the deployment's variables, and does not know which.
 
 ## Both halves, in one record
 
@@ -25,19 +21,23 @@ load-bearing. The closure is what makes `schema.decode(value)` an ordinary
 call and what lets schemas be combined. The shape is untyped -- no type
 parameter -- which is what lets a record's fields sit in a `List` and be
 walked, so a deployment can ask which keys a configuration needs without
-starting the program.
-
-A record of two closures would have lost the second; a bare tree would have
-lost the first. [The schema design
-note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md)
-has the argument in full.
+starting the program, and a document can be rendered from the same value
+that checks the input.
 
 ## Every problem, not the first
 
 Decoding answers a `Validated`, so a record with three bad fields reports
-three. That is the property `std::config` already has and the one worth
-keeping: a person fixing a deployment wants the list, not one line of it at
+three. A person fixing a deployment wants the list, not one line of it at
 a time. `Validated::to_result` is one call for a caller who wants to stop.
+
+## Strict where the source could say, lenient where it could not
+
+`int()` reads a `Raw::Number`, and refuses a `Raw::Text` holding `"8080"`:
+a JSON body that sends a number as a string is wrong, and serde and
+`encoding/json` refuse it too. The environment cannot label anything, so
+it hands over [`Raw::Untyped`], which every primitive reads. Leniency is a
+fact about the source, recorded by the source, and no primitive has to
+guess.
 
 ## Types
 
@@ -47,11 +47,14 @@ a time. `Validated::to_result` is one call for a caller who wants to stop.
 derive(Show)
 pub type Raw =
   | Absent
+  | Null
   | Text(text: String)
+  | Untyped(text: String)
   | Number(text: String)
   | Bool(value: Bool)
   | Sequence(items: List<Raw>)
-  | Record(fields: List<Pair<String, Raw>>);
+  | Record(fields: List<Pair<String, Raw>>)
+  | Denied;
 ```
 
 A value as a source handed it over, before anything has been asked of it.
@@ -64,12 +67,25 @@ about fifteen significant digits, so `9007199254740993` comes back one
 short of itself and `10.10` is never exactly recoverable -- and a schema
 that decoded a `Decimal` through one would rebuild, inside the library
 meant to prevent that class of thing, the exact bug it exists to prevent.
-Keeping the token lets [`int`] and [`decimal`] parse it the way
-`std::config` does, which is why `std::config` is exact.
+Keeping the token lets [`int`] and [`decimal`] parse it exactly.
 
-`std::json` keeps its numbers the same way since #142, so the two trees no
-longer disagree about what a number is. They are still separate types: a
-`Raw` is what *any* source produces, and JSON is one source.
+**`Null` is not `Absent`.** A key that was not there and a key that was
+there holding nothing are different facts to a client: [`optional`] treats
+both as nothing, and a required field given `null` says so rather than
+saying it was not set, which is the difference between a client bug and a
+deployment bug.
+
+**`Untyped` is text the source could not label.** An environment variable,
+a command-line argument, a query parameter and a header are all text, and
+none of them knows whether `8080` was meant as a number. Every primitive
+reads an `Untyped`, and none reads a `Text` as anything but text, which is
+how one `Schema<Int>` refuses `"port": "8080"` in a JSON body and accepts
+`PORT=8080` from the environment.
+
+**`Denied` is a value the source was not allowed to look at.** The
+environment puts it where a variable the manifest does not grant would
+go, and it decodes as [`Problem::Denied`] rather than as missing, because
+the fix is a line in `khora.toml` and not in the deployment.
 
 ### Segment
 
@@ -80,6 +96,30 @@ pub type Segment = | Field(name: String) | Index(at: Int);
 
 One step into a value, so an error can say `listen.port` or `items[3].id`.
 
+### Rule
+
+```khora
+derive(Show, Eq)
+pub type Rule =
+  | Custom(must: String)
+  | Between(low: String, high: String)
+  | AtLeast(bound: String)
+  | AtMost(bound: String)
+  | MinLength(n: Int)
+  | MaxLength(n: Int)
+  | MinItems(n: Int)
+  | MaxItems(n: Int)
+  | OneOf(allowed: List<String>);
+```
+
+What a refinement asked of a value, kept as structure rather than as a
+sentence.
+
+A sentence is what a person reads and a keyword is what a JSON Schema
+carries, and only structure can become both. [`refine`] takes a sentence
+and keeps it as `Custom`; the named rules -- [`between`], [`min_length`]
+and their neighbours -- carry their bounds.
+
 ### Problem
 
 ```khora
@@ -87,7 +127,9 @@ derive(Show)
 pub type Problem =
   | Missing
   | Wrong(wanted: String, found: Redacted<String>)
-  | Refused(must: String);
+  | Refused(rule: Rule)
+  | Unexpected
+  | Denied;
 ```
 
 What was wrong at one place.
@@ -95,8 +137,14 @@ What was wrong at one place.
 **`found` is a `Redacted<String>`**, always, rather than only inside a
 secret. A decode error quotes what it saw, which is most of its value, and
 that is the easiest imaginable way to put a password in a log. Making the
-wrapper unconditional means [`describe`] decides once whether to expose it
-and no future variant can forget.
+wrapper unconditional means [`Rejection::describe`] decides once whether
+to expose it and no future variant can forget.
+
+`Unexpected` is a key a closed record did not declare, and only
+[`Schema::closed`] produces it: unknown keys are ignored by default, as
+every library this audience has used ignores them. `Denied` is a value the
+source was not allowed to read, kept apart from `Missing` because the fix
+is in `khora.toml` and not in the deployment.
 
 ### Rejection
 
@@ -110,17 +158,26 @@ A problem, and where it was.
 ### Shape
 
 ```khora
-derive(Show)
 pub type Shape =
+  | Any
   | String
   | Int
+  | Float
   | Decimal
   | Bool
-  | Many(of: Shape)
+  | List(of: Shape)
+  | Dict(of: Shape)
   | Struct(fields: List<Named>)
-  | Maybe(inner: Shape)
-  | Refined(inner: Shape, must: String)
-  | Secret(inner: Shape);
+  | Cases(cases: List<Alternative>)
+  | Optional(inner: Shape)
+  | Nullable(inner: Shape)
+  | Default(inner: Shape)
+  | Keyed(wire: String, inner: Shape)
+  | Refined(inner: Shape, rule: Rule)
+  | Secret(inner: Shape)
+  | Closed(inner: Shape)
+  | Described(inner: Shape, text: String)
+  | Lazy(name: String, inner: () -> Shape);
 ```
 
 The untyped half of a schema: what it describes, without saying as what.
@@ -130,6 +187,16 @@ types and this is what lets them sit in one `List` and be walked -- to list
 the keys a configuration needs, to print a request body in generated
 documentation, to render a JSON Schema. A closure answers none of those.
 
+**Every arm is named after the constructor that builds it**, one for one:
+[`string`] builds `String`, [`list`] builds `List`, [`Schema::cases`]
+builds `Cases`, [`Schema::lazy`] builds `Lazy`. `Struct` is what
+[`Schema::record`] builds, and is named for the literal that will build it.
+
+`Lazy` holds a thunk rather than a shape, so that a type which mentions
+itself has a shape at all; a walker forces it, and a walker that can meet
+the same name twice keeps a visited set. It is also why `Show` is written
+by hand below: nothing can be derived over a closure.
+
 ### Named
 
 ```khora
@@ -138,6 +205,19 @@ pub type Named = { name: String, shape: Shape };
 ```
 
 One named field of a [`Shape::Struct`].
+
+`name` is the field's name in the type. The key it is read under on the
+wire is the same unless the shape inside is [`Shape::Keyed`], which
+[`Shape::keys`] looks through.
+
+### Alternative
+
+```khora
+derive(Show)
+pub type Alternative = { name: String, fields: List<Named> };
+```
+
+One case of a [`Shape::Cases`]: its tag, and the fields of its payload.
 
 ### Schema
 
@@ -150,9 +230,39 @@ pub type Schema<A> = {
 
 A description of an `A`, and how to read one.
 
-Built with the combinators below rather than by hand: the record is public
+Built with the constructors below rather than by hand: the record is public
 so that a package may add a primitive of its own, and everything `std`
 offers goes through [`string`], [`int`] and their neighbours.
+
+### Fields
+
+```khora
+pub type Fields<A> = {
+  fields: List<Named>,
+  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+};
+```
+
+The fields of a record, decoding to an `A`.
+
+What [`Schema::record`] turns into a schema. Two fields are joined with
+[`Fields::zip`], which nests a tuple, and [`Fields::map`] turns the tuple
+into the record; there is no arity anywhere in it. Public because a
+package may want to build a record schema from something that is not
+source -- a database catalog, say.
+
+### Case
+
+```khora
+pub type Case<A> = {
+  name: String,
+  fields: List<Named>,
+  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+};
+```
+
+One case of a variant: its tag on the wire, the fields of its payload, and
+how the payload becomes the value. Built by [`Schema::case`].
 
 ## Methods
 
@@ -181,6 +291,66 @@ pub fn describe(self) -> String
 ```
 
 What to call this in a message: `text`, `a number`, and so on.
+
+#### of_json
+
+```khora
+pub fn of_json(document: Json) -> Raw
+```
+
+A JSON document as a source produced it.
+
+Total: `null` stays `Null`, a number keeps its literal, and an object
+becomes a record in the order `Json::entries` gives.
+
+#### to_json
+
+```khora
+pub fn to_json(self) -> Json
+```
+
+The JSON a value renders to; the one bridge out.
+
+An `Absent` entry is left out of an object and written as `null` inside
+an array, because an element cannot be omitted. `Untyped` is text, which
+is all a source that could not label it ever knew.
+
+#### of_map
+
+```khora
+pub fn of_map(text: Map<String, String>) -> Raw
+```
+
+A record of text nobody labelled: a query string, the path parameters,
+the headers.
+
+#### of_arguments
+
+```khora
+pub fn of_arguments(arguments: List<String>) -> Raw
+```
+
+Command-line arguments as a record.
+
+`--host x` and `--host=x` are a field named `host`; a bare `--verbose`
+is `true`; `-` in a flag is `_` in its name, so `--log-level` reaches a
+field called `log_level`; and anything that is not a flag is collected,
+in order, under `arguments`.
+
+### Rule
+
+```khora
+impl Rule
+```
+
+#### describe
+
+```khora
+pub fn describe(self) -> String
+```
+
+The rule as the rest of a sentence beginning `must`: `be between 1 and
+65535`, `have at least 1 item`.
 
 ### Segment
 
@@ -231,6 +401,45 @@ naming the bad value is what makes a decode error worth reading, and a
 message naming a password is a leak. The flag is set by [`secret`] and
 nothing else looks at it.
 
+Text is written in double quotes and a number bare, so `port should be
+a whole number, and is "8080"` says what was wrong with it: `8080` is a
+whole number, and the problem was that it arrived as text.
+
+#### report
+
+```khora
+pub fn report(problems: List<Rejection>) -> String
+```
+
+Every problem, one per line, in the order they were found.
+
+### Shape
+
+```khora
+impl Shape
+```
+
+#### keys
+
+```khora
+pub fn keys(self) -> List<String>
+```
+
+The keys a record shape needs, in the order they were declared, as they
+are spelled on the wire.
+
+**The question a deployment asks and a program should not have to be
+started to answer.** Empty for anything that is not a record.
+
+#### wire_key
+
+```khora
+pub fn wire_key(self) -> Option<String>
+```
+
+The wire key a field shape was given by [`key`], looking through the
+wrappers that may sit outside it.
+
 ### Schema<A>
 
 ```khora
@@ -257,22 +466,164 @@ The same, stopping at the first problem.
 
 For one field, or for a caller with nothing to do with a list.
 
-### Shape
+#### map
 
 ```khora
-impl Shape
+pub fn map<B>(self, f: (A) -> B) -> Schema<B>
 ```
 
-#### keys
+The same shape, decoding to something made from the value.
+
+How a newtype reads: `int().map(fn n => UserId(n))`.
+
+#### try_map
 
 ```khora
-pub fn keys(self) -> List<String>
+pub fn try_map<B>(self, wanted: String, f: (A) -> Option<B>) -> Schema<B>
 ```
 
-The keys a record shape needs, in the order they were declared.
+The same shape, decoding to something the value may fail to become.
 
-**The question a deployment asks and a program should not have to be
-started to answer.** Empty for anything that is not a record.
+Parse, don't validate: `string().try_map("an ISO 8601 date",
+Date::of_string)` is a `Schema<Date>`, and a value that is not one reads
+`when should be an ISO 8601 date, and is "yesterday"`.
+
+#### record
+
+```khora
+pub fn record(fields: Fields<A>) -> Schema<A>
+```
+
+A record, from its fields.
+
+The value has to be a record: a field that is not there is reported by
+the field, and something that is not a record at all is reported once.
+
+#### case
+
+```khora
+pub fn case<F>(name: String, fields: Fields<F>, make: (F) -> A) -> Case<A>
+```
+
+One case of a variant, for [`Schema::cases`].
+
+`make` turns the decoded payload into the value; a case with no payload
+takes [`Fields::none`] and ignores its argument.
+
+#### cases
+
+```khora
+pub fn cases(cases: List<Case<A>>) -> Schema<A>
+```
+
+A variant, tagged with `type`.
+
+**A payload-free case is a bare string on the wire and a payload case is
+an object whose first key is `type`.** `"Local"` and `{ "type":
+"Remote", "url": ".." }` are the two forms, decided by the case and not
+by its siblings, so adding a payload case to a shipped enum does not
+change how the existing cases are written. That is what a TypeScript
+union of a literal and a tagged object encodes, and what JSON Schema's
+`oneOf` expresses directly.
+
+The tag key is `type` because `type` is a keyword, and a record field
+cannot be named by it, so no payload can ever collide with its own tag.
+
+#### cases_tagged
+
+```khora
+pub fn cases_tagged(tag: String, cases: List<Case<A>>) -> Schema<A>
+```
+
+A variant tagged with a key of a foreign API's choosing: `kind`,
+`_tag`.
+
+#### lazy
+
+```khora
+pub fn lazy(name: String, build: () -> Schema<A>) -> Schema<A>
+```
+
+A schema built when it is first read, so a type may mention itself.
+
+`name` is what the shape carries, and what a rendered document uses to
+refer to the type a second time. Construction never recurses, because
+nothing inside is built until a value arrives; the cost is that the
+inner schema is rebuilt once per value decoded.
+
+#### closed
+
+```khora
+pub fn closed(self) -> Schema<A>
+```
+
+The same record, refusing a key it did not declare.
+
+Unknown keys are ignored by default, which is what every library this
+audience has used does; a boundary that wants to reject a misspelled
+setting rather than ignore it asks for it here, and gets `verbose is not
+expected` for each one.
+
+#### described
+
+```khora
+pub fn described(self, text: String) -> Schema<A>
+```
+
+The same schema, with a sentence for a document to carry.
+
+### Fields<A>
+
+```khora
+impl<A> Fields<A>
+```
+
+#### of
+
+```khora
+pub fn of(name: String, inner: Schema<A>) -> Fields<A>
+```
+
+One field, read under its own name -- or under the wire key its schema
+was given by [`key`].
+
+#### none
+
+```khora
+pub fn none() -> Fields<()>
+```
+
+No fields at all: the payload of a case that has none.
+
+#### zip
+
+```khora
+pub fn zip<B>(self, other: Fields<B>) -> Fields<(A, B)>
+```
+
+Both sets of fields, decoding to the pair, keeping both sides' failures.
+
+#### map
+
+```khora
+pub fn map<B>(self, f: (A) -> B) -> Fields<B>
+```
+
+The same fields, assembled into something else -- the record, usually.
+
+## Trait implementations
+
+### Show for Shape
+
+```khora
+impl Show for Shape
+```
+
+#### show
+
+```khora
+fn show(self) -> String
+```
 
 ## Functions
 
@@ -284,6 +635,9 @@ pub fn string() -> Schema<String>
 
 Text, as it arrived.
 
+A number is not text: `{ "name": 42 }` is refused, as serde refuses it.
+A source that could not tell hands over [`Raw::Untyped`], which is read.
+
 ### int
 
 ```khora
@@ -292,7 +646,18 @@ pub fn int() -> Schema<Int>
 
 An `Int`, parsed from the token rather than through a float.
 
-A rejection reads `port should be a whole number`.
+A rejection reads `port should be a whole number, and is "eighty"`.
+
+### float
+
+```khora
+pub fn float() -> Schema<Float>
+```
+
+A `Float`, parsed from the token.
+
+The fifteen significant digits a `Float` carries are the caller's choice
+here, and are not made anywhere else in this module.
 
 ### decimal
 
@@ -305,13 +670,32 @@ An exact decimal, parsed from the token.
 The reason [`Raw::Number`] keeps its text: this is the one a price goes
 through, and a `Float` on the way would make it the wrong price.
 
+**Read from text as well as from a number.** Money travels as a string on
+most wires, for the sake of JavaScript clients whose only number is a
+double, and every decimal library this audience has used writes it so.
+
 ### bool
 
 ```khora
 pub fn bool() -> Schema<Bool>
 ```
 
-True or false, spelled the way a configuration file spells it.
+True or false.
+
+From a source that could not label it, `true`, `false`, `1` and `0` --
+and not `yes`, because a reader that accepts every spelling accepts a
+typo as `false`.
+
+### any
+
+```khora
+pub fn any() -> Schema<Raw>
+```
+
+Whatever arrived, as it arrived.
+
+For a field whose shape is somebody else's business; the only thing it
+refuses is a value that is not there.
 
 ### optional
 
@@ -321,17 +705,52 @@ pub fn optional<A>(inner: Schema<A>) -> Schema<Option<A>>
 
 A value that may not be there.
 
-Absent is `None`; present and the wrong shape is still an error, which is
-the distinction that matters: a misspelled setting should not read as one
-nobody set.
+Absent or null is `None`; present and the wrong shape is still an error,
+which is the distinction that matters: a misspelled setting should not
+read as one nobody set. A denied value is not `None` either, because a
+denied optional is still a line missing from `khora.toml`.
 
-### many
+### nullable
 
 ```khora
-pub fn many<A>(inner: Schema<A>) -> Schema<List<A>>
+pub fn nullable<A>(inner: Schema<A>) -> Schema<Option<A>>
+```
+
+A value that must be there and may be null.
+
+The field a JSON API sends as `"ended": null` to mean "not yet", where
+leaving it out would be a different mistake.
+
+### default
+
+```khora
+pub fn default<A>(inner: Schema<A>, fallback: A) -> Schema<A>
+```
+
+A value, or `fallback` when it is not there.
+
+**Absent only.** A value that is present and wrong is never quietly
+replaced, and neither is `null`: a client that sent `"port": null` said
+something, and the answer is a rejection rather than 8080.
+
+### list
+
+```khora
+pub fn list<A>(inner: Schema<A>) -> Schema<List<A>>
 ```
 
 A list of them, with each element's index in its own path.
+
+### dict
+
+```khora
+pub fn dict<A>(inner: Schema<A>) -> Schema<Dict<String, A>>
+```
+
+A record whose keys are data: `{ "en": "Hello", "fr": "Bonjour" }`.
+
+Every value is read with `inner`, under its key, so a bad one reads
+`greetings.fr should be text, and is 7`.
 
 ### refine
 
@@ -341,8 +760,82 @@ pub fn refine<A>(inner: Schema<A>, must: String, holds: (A) -> Bool) -> Schema<A
 
 A condition on a value that is otherwise the right shape.
 
-`must` is the sentence the error uses, so write it as one: `"between 1 and
-65535"` reads as *port must be between 1 and 65535*.
+`must` is the rest of the sentence after `must be`, so write it as one:
+`"between 1 and 65535"` reads as *port must be between 1 and 65535*. The
+named rules below carry their bounds as structure instead, which is what a
+rendered document needs; this is for the rule the vocabulary lacks.
+
+### between
+
+```khora
+pub fn between<A: Ord + Show>(inner: Schema<A>, low: A, high: A) -> Schema<A>
+```
+
+A value between two bounds, inclusive: `between(int(), 1, 65535)`.
+
+### at_least
+
+```khora
+pub fn at_least<A: Ord + Show>(inner: Schema<A>, bound: A) -> Schema<A>
+```
+
+A value no smaller than `bound`.
+
+### at_most
+
+```khora
+pub fn at_most<A: Ord + Show>(inner: Schema<A>, bound: A) -> Schema<A>
+```
+
+A value no larger than `bound`.
+
+### min_length
+
+```khora
+pub fn min_length(inner: Schema<String>, n: Int) -> Schema<String>
+```
+
+Text of at least `n` characters.
+
+### max_length
+
+```khora
+pub fn max_length(inner: Schema<String>, n: Int) -> Schema<String>
+```
+
+Text of at most `n` characters.
+
+### min_items
+
+```khora
+pub fn min_items<A>(inner: Schema<List<A>>, n: Int) -> Schema<List<A>>
+```
+
+A list of at least `n` items.
+
+### max_items
+
+```khora
+pub fn max_items<A>(inner: Schema<List<A>>, n: Int) -> Schema<List<A>>
+```
+
+A list of at most `n` items.
+
+### non_empty
+
+```khora
+pub fn non_empty<A>(inner: Schema<List<A>>) -> Schema<List<A>>
+```
+
+A list with something in it.
+
+### one_of
+
+```khora
+pub fn one_of<A: Eq + Show>(inner: Schema<A>, allowed: List<A>) -> Schema<A>
+```
+
+A value from a closed set: `one_of(string(), ["gzip", "br"])`.
 
 ### secret
 
@@ -360,26 +853,40 @@ holding one already is the evidence that an `A` can be decoded.
 A failure inside one is marked, and [`Rejection::describe`] then says what
 was wanted without quoting what it saw.
 
+### key
+
+```khora
+pub fn key<A>(wire: String, inner: Schema<A>) -> Schema<A>
+```
+
+A field read under a key that is not its name: `key("userId", int())`.
+
+For the wire whose spelling the type cannot use. The rejection names the
+wire key, because that is the one the client sent.
+
+### renamed
+
+```khora
+pub fn renamed<A>(inner: Schema<A>, wire: String, field: String) -> Schema<A>
+```
+
+A record schema with one of its keys spelled differently on the wire:
+`renamed(Settings::schema(), "userId", "user_id")` reads `userId` into the
+field `user_id`.
+
+For the one odd key in a record that is otherwise fine as declared. The
+rejection names the wire key.
+
 ### struct2
 
 ```khora
 pub fn struct2<A, B, C>(a_name: String, a: Schema<A>, b_name: String, b: Schema<B>, combine: (A, B) -> C) -> Schema<C>
 ```
 
-A record of two fields.
+A record of two fields, assembled by `combine`.
 
-**The assembler is the price of having no mapped types.** The spelling a
-reader reaches for --
-`struct({ port: int(), host: string() })` -- cannot be typed: its argument
-is a record of *schemas* and the result would have to be a schema of the
-record of what they decode, which needs a type-level map Khora does not
-have. Something must say how the pieces become the record, and here that is
-a function.
-
-**`derive(Schema)` is not built yet**, so every record schema is one of
-these, written out. When it lands it will generate the assembler from the
-type, and these will remain for what derivation cannot know: a renamed key,
-a refinement, a shape that is not the record's own.
+What [`Schema::record`] over [`Fields`] spells with an arity: two fields
+zipped and mapped through the assembler. Beyond five, nest a record.
 
 ### struct3
 
@@ -404,8 +911,4 @@ pub fn struct5<A, B, C, D, E, F>(a_name: String, a: Schema<A>, b_name: String, b
 ```
 
 A record of five fields. See [`struct2`].
-
-The family stops here because `Validated` does: beyond five, nest a record
-rather than growing the arity, which is what the shape of the data is
-telling you anyway.
 

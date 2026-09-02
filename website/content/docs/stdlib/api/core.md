@@ -1385,6 +1385,20 @@ did not, the answer carries every error from both, left to right, and `f`
 is not called. Chained through a record's fields it reports the whole
 form in one pass.
 
+#### zip
+
+```khora
+pub fn zip<B>(self, other: Validated<B, E>) -> Validated<(A, B), E>
+```
+
+Both values together, keeping both sides' failures.
+
+`map2` with the pair as its answer, and the one combinator that composes
+without an arity: `zip(a, zip(b, c))` is three values in a nested tuple,
+and `let (x, (y, z)) = t;` takes it apart, however many there are. It is
+what a generated record decoder chains through, which is why there is
+no `map6` and never will be.
+
 #### map3
 
 ```khora

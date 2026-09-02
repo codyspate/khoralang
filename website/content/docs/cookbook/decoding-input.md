@@ -34,7 +34,7 @@ refused:
   listen.host is not set
   listen.port must be between 1 and 65535
   password is not set
-  rate should be an exact decimal, and is `about seven percent`
+  rate should be an exact decimal, and is "about seven percent"
 ```
 
 That is why `decode` answers a `Validated` rather than raising. Paths read the
@@ -58,7 +58,7 @@ The decoded value is a `Redacted<String>`, which shows as `<redacted>`. More
 importantly, **a failure inside a secret does not quote what it saw**:
 
 ```text
-public should be a whole number, and is `not a number`
+public should be a whole number, and is "not a number"
 token should be a whole number
 ```
 
@@ -188,7 +188,7 @@ refused:
   listen.host is not set
   listen.port must be between 1 and 65535
   password is not set
-  rate should be an exact decimal, and is `about seven percent`
+  rate should be an exact decimal, and is "about seven percent"
 it needs: [listen, password, rate, debug]
 ```
 
@@ -227,4 +227,5 @@ convenience.
   `std::config` does today, and still the shortest path for reading settings
   out of the environment.
 - [Build a typed JSON API](/docs/cookbook/json-api/) — `std::json`'s own
-  decoders, which are separate from this and stay so until they share a `Raw`.
+  decoders, which are separate from this; `Raw::of_json` is the bridge from a
+  parsed document to a schema.
