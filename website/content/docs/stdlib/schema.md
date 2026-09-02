@@ -90,7 +90,8 @@ Every constructor is named after the type it answers.
 | [`Schema::described`](/docs/stdlib/api/schema/#described) | the same schema, with a sentence for a document to carry |
 | [`Schema::cases`](/docs/stdlib/api/schema/#cases) | a variant: a bare string for a payload-free case, an object tagged with `type` for the rest |
 | [`Schema::lazy`](/docs/stdlib/api/schema/#lazy) | a schema built when first read, so a type may mention itself |
-| [`struct2`](/docs/stdlib/api/schema/#struct2) … [`struct5`](/docs/stdlib/api/schema/#struct5) | a record of that many named fields |
+| [`struct({ .. })`](/docs/stdlib/api/schema/#struct) | a record: a literal whose fields are schemas, typed by the compiler as the record they decode |
+| [`Schema::record`](/docs/stdlib/api/schema/#record) over [`Fields`](/docs/stdlib/api/schema/#fields) | the same, assembled by hand, for what neither `struct` nor a derive can say |
 
 They compose in the obvious way, which is most of the point:
 
@@ -110,7 +111,7 @@ program implements it for a record or a variant with the constructors above:
 ```khora
 impl Decode for Listen {
   fn schema() -> Schema<Listen> {
-    struct2("host", string(), "port", between(int(), 1, 65535), listen)
+    struct({ host: string(), port: between(int(), 1, 65535) })
   }
 }
 ```
