@@ -2932,3 +2932,44 @@ new reader copies from.
 There is no checker for this one. A trailing underscore is legal, sometimes
 warranted, and a grep for it lands on the two cases that are fine as often as
 the two that are not. What catches it is somebody reading the API and asking.
+
+## 76. The design said a spelling could not be typed, and the language could type it
+
+`docs/design/schema.md` had a section headed *Why a record literal of schemas
+cannot be the spelling*. It said that
+
+```khora
+let s = Schema::struct({ a: Schema::integer(), b: Schema::string() });
+```
+
+"cannot be typed", quoted the checker's refusal, and concluded that the only
+record forms were `derive` and an arity family: `Schema::two(..)`, `three`,
+`four`, each taking an assembler closure. What shipped was `struct2` to
+`struct5`, and the first person to read them asked what they were for.
+
+The claim was true of a *library function* and false of the *language*. A
+function `struct<A>(fields: R) -> Schema<A>` has no way to relate `R`, a
+record of schemas, to `A`, the record they decode, without a type-level map,
+and Khora has none. But the compiler is not a library function. It holds every
+type, and a call it recognizes can be rewritten before the checker sees it:
+`struct({ port: int(), host: string() })` lowers to `Schema::record` over
+`Fields::of("port", ..)` zipped with `Fields::of("host", ..)` and a closure
+that builds `{ port: a0, host: a1 }`, all of which the checker types by the
+rules it already has. The result is `Schema<{ port: Int, host: String }>`, or
+`Schema<Listen>` when the expected type says so, with the same diagnostics a
+hand-written literal gets: an ambiguous record is reported as ambiguous, a
+missing field as missing, an extra one as extra.
+
+The mistake was in where the reasoning stopped. "It needs mapped types" was
+the right diagnosis of the function; the step not taken was to ask whether the
+thing had to be a function. Three months of `struct5` came from that.
+
+| | |
+| --- | --- |
+| said | a record literal of schemas cannot be typed; use `derive` or an assembler |
+| true | a generic *function* cannot type it; the compiler can, and does |
+| shipped | `struct({ .. })` as a compiler-known call; `struct2`..`struct5` deleted |
+
+The section is gone from the design, which now argues the opposite under *The
+record form*; `docs/design/schema-derive.md` is the decision record for the
+rewrite, and the reasoning above is there in full.

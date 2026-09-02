@@ -1,352 +1,301 @@
 # Schema
 
-The decision for #141: one description of a value's shape, used to decode
-untrusted input, validate it, and say precisely where it went wrong.
+The decision for #141, revised under #170: one description of a value's shape,
+used to decode untrusted input at every boundary the program has, validate it,
+and say precisely where it went wrong. `docs/design/schema-derive.md` is the
+record of the revision — what was wrong with the first version, the choices
+made and the alternatives refused. This document is what the library is now.
 
 > **A schema describes a value. It does not know where the bytes came from.**
-> That separation is the whole of the design, and it is the one thing
-> `std::config` does not have.
+> That separation is the whole of the design. The other half is newer:
+> **the type is the schema.** A compiled language whose compiler holds every
+> declaration does not need the schema written a second time.
 
-## What is wrong with what exists
+## What it is for
 
-`std::config` reads settings and reads them well. Its four readers are:
+Untrusted data arrives at more places than a request body. Environment
+variables, the command line, a query string, a database row, a model's answer:
+each is text somebody else produced, each has a shape the program expects, and
+each used to be read by its own vocabulary — `std::config` had four readers,
+`std::json` had `FromJson`, `std::ai` had `Extract`, and `khq` parsed its flags
+by hand. Four ways to say "an integer, and here is what was wrong with it".
 
-```khora
-pub fn string(name: String) -> Validated<String, ConfigError> with { env: Env }
-pub fn integer(name: String) -> Validated<Int, ConfigError> with { env: Env }
-pub fn boolean(name: String) -> Validated<Bool, ConfigError> with { env: Env }
-pub fn secret(name: String) -> Validated<Redacted<String>, ConfigError> with { env: Env }
-```
+`std::schema` is the one way. A source hands over a `Raw`, a schema reads it,
+and every problem is reported at once, with a path.
 
-Read the signature rather than the name. `string(name)` is not "this field is a
-string" — it is *go to the environment, fetch this variable, and give me the
-text or a reason*. The description of the shape and the act of reading are one
-function, and that is why none of it is reusable. A JSON request body wants the
-same four questions asked of different bytes; so does a CLI argument, a
-database row, a TOML file. Today each of those either invents its own
-vocabulary or has none.
-
-Three consequences follow, and all three were reported from outside:
-
-- `secret` can only describe a secret **string**. It is a leaf, so there is no
-  `secret(integer())` and no way to redact a whole record.
-- The set of shapes is closed. Adding "a port, which is an integer between 1
-  and 65535" means adding a function to `std::config`.
-- Nothing can be asked of a configuration before it is read — not "which
-  variables does this program need", which is the question a deployment wants
-  answered without starting the program.
-
-## The shape of the answer
-
-Two layers, and the boundary between them is the point.
-
-**A `Schema<A>` describes an `A`.** It is a value, it composes, and it knows
-nothing about the environment, a socket or a file.
-
-**A source produces a `Value`.** `Value` is a universal tree — text, numbers,
-booleans, lists, records, nothing. Reading the environment produces one;
-parsing JSON produces one; so does walking a query result.
-
-**Its numbers carry text, not a `Float`.** A schema library whose `Decimal`
-decoder routed every amount through a double would rebuild, inside itself, the
-exact class of bug it exists to prevent: `9007199254740993` parses back as
-`9007199254740992` and `10.10` can never be recovered exactly. So
-`Value::Number` holds the token's text and each numeric schema parses from it
-with `Int::of_string` or `Decimal::of_string`, which is what `std::config`
-already does and why `std::config` is exact.
-
-This was written when `std::json`'s `Number` was a `Float` and the paragraph
-above it argued that `Value` could not be built on `Json` for that reason. #142
-has since landed and `Json::Number` carries its token too, so the two trees
-agree about what a number is. They remain separate types on a different
-argument: a `Value` is what *any* source produces — the environment, a query
-result, a JSON document — and JSON is one of them.
-
-Decoding is then one function over the two:
-
-```khora
-pub fn decode<A>(schema: Schema<A>, from: Value) -> Validated<A, DecodeError>
-```
-
-Configuration becomes a source plus a schema rather than a family of readers,
-and the same schema decodes a request body without knowing it has been reused.
-
-### Why `Validated` and not `Result`
-
-Because `std::config` is right about this and it is the property worth keeping:
-a configuration with three bad keys should report three bad keys, not the first
-one. `Validated` accumulates; `Result` stops. `decode` therefore answers a
-`Validated`, and `decode_or_stop` is the fail-fast form for a caller who has
-one field and no use for a list.
-
-This is also why a schema is not simply a function `(Value) -> A raises
-DecodeError`. A raise stops at the first problem by construction, and stopping
-is the behaviour we do not want by default.
-
-### Why not raise
-
-Everything else in `std` raises, so the exception wants a reason. It is that
-the accumulating answer *is* the value here: a caller almost always wants to
-print all of it. A raise would force `attempt` at every call site to get back
-the thing the caller wanted in the first place. `Validated::to_result` is one
-call for anyone who disagrees.
-
-## The representation
-
-**Both halves, in one record.** The first draft of this document said "a tree,
-not a closure" and that was a false choice — the two properties wanted are not
-in conflict, they are just carried by different fields:
+## The value and the two traits
 
 ```khora
 pub type Schema<A> = {
   shape: Shape,
-  read: (Value) -> A raises DecodeError,
+  read: (List<Segment>, Raw) -> Validated<A, Rejection>,
+};
+
+pub trait Decode { fn schema() -> Schema<Self>; }
+pub trait Encode { fn encode(self) -> Raw; }
+
+pub fn decode<A: Decode>(raw: Raw) -> Validated<A, Rejection>;
+```
+
+`read` is the typed half: a closure, so schemas compose, and `schema.decode(raw)`
+is an ordinary method call. `shape` is the untyped half, untyped **on purpose**:
+with no type parameter it goes in a `List`, which is what lets a record schema
+hold fields of different types and still be walked — for the variables a
+deployment needs, for a JSON Schema, for which flags are switches.
+
+`Decode` is how a type says what its schema is, and `decode<A: Decode>` is
+selected by the expected type, the way `serde_json::from_str` is: `let s:
+Settings = decode(raw)`. `Encode` is a separate trait rather than a `write`
+half inside `Schema<A>`, and the reason is that the two halves have different
+customers. A schema is *asked* things — its shape is walked, its rules
+rendered, its failures reported — and an encoder is only ever called.
+Effect's bidirectional value is right for a language where the schema is the
+only place the type exists; here the type exists, and a type that can be
+written to the wire and not read from it, or read and not written, is a
+decision the author makes by implementing one trait and not the other.
+`Redacted<A>` decodes and refuses to encode, and the build stops at the site
+that tried, which is the property that decision exists for.
+
+### Why `Validated` and not `Result`
+
+A configuration with three bad keys reports three bad keys. `Validated`
+accumulates; `Result` stops; `Validated::to_result` is one call for a caller
+who wants the other behaviour. This is also why a schema is not a function
+`(Raw) -> A raises Rejection`: a raise stops at the first problem by
+construction, and stopping is the behaviour not wanted by default. Everything
+else in `std` raises; the exception is that here the accumulated answer *is*
+the value a caller wants to print.
+
+## The type is the schema
+
+```khora
+derive(Show, Decode, Encode)
+pub type Mode = | Local | Remote(url: String);
+
+derive(Show, Decode)
+pub type Settings = {
+  /// Where to accept connections.
+  listen: Listen,
+  password: Redacted<String>,
+  debug: Option<Bool>,
+  rate: Decimal,
+  tags: List<String>,
+  mode: Mode,
 };
 ```
 
-`read` is the typed half. It is a closure, so it can be built by combination
-and it is what makes `schema.decode(value)` an ordinary method call:
+Nothing describes the record a second time. `derive(Decode)` is a
+source-to-source expansion, like `derive(Show)`: for a record it writes one
+`let s_i: Schema<T_i> = Decode::schema();` per field, zips them under their
+names with `Fields::of`, and takes the tuple apart into an annotated record
+literal. The annotation is how the impl for each field is chosen — the
+expansion runs before anything knows what a type is, and the checker resolves
+`Decode::schema()` from the `let`'s type exactly as it would for a hand-written
+one. The whole thing sits inside `Schema::lazy("Settings", ..)`, so a type that
+mentions itself terminates: the schema is built when it is first read, not
+when it is constructed.
+
+Every customization is a type. `Option<A>` is an optional field, `List<A>` a
+list, `Redacted<A>` a secret whose failures never quote what they saw,
+`Decimal` exact, a nested record whatever *its* schema is — derived, or
+written by hand with a refined port, and `Settings` picks up whichever. A
+variant reads a payload-free case as a bare string and a payload case as an
+object tagged `type`; a newtype, `type UserId = Int`, is transparent. The
+`///` above the type and above each field is carried into
+`Schema::described`, so a JSON Schema rendered from the type says what the
+comment says.
+
+Two things a derive refuses, at the `derive` line: a field whose type has no
+`Decode`, and a case whose payload has no field names. The wire needs a key,
+and a name the type did not declare is not the compiler's to invent.
+
+## The record form: `struct({ .. })`
 
 ```khora
-let settings = Schema::two("port", integer(), "host", text(),
-                           fn (p, h) => { port: p, host: h });
-let decoded = settings.decode(input)!;
+let listen: Schema<Listen> = struct({
+  port: between(int(), 1, 65535),
+  host: default(string(), "127.0.0.1"),
+});
 ```
 
-`shape` is the untyped half, and it is untyped **on purpose**: with no type
-parameter it goes in a `List`, which is what lets a record schema hold fields of
-different types and still be walked.
+The first version said this could not be typed, and shipped `struct2` to
+`struct5` with assembler closures instead. It could not be typed *as a library
+function*: `struct<A>(fields: R) -> Schema<A>` has no way to relate a record of
+schemas to the record they decode without mapped types. It is not a library
+function. `std::schema` declares it bodiless, `pub fn struct<A>(fields:
+Fields<A>) -> Schema<A>;`, and a call to it with a record literal is rewritten
+during lowering into `Schema::record` over `Fields::of` zipped in field order
+and a closure that builds the literal — `{ port: a0, host: a1 }` — which the
+checker types by the rules it already has. The result is a nominal
+`Schema<Listen>` when the expected type says so and a structural one when it
+does not, and the diagnostics are the record literal's own: ambiguous, missing
+a field, or carrying one the type lacks. Only the literal's field values are
+blamed on the author's text; every synthesized node is blamed on the call.
+
+The rewrite is judged by where `struct` was imported from, so an alias works.
+A pipe into it, or an argument that is not a record literal, is refused with a
+sentence saying what the form is, because the call is a spelling for one
+expansion and not a function that can be passed around. Errata 76 records how
+the first version's argument went wrong.
+
+## Customization without attributes
+
+There are no attributes on fields. What Effect spells as annotations, Khora
+spells as types and as ordinary values:
+
+| want | write |
+| --- | --- |
+| optional field | `Option<A>` |
+| a default | `default(string(), "127.0.0.1")` in a `struct`, or a hand impl |
+| a renamed key | `key("listen-port", int())` in a `struct`, `renamed` on a schema |
+| a rule | `refine(int(), "be even", fn n => n % 2 == 0)`, `between`, `min_length`, `non_empty`, `one_of` |
+| a secret | `Redacted<A>` |
+| a description | `///` on the type or field, or `Schema::described` |
+| no unknown keys | `Schema::closed(schema)` |
+| a transform | `Schema::map`, `Schema::try_map` |
+
+A type that needs any of these on a derived field writes `impl Decode` for
+that field's type, or for the record, and the derive of everything around it
+is unchanged. `Fields<A>` — `of`, `none`, `zip`, `map` — is what both the
+derive and `struct` expand to, and is there for the hand-written case that
+neither covers.
+
+## `Raw`, absence, and strictness
 
 ```khora
-pub type Shape = | Whole | Text_ | Exact | Truth | Nothing
-                 | Sequence(of: Shape)
-                 | Struct_(fields: List<Named>)
-                 | Optional(inner: Shape)
-                 | Choice(cases: List<Named>)
-                 | Refined(inner: Shape, must: String)
-                 | Secret(inner: Shape);
-pub type Named = { name: String, shape: Shape };
+pub type Raw =
+  | Absent | Null | Text(String) | Untyped(String) | Number(String) | Bool(Bool)
+  | Sequence(List<Raw>) | Record(List<Pair<String, Raw>>) | Denied;
 ```
 
-So a deployment can ask a configuration which variables it needs without
-running the program, the documentation generator can print a request body, and
-a caller can still write `schema.decode(..)`. A record of two closures would
-have lost the first; a bare tree would have lost the second.
+**`Absent` is not `Null`.** A missing key and an explicit `null` are different
+statements, and `Option<A>` accepts the first while `nullable` accepts the
+second. A JSON body with `"debug": null` where `debug: Option<Bool>` is
+rejected, which is what a caller who meant to omit it wants to hear.
 
-This was built and run before it was written down; the sketch answers both
-`keys it needs: port host` and `decoded localhost:8080` from the same value.
+**Strictness is a fact about the source.** JSON labels its values, so a JSON
+source hands over `Text` and `Number`, and `int()` refuses `"8080"` with
+`port should be a whole number, and is "8080"`, the way serde and
+`encoding/json` refuse it. The environment, the command line and a query
+string cannot label anything, so they hand over `Untyped`, and every primitive
+reads it. `decimal()` reads `Text` as well, because `"10.10"` in a JSON body
+is the honest spelling of an amount. Nothing in the schema decides this; the
+source records what it knew.
 
-### Why a record literal of schemas cannot be the spelling
+**Numbers carry their text.** `Raw::Number` holds the token, and `int()` and
+`decimal()` parse from it, so `9007199254740993` and `10.10` survive. A schema
+whose `Decimal` routed through a double would rebuild the bug it exists to
+prevent.
 
-The shape a reader reaches for first is this:
+**`Denied` is a source's refusal**, not a decoder's: an environment variable
+the program's permissions do not grant reaches the schema as `Raw::Denied` and
+is reported as `DATABASE_URL is not granted`, distinguishable from unset for
+the reason `std::config`'s doc comment gives.
+
+## `Shape`, rules, and the wire
+
+`Shape`'s arms are named after the constructors, one for one — `String`,
+`Int`, `Decimal`, `Bool`, `List`, `Dict`, `Struct`, `Cases`, `Optional`,
+`Nullable`, `Default`, `Keyed`, `Refined`, `Secret`, `Closed`, `Described`,
+`Lazy` — because a reader who knows the constructor knows the arm. A `Rule` is
+a shape's account of a refinement: a sentence, and where the rule is one a
+JSON Schema can say, the keyword too, so `between(int(), 1, 65535)` is
+`minimum` and `maximum` on the way out and `port must be between 1 and 65535`
+on the way in.
+
+A variant's wire form is chosen by whether the case carries anything: `Local`
+is `"Local"`, and `Remote(url: String)` is `{"type": "Remote", "url": ".."}`.
+The tag key is `type`, which is what the JSON a model or a JavaScript client
+produces already says; `cases_tagged` takes a different key for a wire that
+already exists. In the environment the same variant is `MODE=Remote` and
+`MODE_URL=..`.
+
+## Errors, and every sentence they print
 
 ```khora
-let s = Schema::struct({ a: Schema::integer(), b: Schema::string() });
+pub type Rejection = { path: List<Segment>, problem: Problem };
+pub type Segment = | Field(name: String) | Index(at: Int);
 ```
 
-It cannot be typed. That argument is a `{ a: Schema<Int>, b: Schema<String> }`
-and the result would have to be a `Schema<{ a: Int, b: String }>` — which needs
-a type-level map from a record of schemas to the record of what they decode.
-Khora has no mapped types, and the compiler says so plainly:
-
-```text
-this function returns `Schema<Wanted>`, but its body has type
-`Schema<Described>`; `Wanted` does not match `Described`
-```
-
-Adding mapped types to get a nicer literal would be a far larger change than
-this library, and it is the same wall `Validated`'s docstring already records
-about partial application of type constructors.
-
-So there are two ways to build a record schema, and the ordering matters:
-
-**`derive(Schema)` is the primary one**, not a convenience.
-
-```khora
-derive(Show, Schema)
-pub type Settings = { port: Int, host: String };
-
-let decoded = Settings::schema().decode(input)!;
-```
-
-The type is written once and the schema is generated from it. This is the
-answer to the mapped-type problem rather than a way around typing less, which
-is why it moves from "sequencing question" in the first draft to a required
-part of the first version.
-
-**A combinator with an explicit assembler** is the hand-written form, for a
-renamed key, a refinement, or anything derivation cannot know:
-
-```khora
-Schema::two("port", integer(), "host", text(), fn (p, h) => { port: p, host: h })
-```
-
-The assembler is the price of no mapped types: something has to say how the
-decoded pieces become the record, and in this language that is a function. An
-arity family (`two`, `three`, `four`) is ugly and finite; the alternative is
-`map2` chaining, which composes but reads worse past three fields. Either way
-`derive` is what a reader should meet first.
-
-## Secret is a combinator
-
-The point you raised, and the clearest single improvement over what exists:
-
-```khora
-pub fn secret<A>(inner: Schema<A>) -> Schema<Redacted<A>>
-```
-
-`secret(integer())`, `secret(text())` and `secret(struct_(..))` all work, and
-redaction composes with everything else instead of sitting beside it.
-
-**No bound is needed on `A`, and that is worth saying because it looks as
-though one should be.** A bound would be required if a schema were a type-level
-thing and `Schema<A>` a constraint on `A`. It is not: `Schema<A>` is a *value*,
-and holding one is already the evidence that `A` can be decoded. There is
-nothing for `A: Schema` to add. If the implementation ever finds it needs a
-bound, that is a signal the representation drifted toward the type level and
-should be pulled back.
-
-### Redaction has to survive into the error
-
-A decode failure quotes what it found — that is most of a decode error's value:
-
-```text
-listen.port should be a whole number, and is `eighty`
-```
-
-Inside a `Secret`, it must not. This is the easiest imaginable way to put a
-password in a log, and it is invisible until it happens once in production.
-
-So `DecodeError` carries the found text as a `Redacted<String>` under a secret
-and a plain `String` outside one, and `Secret`'s decoder is responsible for the
-wrapping. A failure inside a secret reads:
-
-```text
-DATABASE_PASSWORD should be a whole number, and is <redacted>
-```
-
-The existing `Redacted` design is kept exactly: its `Show` prints a placeholder
-rather than being absent, on the argument that an unprintable containing record
-makes people stop wrapping the secret. Nothing here weakens that.
-
-## Where it went wrong: the path
-
-`ConfigError` names a variable, which is a path in a flat namespace. A nested
-value needs a real one:
-
-```khora
-pub type Step = | Field(name: String) | Index(at: Int);
-pub type DecodeError = { path: List<Step>, problem: Problem };
-```
-
-`Problem` is the closed set — missing, wrong shape, refused by a refinement, no
-matching case in a union — and a refinement carries its own message, so "must
-be between 1 and 65535" comes from the schema that imposed it rather than from
-a generic complaint.
-
-Rendering a path is `listen.port` and `items[3].id`, which is what a person
-reading a log needs and what `ConfigError::describe` already does for one
-level.
-
-## Deriving a schema from a type
-
-Effect.Schema derives the *type* from the schema, because TypeScript's
-conditional types can do that and its users would otherwise write everything
-twice. Khora should go the other way and derive the **schema from the type**:
-
-```khora
-derive(Show, Schema)
-pub type Listen = { host: String, port: Int };
-```
-
-The language already has `derive` for `Show`, `Eq` and `Ord`, so this is an
-existing mechanism rather than a new one, and it is the direction that suits a
-language where the type is written first. A hand-written schema stays available
-for everything derivation cannot know — a refinement, a renamed key, a
-transform.
-
-`derive(Schema)` is required in the first version rather than optional, for
-the reason under "The representation": without mapped types it is the only way
-to get a record schema without writing an assembler by hand for every type.
-
-## What this replaces
-
-`std::config` keeps its shape and loses its vocabulary:
-
-```khora
-pub fn read<A>(schema: Schema<A>) -> Validated<A, ConfigError> with { env: Env }
-```
-
-`string`, `integer`, `boolean`, `decimal` and `secret` become the corresponding
-schema constructors, and the four env-reading functions become one. The
-`ConfigError` variants stay reachable — `Denied` in particular is not a decode
-problem but a permissions one, and it has to stay distinguishable from
-`Missing` for the reason its own doc comment gives.
-
-Migration is mechanical and the cookbook recipe changes shape rather than
-length.
-
-### What shipped instead, and what it was changed to
-
-**#141 did not do this, and nobody noticed until it was read aloud.** The
-implementation named the constructors `text`, `whole`, `exact` and `truth` —
-four invented words for four types the language already names. Only `secret`
-matched, which is the tell that it was drift rather than a scheme.
-
-The cost is not aesthetic. A reader who knows `Int`, `Bool`, `Decimal` and
-`String` had to learn a second vocabulary to describe them, and `std` then held
-*three* sets of names for the same four concepts: the language's, `std::config`'s
-`integer`/`boolean`, and `std::schema`'s `whole`/`truth`.
-
-The rule now is the obvious one: **a constructor is named after the type it
-answers.**
+`Problem` is the closed set, and each prints one sentence:
 
 | | |
 | --- | --- |
-| `string()` | `String` |
-| `int()` | `Int` |
-| `decimal()` | `Decimal` |
-| `bool()` | `Bool` |
+| missing | `listen.port is not set` |
+| wrong shape | `listen.port should be a whole number, and is "eighty"` |
+| refused by a rule | `listen.port must be between 1 and 65535` |
+| unknown key, under `closed` | `listen.hots is not expected` |
+| a source's refusal | `DATABASE_URL is not granted` |
 
-`Shape`'s arms follow the constructors, one for one. `Raw`'s arms follow
-`Json`'s — `Text`, `Number`, `Bool` — because a `Raw` is what a source
-produced, and the first source anybody bridges from is JSON. `std::config`'s
-`integer` and `boolean` became `int` and `bool` so that the third vocabulary
-also stopped existing.
+Text is quoted, numbers are bare, `null` is `null`. Inside a secret the found
+value is `<redacted>`: `DATABASE_PASSWORD should be a whole number, and is
+<redacted>`. This is the easiest imaginable way to put a password in a log,
+and `secret` is responsible for the wrapping so that no caller can forget.
+`Rejection::report` joins the lines, and `Rejection` encodes as
+`{path, message}`, so an API can answer with the same sentences a log gets.
 
-The *messages* keep their English. A rejection still reads `listen.port must be
-a whole number`, because a person reading a failure wants a sentence and a
-person writing a schema wants a type. Those are different audiences and only
-one of them is the API.
+A source may describe the path its own way: `std::config` prints
+`LISTEN_PORT`, because that is the name the operator will search for.
 
-## Why this can be built now and could not be before
+## Every boundary, one path
 
-Two things were in the way and both are gone.
+| source | how a `Raw` is made | what reads it |
+| --- | --- | --- |
+| JSON body | `Raw::of_json(parse(text))` | `decode`, or `Request::json` |
+| environment | `std::config::read(schema)` names each variable from the shape | the same schema |
+| command line | `Raw::of_arguments_for(shape, args)`; a `Bool` field is a switch | `struct` or a derived record |
+| query, headers, params | `Raw::of_map` | the same |
+| database rows | `Row::to_raw`, `Row::sequence` | `list(Entry::schema())` |
+| a model's answer | `std::ai::extract<A: Decode>` renders the shape into the prompt | the derived schema |
 
-**A refinement may fail.** Until #136 the collection combinators refused a
-closure that raises, so a schema whose refinement called a fallible user
-function could not be written without hand-rolling every walk. The combinators
-carry the caller's rows now.
+`std::config` is a source and nothing else now: `read(schema)`, `variables(shape)`
+for the names a deployment needs before the program starts, `describe` and
+`report`. The shape decides the names — a nested record's field is
+`LISTEN_PORT`, a list is split on commas, `key` renames a segment — and a
+nested optional record is present when any of its variables is.
 
-**A caller can read the failure.** Until #137 a `catch` arm could not bind the
-failure value, so folding a many-variant decode error into one answer meant one
-arm per variant. A binding arm handles it in one.
+## JSON Schema
 
-A schema library that could not compose with the failure system would have
-rebuilt the exact gap those two closed, which is why this was sequenced behind
-them.
+`Shape::to_json_schema` renders a shape as a draft 2020-12 document: a derived
+type is a `$defs` entry and a `$ref`, which is what terminates a type that
+mentions itself; a rule is its keyword; a secret is `writeOnly`; an optional
+or defaulted field is left out of `required`; a variant is an `enum` or a
+`oneOf` over the two forms the decoder reads; a description is `description`.
+It is what a model is prompted with and what an API is documented by, and it
+is rendered from the shape the decoder uses, so the two cannot disagree.
 
 ## What is deliberately not here
 
-**Bidirectionality is in the design and not in the first version.** Effect.Schema
-describes both directions with one value, and that is right — an encoder and a
-decoder that disagree is a bug the type system should not permit. But the
-demand is decode-shaped: untrusted input arriving at a boundary. The variant
-above has room for `encode` and the first version should not ship it half-done.
+**No `unknown`.** `Raw` is the universal tree and it is closed, which is
+narrower than a dynamic type and more honest.
 
-**No `unknown`.** Khora has no dynamic type and does not want one. `Value` is
-the universal tree and it is closed, which is a narrower and more honest thing.
+**No attributes.** Everything an attribute would say is a type or a value, and
+a type can be asked questions an attribute cannot.
 
-**No async decoding.** A refinement that hits a database is a capability row on
-the refinement's closure, which the combinators now carry, and needs nothing
-from this design.
+**No positional payloads on the wire.** A case `Pair(Int, Int)` has no names,
+and the wire needs keys; the derive refuses it rather than inventing `_0`.
+
+**No bidirectional value.** Two traits, above. A type whose encoder and
+decoder must agree is tested for it, the way a hand-written `Show` is.
+
+**No async decoding.** A refinement that reaches a database is a capability
+row on the refinement's closure, which the combinators carry, and needs
+nothing from this design.
+
+## What shipped first
+
+#141 shipped a `Schema<A>` with the shape-and-closure representation kept
+here, and three things this revision replaced. The constructors were named
+`text`, `whole`, `exact` and `truth`, four invented words for four types the
+language already named; errata 73 has that story, and the rule since is that
+a constructor is named after the type it answers. The record forms were
+`struct2` to `struct5` with assembler closures, under an argument that the
+literal form could not be typed; errata 76 has that one. And `std::json`,
+`std::config` and `std::ai` each kept a reader of their own beside the schema,
+so that three vocabularies stood where one was meant to.
+
+Two things were in the way of the first version and are still worth naming,
+because a schema library that could not compose with the failure system would
+have rebuilt the exact gap they closed: until #136 the collection combinators
+refused a closure that raises, and until #137 a `catch` arm could not bind the
+failure value.
