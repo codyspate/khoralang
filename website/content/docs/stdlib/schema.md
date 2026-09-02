@@ -48,7 +48,7 @@ pub type Schema<A> = {
 Both halves are load-bearing, and neither would do on its own.
 
 The **closure** is what makes `schema.decode(value)` an ordinary call, and what
-lets schemas be combined — `optional(many(whole()))` is three closures wrapped
+lets schemas be combined — `optional(many(int()))` is three closures wrapped
 around each other.
 
 The **shape** is untyped, deliberately: it has no type parameter, which is what
@@ -70,10 +70,10 @@ Four primitives, four combinators that wrap another schema, and four assemblers.
 
 | | |
 | --- | --- |
-| [`text()`](/docs/stdlib/api/schema/#text) | text as it arrived; a number or a boolean is accepted as its token |
-| [`whole()`](/docs/stdlib/api/schema/#whole) | an `Int` |
-| [`exact()`](/docs/stdlib/api/schema/#exact) | a `Decimal`, parsed from the token |
-| [`truth()`](/docs/stdlib/api/schema/#truth) | a `Bool` |
+| [`string()`](/docs/stdlib/api/schema/#string) | a `String`, as it arrived; a number or a boolean is accepted as its token |
+| [`int()`](/docs/stdlib/api/schema/#int) | an `Int` |
+| [`decimal()`](/docs/stdlib/api/schema/#decimal) | a `Decimal`, parsed from the token |
+| [`bool()`](/docs/stdlib/api/schema/#bool) | a `Bool` |
 | [`optional(s)`](/docs/stdlib/api/schema/#optional) | an `Option<A>`; the only combinator that can tell a missing field from a present one |
 | [`many(s)`](/docs/stdlib/api/schema/#many) | a `List<A>`, indexing each element into the error path |
 | [`refine(s, must, holds)`](/docs/stdlib/api/schema/#refine) | the same `A`, rejected unless `holds`; `must` is the sentence the message uses |
@@ -83,7 +83,7 @@ Four primitives, four combinators that wrap another schema, and four assemblers.
 They compose in the obvious way, which is most of the point:
 
 ```khora
-refine(whole(), "between 1 and 65535", fn p => p > 0 && p < 65536)
+refine(int(), "between 1 and 65535", fn p => p > 0 && p < 65536)
 ```
 
 [Decode untrusted input](/docs/cookbook/decoding-input/) puts them together
@@ -113,7 +113,7 @@ first problem.
 
 ### A number keeps its text
 
-`Raw::Num` holds the token, not a `Float`. A `Float` carries about fifteen
+`Raw::Number` holds the token, not a `Float`. A `Float` carries about fifteen
 significant digits, so `9007199254740993` comes back one short of itself and
 `10.10` is never exactly recoverable — and a schema that decoded a `Decimal`
 through one would rebuild, inside the library meant to prevent that class of
@@ -141,7 +141,7 @@ token should be a whole number
 **`derive(Schema)` is not built.** The spelling a reader reaches for —
 
 ```khora
-struct({ port: whole(), host: text() })
+struct({ port: int(), host: string() })
 ```
 
 — cannot be typed: its argument is a record of *schemas*, and the result would

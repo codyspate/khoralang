@@ -286,6 +286,39 @@ problem but a permissions one, and it has to stay distinguishable from
 Migration is mechanical and the cookbook recipe changes shape rather than
 length.
 
+### What shipped instead, and what it was changed to
+
+**#141 did not do this, and nobody noticed until it was read aloud.** The
+implementation named the constructors `text`, `whole`, `exact` and `truth` —
+four invented words for four types the language already names. Only `secret`
+matched, which is the tell that it was drift rather than a scheme.
+
+The cost is not aesthetic. A reader who knows `Int`, `Bool`, `Decimal` and
+`String` had to learn a second vocabulary to describe them, and `std` then held
+*three* sets of names for the same four concepts: the language's, `std::config`'s
+`integer`/`boolean`, and `std::schema`'s `whole`/`truth`.
+
+The rule now is the obvious one: **a constructor is named after the type it
+answers.**
+
+| | |
+| --- | --- |
+| `string()` | `String` |
+| `int()` | `Int` |
+| `decimal()` | `Decimal` |
+| `bool()` | `Bool` |
+
+`Shape`'s arms follow the constructors, one for one. `Raw`'s arms follow
+`Json`'s — `Text`, `Number`, `Bool` — because a `Raw` is what a source
+produced, and the first source anybody bridges from is JSON. `std::config`'s
+`integer` and `boolean` became `int` and `bool` so that the third vocabulary
+also stopped existing.
+
+The *messages* keep their English. A rejection still reads `listen.port must be
+a whole number`, because a person reading a failure wants a sentence and a
+person writing a schema wants a type. Those are different audiences and only
+one of them is the API.
+
 ## Why this can be built now and could not be before
 
 Two things were in the way and both are gone.

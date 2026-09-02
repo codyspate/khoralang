@@ -45,9 +45,9 @@ a time. `Validated::to_result` is one call for a caller who wants to stop.
 derive(Show)
 pub type Raw =
   | Absent
-  | Text_(text: String)
-  | Num(text: String)
-  | Truth(value: Bool)
+  | Text(text: String)
+  | Number(text: String)
+  | Bool(value: Bool)
   | Sequence(items: List<Raw>)
   | Record(fields: List<Pair<String, Raw>>);
 ```
@@ -67,7 +67,7 @@ about fifteen significant digits, so `9007199254740993` comes back one
 short of itself and `10.10` is never exactly recoverable -- and a schema
 that decoded a `Decimal` through one would rebuild, inside the library
 meant to prevent that class of thing, the exact bug it exists to prevent.
-Keeping the token lets [`whole`] and [`exact`] parse it the way
+Keeping the token lets [`int`] and [`decimal`] parse it the way
 `std::config` does, which is why `std::config` is exact.
 
 `std::json` keeps its numbers the same way since #142, so the two trees no
@@ -115,12 +115,12 @@ A problem, and where it was.
 ```khora
 derive(Show)
 pub type Shape =
-  | AnyText
-  | Whole
-  | Exact
-  | Truth
+  | String
+  | Int
+  | Decimal
+  | Bool
   | Many(of: Shape)
-  | Struct_(fields: List<Named>)
+  | Struct(fields: List<Named>)
   | Maybe(inner: Shape)
   | Refined(inner: Shape, must: String)
   | Secret(inner: Shape);
@@ -140,7 +140,7 @@ derive(Show)
 pub type Named = { name: String, shape: Shape };
 ```
 
-One named field of a [`Shape::Struct_`].
+One named field of a [`Shape::Struct`].
 
 ### Schema
 
@@ -155,7 +155,7 @@ A description of an `A`, and how to read one.
 
 Built with the combinators below rather than by hand: the record is public
 so that a package may add a primitive of its own, and everything `std`
-offers goes through [`text`], [`whole`] and their neighbours.
+offers goes through [`string`], [`int`] and their neighbours.
 
 ## Methods
 
@@ -279,37 +279,41 @@ started to answer.** Empty for anything that is not a record.
 
 ## Functions
 
-### text
+### string
 
 ```khora
-pub fn text() -> Schema<String>
+pub fn string() -> Schema<String>
 ```
 
 Text, as it arrived.
 
-### whole
+### int
 
 ```khora
-pub fn whole() -> Schema<Int>
+pub fn int() -> Schema<Int>
 ```
 
 A whole number, parsed from the token rather than from a float.
 
-### exact
+The message still says "a whole number", which is what a person
+reading a rejection wants; the constructor is named for the `Int` it
+answers, which is what a person writing a schema wants.
+
+### decimal
 
 ```khora
-pub fn exact() -> Schema<Decimal>
+pub fn decimal() -> Schema<Decimal>
 ```
 
 An exact decimal, parsed from the token.
 
-The reason [`Raw::Num`] keeps its text: this is the one a price goes
+The reason [`Raw::Number`] keeps its text: this is the one a price goes
 through, and a `Float` on the way would make it the wrong price.
 
-### truth
+### bool
 
 ```khora
-pub fn truth() -> Schema<Bool>
+pub fn bool() -> Schema<Bool>
 ```
 
 True or false, spelled the way a configuration file spells it.
@@ -353,8 +357,8 @@ pub fn secret<A>(inner: Schema<A>) -> Schema<Redacted<A>>
 
 A value nothing may print.
 
-**A combinator over any inner schema, not a leaf.** `secret(whole())` and
-`secret(text())` both work, and redaction composes with everything else
+**A combinator over any inner schema, not a leaf.** `secret(int())` and
+`secret(string())` both work, and redaction composes with everything else
 instead of sitting beside it. No bound on `A`: a `Schema<A>` is a value, and
 holding one already is the evidence that an `A` can be decoded.
 
@@ -371,7 +375,7 @@ A record of two fields.
 
 **The assembler is the price of having no mapped types.** The spelling a
 reader reaches for --
-`struct({ port: whole(), host: text() })` -- cannot be typed: its argument
+`struct({ port: int(), host: string() })` -- cannot be typed: its argument
 is a record of *schemas* and the result would have to be a schema of the
 record of what they decode, which needs a type-level map Khora does not
 have. Something must say how the pieces become the record, and here that is

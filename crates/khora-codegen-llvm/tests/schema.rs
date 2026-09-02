@@ -58,8 +58,8 @@ const HEAD: &str = "module main;
 
 import std::core::{List, Option, Pair, Redacted, Result, Show, Validated, print};
 import std::decimal::{Decimal};
-import std::schema::{Rejection, Schema, Shape, Raw, exact, many, optional, refine,
-                     secret, struct2, struct3, text, truth, whole};
+import std::schema::{Rejection, Schema, Shape, Raw, bool, decimal, int, many, optional, refine,
+                     secret, string, struct2, struct3};
 
 pub type Listen = { host: String, port: Int };
 
@@ -78,11 +78,11 @@ fn problems<A>(v: Validated<A, Rejection>) -> String {
 }
 
 fn port() -> Schema<Int> {
-  refine(whole(), \"between 1 and 65535\", fn p => p > 0 && p < 65536)
+  refine(int(), \"between 1 and 65535\", fn p => p > 0 && p < 65536)
 }
 
 fn listen_schema() -> Schema<Listen> {
-  struct2(\"host\", text(), \"port\", port(), listen)
+  struct2(\"host\", string(), \"port\", port(), listen)
 }
 
 // Khora has no anonymous record type, so each shape a test combines into gets
@@ -114,8 +114,8 @@ fn a_record_decodes() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let input = rec([field(\"host\", Raw::Text_(\"localhost\")),
-                   field(\"port\", Raw::Num(\"8080\"))]);
+  let input = rec([field(\"host\", Raw::Text(\"localhost\")),
+                   field(\"port\", Raw::Number(\"8080\"))]);
   match Validated::to_result(Schema::decode(listen_schema(), input)) {{
     Result::Ok(l) => print(\"${{l.host}}:${{l.port}}\"),
     Result::Err(_e) => print(\"refused\"),
@@ -139,7 +139,7 @@ fn every_problem_is_reported_with_its_path() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let input = rec([field(\"port\", Raw::Num(\"99999\"))]);
+  let input = rec([field(\"port\", Raw::Number(\"99999\"))]);
   print(problems(Schema::decode(listen_schema(), input)));
   0
 }}
@@ -161,13 +161,13 @@ fn a_nested_path_is_written_the_way_it_is_read() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let outer = struct2(\"listen\", listen_schema(), \"name\", text(), named_);
-  let input = rec([field(\"listen\", rec([field(\"host\", Raw::Text_(\"h\"))])),
-                   field(\"name\", Raw::Text_(\"svc\"))]);
+  let outer = struct2(\"listen\", listen_schema(), \"name\", string(), named_);
+  let input = rec([field(\"listen\", rec([field(\"host\", Raw::Text(\"h\"))])),
+                   field(\"name\", Raw::Text(\"svc\"))]);
   print(problems(Schema::decode(outer, input)));
 
   let items = many(port());
-  let list = Raw::Sequence([Raw::Num(\"80\"), Raw::Num(\"0\")]);
+  let list = Raw::Sequence([Raw::Number(\"80\"), Raw::Number(\"0\")]);
   print(problems(Schema::decode(items, list)));
   0
 }}
@@ -177,7 +177,7 @@ fn main() -> Int {{
     assert_eq!(out, "listen.port is not set; \n[1] must be between 1 and 65535; \n");
 }
 
-/// **A decimal survives exactly**, which is the reason `Raw::Num` keeps the
+/// **A decimal survives exactly**, which is the reason `Raw::Number` keeps the
 /// token's text rather than holding a `Float`. A price read through a double
 /// is the wrong price, and `std::json` is where that goes unnoticed -- #142.
 #[test]
@@ -187,9 +187,9 @@ fn a_decimal_is_exact() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let input = rec([field(\"rate\", Raw::Num(\"0.0725\")),
-                   field(\"big\", Raw::Num(\"9007199254740993\"))]);
-  let s = struct2(\"rate\", exact(), \"big\", whole(), money);
+  let input = rec([field(\"rate\", Raw::Number(\"0.0725\")),
+                   field(\"big\", Raw::Number(\"9007199254740993\"))]);
+  let s = struct2(\"rate\", decimal(), \"big\", int(), money);
   match Validated::to_result(Schema::decode(s, input)) {{
     Result::Ok(v) => print(\"${{v.rate}} ${{v.big}}\"),
     Result::Err(_e) => print(\"refused\"),
@@ -219,9 +219,9 @@ fn a_secret_is_never_quoted_in_an_error() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let s = struct2(\"public\", whole(), \"token\", secret(whole()), tokens);
-  let input = rec([field(\"public\", Raw::Text_(\"not a number\")),
-                   field(\"token\", Raw::Text_(\"s3cr3t-value\"))]);
+  let s = struct2(\"public\", int(), \"token\", secret(int()), tokens);
+  let input = rec([field(\"public\", Raw::Text(\"not a number\")),
+                   field(\"token\", Raw::Text(\"s3cr3t-value\"))]);
   print(problems(Schema::decode(s, input)));
   0
 }}
@@ -245,9 +245,9 @@ fn a_secret_that_decodes_still_hides() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let s = struct2(\"public\", whole(), \"token\", secret(text()), words);
-  let input = rec([field(\"public\", Raw::Num(\"1\")),
-                   field(\"token\", Raw::Text_(\"s3cr3t-value\"))]);
+  let s = struct2(\"public\", int(), \"token\", secret(string()), words);
+  let input = rec([field(\"public\", Raw::Number(\"1\")),
+                   field(\"token\", Raw::Text(\"s3cr3t-value\"))]);
   match Validated::to_result(Schema::decode(s, input)) {{
     Result::Ok(v) => print(\"${{v.count}} ${{v.phrase}}\"),
     Result::Err(_e) => print(\"refused\"),
@@ -272,8 +272,8 @@ fn the_shape_answers_which_keys_are_needed() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let s = struct3(\"listen\", listen_schema(), \"password\", secret(text()), \"debug\",
-                  optional(truth()), settings);
+  let s = struct3(\"listen\", listen_schema(), \"password\", secret(string()), \"debug\",
+                  optional(bool()), settings);
   print(\"${{Shape::keys(s.shape)}}\");
   print(\"${{Shape::keys(listen_schema().shape)}}\");
   0
@@ -295,12 +295,12 @@ fn optional_tells_absent_from_wrong() {
         &format!(
             "{HEAD}
 fn main() -> Int {{
-  let s = optional(whole());
+  let s = optional(int());
   match Validated::to_result(Schema::decode(s, Raw::Absent)) {{
     Result::Ok(v) => print(\"absent gives ${{v}}\"),
     Result::Err(_e) => print(\"absent refused\"),
   }};
-  print(problems(Schema::decode(s, Raw::Text_(\"eighty\"))));
+  print(problems(Schema::decode(s, Raw::Text(\"eighty\"))));
   0
 }}
 "

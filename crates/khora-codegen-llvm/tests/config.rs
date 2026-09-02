@@ -26,7 +26,7 @@ fn std_source(name: &str) -> String {
 const HEAD: &str = r#"module demo::main;
 import std::core::{Eq, List, Option, Redacted, Result, Show, Validated, print};
 import std::env::{Env, EnvError};
-import std::config::{ConfigError, boolean, decimal, integer, or_default, report, secret, string};
+import std::config::{ConfigError, bool, decimal, int, or_default, report, secret, string};
 import std::decimal::{Decimal};
 
 /// An environment that holds exactly what a test says it does.
@@ -117,7 +117,7 @@ fn every_missing_setting_is_reported_together() {
   with { env: fake(List::Nil, List::Nil) } {
     let both = Validated::map2(
       string("HOST"),
-      integer("PORT"),
+      int("PORT"),
       fn (host, port) => host + ":" + Int::to_string(port),
     );
     print(said(both, fn (line) => line));
@@ -138,8 +138,8 @@ fn a_default_covers_absence_and_not_a_typo() {
         "config_default",
         r#"fn main() -> () {
   with { env: fake(List::Cons(("PORT", "eighty"), List::Nil), List::Nil) } {
-    print(said(or_default(integer("HOST_PORT"), 8080), Int::to_string));
-    print(said(or_default(integer("PORT"), 8080), Int::to_string));
+    print(said(or_default(int("HOST_PORT"), 8080), Int::to_string));
+    print(said(or_default(int("PORT"), 8080), Int::to_string));
   }
 }"#,
     );
@@ -196,9 +196,9 @@ fn a_flag_takes_four_spellings_and_refuses_the_rest() {
               List::Cons(("B", "0"),
               List::Cons(("C", "yes"), List::Nil)));
   with { env: fake(pairs, List::Nil) } {
-    print(said(boolean("A"), fn (flag) => flag.show()));
-    print(said(boolean("B"), fn (flag) => flag.show()));
-    print(said(boolean("C"), fn (flag) => flag.show()));
+    print(said(bool("A"), fn (flag) => flag.show()));
+    print(said(bool("B"), fn (flag) => flag.show()));
+    print(said(bool("C"), fn (flag) => flag.show()));
   }
 }"#,
     );
@@ -227,10 +227,10 @@ fn five_settings_are_reported_in_one_pass() {
   with { env: fake(List::Nil, List::Nil) } {
     let all = Validated::map5(
       string("HOST"),
-      integer("PORT"),
+      int("PORT"),
       string("REGION"),
-      integer("WORKERS"),
-      boolean("DEBUG"),
+      int("WORKERS"),
+      bool("DEBUG"),
       fn (host, port, region, workers, debug) =>
         host + ":" + Int::to_string(port) + " " + region
           + " x" + Int::to_string(workers) + " " + Bool::to_string(debug),
@@ -264,10 +264,10 @@ fn only_the_settings_that_are_wrong_are_reported() {
     // The second and fourth are missing; the first, third and fifth are not.
     let all = Validated::map5(
       string("HOST"),
-      integer("PORT"),
+      int("PORT"),
       string("REGION"),
-      integer("WORKERS"),
-      boolean("DEBUG"),
+      int("WORKERS"),
+      bool("DEBUG"),
       fn (host, port, region, workers, debug) =>
         host + ":" + Int::to_string(port) + " " + region
           + " x" + Int::to_string(workers) + " " + Bool::to_string(debug),
@@ -293,7 +293,7 @@ fn three_and_four_settings_come_together() {
   with { env: fake(set, List::Nil) } {
     let three = Validated::map3(
       string("HOST"),
-      integer("PORT"),
+      int("PORT"),
       string("REGION"),
       fn (host, port, region) => host + ":" + Int::to_string(port) + " " + region,
     );
@@ -301,9 +301,9 @@ fn three_and_four_settings_come_together() {
 
     let four = Validated::map4(
       string("HOST"),
-      integer("PORT"),
+      int("PORT"),
       string("REGION"),
-      integer("WORKERS"),
+      int("WORKERS"),
       fn (host, port, region, workers) =>
         host + ":" + Int::to_string(port) + " " + region + " x" + Int::to_string(workers),
     );
@@ -312,7 +312,7 @@ fn three_and_four_settings_come_together() {
     // And the first of three missing, which is the arm that gathers the rest.
     let missing = Validated::map3(
       string("NOPE"),
-      integer("PORT"),
+      int("PORT"),
       string("ALSO_NOPE"),
       fn (a, b, c) => a + Int::to_string(b) + c,
     );

@@ -47,11 +47,11 @@ first.
 ## A secret is a combinator
 
 `secret` wraps another schema rather than being a leaf of its own, so
-`secret(whole())` and `secret(text())` both work and redaction composes with
+`secret(int())` and `secret(string())` both work and redaction composes with
 everything else:
 
 ```khora
-"password", secret(text()),
+"password", secret(string()),
 ```
 
 The decoded value is a `Redacted<String>`, which shows as `<redacted>`. More
@@ -69,7 +69,7 @@ only the message decides whether to expose it.
 
 ## Numbers keep their text
 
-`Raw::Num` holds the token rather than a `Float`, so `exact()` parses it with
+`Raw::Number` holds the token rather than a `Float`, so `decimal()` parses it with
 `Decimal::of_string` and `0.0725` stays `0.0725`. A price read through a double
 is the wrong price.
 
@@ -93,7 +93,7 @@ it needs: [listen, password, rate, debug]
 ```
 
 The question a deployment asks. Top-level keys only — walk into
-`Shape::Struct_` for the nested ones. A schema that were only a closure could
+`Shape::Struct` for the nested ones. A schema that were only a closure could
 not answer this at all, which is why it is two halves in one record.
 
 ## Complete example
@@ -103,8 +103,8 @@ module service::main;
 
 import std::core::{List, Option, Pair, Redacted, Result, Show, Validated, print};
 import std::decimal::{Decimal};
-import std::schema::{Raw, Rejection, Schema, Shape, exact, optional, refine, secret, struct2,
-                     struct4, text, truth, whole};
+import std::schema::{Raw, Rejection, Schema, Shape, bool, decimal, int, optional, refine,
+                     secret, string, struct2, struct4};
 
 /// What the service needs, written once.
 pub type Listen = { host: String, port: Int };
@@ -129,15 +129,15 @@ fn settings(
 
 /// A port is a whole number in a range, and the range is part of the shape.
 fn port() -> Schema<Int> {
-  refine(whole(), "between 1 and 65535", fn p => p > 0 && p < 65536)
+  refine(int(), "between 1 and 65535", fn p => p > 0 && p < 65536)
 }
 
 pub fn schema() -> Schema<Settings> {
   struct4(
-    "listen", struct2("host", text(), "port", port(), listen),
-    "password", secret(text()),
-    "rate", exact(),
-    "debug", optional(truth()),
+    "listen", struct2("host", string(), "port", port(), listen),
+    "password", secret(string()),
+    "rate", decimal(),
+    "debug", optional(bool()),
     settings,
   )
 }
@@ -148,18 +148,18 @@ fn field(key: String, value: Raw) -> Pair<String, Raw> { { key: key, value: valu
 fn sample() -> Raw {
   Raw::Record([
     field("listen", Raw::Record([
-      field("host", Raw::Text_("localhost")),
-      field("port", Raw::Num("8080")),
+      field("host", Raw::Text("localhost")),
+      field("port", Raw::Number("8080")),
     ])),
-    field("password", Raw::Text_("hunter2")),
-    field("rate", Raw::Num("0.0725")),
+    field("password", Raw::Text("hunter2")),
+    field("rate", Raw::Number("0.0725")),
   ])
 }
 
 fn broken() -> Raw {
   Raw::Record([
-    field("listen", Raw::Record([field("port", Raw::Num("99999"))])),
-    field("rate", Raw::Text_("about seven percent")),
+    field("listen", Raw::Record([field("port", Raw::Number("99999"))])),
+    field("rate", Raw::Text("about seven percent")),
   ])
 }
 
@@ -198,7 +198,7 @@ it needs: [listen, password, rate, debug]
 together. The spelling a reader reaches for first is this:
 
 ```khora
-Schema::struct({ port: whole(), host: text() })   // does not type-check
+Schema::struct({ port: int(), host: string() })   // does not type-check
 ```
 
 Its argument is a record of *schemas*, and the result would have to be a schema
@@ -210,7 +210,7 @@ usually reads better:
 ```khora
 fn listen(host: String, port: Int) -> Listen { { host: host, port: port } }
 
-struct2("host", text(), "port", port(), listen)
+struct2("host", string(), "port", port(), listen)
 ```
 
 Beyond five fields, nest a record rather than reaching for a wider combinator —

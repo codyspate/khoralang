@@ -14,6 +14,18 @@ it will behave differently now.
 
 ### Breaking
 
+- **Every `std::schema` constructor is named after the type it answers.**
+  `text` is `string`, `whole` is `int`, `exact` is `decimal`, `truth` is
+  `bool`; `secret`, `optional`, `many`, `refine` and `struct2`..`struct5` are
+  unchanged. `Shape`'s arms follow the constructors (`String`, `Int`,
+  `Decimal`, `Bool`, and `Struct` without its trailing underscore) and `Raw`'s
+  follow `std::json`'s (`Text`, `Number`, `Bool`). `std::config`'s `integer`
+  and `boolean` are `int` and `bool` for the same reason, so `std` no longer
+  holds three vocabularies for four concepts. Rejection messages are unchanged:
+  one still reads `listen.port must be a whole number`, because a person
+  reading a failure wants a sentence and a person writing a schema wants a
+  type.
+
 - **`Db` has a sixth operation, `broken`.** Every handler must implement it —
   `handler for Db { .. }` without it is a compile error naming the gap. It is
   called when a `ROLLBACK` fails, which leaves a connection that may still hold

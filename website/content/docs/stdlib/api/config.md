@@ -9,7 +9,7 @@ Settings read out of the environment, typed, and reported all at once.
 
 Three things, and the third is the one worth having:
 
-- **Typed.** `integer("PORT")` gives an `Int` or says why it could not.
+- **Typed.** `int("PORT")` gives an `Int` or says why it could not.
 - **Redacted.** `secret("DB_PASSWORD")` gives a `Redacted<String>`, which
   cannot reach a log line or a JSON body -- see `std::core::Redacted`.
 - **Collected.** Every reader answers `Validated`, so `map2` reports *every*
@@ -23,7 +23,7 @@ type Settings = { host: String, port: Int };
 fn settings() -> Validated<Settings, ConfigError> with { env: Env } {
   Validated::map2(
     or_default(string("HOST"), "0.0.0.0"),
-    integer("PORT"),
+    int("PORT"),
     fn (host, port) => { host: host, port: port },
   )
 }
@@ -112,10 +112,10 @@ The variable's text, or why not.
 Every other reader is this one plus a parse, so the denial is caught in one
 place and the shape of the answer is decided in one place.
 
-### integer
+### int
 
 ```khora
-pub fn integer(name: String) -> Validated<Int, ConfigError> with { env: Env }
+pub fn int(name: String) -> Validated<Int, ConfigError> with { env: Env }
 ```
 
 The variable as a whole number.
@@ -144,10 +144,10 @@ configuration file is exactly where that would go unnoticed.
 but a rate written to four places stays written to four, which is what
 makes a total built from it print the way the person who set it expected.
 
-### boolean
+### bool
 
 ```khora
-pub fn boolean(name: String) -> Validated<Bool, ConfigError> with { env: Env }
+pub fn bool(name: String) -> Validated<Bool, ConfigError> with { env: Env }
 ```
 
 The variable as a flag.

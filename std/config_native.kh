@@ -8,7 +8,7 @@ import std::env::{Env, EnvError};
 //!
 //! Three things, and the third is the one worth having:
 //!
-//! - **Typed.** `integer("PORT")` gives an `Int` or says why it could not.
+//! - **Typed.** `int("PORT")` gives an `Int` or says why it could not.
 //! - **Redacted.** `secret("DB_PASSWORD")` gives a `Redacted<String>`, which
 //!   cannot reach a log line or a JSON body -- see `std::core::Redacted`.
 //! - **Collected.** Every reader answers `Validated`, so `map2` reports *every*
@@ -22,7 +22,7 @@ import std::env::{Env, EnvError};
 //! fn settings() -> Validated<Settings, ConfigError> with { env: Env } {
 //!   Validated::map2(
 //!     or_default(string("HOST"), "0.0.0.0"),
-//!     integer("PORT"),
+//!     int("PORT"),
 //!     fn (host, port) => { host: host, port: port },
 //!   )
 //! }
@@ -108,7 +108,7 @@ pub fn string(name: String) -> Validated<String, ConfigError> with { env: Env } 
 }
 
 /// The variable as a whole number.
-pub fn integer(name: String) -> Validated<Int, ConfigError> with { env: Env } {
+pub fn int(name: String) -> Validated<Int, ConfigError> with { env: Env } {
   Validated::and_then(string(name), fn text =>
     match Int::of_string(text) {
       Option::Some(number) => Validated::of(number),
@@ -147,7 +147,7 @@ pub fn decimal(name: String) -> Validated<Decimal, ConfigError> with { env: Env 
 /// and an empty string all mean "true" somewhere, and a config reader that
 /// accepts every one of them accepts a typo as a `false`. This one says so
 /// instead.
-pub fn boolean(name: String) -> Validated<Bool, ConfigError> with { env: Env } {
+pub fn bool(name: String) -> Validated<Bool, ConfigError> with { env: Env } {
   Validated::and_then(string(name), fn text =>
     if text.eq("true") || text.eq("1") {
       Validated::of(true)

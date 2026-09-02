@@ -2767,3 +2767,54 @@ still exited 0, and the only reason that got chased is that the line named a
 file this commit had just deleted. The sensitivity suite that now exists —
 edit a file, delete a file, edit a file *while another is deleted* — is four
 cases the old version fails and every future version has to pass.
+
+## 73. Four invented words for four types the language already had
+
+`std::schema`'s constructors shipped as `text`, `whole`, `exact` and `truth`.
+The types they answer are `String`, `Int`, `Decimal` and `Bool`.
+
+`docs/design/schema.md` had specified otherwise, in as many words: *"`string`,
+`integer`, `boolean`, `decimal` and `secret` become the corresponding schema
+constructors."* Four of the five shipped under a different name. The fifth,
+`secret`, matched — which is the tell. A deliberate alternative scheme would
+have renamed that one too; what happened instead was that each constructor got
+named as it was written, by whatever word described its behaviour at the
+moment, and nothing afterwards compared the result to the plan.
+
+**Nothing could have caught it.** `khora doc --check` verifies that the
+generated page matches the doc comment. `check-docs.sh` compiles the examples.
+Both were green, because both check the code against itself. No gate compares
+an API to the design document that specified it, and the design document is
+not executable, so the drift was invisible to every automated check the project
+has. It was found by a person reading the vocabulary table out loud and asking
+why a schema library needed a word for "integer".
+
+**The cost, stated plainly.** `std` held three vocabularies for four concepts:
+the language's `Int`/`Bool`/`Decimal`/`String`, `std::config`'s
+`integer`/`boolean`, and `std::schema`'s `whole`/`truth`. Every one of those
+was a thing to learn that carried no information — `whole()` does not tell a
+reader it produces an `Int`, and `exact()` actively hides it.
+
+The rule is now written into the design document: **a constructor is named
+after the type it answers.** `Shape`'s arms follow the constructors one for
+one; `Raw`'s follow `Json`'s, because a `Raw` is what a source produced and the
+first source anybody bridges from is JSON. Two needless trailing underscores
+went with it — `Raw::Text_` and `Shape::Struct_` were defensive against a
+collision that does not exist, which a four-line program confirms.
+
+**The sweep missed a third of the call sites.** `git grep` over `*.kh` and
+`*.md` came back clean and the rename looked done. It was not: eleven Khora
+programs live inside Rust string literals in `crates/khora-codegen-llvm/tests`,
+which no source-extension glob reaches. The baseline found them, eighteen
+failures across `schema.rs` and `config.rs`. A grep scoped by file extension is
+scoped by an assumption about where a language lives, and in this repository
+Khora also lives inside Rust — so the honest check after a rename is the test
+suite, not a second grep.
+
+**What did not change: the messages.** A rejection still reads `listen.port
+must be a whole number` and `rate should be an exact decimal`. Those are
+sentences for somebody reading a failure, and the audience for a sentence is
+not the audience for an identifier. Keeping them also meant the cookbook's
+documented sample output stayed correct through the rename, which is how the
+rename was verified: the recipe's complete program was extracted and run, and
+its output was byte-identical to the page.

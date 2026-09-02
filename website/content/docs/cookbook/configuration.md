@@ -13,7 +13,7 @@ The alternative is what most services do: stop at the first missing variable, pr
 ```khora
 module main;
 
-import std::config::{ConfigError, integer, or_default, report, secret, string};
+import std::config::{ConfigError, int, or_default, report, secret, string};
 import std::core::{Redacted, Show, Validated, print};
 import std::env::{Env};
 
@@ -32,7 +32,7 @@ type Settings = {
 fn listen() -> Validated<Listen, ConfigError> with { env: Env } {
   Validated::map2(
     or_default(string("HOST"), "0.0.0.0"),
-    integer("PORT"),
+    int("PORT"),
     fn (host, port) => { host: host, port: port },
   )
 }
@@ -97,11 +97,11 @@ Validated::map2(a, b, fn (x, y) => combine(x, y))
 
 If `a` and `b` both failed, the answer carries both errors and `combine` never runs. For a third field, split the record the way `listen` is split above: the halves compose, so a subsystem can own its own reader and you never nest `map2` more than one deep.
 
-`Validated::and_then` is the fail-fast one, for a second step written in terms of the first's value. `integer` is `string` plus `and_then`: "not set" and "not a number" are never both true of one variable.
+`Validated::and_then` is the fail-fast one, for a second step written in terms of the first's value. `int` is `string` plus `and_then`: "not set" and "not a number" are never both true of one variable.
 
 ## The readers
 
-`string`, `integer`, `boolean` and `secret` each read one variable and say what went wrong. `boolean` takes `true`, `false`, `1` and `0`, and nothing else — `yes`, `on` and `Y` all mean true somewhere, and a reader that accepts all of them accepts a typo as a `false`.
+`string`, `int`, `bool` and `secret` each read one variable and say what went wrong. `bool` takes `true`, `false`, `1` and `0`, and nothing else — `yes`, `on` and `Y` all mean true somewhere, and a reader that accepts all of them accepts a typo as a `false`.
 
 `or_default` fires on *missing* and on nothing else:
 

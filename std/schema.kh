@@ -54,7 +54,7 @@ import std::decimal::{Decimal};
 /// short of itself and `10.10` is never exactly recoverable -- and a schema
 /// that decoded a `Decimal` through one would rebuild, inside the library
 /// meant to prevent that class of thing, the exact bug it exists to prevent.
-/// Keeping the token lets [`whole`] and [`exact`] parse it the way
+/// Keeping the token lets [`int`] and [`decimal`] parse it the way
 /// `std::config` does, which is why `std::config` is exact.
 ///
 /// `std::json` keeps its numbers the same way since #142, so the two trees no
@@ -63,9 +63,9 @@ import std::decimal::{Decimal};
 derive(Show)
 pub type Raw =
   | Absent
-  | Text_(text: String)
-  | Num(text: String)
-  | Truth(value: Bool)
+  | Text(text: String)
+  | Number(text: String)
+  | Bool(value: Bool)
   | Sequence(items: List<Raw>)
   | Record(fields: List<Pair<String, Raw>>);
 
@@ -90,9 +90,9 @@ impl Raw {
   pub fn describe(self) -> String {
     match self {
       Raw::Absent => "nothing",
-      Raw::Text_(_t) => "text",
-      Raw::Num(_t) => "a number",
-      Raw::Truth(_b) => "true or false",
+      Raw::Text(_t) => "text",
+      Raw::Number(_t) => "a number",
+      Raw::Bool(_b) => "true or false",
       Raw::Sequence(_i) => "a list",
       Raw::Record(_f) => "a record",
     }
@@ -192,17 +192,17 @@ impl Rejection {
 /// documentation, to render a JSON Schema. A closure answers none of those.
 derive(Show)
 pub type Shape =
-  | AnyText
-  | Whole
-  | Exact
-  | Truth
+  | String
+  | Int
+  | Decimal
+  | Bool
   | Many(of: Shape)
-  | Struct_(fields: List<Named>)
+  | Struct(fields: List<Named>)
   | Maybe(inner: Shape)
   | Refined(inner: Shape, must: String)
   | Secret(inner: Shape);
 
-/// One named field of a [`Shape::Struct_`].
+/// One named field of a [`Shape::Struct`].
 derive(Show)
 pub type Named = { name: String, shape: Shape };
 
@@ -210,7 +210,7 @@ pub type Named = { name: String, shape: Shape };
 ///
 /// Built with the combinators below rather than by hand: the record is public
 /// so that a package may add a primitive of its own, and everything `std`
-/// offers goes through [`text`], [`whole`] and their neighbours.
+/// offers goes through [`string`], [`int`] and their neighbours.
 pub type Schema<A> = {
   shape: Shape,
   read: (List<Segment>, Raw) -> Validated<A, Rejection>,
@@ -239,7 +239,7 @@ impl Shape {
   /// started to answer.** Empty for anything that is not a record.
   pub fn keys(self) -> List<String> {
     match self {
-      Shape::Struct_(fields) => List::map(fields, fn named => named.name),
+      Shape::Struct(fields) => List::map(fields, fn named => named.name),
       Shape::Maybe(inner) => Shape::keys(inner),
       Shape::Refined(inner, _must) => Shape::keys(inner),
       Shape::Secret(inner) => Shape::keys(inner),
@@ -259,9 +259,9 @@ fn wrong<A>(path: List<Segment>, wanted: String, saw: Raw) -> Validated<A, Rejec
       Validated::error({ path: path, secret: false, problem: Problem::Missing }),
     _ => {
       let found = match saw {
-        Raw::Text_(text) => text,
-        Raw::Num(text) => text,
-        Raw::Truth(value) => Show::show(value),
+        Raw::Text(text) => text,
+        Raw::Number(text) => text,
+        Raw::Bool(value) => Show::show(value),
         other => Raw::describe(other),
       };
       Validated::error({
@@ -274,32 +274,36 @@ fn wrong<A>(path: List<Segment>, wanted: String, saw: Raw) -> Validated<A, Rejec
 }
 
 /// Text, as it arrived.
-pub fn text() -> Schema<String> {
+pub fn string() -> Schema<String> {
   {
-    shape: Shape::AnyText,
+    shape: Shape::String,
     read: fn (path, value) =>
     match value {
-      Raw::Text_(t) => Validated::of(t),
+      Raw::Text(t) => Validated::of(t),
       // A number or a boolean is text a source has already labelled, and
       // refusing it would make every environment variable a special case.
-      Raw::Num(t) => Validated::of(t),
+      Raw::Number(t) => Validated::of(t),
       other => wrong(path, "text", other),
     },
   }
 }
 
 /// A whole number, parsed from the token rather than from a float.
-pub fn whole() -> Schema<Int> {
+///
+/// The message still says "a whole number", which is what a person
+/// reading a rejection wants; the constructor is named for the `Int` it
+/// answers, which is what a person writing a schema wants.
+pub fn int() -> Schema<Int> {
   {
-    shape: Shape::Whole,
+    shape: Shape::Int,
     read: fn (path, value) =>
     match value {
-      Raw::Num(t) =>
+      Raw::Number(t) =>
         match Int::of_string(t) {
           Option::Some(n) => Validated::of(n),
           Option::None => wrong(path, "a whole number", value),
         },
-      Raw::Text_(t) =>
+      Raw::Text(t) =>
         match Int::of_string(t) {
           Option::Some(n) => Validated::of(n),
           Option::None => wrong(path, "a whole number", value),
@@ -311,19 +315,19 @@ pub fn whole() -> Schema<Int> {
 
 /// An exact decimal, parsed from the token.
 ///
-/// The reason [`Raw::Num`] keeps its text: this is the one a price goes
+/// The reason [`Raw::Number`] keeps its text: this is the one a price goes
 /// through, and a `Float` on the way would make it the wrong price.
-pub fn exact() -> Schema<Decimal> {
+pub fn decimal() -> Schema<Decimal> {
   {
-    shape: Shape::Exact,
+    shape: Shape::Decimal,
     read: fn (path, value) =>
     match value {
-      Raw::Num(t) =>
+      Raw::Number(t) =>
         match Decimal::of_string(t) {
           Option::Some(d) => Validated::of(d),
           Option::None => wrong(path, "an exact decimal", value),
         },
-      Raw::Text_(t) =>
+      Raw::Text(t) =>
         match Decimal::of_string(t) {
           Option::Some(d) => Validated::of(d),
           Option::None => wrong(path, "an exact decimal", value),
@@ -334,13 +338,13 @@ pub fn exact() -> Schema<Decimal> {
 }
 
 /// True or false, spelled the way a configuration file spells it.
-pub fn truth() -> Schema<Bool> {
+pub fn bool() -> Schema<Bool> {
   {
-    shape: Shape::Truth,
+    shape: Shape::Bool,
     read: fn (path, value) =>
     match value {
-      Raw::Truth(b) => Validated::of(b),
-      Raw::Text_(t) =>
+      Raw::Bool(b) => Validated::of(b),
+      Raw::Text(t) =>
         if t == "true" || t == "yes" || t == "1" {
           Validated::of(true)
         } else if t == "false" || t == "no" || t == "0" {
@@ -424,8 +428,8 @@ pub fn refine<A>(inner: Schema<A>, must: String, holds: (A) -> Bool) -> Schema<A
 
 /// A value nothing may print.
 ///
-/// **A combinator over any inner schema, not a leaf.** `secret(whole())` and
-/// `secret(text())` both work, and redaction composes with everything else
+/// **A combinator over any inner schema, not a leaf.** `secret(int())` and
+/// `secret(string())` both work, and redaction composes with everything else
 /// instead of sitting beside it. No bound on `A`: a `Schema<A>` is a value, and
 /// holding one already is the evidence that an `A` can be decoded.
 ///
@@ -458,7 +462,7 @@ fn at<A>(name: String, inner: Schema<A>, path: List<Segment>, value: Raw)
 ///
 /// **The assembler is the price of having no mapped types.** The spelling a
 /// reader reaches for --
-/// `struct({ port: whole(), host: text() })` -- cannot be typed: its argument
+/// `struct({ port: int(), host: string() })` -- cannot be typed: its argument
 /// is a record of *schemas* and the result would have to be a schema of the
 /// record of what they decode, which needs a type-level map Khora does not
 /// have. Something must say how the pieces become the record, and here that is
@@ -478,7 +482,7 @@ pub fn struct2<A, B, C>(
   combine: (A, B) -> C,
 ) -> Schema<C> {
   {
-    shape: Shape::Struct_([{ name: a_name, shape: a.shape }, { name: b_name, shape: b.shape }]),
+    shape: Shape::Struct([{ name: a_name, shape: a.shape }, { name: b_name, shape: b.shape }]),
     read: fn (path, value) =>
     Validated::map2(at(a_name, a, path, value), at(b_name, b, path, value), combine),
   }
@@ -495,7 +499,7 @@ pub fn struct3<A, B, C, D>(
   combine: (A, B, C) -> D,
 ) -> Schema<D> {
   {
-    shape: Shape::Struct_([
+    shape: Shape::Struct([
         { name: a_name, shape: a.shape },
         { name: b_name, shape: b.shape },
         { name: c_name, shape: c.shape },
@@ -523,7 +527,7 @@ pub fn struct4<A, B, C, D, E>(
   combine: (A, B, C, D) -> E,
 ) -> Schema<E> {
   {
-    shape: Shape::Struct_([
+    shape: Shape::Struct([
         { name: a_name, shape: a.shape },
         { name: b_name, shape: b.shape },
         { name: c_name, shape: c.shape },
@@ -559,7 +563,7 @@ pub fn struct5<A, B, C, D, E, F>(
   combine: (A, B, C, D, E) -> F,
 ) -> Schema<F> {
   {
-    shape: Shape::Struct_([
+    shape: Shape::Struct([
         { name: a_name, shape: a.shape },
         { name: b_name, shape: b.shape },
         { name: c_name, shape: c.shape },
