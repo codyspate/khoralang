@@ -14,6 +14,19 @@ it will behave differently now.
 
 ### Breaking
 
+- **`khora doc` no longer defaults to this repository's layout, and no longer
+  claims the directory it writes to.** `paths` defaulted to `std` and `--out`
+  to `website/content/docs/stdlib/api`, both resolved against the caller's
+  working directory, so the command documented nothing a user owned and wrote
+  into a path that meant nothing to them -- and its stale sweep deleted every
+  markdown file there it had not just generated, which is data loss for a
+  directory that is not a generated tree. The defaults are package-relative
+  now: the nearest `khora.toml` decides, sources come from its `src`, pages go
+  to its `docs/api`, and outside a package the command refuses and says what to
+  type. The sweep is scoped by a `.khora-doc` record written beside the pages,
+  so a page whose module was deleted still goes and a file the command did not
+  write is left alone and reported. Projects that passed both arguments
+  explicitly, this repository included, are unaffected.
 - **`std::ai::Extract` is deleted; `extract` asks for `Decode`.** A type that
   derives `Decode` is extracted with nothing else written: its shape,
   rendered as a JSON Schema by the new `Shape::to_json_schema`, is what the

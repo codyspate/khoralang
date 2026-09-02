@@ -263,7 +263,14 @@ await validateDocLinks(sourceFiles, knownRoutes);
 
 await rm(collectionRoot, { recursive: true, force: true });
 await mkdir(target, { recursive: true });
-await cp(source, target, { recursive: true });
+// Pages only. `khora doc` keeps a `.khora-doc` record beside the reference it
+// generates, saying which pages are its to delete; it belongs to the source
+// tree and not to the site, and a non-page inside a content collection is at
+// best noise and at worst something Astro tries to parse.
+await cp(source, target, {
+  recursive: true,
+  filter: (from) => !path.basename(from).startsWith('.'),
+});
 
 async function normalizeMarkdown(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {

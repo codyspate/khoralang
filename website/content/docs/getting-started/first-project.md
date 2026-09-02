@@ -93,6 +93,24 @@ khora test .
 
 The test runner discovers `test` blocks in the package and reports failures through the CLI. For testing patterns around capabilities, typed failure, and cancellation, see [Testing](/docs/reference/testing/).
 
+## Document what you wrote
+
+```bash
+khora doc
+```
+
+Run inside a package, this reads the `///` and `//!` comments from its `src`
+and writes a page per module into `docs/api` beside the `khora.toml`. Name
+sources or a destination when you want different ones, as in
+`khora doc src --out reference`.
+
+It keeps a `.khora-doc` record beside the pages listing the ones it generated.
+That is what lets a later run delete the page of a module you removed without
+touching anything it did not write, so a hand-written file in the same
+directory is safe and is reported rather than removed. `khora doc --check`
+writes nothing and fails when a checked-in page no longer matches its source,
+which is how a project keeps generated documentation honest in CI.
+
 ## Build a native executable
 
 ```bash
@@ -142,6 +160,7 @@ khora fmt .
 khora check .
 khora test .
 khora build .
+khora doc
 ```
 
 The language server uses the same compiler queries as `khora check`, so editor diagnostics and command-line diagnostics stay aligned. Continue with [Editor setup](/docs/getting-started/editor/) when you want that feedback in your editor.

@@ -197,3 +197,93 @@ fn a_page_with_windows_line_endings_is_not_stale() {
         String::from_utf8_lossy(&checked.stdout)
     );
 }
+
+/// **The sweep deletes pages, and a page is not every markdown file.** The
+/// stale sweep used to take every `.md` under `--out`, which is right when the
+/// directory is a generated tree and destroys somebody's work when it is not.
+/// With the old default sending it into a path the caller never named, that
+/// was a way to lose a file by running a documentation command.
+#[test]
+fn a_file_this_did_not_write_is_left_alone() {
+    let w = world();
+    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\npub fn f() -> Int { 1 }\n");
+    write(&w.out.join("by-hand.md"), "# Mine\n\nWritten by a person.\n");
+    write(&w.out.join("deep").join("also-mine.md"), "# Mine too\n");
+
+    let out = run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    assert_eq!(
+        std::fs::read_to_string(w.out.join("by-hand.md")).expect("the hand-written page"),
+        "# Mine\n\nWritten by a person.\n",
+        "a file this command did not write is not its to delete"
+    );
+    assert!(w.out.join("deep").join("also-mine.md").is_file(), "nor one in a subdirectory");
+    assert!(w.out.join("alpha.md").is_file(), "and the page it did write is there");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("was not written by `khora doc`"),
+        "and it says so rather than passing over it silently: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Adopting a tree is not the same as owning every file in it: a second run
+/// still deletes what the first one wrote, and still leaves the rest.
+#[test]
+fn the_sweep_stays_scoped_across_runs() {
+    let w = world();
+    write(&w.src.join("a.kh"), "module p::alpha;\n//! Alpha.\npub fn f() -> Int { 1 }\n");
+    write(&w.src.join("b.kh"), "module p::beta;\n//! Beta.\npub fn g() -> Int { 1 }\n");
+    write(&w.out.join("by-hand.md"), "# Mine\n");
+    run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
+    assert!(w.out.join("beta.md").is_file());
+
+    std::fs::remove_file(w.src.join("b.kh")).expect("removing the module");
+    let out = run(&["doc", w.src.to_str().unwrap(), "--out", w.out.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    assert!(!w.out.join("beta.md").exists(), "the page whose module went away is gone");
+    assert!(w.out.join("by-hand.md").is_file(), "the file it never wrote is still there");
+}
+
+/// `khora doc` in a package documents *that package*, into a directory beside
+/// its manifest. The defaults used to be this repository's own layout, so the
+/// command meant something different everywhere else than it did here.
+#[test]
+fn a_package_documents_itself_by_default() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let root = tmp.path();
+    write(&root.join("khora.toml"), "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n");
+    write(&root.join("src").join("main.kh"), "module probe::main;\n//! A probe.\npub fn f() -> Int { 1 }\n");
+
+    let out = Command::new(khora())
+        .arg("doc")
+        .current_dir(root)
+        .output()
+        .expect("khora should run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let page = root.join("docs").join("api").join("main.md");
+    assert!(page.is_file(), "the page goes beside the manifest, not into a path from another repository");
+    assert!(
+        std::fs::read_to_string(&page).expect("the page").contains("title: probe::main"),
+        "and it documents this package"
+    );
+}
+
+/// Outside a package and with nothing named, there is nothing to document, and
+/// the refusal says what to type instead of inventing a target.
+#[test]
+fn nothing_to_document_is_a_refusal_that_says_what_to_do() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let out = Command::new(khora())
+        .arg("doc")
+        .current_dir(tmp.path())
+        .output()
+        .expect("khora should run");
+
+    assert!(!out.status.success(), "there is no package here");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("no `khora.toml`"), "it says why: {said}");
+    assert!(said.contains("khora doc src"), "and what to type: {said}");
+}

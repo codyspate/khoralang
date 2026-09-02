@@ -5,7 +5,7 @@
 //! itself a project gets. `khora toolchain` is the part that manages the
 //! others, so there is nothing else to install first.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -165,11 +165,14 @@ enum Command {
     /// deleted, so a stale page cannot outlive the code it documented.
     Doc {
         /// One or more `.kh` files, or directories to walk.
-        #[arg(default_value = "std")]
+        ///
+        /// Left out, this documents the nearest package's `src`, so `khora doc`
+        /// in a package documents that package.
         paths: Vec<PathBuf>,
-        /// Where the pages go.
-        #[arg(short, long, default_value = "website/content/docs/stdlib/api")]
-        out: PathBuf,
+        /// Where the pages go. Defaults to `docs/api` beside the package's
+        /// `khora.toml`.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
         /// Report what would change and write nothing.
         ///
         /// The exit status is what CI reads: non-zero means the checked-in
@@ -489,7 +492,10 @@ fn dispatch() -> Result<ExitCode> {
         }
         Command::Cache { clear } => cache_command(clear).map(|()| true),
         Command::Sbom { path, out } => sbom(&path, out.as_deref()).map(|()| true),
-        Command::Doc { paths, out, check } => doc(&paths, &out, check),
+        Command::Doc { paths, out, check } => {
+            let (paths, out) = doc_targets(paths, out)?;
+            doc(&paths, &out, check)
+        }
         Command::Install { url, rev, subdir, path } => {
             install(url.as_deref(), &rev, subdir.as_deref(), &path).map(|()| true)
         }
@@ -2639,6 +2645,60 @@ fn sbom(path: &Path, out: Option<&Path>) -> Result<()> {
 /// deleted. Both halves are needed for the same reason: a generated tree is
 /// only reviewable if regenerating it after no change produces no diff, and a
 /// page for a module somebody deleted is worse than no page at all.
+/// What to document and where to put it, when the command line said neither.
+///
+/// **The defaults used to be this repository's own layout**: `std` for the
+/// sources and `website/content/docs/stdlib/api` for the output, both relative
+/// to wherever the caller was standing. Somebody running `khora doc` in their
+/// own package documented nothing they owned and wrote pages into a four-deep
+/// path that meant nothing there. It is a package-relative pair now, so the
+/// command means the same thing in every package: document this one, and put
+/// the pages beside its manifest. This repository still passes both
+/// explicitly, which is why its own invocation is unchanged.
+fn doc_targets(paths: Vec<PathBuf>, out: Option<PathBuf>) -> Result<(Vec<PathBuf>, PathBuf)> {
+    if !paths.is_empty() {
+        // Sources were named, so the output is beside the manifest nearest the
+        // first of them rather than the one nearest the caller: `khora doc
+        // ../other/src` documents `../other`, not here.
+        let out = match out {
+            Some(out) => out,
+            None => doc_output_for(&paths[0])?,
+        };
+        return Ok((paths, out));
+    }
+
+    let here = std::env::current_dir().context("finding the current directory")?;
+    let Some(manifest) = nearest_manifest(&here) else {
+        anyhow::bail!(
+            "no `khora.toml` here or above, so there is no package to document.\n\
+             Name what to document, as in `khora doc src`, or run this inside a package"
+        );
+    };
+    let root = manifest.parent().unwrap_or(&here).to_path_buf();
+    let source = root.join("src");
+    if !source.is_dir() {
+        anyhow::bail!(
+            "{} has no `src` directory, so there is nothing to document by default.\n\
+             Name what to document, as in `khora doc {}`",
+            root.display(),
+            root.display()
+        );
+    }
+    let out = out.unwrap_or_else(|| root.join("docs").join("api"));
+    Ok((vec![source], out))
+}
+
+/// `docs/api` beside the manifest nearest `path`, or beside `path` itself when
+/// nothing above it is a package.
+fn doc_output_for(path: &Path) -> Result<PathBuf> {
+    if let Some(manifest) = nearest_manifest(path) {
+        let root = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
+        return Ok(root.join("docs").join("api"));
+    }
+    let base = if path.is_dir() { path.to_path_buf() } else { PathBuf::from(".") };
+    Ok(base.join("docs").join("api"))
+}
+
 fn doc(paths: &[PathBuf], out: &Path, check: bool) -> Result<bool> {
     let files = documentable(paths)?;
     if files.is_empty() {
@@ -2681,13 +2741,32 @@ fn doc(paths: &[PathBuf], out: &Path, check: bool) -> Result<bool> {
         pages.insert(file, khora_doc::markdown(&module));
     }
 
-    let stale = existing_pages(out).into_iter().filter(|p| !pages.contains_key(p));
+    // **Only what this command wrote is this command's to delete.** The
+    // stale-page sweep used to take every `.md` under `--out`, which is
+    // correct when the directory is a generated tree and destroys somebody's
+    // work when it is not -- and the old default sent it into a path the
+    // caller had never named. What it owns is recorded in the directory, so
+    // the sweep is scoped to pages a previous run put there, and a directory
+    // with no record is one this command has not written to before.
+    let owned = owned_pages(out);
+    let unowned: Vec<PathBuf> = existing_pages(out)
+        .into_iter()
+        .filter(|p| !pages.contains_key(p) && !owned.contains(p))
+        .collect();
+    let stale: Vec<PathBuf> =
+        owned.into_iter().filter(|p| !pages.contains_key(p) && p.exists()).collect();
     let mut changed: Vec<String> = Vec::new();
     for path in stale {
         changed.push(format!("  delete {}", path.display()));
         if !check {
             let _ = std::fs::remove_file(&path);
         }
+    }
+    for path in &unowned {
+        eprintln!(
+            "warning: {} was not written by `khora doc`, so it is left alone",
+            path.display()
+        );
     }
     for (path, page) in &pages {
         let before = std::fs::read_to_string(path).ok();
@@ -2716,6 +2795,7 @@ fn doc(paths: &[PathBuf], out: &Path, check: bool) -> Result<bool> {
     }
 
     if !check {
+        write_owned(out, pages.keys())?;
         prune_empty(out);
     }
 
@@ -2793,6 +2873,59 @@ fn unified(text: &str) -> String {
 }
 
 /// Every `.md` already under `out`, so the ones this run did not write can go.
+/// The name of the record a generated tree keeps of its own pages.
+const DOC_OWNED: &str = ".khora-doc";
+
+/// The pages a previous `khora doc` wrote into `out`.
+///
+/// **Absent means "nothing here is mine"**, which is the safe reading in both
+/// directions: a directory this command has never written to loses nothing,
+/// and the first run after this file was introduced adopts the tree by
+/// recording it rather than by deleting it.
+fn owned_pages(out: &Path) -> BTreeSet<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(out.join(DOC_OWNED)) else {
+        return BTreeSet::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| out.join(line))
+        .collect()
+}
+
+/// Records the pages just written, so the next run knows what it may remove.
+///
+/// Paths are relative and `/`-separated, because this file is committed
+/// alongside the tree it describes and a Windows checkout and a Linux one have
+/// to agree about it.
+fn write_owned<'a>(out: &Path, pages: impl Iterator<Item = &'a PathBuf>) -> Result<()> {
+    let mut text = String::from(
+        "# Written by `khora doc`. It lists the pages this directory's\n\
+         # generator owns, and is what lets a later run delete a page whose\n\
+         # module is gone without touching anything it did not write.\n",
+    );
+    let mut lines: Vec<String> = Vec::new();
+    for page in pages {
+        let relative = page.strip_prefix(out).unwrap_or(page);
+        let mut spelled = String::new();
+        for (i, part) in relative.components().enumerate() {
+            if i > 0 {
+                spelled.push('/');
+            }
+            spelled.push_str(&part.as_os_str().to_string_lossy());
+        }
+        lines.push(spelled);
+    }
+    lines.sort();
+    for line in lines {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    std::fs::write(out.join(DOC_OWNED), text)
+        .with_context(|| format!("writing {}", out.join(DOC_OWNED).display()))
+}
+
 fn existing_pages(out: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![out.to_path_buf()];

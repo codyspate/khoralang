@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **165 of 222**, and re-scored
+than against the roadmap's account of itself. **166 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -50,7 +50,7 @@ advertised, so no wasm deployment has to work.
 | 8. FFI and C interoperability | 4 / 8 |
 | 9. Traps, debugging and production diagnosis | 3 / 7 |
 | 10. Compiler performance and scale | 1 / 6 |
-| 11. Tooling and editor experience | 6 / 10 |
+| 11. Tooling and editor experience | 7 / 10 |
 | 12. Installation, toolchains and release artifacts | 6 / 9 |
 | 13. Package ecosystem | 7 / 7 |
 | 14. Supply chain and security | 4 / 7 |
@@ -263,7 +263,7 @@ A target is “supported” only when the toolchain produces something users can
 - [ ] Syntax highlighting covers the complete current grammar. **Left:** Not audited against the grammar since the grammar last changed.
 - [x] The editor extension and compiler report their versions in bug reports/repro instructions. **Done:** The status bar runs `khora toolchain which` and shows the answering toolchain and its reason.
 - [x] The language's MCP support is documented as optional tooling rather than required to write correct Khora. **Done:** `/docs/getting-started/editor/` puts it under *AI coding tools*, after the paragraph that says what an editor actually needs, and states outright that it is optional — the compiler and the language server behave identically whether or not an agent is connected.
-- [ ] `khora doc` works in an ordinary user package rather than only over `std`. **Left:** it runs and writes to the wrong place, destructively. `--out` defaults to `website/content/docs/stdlib/api` (`khora-cli/src/main.rs:171`), which is a path inside *this* repository, and the command clears the directory rather than writing only what it generated. Running it over a three-module scratch package from the repository root produced three pages there and removed all 21 checked-in `std` pages. For a user the default is meaningless; for anyone whose project has that layout it deletes their work. #174.
+- [x] `khora doc` works in an ordinary user package rather than only over `std`. **Done:** #174 fixed both halves. The defaults are package-relative -- the nearest `khora.toml` decides, sources come from its `src` and pages go to its `docs/api` -- so the command means the same thing in every package, and outside a package it refuses and says what to type. The stale sweep no longer claims the output directory: a `.khora-doc` record beside the pages lists what the generator owns, so a page whose module was deleted still goes and a file the command did not write is left alone and reported. Five tests in `khora-cli/tests/doc.rs`, including a hand-written page surviving a run and a rerun.
 - [x] A package may declare more than one executable, or the `src/bin` convention the linter enforces is documented as the only supported shape. **Done:** #162 implemented both halves. `khora build .` builds `src/main.kh` and every file under `src/bin/`, each as its own compilation so two `main`s never meet, and each named after its file. `khora run .` runs the package's own program and names the others when there is none. `misplaced-main` now allows `src/bin/*.kh`, and `/docs/reference/modules-and-packages/` documents the layout.
 
 ---
