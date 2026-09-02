@@ -57,6 +57,8 @@ fn demo_db() -> Db {
       print("ROLLBACK");
       Result::Ok(())
     },
+
+    broken: fn () => print("the connection's state is no longer known"),
   }
 }
 

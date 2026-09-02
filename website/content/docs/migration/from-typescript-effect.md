@@ -16,7 +16,8 @@ public is `pub`:
 
 ```khora
 pub type Entry = { id: Int, memo: String };
-pub fn total(entries: List<Entry>) -> Int { .. }
+
+pub fn total(entries: List<Entry>) -> Int
 ```
 
 It also appears on methods, which is why it is not `export`: nobody imports

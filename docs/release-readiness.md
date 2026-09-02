@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree on 2026-08-31, item by item, against what is in the
-repository rather than against the roadmap's account of itself. **152 of 222**,
+repository rather than against the roadmap's account of itself. **153 of 222**,
 and re-scored whenever a section moves.
 
 **A score is only as good as the reading behind it.** Section 3 was scored at
@@ -49,7 +49,7 @@ advertised, so no wasm deployment has to work.
 | 14. Supply chain and security | 4 / 7 |
 | 15. Compatibility, governance and contribution policy | 8 / 8 |
 | 16. Public documentation | 44 / 46 |
-| 17. khoralang.com production documentation site | 7 / 12 |
+| 17. khoralang.com production documentation site | 8 / 12 |
 | 18. Reference applications and end-to-end proof | 6 / 6 |
 | 19. External-user validation | 0 / 5 |
 | 20. Public positioning and benchmark integrity | 3 / 7 |
@@ -402,7 +402,7 @@ These guides should translate mental models, not market against other languages.
 - [ ] `/docs/<version>/` resolves pinned documentation for supported historical releases. **Left:** There are no historical releases. Starts at 0.2.0, per `docs/design/docs-urls.md`.
 - [ ] `/docs/next/` may expose development documentation but must be visibly marked unstable. **Left:** The whole site is `next` until 0.1.0 ships, and is marked: `sync-docs.mjs` puts an unstable banner on every page. The path itself starts existing when `/docs/` stops being it.
 - [x] Site search covers the language guide, reference and standard library. **Done:** Starlight's Pagefind index, over all 100 pages including the generated `stdlib/api` tree. This was already true when the section was scored — a build prints `Found 100 HTML files` — and was unticked because nobody had run one.
-- [ ] Code snippets are syntax highlighted and, where feasible, checked against the matching Khora compiler during the docs build. **Left:** Highlighted; not compiled against the matching toolchain.
+- [x] Code snippets are syntax highlighted and, where feasible, checked against the matching Khora compiler during the docs build. **Done:** all 580 hand-written examples are compiled by `scripts/check-docs.sh`, which is a step of the gate — so an example and the compiler cannot disagree without the build saying so. A fragment is *parsed*, which is what catches syntax that no longer exists; the 17 that declare their own `module` are fully checked, and those are the ones that caught a `handler for Db` gone stale two commits earlier. `khora doc --check` owns the 993 generated ones.
 - [x] Broken internal links and stale symbol references fail CI. **Done, and it had a bug.** `sync-docs.mjs` has always refused a link that resolves to no route, and refused a link written to a `.md` source file rather than the route it renders as — but it applied the second test before asking whether the link was *external*, so three links to `CONTRIBUTING.md` and friends on GitHub broke the build and the site did not build for a week. Nothing caught it, because CI only runs on a push and this gate did not build the site at all. It does now, as a step of `scripts/baseline.sh`. Stale *symbol* references are the other half and are `khora doc --check`, which is a separate step here.
 - [x] The site contains direct paths to installation, releases, documentation, GitHub/source, security reporting and contribution information. **Done:** `/install`, `/guide`, `/reference`, `/stdlib`, `/versioning`, `/limitations`, `/releases`, `/source`, `/security`, `/contributing` and `/changelog`, as redirects in `astro.config.mjs`, and in the footer of every page. They are the ones that get pasted into a chat window, and they survive the pages behind them moving.
 - [x] Benchmarks shown publicly link to reproducible methodology rather than presenting context-free numbers. **Done:** `/docs/performance/`, which publishes the methodology and **no numbers at all** — because the load generator is currently the limit and the same configuration does not repeat to within 1.85×. It says which comparisons mean something, how to run them, and the four things that would have to be true before a figure is worth printing.

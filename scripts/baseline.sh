@@ -130,6 +130,18 @@ step 'the standard library reference matches the standard library'
 # hand, sometimes, is a page that is wrong at the moment somebody reads it.
 "$khora" doc std --out website/content/docs/stdlib/api --check
 
+step 'the hand-written examples compile'
+# **The generated pages were the only ones anything checked.** `khora doc std
+# --check` keeps the 993 examples under `stdlib/api` honest, because they come
+# from `///` comments this gate already compiles. The 580 in the Guide, the
+# Reference and the Cookbook — the pages somebody reads first — had never been
+# compiled at all, and 55 of them did not.
+#
+# About three minutes, nearly all of it `khora parse` starting up. It is slower
+# than every other step here and is worth it: a documentation example that no
+# longer compiles is the failure a reader meets before any other.
+bash scripts/check-docs.sh
+
 step 'the documentation site assembles and its links resolve'
 # **The gate did not build the site, and the site was broken for a week.**
 # Three links to `CONTRIBUTING.md` and friends on GitHub were rejected by the

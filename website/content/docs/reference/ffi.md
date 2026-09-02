@@ -91,19 +91,13 @@ When C needs temporary access to bytes owned by Khora, lend them for the duratio
 For strings, the standard forms are:
 
 ```khora
-String::with_c_string<B, 'ef, 'er>(
-  text,
-  body
-)
+String::with_c_string(text, body)
 ```
 
 where `body` receives a temporary `Ptr` to NUL-terminated bytes, and:
 
 ```khora
-String::with_data<B, 'ef, 'er>(
-  text,
-  body
-)
+String::with_data(text, body)
 ```
 
 where `body` receives `(Ptr, Int)` for the bytes and their length.

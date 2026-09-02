@@ -126,6 +126,14 @@ it will behave differently now.
 
 ### Added
 
+- **Every hand-written documentation example is compiled by the gate.** All 580
+  blocks in the Guide, the Reference and the Cookbook, which nothing had ever
+  compiled — 55 of them did not. Most were legitimate shapes the checker had to
+  learn (a bodyless signature, a list of types, the arms of a `match`, one entry
+  of a handler); six were rot, including a `handler for Db` that went stale two
+  commits earlier. `scripts/check-docs.sh` takes page arguments, so one page can
+  be checked while it is being written.
+
 - **A package's other programs go in `src/bin/`.** One file per program, each
   built with the package's modules and not with the others, each named after
   its file: `src/bin/backfill.kh` becomes `build/backfill.exe` beside

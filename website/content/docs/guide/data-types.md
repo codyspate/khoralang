@@ -272,8 +272,8 @@ traits and `Decimal` implements them — and it does so **by value**, so `1.50d`
 and `1.5d` are the same number:
 
 ```khora
-if paid == owed { .. }
-if amount < limit { .. }
+if paid == owed { settle(invoice) }
+if amount < limit { approve(amount) }
 ```
 
 Arithmetic is by name. `+`, `-` and `*` are the primitive numeric types', and
