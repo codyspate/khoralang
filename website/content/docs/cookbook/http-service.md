@@ -77,7 +77,22 @@ For typed request/response bodies, continue with [JSON API](/docs/cookbook/json-
 
 ## Bound the resource that is actually constrained
 
-The router already owns request fibers. If a downstream resource has a smaller capacity—for example a database pool—bound concurrency around that work rather than treating the total number of HTTP connections as the same limit. See [Bounded concurrency](/docs/cookbook/bounded-concurrency/).
+**The server has one capacity number, not two.** `Router::listen` accepts at
+most 256 connections at once, and an accepted connection is a fiber that is
+inside your handler for as long as the handler runs. There is no second,
+smaller pool that handlers queue for, so 256 is both the most connections
+served at once and the most handlers running at once.
+
+That bound is not usually what limits throughput. Measured on a 16-core
+desktop, the server saturates by about 16 connections: from there to 128 the
+rate is flat while the median request slows in proportion to the queue behind
+it. Past saturation, raising the bound lengthens the queue and lowers it sheds
+load sooner; neither makes the server faster.
+
+So bound the thing that is actually scarce. If a handler waits on a database
+pool or a rate-limited API, put a smaller bound around *that* work rather than
+lowering the connection limit, which would refuse connections that could have
+been served. See [Bounded concurrency](/docs/cookbook/bounded-concurrency/).
 
 ## A trap in a handler ends the server
 

@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **179 of 222**, and re-scored
+than against the roadmap's account of itself. **180 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -43,7 +43,7 @@ advertised, so no wasm deployment has to work.
 | 1. Language and compiler correctness | 13 / 19 |
 | 2. Runtime soundness and structured concurrency | 10 / 16 |
 | 3. Resource, database and cancellation semantics | 5 / 6 |
-| 4. HTTP, overload and server behavior | 7 / 10 |
+| 4. HTTP, overload and server behavior | 8 / 10 |
 | 5. Observability | 4 / 7 |
 | 6. Database ecosystem proof | 6 / 7 |
 | 7. Cross-compilation and deployment | 4 / 11 |
@@ -155,7 +155,7 @@ Khora's runtime is part of the language contract. The release cannot rely on “
 
 Peak requests per second alone is not a release gate. A production runtime must remain healthy when offered work exceeds sustainable throughput.
 
-- [ ] The HTTP server has a documented distinction between connection capacity and actively executing/request-processing capacity. **Left:** not documented. The server bounds accepted connections with a nursery of 256 and there is no second, smaller bound on how many of those are executing a handler at once, so the two capacities are one number. `/docs/stdlib/api/net/http/` does not use the word.
+- [x] The HTTP server has a documented distinction between connection capacity and actively executing/request-processing capacity. **Done:** by saying that they are one number and why, rather than by inventing a second. An accepted connection is a fiber and that fiber is inside the handler for as long as the handler runs, so 256 is both the most connections served at once and the most handlers running at once. `http_native.kh` says so where the bound is written and `/docs/cookbook/http-service/` says it where somebody writing a server will meet it, with the measurement that matters: the server saturates by about 16 connections, so past that the bound governs queueing rather than capacity, and a handler waiting on something scarcer wants its own smaller bound rather than a lower connection limit.
 - [x] The current connection/nursery limits are intentionally tuned for scheduled fibers rather than inherited from the old OS-thread implementation. **Done:** measurable now, and measured. Throughput is flat from 16 connections to 128 -- 176k, 180k, 177k, 176k -- while median latency rises in proportion to the queue, 70us to 724us, which is a saturated server rather than one that has run out of capacity. The server saturates well below 256 connections, so the bound is not what limits throughput at any concurrency this rig can offer, and raising or lowering it would change queueing rather than capacity. 256 is now a number with a measurement behind it rather than an inherited one.
 - [x] Sustained overload tests cover at least 100%, 125% and 200% of sustainable offered load. **Done:** `khora-codegen-llvm/tests/load.rs`: overload, recovery and shutdown.
 - [x] Under overload, RSS remains bounded within the configured operating model. **Done:** `loadgen --watch-pid` samples the server's resident set through a run. `bench/service` peaks at 584 KB at 32 connections and *less* at 128, and every server measured -- Khora, Rust, Go, C#, Java, Node -- stays under a megabyte. Memory does not grow with connections, which is the property this item is about.
