@@ -868,6 +868,7 @@ fn wrong<A>(path: List<Segment>, wanted: String, saw: Raw) -> Validated<A, Rejec
 /// Text, as it arrived.
 ///
 /// A number is not text: `{ "name": 42 }` is refused, as serde refuses it.
+///
 /// A source that could not tell hands over [`Raw::Untyped`], which is read.
 pub fn string() -> Schema<String> {
   {
