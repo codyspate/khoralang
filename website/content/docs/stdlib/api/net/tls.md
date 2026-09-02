@@ -7,7 +7,7 @@ description: "TLS, over the sockets in std::net::socket"
 
 TLS, over the sockets in `std::net::socket`.
 
-**Bound, not written.** `docs/design/ecosystem.md` puts TLS in the short list
+**Bound, not written.** [the ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) puts TLS in the short list
 of things Khora does not implement — "correctness is a specialist matter and
 a bug is a breach" — so this is `rustls`, reached through the runtime that
 every Khora executable already links. Nothing here is cryptography; it is a
@@ -237,6 +237,6 @@ certificate verification exists to prevent, so there is no overload that
 takes one.
 
 The socket is made here rather than passed in, because resolving a name
-needs `getaddrinfo` and a `struct addrinfo` cannot cross the C ABI — errata
-35. The runtime already has a resolver worth using.
+needs `getaddrinfo` and a `struct addrinfo` cannot cross the C ABI. The
+runtime already has a resolver worth using.
 

@@ -53,7 +53,7 @@ pub effect Env {
   /// in `khora.toml` rather than a line in a deployment script. Answering
   /// `None` for both would send a reader to look at their environment for a
   /// decision their own manifest made -- the same reasoning `IoError::Denied`
-  /// records. `docs/design/permissions.md`.
+  /// records.
   variable: (String) -> Option<String> raises EnvError,
   /// Everything the process was invoked with, the program's own name first —
   /// the same convention C, Rust and Go all follow.

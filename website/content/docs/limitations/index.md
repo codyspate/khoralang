@@ -91,7 +91,7 @@ There is no way to write "an `Int` or a `String`" as the type of a value. `+` jo
 
 The practical consequence is that `attempt` handles a body raising exactly one type. Use [`catch`](/docs/reference/failures/#catch) for a wider row — it matches per type and never has to name a combined type.
 
-`docs/design/unions.md` in the repository records what a union would mean, what it would cost, and why existentials are not part of the same question.
+[The unions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/unions.md) records what a union would mean, what it would cost, and why existentials are not part of the same question.
 
 ## Concurrency combinators
 
@@ -117,4 +117,4 @@ Khora has not reached 1.0. Source compatibility across arbitrary development rev
 
 If the documentation says something should work and the compiler disagrees, treat that as a bug in either the implementation or the docs.
 
-Every hand-written example on this site is compiled by `scripts/check-docs.sh`, which is a step of the project baseline, and the generated API pages are checked against their declarations by `khora doc --check`. Two gaps remain. A hand-written fragment is *parsed* rather than type-checked unless it declares its own `module`, so an example can be syntactically valid and still mean the wrong thing — `List<String` with the bracket missing is a valid comparison. And the examples inside `///` doc comments, which become the generated pages, are not run at all. Where an example and the compiler disagree, reconcile them against the implementation rather than assuming either side is right.
+Every hand-written example on this site is compiled as a step of the project's build gate, and the generated API pages are checked against their declarations by `khora doc --check`. Two gaps remain. A hand-written fragment is *parsed* rather than type-checked unless it declares its own `module`, so an example can be syntactically valid and still mean the wrong thing — `List<String` with the bracket missing is a valid comparison. And the examples inside `///` doc comments, which become the generated pages, are not run at all. Where an example and the compiler disagree, reconcile them against the implementation rather than assuming either side is right.

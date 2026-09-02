@@ -16,7 +16,7 @@ end of this page are what differs underneath it.
 **No struct crosses the boundary.** `bind` wants a `sockaddr_in`, which is
 sixteen bytes; those sixteen bytes are laid out in Khora, in an `Array<U8>`,
 and lent as a `Ptr` for exactly the duration of the call. That is what
-`docs/design/ffi.md` says a pointer is for, and it is why binding a socket
+[The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) says a pointer is for, and it is why binding a socket
 needs nothing added to the runtime.
 
 ## On Linux
@@ -130,13 +130,13 @@ A database driver is the first caller that needs the other direction.
 `host` may be a name or an address; resolution, address family and the
 platform's own resolver are the runtime's, which is why this is one extern
 rather than `getaddrinfo` and two `sockaddr` layouts written three times.
-`docs/design/ffi.md` is the boundary and `khora_net_connect` is on the far
+[The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) is the boundary and `khora_net_connect` is on the far
 side of it.
 
 **It blocks the fiber's worker while it connects.** A DNS lookup is not
 something the reactor can wait on. That is once per connection against many
-queries, which is the right thing to get wrong first, and it is written
-down in `docs/roadmap.md` Phase 13 rather than left to be found.
+queries, which is the right thing to get wrong first — a known cost rather
+than one left to be found.
 
 ### transmit_bytes
 

@@ -15,7 +15,7 @@ non-negotiable, and until `Clock.sleep` existed the checked-in version was
 **Named for the family rather than for `retry`.** A circuit breaker, a rate
 limiter, a bulkhead and a hedged request are all the same subject and none
 of them is a retry; a module called `std::retry` could not hold them and
-this one can. `docs/design/effect-survey.md` §3.2.
+this one can.
 
 ### The two things worth knowing before reading further
 

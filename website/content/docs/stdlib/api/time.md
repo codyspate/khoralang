@@ -19,7 +19,7 @@ milliseconds since 1970.
 The **types** are here — a civil date, a time of day, the two together, and
 a fixed offset from UTC — because they are vocabulary. Two libraries that
 disagree about what a date is cannot exchange one, and
-`docs/design/ecosystem.md` reserves exactly that case for `std`.
+[The ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) reserves exactly that case for `std`.
 
 The **time zone database is not**, and cannot be. It is a dataset: Egypt
 changes its rules, IANA cuts a release, and every binary already shipped is

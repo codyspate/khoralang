@@ -38,8 +38,8 @@ A JSON value.
 **`Number` carries the token's text, not a `Float`.** RFC 8259 §6 admits a
 number of arbitrary precision; what it *warns* is that implementations
 commonly use IEEE 754 doubles and that anything outside the range of an
-exact integer double may not survive a round trip between two of them. This
-parser used to be one of those implementations:
+exact integer double may not survive a round trip between two of them. A
+parser that decodes through a double is one of those implementations:
 
     parse("{\"big\": 9007199254740993}")   ->   9007199254740992
 
@@ -48,7 +48,7 @@ kind on a decimal, where `10.10` became the nearest double and was never
 exactly recoverable again. In the language that gives `Decimal` a 128-bit
 significand for money, and whose configuration reader refuses exponent
 notation on the grounds that a number arriving as `1e-3` has been through a
-float somewhere, that was the wrong default. Roadmap #142.
+float somewhere, that was the wrong default.
 
 So the parser stores what it read and each accessor decides what to make of
 it: `Json::integer` goes through `Int::of_string` and is exact,
@@ -408,7 +408,7 @@ fn to_json(self) -> Json
 
 **The digits, not a `Float`.** This was `Json::Number(Int::to_float(self))`,
 so an identifier above 2^53 was rounded on the way *out* as well as on the
-way in. Roadmap #142.
+way in.
 
 ### FromJson for Int
 

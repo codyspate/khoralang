@@ -217,8 +217,9 @@ Beyond five fields, nest a record rather than reaching for a wider combinator â€
 which is usually what the shape of the data was telling you anyway.
 
 `derive(Schema)` will remove the assembler entirely by generating it from the
-type. It is not shipped yet; `docs/design/schema.md` records why it is required
-rather than a convenience.
+type. It is not shipped yet; [the schema design
+note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md) records why it is required rather than a
+convenience.
 
 ## See also
 

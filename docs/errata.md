@@ -2818,3 +2818,62 @@ not the audience for an identifier. Keeping them also meant the cookbook's
 documented sample output stayed correct through the rename, which is how the
 rename was verified: the recipe's complete program was extracted and run, and
 its output was byte-identical to the page.
+
+## 74. The documentation was addressed to the person writing it
+
+A reader asked why `std::schema`'s page said this, under `int()`:
+
+> The message still says "a whole number", which is what a person reading a
+> rejection wants; the constructor is named for the `Int` it answers, which is
+> what a person writing a schema wants.
+
+That is an argument for a naming decision, addressed to whoever was making it.
+It had been written the day before, in the commit that made the decision, and
+it went onto a public API page because a doc comment is the nearest surface to
+the code being changed.
+
+**It was not one sentence.** Sweeping what `khora doc` publishes found about
+thirty passages of the same kind and sixty-six references to files in the
+repository:
+
+- *implementation history* — "an empty map used to cost an eight-element
+  array", "that check used to be a digit short", "which took a second attempt",
+  "the reason is not the one that used to be written here", "the note that
+  stood here said";
+- *internal indexes* — `errata 35`, `Roadmap #142`, `docs/roadmap.md Phase 13`;
+- *repository paths* — fifty-one `docs/design/*.md`, most of them a whole
+  sentence consisting of a path and a full stop, which resolves to nothing at
+  all from a browser.
+
+**The distinction that decided each one.** Rationale for what the code does now
+is documentation and stays: a reader choosing between `Clock`'s two millisecond
+operations needs to know why there are two. An account of what the code did
+before is a changelog entry wearing a doc comment, and it ages badly besides —
+"this used to trap" is a claim about a version nobody can run.
+
+Some cases sit on the line and were kept. `` `Clock` used to live here and now
+does not`` is phrased as history but answers a live question — a reader whose
+`import std::env::{Clock}` stopped resolving needs exactly that sentence. The
+test is not the tense; it is whether the sentence helps somebody using the
+thing.
+
+Bare repository paths became links to GitHub where the sentence made a claim
+about what the document contains, and were deleted where the path *was* the
+sentence.
+
+**What made it invisible.** Every check the project has compares the
+documentation to the code. `khora doc --check` verifies that a page matches the
+comment it came from; `check-docs.sh` compiles the examples. Both were green
+throughout, because both were asking whether the documentation was *accurate*,
+and it was. Nothing was asking who it was for.
+
+`scripts/no-maintainer-notes.sh` now asks, and is a gate step. It matches the
+unambiguous markers only — backticked repository paths, errata and roadmap
+numbers, and notes about a previous version of the note. "Used to" is
+deliberately not among them: it is ordinary English and it is also how a
+genuine migration note reads, so it needs a person. The suite that proves the
+checker works includes those four legitimate phrasings alongside six bad ones,
+because a checker that fails a correct page gets switched off.
+
+It found four more offenders the manual sweep had missed, in the same run that
+first passed.

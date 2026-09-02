@@ -254,9 +254,10 @@ readable and simply not granted — and the third is the one somebody debugs for
 an hour, because nothing in a `false` points at a manifest. The remaining
 `false` means one thing: the operating system would not open it.
 
-That combines with the glob rule above, which is where it bit hardest.
-`./data/**` does not grant `data`, so `is_dir("data")` used to answer `false`
-about a directory whose every file the program could read.
+That combines with the glob rule above, which is where it matters most.
+`./data/**` does not grant `data`, so `is_dir("data")` raises `Denied` for a
+directory whose every file the program can read — the manifest is what has to
+change, and the message says so.
 
 `Unreachable` is DNS or a firewall; `Denied` is a line you can copy out of the message into the manifest. `Env::variable` and `std::env::variable_or` therefore `raise EnvError`, so both need a `!` at the call site:
 

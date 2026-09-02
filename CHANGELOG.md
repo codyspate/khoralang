@@ -211,6 +211,16 @@ it will behave differently now.
 
 ### Changed
 
+- **The published documentation stopped explaining itself to its authors.**
+  About thirty passages of implementation history — what a function used to do,
+  which attempt fixed it, what a previous version of the note said — are gone
+  from the standard-library pages, along with sixty-six references to files
+  inside the repository. A `docs/design/*.md` path that made a claim about what
+  the document contains is now a link to GitHub; one that was the whole
+  sentence is gone. Rationale for current behaviour stays, and so do migration
+  notes that happen to be phrased as history. `scripts/no-maintainer-notes.sh`
+  is a gate step so it does not come back.
+
 - **The Guide is gone; the Language Reference absorbed it.** Fourteen of the
   Guide's fifteen pages were a second telling of a Reference page — the same
   constructs, one register apart — and keeping both in step with a compiler

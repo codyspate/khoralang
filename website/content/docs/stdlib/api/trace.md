@@ -14,7 +14,7 @@ this module.
 
 ## Why this is `std`'s and the exporter is not
 
-`docs/design/observability.md` argues it in full and the short version is
+[The observability design note](https://github.com/codyspate/khoralang/blob/main/docs/design/observability.md) argues it in full and the short version is
 `ecosystem.md`'s rule: what belongs here is the layer everyone would
 otherwise re-derive subtly wrong, and for tracing that is two things.
 
@@ -319,10 +319,10 @@ what makes it ordinary.
 #### Whichever way it leaves
 
 Three ways out, and the two that matter are the ones a `let` and a call
-cannot see. This used to be `start`, `body()`, `finish` in a row, which
-finishes the span exactly when nothing goes wrong — and a span that is only
-closed on the happy path is worse than no span, because a trace with a
-dangling parent is read as *still running*.
+cannot see. Written as `start`, `body()`, `finish` in a row, a span would
+be finished exactly when nothing goes wrong — and a span closed only on the
+happy path is worse than no span, because a trace with a dangling parent is
+read as *still running*.
 
 So the finish is registered with a region before the body starts, the same
 way `std::db::transaction` registers its rollback, and for the same reason:
@@ -332,7 +332,7 @@ releases the binding holding the region. A body that returns marks the span
 finalizer to close it, and it closes as `Failed` because that is what
 happened.
 
-`raises 'er` is the other half. `docs/design/effect-runtime.md` §6: a
+`raises 'er` is the other half. [The effect-runtime design note](https://github.com/codyspate/khoralang/blob/main/docs/design/effect-runtime.md) §6: a
 cancellation point is a `!` in a function that can raise, so a body with no
 row has none, nothing inside the span can be interrupted, and no frame here
 could carry the interruption if it were. A body that does no fallible work

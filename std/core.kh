@@ -19,7 +19,6 @@ module std::core;
 //! is no longer an `Effect` type to name it after, and `effect` is now a
 //! reserved word, so `std::effect` will not lex as a path.
 //!
-//! See docs/design/effects.md.
 
 // ---------------------------------------------------------------------------
 // Comparison and display
@@ -43,7 +42,7 @@ pub type Ordering =
 ///
 /// **`Float` is not an instance**, because `NaN == NaN` is false and a type
 /// whose values are not equal to themselves breaks every container built on
-/// this one. `docs/design/numbers.md` has the argument.
+/// this one. [The numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md) has the argument.
 pub trait Eq {
   /// Whether these are the same value.
   fn eq(self, other: Self) -> Bool;
@@ -70,7 +69,7 @@ pub trait Ord: Eq {
 ///
 /// `Float` is deliberately not an instance, because it is not an instance of
 /// `Eq`: `NaN == NaN` is false, and a key that is not equal to itself is a
-/// lost entry in every language that allows one. `docs/design/numbers.md`.
+/// lost entry in every language that allows one.
 pub trait Hash: Eq {
   /// A number to bucket by. Any number: spreading it out is the map's job, not
   /// this one's, so an implementation only has to be *consistent*.
@@ -82,7 +81,7 @@ pub trait Hash: Eq {
 /// **Not a serialization format.** `show` is for a log line, an error message
 /// and a test's failure output; `std::json` is for something that has to be
 /// read back. Nothing promises that `show` round-trips, and `Float` is the one
-/// place it happens to — see `docs/design/compatibility.md`, which makes that
+/// place it happens to — see [the compatibility design note](https://github.com/codyspate/khoralang/blob/main/docs/design/compatibility.md), which makes that
 /// a promise about `Float` rather than about `Show`.
 pub trait Show {
   /// This value, as text.
@@ -275,7 +274,6 @@ impl Show for String {
 /// Fibers are operating-system threads today, so this is `Sync` rather than
 /// `Send`: both fibers keep their reference, and neither hands it over.
 ///
-/// `docs/design/sharing.md`.
 pub trait Share {}
 
 impl Eq for Int {
@@ -427,7 +425,7 @@ pub type Option<A> =
 /// **The same thing a `raises` row says, said as a value.** A tagged return
 /// already *is* "an error or a value"; which of the two readings a function
 /// offers is a choice about its caller, and `attempt` is where one becomes the
-/// other. `docs/design/effect-runtime.md` §8.
+/// other.
 pub type Result<A, E> =
   | Ok(value: A)
   | Err(error: E);
@@ -689,12 +687,10 @@ impl<A, E> Result<A, E> {
 /// Interpolation is covered by the same `Show`. `"${key}"` calls it like any
 /// other hole, so the line compiles and prints `<redacted>`.
 ///
-/// **That is better than refusing, which is what it used to do.** A hole
-/// wanted a `String` before it called `Show`, so `"${key}"` did not compile --
-/// and the way past a hole that will not compile is `expose`, which puts the
-/// secret in the log by the shortest route available to somebody who just
-/// wants their message printed. Refusing read as the stricter of the two and
-/// was not.
+/// **Nothing needs `expose` to print one.** `expose` hands over the secret
+/// itself, which is the shortest route into a log for somebody who only wanted
+/// their message printed; a hole that already redacts removes the reason to
+/// reach for it.
 ///
 /// So every way a value reaches a log -- `show`, a derived `Show` on something
 /// holding it, and a hole -- goes through the one implementation, and there is
@@ -987,11 +983,9 @@ impl<A: Ord> List<A> {
   /// `sort_by`, which does not exist yet and wants a closure.
   ///
   /// **Its own recursion is the divide, so it goes about `log2(n)` deep** —
-  /// twenty frames for a million elements, which is what it now sorts. The
-  /// `merge` underneath it used to go one frame per element, and freeing the
-  /// intermediate lists used to go one frame per cell; between them they made
-  /// this the first `std` function a real workload could kill, at about twelve
-  /// thousand elements.
+  /// twenty frames for a million elements. The `merge` underneath it is
+  /// iterative and so is the release of the intermediate lists, so neither
+  /// adds a frame per element and the depth is the only depth there is.
   pub fn sort(self) -> List<A> {
     match self {
       List::Nil => List::Nil,
@@ -1494,9 +1488,8 @@ impl<A> List<A> {
 ///
 /// **This is the allocation `for` pays per element.** A `Step` is an ordinary
 /// heap object, so a `for` loop is about 3.6 times slower than the same loop
-/// written out -- measured in `bench/iteration`. Unboxing is what closes that;
-/// `docs/roadmap.md` has the argument and why desugaring `for` to a closure is
-/// not the answer.
+/// written out -- measured in `bench/iteration`. Unboxing is what would close
+/// that; desugaring `for` to a closure would not.
 pub type Step<S, A> =
   | Yield(state: S, item: A)
   | Done;
@@ -1933,7 +1926,7 @@ impl Traversable for List {
 /// Only allowed inside a `test` block, and inside one it needs no `!`. Both
 /// halves of that are deliberate: an assertion is the one place a reader of a
 /// test already expects control to leave, it is written at every one of them,
-/// and a test is not ordinary code. `docs/design/testing.md`.
+/// and a test is not ordinary code.
 pub fn assert(condition: Bool);
 
 /// Writes a line to standard output.
@@ -2042,7 +2035,7 @@ impl Scope {
 /// holds it — on every path out, including a raise passing through. Put one in
 /// a region and the region waits; put it in a block and the block does. That
 /// is where structured concurrency comes from, and it needed nothing of its
-/// own. `docs/design/fibers.md`.
+/// own.
 pub type Fiber<A, 'er>;
 
 /// A handle to a running fiber, and every operation on one is a message to the
@@ -2060,7 +2053,7 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   ///
   /// `A` must be `Share` for the reason every value crossing a fiber must be:
   /// it is computed on one and read on another, so a thing that cannot be held
-  /// twice cannot be an answer. `docs/design/sharing.md`.
+  /// twice cannot be an answer.
   pub fn spawn(body: () -> A raises 'er) -> Fiber<A, 'er>;
 
   /// Waits for the fiber to finish, and answers what it answered.
@@ -2085,7 +2078,7 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   ///
   /// An erased handle would have needed a `!` on every join — including on a
   /// fiber that provably cannot fail — and `catch { _ => .. }` as the only
-  /// arm. `docs/design/effect-survey.md` §3.1 records what that cost and why
+  /// arm. [The effect-survey design note](https://github.com/codyspate/khoralang/blob/main/docs/design/effect-survey.md) §3.1 records what that cost and why
   /// the row is on the type instead.
   pub fn join(self) -> A raises 'er;
 
@@ -2112,7 +2105,7 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   /// waits: `join` waits, and so does letting the binding go, which is where
   /// structured concurrency comes from. That is right, and it is also how a
   /// program hangs — one finalizer that never returns holds its nursery, which
-  /// holds its parent, up to `main`. `docs/design/scheduler.md` promises both
+  /// holds its parent, up to `main`. [The scheduler design note](https://github.com/codyspate/khoralang/blob/main/docs/design/scheduler.md) promises both
   /// bounded cancellation latency and that a nursery exit leaves every child
   /// stopped or joined, and those two are in tension exactly here.
   ///
@@ -2177,7 +2170,7 @@ impl<A> Array<A> {
   /// neither -- `Array::empty` sits above this for the empty case.
   /// `Array::filled(length, fill)` is what the rule asks for, and
   /// renaming a published `std` signature is a compatibility decision
-  /// rather than a style one. `docs/design/naming.md` records it.
+  /// rather than a style one. [The naming design note](https://github.com/codyspate/khoralang/blob/main/docs/design/naming.md) records it.
   pub fn new(length: Int, fill: A) -> Array<A>;
   /// How many elements it has. Fixed at construction; nothing grows an array.
   pub fn length(self) -> Int;
@@ -2192,7 +2185,7 @@ impl<A> Array<A> {
   ///
   /// **The one mutation in `core`**, and the reason `Array` is not `Share`:
   /// two fibers writing one array is a data race, so an array crosses into a
-  /// fiber only inside a type that says it is safe. `docs/design/sharing.md`.
+  /// fiber only inside a type that says it is safe.
   ///
   /// An index outside the array stops the program, as `get` does.
   pub fn set(self, index: Int, value: A) -> ();
@@ -2372,7 +2365,7 @@ impl<A> Array<A> {
   ///
   /// Only an array of numbers can be lent. An `Array<A>` of Khora objects
   /// holds reference-counted pointers, and handing those across is the mistake
-  /// the whole boundary exists to prevent. `docs/design/ffi.md`.
+  /// the whole boundary exists to prevent.
   pub fn with_data<B, 'ef, 'er>(self, body: (Ptr, Int) -> B with 'ef raises 'er) -> B
     with 'ef
     raises 'er;
@@ -3121,7 +3114,7 @@ impl String {
 /// The shortest text that reads back as the same number.
 ///
 /// Bound rather than written: shortest-round-trip formatting is Ryū or Grisu,
-/// a table and a thousand lines, and `docs/design/ecosystem.md` names exactly
+/// a table and a thousand lines, and [the ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) names exactly
 /// this kind of thing as something to bind rather than write twice.
 extern fn khora_float_text(value: Float, into: Ptr, capacity: Int) -> Int;
 
@@ -3363,18 +3356,16 @@ impl Int {
   /// text off a socket is a denial of service with extra steps. The running
   /// total is checked before it is grown instead.
   ///
-  /// That check used to be a digit short. It compared the total against a
-  /// tenth of the maximum and let an equal one through, so
-  /// `"9223372036854775808"` — one past the largest `Int`, and the shape of a
-  /// number somebody fat-fingered into a form — grew past the end and stopped
-  /// the program, which is the exact thing the paragraph above promises it
-  /// does not do.
+  /// The guard is exact rather than approximate: it asks for the room one more
+  /// digit needs, so `"9223372036854775808"` — one past the largest `Int`, and
+  /// the shape of a number somebody fat-fingered into a form — is refused
+  /// rather than wrapped or fatal.
   ///
-  /// **The total is counted downward**, which is the second fix and the reason
-  /// the guard is written against `smallest_int` rather than a largest one.
-  /// Every `Int` has a negative twin and not every one has a positive twin:
-  /// building `9223372036854775808` on the way to `-9223372036854775808` is
-  /// how the most negative number becomes unreadable, and it was.
+  /// **The total is counted downward**, which is why the guard is written
+  /// against `smallest_int` rather than a largest one. Every `Int` has a
+  /// negative twin and not every one has a positive twin, so building
+  /// `9223372036854775808` on the way to `-9223372036854775808` would make the
+  /// most negative number the one value this could not read.
   pub fn of_string(text: String) -> Option<Int> {
     let length = String::byte_length(text);
     let negative = length > 0 && U8::to_int(String::byte(text, 0)) == 45;
@@ -3425,11 +3416,9 @@ impl Int {
   /// because it is four lines of Khora and a good test of whether they are
   /// pleasant to write.
   ///
-  /// **The most negative `Int` prints**, which took a second attempt. Taking
-  /// its magnitude with `0 - self` overflows — that is the whole peculiarity
-  /// of the number — so it stopped the program instead, reporting a
-  /// subtraction the caller never wrote. A `Decimal` at that significand could
-  /// be built, compared and added, and not shown.
+  /// **The most negative `Int` prints.** Taking its magnitude with `0 - self`
+  /// overflows — that is the whole peculiarity of the number — so the digits
+  /// are never reached that way.
   ///
   /// The digits are walked on whichever side of zero the number is already on,
   /// so nothing is ever negated.
@@ -3476,7 +3465,7 @@ impl Int {
 /// that side's business.
 ///
 /// Lending a *buffer* across is the harder question and this type deliberately
-/// does not answer it. `docs/design/ffi.md`.
+/// does not answer it.
 pub type Ptr;
 
 impl Ptr {
@@ -4060,7 +4049,7 @@ pub type Least<K, V> = {
 /// and is exactly why it cannot cross a fiber or go in a `Shared`. This is
 /// built out of ordinary variants, so it holds nothing writable and is
 /// shareable in the ordinary structural way — a `Shared<Dict<K, V>>` is how a
-/// cache several fibers use is spelled. `docs/design/shared.md`.
+/// cache several fibers use is spelled.
 ///
 /// Persistent, so an insert gives back a new map and the old one is still
 /// there. The two share everything the insert did not touch, which is what
@@ -4377,12 +4366,10 @@ pub type Map<K, V> = {
 impl<K: Hash, V> Map<K, V> {
   /// An empty map, which allocates nothing but itself.
   ///
-  /// **The buckets wait for the first insert.** An empty map used to cost an
-  /// eight-element array, and a great many maps are never written to: a
-  /// request with no query string still builds a query map, a route with no
-  /// `:name` still builds one for its parameters, and both were paid for on
-  /// every request a server answered. `Array::empty` is what makes the
-  /// difference, and it did not exist when this was written.
+  /// **The buckets wait for the first insert**, so a map that is never written
+  /// to costs nothing beyond the map itself. A great many are never written
+  /// to: a request with no query string still builds a query map, and a route
+  /// with no `:name` still builds one for its parameters.
   pub fn new() -> Map<K, V> { { buckets: Array::empty(), count: 0 } }
 
   /// How many entries there are. Counted as it goes, not walked.
@@ -4649,7 +4636,7 @@ impl<K: Hash + Show, V: Show> Show for Map<K, V> {
 /// Fiber-local, like `Map` and for the same reason: the `mut` fields are what
 /// make `push` cheap, and they are exactly what the sharing rules refuse to a
 /// second fiber. A sequence several fibers write is a `Shared<List<A>>`, which
-/// is slower and says so. `docs/design/sharing.md`.
+/// is slower and says so.
 ///
 /// **The obstacle, and what it cost to get around it wrongly.** `Array::new`
 /// needs a value to fill with, and there is no value of an arbitrary `A` to be
@@ -4955,15 +4942,9 @@ impl<A> Vector<A> {
   /// A vector of the list's elements, in the same order.
   ///
   /// Pushed one at a time into an empty vector rather than sized up front with
-  /// `List::length`. The reason used to be that the measuring walk recursed
-  /// once per element, so a list long enough to be worth pre-sizing for was a
-  /// list long enough to overflow the stack being measured. `List::length` is
-  /// a loop now and that is no longer true.
-  ///
-  /// It stays as it is on the weaker but still sufficient argument: pre-sizing
-  /// costs a second full walk of the list to save a handful of reallocations
-  /// that double, and a walk of the whole input is the more expensive half of
-  /// that trade.
+  /// `List::length`, on the argument that pre-sizing costs a second full walk
+  /// of the list to save a handful of reallocations that double — and a walk
+  /// of the whole input is the more expensive half of that trade.
   pub fn from_list(items: List<A>) -> Vector<A> {
     let out: Vector<A> = Vector::new();
     let mut rest = items;
@@ -4997,7 +4978,7 @@ impl<A> Vector<A> {
 ///
 /// The cost is the wrapper at the mount site, and that is the honest price: the
 /// alternative is a bit in every function type, which colours every container
-/// of a function all the way up. `docs/design/sharing.md`.
+/// of a function all the way up.
 pub type SharedFn<A, B, 'er>;
 
 impl<A, B, 'er> Share for SharedFn<A, B, 'er> {}
@@ -5163,7 +5144,7 @@ impl<A: Share> Channel<A> {
 /// — and that is the whole of why this is safe rather than careful. Handing out
 /// the inner value would mean stopping it escaping the critical section, and
 /// without lifetimes there is no way to say that. Nothing unshareable goes in
-/// or comes out, so there is nothing to leak. `docs/design/shared.md`.
+/// or comes out, so there is nothing to leak.
 ///
 /// The contents must be `Share` for the same reason, which also means a `Map`
 /// cannot go in one: it mutates its buckets in place. `Dict` is the ordered
@@ -5218,7 +5199,7 @@ impl<A: Share> Shared<A> {
 /// Releasing one cancels its children and waits for them, which is where
 /// structured concurrency comes from — a fiber cannot escape the block that
 /// started it, because the binding holding the nursery ends on every path out.
-/// `nursery` is the ordinary way to get one. `docs/design/fibers.md`.
+/// `nursery` is the ordinary way to get one.
 ///
 /// One value means both "wait for the children" and "the answers are no
 /// longer wanted", without ever being told which of the two it is: on the
@@ -5345,18 +5326,12 @@ pub fn join_all<A: Share, 'er>(fibers: List<Fiber<A, 'er>>) -> List<A> raises 'e
 
 /// Where a spawned fiber goes.
 ///
-/// **The operation takes a fiber rather than a thunk**, and the reason is not
-/// the one that used to be written here. It said an operation could not be
-/// generic in what a thunk raises, and that stopped being true: a row can be
-/// quantified per call, so `adopt: (() -> () raises 'er) -> ()` would now be
-/// accepted.
-///
-/// The reason that stands is that a thunk cannot be *forwarded* to
+/// **The operation takes a fiber rather than a thunk**, because a thunk cannot
+/// be *forwarded* to
 /// `Fiber::spawn` at all. A fiber's body has to be written where it starts, so
 /// that what it closes over can be checked against the rule that a mutable
 /// value may not cross — a thunk that arrived from somewhere else took its
 /// captures with it, and that is the one thing the check cannot see.
-/// `docs/design/memory.md` §5a.
 ///
 /// The answer is fixed at `()` because an operation cannot be generic in a
 /// *type*, and because a nursery has nothing to do with an answer it cannot
@@ -5400,7 +5375,7 @@ pub effect Nursery {
 /// capability lexically where it can and *requires* it where it cannot, so
 /// this one's type becomes `() -> () with { nursery: Nursery }` and the
 /// `body()!` below supplies it from the handler just installed. That is the
-/// rule in `docs/design/capability-passing.md`, and the reason for it is that
+/// rule in [the capability-passing design note](https://github.com/codyspate/khoralang/blob/main/docs/design/capability-passing.md), and the reason for it is that
 /// eta-expansion must not alter what a program means.
 ///
 /// **And the body may name the nursery**, which for a while it could not:
@@ -5412,10 +5387,9 @@ pub effect Nursery {
 /// })!
 /// ```
 ///
-/// A bare name used to resolve by ordinary lookup and find this function, so a
-/// whole group of children needed a named function of its own to hold the
-/// label. The label is the lambda's parameter in all but spelling, and shadows
-/// this function the way a parameter shadows anything else.
+/// Inside the body, `nursery` is the capability rather than this function: the
+/// label is the lambda's parameter in all but spelling, and shadows this
+/// function the way a parameter shadows anything else.
 pub fn nursery<A, 'ef, 'er>(body: () -> A with { 'ef | nursery: Nursery } raises 'er) -> A
   with 'ef
   raises 'er + ChildFailed

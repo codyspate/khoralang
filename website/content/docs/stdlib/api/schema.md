@@ -28,7 +28,7 @@ walked, so a deployment can ask which keys a configuration needs without
 starting the program.
 
 A record of two closures would have lost the second; a bare tree would have
-lost the first. `docs/design/schema.md` has the argument in full.
+lost the first. The [design note](https://github.com/codyspate/khoralang/blob/main/[the schema design note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md)) has the argument in full.
 
 ## Every problem, not the first
 
@@ -54,13 +54,8 @@ pub type Raw =
 
 A value as a source handed it over, before anything has been asked of it.
 
-A record's fields are `Pair`s rather than a type of this module's own,
-which is the better API and was once also a workaround. Declaring an
-`Entry` here broke `Show` for a program that had one of its own, and the
-reason recorded at the time -- that a record type resolves by its field
-names -- was wrong. An impl was found by the head of its type as a bare
-name, so two modules that each declared an `Entry` shared one. Errata 62
-has the real account; the `Pair` here is a preference now, not a dodge.
+A record's fields are [`Pair`]s from `std::core` rather than a type of this
+module's own, so anything that already walks a `Pair` walks these.
 
 **A number is its text, and that is not an oversight.** A `Float` holds
 about fifteen significant digits, so `9007199254740993` comes back one
@@ -293,11 +288,9 @@ Text, as it arrived.
 pub fn int() -> Schema<Int>
 ```
 
-A whole number, parsed from the token rather than from a float.
+An `Int`, parsed from the token rather than through a float.
 
-The message still says "a whole number", which is what a person
-reading a rejection wants; the constructor is named for the `Int` it
-answers, which is what a person writing a schema wants.
+A rejection reads `port should be a whole number`.
 
 ### decimal
 
@@ -381,12 +374,10 @@ record of what they decode, which needs a type-level map Khora does not
 have. Something must say how the pieces become the record, and here that is
 a function.
 
-**`derive(Schema)` is not built yet, and this said that it was.** When it
-lands it will write this from the type, and these will be what is left for
-a renamed key, a refinement, or a shape derivation cannot know. Until then
-every record schema is one of these, written out. `docs/design/schema.md`
-records why it is a required part of the first version rather than a
-convenience.
+**`derive(Schema)` is not built yet**, so every record schema is one of
+these, written out. When it lands it will generate the assembler from the
+type, and these will remain for what derivation cannot know: a renamed key,
+a refinement, a shape that is not the record's own.
 
 ### struct3
 

@@ -51,7 +51,7 @@ connections gave 948k in one sitting and 1,760k in the next — **1.85× apart,
 same binary, same machine, minutes apart.** That spread is wider than most of
 the differences anybody would want to read off a table.
 
-Both facts are recorded in `docs/design/fibers.md`, with the dated numbers and
+Both facts are recorded in [the fibers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/fibers.md), with the dated numbers and
 their limits, and the harness is [tracked as a known
 gap](/docs/limitations/#the-fiber-scheduler).
 

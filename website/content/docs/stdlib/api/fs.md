@@ -30,9 +30,9 @@ single capability made the finer half unexpressible: a function allowed
 only to read still received the authority to delete. `copy` is the one
 helper here that needs both, and it says so.
 
-`docs/design/permissions.md` for the manifest half.
+[The permissions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/permissions.md) for the manifest half.
 
-`docs/design/ffi.md` for the boundary rules this obeys.
+[The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) for the boundary rules this obeys.
 
 ## Types
 
@@ -68,7 +68,7 @@ things from whoever reads the message. `Failed` is a disk, a permission
 bit, a name that was there a moment ago; `Denied` is `khora.toml`, and
 the fix is a line in a file the reader owns. Folding it into `Failed`
 would send somebody to look at their file system for a decision their
-own manifest made. `docs/design/permissions.md`.
+own manifest made.
 
 ## Effects
 
@@ -126,12 +126,12 @@ caller that needs the distinction wants a permissions API rather than
 this one.
 
 **A path the manifest denies raises `Denied` rather than answering
-`false`.** It used to answer `false`, and that made three different
-situations one word: a file that is not there, a file that is there and
-unreadable, and a file that is there, readable, and simply not granted.
-The third is the one somebody debugs for an hour, because nothing in a
-`false` points at the manifest -- and it is exactly the confusion
-[`IoError::Denied`] exists to prevent everywhere else.
+`false`.** Answering `false` would make three different situations one
+word: a file that is not there, a file that is there and unreadable, and
+a file that is there, readable, and simply not granted. The third is the
+one somebody debugs for an hour, because nothing in a `false` points at
+the manifest -- and it is exactly the confusion [`IoError::Denied`]
+exists to prevent everywhere else.
 
 The cost is a `!` on a probe, which is the same cost `read` has always
 had and for the same reason. What it buys is that the remaining `false`

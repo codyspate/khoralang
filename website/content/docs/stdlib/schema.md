@@ -61,8 +61,7 @@ print("it needs: ${Shape::keys(schema().shape)}");
 ```
 
 A record of two closures would have lost the shape. A bare description tree
-would have lost the decoder. `docs/design/schema.md` in the repository has the
-argument in full.
+would have lost the decoder. [the schema design note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md) has the argument in full.
 
 ## The vocabulary
 
@@ -148,8 +147,8 @@ struct({ port: int(), host: string() })
 have to be a schema of the record of what they decode, which needs a type-level
 map Khora does not have. So something has to say how the pieces become the
 record, and today that is the function passed to `struct2` … `struct5`.
-Generating it from the type is the answer, `docs/design/schema.md` calls it a
-required part of the first version, and it has not landed.
+Generating it from the type is the answer, [the schema design note](https://github.com/codyspate/khoralang/blob/main/docs/design/schema.md) calls it a required part of
+the first version, and it has not landed.
 
 **Records stop at five fields.** Nest a record rather than reaching for a wider
 combinator — which is usually what the shape of the data was telling you

@@ -68,7 +68,7 @@ not grant is a different thing from one nobody set, and the fix is a line
 in `khora.toml` rather than a line in a deployment script. Answering
 `None` for both would send a reader to look at their environment for a
 decision their own manifest made -- the same reasoning `IoError::Denied`
-records. `docs/design/permissions.md`.
+records.
 
 #### arguments
 

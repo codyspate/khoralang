@@ -50,15 +50,15 @@ There is no editions mechanism, and there will not be one until something needs 
 1.0 means the surfaces in the table above stop changing without a major version. It is waiting on four things, none of which is a feature:
 
 1. **A bug-discovery rate that has flattened.** The honest signal is not a feature list; it is how often a session aimed at known issues turns up something new. Recent sessions have still produced silent-wrongness bugs in trait dispatch and structured concurrency. Until that stops, a stability promise would be a promise to keep bugs.
-2. **The formal soundness review finished.** All 282 `unsafe` blocks now name the invariant that makes them sound, and a gate step keeps it that way. What is missing is the other half: which *test* protects each invariant. The load-bearing ones say so; most do not. `docs/design/soundness.md` is where that lives.
-3. **The scheduler measured on Linux.** Fibers are OS threads by default and the M:N scheduler is opt-in; that choice is settled for 0.1.0 and written up in `docs/design/fibers.md`. What is not settled is whether it should stay that way, and the missing evidence is the density claim on Linux — the reason the scheduler exists. The I/O backends underneath it (`poll` rather than epoll or IOCP) are the other half of that question.
+2. **The formal soundness review finished.** All 282 `unsafe` blocks now name the invariant that makes them sound, and a gate step keeps it that way. What is missing is the other half: which *test* protects each invariant. The load-bearing ones say so; most do not. [The soundness design note](https://github.com/codyspate/khoralang/blob/main/docs/design/soundness.md) is where that lives.
+3. **The scheduler measured on Linux.** Fibers are OS threads by default and the M:N scheduler is opt-in; that choice is settled for 0.1.0 and written up in [the fibers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/fibers.md). What is not settled is whether it should stay that way, and the missing evidence is the density claim on Linux — the reason the scheduler exists. The I/O backends underneath it (`poll` rather than epoll or IOCP) are the other half of that question.
 4. **Use by people who did not write it.** Nothing else substitutes for it, and it has not happened yet.
 
 The [known limitations](/docs/limitations/) page tracks the shorter-term version of the same list.
 
 ## How language changes are decided
 
-In the open, in an issue, before the code. Changes that alter what a program means are recorded in the roadmap or in a design document under `docs/design/` in the repository, with the argument rather than only the conclusion. [`CONTRIBUTING.md`](https://github.com/codyspate/khoralang/blob/main/CONTRIBUTING.md) has the process.
+In the open, in an issue, before the code. Changes that alter what a program means are recorded in the roadmap or in a [design note](https://github.com/codyspate/khoralang/tree/main/docs/design), with the argument rather than only the conclusion. [`CONTRIBUTING.md`](https://github.com/codyspate/khoralang/blob/main/CONTRIBUTING.md) has the process.
 
 One maintainer has final say. That is stated plainly rather than dressed as a committee, so you can judge the project's bus factor for yourself.
 

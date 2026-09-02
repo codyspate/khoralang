@@ -129,7 +129,7 @@ or_default(string("HOST"), "0.0.0.0")
 
 - `Show` prints `<redacted>`, so a record holding one still derives `Show` and the start-up log stays useful.
 - There is no `ToJson`, so a record holding one does **not** derive `ToJson`. The build stops, which is the right place to stop.
-- `"${password}"` compiles and prints `<redacted>`, because a hole calls `Show` like anything else. It used to be refused outright, which read as stricter and was not: the way past a hole that will not compile is `expose`, and then the secret is in the log.
+- `"${password}"` compiles and prints `<redacted>`, because a hole calls `Show` like anything else. Nothing needs `expose` to print one, which matters: `expose` hands over the secret itself, and it is what somebody reaches for when a hole will not compile.
 
 The only way out is `Redacted::expose`, which is a word a reviewer can search for. There is deliberately no `Eq`: comparing two secrets byte by byte is how a timing side channel gets written by somebody who was not writing one.
 

@@ -10,7 +10,7 @@ measured.
 
 `docs/positioning.md` opens by saying Khora is well suited to financial
 reconciliation, and until this module there was no way to write ten pence.
-`Float` is IEEE and `docs/design/numbers.md` explains at length why it
+`Float` is IEEE and [the numbers design note](https://github.com/codyspate/khoralang/blob/main/docs/design/numbers.md) explains at length why it
 implements neither `Eq` nor `Ord`: `0.1 + 0.2` is not `0.3` and never was.
 A ledger cannot be built on a type whose equality is a trap.
 
@@ -78,7 +78,7 @@ A number counted in steps of `10^-scale`.
 **`hi` and `lo` are one number in two halves**, the upper and lower
 sixty-four bits of a signed hundred-and-twenty-eight bit significand. They
 are two fields because only scalars cross into the runtime — see
-`docs/design/ffi.md` — and they are never taken apart anywhere else.
+[The ffi design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ffi.md) — and they are never taken apart anywhere else.
 
 The fields are public because a decimal is its representation and hiding it
 would only mean writing accessors for all three. `scale` is never negative:
@@ -416,11 +416,11 @@ written twice, and a ledger that thought otherwise would report a
 difference where there is none. This is the whole reason `Float` cannot
 have an `Eq` and this can.
 
-**And it cannot stop the program**, which took a second attempt. It used
-to bring both operands to a common scale, the same way `add` does — so
-comparing a hundred million against a rate to twelve places asked for a
-multiplication by `10^12` that no significand survives, and two perfectly
-legal numbers halted a reconciler. An equality that traps is a worse trap
+**And it cannot stop the program.** Bringing both operands to a common
+scale, the way `add` does, would ask for a multiplication by `10^12` to
+compare a hundred million against a rate to twelve places — which no
+significand survives, so two perfectly legal numbers would halt a
+reconciler. An equality that traps is a worse trap
 than one that surprises, and this one is sold as the reason to prefer
 `Decimal` at all.
 

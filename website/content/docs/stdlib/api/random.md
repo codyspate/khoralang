@@ -13,7 +13,7 @@ generate randomness" is worth seeing *and* worth pinning, because a function
 that draws is a function whose test passes ninety-nine runs in a hundred.
 `Random::seeded` is the whole payoff: the same seed gives the same sequence,
 so a failure is reproducible and a fixture is a fixture rather than a coin
-flip. `docs/design/permissions.md` draws this line — the time, the
+flip. [The permissions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/permissions.md) draws this line — the time, the
 environment and the dice are three different things to deny a dependency.
 
 The generator is splitmix64, and it lives half here and half in the runtime:
@@ -116,5 +116,5 @@ The state is a `Shared<Int>` and that is the answer to fibers being
 threads. Two of them drawing at once are serialized by the cell's lock —
 the same lock every other shared value uses, not a second mechanism — and
 the handler may cross into a fiber because a `Shared` is the one writable
-thing the sharing rules allow it to capture. `docs/design/sharing.md`.
+thing the sharing rules allow it to capture.
 

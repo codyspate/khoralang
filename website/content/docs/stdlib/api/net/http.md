@@ -216,7 +216,7 @@ parse that performs several hundred reference-count operations. It did not
 move the benchmark.
 
 A record of closures is what an `effect` compiles to anyway
-(`docs/design/effect-runtime.md` §2), and this is not one only because a
+([the effect-runtime design note](https://github.com/codyspate/khoralang/blob/main/docs/design/effect-runtime.md) §2), and this is not one only because a
 transport belongs to a connection rather than to a computation: two fibers
 serve two clients at once, and a capability installed by `with` would be
 one of them.
@@ -508,7 +508,7 @@ The manifest does not grant this host.
 places: `Unreachable` is DNS, a firewall, a service that is down, and
 `Denied` is `[permissions] network` in `khora.toml`. Reported as
 `host:port` so the line that would allow it can be copied out of the
-message. `docs/design/permissions.md`.
+message.
 
 ## Effects
 
@@ -526,7 +526,7 @@ Making requests, as a capability.
 one. A program that says `with { http: HttpClient }` can be handed a
 recording double in a test, a client that only reaches one host, or one
 wrapped for tracing — and every caller above is unchanged, because a
-capability *is* an interception point. `docs/design/observability.md` shows
+capability *is* an interception point. [The observability design note](https://github.com/codyspate/khoralang/blob/main/docs/design/observability.md) shows
 the wrapper.
 
 One operation. `Call` carries everything a request is, so a second would
@@ -1118,13 +1118,11 @@ The buffer is allocated once at this size and never grows, which is what
 makes a lying `Content-Length` harmless: the header is a promise about what
 is coming, not an instruction to allocate.
 
-**Eight kilobytes is now a policy, and it used to be a workaround.** The
-note that stood here said the number was where the stack ran out, because
-`String::slice`, `String::index_of` and `String::matches_at` each recursed
-once per byte and a nine-thousand-byte request took the process with it.
-All three are loops or intrinsics now, and `fill_headers` walks a cursor
-instead of calling itself per line, so the cliff is gone: measured again,
-a 39,808-byte request carrying 2,001 headers parses and answers.
+**Eight kilobytes is a policy, not a limit of the parser.** Nothing here
+recurses per byte or per line, so a larger request is refused because the
+limit says so rather than because the parser cannot manage it: a
+39,808-byte request carrying 2,001 headers parses and answers when the
+limit is raised to admit it.
 
 The number stays at eight kilobytes anyway, which is what nginx and most
 others allow, because the question it answers changed rather than

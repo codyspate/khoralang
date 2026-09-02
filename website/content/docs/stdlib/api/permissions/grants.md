@@ -19,7 +19,7 @@ that breaks the next time somebody reformats it.
 
 **A missing `[permissions]` table grants everything.** That is opt-in
 tightening rather than a tax on starting, and it is why the default here is
-`**` rather than nothing. `docs/design/permissions.md`.
+`**` rather than nothing.
 
 ## Functions
 

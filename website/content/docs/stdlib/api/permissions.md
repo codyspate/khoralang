@@ -15,7 +15,6 @@ means, and `std::fs`'s real handlers consult it before touching a file.
 **The grants are compiled in, not read at run time.** A file the program
 consults for its own permissions is a file an attacker edits; a list the
 compiler wrote into the binary is one nothing at run time can widen.
-`docs/design/permissions.md`.
 
 ## Why this is a file you can read rather than a check inside the compiler
 
@@ -118,6 +117,6 @@ refused, which is the safe answer.
 **Nor is anything resolved against a working directory or a package root.**
 A grant is matched against the path the program passes, so a program that
 builds its paths from its own arguments needs a grant wide enough to cover
-what its users will type. `docs/design/permissions.md` records why that is
+what its users will type. [The permissions design note](https://github.com/codyspate/khoralang/blob/main/docs/design/permissions.md) records why that is
 the boundary and what it costs a CLI.
 

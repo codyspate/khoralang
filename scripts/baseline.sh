@@ -130,6 +130,15 @@ step 'the standard library reference matches the standard library'
 # hand, sometimes, is a page that is wrong at the moment somebody reads it.
 "$khora" doc std --out website/content/docs/stdlib/api --check
 
+step 'the documentation is addressed to a reader'
+# **A doc comment is written by whoever just changed the code**, so it comes out
+# in their voice: what was wrong before, which attempt fixed it, which errata
+# has the argument, which file under `docs/design/` holds the rest. True, and
+# none of it belongs on a page somebody reads to find out what a function does
+# — a repository path does not resolve from a browser, and "this used to trap"
+# is a claim about a version nobody can run. Errata 74.
+bash scripts/no-maintainer-notes.sh
+
 step 'the hand-written examples compile'
 # **The generated pages were the only ones anything checked.** `khora doc std
 # --check` keeps the 993 examples under `stdlib/api` honest, because they come

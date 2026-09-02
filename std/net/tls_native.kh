@@ -4,7 +4,7 @@ import std::core::{Array, Ptr, Scope, Share, acquire};
 
 //! TLS, over the sockets in `std::net::socket`.
 //!
-//! **Bound, not written.** `docs/design/ecosystem.md` puts TLS in the short list
+//! **Bound, not written.** [the ecosystem design note](https://github.com/codyspate/khoralang/blob/main/docs/design/ecosystem.md) puts TLS in the short list
 //! of things Khora does not implement — "correctness is a specialist matter and
 //! a bug is a breach" — so this is `rustls`, reached through the runtime that
 //! every Khora executable already links. Nothing here is cryptography; it is a
@@ -77,7 +77,7 @@ pub type TlsServer = { settings: Ptr };
 /// be handed to the fiber answering a connection would not be a server.
 ///
 /// This module is the only thing that can say so, which is exactly why
-/// `docs/design/sharing.md` restricts the assertion to the declaring module.
+/// [The sharing design note](https://github.com/codyspate/khoralang/blob/main/docs/design/sharing.md) restricts the assertion to the declaring module.
 /// It was smuggled across as an `Int` for one commit, which is worse in every
 /// way: the same sharing, no review, and no diagnostic if it were wrong.
 impl Share for TlsServer {}
@@ -215,8 +215,8 @@ pub fn trusting(extra: String) -> TlsClient
 /// takes one.
 ///
 /// The socket is made here rather than passed in, because resolving a name
-/// needs `getaddrinfo` and a `struct addrinfo` cannot cross the C ABI — errata
-/// 35. The runtime already has a resolver worth using.
+/// needs `getaddrinfo` and a `struct addrinfo` cannot cross the C ABI. The
+/// runtime already has a resolver worth using.
 pub fn connect(client: TlsClient, host: String, port: Int) -> TlsConnection
   raises TlsError
 {
