@@ -13,7 +13,7 @@ A section is complete only when its behavior is implemented, documented, tested,
 ## Current state
 
 Scored against the tree, item by item, against what is in the repository rather
-than against the roadmap's account of itself. **191 of 222**, and re-scored
+than against the roadmap's account of itself. **192 of 222**, and re-scored
 whenever a section moves.
 
 **The number is counted, not typed.** `scripts/check-readiness.sh` counts the
@@ -50,7 +50,7 @@ advertised, so no wasm deployment has to work.
 | 8. FFI and C interoperability | 4 / 8 |
 | 9. Traps, debugging and production diagnosis | 7 / 7 |
 | 10. Compiler performance and scale | 5 / 6 |
-| 11. Tooling and editor experience | 7 / 10 |
+| 11. Tooling and editor experience | 8 / 10 |
 | 12. Installation, toolchains and release artifacts | 6 / 9 |
 | 13. Package ecosystem | 7 / 7 |
 | 14. Supply chain and security | 6 / 7 |
@@ -260,7 +260,7 @@ A target is “supported” only when the toolchain produces something users can
 - [x] Completion is good enough for ordinary standard-library and project symbols. **Done:** 34 items for `List::` over the wire.
 - [x] Formatting integrates with the editor and CI.
 - [x] A maintained VS Code extension or an equivalently accessible editor integration exists for the first public audience. **Done:** `editors/vscode`, built by `.github/workflows/extension.yml`, tagged `vscode-v0.3.0`.
-- [ ] Syntax highlighting covers the complete current grammar. **Left:** Not audited against the grammar since the grammar last changed.
+- [x] Syntax highlighting covers the complete current grammar. **Done, and the audit found six gaps.** The keyword axis was already airtight -- both lists are checked against the lexer by `editor_grammar.rs` on every run -- and nothing checked the literals or the operators, which is where the grammar had fallen behind. Fixed: backtick strings had **no rule at all**, so their contents were scanned as code and an embedded `"` mis-colored the rest of the file (`std/core.kh`, `std/json.kh` and `std/schema.kh` each contain one); decimal literals `1d` and `0.01d` went uncolored because both numeric rules end in `\b`; bare `<` and `>` had no rule, so every type bracket and every `a < b` was uncolored while `a <= b` was not; `${}` holes read as string rather than as the code they are; `..` fell into the separator class; and `///` had no scope of its own. Postfix `!` no longer reads as logical negation. Six new tests assert each, including one that fails if any literal the lexer makes has no rule -- which is the test whose absence let three of these through.
 - [x] The editor extension and compiler report their versions in bug reports/repro instructions. **Done:** The status bar runs `khora toolchain which` and shows the answering toolchain and its reason.
 - [x] The language's MCP support is documented as optional tooling rather than required to write correct Khora. **Done:** `/docs/getting-started/editor/` puts it under *AI coding tools*, after the paragraph that says what an editor actually needs, and states outright that it is optional — the compiler and the language server behave identically whether or not an agent is connected.
 - [x] `khora doc` works in an ordinary user package rather than only over `std`. **Done:** #174 fixed both halves. The defaults are package-relative -- the nearest `khora.toml` decides, sources come from its `src` and pages go to its `docs/api` -- so the command means the same thing in every package, and outside a package it refuses and says what to type. The stale sweep no longer claims the output directory: a `.khora-doc` record beside the pages lists what the generator owns, so a page whose module was deleted still goes and a file the command did not write is left alone and reported. Five tests in `khora-cli/tests/doc.rs`, including a hand-written page surviving a run and a rerun.

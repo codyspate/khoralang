@@ -33,6 +33,67 @@ fn url_of(path: &Path) -> String {
     url::Url::from_file_path(path).expect("a file URL").to_string()
 }
 
+/// A reader that does something once, part-way through the script.
+///
+/// **For the notifications that are about the disk.** A watcher event says a
+/// file appeared, and a test of it has to have the file appear *after*
+/// `initialize` has read the workspace — otherwise the server already had it
+/// and the notification proves nothing. The script is one buffer handed to
+/// `serve`, so the only place to put a side effect between two messages is in
+/// the reader that hands them over.
+struct Interrupting<F: FnMut()> {
+    data: Vec<u8>,
+    at: usize,
+    after: usize,
+    done: bool,
+    act: F,
+}
+
+impl<F: FnMut()> std::io::Read for Interrupting<F> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if !self.done && self.at >= self.after {
+            self.done = true;
+            (self.act)();
+        }
+        let left = self.data.len().saturating_sub(self.at);
+        let n = left.min(out.len());
+        out[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// Runs a script, performing `act` once the first `before` messages have been
+/// handed to the server.
+fn session_interrupted(messages: &[Value], before: usize, act: impl FnMut()) -> Vec<Value> {
+    let mut framed: Vec<Vec<u8>> = Vec::new();
+    for message in messages {
+        let mut one = Vec::new();
+        write_message(&mut one, &serde_json::to_string(message).expect("json")).expect("writing");
+        framed.push(one);
+    }
+    let after: usize = framed.iter().take(before).map(Vec::len).sum();
+    let data: Vec<u8> = framed.concat();
+
+    // Wrapped rather than implementing `BufRead` by hand: `serve` reads framed
+    // messages, and a buffered reader over the interrupting one still asks it
+    // for bytes in the order the script is in, which is what the side effect
+    // is timed against.
+    let mut input = std::io::BufReader::with_capacity(
+        1,
+        Interrupting { data, at: 0, after, done: false, act },
+    );
+    let mut output = Vec::new();
+    khora_lsp::serve(&mut input, &mut output).expect("the server should not fail");
+
+    let mut replies = Vec::new();
+    let mut reading = output.as_slice();
+    while let Some(text) = read_message(&mut reading).expect("reading a reply") {
+        replies.push(serde_json::from_str(&text).expect("a reply that is JSON"));
+    }
+    replies
+}
+
 /// Runs a script and returns everything the server said.
 fn session(messages: &[Value]) -> Vec<Value> {
     let mut input = Vec::new();
@@ -1672,4 +1733,424 @@ fn a_file_with_no_tests_gets_no_lenses() {
         exit(),
     ]);
     assert_eq!(result_of(&replies, 2), json!([]));
+}
+
+// --- what an edit does to the files it is not in ---------------------------
+
+/// Every `publishDiagnostics` the server sent, as (uri, count).
+fn published(replies: &[Value]) -> Vec<(String, usize)> {
+    replies
+        .iter()
+        .filter(|r| {
+            r.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+        })
+        .filter_map(|r| {
+            let uri = r.pointer("/params/uri")?.as_str()?.to_string();
+            let n = r.pointer("/params/diagnostics")?.as_array()?.len();
+            Some((uri, n))
+        })
+        .collect()
+}
+
+/// The last count published for one document, or `None` if it never was.
+fn published_for(replies: &[Value], path: &Path) -> Option<usize> {
+    let want = url_of(path);
+    published(replies).into_iter().rev().find(|(uri, _)| *uri == want).map(|(_, n)| n)
+}
+
+/// **A build is whole-program, so an edit here is a diagnostic there.**
+///
+/// Breaking `library.kh` breaks `main.kh`, and the server used to publish only
+/// for the file that changed — so the editor showed `main.kh` as it was before
+/// the edit until somebody happened to touch it.
+#[test]
+fn an_edit_republishes_the_other_open_files() {
+    let w = workspace(&[
+        ("src/library.kh", "module p::library;\npub fn shared() -> Int { 1 }\n"),
+        ("src/main.kh", "module p::main;\nimport p::library::{shared};\npub fn main() -> Int { shared() }\n"),
+    ]);
+    let library = w.root.join("src/library.kh");
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, &std::fs::read_to_string(&main).expect("main")),
+        did_open(&library, &std::fs::read_to_string(&library).expect("library")),
+        // The function `main.kh` imports goes away.
+        did_change(&library, "module p::library;\n"),
+        exit(),
+    ]);
+
+    assert!(
+        published_for(&replies, &main).is_some_and(|n| n > 0),
+        "main.kh imports a name that library.kh no longer defines, and it is open, \
+         so the server has to say so without waiting to be asked: {:?}",
+        published(&replies)
+    );
+}
+
+/// Closing a file takes its squiggles with it.
+///
+/// A diagnostic is published against a URI and stays in the client until
+/// something replaces it. Dropping the line index without publishing an empty
+/// list left a closed file in the Problems panel for the rest of the session.
+#[test]
+fn closing_a_file_clears_its_diagnostics() {
+    let w = workspace(&[("src/main.kh", "module p::main;\npub fn main() -> Int { nope() }\n")]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, "module p::main;\npub fn main() -> Int { nope() }\n"),
+        json!({
+            "jsonrpc": "2.0", "method": "textDocument/didClose",
+            "params": { "textDocument": { "uri": url_of(&main) } }
+        }),
+        exit(),
+    ]);
+
+    let seen = published(&replies);
+    assert!(
+        seen.iter().any(|(uri, n)| *uri == url_of(&main) && *n > 0),
+        "the open file should have been reported as broken first: {seen:?}"
+    );
+    assert_eq!(
+        seen.last().map(|(_, n)| *n),
+        Some(0),
+        "and closing it should take the report back: {seen:?}"
+    );
+}
+
+/// A `.kh` file that appears outside the editor joins the source root.
+///
+/// The client already sends this — the extension watches `**/*.kh` — and the
+/// server used to drop it, so a file written by `git checkout` or `khora new`
+/// stayed invisible and every name it defined read as unresolved until
+/// somebody restarted the server.
+#[test]
+fn a_file_created_outside_the_editor_joins_the_root() {
+    let w = workspace(&[(
+        "src/main.kh",
+        "module p::main;\nimport p::later::{answer};\npub fn main() -> Int { answer() }\n",
+    )]);
+    let main = w.root.join("src/main.kh");
+    let later = w.root.join("src/later.kh");
+
+    let text = std::fs::read_to_string(&main).expect("main");
+    let writing = later.clone();
+    // Written once `initialize` and `didOpen` have gone through, so the
+    // workspace scan genuinely did not see it. That is the situation the
+    // notification exists for.
+    let replies = session_interrupted(
+        &[
+            initialize(&w.root),
+            did_open(&main, &text),
+            json!({
+                "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles",
+                "params": { "changes": [{ "uri": url_of(&later), "type": 1 }] }
+            }),
+            exit(),
+        ],
+        2,
+        move || {
+            std::fs::write(&writing, "module p::later;\npub fn answer() -> Int { 42 }\n")
+                .expect("writing the new file");
+        },
+    );
+
+    let counts: Vec<usize> =
+        published(&replies).into_iter().filter(|(uri, _)| *uri == url_of(&main)).map(|(_, n)| n).collect();
+    assert!(
+        counts.first().is_some_and(|n| *n > 0),
+        "before the file arrived, the import cannot resolve: {counts:?}"
+    );
+    assert_eq!(
+        counts.last(),
+        Some(&0),
+        "and once it has, the server should say the file is fine without a restart: {counts:?}"
+    );
+}
+
+/// The same file, deleted, stops satisfying the import.
+#[test]
+fn a_file_deleted_outside_the_editor_leaves_the_root() {
+    let w = workspace(&[
+        ("src/library.kh", "module p::library;\npub fn shared() -> Int { 1 }\n"),
+        ("src/main.kh", "module p::main;\nimport p::library::{shared};\npub fn main() -> Int { shared() }\n"),
+    ]);
+    let main = w.root.join("src/main.kh");
+    let library = w.root.join("src/library.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, &std::fs::read_to_string(&main).expect("main")),
+        json!({
+            "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles",
+            "params": { "changes": [{ "uri": url_of(&library), "type": 3 }] }
+        }),
+        exit(),
+    ]);
+
+    assert!(
+        published_for(&replies, &main).is_some_and(|n| n > 0),
+        "the file it imported from is gone: {:?}",
+        published(&replies)
+    );
+}
+
+/// A file open in the editor is not overwritten from disk.
+///
+/// The buffer is the truth; what is on disk is behind whatever has not been
+/// saved. A watcher event for an open file has to be ignored or typing would
+/// be undone by the last save.
+#[test]
+fn a_watcher_event_does_not_overwrite_an_open_buffer() {
+    let w = workspace(&[("src/main.kh", "module p::main;\npub fn main() -> Int { 0 }\n")]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        // The buffer is broken; the file on disk is not.
+        did_open(&main, "module p::main;\npub fn main() -> Int { nope() }\n"),
+        json!({
+            "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles",
+            "params": { "changes": [{ "uri": url_of(&main), "type": 2 }] }
+        }),
+        exit(),
+    ]);
+
+    assert!(
+        published_for(&replies, &main).is_some_and(|n| n > 0),
+        "the unsaved buffer is what the author is looking at, so its error stands: {:?}",
+        published(&replies)
+    );
+}
+
+// --- document highlight ----------------------------------------------------
+
+/// Every mention of the name under the cursor, in this file.
+#[test]
+fn the_name_under_the_cursor_is_highlighted() {
+    let w = workspace(&[(
+        "src/main.kh",
+        "module p::main;\npub fn main() -> Int {\n  let count = 1;\n  count + count\n}\n",
+    )]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, &std::fs::read_to_string(&main).expect("main")),
+        json!({
+            "jsonrpc": "2.0", "id": 9, "method": "textDocument/documentHighlight",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                // `count` in `let count = 1;`
+                "position": { "line": 2, "character": 6 }
+            }
+        }),
+        exit(),
+    ]);
+
+    let answer = replies
+        .iter()
+        .find(|r| r.get("id").and_then(Value::as_i64) == Some(9))
+        .and_then(|r| r.pointer("/result"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    assert_eq!(
+        answer.len(),
+        3,
+        "the binding and both reads: {}",
+        serde_json::to_string(&answer).unwrap_or_default()
+    );
+    for hit in &answer {
+        assert!(hit.get("range").is_some(), "a highlight is a range: {hit}");
+        assert!(hit.get("uri").is_none(), "a highlight is in this file, so it carries no uri");
+    }
+}
+
+// --- what a name is, not just what type it has -----------------------------
+
+const DOCUMENTED: &str = "module p::main;\n\
+/// Adds two numbers, which is all it does.\n\
+///\n\
+/// The second paragraph, so a joined block can be told from one line.\n\
+pub fn add(a: Int, b: Int) -> Int { a + b }\n\
+\n\
+pub fn main() -> Int { add(1, 2) }\n";
+
+/// Hovering a function shows the line that declares it and the prose above it.
+///
+/// It used to show the type of the expression under the cursor and nothing
+/// else, which answers "what is this" while somebody hovering a name they have
+/// not called before is asking "what is it for".
+#[test]
+fn hovering_a_function_shows_its_signature_and_documentation() {
+    let w = workspace(&[("src/main.kh", DOCUMENTED)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, DOCUMENTED),
+        json!({
+            "jsonrpc": "2.0", "id": 7, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                // `add` in the call on the last line.
+                "position": { "line": 6, "character": 24 }
+            }
+        }),
+        exit(),
+    ]);
+
+    let value = result_of(&replies, 7)
+        .pointer("/contents/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        value.contains("pub fn add(a: Int, b: Int) -> Int"),
+        "the declaration as its author wrote it: {value:?}"
+    );
+    assert!(!value.contains("{ a + b }"), "and not its body: {value:?}");
+    assert!(
+        value.contains("Adds two numbers"),
+        "and the sentence explaining it: {value:?}"
+    );
+    assert!(
+        value.contains("second paragraph"),
+        "the whole block, not the first line: {value:?}"
+    );
+}
+
+/// A name with no `///` still hovers: the signature alone is worth having, and
+/// an empty answer would read as "this does not exist".
+#[test]
+fn hovering_an_undocumented_function_still_shows_its_signature() {
+    let source = "module p::main;\npub fn plain(a: Int) -> Int { a }\npub fn main() -> Int { plain(1) }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        json!({
+            "jsonrpc": "2.0", "id": 7, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                "position": { "line": 2, "character": 24 }
+            }
+        }),
+        exit(),
+    ]);
+
+    let value = result_of(&replies, 7)
+        .pointer("/contents/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    assert!(value.contains("pub fn plain(a: Int) -> Int"), "got {value:?}");
+}
+
+/// An expression that names no declaration still hovers with its type, which
+/// is the whole of what can be said about it.
+#[test]
+fn hovering_an_expression_still_shows_its_type() {
+    let source = "module p::main;\npub fn main() -> Int { 1 + 2 }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        json!({
+            "jsonrpc": "2.0", "id": 7, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                // The `1` of `1 + 2`.
+                "position": { "line": 1, "character": 23 }
+            }
+        }),
+        exit(),
+    ]);
+
+    let value = result_of(&replies, 7)
+        .pointer("/contents/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    assert!(value.contains("Int"), "an arithmetic operand still has a type: {value:?}");
+}
+
+/// Completion carries the documentation, not only the word "function".
+///
+/// A name and its kind is enough to finish typing something already known; the
+/// sentence its author wrote is what says whether it is the right one.
+#[test]
+fn completion_carries_the_documentation() {
+    let w = workspace(&[("src/main.kh", DOCUMENTED)]);
+    let main = w.root.join("src/main.kh");
+    let typing = DOCUMENTED.replace("pub fn main() -> Int { add(1, 2) }", "pub fn main() -> Int { a }");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, DOCUMENTED),
+        did_change(&main, &typing),
+        json!({
+            "jsonrpc": "2.0", "id": 8, "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                "position": { "line": 6, "character": 24 }
+            }
+        }),
+        exit(),
+    ]);
+
+    let items = result_of(&replies, 8).as_array().cloned().unwrap_or_default();
+    let add = items
+        .iter()
+        .find(|i| i.get("label").and_then(Value::as_str) == Some("add"))
+        .unwrap_or_else(|| panic!("`add` should be offered: {}", serde_json::to_string(&items).unwrap_or_default()));
+
+    let docs = add.pointer("/documentation/value").and_then(Value::as_str).unwrap_or_default();
+    assert!(docs.contains("Adds two numbers"), "the prose comes with it: {add}");
+    let detail = add.get("detail").and_then(Value::as_str).unwrap_or_default();
+    assert!(
+        detail.contains("pub fn add(a: Int, b: Int) -> Int"),
+        "and the signature stands where the word `function` used to: {add}"
+    );
+}
+
+/// A local has no declaration to explain, and gets no empty panel for one.
+#[test]
+fn a_local_is_offered_without_an_empty_documentation_panel() {
+    let source = "module p::main;\npub fn main() -> Int {\n  let total = 1;\n  t\n}\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        json!({
+            "jsonrpc": "2.0", "id": 8, "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                "position": { "line": 3, "character": 3 }
+            }
+        }),
+        exit(),
+    ]);
+
+    let items = result_of(&replies, 8).as_array().cloned().unwrap_or_default();
+    let total = items
+        .iter()
+        .find(|i| i.get("label").and_then(Value::as_str) == Some("total"))
+        .unwrap_or_else(|| panic!("the local should be offered: {}", serde_json::to_string(&items).unwrap_or_default()));
+    assert!(
+        total.get("documentation").is_none(),
+        "a local has nothing to document, so the field is absent: {total}"
+    );
 }

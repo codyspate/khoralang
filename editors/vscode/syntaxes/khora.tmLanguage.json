@@ -54,6 +54,11 @@
     "comments": {
       "patterns": [
         {
+          "comment": "`///` on an item and `//!` on a module. `////` is a divider somebody drew, which is why the first is guarded against a fourth slash -- the same rule `khora doc` applies when it decides what to publish.",
+          "name": "comment.line.documentation.khora",
+          "match": "///(?!/).*$|//!.*$"
+        },
+        {
           "name": "comment.line.double-slash.khora",
           "match": "//.*$"
         },
@@ -73,18 +78,22 @@
       ]
     },
     "strings": {
-      "name": "string.quoted.double.khora",
-      "begin": "\"",
-      "end": "\"",
       "patterns": [
         {
-          "name": "constant.character.escape.khora",
-          "match": "\\\\."
+          "include": "#quoted-string"
+        },
+        {
+          "include": "#backtick-string"
         }
       ]
     },
     "numbers": {
       "patterns": [
+        {
+          "comment": "`1d` and `0.01d`. The language's only literal suffix, and the two rules below cannot match it: both end in `\\b`, which fails between a digit and the `d`. It gets a scope of its own because an exact decimal is a different kind of number from a float, which is the entire reason the suffix exists.",
+          "name": "constant.numeric.decimal.khora",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?d\\b"
+        },
         {
           "name": "constant.numeric.float.khora",
           "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b"
@@ -142,7 +151,7 @@
           }
         },
         {
-          "comment": "Module and import paths are `::`-separated: `module app::main;`, `import std::core::{Option};`. This is the one position where the grammar knows *every* segment is a module without guessing — elsewhere a `::` qualifier may equally be a type — so the whole path is scoped as a namespace here rather than left to #paths and its heuristics. The path stops at the `::` before `{` or `*`, which #path-separator and #paths take. The nested include keeps the separator itself the same color it has in every other path.",
+          "comment": "Module and import paths are `::`-separated: `module app::main;`, `import std::core::{Option};`. This is the one position where the grammar knows *every* segment is a module without guessing \u2014 elsewhere a `::` qualifier may equally be a type \u2014 so the whole path is scoped as a namespace here rather than left to #paths and its heuristics. The path stops at the `::` before `{` or `*`, which #path-separator and #paths take. The nested include keeps the separator itself the same color it has in every other path.",
           "match": "\\b(module|import)\\s+([a-z_][A-Za-z0-9_]*(?:\\s*::\\s*[a-z_][A-Za-z0-9_]*)*)",
           "captures": {
             "1": {
@@ -163,7 +172,7 @@
     "contextual-keywords": {
       "patterns": [
         {
-          "comment": "Keep in sync with CONTEXTUAL_KEYWORDS in crates/khora-syntax/src/kind.rs. Enforced by the contextual_keywords_match_the_lexer test. These words are ordinary identifiers everywhere except one position each, so every rule reproduces that position instead of matching the bare word — otherwise a parameter named `handler` or a variable named `in` would be colored as a keyword.",
+          "comment": "Keep in sync with CONTEXTUAL_KEYWORDS in crates/khora-syntax/src/kind.rs. Enforced by the contextual_keywords_match_the_lexer test. These words are ordinary identifiers everywhere except one position each, so every rule reproduces that position instead of matching the bare word \u2014 otherwise a parameter named `handler` or a variable named `in` would be colored as a keyword.",
           "match": "\\b(handler)\\b(?=\\s+for\\b)",
           "captures": {
             "1": {
@@ -245,10 +254,10 @@
       ]
     },
     "paths": {
-      "comment": "`::` is the compile-time path: module paths, types, associated items and enum constructors. Splitting it from the runtime `.` is what makes these rules possible at all — under the universal dot, `Effect.map`, `report.risk` and `RiskLevel.Low` were the same three characters of regex and nothing could tell them apart. Now the *case of the qualifier* decides: a lowercase qualifier is a module, so what follows it is a type; a capitalized qualifier is a type, so what follows it is an associated item or a constructor. Scope names are the default TextMate fallbacks VS Code maps the matching LSP semantic tokens onto, so colors will not jump when the language server takes this over (roadmap phase 8.4). The pair rules come first: a longer match starting at the same position only wins if it is listed earlier.",
+      "comment": "`::` is the compile-time path: module paths, types, associated items and enum constructors. Splitting it from the runtime `.` is what makes these rules possible at all \u2014 under the universal dot, `Effect.map`, `report.risk` and `RiskLevel.Low` were the same three characters of regex and nothing could tell them apart. Now the *case of the qualifier* decides: a lowercase qualifier is a module, so what follows it is a type; a capitalized qualifier is a type, so what follows it is an associated item or a constructor. Scope names are the default TextMate fallbacks VS Code maps the matching LSP semantic tokens onto, so colors will not jump when the language server takes this over (roadmap phase 8.4). The pair rules come first: a longer match starting at the same position only wins if it is listed earlier.",
       "patterns": [
         {
-          "comment": "`RiskLevel::Critical`, `Device::Cpu` — a capitalized qualifier means the tail is reached *through* a type, so it is a variant constructor rather than a type of its own. An associated type such as `Schema::Spec` lands here too and is colored as a constructor: the two are indistinguishable to a regex, and constructors are far more common. `variable.other.enummember` is what the `enumMember` semantic token falls back to.",
+          "comment": "`RiskLevel::Critical`, `Device::Cpu` \u2014 a capitalized qualifier means the tail is reached *through* a type, so it is a variant constructor rather than a type of its own. An associated type such as `Schema::Spec` lands here too and is colored as a constructor: the two are indistinguishable to a regex, and constructors are far more common. `variable.other.enummember` is what the `enumMember` semantic token falls back to.",
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -263,7 +272,7 @@
           }
         },
         {
-          "comment": "`Prompt::new()`, `Tensor::zeros(..)` — an associated function. It is a static method, and `entity.name.function.member` is the `method` semantic token's fallback, so it reads like the `.method()` calls in #projections rather than like a free function.",
+          "comment": "`Prompt::new()`, `Tensor::zeros(..)` \u2014 an associated function. It is a static method, and `entity.name.function.member` is the `method` semantic token's fallback, so it reads like the `.method()` calls in #projections rather than like a free function.",
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(::)\\s*([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
             "1": {
@@ -278,7 +287,7 @@
           }
         },
         {
-          "comment": "`Scope::root`, `AnalysisReport::spec` — an associated item that is read, not called. Nothing here is being applied, so scoping it as a function would be a lie; `variable.other.constant` is where a read-only associated item lands.",
+          "comment": "`Scope::root`, `AnalysisReport::spec` \u2014 an associated item that is read, not called. Nothing here is being applied, so scoping it as a function would be a lie; `variable.other.constant` is where a read-only associated item lands.",
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(::)\\s*([a-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -293,7 +302,7 @@
           }
         },
         {
-          "comment": "`std::core::Option` — a lowercase qualifier is a module, and that is exactly what makes the capitalized tail a *type* and not a constructor. A three-segment path reaches this rule on its last two segments, after the leading `std` has been taken by the qualifier rule below.",
+          "comment": "`std::core::Option` \u2014 a lowercase qualifier is a module, and that is exactly what makes the capitalized tail a *type* and not a constructor. A three-segment path reaches this rule on its last two segments, after the leading `std` has been taken by the qualifier rule below.",
           "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -325,7 +334,7 @@
           }
         },
         {
-          "comment": "A capitalized segment whose qualifier was already consumed, as in the tail of `A::B::C`. Reaching here means it follows a `::` that did not come from a module — a module qualifier is handled by the `module::Type` rule above — so it is a constructor or associated item, not a type. A lowercase segment in the same position is deliberately left alone: after a module it is another module and after a type it is a value, and an uncolored identifier is the honest answer.",
+          "comment": "A capitalized segment whose qualifier was already consumed, as in the tail of `A::B::C`. Reaching here means it follows a `::` that did not come from a module \u2014 a module qualifier is handled by the `module::Type` rule above \u2014 so it is a constructor or associated item, not a type. A lowercase segment in the same position is deliberately left alone: after a module it is another module and after a type it is a value, and an uncolored identifier is the honest answer.",
           "match": "(?<=::)\\s*([A-Z][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -334,7 +343,7 @@
           }
         },
         {
-          "comment": "`import std::net::http::*;` — the glob is not multiplication, and would otherwise fall through to the arithmetic operator rule. Java's grammar scopes a wildcard import this way.",
+          "comment": "`import std::net::http::*;` \u2014 the glob is not multiplication, and would otherwise fall through to the arithmetic operator rule. Java's grammar scopes a wildcard import this way.",
           "match": "(?<=::)\\s*(\\*)",
           "captures": {
             "1": {
@@ -348,7 +357,7 @@
       ]
     },
     "path-separator": {
-      "comment": "`::` on its own — the leading separators of a long path, and the `::` before an import's `{..}` or `*`. It gets an operator scope of its own rather than joining the arithmetic and comparison operators, because a namespace qualification is structure and should not read as an expression. Also included from the #declarations module/import rule so the separator looks the same there.",
+      "comment": "`::` on its own \u2014 the leading separators of a long path, and the `::` before an import's `{..}` or `*`. It gets an operator scope of its own rather than joining the arithmetic and comparison operators, because a namespace qualification is structure and should not read as an expression. Also included from the #declarations module/import rule so the separator looks the same there.",
       "name": "keyword.operator.path.khora",
       "match": "::"
     },
@@ -384,7 +393,7 @@
     "types": {
       "patterns": [
         {
-          "comment": "What is left once #paths and #projections have run: a capitalized identifier that is neither part of a `::` path nor the tail of a `.`. That is a type name — an annotation, a type argument, a declaration's right-hand side — or a constructor imported bare through `import a::b::{Some}`, and `type` is the right default for both. Constructors reached through their type no longer come here, which is what the `::` split bought; the remaining ambiguity is a name-resolution question the LSP will answer via semantic tokens.",
+          "comment": "What is left once #paths and #projections have run: a capitalized identifier that is neither part of a `::` path nor the tail of a `.`. That is a type name \u2014 an annotation, a type argument, a declaration's right-hand side \u2014 or a constructor imported bare through `import a::b::{Some}`, and `type` is the right default for both. Constructors reached through their type no longer come here, which is what the `::` split bought; the remaining ambiguity is a name-resolution question the LSP will answer via semantic tokens.",
           "name": "entity.name.type.khora",
           "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
         }
@@ -393,7 +402,7 @@
     "calls": {
       "patterns": [
         {
-          "comment": "A free function call. A method or associated call is already gone by now — #projections and #paths run first and start their match at the `.` or at the qualifier, which is earlier in the line and so wins.",
+          "comment": "A free function call. A method or associated call is already gone by now \u2014 #projections and #paths run first and start their match at the `.` or at the qualifier, which is earlier in the line and so wins.",
           "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
             "1": {
@@ -405,6 +414,16 @@
     },
     "operators": {
       "patterns": [
+        {
+          "comment": "`..` in a record update. Without a rule it fell into the `[,:.]` separator class and read as two annotation colons' worth of punctuation.",
+          "name": "keyword.operator.spread.khora",
+          "match": "\\.\\."
+        },
+        {
+          "comment": "Postfix `!` is the try operator, not logical negation, and it reads as an operator of its own. Recognized by what precedes it: a name, a literal or a closing bracket. `!=` is excluded by the lookahead, and a prefix `!x` has nothing before it to match.",
+          "name": "keyword.operator.try.khora",
+          "match": "(?<=[A-Za-z0-9_)\\]])!(?!=)"
+        },
         {
           "comment": "The flow operator, before the pipe and before logical-or: it starts with both of them, and TextMate takes the first pattern that matches rather than the longest.",
           "name": "keyword.operator.flow.khora",
@@ -424,11 +443,16 @@
           "match": "==|!=|<=|>="
         },
         {
+          "comment": "Bare `<` and `>`, after the two-character forms above so `<=` still wins. They are a comparison here and a type bracket in `List<Int>`, and TextMate cannot tell those apart without semantics -- so they take the scope that is right for one of the two rather than going uncolored in both, which is what happened before. In VS Code the server's semantic tokens correct the type positions.",
+          "name": "keyword.operator.comparison.khora",
+          "match": "<|>"
+        },
+        {
           "name": "keyword.operator.logical.khora",
           "match": "&&|\\|\\||!"
         },
         {
-          "comment": "`::` is deliberately not in this class and `*` here is multiplication only: a wildcard import is taken earlier by #paths. Do not add the path separator here — it is structure, not arithmetic, and lives in #path-separator.",
+          "comment": "`::` is deliberately not in this class and `*` here is multiplication only: a wildcard import is taken earlier by #paths. Do not add the path separator here \u2014 it is structure, not arithmetic, and lives in #path-separator.",
           "name": "keyword.operator.arithmetic.khora",
           "match": "[+\\-*/%]"
         },
@@ -457,6 +481,56 @@
         {
           "name": "punctuation.brackets.khora",
           "match": "[{}()\\[\\]]"
+        }
+      ]
+    },
+    "interpolation": {
+      "comment": "A `${...}` hole is code, and every other language with interpolation colors it as code. `$self` rather than a narrower list: what may appear in a hole is an expression, which is the whole grammar.",
+      "name": "meta.embedded.line.khora",
+      "begin": "\\$\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.begin.khora"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.end.khora"
+        }
+      },
+      "patterns": [
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "quoted-string": {
+      "name": "string.quoted.double.khora",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.khora",
+          "match": "\\\\."
+        },
+        {
+          "include": "#interpolation"
+        }
+      ]
+    },
+    "backtick-string": {
+      "comment": "The other string literal the lexer makes (`lex_backtick`): multi-line, interpolating, and escaping a backtick or a dollar. Without this rule its contents were scanned by every other pattern in the file, so a template's keywords lit up as code and an embedded `\"` opened a string that mis-colored the rest of the file. `std/core.kh`, `std/json.kh` and `std/schema.kh` all contain one.",
+      "name": "string.quoted.other.khora",
+      "begin": "`",
+      "end": "`",
+      "patterns": [
+        {
+          "name": "constant.character.escape.khora",
+          "match": "\\\\."
+        },
+        {
+          "include": "#interpolation"
         }
       ]
     }

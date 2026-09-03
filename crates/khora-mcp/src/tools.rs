@@ -105,10 +105,20 @@ pub fn describe() -> Vec<Value> {
         json!({
             "name": FORMAT,
             "description": "Format Khora source canonically. Also a syntax check: source that \
-                            does not parse cannot be formatted.",
+                            does not parse cannot be formatted. Pass `path` when the source \
+                            belongs to a package, so its `[fmt]` settings are used rather than \
+                            the defaults.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "source": { "type": "string" } },
+                "properties": {
+                    "source": { "type": "string" },
+                    "path": {
+                        "type": "string",
+                        "description": "A file or directory inside the package this source \
+                                        belongs to. The nearest `khora.toml` above it decides \
+                                        indentation."
+                    }
+                },
                 "required": ["source"]
             }
         }),
@@ -129,7 +139,10 @@ pub fn run(name: &str, arguments: &Value, surface: &[Entry]) -> Result<String> {
             Some(want) => design_doc(want),
             None => Ok(list_design_docs()),
         },
-        FORMAT => format(text_argument(arguments, "source")?),
+        FORMAT => format(
+            text_argument(arguments, "source")?,
+            arguments.get("path").and_then(Value::as_str),
+        ),
         other => bail!("`{other}` is not a tool this server has"),
     }
 }
@@ -183,8 +196,17 @@ fn at(source: &str, offset: usize) -> String {
     format!("{line}:{column}")
 }
 
-fn format(source: &str) -> Result<String> {
-    match khora_fmt::format(source) {
+/// Formats source the way the package it belongs to would.
+///
+/// **The settings have to come from somewhere, and a string has no package.**
+/// This formatted with the defaults while `khora fmt` and the language server
+/// both read `[fmt]` from the manifest, so an agent editing a four-space
+/// project produced two-space output that the project's own `--check` then
+/// rejected. `path` is how a caller says which package the source is from;
+/// without one the defaults are still the only honest answer.
+fn format(source: &str, path: Option<&str>) -> Result<String> {
+    let options = path.map(std::path::Path::new).map(fmt_options).unwrap_or_default();
+    match khora_fmt::format_with(source, &options) {
         Ok(text) => Ok(text),
         Err(errors) => {
             let mut out = String::from("This does not parse, so it cannot be formatted.\n\n");
@@ -198,6 +220,27 @@ fn format(source: &str) -> Result<String> {
             Ok(out)
         }
     }
+}
+
+/// The `[fmt]` settings of the package nearest `start`, or the defaults.
+fn fmt_options(start: &std::path::Path) -> khora_fmt::Options {
+    let mut here = Some(if start.is_dir() { start } else { start.parent().unwrap_or(start) });
+    while let Some(dir) = here {
+        let manifest = dir.join("khora.toml");
+        if manifest.is_file() {
+            let Ok(parsed) = khora_manifest::Manifest::load(&manifest) else { break };
+            let Some(table) = parsed.manifest.fmt else { break };
+            return match table.indent_style {
+                Some(khora_manifest::IndentStyle::Tab) => khora_fmt::Options::tabs(),
+                Some(khora_manifest::IndentStyle::Space) | None => match table.indent_width {
+                    Some(width) => khora_fmt::Options::spaces(width),
+                    None => khora_fmt::Options::default(),
+                },
+            };
+        }
+        here = dir.parent();
+    }
+    khora_fmt::Options::default()
 }
 
 /// Substring search over names and documentation.

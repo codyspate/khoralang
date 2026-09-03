@@ -11,6 +11,7 @@ khora-db.workspace = true
 khora-hir.workspace = true
 khora-types.workspace = true
 khora-fmt.workspace = true
+khora-manifest.workspace = true
 khora-syntax.workspace = true
 anyhow.workspace = true
 serde.workspace = true

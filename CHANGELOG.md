@@ -169,6 +169,47 @@ it will behave differently now.
 
 ### Fixed
 
+- **A backtick string had no rule in the editor grammar, so its contents were
+  highlighted as code.** Not merely uncolored: the template's keywords and
+  numbers lit up, and a `"` inside one opened a string that ran on and
+  mis-colored the rest of the file. `std/core.kh`, `std/json.kh` and
+  `std/schema.kh` each contain one, so the standard library was the worst
+  affected thing anybody was likely to read. Five more gaps went with it:
+  decimal literals `1d` and `0.01d` (both numeric rules end in `\b`, which
+  fails against the suffix), bare `<` and `>` (so every type bracket and every
+  `a < b` was uncolored while `a <= b` was not), `${}` holes, the `..` record
+  spread, and `///`, which had no scope of its own. Postfix `!` no longer
+  reads as logical negation.
+- **The VS Code extension declared a version of VS Code it cannot run on.**
+  `engines.vscode` said `^1.75.0` while its only runtime dependency requires
+  `^1.82.0`, so on anything in between it installed cleanly and then failed to
+  activate. `khora.runTest` is also hidden from the command palette now: it is
+  a code-lens callback, and run without its arguments it opened a terminal
+  filtering on nothing.
+- **The language server dropped the file-watcher notification the extension
+  was already sending.** A `.kh` file created by `git checkout`, `khora new`
+  or another editor never joined the source root, so every name it defined
+  read as unresolved until somebody restarted the server.
+  `workspace/didChangeWatchedFiles` is handled; a file open in the editor is
+  left alone, because the buffer is the truth and the disk is behind it.
+- **Diagnostics went stale in every file but the one being edited.** A build
+  is whole-program, so deleting a function from one file breaks another, and
+  the server published only for the file that changed. Every open document is
+  republished now. Closing a file also clears its diagnostics, which it never
+  did, so a closed file used to stay in the Problems panel for the session.
+- **The agent-facing formatter ignored the project's settings.** `khora_format`
+  over MCP used the defaults while `khora fmt` and the language server both
+  read `[fmt]` from the manifest, so an agent editing a four-space project
+  produced two-space output that the project's own `--check` then rejected. It
+  takes an optional `path` naming the package.
+- **Four documentation claims that were not true of the code.**
+  `docs/project.md` advertised sub-15ms completion that has never been
+  measured, workspace-wide semantic rename when rename is locals-only, match
+  pattern stub generation that does not exist, and a `khora lint` command that
+  was never built. The editor setup page called Emacs and Sublime support
+  "ready-to-use" when both are untested snippets, and never said how to
+  install the VS Code extension.
+
 - **The first table from the new benchmark rig had every memory figure wrong.**
   `tasklist` on Windows prints a process's memory with a thousands separator,
   and both samplers took the text after the last comma -- reading 468 KB from a
@@ -316,6 +357,10 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **`textDocument/documentHighlight`.** Every mention of the name under the
+  cursor, in the file being read. The same search `references` runs, narrowed
+  to one document, because an editor asks for this on every cursor move.
 
 - **`KHORA_TIMINGS=1` says where a build's time went**, splitting it into
   check, monomorphize, lower, optimize, object and link. The split is the

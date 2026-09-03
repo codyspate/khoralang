@@ -234,3 +234,35 @@ fn formatting_returns_canonical_source() {
     let answer = text(find(&replies, 2));
     assert!(!answer.contains("    1"), "it should be tidied: {answer:?}");
 }
+
+/// **An agent's formatter has to agree with the project's.**
+///
+/// This formatted with the defaults while `khora fmt` and the language server
+/// both read `[fmt]` from the manifest, so an agent editing a four-space
+/// project produced two-space output that the project's own `--check` then
+/// rejected. `path` says which package the source belongs to.
+#[test]
+fn formatting_honours_the_packages_own_settings() {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let root = tmp.path();
+    std::fs::write(
+        root.join("khora.toml"),
+        "[package]\nname = \"wide\"\nversion = \"0.1.0\"\n\n[fmt]\nindent-width = 4\n",
+    )
+    .expect("writing a manifest");
+
+    let source = "module m;\npub fn f() -> Int {\n1\n}\n";
+    let replies = session(&[
+        initialize(),
+        call(2, "khora_format", json!({ "source": source })),
+        call(3, "khora_format", json!({ "source": source, "path": root.to_str().expect("a path") })),
+    ]);
+
+    let bare = text(find(&replies, 2));
+    let in_package = text(find(&replies, 3));
+    assert!(bare.contains("\n  1"), "with no package, the default two spaces: {bare:?}");
+    assert!(
+        in_package.contains("\n    1"),
+        "inside a package asking for four, four: {in_package:?}"
+    );
+}

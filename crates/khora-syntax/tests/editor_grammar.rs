@@ -381,3 +381,129 @@ fn extension_declares_the_kh_file_type() {
     let exts = langs[0]["extensions"].as_array().expect("no extensions");
     assert!(exts.iter().any(|e| e == ".kh"), "extension does not claim .kh");
 }
+
+/// Every literal the lexer can produce has a rule that colors it.
+///
+/// **This is the test that was missing.** The keyword lists were checked
+/// against the lexer and stayed in step for that reason; nothing checked the
+/// literals, and three of them had fallen behind at once — a backtick string,
+/// a decimal suffix, and the interpolation hole inside both string kinds.
+///
+/// The backtick was the one that mattered. A string with no rule is not
+/// merely uncolored: its contents are scanned by every other pattern in the
+/// file, so a template's keywords light up as code, and a `"` inside it opens
+/// a string that runs to the next one and mis-colors everything between.
+/// `std/core.kh`, `std/json.kh` and `std/schema.kh` each contain one, so the
+/// standard library was the worst-affected file anybody was likely to read.
+#[test]
+fn every_literal_the_lexer_makes_has_a_rule() {
+    let g = grammar();
+    let all = rules(&g);
+    let matching = |needle: &str| all.iter().any(|(regex, _)| regex.contains(needle));
+
+    assert!(
+        matching("`"),
+        "no rule begins on a backtick, so `lex_backtick`'s strings are scanned as code"
+    );
+    assert!(
+        all.iter().any(|(regex, scopes)| regex.contains("d\\b")
+            && scopes.iter().any(|s| s.contains("numeric"))),
+        "no numeric rule accepts the `d` suffix, so `1d` and `0.01d` go uncolored"
+    );
+    assert!(
+        matching("\\$\\{"),
+        "no rule matches an interpolation hole, so the expression inside one reads as string"
+    );
+}
+
+/// A `${..}` hole is code and is colored as code, in both kinds of string.
+///
+/// Sharing one rule between them is the point: two copies is how the backtick
+/// string came to have no interpolation while the quoted one did.
+#[test]
+fn both_strings_interpolate_through_the_same_rule() {
+    let g = grammar();
+    for kind in ["quoted-string", "backtick-string"] {
+        let patterns = g["repository"][kind]["patterns"]
+            .as_array()
+            .unwrap_or_else(|| panic!("repository.{kind}.patterns missing"));
+        let includes: Vec<&str> = patterns.iter().filter_map(|p| p["include"].as_str()).collect();
+        assert!(
+            includes.contains(&"#interpolation"),
+            "{kind} does not include #interpolation, so a `${{}}` hole in it reads as string"
+        );
+    }
+    let holes = &g["repository"]["interpolation"];
+    assert_eq!(
+        holes["patterns"][0]["include"].as_str(),
+        Some("$self"),
+        "a hole holds an expression, so it is highlighted by the whole grammar"
+    );
+}
+
+/// The escape rule runs before the hole, so `\\${` is an escape and not the
+/// start of one. TextMate takes the first pattern that matches.
+#[test]
+fn an_escaped_dollar_is_not_an_interpolation() {
+    let g = grammar();
+    for kind in ["quoted-string", "backtick-string"] {
+        let patterns = g["repository"][kind]["patterns"].as_array().expect("patterns");
+        let escape_at = patterns.iter().position(|p| p["match"].as_str() == Some("\\\\."));
+        let hole_at = patterns.iter().position(|p| p["include"].as_str() == Some("#interpolation"));
+        let (Some(escape_at), Some(hole_at)) = (escape_at, hole_at) else {
+            panic!("{kind} is missing an escape rule or the hole");
+        };
+        assert!(escape_at < hole_at, "in {kind} the escape must be tried before the hole");
+    }
+}
+
+/// Doc comments are their own scope, so a theme can tell them from a note.
+///
+/// `////` is excluded, which is the same rule `khora doc` applies when it
+/// decides what to publish: four slashes are a divider somebody drew.
+#[test]
+fn a_doc_comment_is_not_an_ordinary_comment() {
+    let scopes = scopes_of("comments");
+    assert!(
+        scopes.iter().any(|s| s == "comment.line.documentation.khora"),
+        "`///` and `//!` share a scope with `//`, so no theme can tell them apart: {scopes:?}"
+    );
+    let g = grammar();
+    let doc = g["repository"]["comments"]["patterns"][0]["match"].as_str().expect("a doc rule");
+    assert!(doc.contains("(?!/)"), "`////` is a divider and must not read as documentation: {doc}");
+}
+
+/// Every operator token the lexer has is colored by something.
+///
+/// `<` and `>` were the gap. The two-character forms were covered and the bare
+/// ones were not, so `a <= b` was colored and `a < b` was not, and every type
+/// bracket in `List<Int>` went uncolored with them.
+#[test]
+fn the_operators_cover_the_ones_that_are_one_character() {
+    let g = grammar();
+    let all = rules(&g);
+    for (token, why) in [
+        ("<|>", "bare `<` and `>`, which are comparisons and type brackets"),
+        ("\\.\\.", "`..`, the record-update spread"),
+    ] {
+        assert!(
+            all.iter().any(|(regex, _)| regex.contains(token)),
+            "no rule matches {why}"
+        );
+    }
+}
+
+/// Postfix `!` is the try operator and takes a scope of its own, rather than
+/// the logical negation it is spelled like.
+#[test]
+fn postfix_try_is_not_logical_negation() {
+    let g = grammar();
+    let all = rules(&g);
+    let (regex, scopes) = all
+        .iter()
+        .find(|(_, scopes)| scopes.iter().any(|s| s == "keyword.operator.try.khora"))
+        .expect("no rule scopes the try operator");
+    assert!(regex.contains("(?!=)"), "`!=` must not be read as a try: {regex}");
+    assert!(regex.contains("(?<="), "a try is recognized by what precedes it: {regex}");
+    assert!(!scopes.iter().any(|s| s.contains("logical")), "a try is not a negation");
+}

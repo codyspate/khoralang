@@ -5,17 +5,32 @@
   "version": "0.3.0",
   "publisher": "khora-lang",
   "license": "MIT OR Apache-2.0",
-  "repository": { "type": "git", "url": "https://github.com/codyspate/khoralang" },
-  "engines": { "vscode": "^1.75.0" },
-  "categories": ["Programming Languages", "Formatters"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codyspate/khoralang"
+  },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters"
+  ],
   "main": "./src/extension.js",
-  "activationEvents": ["onLanguage:khora"],
+  "activationEvents": [
+    "onLanguage:khora"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "khora",
-        "aliases": ["Khora", "khora"],
-        "extensions": [".kh"],
+        "aliases": [
+          "Khora",
+          "khora"
+        ],
+        "extensions": [
+          ".kh"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -36,7 +51,11 @@
         },
         "khora.trace.server": {
           "type": "string",
-          "enum": ["off", "messages", "verbose"],
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
           "default": "off",
           "description": "Log the traffic between this extension and the server, into the Khora output channel."
         }
@@ -60,6 +79,14 @@
       "[khora]": {
         "editor.formatOnSave": true
       }
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "khora.runTest",
+          "when": "false"
+        }
+      ]
     }
   },
   "dependencies": {

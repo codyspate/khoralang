@@ -8,6 +8,17 @@ Khora ships one language server as part of the compiler toolchain: `khora lsp`. 
 
 Your editor should launch the server for `.kh` files; you normally do not need to run it in a terminal yourself.
 
+## VS Code
+
+The extension is not on the Marketplace yet. Install it from a release:
+
+1. Download `khora-lang.khora.vsix` from the newest `vscode-v*` release on GitHub.
+2. Run `code --install-extension khora-lang.khora.vsix`, or use **Extensions: Install from VSIX** in the command palette.
+
+It needs `khora` on your `PATH`, which both installers arrange. If it cannot find one it says so and offers to open the `khora.server.path` setting rather than failing quietly. Format-on-save is turned on for `.kh` files only.
+
+The status bar shows which toolchain answered, and turns yellow when a project pins a version that is not installed.
+
 ## Language server command
 
 Configure an LSP client with:
@@ -27,6 +38,7 @@ The server currently provides:
 - semantic tokens;
 - inlay hints;
 - code actions and code lenses;
+- highlighting every mention of the name under the cursor;
 - local-variable rename.
 
 Rename is deliberately conservative. The current implementation renames locals and refuses a symbol it cannot edit completely rather than applying a partial project-wide change.
@@ -51,7 +63,7 @@ Editors that support LSP formatting can delegate format-on-save to `khora lsp`.
 
 ## Editor clients
 
-Any editor with a Language Server Protocol client can launch `khora lsp`. The repository includes ready-to-use configuration or integration examples for VS Code, Helix, Neovim, Emacs, and Sublime Text.
+Any editor with a Language Server Protocol client can launch `khora lsp`. The repository ships working configuration for VS Code, Helix and Neovim. Emacs and Sublime Text have LSP snippets in `editors/README.md` that nobody has run; they are a starting point rather than a supported setup. Zed needs an extension compiled to WebAssembly and has none.
 
 The important part is always the same: the project root contains `khora.toml`, `.kh` files are associated with Khora, and the editor starts `khora lsp`.
 

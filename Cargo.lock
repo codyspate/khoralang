@@ -700,6 +700,7 @@ dependencies = [
  "khora-db",
  "khora-fmt",
  "khora-hir",
+ "khora-manifest",
  "khora-syntax",
  "khora-types",
  "serde",

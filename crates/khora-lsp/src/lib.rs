@@ -36,6 +36,7 @@
 
 mod completion;
 mod definition;
+mod explain;
 mod fixes;
 mod imports;
 mod hints;
@@ -160,6 +161,9 @@ impl Server {
             ("textDocument/references", Some(id)) => {
                 vec![ok(id, self.references(&params).unwrap_or(Value::Null))]
             }
+            ("textDocument/documentHighlight", Some(id)) => {
+                vec![ok(id, self.document_highlights(&params).unwrap_or(Value::Null))]
+            }
             ("textDocument/documentSymbol", Some(id)) => {
                 vec![ok(id, self.document_symbols(&params).unwrap_or(Value::Null))]
             }
@@ -185,11 +189,24 @@ impl Server {
             ("textDocument/didOpen", _) => self.opened(&params),
             ("textDocument/didChange", _) => self.changed(&params),
             ("textDocument/didClose", _) => {
-                if let Some(url) = url_of(&params) {
-                    self.lines.remove(&url);
+                match url_of(&params) {
+                    // **Cleared, not just forgotten.** A diagnostic is
+                    // published against a URI and stays in the client
+                    // until something replaces it. Dropping the line
+                    // index without saying so left a closed file
+                    // squiggled in the Problems panel for the rest of the
+                    // session, and nothing would ever take it back.
+                    Some(url) => {
+                        self.lines.remove(&url);
+                        vec![notification(
+                            "textDocument/publishDiagnostics",
+                            json!({ "uri": url.as_str(), "diagnostics": [] }),
+                        )]
+                    }
+                    None => Vec::new(),
                 }
-                Vec::new()
             }
+            ("workspace/didChangeWatchedFiles", _) => self.watched_files_changed(&params),
             // A request we do not implement must still be answered, or the
             // client waits forever. A notification we do not implement must be
             // ignored in silence, which is what the protocol says.
@@ -276,6 +293,7 @@ impl Server {
                 }),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 // `prepareProvider`, so an editor asks before it opens the box
@@ -383,11 +401,135 @@ impl Server {
             }
         }
 
-        let Some(file) = self.files.get(&path).copied() else { return Vec::new() };
-        vec![notification(
-            "textDocument/publishDiagnostics",
-            json!({ "uri": url, "diagnostics": self.diagnostics(parsed, file) }),
-        )]
+        if !self.files.contains_key(&path) {
+            return Vec::new();
+        }
+        drop(parsed);
+        self.publish_open()
+    }
+
+    /// Diagnostics for every open document, not only the one just edited.
+    ///
+    /// **A build is whole-program, so an edit here is a diagnostic
+    /// there.** Deleting a function from `library.kh` breaks `main.kh`,
+    /// and publishing only for the file that changed left the other one
+    /// showing squiggles from before the edit — or worse, showing none
+    /// while the build failed. The editor believed whichever file the
+    /// author happened to touch last.
+    ///
+    /// Every open document, rather than every file in the root: a
+    /// diagnostic for a file nobody has open is not displayed anywhere,
+    /// and computing it would put the whole workspace on the keystroke
+    /// path. Salsa memoizes the ones that did not change, so the cost is
+    /// the files that actually moved.
+    fn publish_open(&self) -> Vec<Value> {
+        let mut out = Vec::new();
+        for url in self.lines.keys() {
+            let Ok(path) = url.to_file_path() else { continue };
+            let Some(file) = self.files.get(&path).copied() else { continue };
+            out.push(notification(
+                "textDocument/publishDiagnostics",
+                json!({
+                    "uri": url.as_str(),
+                    "diagnostics": self.diagnostics(url.clone(), file),
+                }),
+            ));
+        }
+        out
+    }
+
+    /// A `.kh` file appeared, changed or went away outside the editor.
+    ///
+    /// **The client was already sending this and the server was dropping
+    /// it.** The extension registers a watcher over `**/*.kh` precisely
+    /// because the root is read once at `initialize`, so a file created
+    /// by `git checkout`, `khora new`, or another editor never joined it
+    /// and every name it defined read as unresolved until somebody
+    /// restarted the server.
+    ///
+    /// A file that is open in the editor is left alone: its buffer is the
+    /// truth, and what is on disk is behind whatever has not been saved.
+    fn watched_files_changed(&mut self, params: &Value) -> Vec<Value> {
+        let Some(changes) = params.pointer("/changes").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+
+        let mut moved = false;
+        for change in changes {
+            let Some(url) = change.get("uri").and_then(Value::as_str) else { continue };
+            let Ok(parsed) = Url::parse(url) else { continue };
+            let Ok(path) = parsed.to_file_path() else { continue };
+            if self.lines.contains_key(&parsed) {
+                continue;
+            }
+            if !khora_db::selected_for_target(&path, khora_db::host_target()) {
+                continue;
+            }
+
+            // 1 created, 2 changed, 3 deleted.
+            let kind = change.get("type").and_then(Value::as_i64).unwrap_or(2);
+            if kind == 3 {
+                if self.files.remove(&path).is_some() {
+                    moved = true;
+                }
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            match self.files.get(&path).copied() {
+                Some(file) => {
+                    file.set_text(&mut self.db).to(text);
+                }
+                None => {
+                    let file = SourceFile::new(&self.db, path.clone(), text);
+                    self.files.insert(path, file);
+                    moved = true;
+                }
+            }
+        }
+
+        // Only when the *set* changed: setting the same list back is an
+        // input write, and salsa would invalidate every query that read it.
+        if moved {
+            let mut all: Vec<SourceFile> = self.files.values().copied().collect();
+            all.sort_by_key(|f| f.path(&self.db).clone());
+            match khora_db::source_root(&self.db) {
+                Some(root) => {
+                    root.set_files(&mut self.db).to(all);
+                }
+                None => {
+                    SourceRoot::new(&self.db, all);
+                }
+            }
+        }
+        self.publish_open()
+    }
+
+    /// Every mention of the thing under the cursor, in this file only.
+    ///
+    /// The same search `references` runs, narrowed to the document asking
+    /// and answered as highlights. An editor asks for this on every cursor
+    /// move, so it must not be the cross-file walk.
+    fn document_highlights(&self, params: &Value) -> Option<Value> {
+        let (file, offset) = self.locate(params)?;
+        let root = khora_db::source_root(&self.db)?;
+        let found = references::at(&self.db, root, file, offset, true)?;
+        let index = LineIndex::new(file.text(&self.db));
+        let mut out = Vec::new();
+        for (each, ranges) in found.sites {
+            if each != file {
+                continue;
+            }
+            for range in ranges {
+                out.push(json!({
+                    "range": Range {
+                        start: index.position(range.start(), self.encoding),
+                        end: index.position(range.end(), self.encoding),
+                    },
+                    "kind": 1,
+                }));
+            }
+        }
+        Some(Value::Array(out))
     }
 
     /// Everything wrong with one file, as the client wants it.
@@ -732,11 +874,19 @@ impl Server {
         let items: Vec<Value> = completion::at(&self.db, root, file, offset)
             .into_iter()
             .map(|candidate| {
-                json!({
+                let mut item = json!({
                     "label": candidate.label,
                     "kind": candidate.kind,
                     "detail": candidate.detail,
-                })
+                });
+                // Markdown, and only when there is some: an empty
+                // documentation field makes an editor draw a blank panel
+                // beside the list, which reads as "this has no
+                // documentation" for a name that simply is not a declaration.
+                if let Some(docs) = candidate.documentation {
+                    item["documentation"] = json!({ "kind": "markdown", "value": docs });
+                }
+                item
             })
             .collect();
         Some(Value::Array(items))
@@ -977,6 +1127,23 @@ impl Server {
             }
         }
 
+        // **The declaration first, and the type only if there is none.**
+        // A type answers "what is this" and a signature with its `///`
+        // answers "what is it for", which is the question somebody hovering a
+        // name they have not used before is actually asking. Falling back to
+        // the type keeps every expression hoverable: an arithmetic
+        // subexpression names no declaration and its type is the whole of
+        // what can be said about it.
+        if let Some(explained) = self.explain_at(file, offset) {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: explained.markdown(),
+                }),
+                range: best.map(|(range, _)| index.range(range, self.encoding)),
+            });
+        }
+
         let (range, ty) = best?;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -985,6 +1152,23 @@ impl Server {
             }),
             range: Some(index.range(range, self.encoding)),
         })
+    }
+
+    /// The declaration the cursor names, explained.
+    ///
+    /// Resolution is `definition::at`'s, so hovering a name and jumping to it
+    /// agree about what it refers to. A local binding is deliberately not
+    /// explained here: it has no `///` and its signature is its `let`, so the
+    /// inferred type below is the better answer for one.
+    fn explain_at(&self, file: SourceFile, offset: text_size::TextSize) -> Option<explain::Explained> {
+        let root = khora_db::source_root(&self.db)?;
+        if definition::local_use_at(&self.db, file, offset).is_some()
+            || definition::local_binding_at(&self.db, file, offset).is_some()
+        {
+            return None;
+        }
+        let found = definition::at(&self.db, root, file, offset)?;
+        explain::at(&self.db, found.file, found.range)
     }
 }
 

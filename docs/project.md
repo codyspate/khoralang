@@ -228,8 +228,8 @@ indent-style = "space"
 indent-width = 2
 
 [lints]
-unused-capabilities = "deny"
-cyclomatic-complexity = { level = "warn", max = 15 }
+unused-capability = "deny"
+unused-import = "warn"
 
 [dependencies]
 "std.effect" = { version = "1.0.0" }
@@ -543,13 +543,13 @@ The `khora` executable is a single static binary containing the compiler, packag
 
 
 
-### 6.3 Built-in Linter & Diagnostic Engine (`khora lint`)
+### 6.3 Built-in Linter & Diagnostic Engine
 
 The linter runs as a pass immediately following type inference, leveraging row-polymorphic tracking:
 
 * **Unused Capability Warning:** Flags when a capability row `{ db: Database | 'r }` is requested via `ask()` but never invoked.
 * **Dangling Pure Expressions:** Flags non-`Effect` expressions whose return values are discarded without being piped or bound.
-* **Redundant Pattern Match Arms:** Identifies unreachable branches in `match` blocks.
+* **Redundant Pattern Match Arms:** a type error rather than a lint. The checker's usefulness algorithm already refuses an arm nothing can reach, and making it a lint as well would give one mistake two voices.
 
 ### 6.4 Native Test Framework (`khora test`)
 
@@ -564,6 +564,6 @@ Unit and integration tests are first-class declarations in the language, written
 
 Built into the same binary to ensure zero version drift between IDE features and compiler behavior:
 
-* **Instant Diagnostics:** Incremental salsa-based query engine providing sub-15ms auto-complete and type hover info.
-* **Capability Inlay Hints:** Displays inferred open rows (`{ db: Database | 'r }`) inline above function signatures.
-* **Smart Refactoring:** Semantic symbol renaming across whole workspaces, auto-import resolution for prefix imports (`import a.b.{X}`), and match pattern stub generation.
+* **Diagnostics on the keystroke:** an incremental salsa query engine answers hover, completion and diagnostics from the same queries the compiler uses. No latency figure is published: the server is one thread with no cancellation, and the measurement has never been taken. Roadmap 14.10.
+* **Capability inlay hints:** the inferred rows (`{ db: Database | 'r }`) shown after each call site, which is where the row is decided.
+* **Refactoring:** renaming a local, auto-import for an unresolved name, and quick fixes where a diagnostic names exactly one edit. Rename is deliberately locals-only — a declaration is refused with a reason rather than half-renamed across a workspace.

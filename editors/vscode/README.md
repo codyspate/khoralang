@@ -176,9 +176,11 @@ updating this grammar is caught by `cargo test`.
 There are two lists, and they live in separate repository rules:
 
 - `#keywords` mirrors `KEYWORDS` — the hard keywords, matched as bare words.
-- `#contextual-keywords` mirrors `CONTEXTUAL_KEYWORDS` — `handler`, `for`,
-  `context`, `test` and `bench`, which are ordinary identifiers everywhere
-  except one position each. Matching them as bare words would color a
+- `#contextual-keywords` mirrors `CONTEXTUAL_KEYWORDS` — `handler`, `in`,
+  `context`, `test`, `bench`, `derive` and `extern`, which are ordinary
+  identifiers everywhere except one position each. `for` used to be on this
+  list and is a hard keyword now, which is the sort of drift the sync test
+  exists to catch. Matching them as bare words would color a
   parameter named `handler` or a variable named `test`, so each rule instead
   reproduces the position the parser recognizes: `handler` before `for`,
   `context` at the start of a declaration, `test`/`bench` before a name string.

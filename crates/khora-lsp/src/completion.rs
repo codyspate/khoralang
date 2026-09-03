@@ -56,6 +56,21 @@ pub struct Candidate {
     pub kind: CompletionItemKind,
     /// The signature or type, shown beside the name.
     pub detail: Option<String>,
+    /// The `///` above the declaration, as Markdown.
+    ///
+    /// **What the list is for.** A name and the word "function" is enough to
+    /// finish typing something you already knew; the sentence its author
+    /// wrote is what tells you whether it is the one you want. `std` has one
+    /// on nearly everything, and none of it was reaching the editor.
+    pub documentation: Option<String>,
+}
+
+impl Candidate {
+    /// A candidate with nothing to say about itself: a local, an imported
+    /// alias, anything whose declaration is not in reach here.
+    fn plain(label: String, kind: CompletionItemKind, detail: Option<String>) -> Candidate {
+        Candidate { label, kind, detail, documentation: None }
+    }
 }
 
 /// What could be written at `offset`.
@@ -164,11 +179,11 @@ fn after_colons(
     {
         let map = khora_types::type_map(db, file);
         for variant in map.variants.iter().filter(|v| v.type_name == owner) {
-            out.push(Candidate {
-                label: variant.name.clone(),
-                kind: CompletionItemKind::ENUM_MEMBER,
-                detail: Some(owner.clone()),
-            });
+            out.push(Candidate::plain(
+                variant.name.clone(),
+                CompletionItemKind::ENUM_MEMBER,
+                Some(owner.clone()),
+            ));
         }
     }
 
@@ -265,6 +280,7 @@ fn in_scope(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<Candidate> {
                 label: local.name.clone(),
                 kind: CompletionItemKind::VARIABLE,
                 detail: types.map(|t| t.local(id).to_string()),
+                documentation: None,
             });
         }
         break;
@@ -272,20 +288,16 @@ fn in_scope(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<Candidate> {
 
     let map = khora_hir::item_map(db, file);
     for item in &map.items {
-        out.push(Candidate {
-            label: item.name.clone(),
-            kind: kind_of(item.kind),
-            detail: Some(item.kind.describe().to_string()),
-        });
+        out.push(described(db, file, item));
     }
     for import in &map.imports {
         if let khora_hir::ImportKind::Named(names) = &import.kind {
             for imported in names {
-                out.push(Candidate {
-                    label: imported.alias.clone(),
-                    kind: CompletionItemKind::REFERENCE,
-                    detail: Some(import.path.to_string()),
-                });
+                out.push(Candidate::plain(
+                    imported.alias.clone(),
+                    CompletionItemKind::REFERENCE,
+                    Some(import.path.to_string()),
+                ));
             }
         }
     }
@@ -296,18 +308,49 @@ fn in_scope(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<Candidate> {
 /// What a module offers to whoever imports it.
 fn exports_of(db: &dyn Db, file: SourceFile) -> Vec<Candidate> {
     let api = khora_hir::module_api(db, file);
+    // **The range comes from `item_map`, not from `module_api`.** An
+    // `ApiItem` deliberately carries no `TextRange`: that is what stops an
+    // edit to one body invalidating every module that imports from it. Looking
+    // the declaration up by name here keeps that property, and costs a map
+    // this file has already built.
+    let map = khora_hir::item_map(db, file);
     let mut out: Vec<Candidate> = api
         .items
         .iter()
         .filter(|item| item.is_public)
-        .map(|item| Candidate {
-            label: item.name.clone(),
-            kind: kind_of(item.kind),
-            detail: Some(item.kind.describe().to_string()),
+        .map(|item| match map.items.iter().find(|d| d.name == item.name) {
+            Some(declared) => described(db, file, declared),
+            None => Candidate::plain(
+                item.name.clone(),
+                kind_of(item.kind),
+                Some(item.kind.describe().to_string()),
+            ),
         })
         .collect();
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out
+}
+
+/// A declaration as a candidate: its own signature rather than the word
+/// "function", and the `///` its author wrote.
+///
+/// Falling back to the kind when the declaration cannot be read keeps a name
+/// in the list either way — an editor that offered nothing because a comment
+/// was missing would be worse than one that offered the name alone.
+fn described(db: &dyn Db, file: SourceFile, item: &khora_hir::Item) -> Candidate {
+    match crate::explain::at(db, file, item.range) {
+        Some(explained) => Candidate {
+            label: item.name.clone(),
+            kind: kind_of(item.kind),
+            detail: Some(explained.signature.clone()),
+            documentation: explained.docs,
+        },
+        None => Candidate::plain(
+            item.name.clone(),
+            kind_of(item.kind),
+            Some(item.kind.describe().to_string()),
+        ),
+    }
 }
 
 /// Every method whose impl is on `head`, inherent or through a trait.
@@ -325,15 +368,15 @@ fn methods_on(db: &dyn Db, file: SourceFile, head: &str) -> Vec<Candidate> {
         if self_name != head {
             continue;
         }
-        out.push(Candidate {
-            label: method.to_string(),
-            kind: CompletionItemKind::METHOD,
-            detail: Some(if trait_name.is_empty() {
+        out.push(Candidate::plain(
+            method.to_string(),
+            CompletionItemKind::METHOD,
+            Some(if trait_name.is_empty() {
                 signature.as_fn().to_string()
             } else {
                 format!("{trait_name} — {}", signature.as_fn())
             }),
-        });
+        ));
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
     dedup(out)
