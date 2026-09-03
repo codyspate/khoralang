@@ -527,6 +527,309 @@ fn adversarial_execution_leaves_nothing_behind() {
     );
 }
 
+/// Pins this process to one CPU, and says whether it worked.
+///
+/// **The single most useful thing a test can do to a lock-free handover.** On
+/// several cores, two threads racing a transition mostly do not: they run at
+/// the same time, each finishes its half, and the window between the two
+/// stores is never entered by anybody. On one core they cannot run at the same
+/// time, so every interleaving is a *preemption* landing at a point the OS
+/// chose -- including inside the window. A bug that needs the second thread to
+/// observe a half-written handover is orders of magnitude likelier here than
+/// under ordinary parallelism.
+///
+/// **Affinity is a property of the whole process, so it is put back.** Under
+/// `cargo nextest` -- which the baseline runs -- every test has its own process
+/// and it would not matter. Under a plain `cargo test` the whole binary shares
+/// one, and a test that pinned it and walked away would leave every test after
+/// it on a single core. So this is a guard rather than a call: it restores the
+/// mask it found when it is dropped.
+struct OneCpu {
+    /// What the process was allowed before, and whether the pin took.
+    restore: Option<Restore>,
+}
+
+#[cfg(windows)]
+type Restore = usize;
+#[cfg(target_os = "linux")]
+type Restore = libc::cpu_set_t;
+#[cfg(not(any(windows, target_os = "linux")))]
+type Restore = ();
+
+impl OneCpu {
+    fn taken() -> OneCpu {
+        OneCpu { restore: pin() }
+    }
+
+    /// Whether the process really is on one CPU.
+    fn pinned(&self) -> bool {
+        self.restore.is_some()
+    }
+}
+
+impl Drop for OneCpu {
+    fn drop(&mut self) {
+        let Some(previous) = self.restore.take() else { return };
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessAffinityMask};
+            // SAFETY: a pseudo-handle and a mask this process was running under
+            // moments ago.
+            unsafe {
+                SetProcessAffinityMask(GetCurrentProcess(), previous);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: the set came from `sched_getaffinity` and is unchanged.
+            unsafe {
+                libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &previous);
+            }
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            let _ = previous;
+        }
+    }
+}
+
+/// Pins this process to one CPU, answering what it was allowed before.
+///
+/// **The single most useful thing a test can do to a lock-free handover.** On
+/// several cores, two threads racing a transition mostly do not: they run at
+/// the same time, each finishes its half, and the window between the two
+/// stores is never entered by anybody. On one core they cannot run at the same
+/// time, so every interleaving is a *preemption* landing at a point the OS
+/// chose -- including inside the window. A bug that needs the second thread to
+/// observe a half-written handover is orders of magnitude likelier here than
+/// under ordinary parallelism.
+fn pin() -> Option<Restore> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetProcessAffinityMask, SetProcessAffinityMask,
+        };
+        let mut allowed: usize = 0;
+        let mut system: usize = 0;
+        // SAFETY: a pseudo-handle and two live `usize`s to write through.
+        let read = unsafe {
+            GetProcessAffinityMask(GetCurrentProcess(), &raw mut allowed, &raw mut system)
+        };
+        if read == 0 || allowed == 0 {
+            return None;
+        }
+        // The lowest CPU this process is already allowed, rather than CPU 0 --
+        // which it may not be allowed at all under an affinity a runner set.
+        let one = allowed & allowed.wrapping_neg();
+        // SAFETY: as above, with a mask that is a subset of `allowed`.
+        let set = unsafe { SetProcessAffinityMask(GetCurrentProcess(), one) };
+        if set == 0 { None } else { Some(allowed) }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a zeroed set of exactly the size passed, written by the call.
+        unsafe {
+            let mut before: libc::cpu_set_t = std::mem::zeroed();
+            let size = std::mem::size_of::<libc::cpu_set_t>();
+            if libc::sched_getaffinity(0, size, &mut before) != 0 {
+                return None;
+            }
+            // The lowest CPU already allowed, for the reason above.
+            let mut one: libc::cpu_set_t = std::mem::zeroed();
+            libc::CPU_ZERO(&mut one);
+            let mut found = false;
+            for cpu in 0..libc::CPU_SETSIZE as usize {
+                if libc::CPU_ISSET(cpu, &before) {
+                    libc::CPU_SET(cpu, &mut one);
+                    found = true;
+                    break;
+                }
+            }
+            if !found || libc::sched_setaffinity(0, size, &one) != 0 {
+                return None;
+            }
+            Some(before)
+        }
+    }
+    // macOS has no affinity API that binds a thread to a CPU -- its
+    // `THREAD_AFFINITY_POLICY` is a hint about sharing caches, not a binding --
+    // so the test runs there without the pinning and says so.
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// **The same workload under a schedule chosen to be as bad as possible.**
+///
+/// `adversarial_execution_leaves_nothing_behind` is adversarial in its
+/// *messages*: it wakes and cancels fibers that have no business being woken or
+/// cancelled. It is not adversarial in its *schedule* -- four workers on a
+/// sixteen-core machine mostly do not contend, and a handover race that needs
+/// one thread to be preempted between two stores is a race that machine will
+/// not run.
+///
+/// So this changes the schedule rather than the work:
+///
+/// - **One CPU.** Every interleaving becomes a preemption at a point the OS
+///   chose rather than two threads genuinely running at once, which is what
+///   puts another thread inside a half-finished handover.
+/// - **One worker.** Every fiber goes through one queue, so the queue's own
+///   transitions are contended by everything at once rather than spread over
+///   four.
+/// - **A saturated blocking pool.** Background work keeps every pool thread
+///   busy, so a `Blocking` fiber queues and its submitter waits -- the fiber ↔
+///   blocking-thread handover under back-pressure rather than at leisure.
+/// - **Cancellation storms.** Everything known is cancelled at once, in
+///   bursts, rather than one at a time: a fiber is far likelier to be
+///   cancelled *during* a transition than between two.
+///
+/// The invariants asserted are the same ones, for the same reason: a scheduler
+/// has no answer to get wrong, so a failure is arithmetic that does not come
+/// back to zero.
+#[test]
+fn a_hostile_schedule_leaves_nothing_behind() {
+    let rounds = env("KHORA_SOAK_ROUNDS", 400);
+    let seed = env("KHORA_SOAK_SEED", 0xB00B_1E5F);
+    // Held for the whole test and put back when it ends, however it ends.
+    let cpu = OneCpu::taken();
+    let pinned = cpu.pinned();
+
+    let mut rng = Rng::new(seed);
+    let tally = Arc::new(Tally::default());
+    // One worker: everything through one queue.
+    let pool = Arc::new(Scheduler::new(1));
+
+    let known: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let waiters: Arc<Mutex<std::collections::VecDeque<usize>>> = Arc::default();
+
+    // As in the test above: a `Waiting` fiber gets exactly one wake from
+    // somebody whose job that is, and the storms below are best-effort.
+    let releaser = {
+        let pool = pool.clone();
+        let waiters = waiters.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || loop {
+            let next = waiters.lock().expect("the waiters").pop_front();
+            match next {
+                Some(id) => pool.wake_fiber(id),
+                None if stop.load(Ordering::Relaxed) => return,
+                None => std::thread::yield_now(),
+            }
+        })
+    };
+
+    // **Cancel everything at once, then again.** One cancellation at a time
+    // finds a fiber between transitions; a burst finds one inside every
+    // transition there is.
+    let storm = {
+        let pool = pool.clone();
+        let known = known.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let ids: Vec<usize> = known.lock().expect("the known fibers").clone();
+                for id in ids {
+                    pool.cancel_fiber(id);
+                    pool.wake_fiber(id);
+                }
+                std::thread::yield_now();
+            }
+        })
+    };
+
+    // **The blocking pool, kept full.** A `Blocking` fiber then finds no thread
+    // free, queues, and its submitter waits -- which is the path the leisurely
+    // version never takes.
+    let saturator = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                // Not through `blocking`, which needs a fiber to suspend.
+                // Submitting from an ordinary thread runs the work inline,
+                // which is exactly the occupancy this wants.
+                crate::blocking::blocking(|| {
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                });
+            }
+        })
+    };
+
+    let watchdog = {
+        let pool = pool.clone();
+        let stop = stop.clone();
+        let patience = std::time::Duration::from_secs(env("KHORA_SOAK_PATIENCE", 120));
+        std::thread::spawn(move || {
+            let until = std::time::Instant::now() + patience;
+            while std::time::Instant::now() < until {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            eprintln!(
+                "HOSTILE SOAK STUCK after {patience:?}\n  seed={seed} rounds={rounds} pinned={pinned}\n  {:?}\n  {:?}",
+                pool.audit(),
+                pool.counts(),
+            );
+            std::process::abort();
+        })
+    };
+
+    let mut expected = 0usize;
+    for round in 0..rounds {
+        let shape = Shape::pick(&mut rng);
+        let task = fiber(shape, rng.next(), tally.clone());
+        let id = task.fiber().id();
+        {
+            let mut ids = known.lock().expect("the known fibers");
+            if ids.len() >= 64 {
+                ids.remove(0);
+            }
+            ids.push(id);
+        }
+        expected += 1;
+        pool.spawn(task);
+        if shape == Shape::Waiting {
+            waiters.lock().expect("the waiters").push_back(id);
+        }
+        if round % 32 == 0 {
+            let audit = pool.audit();
+            assert!(audit.outstanding() >= 0, "more fibers finished than began: {audit:?}");
+        }
+    }
+
+    while !waiters.lock().expect("the waiters").is_empty() {
+        std::thread::yield_now();
+    }
+    pool.drain();
+    let audit = pool.settle(std::time::Duration::from_secs(2));
+    stop.store(true, Ordering::Relaxed);
+    releaser.join().expect("the releaser");
+    storm.join().expect("the storm");
+    saturator.join().expect("the saturator");
+    watchdog.join().expect("the watchdog");
+
+    expected += tally.children.load(Ordering::Relaxed);
+    let counts = pool.counts();
+    let context = format!("pinned={pinned}\n{audit:?}\n{counts:?}");
+
+    assert_eq!(
+        tally.finished.load(Ordering::Relaxed),
+        expected,
+        "fibers ran a different number of times than they were spawned\n{context}"
+    );
+    assert!(audit.settled(), "the pool did not come back to empty\n{context}");
+    assert_eq!(audit.in_hand(), 0, "{context}");
+
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while crate::coro::resuming_now() != 0 && std::time::Instant::now() < until {
+        std::thread::yield_now();
+    }
+    assert_eq!(crate::coro::resuming_now(), 0, "a worker is still inside a fiber\n{context}");
+}
+
 /// The same, over and over with a fresh seed, watching for drift.
 ///
 /// **The leak check, and the reason it has to be one process.** Every

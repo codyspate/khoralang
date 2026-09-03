@@ -56,6 +56,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     # `WriteFile`'s signature names `OVERLAPPED`, which lives here.
     "Win32_System_IO",
+    # `soak.rs` pins the process to one CPU, which is what turns a handover
+    # race into a preemption rather than two threads not contending.
+    "Win32_System_Threading",
 ] }
 
 [target.'cfg(unix)'.dependencies]
