@@ -178,6 +178,14 @@ else
     exit 1
 fi
 
+step 'a released documentation tree is the tag it says it is'
+# `/docs/v0.1/` claims to document what `v0.1.0` published. Nothing about the
+# directory would show the difference if it did not, so the tag it was cut from
+# is recorded in `versions.mjs` and checked here. Pages corrected after a
+# release are legitimate and are listed rather than failed; a `cutFrom` naming
+# a tag that does not exist is not.
+bash scripts/check-released-docs.sh
+
 step 'the packages pass their own tests'
 # A package whose tests nobody runs is a package with no tests. `khora test`
 # compiles the `test` blocks into their own executable and runs it — the same

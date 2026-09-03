@@ -11,9 +11,11 @@ cannot, once somebody has linked to it from a Stack Overflow answer.
 
 ## The decision
 
-**A documentation tree per stable major version, plus `next` for the version
-being written, each under `/docs/<id>/`.** `/docs/` redirects to the newest
-stable one — or to `next` while there is none, which is now.
+**A documentation tree per stable release that can change the answer to "how
+do I do X", plus `next` for the version being written, each under
+`/docs/<id>/`.** `/docs/` redirects to the newest stable one. As of `v0.1.0`
+that is `/docs/v0.1/`; before it, there was no stable tree and `/docs/` went to
+`next`.
 
 `website/versions.mjs` is the list, and it is the only place the set is
 written down: `scripts/sync-docs.mjs` copies each tree into its segment and
@@ -21,17 +23,63 @@ written down: `scripts/sync-docs.mjs` copies each tree into its segment and
 Two files that disagreed about which versions exist would pass the link checker
 and 404 the site.
 
-### Why major versions, and not every release
+### Which releases get a section
 
-A section per stable *major*. Not per patch: `0.1.1` fixing a typo does not give
-a reader a different language, and a switcher listing forty entries is a
-switcher nobody uses. A major is the granularity at which the answer to "how do
-I do X" actually changes, which is what somebody is switching versions to find
-out.
+Not every one: `0.1.1` fixing a typo gives a reader the same language, and a
+switcher listing forty entries is a switcher nobody uses. The section is per
+release that is *allowed to break*, because that is the granularity at which
+the answer to "how do I do X" actually changes, which is what somebody is
+switching versions to find out.
 
-Before v1 there is no stable section at all. Everything ships from `next`, which
-is what `/docs/reference/compatibility/` already promises: the language may
-change, so there is nothing yet whose documentation is worth pinning.
+Which number that is depends on whether the major is zero. From 1.0 it is the
+major, since `1.x` promises compatibility within itself. Before 1.0 semver puts
+the breaking changes in the minor — `0.1` to `0.2` is what `1` to `2` will be —
+so 0.x gets a section per minor. One rule, applied to whichever number is
+allowed to break.
+
+#### And this reverses the pre-1.0 half of it
+
+This section used to end: *before v1 there is no stable section at all,
+everything ships from `next`, because the language may change and there is
+nothing yet whose documentation is worth pinning.*
+
+That was right for exactly as long as `next` was the only compiler anybody
+could install. `v0.1.0` published on 2026-09-03, and within the hour the front
+door became a redirect to a tree banner-marked *this describes the unreleased
+compiler* — documentation for something a reader cannot get, offered as the
+answer to `/docs/`. The banner was honest and the destination was still wrong.
+
+The argument it rested on was about *pinning*: that nothing pre-1.0 is stable
+enough to be worth freezing. That argument survives, and it is why `v0.1` will
+not be kept alive forever. It was never an argument for the released compiler
+having no documentation of its own.
+
+### A stable tree is cut from the tag
+
+Not copied from the working tree:
+
+    git archive v0.1.0 website/content/docs | tar -x
+    mv website/content/docs website/content/versions/v0.1
+
+The entry in `versions.mjs` records the tag in `cutFrom`. This is what lets
+`/docs/v0.1/` claim to document what `v0.1.0` published rather than whatever
+was on `main` that afternoon — which is `docs/release-readiness.md` §18's
+"documentation deployed to `khoralang.com` is generated from that same
+release/tag", answered by *where the tree came from* rather than by what the
+deploy workflow checks out. The deploy still runs from `main`, because `main`
+is where both trees live and `next` must track it.
+
+A page in a released tree may be corrected afterwards — documentation gets
+fixed after a release, and that is most of why versioned trees exist. `cutFrom`
+keeps pointing at where the tree began, not at what it has become.
+
+**The repository's gates do not check a released tree, deliberately.**
+`scripts/check-docs.sh` compiles every example under `website/content/docs`
+and `khora doc --check` regenerates the API pages there. Both scope to
+`content/docs`, so neither touches `content/versions`. A released tree
+describes a different compiler; compiling its examples against this one would
+fail the day the language moves, and "fixing" them would silently rewrite
+history a reader is relying on.
 
 ### This reverses an earlier decision, and why
 

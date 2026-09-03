@@ -1,0 +1,25 @@
+# Written by `khora doc`. It lists the pages this directory's
+# generator owns, and is what lets a later run delete a page whose
+# module is gone without touching anything it did not write.
+ai.md
+clock.md
+config.md
+core.md
+db.md
+decimal.md
+env.md
+fs.md
+json.md
+log.md
+net/http.md
+net/socket.md
+net/tls.md
+permissions.md
+permissions/grants.md
+process.md
+process/shell.md
+random.md
+resilience.md
+schema.md
+time.md
+trace.md
