@@ -133,7 +133,25 @@ A fiber may resume on a different operating-system thread after a Khora suspensi
 - borrowed errno-like thread state;
 - a thread-affine handle whose contract requires one OS thread.
 
-Potentially blocking native work must use an API/runtime boundary intended for blocking work rather than occupying a scheduler worker indefinitely.
+Potentially blocking native work must run on a fiber of its own rather than on the one that needs the answer:
+
+```khora
+extern fn slow_native_thing(handle: Ptr) -> Int;
+
+fn measure(handle: Ptr) -> Int {
+  Fiber::join(Fiber::spawn(fn () => slow_native_thing(handle)))!
+}
+```
+
+**That is the boundary**, and it is written at the call site rather than wrapped in a helper. A fiber is an operating-system thread, so the blocking call holds a thread that is running nothing else, and the caller suspends the way it would for a socket.
+
+There is no `blocking(body)` in `std` to reach for instead, and the reason is a property of the language rather than an omission. A closure's captures are not part of its type, so nothing at a `spawn` can tell whether what it captured may cross to another fiber — which is why `Fiber::spawn` requires the closure to be *written where it is spawned*, and why a helper taking `body` as a parameter is refused:
+
+> `body` cannot be handed to another fiber: `() -> A` holds a closure, and what a closure captured is not in its type — so nothing here can tell whether *that* can be written.
+
+Two consequences worth planning for. The cost is a thread and the round trip to start and join one, which is the wrong trade for a call that takes a microsecond: reach for this when the work would hold a thread long enough to matter. And it is **not a cancellation point on the far side** — a cancelled caller stops at the join while the native call runs to its end, because the runtime cannot interrupt foreign code and returning early would mean doing so while a thread still holds the caller's buffer.
+
+When fibers become M:N over a fixed set of workers, blocking on one *will* occupy a worker, and this shape is what the runtime will be able to route to its blocking pool. A direct call to the native function is not.
 
 An ordinary foreign call also cannot secretly suspend Khora while foreign stack or thread-affine state remains live around the call.
 
