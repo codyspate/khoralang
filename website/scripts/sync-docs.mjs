@@ -3,13 +3,35 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+import { current, stable, versions } from '../versions.mjs';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const source = path.join(root, 'content', 'docs');
 const collectionRoot = path.join(root, 'src', 'content', 'docs');
-const target = path.join(collectionRoot, 'docs');
-const unstableBanner =
-  'Khora is unstable before v1. Syntax, standard-library APIs, and behavior may change before v1.';
+
+/// The banner a reader of `version` should see, or `null` for none.
+///
+/// **Three cases, and the third is the one versioning exists for.** The
+/// unreleased tree says so. A stable tree that is no longer current says so
+/// loudly, because somebody who arrived from a search result has no other way
+/// to find out. The current stable tree says nothing at all — a banner on the
+/// page everybody is supposed to be reading is a banner everybody learns to
+/// ignore, and then the one that matters is invisible too.
+function bannerFor(version) {
+  if (!version.stable) {
+    const pointer = stable
+      ? ` The current release is documented under <a href="/docs/${stable.id}/">${stable.label}</a>.`
+      : '';
+    return `You are reading <strong>next</strong>, which describes the unreleased `
+      + `compiler. Khora is unstable before v1: syntax, standard-library APIs and `
+      + `behavior may change.${pointer}`;
+  }
+  if (version.id !== current) {
+    return `You are reading <strong>${version.label}</strong>, which is not the `
+      + `current release. <a href="/docs/${current}/">Go to ${current}</a>.`;
+  }
+  return null;
+}
 
 // --- what this build was made from ------------------------------------------
 //
@@ -109,7 +131,7 @@ async function collectDocFiles(dir) {
   return files;
 }
 
-function routeForFile(file) {
+function routeForFile(file, source, version) {
   const relative = path.relative(source, file).split(path.sep).join('/');
   const withoutExtension = relative.replace(/\.(?:md|mdx)$/i, '');
   const routePath = withoutExtension.endsWith('/index')
@@ -117,7 +139,7 @@ function routeForFile(file) {
     : withoutExtension === 'index'
       ? ''
       : withoutExtension;
-  return `/docs/${routePath ? `${routePath}/` : ''}`;
+  return `/docs/${version}/${routePath ? `${routePath}/` : ''}`;
 }
 
 function isExternalUrl(raw) {
@@ -139,7 +161,7 @@ function looksLikeDocPath(pathname) {
   return !path.posix.basename(pathname).includes('.');
 }
 
-function sourceRelativeRoute(url, fromFile) {
+function sourceRelativeRoute(url, fromFile, source, version) {
   const raw = url.trim().replace(/^<|>$/g, '');
   if (!raw || raw.startsWith('#') || isExternalUrl(raw)) return null;
   if (raw.startsWith('/')) return null;
@@ -152,16 +174,25 @@ function sourceRelativeRoute(url, fromFile) {
   const resolved = new URL(pathname || '.', base);
   let routePath = resolved.pathname.replace(/^\/+/, '').replace(/\/+/g, '/');
   if (!routePath.endsWith('/')) routePath += '/';
-  return { route: `/docs/${routePath}`, suffix };
+  return { route: `/docs/${version}/${routePath}`, suffix };
 }
 
-function absoluteDocRoute(url) {
+/// A `/docs/...` link written in a source page, as a route in `version`.
+///
+/// **The source tree is version-agnostic and its links are too.** A page writes
+/// `/docs/reference/traps/` because that is what it means; which tree it lands
+/// in is decided here, when the page is copied into one. A link that already
+/// names a version is left alone, so a `next` page can point at a released one
+/// on purpose.
+function absoluteDocRoute(url, version) {
   const raw = url.trim().replace(/^<|>$/g, '');
   if (!raw.startsWith('/docs/')) return null;
   const { pathname, suffix } = splitUrl(raw);
   let route = pathname.replace(/\/+/g, '/');
   if (!route.endsWith('/')) route += '/';
-  return { route, suffix };
+  const segment = route.slice('/docs/'.length).split('/')[0];
+  if (versions.some((each) => each.id === segment)) return { route, suffix };
+  return { route: `/docs/${version}/${route.slice('/docs/'.length)}`, suffix };
 }
 
 function linksIn(text) {
@@ -181,7 +212,7 @@ function linksIn(text) {
   return found;
 }
 
-function resolvedDocLink(url, fromFile) {
+function resolvedDocLink(url, fromFile, source, version) {
   const raw = url.trim().replace(/^<|>$/g, '');
   // **External first.** The `.md` test below is about somebody linking to a
   // source file in this tree instead of to the route it renders as -- a real
@@ -196,16 +227,16 @@ function resolvedDocLink(url, fromFile) {
   if (/\.mdx?(?:[?#].*)?$/i.test(raw)) {
     return { error: 'source filename is not a rendered route' };
   }
-  return absoluteDocRoute(raw) ?? sourceRelativeRoute(raw, fromFile);
+  return absoluteDocRoute(raw, version) ?? sourceRelativeRoute(raw, fromFile, source, version);
 }
 
-async function validateDocLinks(files, knownRoutes) {
+async function validateDocLinks(files, knownRoutes, source, version) {
   const broken = [];
 
   for (const file of files) {
     const text = await readFile(file, 'utf8');
     for (const link of linksIn(text)) {
-      const resolved = resolvedDocLink(link.url, file);
+      const resolved = resolvedDocLink(link.url, file, source, version);
       if (!resolved) continue;
       if (resolved.error) {
         broken.push(`${path.relative(source, file)}:${link.line} -> ${link.url} (${resolved.error})`);
@@ -226,29 +257,31 @@ async function validateDocLinks(files, knownRoutes) {
   }
 }
 
-function rewriteDocUrl(url, fromFile, knownRoutes) {
-  const resolved = resolvedDocLink(url, fromFile);
+function rewriteDocUrl(url, fromFile, knownRoutes, source, version) {
+  const resolved = resolvedDocLink(url, fromFile, source, version);
   if (!resolved || resolved.error || !knownRoutes.has(resolved.route)) return url;
   return `${resolved.route}${resolved.suffix}`;
 }
 
-function rewriteDocLinks(text, fromFile, knownRoutes) {
+function rewriteDocLinks(text, fromFile, knownRoutes, source, version) {
+  const rewrite = (url) => rewriteDocUrl(url, fromFile, knownRoutes, source, version);
   text = text.replace(
     /((?<!!)\[[^\]]*\]\(\s*<?)([^\s)>]+)(>?[^)]*\))/g,
-    (whole, before, url, after) => `${before}${rewriteDocUrl(url, fromFile, knownRoutes)}${after}`,
+    (whole, before, url, after) => `${before}${rewrite(url)}${after}`,
   );
   text = text.replace(
     /(href\s*=\s*["'])([^"']+)(["'])/gi,
-    (whole, before, url, after) => `${before}${rewriteDocUrl(url, fromFile, knownRoutes)}${after}`,
+    (whole, before, url, after) => `${before}${rewrite(url)}${after}`,
   );
   return text.replace(
     /^(\s*\[[^\]]+\]:\s*<?)([^\s>]+)(>?)/gm,
-    (whole, before, url, after) => `${before}${rewriteDocUrl(url, fromFile, knownRoutes)}${after}`,
+    (whole, before, url, after) => `${before}${rewrite(url)}${after}`,
   );
 }
 
-function addBanner(text) {
-  const bannerYaml = `banner:\n  content: "${unstableBanner}"\n`;
+function addBanner(text, banner) {
+  if (!banner) return text;
+  const bannerYaml = `banner:\n  content: "${banner.replaceAll('"', '\\"')}"\n`;
   if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) return text;
   const frontmatterEnd = text.indexOf('\n---\n', 4);
   if (frontmatterEnd < 0) return text;
@@ -257,34 +290,90 @@ function addBanner(text) {
   return `${text.slice(0, frontmatterEnd)}\n${bannerYaml}${text.slice(frontmatterEnd)}`;
 }
 
-const sourceFiles = await collectDocFiles(source);
-const knownRoutes = new Set(sourceFiles.map(routeForFile));
-await validateDocLinks(sourceFiles, knownRoutes);
-
+// **Every version, into its own segment.** The collection is emptied once and
+// then each tree is copied under `docs/<id>/`, which is what makes the route
+// `/docs/next/reference/traps/` rather than `/docs/reference/traps/`.
 await rm(collectionRoot, { recursive: true, force: true });
-await mkdir(target, { recursive: true });
-// Pages only. `khora doc` keeps a `.khora-doc` record beside the reference it
-// generates, saying which pages are its to delete; it belongs to the source
-// tree and not to the site, and a non-page inside a content collection is at
-// best noise and at worst something Astro tries to parse.
-await cp(source, target, {
-  recursive: true,
-  filter: (from) => !path.basename(from).startsWith('.'),
-});
 
-async function normalizeMarkdown(dir) {
+/// Everything one version needs, resolved from its entry.
+const trees = versions.map((version) => ({
+  version,
+  source: path.join(root, version.from),
+  target: path.join(collectionRoot, 'docs', version.id),
+}));
+
+for (const tree of trees) {
+  const sourceFiles = await collectDocFiles(tree.source);
+  const knownRoutes = new Set(
+    sourceFiles.map((file) => routeForFile(file, tree.source, tree.version.id)),
+  );
+  // **Checked per tree, and a broken link in any of them fails the build.** An
+  // old version's pages are not maintained, but they are served, and a reader
+  // following a dead link out of one has no way to tell it from a bug in the
+  // one they wanted.
+  await validateDocLinks(sourceFiles, knownRoutes, tree.source, tree.version.id);
+
+  await mkdir(tree.target, { recursive: true });
+  // Pages only. `khora doc` keeps a `.khora-doc` record beside the reference it
+  // generates, saying which pages are its to delete; it belongs to the source
+  // tree and not to the site, and a non-page inside a content collection is at
+  // best noise and at worst something Astro tries to parse.
+  await cp(tree.source, tree.target, {
+    recursive: true,
+    filter: (from) => !path.basename(from).startsWith('.'),
+  });
+  tree.knownRoutes = knownRoutes;
+}
+
+/// Where an unversioned `/docs/...` path should land.
+///
+/// **Every page, not just the section roots.** The links already written down
+/// in other people's bookmarks, issues and answers were written before there
+/// was a version segment, and they are deep: `/docs/reference/traps/`, not
+/// `/docs/reference/`. A redirect map covering only the roots leaves every one
+/// of them on a 404, which is the failure this whole change exists to avoid.
+///
+/// Generated rather than hand-written, from the routes that actually exist in
+/// the current version, so a page added tomorrow is redirectable without
+/// anybody remembering to add a line.
+async function writeUnversionedRedirects(tree) {
+  const map = {};
+  for (const route of tree.knownRoutes) {
+    const withoutVersion = `/docs/${route.slice(`/docs/${tree.version.id}/`.length)}`;
+    // `/docs/` itself is written by hand in the config, beside the other short
+    // paths, because it is the one people type rather than follow.
+    if (withoutVersion === '/docs/') continue;
+    // Astro matches these without the trailing slash.
+    map[withoutVersion.replace(/\/$/, '')] = route;
+  }
+  const file = path.join(root, 'src', 'generated', 'redirects.js');
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(
+    file,
+    '// Written by scripts/sync-docs.mjs. Not edited by hand, not committed.\n'
+      + `export const unversioned = ${JSON.stringify(map, null, 2)};\n`,
+    'utf8',
+  );
+  return Object.keys(map).length;
+}
+
+const redirected = await writeUnversionedRedirects(
+  trees.find((tree) => tree.version.id === current) ?? trees[0],
+);
+
+async function normalizeMarkdown(dir, tree) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
 
     if (entry.isDirectory()) {
-      await normalizeMarkdown(full);
+      await normalizeMarkdown(full, tree);
       continue;
     }
 
     if (!isDocFile(entry.name)) continue;
 
-    const relative = path.relative(target, full);
-    const canonicalSource = path.join(source, relative);
+    const relative = path.relative(tree.target, full);
+    const canonicalSource = path.join(tree.source, relative);
     let text = await readFile(full, 'utf8');
 
     if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) {
@@ -297,8 +386,8 @@ async function normalizeMarkdown(dir) {
       text = `---\ntitle: "${title}"\n---\n\n${text}`;
     }
 
-    text = rewriteDocLinks(text, canonicalSource, knownRoutes);
-    text = addBanner(text);
+    text = rewriteDocLinks(text, canonicalSource, tree.knownRoutes, tree.source, tree.version.id);
+    text = addBanner(text, bannerFor(tree.version));
     await writeFile(full, text, 'utf8');
   }
 }
@@ -407,11 +496,17 @@ async function enhanceGeneratedApi(dir) {
   }
 }
 
-await normalizeMarkdown(target);
-await enhanceGeneratedApi(path.join(target, 'stdlib', 'api'));
+for (const tree of trees) {
+  await normalizeMarkdown(tree.target, tree);
+  await enhanceGeneratedApi(path.join(tree.target, 'stdlib', 'api'));
+}
 
 const built = await writeProvenance();
-console.log(`Synced public docs: ${source} -> ${target}`);
+console.log(
+  `Synced ${trees.length} documentation version(s): `
+    + trees.map((tree) => `${tree.version.id} <- ${tree.version.from}`).join(', '),
+);
+console.log(`/docs/ serves ${current}, with ${redirected} unversioned path(s) redirected into it`);
 console.log(
   built.short
     ? `Built from ${built.short}${built.release ? ` (${built.release})` : ''} at ${built.builtAt}`

@@ -10,7 +10,7 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
-## Unreleased
+## 0.1.0 — 2026-09-03
 
 ### Breaking
 
