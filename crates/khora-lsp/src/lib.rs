@@ -1045,6 +1045,7 @@ impl Server {
                 code,
                 range,
                 covered,
+                text,
                 enclosing.as_ref(),
             ));
 

@@ -4708,6 +4708,34 @@ pub type Vector<A> = {
 /// has nothing to say about it.
 extern fn khora_bounds_fail(index: Int, length: Int) -> Never;
 
+/// A hole where the code is not written yet.
+///
+/// **It answers whatever is wanted, so it fits anywhere.** An unwritten match
+/// arm has to agree with whatever its neighbours produce, so this is generic in
+/// its result and `todo()` type-checks in a `String` arm and an `Int` arm
+/// alike, leaving the program compiling while a case is unfinished.
+///
+/// Generic rather than `-> Never` because a body that *is* a `Never` call has
+/// no value for the backend to return; the runtime symbol under it has that
+/// type, and a caller substitutes its own.
+///
+/// Running one stops the program the way every other trap does, with a message
+/// and status 134. That is the point rather than a limitation: a placeholder
+/// that returned a plausible value would let a half-written program answer, and
+/// a wrong answer is the one outcome worse than a refusal.
+///
+/// ```khora
+/// match colour {
+///   Colour::Red => "red",
+///   Colour::Green => todo(),
+/// }
+/// ```
+pub fn todo<A>() -> A {
+  khora_todo()
+}
+
+extern fn khora_todo() -> Never;
+
 /// `[a, b, c]`, the same as a `List` of the same elements.
 ///
 /// The two print alike on purpose: which container a value is in is a decision

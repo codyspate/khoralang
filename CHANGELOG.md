@@ -373,19 +373,41 @@ it will behave differently now.
 
 ### Added
 
-- **Two assists the diagnostics already half-wrote.** The message saying a
-  call needs its `!` names one edit in one place, so it is offered as one.
-  The message saying a `match` is not exhaustive names the missing cases, and
-  every one of them is written at once, qualified the way the arms already
-  there are written -- a bare constructor name is a *binding*, so
-  `Green => ..` would match everything and compile, which is the one outcome
-  worse than an error. The body is `()` rather than an invented `todo`, so what
-  remains is the type checker's own message naming what the arm has to
-  produce.
-- **A lens for what a function absorbs.** Khora's rows are transitive, so a
-  lens repeating a signature would be noise -- except where a `catch` stops a
-  failure reaching it. `catches DbError` above a function whose signature
-  mentions no error is the line the type system deliberately hides.
+- **`std::core::todo`, a hole that type-checks anywhere and refuses to run.**
+  It is generic in its result, so it answers whatever is wanted: an unwritten
+  `match` arm compiles beside a `String` arm and an `Int` arm alike and the
+  rest of the program still builds. Generic rather than `-> Never` because a
+  body that *is* a `Never` call has no value for the backend to return. Running one stops with
+  `khora: this is not written yet` and status 134, the same as every other
+  trap: a placeholder that returned a plausible value would let a half-written
+  program answer, and a wrong answer is the one outcome worse than a refusal.
+  The backend emits `unreachable` after any call whose type is `Never`, which
+  is what lets a function whose whole body is one of these have a return type
+  it never returns.
+- **Six assists the diagnostics already half-wrote.** Each is offered only
+  where the message names one edit and there is nothing to choose:
+  - the call that needs its `!` gets it;
+  - a `match` that is not exhaustive gets every missing case at once, qualified
+    the way the arms already there are written -- a bare constructor name is a
+    *binding*, so `Green => ..` would match everything and compile, which is
+    the one outcome worse than an error -- with `todo()` for a body;
+  - an unused import is removed together with one separating comma, since
+    deleting the name the diagnostic covers and nothing else leaves
+    `{List, , print}`;
+  - an unused binding is renamed to `_name`. The message names a deletion too,
+    and that one is not offered: it means deciding what to do with the
+    initializer, which may be the call that does the work;
+  - `cannot find `prnt`; did you mean `print`?` becomes the name it meant;
+  - a record literal missing a field gets the field, with `todo()` in it, found
+    by counting braces forward from the field the checker did read.
+- **A lens for what a function absorbs**, in both halves. Khora's rows are
+  transitive, so a lens repeating a signature would be noise -- except where a
+  `catch` stops a failure reaching it, or a `with` block answers a requirement
+  before it gets there. `installs { db } · catches DbError` above a function
+  whose signature mentions neither is the line the type system deliberately
+  hides. The capability half needed `CallRows::declared`: `requires` is what a
+  call *still* owes, so inside a `with` block it is empty and the discharged
+  capability was invisible at exactly the call that discharged it.
 
 - **The server takes messages in batches, and honours `$/cancelRequest`.** It
   is still one thread doing one thing at a time; what changed is that it can

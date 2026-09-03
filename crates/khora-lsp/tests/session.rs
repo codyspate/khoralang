@@ -1593,6 +1593,144 @@ fn the_renamed_keyword_is_offered_a_fix() {
     assert_eq!(edits[0].pointer("/range/start/line"), Some(&json!(2)), "{actions}");
 }
 
+/// The one action offered for the first diagnostic whose message says `needle`,
+/// with its edits applied to `text`.
+///
+/// **Applied rather than inspected**, because a range that is off by a comma
+/// produces an edit that reads correctly in JSON and source that does not
+/// parse. The result is the thing a person would see in their editor, so that
+/// is what the assertions are written against.
+fn applied(text: &str, needle: &str) -> (String, String) {
+    let w = workspace(&[("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+    fix_in(&w, &file, text, needle)
+}
+
+/// The half of `applied` that does not decide what else is in the workspace.
+fn fix_in(w: &Workspace, file: &Path, text: &str, needle: &str) -> (String, String) {
+    let reported = session(&[initialize(&w.root), did_open(file, text), exit()]);
+    let found = last_diagnostics(&reported);
+    let about = found
+        .iter()
+        .find(|d| d.get("message").and_then(Value::as_str).is_some_and(|m| m.contains(needle)))
+        .unwrap_or_else(|| panic!("no diagnostic mentioning {needle:?} in {found:#?}"))
+        .clone();
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(file, text),
+        code_action(file, vec![about], 2),
+        exit(),
+    ]);
+    let actions = result_of(&replies, 2);
+    let list = actions.as_array().expect("a list");
+    assert_eq!(list.len(), 1, "exactly one action: {actions}");
+    let title = list[0].get("title").and_then(Value::as_str).expect("a title").to_string();
+
+    let edits = list[0]
+        .pointer("/edit/changes")
+        .and_then(Value::as_object)
+        .and_then(|c| c.values().next())
+        .and_then(Value::as_array)
+        .expect("edits")
+        .clone();
+
+    // Later edits first, so that an earlier one's offsets stay true.
+    let mut spans: Vec<(usize, usize, String)> = edits
+        .iter()
+        .map(|edit| {
+            let at = |which: &str| {
+                let line = edit
+                    .pointer(&format!("/range/{which}/line"))
+                    .and_then(Value::as_u64)
+                    .expect("a line") as usize;
+                let character = edit
+                    .pointer(&format!("/range/{which}/character"))
+                    .and_then(Value::as_u64)
+                    .expect("a character") as usize;
+                // The tests here are all ASCII, so a UTF-16 unit is a byte.
+                text.split_inclusive('\n').take(line).map(str::len).sum::<usize>() + character
+            };
+            let new = edit.get("newText").and_then(Value::as_str).unwrap_or_default().to_string();
+            (at("start"), at("end"), new)
+        })
+        .collect();
+    spans.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+
+    let mut out = text.to_string();
+    for (start, end, new) in spans {
+        out.replace_range(start..end, &new);
+    }
+    (title, out)
+}
+
+/// `applied`, with a `helper` module beside the file for imports to name.
+fn applied_with_helper(text: &str, needle: &str) -> (String, String) {
+    let helper = "module helper;\n\npub fn add(a: Int, b: Int) -> Int { a + b }\n\n\
+                  pub fn twice(a: Int) -> Int { a + a }\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", text)]);
+    let file = w.root.join("src/main.kh");
+    fix_in(&w, &file, text, needle)
+}
+
+/// **An unused import takes its comma with it**, which is the whole difficulty:
+/// the diagnostic covers the name alone, and deleting exactly that leaves
+/// `{List, , print}`.
+#[test]
+fn an_unused_import_is_removed_with_its_separator() {
+    let (title, after) = applied_with_helper(
+        "module main;\n\nimport helper::{add, twice};\n\nfn go() -> Int { add(1, 2) }\n",
+        "`twice` is imported and never used",
+    );
+    assert!(title.contains("`twice`"), "{title}");
+    assert!(after.contains("import helper::{add};"), "{after}");
+}
+
+/// The same, for a name that is not last: the comma after it goes instead.
+#[test]
+fn an_unused_import_in_front_takes_the_comma_after_it() {
+    let (_, after) = applied_with_helper(
+        "module main;\n\nimport helper::{twice, add};\n\nfn go() -> Int { add(1, 2) }\n",
+        "`twice` is imported and never used",
+    );
+    assert!(after.contains("import helper::{add};"), "{after}");
+}
+
+/// **An unused binding is offered the rename and not the deletion**, though the
+/// message names both. Deleting means deciding what to do with the initializer,
+/// which may be the call that does the work; the prefix is one token.
+#[test]
+fn an_unused_binding_is_offered_the_underscore() {
+    let text = "module main;\n\nfn go() -> Int {\n  let spare = 1;\n  2\n}\n";
+    let (title, after) = applied(text, "`spare` is bound and never read");
+    assert!(title.contains("`_spare`"), "{title}");
+    assert!(after.contains("let _spare = 1;"), "{after}");
+}
+
+/// **The suggestion in the message becomes the edit.** The checker already did
+/// the work of finding the near name; this saves retyping it.
+#[test]
+fn a_misspelling_is_offered_the_name_it_meant() {
+    let text = "module main;\n\nfn go() -> Int {\n  let count = 1;\n  cout\n}\n";
+    let (title, after) = applied(text, "did you mean `count`?");
+    assert!(title.contains("`count`"), "{title}");
+    assert!(after.contains("\n  count\n"), "{after}");
+}
+
+/// **A record missing a field is offered the field, with `todo()` in it.**
+///
+/// The value is a hole for the reason the match arms are: a plausible default
+/// would be a wrong answer where the error was a refusal.
+#[test]
+fn a_missing_record_field_is_offered_a_hole() {
+    let text = "module main;\n\ntype Point = { x: Int, y: Int };\n\n\
+                fn go() -> Point { { x: 1 } }\n";
+    let (title, after) = applied(text, "is missing `y`");
+    assert!(title.contains("`y`"), "{title}");
+    assert!(after.contains("y: todo()"), "{after}");
+    assert!(after.contains("x: 1,"), "the field it already had keeps its comma: {after}");
+}
+
 /// **A diagnostic with no mechanical fix is offered nothing**, which is the
 /// rule: an action is applied by somebody who read four words of the message,
 /// so one that guesses is worse than none.
@@ -3225,8 +3363,7 @@ pub fn name(c: Colour) -> String {\n\
         .find(|a| a.get("title").and_then(Value::as_str).is_some_and(|t| t.contains("missing")))
         .expect("an action");
     let written = edits_of(offered).join("");
-    assert!(written.contains("=> (),"), "a real value, so the error is a type error: {written:?}");
-    assert!(!written.contains("todo"), "Khora has no `todo` to write: {written:?}");
+    assert!(written.contains("=> todo(),"), "the case is marked, not answered: {written:?}");
 }
 
 // --- the lens for what a function absorbs ----------------------------------
@@ -3281,6 +3418,52 @@ fn a_function_that_catches_says_so_in_a_lens() {
     assert!(
         lenses.iter().any(|(line, title)| *line == 9 && title == "catches Broke"),
         "the function that catches: {lenses:?}"
+    );
+}
+
+const INSTALLS: &str = "module p::main;\n\
+\n\
+pub effect Clock {\n\
+  now: () -> Int,\n\
+}\n\
+\n\
+fn stamp() -> Int with { clock: Clock } { clock.now() }\n\
+\n\
+fn passes_it_on() -> Int with { clock: Clock } { stamp() }\n\
+\n\
+pub fn takes_it_on() -> Int {\n\
+  with { clock: handler for Clock { now: fn () => 0 } } { stamp() }\n\
+}\n";
+
+/// **The capability half of the same idea**, and the half the type checker
+/// makes hardest to see: `requires` is what a call *still* owes, so inside the
+/// `with` block it is empty, and the discharged capability is invisible at
+/// exactly the call that discharged it. `CallRows::declared` keeps the
+/// callee's own row from before that subtraction, and the difference is this.
+#[test]
+fn a_function_that_installs_a_capability_says_so_in_a_lens() {
+    let w = workspace(&[("src/main.kh", INSTALLS)]);
+    let main = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, INSTALLS),
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": url_of(&main) } }
+        }),
+        exit(),
+    ]);
+
+    let lenses = lenses_in(&replies, 5);
+    assert!(
+        lenses.iter().any(|(line, title)| *line == 10 && title == "installs { clock }"),
+        "the function that installs: {lenses:?}"
+    );
+    // And not on the one that only passes the requirement outwards, whose
+    // signature already says it.
+    assert!(
+        !lenses.iter().any(|(line, _)| *line == 8),
+        "nothing on the function that declares it: {lenses:?}"
     );
 }
 

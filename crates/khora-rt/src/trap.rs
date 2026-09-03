@@ -96,6 +96,26 @@ pub unsafe extern "C" fn khora_overflow(what: *const u8, len: u64) -> ! {
     stop(contained)
 }
 
+/// Reports a hole somebody left in a program, and stops.
+///
+/// **A trap rather than a value, for the same reason the others here are.** A
+/// `todo()` that returned something would let a half-written program run and
+/// answer, which is the outcome every trap in this file exists to prevent: the
+/// refusal is the useful part. `-> !` is what makes it usable in any position,
+/// so an unwritten match arm type-checks against whatever its neighbours
+/// produce and still refuses to run.
+#[unsafe(no_mangle)]
+pub extern "C" fn khora_todo() -> ! {
+    // The same block, for the same reason as `khora_overflow`.
+    let contained = {
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(err, "khora: this is not written yet{}", on_which_fiber());
+        where_from(&mut err);
+        say_what_happens_next(&mut err)
+    };
+    stop(contained)
+}
+
 /// Reports an index that was not in range, and stops.
 ///
 /// A trap rather than a wrapped value or a poisoned read, for the same reason

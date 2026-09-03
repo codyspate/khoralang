@@ -142,6 +142,20 @@ impl<'a> Checker<'a> {
             // known by now, which is the ordinary case; one that is still a
             // variable simply has nothing to subtract.
             let mut row = self.unifier.zonk(row);
+            // **Kept before the subtraction below, and published even when
+            // that leaves nothing.** What a call still has to answer is what
+            // the checker needs; what the callee asked for in the first place
+            // is what a reader needs, and inside a `with` block those differ by
+            // exactly the capabilities the block absorbed. Recording it after
+            // the loop would record the residue, and recording it only for
+            // non-empty residues would drop precisely the interesting case.
+            if clause == Clause::Requires {
+                if let (Some(at), Type::Row { fields, .. }) = (callee_site, &row) {
+                    if !fields.is_empty() {
+                        self.call_rows.entry(at).or_default().declared = Some(row.clone());
+                    }
+                }
+            }
             // Whatever an enclosing `with` block supplies is already answered
             // -- by label, and then by type for anything installed without one.
             if clause == Clause::Requires {

@@ -99,6 +99,7 @@ pub fn for_diagnostic(
     code: Option<&str>,
     range: TextRange,
     at: &str,
+    source: &str,
     enclosing: Option<&Signature>,
 ) -> Vec<Fix> {
     match code {
@@ -109,11 +110,15 @@ pub fn for_diagnostic(
             // spelling the message itself suggests.
             replacement: format!("let _ = {at}"),
         }],
+        Some("unused-import") => for_unused_import(range, at, source).into_iter().collect(),
+        Some("unused-binding") => for_unused_binding(range, at).into_iter().collect(),
         Some(_) => Vec::new(),
         None => {
             let mut out = for_parse_error(message, range);
             out.extend(enclosing.and_then(|sig| for_missing_clause(message, sig)));
             out.extend(for_missing_try(message, range, at));
+            out.extend(for_misspelling(message, range));
+            out.extend(for_missing_field(message, range, source));
             out.extend(for_missing_arms(message, range, at));
             out
         }
@@ -188,6 +193,144 @@ fn add_to_raises(entry: &str, sig: &Signature) -> Option<Fix> {
     })
 }
 
+/// An import nobody uses, taken out of the list it is in.
+///
+/// **The comma is the whole difficulty.** The diagnostic covers the name and
+/// nothing else, and deleting just that leaves `{List, , print}`, which does
+/// not parse. So the range grows to swallow one separator: the one after the
+/// name, or the one before it when the name is last. A list with a single
+/// entry has no separator and the whole import goes.
+fn for_unused_import(range: TextRange, at: &str, source: &str) -> Option<Fix> {
+    let start = usize::from(range.start());
+    let end = usize::from(range.end());
+    if end > source.len() || source.get(start..end) != Some(at) {
+        return None;
+    }
+
+    let after = &source[end..];
+    let trailing = after.len() - after.trim_start().len();
+    if after[trailing..].starts_with(',') {
+        // `X, Y` — take the comma and the space after it.
+        let comma = trailing + 1;
+        let gap = after[comma..].len() - after[comma..].trim_start_matches(' ').len();
+        return Some(Fix {
+            title: format!("Remove the unused import `{at}`"),
+            range: TextRange::new(range.start(), range.end() + text_size(comma + gap)),
+            replacement: String::new(),
+        });
+    }
+
+    let before = &source[..start];
+    let kept = before.trim_end_matches(' ');
+    if kept.ends_with(',') {
+        // `Y, X` — take the comma in front instead.
+        let back = before.len() - kept.len() + 1;
+        return Some(Fix {
+            title: format!("Remove the unused import `{at}`"),
+            range: TextRange::new(range.start() - text_size(back), range.end()),
+            replacement: String::new(),
+        });
+    }
+
+    // No separator on either side means a list with one name in it, and there
+    // is nothing safe to do with the `import` line holding it. The lint refuses
+    // to fire in that case anyway -- it reports a name only when another name
+    // in the same list survives -- so this is a guard rather than a case.
+    None
+}
+
+/// `` `y` is bound and never read. Delete it, or rename it to `_y` `` — the
+/// second of those, which is the one that is always safe.
+///
+/// **Two edits are named and only one of them is unambiguous.** Deleting a
+/// binding means deciding what to do with its initializer, which may be the
+/// call that does the work; prefixing it is a rename of one token and changes
+/// nothing else. So this offers the rename and leaves the deletion to a person
+/// who has read the line.
+fn for_unused_binding(range: TextRange, at: &str) -> Option<Fix> {
+    if at.is_empty() || at.starts_with('_') || !at.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(Fix {
+        title: format!("Rename it to `_{at}` to say it is deliberate"),
+        range,
+        replacement: format!("_{at}"),
+    })
+}
+
+/// `` cannot find `prnt` in this scope; did you mean `print`? `` — so mean it.
+fn for_misspelling(message: &str, range: TextRange) -> Option<Fix> {
+    // Not every "did you mean" is about a name in a body: the manifest reader
+    // writes one about a key in `khora.toml`, whose range is not source at all.
+    if !message.starts_with("cannot find `") {
+        return None;
+    }
+    let meant = message.rsplit_once("did you mean `")?.1.strip_suffix("`?")?;
+    if meant.is_empty() {
+        return None;
+    }
+    Some(Fix {
+        title: format!("Change it to `{meant}`"),
+        range,
+        replacement: meant.to_string(),
+    })
+}
+
+/// `` this `Point` is missing `y` `` — so add it.
+///
+/// The field is written with `todo()` for a value, for the reason the match
+/// arms are: a plausible default would be a wrong answer where the error was a
+/// refusal.
+///
+/// **The literal has to be found rather than read off the diagnostic.** The
+/// checker points at the last field it did read, not at the braces around it,
+/// so the closing brace is found by scanning forward through the source and
+/// counting nesting — the new field goes just before it, after whatever was
+/// written last.
+fn for_missing_field(message: &str, range: TextRange, source: &str) -> Option<Fix> {
+    let field = message.rsplit_once(" is missing `")?.1.strip_suffix('`')?;
+    // `this impl is missing `m` from `T`` ends in a backtick too, and names a
+    // method rather than a field. A suffix with a backtick inside it is that.
+    if field.is_empty() || field.contains('`') {
+        return None;
+    }
+    let from = usize::from(range.end());
+    let close = from + closing_brace(source.get(from..)?)?;
+    let before = source[..close].trim_end();
+    // `{` last means the literal has no fields yet, and a leading comma would
+    // make it `{, y: todo() }`.
+    let separator = if before.ends_with('{') { "" } else { "," };
+    Some(Fix {
+        title: format!("Add the missing field `{field}`"),
+        range: TextRange::new(text_size(before.len()), text_size(close)),
+        replacement: format!("{separator} {field}: todo() "),
+    })
+}
+
+/// Where the brace closing the literal this sits inside is, counting nesting.
+///
+/// `None` where the text runs out first, or where a `;` or a `)` arrives at
+/// depth zero — both mean the scan left the literal without finding its end,
+/// and inserting a field into whatever came next would be a guess.
+fn closing_brace(rest: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, c) in rest.char_indices() {
+        match c {
+            '{' | '[' | '(' => depth += 1,
+            '}' if depth == 0 => return Some(at),
+            '}' | ']' | ')' => depth = depth.checked_sub(1)?,
+            ';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A byte count as a `TextSize`, which is what every range here is built from.
+fn text_size(bytes: usize) -> TextSize {
+    TextSize::new(bytes as u32)
+}
+
 /// `` the call needs `!`: write `f(..)!` `` — so write it.
 ///
 /// **The message already contains the edit**, which is this module's whole
@@ -217,17 +360,16 @@ fn for_missing_try(message: &str, range: TextRange, at: &str) -> Option<Fix> {
 /// **The checker names the pattern, which is the part a person cannot work
 /// out from the error.** Writing the arm from there is mechanical: it goes
 /// before the closing brace, indented like the arms above it, with a body of
-/// `()` so the program still does not compile until somebody says what the
-/// case means. An arm that silently returned a plausible value would turn a
-/// refusal into a wrong answer, which is the one outcome worse than an error.
+/// `todo()` so the case is marked rather than answered. An arm that silently
+/// returned a plausible value would turn a refusal into a wrong answer, which
+/// is the one outcome worse than an error.
 ///
-/// **`()` rather than a `todo`, because Khora has no `todo`.** Rust's assist
-/// writes `todo!()` and can, because the macro exists; inventing a name here
-/// would fail with "cannot find `todo` in this scope", which tells the author
-/// nothing about the arm. The unit value is real, so the error is the type
-/// checker's own -- *expected `String`, found `()`* -- pointing at the arm and
-/// naming what it has to produce. Where the match is already `()`-typed the
-/// stub simply compiles, which is right.
+/// `std::core::todo` is generic in its result, so the arm type-checks against
+/// whatever its neighbours produce and the file compiles with the hole in it;
+/// running that arm stops the program and says so. Where `todo` is not
+/// imported the result is "cannot find `todo` in this scope", which the
+/// auto-import action already answers -- so the follow-up is one click and the
+/// program then builds, which writing `()` here never achieved.
 fn for_missing_arms(message: &str, range: TextRange, at: &str) -> Option<Fix> {
     if !message.contains("not exhaustive") {
         return None;
@@ -271,7 +413,7 @@ fn for_missing_arms(message: &str, range: TextRange, at: &str) -> Option<Fix> {
     };
     let written: String = patterns
         .iter()
-        .map(|pattern| format!("{inner}{qualifier}{pattern} => (),\n"))
+        .map(|pattern| format!("{inner}{qualifier}{pattern} => todo(),\n"))
         .collect();
     Some(Fix {
         title,
@@ -337,14 +479,14 @@ mod tests {
 
     #[test]
     fn a_discarded_result_is_offered_a_binding() {
-        let fixes = for_diagnostic("", Some("discarded-result"), range(), "db.execute(sql)!;", None);
+        let fixes = for_diagnostic("", Some("discarded-result"), range(), "db.execute(sql)!;", "", None);
         assert_eq!(fixes.len(), 1);
         assert_eq!(fixes[0].replacement, "let _ = db.execute(sql)!;");
     }
 
     #[test]
     fn the_renamed_keyword_is_offered_the_rename() {
-        let fixes = for_diagnostic("`export` is spelled `pub`", None, range(), "export", None);
+        let fixes = for_diagnostic("`export` is spelled `pub`", None, range(), "export", "", None);
         assert_eq!(fixes.len(), 1);
         assert_eq!(fixes[0].replacement, "pub");
     }
@@ -356,6 +498,7 @@ mod tests {
             None,
             range(),
             "let",
+            "",
             None,
         );
         assert_eq!(fixes[0].replacement, "const");
@@ -366,13 +509,13 @@ mod tests {
     /// words of the message must not guess.
     #[test]
     fn a_lint_that_needs_a_decision_is_offered_nothing() {
-        assert!(for_diagnostic("", Some("unused-capability"), range(), "", None).is_empty());
-        assert!(for_diagnostic("", Some("reference-cycle"), range(), "", None).is_empty());
+        assert!(for_diagnostic("", Some("unused-capability"), range(), "", "", None).is_empty());
+        assert!(for_diagnostic("", Some("reference-cycle"), range(), "", "", None).is_empty());
     }
 
     #[test]
     fn an_ordinary_type_error_is_offered_nothing() {
-        assert!(for_diagnostic("expected `Int`, found `String`", None, range(), "x", None)
+        assert!(for_diagnostic("expected `Int`, found `String`", None, range(), "x", "", None)
             .is_empty());
     }
 
@@ -419,7 +562,7 @@ mod tests {
     #[test]
     fn a_missing_capability_is_added_to_the_row_that_is_there() {
         let (text, sig) = signature("fn main() -> Int with { log: Log } { load() }");
-        let fixes = for_diagnostic(NEEDS_DB, None, range(), "load()", Some(&sig));
+        let fixes = for_diagnostic(NEEDS_DB, None, range(), "load()", "", Some(&sig));
         assert_eq!(fixes.len(), 1);
         assert_eq!(applied(&text, &fixes[0]), "fn main() -> Int with { log: Log, db: Db } { load() }");
     }
@@ -427,7 +570,7 @@ mod tests {
     #[test]
     fn a_function_with_no_with_clause_is_given_one() {
         let (text, sig) = signature("fn main() -> Int { load() }");
-        let fixes = for_diagnostic(NEEDS_DB, None, range(), "load()", Some(&sig));
+        let fixes = for_diagnostic(NEEDS_DB, None, range(), "load()", "", Some(&sig));
         assert_eq!(applied(&text, &fixes[0]), "fn main() -> Int with { db: Db } { load() }");
     }
 
@@ -436,7 +579,7 @@ mod tests {
     #[test]
     fn a_with_clause_goes_in_front_of_the_raises_clause() {
         let (text, sig) = signature("fn main() -> Int raises IoError { load() }");
-        let fixes = for_diagnostic(NEEDS_DB, None, range(), "load()", Some(&sig));
+        let fixes = for_diagnostic(NEEDS_DB, None, range(), "load()", "", Some(&sig));
         assert_eq!(
             applied(&text, &fixes[0]),
             "fn main() -> Int with { db: Db } raises IoError { load() }"
@@ -455,7 +598,7 @@ mod tests {
             ),
         ] {
             let (text, sig) = signature(before);
-            let fixes = for_diagnostic(NEEDS_DB, None, range(), "load()", Some(&sig));
+            let fixes = for_diagnostic(NEEDS_DB, None, range(), "load()", "", Some(&sig));
             assert_eq!(applied(&text, &fixes[0]), after, "from {before}");
         }
     }
@@ -463,7 +606,7 @@ mod tests {
     #[test]
     fn a_missing_error_becomes_another_term_of_the_union() {
         let (text, sig) = signature("fn main() -> Int raises 'e + IoError { load() }");
-        let fixes = for_diagnostic(NEEDS_ERR, None, range(), "load()", Some(&sig));
+        let fixes = for_diagnostic(NEEDS_ERR, None, range(), "load()", "", Some(&sig));
         assert_eq!(
             applied(&text, &fixes[0]),
             "fn main() -> Int raises 'e + IoError + DbError { load() }"
@@ -473,7 +616,7 @@ mod tests {
     #[test]
     fn a_function_that_raises_nothing_is_given_a_raises_clause() {
         let (text, sig) = signature("fn main() -> Int { load() }");
-        let fixes = for_diagnostic(NEEDS_ERR, None, range(), "load()", Some(&sig));
+        let fixes = for_diagnostic(NEEDS_ERR, None, range(), "load()", "", Some(&sig));
         assert_eq!(applied(&text, &fixes[0]), "fn main() -> Int raises DbError { load() }");
     }
 
@@ -481,6 +624,6 @@ mod tests {
     /// diagnostic at module level arrives in.
     #[test]
     fn a_missing_clause_outside_a_function_is_offered_nothing() {
-        assert!(for_diagnostic(NEEDS_DB, None, range(), "load()", None).is_empty());
+        assert!(for_diagnostic(NEEDS_DB, None, range(), "load()", "", None).is_empty());
     }
 }

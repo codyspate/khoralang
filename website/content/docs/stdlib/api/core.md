@@ -5639,6 +5639,35 @@ the argument's type, because there is no prelude yet to declare three
 differently-typed printers. It is not an effect, which it eventually should
 be — writing to a console is exactly the sort of thing a capability is for.
 
+### todo
+
+```khora
+pub fn todo<A>() -> A
+```
+
+A hole where the code is not written yet.
+
+**It answers whatever is wanted, so it fits anywhere.** An unwritten match
+arm has to agree with whatever its neighbours produce, so this is generic in
+its result and `todo()` type-checks in a `String` arm and an `Int` arm
+alike, leaving the program compiling while a case is unfinished.
+
+Generic rather than `-> Never` because a body that *is* a `Never` call has
+no value for the backend to return; the runtime symbol under it has that
+type, and a caller substitutes its own.
+
+Running one stops the program the way every other trap does, with a message
+and status 134. That is the point rather than a limitation: a placeholder
+that returned a plausible value would let a half-written program answer, and
+a wrong answer is the one outcome worse than a refusal.
+
+```khora
+match colour {
+  Colour::Red => "red",
+  Colour::Green => todo(),
+}
+```
+
 ### join_all
 
 ```khora

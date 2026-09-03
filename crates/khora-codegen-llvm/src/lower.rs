@@ -529,6 +529,17 @@ impl<'ctx> Lower<'_, 'ctx> {
         }
     }
 
+    /// The checked type of the expression the body ends with.
+    ///
+    /// `Unknown` when there is no root, which keeps the caller's fallback the
+    /// one that reports rather than this one silently swallowing it.
+    fn tail_type(&self) -> Type {
+        match self.body.root {
+            Some(root) => self.types.of(root).clone(),
+            None => Type::Unknown,
+        }
+    }
+
     /// Emits the function's `ret`, and repairs the IR if lowering gave up.
     fn finish(&mut self, value: Flow<'ctx>) {
         // A fallible function always returns the tagged pair, so falling off
@@ -550,6 +561,16 @@ impl<'ctx> Lower<'_, 'ctx> {
                 }
                 (_, Some(expected)) if expected == value.get_type() => {
                     self.be.builder.build_return(Some(&value)).expect("returning a value");
+                }
+                // **A body that always diverges has nothing to return.** A
+                // function whose tail is a call marked `noreturn` -- `todo()`,
+                // or anything else ending in `Never` -- produces a value of no
+                // useful type, and returning it is what LLVM has `unreachable`
+                // for. Without this the only way to write an always-failing
+                // helper was to give it a branch that returns, which is a
+                // branch that cannot be taken.
+                _ if matches!(self.tail_type(), Type::Never) => {
+                    self.be.builder.build_unreachable().expect("a body that cannot return");
                 }
                 _ => {
                     // Reachable when a body's type is `Unknown` — a `loop` used

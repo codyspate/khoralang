@@ -54,10 +54,23 @@ pub struct BodyTypes {
 /// fail should render as nothing at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallRows {
-    /// Capabilities the callee requires.
+    /// Capabilities the callee requires that this call still has to answer.
+    ///
+    /// Empty where an enclosing `with` block already supplied them, which is
+    /// the right answer for checking and the wrong one for showing: at exactly
+    /// the call that discharged a capability, this says nothing about it.
     pub requires: Option<Type>,
     /// Errors it may raise.
     pub raises: Option<Type>,
+    /// Capabilities the callee's signature asks for, before anything in scope
+    /// answered them.
+    ///
+    /// **The difference between the two is what the enclosing code absorbs**,
+    /// which is the one thing a Khora signature never says. A row is
+    /// transitive, so a function's `with` clause tells a reader everything it
+    /// passes on and nothing about what it takes on itself. Subtracting
+    /// `requires` from this gives the rest.
+    pub declared: Option<Type>,
 }
 
 impl BodyTypes {

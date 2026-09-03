@@ -44,6 +44,10 @@ The server currently provides:
 - inlay hints: the capability and failure rows a call needs, and the inferred type of a binding that does not say its own;
 - rename, across every file that names the thing.
 
+Quick fixes are offered only where a diagnostic's own message names one edit and there is nothing to choose, because an action is applied by somebody who read four words of it. Six qualify today: adding the `!` a call needs; writing every missing `match` arm at once, qualified the way the arms already there are, with `todo()` for a body; removing an unused import together with one separating comma; renaming an unused binding to `_name`; taking the spelling a "did you mean" suggests; and adding a record's missing field, again with `todo()`. The message that says a call needs a capability the function does not require offers the signature edit and nothing beside it, because propagating the requirement outwards is one of two answers and only that one is spelled out.
+
+A code lens marks what a function absorbs rather than passes on: `installs { db } · catches DbError` above a function whose signature mentions neither. Rows are transitive, so a lens repeating a signature would be noise; a `with` block and a `catch` are the two places that stops being true, and they are what the type system deliberately hides.
+
 Rename edits the declaration, every use, and the import that brings the name into each file. Where a file imports under an alias, the import's original name is renamed and the alias is left alone, because the alias is that file's own word for it. A trait member and a constructor are still refused, each with a sentence saying why: a trait member's name belongs to the trait and to every impl of it, and a constructor has no recorded range to edit.
 
 The server asks for incremental synchronization, so an edit sends the edit rather than the file.

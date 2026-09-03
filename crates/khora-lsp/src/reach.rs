@@ -1,40 +1,35 @@
-//! What a function absorbs: the failures it handles rather than passes on.
+//! What a function absorbs: the authority it installs and the failures it
+//! handles, rather than passes on.
 //!
 //! **Khora's signatures are already transitive**, which is the whole point of
 //! row polymorphism and is why a lens repeating one would be noise. A function
-//! that can fail says so, and so does every caller, all the way up. There is
-//! exactly one place that stops being true: where a function *discharges*
-//! something. A `catch` handles a failure so that it never reaches the
-//! `raises` clause, and the signature then says nothing about it.
+//! that needs a database says so, and so does every caller, all the way up.
+//! There is exactly one place that stops being true: where a function
+//! *discharges* something. A `with { db: .. }` block satisfies a requirement so
+//! that it never reaches the signature; a `catch` handles a failure so that it
+//! never reaches the `raises`.
 //!
 //! Those are the interesting lines in a program and they are the ones the type
 //! system deliberately hides. A signature tells you what a function asks of
 //! its caller; nothing tells you what it quietly takes on itself. A `main`
-//! that catches four errors has a signature that mentions none of them.
+//! that installs six handlers and catches four errors has a signature that
+//! mentions none of it.
 //!
-//! So: the union of what the body's calls can raise, minus what the signature
-//! declares, is what the function absorbs — and that is the lens.
+//! # Where the two halves come from
 //!
-//! # Why capabilities are not here, and what it would take
+//! Failures are the easy half: `CallRows::raises` is recorded before any
+//! `catch` subtracts from it, so what a body's calls can raise, minus what the
+//! signature declares, is what the function swallows.
 //!
-//! The same lens for `with` blocks would be better still: a `main` that
-//! installs six handlers is absorbing six requirements and says so nowhere.
-//! It cannot be built from what the checker publishes today.
-//!
-//! `BodyTypes::calls_with_rows` records *what each call site asked of the
-//! function containing it* — the requirement still outstanding after any
-//! enclosing `with` block has satisfied it. Inside such a block that is empty
-//! by construction, so a discharged capability is invisible at exactly the
-//! call that discharged it. Failures are recorded before their `catch` rather
-//! than after, which is why the other half works; the asymmetry is not
-//! deliberate, it is what each was needed for.
-//!
-//! Counting the handlers a `with` block names is not a substitute. A handler
-//! may satisfy nothing — that is the `unused-capability` lint's whole subject
-//! — and a block may satisfy a requirement raised three calls deep in a
-//! function it calls. What would answer it is the callee's declared `with` row
-//! recorded beside the outstanding one, which the checker reads at every call
-//! to do the subtraction and then discards.
+//! Capabilities were the hard half and were missing until `CallRows::declared`
+//! existed. `requires` is what a call *still* has to answer, so inside a `with`
+//! block it is empty by construction and a discharged capability was invisible
+//! at exactly the call that discharged it. Counting the handlers a block names
+//! is not a substitute: a handler may satisfy nothing, which is the
+//! `unused-capability` lint's whole subject, and a block may satisfy a
+//! requirement raised three calls deep in a function it calls. `declared` is
+//! the callee's own row, kept before the subtraction, and the difference is
+//! the answer.
 
 use khora_db::{Db, SourceFile};
 use khora_types::Type;
@@ -45,6 +40,9 @@ use text_size::TextRange;
 pub struct Absorbed {
     /// Where the function's name is, so a lens sits above it.
     pub at: TextRange,
+    /// Capability labels the body's calls ask for and the signature does not
+    /// declare, because something in the function answered them.
+    pub capabilities: Vec<String>,
     /// Error types the body can raise and the signature does not declare.
     pub failures: Vec<String>,
 }
@@ -52,10 +50,17 @@ pub struct Absorbed {
 impl Absorbed {
     /// The lens text, or `None` when there is nothing to say.
     pub fn title(&self) -> Option<String> {
-        if self.failures.is_empty() {
+        let mut parts = Vec::new();
+        if !self.capabilities.is_empty() {
+            parts.push(format!("installs {{ {} }}", self.capabilities.join(", ")));
+        }
+        if !self.failures.is_empty() {
+            parts.push(format!("catches {}", self.failures.join(", ")));
+        }
+        if parts.is_empty() {
             return None;
         }
-        Some(format!("catches {}", self.failures.join(", ")))
+        Some(parts.join(" · "))
     }
 }
 
@@ -71,25 +76,40 @@ pub fn in_file(db: &dyn Db, file: SourceFile) -> Vec<Absorbed> {
         };
         let Some(item) = map.items.iter().find(|item| &item.name == name) else { continue };
 
+        let mut capabilities: Vec<String> = Vec::new();
         let mut failures: Vec<String> = Vec::new();
         for (_, rows) in types.calls_with_rows() {
             if let Some(row) = rows.raises.as_ref() {
                 failures.extend(labels_of(row));
+            }
+            // What the callee asked for, minus what this call still owes: the
+            // rest was answered here.
+            if let Some(asked) = rows.declared.as_ref() {
+                let outstanding: Vec<String> =
+                    rows.requires.as_ref().map(labels_of).unwrap_or_default();
+                for label in labels_of(asked) {
+                    if !outstanding.contains(&label) {
+                        capabilities.push(label);
+                    }
+                }
             }
         }
 
         // What the signature already says is not absorbed: it is passed on,
         // and every caller sees it.
         let declared = declared_labels(db, file, item.range);
+        capabilities.retain(|label| !declared.contains(label));
         failures.retain(|label| !declared.contains(label));
+        capabilities.sort();
+        capabilities.dedup();
         failures.sort();
         failures.dedup();
 
-        if failures.is_empty() {
+        if capabilities.is_empty() && failures.is_empty() {
             continue;
         }
         let Some(at) = name_of(db, file, item.range) else { continue };
-        out.push(Absorbed { at, failures });
+        out.push(Absorbed { at, capabilities, failures });
     }
 
     out.sort_by_key(|found| found.at.start());
