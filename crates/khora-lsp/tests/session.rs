@@ -219,7 +219,9 @@ fn an_unimplemented_request_gets_an_error_rather_than_silence() {
     let w = workspace(&[("src/main.kh", "module app::main;\n")]);
     let replies = session(&[
         initialize(&w.root),
-        json!({ "jsonrpc": "2.0", "id": 7, "method": "textDocument/foldingRange", "params": {} }),
+        // Whatever is unimplemented next. `foldingRange` stood here until it
+        // was implemented, which is the point: the rule outlives the example.
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "textDocument/documentLink", "params": {} }),
         exit(),
     ]);
     let reply = replies.iter().find(|r| r.get("id") == Some(&json!(7))).expect("a reply");
@@ -831,11 +833,14 @@ fn a_rename_can_be_asked_for_from_the_binding() {
 }
 
 /// **A declaration is refused with a reason, not with silence.** `null` from
-/// `prepareRename` makes an editor say "cannot be renamed" and explain nothing.
+/// **A rename now leaves the file it started in.** It refused to until the two
+/// things that made it unsafe were answered: a declaration's range covers its
+/// whole body, and an import list is not a `::` path so nothing looked at it.
+/// Both are handled, so the edit reaches every file that names the thing.
 #[test]
-fn renaming_a_declaration_is_refused_and_says_why() {
+fn renaming_a_declaration_edits_every_file_that_names_it() {
     let helper = "module helper;\n\npub fn add(a: Int, b: Int) -> Int { a + b }\n";
-    let main = "module main;\n\nimport helper::{add};\n\nfn go() -> Int { helper::add(1, 2) }\n";
+    let main = "module main;\n\nimport helper::{add};\n\nfn go() -> Int { add(1, 2) }\n";
     let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
     let file = w.root.join("src/main.kh");
     let column = main.lines().nth(4).expect("a line").find("add").expect("it") as u32;
@@ -844,12 +849,119 @@ fn renaming_a_declaration_is_refused_and_says_why() {
         initialize(&w.root),
         did_open(&file, main),
         prepare_rename(&file, 4, column + 1, 2),
+        rename(&file, 4, column + 1, "plus", 3),
+        exit(),
+    ]);
+
+    assert!(
+        result_of(&replies, 2).get("placeholder").is_some(),
+        "prepareRename should accept it now: {}",
+        result_of(&replies, 2)
+    );
+
+    let changes = result_of(&replies, 3).pointer("/changes").cloned().unwrap_or(Value::Null);
+    let map = changes.as_object().cloned().unwrap_or_default();
+    assert_eq!(map.len(), 2, "both files: {changes}");
+
+    let in_helper = map
+        .iter()
+        .find(|(uri, _)| uri.ends_with("helper.kh"))
+        .map(|(_, edits)| edits.as_array().cloned().unwrap_or_default())
+        .unwrap_or_default();
+    assert_eq!(in_helper.len(), 1, "the declaration's name, once: {in_helper:?}");
+    // `pub fn add` is on line 2, and the edit must cover `add` alone rather
+    // than the declaration it belongs to.
+    assert_eq!(in_helper[0].pointer("/range/start/line"), Some(&json!(2)), "{in_helper:?}");
+    let start = in_helper[0].pointer("/range/start/character").and_then(Value::as_u64);
+    let finish = in_helper[0].pointer("/range/end/character").and_then(Value::as_u64);
+    assert_eq!(
+        finish.zip(start).map(|(f, s)| f - s),
+        Some(3),
+        "three characters, not the whole declaration: {in_helper:?}"
+    );
+
+    let in_main = map
+        .iter()
+        .find(|(uri, _)| uri.ends_with("main.kh"))
+        .map(|(_, edits)| edits.as_array().cloned().unwrap_or_default())
+        .unwrap_or_default();
+    assert_eq!(
+        in_main.len(),
+        2,
+        "the import that brings it in, and the call: {in_main:?}"
+    );
+    assert!(
+        in_main.iter().any(|e| e.pointer("/range/start/line") == Some(&json!(2))),
+        "**the import list is the one nothing else looks at**: {in_main:?}"
+    );
+}
+
+/// `import m::{foo as bar}` renames the `foo` and leaves the `bar`, because
+/// the alias is this file's own word for it.
+#[test]
+fn renaming_through_an_alias_leaves_the_alias_alone() {
+    let helper = "module helper;\n\npub fn add(a: Int, b: Int) -> Int { a + b }\n";
+    let main = "module main;\n\nimport helper::{add as plus};\n\nfn go() -> Int { plus(1, 2) }\n";
+    let w = workspace(&[("src/helper.kh", helper), ("src/main.kh", main)]);
+    let file = w.root.join("src/helper.kh");
+    let column = helper.lines().nth(2).expect("a line").find("add").expect("it") as u32;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, helper),
+        rename(&file, 2, column + 1, "sum", 3),
+        exit(),
+    ]);
+
+    let map = result_of(&replies, 3)
+        .pointer("/changes")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let in_main = map
+        .iter()
+        .find(|(uri, _)| uri.ends_with("main.kh"))
+        .map(|(_, edits)| edits.as_array().cloned().unwrap_or_default())
+        .unwrap_or_default();
+
+    assert_eq!(in_main.len(), 1, "only the import's original name: {in_main:?}");
+    let at = in_main[0].pointer("/range/start/character").and_then(Value::as_u64);
+    let ends = in_main[0].pointer("/range/end/character").and_then(Value::as_u64);
+    let line = main.lines().nth(2).expect("the import");
+    assert_eq!(
+        at.map(|a| line.len() as u64 - (line.len() as u64 - a)),
+        Some(line.find("add").expect("the written name") as u64),
+        "the `add`, not the `plus`: {in_main:?}"
+    );
+    assert_eq!(ends.zip(at).map(|(e, a)| e - a), Some(3), "{in_main:?}");
+}
+
+/// A trait member is refused, and says why: the name belongs to the trait and
+/// to every impl of it, and editing one without the others does not compile.
+#[test]
+fn renaming_a_trait_member_is_refused_and_says_why() {
+    let source = "module main;\n\
+import std::core::{Show};\n\
+pub type Tag = { n: Int };\n\
+impl Show for Tag {\n\
+  fn show(self) -> String { \"tag\" }\n\
+}\n\
+fn go(t: Tag) -> String { Tag::show(t) }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let file = w.root.join("src/main.kh");
+    let line = source.lines().nth(6).expect("the call");
+    let column = line.rfind("show").expect("the method") as u32;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&file, source),
+        prepare_rename(&file, 6, column + 1, 2),
         exit(),
     ]);
 
     let why = error_of(&replies, 2).expect("a refusal with a reason");
-    assert!(why.contains("not supported yet"), "{why}");
-    assert!(why.contains("local binding works"), "it should say what does work: {why}");
+    assert!(why.contains("trait member"), "{why}");
+    assert!(why.contains("every impl"), "it should say why: {why}");
 }
 
 // --- items ---
@@ -2634,4 +2746,263 @@ pub fn go() -> Int {\n\
         "{:?}",
         hints_in(&replies, 5)
     );
+}
+
+// --- go to the type, and go to the implementations -------------------------
+
+fn request_at(method: &str, path: &Path, line: u32, character: u32, id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id, "method": method,
+        "params": {
+            "textDocument": { "uri": url_of(path) },
+            "position": { "line": line, "character": character }
+        }
+    })
+}
+
+const SHAPES: &str = "module p::main;\n\
+import std::core::{Show};\n\
+\n\
+pub type Colour = { red: Int };\n\
+\n\
+impl Show for Colour {\n\
+  fn show(self) -> String { \"colour\" }\n\
+}\n\
+\n\
+impl Colour {\n\
+  pub fn make() -> Colour { { red: 1 } }\n\
+}\n\
+\n\
+pub fn go() -> Int {\n\
+  let mixed = Colour::make();\n\
+  mixed.red\n\
+}\n";
+
+/// **A different question from "where is this declared".** On
+/// `let mixed = Colour::make()`, go-to-definition lands on `make` and this
+/// lands on `Colour`, which is what somebody chasing an unfamiliar return
+/// value wants.
+#[test]
+fn go_to_type_definition_finds_the_type_not_the_function() {
+    let w = workspace(&[("src/main.kh", SHAPES)]);
+    let main = w.root.join("src/main.kh");
+    let line = SHAPES.lines().nth(14).expect("the binding");
+    let column = line.find("make").expect("the call") as u32;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, SHAPES),
+        request_at("textDocument/typeDefinition", &main, 14, column + 1, 2),
+        request_at("textDocument/definition", &main, 14, column + 1, 3),
+        exit(),
+    ]);
+
+    assert_eq!(
+        result_of(&replies, 2).pointer("/range/start/line"),
+        Some(&json!(3)),
+        "the type declaration: {}",
+        result_of(&replies, 2)
+    );
+    assert_eq!(
+        result_of(&replies, 3).pointer("/range/start/line"),
+        Some(&json!(10)),
+        "and go-to-definition still lands on the function: {}",
+        result_of(&replies, 3)
+    );
+}
+
+/// Every `impl` written for the type under the cursor, one result per block
+/// rather than one per method.
+#[test]
+fn go_to_implementation_lists_every_impl_of_a_type() {
+    let w = workspace(&[("src/main.kh", SHAPES)]);
+    let main = w.root.join("src/main.kh");
+    let column = SHAPES.lines().nth(3).expect("the type").find("Colour").expect("the name") as u32;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, SHAPES),
+        request_at("textDocument/implementation", &main, 3, column + 1, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2).as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        found.len(),
+        2,
+        "the `Show` impl and the inherent one, once each: {}",
+        serde_json::to_string(&found).unwrap_or_default()
+    );
+}
+
+/// A trait answers with who implements it, which is the question asked about a
+/// trait far more often than where it is declared.
+#[test]
+fn go_to_implementation_on_a_trait_finds_its_implementors() {
+    let w = workspace(&[("src/main.kh", SHAPES)]);
+    let main = w.root.join("src/main.kh");
+    let column = SHAPES.lines().nth(5).expect("the impl").find("Show").expect("the trait") as u32;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, SHAPES),
+        request_at("textDocument/implementation", &main, 5, column + 1, 2),
+        exit(),
+    ]);
+
+    let found = result_of(&replies, 2).as_array().cloned().unwrap_or_default();
+    assert!(
+        !found.is_empty(),
+        "`Show` is implemented here: {}",
+        serde_json::to_string(&found).unwrap_or_default()
+    );
+}
+
+/// Both are advertised, or no client will ask.
+#[test]
+fn the_navigation_capabilities_are_declared() {
+    let w = workspace(&[("src/main.kh", "module p::main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let caps = replies[0].pointer("/result/capabilities").cloned().unwrap_or(Value::Null);
+    assert!(caps.get("typeDefinitionProvider").is_some(), "{caps}");
+    assert!(caps.get("implementationProvider").is_some(), "{caps}");
+}
+
+// --- folding and expand-selection ------------------------------------------
+
+const FOLDABLE: &str = "module p::main;\n\
+import std::core::{List};\n\
+import std::env::{Env};\n\
+\n\
+/* a block\n\
+   comment */\n\
+pub fn go(n: Int) -> Int {\n\
+  match n {\n\
+    0 => 1,\n\
+    _ => 2,\n\
+  }\n\
+}\n";
+
+/// Folds by (startLine, endLine, kind).
+fn folds_in(replies: &[Value], id: i64) -> Vec<(u64, u64, String)> {
+    result_of(replies, id)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|f| {
+            Some((
+                f.get("startLine")?.as_u64()?,
+                f.get("endLine")?.as_u64()?,
+                f.get("kind").and_then(Value::as_str).unwrap_or("region").to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// A run of imports folds as one region, which nothing gives you by accident:
+/// each import is its own declaration, so no node spans them.
+#[test]
+fn a_run_of_imports_folds_together() {
+    let w = workspace(&[("src/main.kh", FOLDABLE)]);
+    let main = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, FOLDABLE),
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "textDocument/foldingRange",
+            "params": { "textDocument": { "uri": url_of(&main) } }
+        }),
+        exit(),
+    ]);
+
+    let folds = folds_in(&replies, 5);
+    assert!(
+        folds.iter().any(|(start, _, kind)| *start == 1 && kind == "imports"),
+        "the two imports on lines 2 and 3: {folds:?}"
+    );
+    assert!(
+        folds.iter().any(|(start, _, kind)| *start == 4 && kind == "comment"),
+        "the block comment: {folds:?}"
+    );
+    assert!(
+        folds.iter().any(|(start, end, _)| *start == 6 && *end >= 11),
+        "the function body: {folds:?}"
+    );
+}
+
+/// **A fold that starts and ends on one line is not a fold.** An editor asked
+/// to draw one puts a chevron beside a line that cannot collapse.
+#[test]
+fn a_single_line_declaration_is_not_folded() {
+    let source = "module p::main;\npub fn one() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "textDocument/foldingRange",
+            "params": { "textDocument": { "uri": url_of(&main) } }
+        }),
+        exit(),
+    ]);
+    assert!(folds_in(&replies, 5).is_empty(), "{:?}", folds_in(&replies, 5));
+}
+
+/// Expand-selection widens through the tree, each step containing the one
+/// before it, and never repeats a range — a step that does not widen makes the
+/// key press look broken.
+#[test]
+fn expanding_a_selection_widens_every_step() {
+    let source = "module p::main;\npub fn go() -> Int {\n  let n = 1 + 2;\n  n\n}\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "textDocument/selectionRange",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                // On the `1` of `1 + 2`.
+                "positions": [{ "line": 2, "character": 10 }]
+            }
+        }),
+        exit(),
+    ]);
+
+    let first = result_of(&replies, 5).as_array().and_then(|a| a.first().cloned()).unwrap_or(Value::Null);
+    assert!(first.get("range").is_some(), "a chain starts with a range: {first}");
+
+    // Walk out, checking each parent strictly contains its child.
+    let mut step = first;
+    let mut steps = 0;
+    while let Some(parent) = step.get("parent").cloned() {
+        let inner = step.pointer("/range").cloned().expect("a range");
+        let outer = parent.pointer("/range").cloned().expect("a parent range");
+        let inner_start = inner.pointer("/start/character").and_then(Value::as_u64);
+        let outer_start = outer.pointer("/start/character").and_then(Value::as_u64);
+        let inner_line = inner.pointer("/start/line").and_then(Value::as_u64);
+        let outer_line = outer.pointer("/start/line").and_then(Value::as_u64);
+        assert!(
+            (outer_line, outer_start) <= (inner_line, inner_start),
+            "a parent begins no later than its child: {outer} vs {inner}"
+        );
+        assert_ne!(inner, outer, "a step that does not widen is a key press that does nothing");
+        step = parent;
+        steps += 1;
+    }
+    assert!(steps >= 3, "the literal, the sum, the binding, the block: {steps} step(s)");
+}
+
+/// Both are advertised, or no client will ask.
+#[test]
+fn the_structure_capabilities_are_declared() {
+    let w = workspace(&[("src/main.kh", "module p::main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let caps = replies[0].pointer("/result/capabilities").cloned().unwrap_or(Value::Null);
+    assert!(caps.get("foldingRangeProvider").is_some(), "{caps}");
+    assert!(caps.get("selectionRangeProvider").is_some(), "{caps}");
 }

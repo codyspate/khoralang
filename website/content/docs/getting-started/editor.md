@@ -39,9 +39,14 @@ The server currently provides:
 - inlay hints;
 - code actions and code lenses;
 - highlighting every mention of the name under the cursor;
-- local-variable rename.
+- go to the *type* of an expression, and to every `impl` of a type or trait;
+- folding, and expand-selection through the tree;
+- inlay hints: the capability and failure rows a call needs, and the inferred type of a binding that does not say its own;
+- rename, across every file that names the thing.
 
-Rename is deliberately conservative. The current implementation renames locals and refuses a symbol it cannot edit completely rather than applying a partial project-wide change.
+Rename edits the declaration, every use, and the import that brings the name into each file. Where a file imports under an alias, the import's original name is renamed and the alias is left alone, because the alias is that file's own word for it. A trait member and a constructor are still refused, each with a sentence saying why: a trait member's name belongs to the trait and to every impl of it, and a constructor has no recorded range to edit.
+
+The server asks for incremental synchronization, so an edit sends the edit rather than the file.
 
 The installed toolchain is the only server installation you need. Updating or pinning Khora also selects the compiler behavior your editor sees for that project.
 

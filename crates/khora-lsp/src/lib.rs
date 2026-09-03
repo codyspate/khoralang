@@ -22,15 +22,16 @@
 //!
 //! # What it answers
 //!
-//! Diagnostics, hover, formatting, go to definition, find references, rename,
-//! and symbols. All of them come from things that already existed:
+//! Diagnostics, hover, completion, formatting, go to definition, to the type,
+//! and to the implementations, find references, highlight, rename, symbols,
+//! folding, expand-selection, inlay hints, code actions and code lenses. All of them come from things that already existed:
 //! `khora_db::parse`, `khora_types::diagnostics`, `khora_lint::findings`, the
 //! checker's `BodyTypes`, `khora_fmt`, `khora_hir::resolve_path` and
 //! `khora_hir::item_map`.
 //!
-//! **Rename covers locals only**, and refuses a declaration with a reason
-//! rather than editing one badly — `references` has the argument. Completion
-//! and capability inlay hints are not here at all.
+//! **Rename covers a declaration across the workspace**, and refuses a trait
+//! member or a constructor with a reason rather than editing one badly —
+//! `references` has the argument for each.
 
 #![deny(missing_docs)]
 
@@ -44,6 +45,7 @@ mod position;
 mod references;
 mod semantic;
 mod signature;
+mod structure;
 mod symbols;
 mod transport;
 
@@ -163,6 +165,18 @@ impl Server {
             }
             ("textDocument/documentHighlight", Some(id)) => {
                 vec![ok(id, self.document_highlights(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/typeDefinition", Some(id)) => {
+                vec![ok(id, self.type_definition(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/implementation", Some(id)) => {
+                vec![ok(id, self.implementations(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/foldingRange", Some(id)) => {
+                vec![ok(id, self.folding_ranges(&params).unwrap_or(Value::Null))]
+            }
+            ("textDocument/selectionRange", Some(id)) => {
+                vec![ok(id, self.selection_ranges(&params).unwrap_or(Value::Null))]
             }
             ("textDocument/documentSymbol", Some(id)) => {
                 vec![ok(id, self.document_symbols(&params).unwrap_or(Value::Null))]
@@ -304,6 +318,10 @@ impl Server {
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
+                implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
+                folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
+                selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 // `prepareProvider`, so an editor asks before it opens the box
@@ -546,6 +564,98 @@ impl Server {
             }
         }
         self.publish_open()
+    }
+
+    /// What an editor may collapse in this file.
+    fn folding_ranges(&self, params: &Value) -> Option<Value> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let index = self.lines.get(&url)?;
+
+        let items: Vec<Value> = structure::folds(&self.db, file)
+            .into_iter()
+            .map(|fold| {
+                let range = index.range(fold.range, self.encoding);
+                // **The last line of the region, not the line after it.** A
+                // node's range ends just past its final character, so a body
+                // closed by a brace ends at column 1 of the *next* line and a
+                // run of imports ends part-way along its own. Taking the end
+                // line unconditionally would fold one line too many in the
+                // first case; subtracting one unconditionally drops the second
+                // case entirely, because its region is then a single line and
+                // an editor will not draw one.
+                let end_line = if range.end.character > 0 {
+                    range.end.line
+                } else {
+                    range.end.line.saturating_sub(1)
+                };
+                let mut item = json!({
+                    "startLine": range.start.line,
+                    "endLine": end_line,
+                });
+                if let Some(kind) = fold.kind {
+                    item["kind"] = json!(kind);
+                }
+                item
+            })
+            .filter(|item| item["endLine"].as_u64() > item["startLine"].as_u64())
+            .collect();
+        Some(Value::Array(items))
+    }
+
+    /// The ranges to step through as a selection widens.
+    fn selection_ranges(&self, params: &Value) -> Option<Value> {
+        let url = url_of(params)?;
+        let path = url.to_file_path().ok()?;
+        let file = self.files.get(&path).copied()?;
+        let index = self.lines.get(&url)?;
+
+        let positions = params.get("positions")?.as_array()?.clone();
+        let mut out = Vec::new();
+        for position in positions {
+            let Ok(position) = serde_json::from_value::<Position>(position) else { continue };
+            let offset = index.offset(position, self.encoding);
+            let chain = structure::selection_chain(&self.db, file, offset);
+            // Built from the outside in, because each step is the `parent` of
+            // the one before it in the protocol's shape.
+            let mut node = Value::Null;
+            for range in chain.iter().rev() {
+                let mut step = json!({ "range": index.range(*range, self.encoding) });
+                if !node.is_null() {
+                    step["parent"] = node;
+                }
+                node = step;
+            }
+            out.push(node);
+        }
+        Some(Value::Array(out))
+    }
+
+    /// Where the *type* of the thing under the cursor is declared.
+    fn type_definition(&self, params: &Value) -> Option<Value> {
+        let (file, offset) = self.locate(params)?;
+        let root = khora_db::source_root(&self.db)?;
+        let found = definition::type_at(&self.db, root, file, offset)?;
+        Some(self.as_location(&found))
+    }
+
+    /// Every `impl` written for the type or trait under the cursor.
+    fn implementations(&self, params: &Value) -> Option<Value> {
+        let (file, offset) = self.locate(params)?;
+        let root = khora_db::source_root(&self.db)?;
+        let found = definition::implementations(&self.db, root, file, offset);
+        Some(Value::Array(found.iter().map(|each| self.as_location(each)).collect()))
+    }
+
+    /// A definition as the protocol wants it, with the range read against the
+    /// file it is in rather than the one that asked.
+    fn as_location(&self, found: &definition::Definition) -> Value {
+        let index = LineIndex::new(found.file.text(&self.db));
+        let uri = Url::from_file_path(found.file.path(&self.db))
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        json!({ "uri": uri, "range": index.range(found.range, self.encoding) })
     }
 
     /// Every mention of the thing under the cursor, in this file only.
@@ -988,6 +1098,25 @@ impl Server {
                     "placeholder": name,
                 }))
             }
+            references::Renameable::Item { name, sites } => {
+                // The occurrence under the cursor, which is the one the editor
+                // highlights and pre-fills.
+                let here = sites
+                    .iter()
+                    .find(|(each, _)| *each == file)
+                    .and_then(|(_, ranges)| ranges.iter().find(|r| r.contains_inclusive(offset)))
+                    .copied();
+                match here {
+                    Some(here) => Ok(json!({
+                        "range": Range {
+                            start: index.position(here.start(), self.encoding),
+                            end: index.position(here.end(), self.encoding),
+                        },
+                        "placeholder": name,
+                    })),
+                    None => Ok(Value::Null),
+                }
+            }
             references::Renameable::Refused(why) => Err(why.to_string()),
             references::Renameable::Nothing => Ok(Value::Null),
         }
@@ -1018,6 +1147,30 @@ impl Server {
                     })
                     .collect();
                 Ok(json!({ "changes": { url.as_str(): edits } }))
+            }
+            references::Renameable::Item { sites, .. } => {
+                // **Every file that names it, in one edit.** A rename that
+                // reached the uses and not the import, or the declaration and
+                // not the uses, would leave a repository that does not
+                // compile -- which is why this refused to leave a body until
+                // the import list and the declaration's own name token were
+                // both accounted for.
+                let mut changes = serde_json::Map::new();
+                for (each, ranges) in sites {
+                    let Ok(uri) = Url::from_file_path(each.path(&self.db)) else { continue };
+                    let lines = LineIndex::new(each.text(&self.db));
+                    let edits: Vec<Value> = ranges
+                        .iter()
+                        .map(|range| {
+                            json!({
+                                "range": lines.range(*range, self.encoding),
+                                "newText": new_name,
+                            })
+                        })
+                        .collect();
+                    changes.insert(uri.to_string(), Value::Array(edits));
+                }
+                Ok(json!({ "changes": changes }))
             }
             references::Renameable::Refused(why) => Err(why.to_string()),
             references::Renameable::Nothing => Ok(Value::Null),

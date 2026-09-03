@@ -373,6 +373,30 @@ it will behave differently now.
 
 ### Added
 
+- **Rename reaches the whole workspace.** It refused to leave a body until the
+  two things that made it unsafe were answered: a declaration's range covers
+  its whole body, so renaming through it would have replaced the body too, and
+  an import list is not a `::` path so nothing looked at it. The name is
+  narrowed out of the declaration, import lists are searched directly, and
+  every edit is checked against the declaration's own spelling — so
+  `import m::{foo as bar}` renames the `foo`, leaves the `bar` and its uses
+  alone, and still renames a fully qualified `m::foo` in the same file. A
+  trait member and a constructor are refused, each with a sentence saying why.
+- **Go to the type, and go to the implementations.**
+  `textDocument/typeDefinition` answers from the checked type rather than the
+  path, so on `let mixed = Colour::make()` it lands on `Colour` where
+  go-to-definition lands on `make`; a function type is followed to its result,
+  since the callee's own type is `() -> Colour` and the question is about what
+  it produces. `textDocument/implementation` lists every `impl` of a type or a
+  trait, one result per block rather than one per method.
+- **Folding and expand-selection.** A fold is offered for anything with a body
+  worth collapsing and for a run of imports, which nothing gives you by
+  accident: each import is its own declaration, so no node spans them. A
+  region that starts and ends on one line is not offered, because an editor
+  asked to draw one puts a chevron beside a line that cannot collapse.
+  Expand-selection walks the ancestor chain, discarding steps that do not
+  widen the selection so the key press never appears to do nothing.
+
 - **Hovering a generic call shows what the type variables became.** A
   declaration says `A`; at the call site `A` is something in particular, and
   which one it is cannot be read off the declaration. The instantiated type

@@ -279,6 +279,112 @@ fn locate(db: &dyn Db, root: SourceRoot, resolution: &Resolution) -> Option<Defi
     }
 }
 
+/// The declaration of the *type* of the thing under the cursor.
+///
+/// **A different question from "where is this declared".** On
+/// `let rows = query(..)`, go-to-definition lands on `query` and this lands on
+/// `List`, which is what somebody chasing an unfamiliar return value wants. It
+/// is answered from the checked type rather than from the path, because the
+/// type is what the question is about and the path may not mention it at all.
+pub fn type_at(
+    db: &dyn Db,
+    root: SourceRoot,
+    file: SourceFile,
+    offset: TextSize,
+) -> Option<Definition> {
+    // **A call's callee has a *function* type, and the question is about what
+    // it produces.** The cursor on `make` in `Colour::make()` sits inside the
+    // path, whose type is `() -> Colour`; the answer somebody wants is
+    // `Colour`. So a function type is followed to its result.
+    let found = type_under(db, file, offset)?;
+    let produced = match &found {
+        khora_types::Type::Fn { ret, .. } => ret.as_ref().clone(),
+        other => other.clone(),
+    };
+    let head = head_of(&produced)?;
+    let graph = &khora_hir::module_graph(db, root);
+    graph.paths().find_map(|module| item_in(db, graph, module, &head))
+}
+
+/// The checked type of the innermost expression covering `offset`.
+fn type_under(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<khora_types::Type> {
+    let checked = khora_types::checked(db, file);
+    let mut best: Option<(TextRange, khora_types::Type)> = None;
+    for (name, body) in khora_hir::body::bodies(db, file) {
+        let Some(types) = checked.bodies.iter().find(|(n, _)| n == name).map(|(_, t)| t) else {
+            continue;
+        };
+        for (id, _) in body.exprs() {
+            let range = body.range(id);
+            if !range.contains(offset) {
+                continue;
+            }
+            let ty = types.of(id);
+            if matches!(ty, khora_types::Type::Unknown) {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(seen, _)| range.len() < seen.len()) {
+                best = Some((range, ty.clone()));
+            }
+        }
+    }
+    best.map(|(_, ty)| ty)
+}
+
+/// The constructor at the head of a type: `List` for `List<Int>`.
+fn head_of(ty: &khora_types::Type) -> Option<String> {
+    match ty {
+        khora_types::Type::Adt { name, .. } => Some(name.clone()),
+        khora_types::Type::Applied { head, .. } => head_of(head),
+        _ => None,
+    }
+}
+
+/// Every `impl` written for the type or trait under the cursor.
+///
+/// **The answer is a list, which is why it is not go-to-definition.** A trait
+/// has as many implementations as somebody wrote, and the question "who
+/// implements this" is the one asked about a trait far more often than "where
+/// is it declared".
+pub fn implementations(
+    db: &dyn Db,
+    root: SourceRoot,
+    file: SourceFile,
+    offset: TextSize,
+) -> Vec<Definition> {
+    let tree = khora_db::parse(db, file).syntax();
+    let Some(token) = token_at(&tree, offset) else { return Vec::new() };
+    let name = token.text().to_string();
+    if !name.starts_with(char::is_uppercase) {
+        return Vec::new();
+    }
+
+    let graph = &khora_hir::module_graph(db, root);
+    let mut out = Vec::new();
+    for module in graph.paths() {
+        let Some(each) = graph.file(module) else { continue };
+        let map: &ItemMap = khora_hir::item_map(db, each);
+        // One entry per impl block, not per method: the method list is what
+        // the file shows once you are there, and thirty results for `Show`
+        // would be a list of every function rather than of every impl.
+        let mut seen: Vec<(String, Option<String>)> = Vec::new();
+        for method in &map.methods {
+            let matches = method.type_name == name
+                || method.trait_name.as_deref() == Some(name.as_str());
+            if !matches {
+                continue;
+            }
+            let key = (method.type_name.clone(), method.trait_name.clone());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            out.push(Definition { file: each, range: method.range });
+        }
+    }
+    out
+}
+
 /// A method `name` written in an `impl` for `type_name`, wherever it is.
 ///
 /// **Every module, because an impl does not have to be beside its type.** A
