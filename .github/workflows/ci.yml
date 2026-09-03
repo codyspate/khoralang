@@ -81,7 +81,7 @@ jobs:
       # `inputs.tool` comes out empty, `main.sh` warns "no tool specified" and
       # then **exits 0** for backward compatibility. The step would pass, and
       # nextest would not be installed.
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+      - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
           tool: nextest
       - run: cargo nextest run --workspace
@@ -182,7 +182,7 @@ jobs:
       # `inputs.tool` comes out empty, `main.sh` warns "no tool specified" and
       # then **exits 0** for backward compatibility. The step would pass, and
       # nextest would not be installed.
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+      - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
           tool: nextest
 
