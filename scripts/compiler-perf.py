@@ -123,7 +123,7 @@ def timed(command, cwd, watch=True):
 
 
 def clean(path):
-    for junk in ("build", "src/main.exe", "src/main"):
+    for junk in ("build",):
         target = os.path.join(path, junk)
         if os.path.isdir(target):
             shutil.rmtree(target, ignore_errors=True)

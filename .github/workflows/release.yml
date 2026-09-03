@@ -135,7 +135,40 @@ jobs:
           # No KHORA_STD, no KHORA_RT_LIB. If the layout is wrong, here is
           # where it shows.
           "$GITHUB_WORKSPACE/dist/$name/bin/khora" build .
-          if [ -f src/main.exe ]; then ./src/main.exe; else ./src/main; fi
+
+          # **The binary is `build/<package>`, and this step looked for
+          # `src/main`.** It had done since before a build got an output
+          # directory of its own, and nothing noticed, because the step's last
+          # command was the only thing here that could fail and it failed
+          # identically whether the toolchain was broken or the path was
+          # stale. It was the path: the packaged compiler built
+          # `build/first.exe`, the check ran `./src/main`, exit 127, and three
+          # platforms went red on a release whose toolchain was fine.
+          #
+          # So a miss now prints what the build actually produced rather than
+          # a shell's file-not-found, and the run is checked against what the
+          # program was supposed to say -- a step that only asserts "exited 0"
+          # passes for a program that printed nothing.
+          built=build/first
+          if [ -f "$built.exe" ]; then built="$built.exe"; fi
+          if [ ! -f "$built" ]; then
+            echo "No executable at build/first. What the build produced:"
+            find . -type f -not -path './src/*' | sed 's/^/  /'
+            exit 1
+          fi
+
+          # Run it directly rather than through `khora run`: what has to be
+          # proven is that the *produced binary* stands on its own, linked
+          # against the runtime and needing no toolchain on the path, which is
+          # what somebody shipping one gets. `tr` because a Windows runner
+          # ends the line with a carriage return, and a comparison that fails
+          # on the invisible half of a string is a bad afternoon.
+          said=$("./$built" | tr -d '\r')
+          echo "$said"
+          if [ "$said" != "a packaged toolchain works" ]; then
+            echo "The program ran, and said something else."
+            exit 1
+          fi
 
       # **One platform, because the answer is the same on all of them.** The
       # bill of materials comes from `cargo metadata --locked`, which reads
