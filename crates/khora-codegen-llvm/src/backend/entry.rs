@@ -191,14 +191,14 @@ impl<'ctx> Backend<'ctx> {
     pub(super) fn emit_c_main(&mut self, entry: Option<&str>) {
         let Some(entry) = entry else {
             self.error(
-                "this program has no `main` function, so there is nothing to run",
+                "this package has no `main` function, so there is no program to build. A library \n                 has none by design: `khora build --lib` makes a C shared library from its \n                 `pub extern fn`s. A program needs `pub fn main()` in `src/main.kh`",
                 TextRange::empty(0.into()),
             );
             return;
         };
         let Some(signature) = self.signature_of(entry) else {
             self.error(
-                "this program has no `main` function, so there is nothing to run",
+                "this package has no `main` function, so there is no program to build. A library \n                 has none by design: `khora build --lib` makes a C shared library from its \n                 `pub extern fn`s. A program needs `pub fn main()` in `src/main.kh`",
                 TextRange::empty(0.into()),
             );
             return;

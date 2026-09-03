@@ -6,6 +6,12 @@ sidebar:
 
 You can go from an empty directory to a checked, tested, native Khora executable in a few minutes.
 
+Two things worth knowing before you start. `khora std search <query>` finds
+anything in the standard library from the terminal — it reads the compiler's
+own view of the `std` beside it, so it is never out of step with the toolchain
+you have. And the compiler's error messages name the fix, not just the
+problem; reading them is usually faster than searching these pages.
+
 ## 1. Install Khora
 
 On macOS or Linux:

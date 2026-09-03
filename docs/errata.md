@@ -3187,3 +3187,66 @@ closes a connection here also sets a deadline, and every one of them was ten
 seconds slower than it should have been. A test written for a different claim
 found it in its first run, and only because it timed a line nobody had thought
 to time.
+
+
+## 79. Adding a type to `std` crashed a program that had one of the same name
+
+Found by adding `std::log`. Every test in the tree compiles the whole standard
+library, and one of them started exiting `0xC000001D` —
+`STATUS_ILLEGAL_INSTRUCTION` — on a program that had compiled and run correctly
+for months.
+
+`schema.rs`'s `a_derived_schema_reads_the_declaration` declares, in its own
+module:
+
+```khora
+pub type Level = | Debug | Info;
+```
+
+`std::log` declared, in `std::log`:
+
+```khora
+pub type Level = | Trace | Debug | Info | Warn | Error;
+```
+
+The test does not import `std::log`. It does not mention it. The two types are
+in different modules and the program names only its own — and the program
+compiled clean and then died on a bad instruction.
+
+**Renaming the one in `std` fixes it**, which is what pins the cause: the same
+tree with `Severity` in `std::log` passes. Nothing else changed.
+
+### What is not yet known
+
+Neither obvious reduction reproduces it. Two modules each declaring
+`pub type Level`, one deriving `Show`, printing a variant: fine. The same with
+`derive(Decode)` and a record holding one, asking for its `Shape`: fine. It
+needs more of the fixture than that — which has `Redacted`, `Decimal`,
+`Validated`, a nested record and a `Lazy` shape in the same declaration — and
+narrowing it further is the next step rather than a finished one.
+
+What can be said is the shape of the failure. It is not the wrong type being
+*chosen*: choosing `std::log`'s five-variant `Level` would have produced a wrong
+`Shape` and failed the assertion with a diff. It crashed instead, which points
+at a layout or discriminant mismatch — two types agreeing on a name and
+disagreeing on their variants, with something keyed by the name alone.
+
+### Why it matters more than one test
+
+**Any type added to `std` can do this to a program that already has one.**
+`Level`, `Config`, `Entry`, `Node`, `State` — the collision surface is every
+name a user is likely to pick, and the failure is a runtime crash rather than a
+compile error, in a program the user did not change. Nothing warned. The
+compiler had every opportunity to: it had both declarations in front of it.
+
+`std::log`'s type is `Severity` for now, with a comment saying it is a
+workaround and should go back to `Level` when this is fixed. That keeps the tree
+green and does not fix anything: the next type added to `std` has the same
+problem, and so does every package a program depends on.
+
+**The lesson is about what the gate can see.** The full baseline caught this
+because it compiles `std` into every test, so a new module is exercised against
+two thousand programs. A checked-in test for `std::log` alone would have passed:
+the module works, the logging works, six tests cover it. What failed was a
+program that had nothing to do with it.
+

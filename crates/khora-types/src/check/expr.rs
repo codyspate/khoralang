@@ -584,7 +584,30 @@ impl<'a> Checker<'a> {
             other => self.types.traits.find(trait_name, other).is_some(),
         };
         if !available {
+            // **A type that is not in scope has no impls *here*, whatever it
+            // has where it was declared.** Telling the reader to write one is
+            // the worst answer this compiler gives: a `Money` that derives `Eq`
+            // and is merely unimported produced `Write \`impl Eq for Money\``,
+            // which would have them hand-write a duplicate impl for a type
+            // their module does not own. An evaluator hit exactly that and
+            // called it the worst diagnostic in the toolchain, in the tone the
+            // good ones had earned trust with.
+            //
+            // The same test `why_no_field` uses: the name is an `Adt` and
+            // nothing here declares it.
+            let missing = match ty {
+                Type::Adt { name, .. } => {
+                    !self.types.adts.contains_key(name)
+                        && !self.types.variants.iter().any(|v| &v.type_name == name)
+                }
+                _ => false,
+            };
             let advice = match ty {
+                _ if missing => format!(
+                    "`{ty}` is not in scope here, so nothing is known about its impls — add it \
+                     to an `import`. If it really has none, write `impl {trait_name} for {ty}` \
+                     where it is declared"
+                ),
                 Type::Param(param) => format!("Add the bound, as `{param}: {trait_name}`"),
                 other => format!("Write `impl {trait_name} for {other}`"),
             };

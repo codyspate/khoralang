@@ -302,7 +302,8 @@ From loosest to tightest:
 3. logical OR `||`
 4. logical AND `&&`
 5. comparisons `== != < > <= >=`
-6. addition/subtraction `+ -`
+6. addition/subtraction `+ -` — `+` also joins two `String`s, which is the only
+   concatenation operator there is; there is no `++`
 7. multiplication/division/remainder `* / %`
 8. prefix negation `-` and boolean not `!`
 9. postfix call, field access, failure `!`, `catch`, and `with`

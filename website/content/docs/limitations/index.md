@@ -101,6 +101,42 @@ A fiber carries its answer and its failure row — `Fiber<A, 'er>`, with `join` 
 
 `Channel` also has no `select` (waiting on the first of several) and no zero-capacity rendezvous. `Channel::bounded(0)` gets a capacity of one rather than a rendezvous, deliberately.
 
+## What a nursery actually does
+
+Three things about nurseries are not yet what the [concurrency
+reference](/docs/reference/concurrency/) describes. All three were found by
+measuring rather than by reading, and a reader who builds on the prose will
+meet them as flakiness.
+
+**A bounded nursery admits `limit + 1` children.** `bounded_nursery(4)` runs
+five at once. `Fiber::spawn` *starts* the child, and `nursery.adopt` is what
+blocks when the nursery is full — so by the time the bound is applied, the work
+is already running. Treat the number as a bound on children the nursery is
+holding, not on work in flight, and subtract one where the limit is a real
+resource such as a connection pool.
+
+**A child's failure is noticed in adoption order, so cancelling the siblings
+can be arbitrarily late.** A nursery reaps handles oldest-first, so a failure in
+the third child is invisible until the first two have finished. With twelve
+2-second jobs and a failure at 10 ms, the siblings were cancelled after 21 ms
+when the doomed child was adopted first and after 2044 ms when it was adopted
+third — and how many siblings were still running to cancel varied between runs.
+The group does collapse, and every child is still waited for; *when* it
+collapses is not yet a promise.
+
+**The two fiber backends are distinguishable.** The reference says twice that a
+program cannot tell which it has. It can: under `KHORA_FIBERS=scheduler` a
+fiber inside `clock.sleep` is woken by a cancellation and its sleep returns
+early, and under the default thread backend the sleep runs to completion. That
+is a 180× difference in wall clock on the same source, and it means the default
+cannot be changed without notice yet.
+
+Related, and true under both: **cancellation only lands where the fiber checks
+for it** — at a `!` in a function that can raise, or a loop back-edge. A long
+`sleep` is not a cancellation point, so work that must stop promptly has to be
+chunked into a loop. The reference's "a blocked or suspended operation is made
+runnable" describes the intent rather than the current thread backend.
+
 ## Cross-compilation and WebAssembly
 
 LLVM object/module emission is further along than the complete runtime/link/sysroot/deployment path for every target. Only targets tested end to end are labeled supported.

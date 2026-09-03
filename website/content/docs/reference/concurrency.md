@@ -20,10 +20,14 @@ impl<A: Share, 'er> Fiber<A, 'er> {
   pub fn join(self) -> A raises 'er;
   pub fn cancel(self) -> ();
   pub fn detach(self) -> ();
+  pub fn wait(self) -> ();
 }
 ```
 
 `A` must be `Share`: the value is computed on one fiber and read on another.
+
+`wait` waits without taking the answer, which is what you need after `cancel`: a
+cancelled fiber has no answer, so `join` on one unwinds the joiner along with it.
 
 `join` waits and answers what the body answered. If the body raised, `join` re-raises with the same type, so the caller catches by name:
 

@@ -81,7 +81,9 @@ Khora compiles to native object code, so producing an executable requires the pl
 | macOS | `xcode-select --install` |
 | Debian / Ubuntu | `apt install clang` or `apt install build-essential` |
 | Fedora / RHEL | `dnf install clang` |
-| Windows | Visual Studio Build Tools with **Desktop development with C++**, or LLVM |
+| Windows | [LLVM](https://releases.llvm.org), or the Visual Studio Build Tools with the **C++ Clang tools for Windows** component |
+
+Khora links through `clang`, so Windows needs one specifically. The **Desktop development with C++** workload does not install `clang` by itself — its **C++ Clang tools for Windows** component is separate — and MSVC's own `cl.exe` is not a substitute, because the driver is what locates the C runtime and system libraries. Installing LLVM is the shorter route.
 
 The installer checks for a usable linker and tells you if one is missing.
 

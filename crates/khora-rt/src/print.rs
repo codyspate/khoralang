@@ -1,4 +1,4 @@
-//! Writing to standard output.
+//! Writing to standard output, and to standard error.
 //!
 //! One function per shape rather than one that formats, because the code
 //! generator knows the static type at the call site and a runtime that has to
@@ -73,4 +73,38 @@ pub unsafe extern "C" fn khora_print_str(ptr: *const u8, len: usize) {
 pub extern "C" fn khora_print_float(value: f64) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{value}");
+}
+
+/// Writes bytes and a newline to **standard error**.
+///
+/// **The stream is the whole point.** Everything above writes to stdout, which
+/// is where a program's *answer* goes; a diagnostic written there is swallowed
+/// by the first `> out.txt` anybody types. Until this existed a Khora program
+/// had no way to say anything that survived a redirect, which two independent
+/// evaluators building command-line tools reported as a real gap and one of
+/// them worked around by giving up on the distinction.
+///
+/// Taking a pointer and a length rather than being dispatched on a type, the
+/// way `khora_print_str` is: this is reached from Khora through
+/// `String::with_data`, so it needs no compiler intrinsic and `std` can build
+/// whatever it likes on top of it.
+///
+/// **Not line buffered, and deliberately.** Rust's stderr is unbuffered, which
+/// is what a diagnostic wants: a program that traps or is killed mid-line
+/// should still have said everything it said before that.
+///
+/// # Safety
+///
+/// `ptr` must address `len` initialized bytes, live and unmodified for the
+/// duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_eprint(ptr: *const u8, len: usize) {
+    let mut out = std::io::stderr().lock();
+    if !ptr.is_null() && len > 0 {
+        // SAFETY: the caller's guarantee, and `len` is far below `isize::MAX`
+        // because it came from an allocation.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let _ = out.write_all(bytes);
+    }
+    let _ = out.write_all(b"\n");
 }

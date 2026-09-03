@@ -30,6 +30,8 @@ The current standard library includes APIs for:
 - database capability and row/cell vocabulary, in [`std::db`](/docs/stdlib/api/db/);
 - tracing context and W3C propagation vocabulary, in
   [`std::trace`](/docs/stdlib/api/trace/);
+- structured logging and writing to standard error, in
+  [`std::log`](/docs/stdlib/api/log/);
 - capability permissions, in [`std::permissions`](/docs/stdlib/api/permissions/).
 
 Every entry links, which they did not all do: `civil dates and offsets` and

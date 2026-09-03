@@ -41,6 +41,13 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 pub use surface::Entry;
+// **The same index, for a person.** `khora_std_search` was the most accurate
+// reference Khora had and the only one a human could not reach: four
+// evaluators reading the website hit six APIs that did not exist in the
+// compiler they had, and the agent-facing tool was the thing that unstuck the
+// one who found it. Exported so `khora std search` can answer out of exactly
+// the same data rather than out of a second copy that drifts.
+pub use tools::{read_std_surface, search};
 
 /// The MCP revision this speaks.
 ///

@@ -1,0 +1,370 @@
+module std::log;
+
+//! Saying what happened, on the stream meant for it.
+//!
+//! **Khora had no way to write to standard error at all.** Everything went to
+//! stdout, so a program's diagnostics and its answer were the same stream: a
+//! command-line tool whose output you redirected lost its own error messages
+//! into the file. Two independent evaluators building ordinary tools reported
+//! it, and one of them stopped trying to keep the two apart.
+//!
+//! [`eprint`] is the primitive that fixes it. Everything else here is the
+//! capability built on top.
+//!
+//! # Why logging is an effect
+//!
+//! Because everything else that reaches outside is. A function that logs is a
+//! function that writes to a stream somebody else owns, and Khora's whole
+//! argument is that such a function says so in its signature:
+//!
+//! ```khora
+//! fn charge(account: Account, amount: Decimal) -> Receipt
+//!   with { log: Log, db: Db }
+//!   raises DbError
+//! ```
+//!
+//! That buys the same three things capabilities always buy. A test installs a
+//! logger that collects into a list and asserts on what was said, with no
+//! global to reset between cases. A library cannot log without its caller
+//! knowing, because the row would say so. And the caller decides the format
+//! and the destination, which is the decision a library has no business making.
+//!
+//! `print` is not an effect and says so in its own doc comment; it is the one
+//! that predates the argument rather than the one that refutes it.
+//!
+//! # Levels
+//!
+//! Five, in the order everybody already knows: [`Severity::Trace`],
+//! [`Severity::Debug`], [`Severity::Info`], [`Severity::Warn`], [`Severity::Error`]. Not
+//! four and not seven, because these are the ones every operator has a filter
+//! for, and a level nobody filters on is a level nobody sets.
+//!
+//! **The handler decides what to drop, not the caller.** `Logger::to_stderr`
+//! takes a minimum and discards anything below it. A caller that checked the
+//! level itself would be a caller that has to know the configuration, which is
+//! the thing the capability exists to keep away from it.
+//!
+//! # The format is JSON
+//!
+//! One object per line, on standard error:
+//!
+//! ```text
+//! {"timestamp":1757021376817,"level":"warn","message":"retrying","attempt":2}
+//! ```
+//!
+//! **Because a log is read by a program before it is read by a person.** It
+//! goes to a collector, gets indexed, and is queried months later by somebody
+//! who was not there; a format that needs a regular expression to take apart
+//! is a format that loses a field the first time a message contains a space.
+//! `Log::plain` is there for a terminal, and it is the exception rather than
+//! the default.
+//!
+//! `timestamp` is milliseconds since 1970, as a JSON *number*. Milliseconds
+//! rather than nanoseconds because a nanosecond epoch is about 2^60 and JSON
+//! numbers are doubles in most readers, which would round it — the same trap
+//! `std::trace`'s OTLP encoding avoids by sending strings. Milliseconds are
+//! about 2^41 and exact in a double for the next twenty thousand years.
+//!
+//! `level` is lower case — `"warn"`, not `"Warn"` — which is what Elastic
+//! Common Schema, `slog`, `zap` and `structlog` all emit, and therefore what a
+//! collector's default level filter already matches.
+//!
+//! Attributes become fields of the same object. A field named `level`,
+//! `message` or `timestamp` would collide with the three above; it is written
+//! anyway, last, because silently renaming somebody's field is worse than a
+//! duplicate key that a collector will show them.
+//!
+//! # Correlating with traces
+//!
+//! A record carries [`Attribute`]s, the same ones `std::trace` puts on a span,
+//! so a caller can attach the trace and span it belongs to:
+//!
+//! ```khora
+//! log.record(Severity::Warn, "retrying", [text("trace_id", trace_id(span.context))])
+//! ```
+//!
+//! **Attached by the caller rather than found automatically**, and that is a
+//! limitation rather than a design. `std::trace` has no notion of a *current*
+//! span — `Span` carries a `parent` field that nothing ever sets — so there is
+//! nothing ambient for a logger to read. When the tracer learns which span is
+//! running, this is where the correlation goes.
+
+import std::clock::{Clock};
+import std::core::{Eq, List, Option, Ord, Ordering, Show};
+import std::json::{Json, encode};
+import std::trace::{Attribute, Value};
+
+/// How much something matters, in the order everybody already filters on.
+///
+/// `Ord` so a handler can compare against a minimum: `Trace` is the least and
+/// `Error` the most, which is the direction "at least Info" reads in.
+///
+/// **Named `Severity` rather than `Level`, and not for taste.** `Level` is what
+/// this is called everywhere, and it is still the name of the JSON field. It is
+/// also a name a program is likely to have already — and today two modules
+/// declaring one type name is a compiler bug rather than a resolution: the
+/// program compiles and then stops on an illegal instruction at run time. This
+/// name avoids the collision until that is fixed, and should go back to `Level`
+/// when it is.
+derive(Eq, Ord, Show)
+pub type Severity =
+  /// The finest detail, off outside a debugging session.
+  | Trace
+  /// What a developer wants while working on this code.
+  | Debug
+  /// What an operator wants while the program is behaving.
+  | Info
+  /// Something is wrong and the program is carrying on.
+  | Warn
+  /// Something is wrong and something did not happen.
+  | Error;
+
+impl Severity {
+  /// The five-character name, padded, so lines align in a terminal.
+  ///
+  /// Padded rather than not, because an operator reads a log by scanning the
+  /// left edge, and a ragged one makes them read every line instead.
+  pub fn label(self) -> String {
+    match self {
+      Severity::Trace => "TRACE",
+      Severity::Debug => "DEBUG",
+      Severity::Info => "INFO ",
+      Severity::Warn => "WARN ",
+      Severity::Error => "ERROR",
+    }
+  }
+
+  /// The lower-case name, which is what goes on the wire.
+  ///
+  /// Lower case because that is what Elastic Common Schema, `slog`, `zap` and
+  /// `structlog` emit, so a collector's default level filter already matches
+  /// it without anybody configuring one.
+  pub fn name(self) -> String {
+    match self {
+      Severity::Trace => "trace",
+      Severity::Debug => "debug",
+      Severity::Info => "info",
+      Severity::Warn => "warn",
+      Severity::Error => "error",
+    }
+  }
+
+  /// Where this sits, for comparing against a minimum.
+  pub fn severity(self) -> Int {
+    match self {
+      Severity::Trace => 0,
+      Severity::Debug => 1,
+      Severity::Info => 2,
+      Severity::Warn => 3,
+      Severity::Error => 4,
+    }
+  }
+
+  /// The level `name` spells, or `None`.
+  ///
+  /// **Both cases spelled out, because `std` has no `String::to_lower`.** It
+  /// has `Char::to_lower` and nothing that folds a whole string, so the
+  /// alternative was to write one here and get Unicode case folding wrong in a
+  /// corner of a logging module. A level name is a closed set of six words, and
+  /// listing them is honest about what is actually accepted.
+  ///
+  /// `WARNING` is taken as well as `WARN` because half the world writes it.
+  pub fn of_name(name: String) -> Option<Severity> {
+    match name {
+      "trace" => Option::Some(Severity::Trace),
+      "TRACE" => Option::Some(Severity::Trace),
+      "debug" => Option::Some(Severity::Debug),
+      "DEBUG" => Option::Some(Severity::Debug),
+      "info" => Option::Some(Severity::Info),
+      "INFO" => Option::Some(Severity::Info),
+      "warn" => Option::Some(Severity::Warn),
+      "WARN" => Option::Some(Severity::Warn),
+      "warning" => Option::Some(Severity::Warn),
+      "WARNING" => Option::Some(Severity::Warn),
+      "error" => Option::Some(Severity::Error),
+      "ERROR" => Option::Some(Severity::Error),
+      _ => Option::None,
+    }
+  }
+}
+
+/// Writing a line somebody will read later.
+///
+/// One operation, because a level is an argument rather than a method: five
+/// operations would be five things for every handler to implement and five
+/// places for one of them to behave differently.
+pub effect Log {
+  /// Records one line at `level`, with whatever structure is attached.
+  record: (Severity, String, List<Attribute>) -> (),
+}
+
+impl Log {
+  /// A logger that records nothing, as cheaply as possible.
+  ///
+  /// **The default, and it has to be nearly free.** If logging costs when it
+  /// is off it gets turned off, and then it does not exist. This reads no
+  /// argument and builds no string; with Perceus the list the caller passed is
+  /// released at the call.
+  pub fn none() -> Log {
+    handler for Log {
+      record: fn (_level, _message, _attributes) => (),
+    }
+  }
+
+  /// A logger that writes one JSON object per line to standard error, at
+  /// `minimum` and above.
+  ///
+  /// Stamped from the real clock. `Log::json_using` takes one instead, which is
+  /// what a test wants: a fixed clock makes the output byte-for-byte
+  /// predictable, and a log line with a real timestamp in it cannot be
+  /// compared against anything.
+  pub fn json(minimum: Severity) -> Log {
+    Log::json_using(minimum, Clock::real())
+  }
+
+  /// `json`, reading the time from a clock the caller supplies.
+  ///
+  /// **The clock is a value here, not a requirement.** An effect operation
+  /// cannot ask for a capability — it runs wherever the effect is performed,
+  /// not where the handler was built — so this holds the one it was given, the
+  /// same way `std::trace`'s exporters hold theirs.
+  pub fn json_using(minimum: Severity, clock: Clock) -> Log {
+    handler for Log {
+      record: fn (level, message, attributes) =>
+      if Severity::severity(level) >= Severity::severity(minimum) {
+        eprint(
+          "{\"timestamp\":" + Int::to_string(clock.unix_millis())
+          + ",\"level\":" + quoted(Severity::name(level))
+          + ",\"message\":" + quoted(message)
+          + fields(attributes)
+          + "}",
+        )
+      } else {
+      },
+    }
+  }
+
+  /// A logger that writes a plain line to standard error, for a terminal.
+  ///
+  /// The level, the message, then `key=value` for each attribute. For a small
+  /// program whose log is read by the person who ran it; anything that ships
+  /// its logs anywhere wants `json`.
+  pub fn plain(minimum: Severity) -> Log {
+    handler for Log {
+      record: fn (level, message, attributes) =>
+      if Severity::severity(level) >= Severity::severity(minimum) {
+        eprint(Severity::label(level) + " " + message + rendered(attributes))
+      } else {
+      },
+    }
+  }
+}
+
+/// `text` as a JSON string, quotes and escapes included.
+///
+/// Through `std::json` rather than by hand: a message is arbitrary text and
+/// will eventually contain a quote, a backslash or a newline, and a logger that
+/// emits broken JSON on that line is worse than one that emits none.
+fn quoted(text: String) -> String {
+  encode(Json::Text(text))
+}
+
+/// The attributes as `,"key":value`, ready to sit before the closing brace.
+///
+/// **Assembled rather than built as a `Json::Object`**, because an object is a
+/// `Map` and a map has no order. `timestamp`, `level` and `message` come first
+/// in every line, which is what makes a log readable with `head` and
+/// diffable between runs.
+fn fields(attributes: List<Attribute>) -> String {
+  List::fold(attributes, "", fn (sofar, each) =>
+    sofar + "," + quoted(each.name) + ":" + as_json(each.value))
+}
+
+/// One attribute value, as JSON.
+fn as_json(value: Value) -> String {
+  match value {
+    Value::Text(text) => quoted(text),
+    Value::Number(number) => Int::to_string(number),
+    Value::Decimal(number) => Float::to_string(number),
+    Value::Flag(flag) => if flag { "true" } else { "false" },
+  }
+}
+
+/// The attributes as ` key=value`, or nothing at all when there are none.
+fn rendered(attributes: List<Attribute>) -> String {
+  List::fold(attributes, "", fn (sofar, each) =>
+    sofar + " " + each.name + "=" + shown(each.value))
+}
+
+/// One attribute value, as text.
+fn shown(value: Value) -> String {
+  match value {
+    Value::Text(text) => text,
+    Value::Number(number) => Int::to_string(number),
+    Value::Decimal(number) => Float::to_string(number),
+    Value::Flag(flag) => if flag { "true" } else { "false" },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The five a caller actually writes
+// ---------------------------------------------------------------------------
+//
+// One per level, taking a message and nothing else, because that is the call
+// at the overwhelming majority of sites. `log.record(..)` is there underneath
+// for the ones that carry structure, and these are written in terms of it so
+// there is one path to a handler rather than six.
+
+/// The finest detail.
+pub fn trace(message: String) -> () with { log: Log } {
+  log.record(Severity::Trace, message, List::Nil)
+}
+
+/// What a developer wants while working on this code.
+pub fn debug(message: String) -> () with { log: Log } {
+  log.record(Severity::Debug, message, List::Nil)
+}
+
+/// What an operator wants while the program is behaving.
+pub fn info(message: String) -> () with { log: Log } {
+  log.record(Severity::Info, message, List::Nil)
+}
+
+/// Something is wrong and the program is carrying on.
+pub fn warn(message: String) -> () with { log: Log } {
+  log.record(Severity::Warn, message, List::Nil)
+}
+
+/// Something is wrong and something did not happen.
+pub fn error(message: String) -> () with { log: Log } {
+  log.record(Severity::Error, message, List::Nil)
+}
+
+// ---------------------------------------------------------------------------
+// The primitive
+// ---------------------------------------------------------------------------
+
+/// Writes a line to standard error.
+///
+/// **The stream is the whole point.** `print` writes a program's *answer*, and
+/// an answer is what `> out.txt` is for. A diagnostic written there goes into
+/// the file with it, which is how a command-line tool ends up silently
+/// discarding the reason it failed.
+///
+/// Not an effect, for the same reason `print` is not one: it is the primitive
+/// the effect above is built out of, and a usage message printed before any
+/// capability is installed has nowhere to get one from.
+///
+/// ```khora
+/// eprint("usage: report <events.json>")
+/// ```
+pub fn eprint(text: String) -> () {
+  String::with_data(text, fn (from, n) => khora_eprint(from, n))
+}
+
+/// Writes `len` bytes and a newline to standard error.
+///
+/// A pointer and a length rather than a `String`, because only scalars and
+/// pointers cross the boundary — the same shape `std::net`'s writes use, and
+/// the reason this needs no compiler intrinsic the way `print` does.
+extern fn khora_eprint(from: Ptr, len: Int) -> ();

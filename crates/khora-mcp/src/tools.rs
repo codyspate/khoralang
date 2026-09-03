@@ -244,7 +244,11 @@ fn fmt_options(start: &std::path::Path) -> khora_fmt::Options {
 }
 
 /// Substring search over names and documentation.
-fn search(query: &str, limit: usize, surface: &[Entry]) -> String {
+///
+/// Public because `khora std search` answers out of it too. The wording is
+/// written for whoever reads the result, and both readers want the same thing:
+/// what exists, spelled the way the compiler spells it.
+pub fn search(query: &str, limit: usize, surface: &[Entry]) -> String {
     let needle = query.to_lowercase();
     let mut hits: Vec<&Entry> = surface
         .iter()

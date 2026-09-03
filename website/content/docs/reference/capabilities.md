@@ -70,6 +70,56 @@ let fixed_clock = handler for Clock {
 
 A handler's type is the effect it implements.
 
+## Installing the real thing
+
+The handlers above are invented, because a page about syntax should not depend
+on which effects `std` happens to ship. Real programs install the ones it does,
+and each capability's own module provides them:
+
+```khora
+import std::clock::{Clock};
+import std::env::{Env};
+import std::fs::{FsRead, FsWrite};
+import std::log::{Level, Log};
+
+pub fn main() -> Int {
+  with {
+    env: Env::real(),
+    reads: FsRead::real(),
+    writes: FsWrite::real(),
+    clock: Clock::real(),
+    log: Log::json(Level::Info),
+  } {
+    work()
+  }
+}
+```
+
+**The label is chosen by the function you are calling, not by you.** A row entry
+named `fs:` will not satisfy a function that declared `reads: FsRead`; the error
+says so — ``needs `reads: FsRead`, which this function does not require`` — but
+it is worth knowing before you meet it, because the labels are effectively part
+of `std`'s public API:
+
+| Capability | Label | From |
+| --- | --- | --- |
+| `Env` | `env` | [`std::env`](/docs/stdlib/api/env/) |
+| `FsRead` | `reads` | [`std::fs`](/docs/stdlib/api/fs/) |
+| `FsWrite` | `writes` | [`std::fs`](/docs/stdlib/api/fs/) |
+| `Clock` | `clock` | [`std::clock`](/docs/stdlib/api/clock/) |
+| `Random` | `random` | [`std::random`](/docs/stdlib/api/random/) |
+| `Log` | `log` | [`std::log`](/docs/stdlib/api/log/) |
+| `Tracer` | `tracer` | [`std::trace`](/docs/stdlib/api/trace/) |
+| `Db` | `db` | [`std::db`](/docs/stdlib/api/db/) |
+| `HttpClient` | `client` | [`std::net::http`](/docs/stdlib/api/net/http/) |
+| `Process` | `process` | [`std::process`](/docs/stdlib/api/process/) |
+| `Nursery` | `nursery` | [`std::core`](/docs/stdlib/api/core/) |
+| `Scope` | `scope` | [`std::core`](/docs/stdlib/api/core/) |
+
+Every `real()` reaches the actual machine. A test installs a handler of its own
+instead — see [Testing capabilities](/docs/cookbook/testing-capabilities/),
+which is what the seam is for.
+
 ## Postfix `with`
 
 Install handlers for one expression:
@@ -232,7 +282,7 @@ write = ["./data/out.txt"]
 Both `read` entries, and the reason is the one surprise in the glob dialect
 below: `./data/**` grants what is *inside* `data` and not `data` itself, so with
 only that line a program can read every file in the directory and cannot list
-it. `read_dir("data")` raises `Denied` and `is_dir("data")` answers `false`.
+it. `read_dir("data")` and `is_dir("data")` both raise `Denied`. The probes raise rather than answering `false` for the reason given further down: a `false` that could mean "not there", "unreadable" or "not granted" is the one somebody debugs for an hour.
 
 The grants are compiled into the binary rather than read at run time. A file the program consults for its own permissions is a file an attacker edits.
 

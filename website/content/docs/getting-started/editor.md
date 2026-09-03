@@ -86,6 +86,8 @@ The important part is always the same: the project root contains `khora.toml`, `
 
 Khora also exposes a compiler-backed MCP server. A coding agent can use it to ask the real Khora compiler about source instead of guessing syntax or type behavior.
 
+The same standard-library index is on the command line as `khora std search <query>`, so it is not an agent-only facility. Both read the compiler's own view of the `std` beside them rather than a checked-in list, which is why neither can describe a version you do not have.
+
 It is optional. Nothing about writing, building or testing correct Khora requires it, and the compiler and language server behave identically whether or not an agent is connected.
 
 A typical MCP client configuration is:

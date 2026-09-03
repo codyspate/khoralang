@@ -1277,60 +1277,86 @@ impl Router {
   }
 
   /// Serves until the process stops, on a fiber per connection.
+  ///
+  /// **This writes one line to standard output** — `listening on <port>` — once
+  /// the port is open. It is a readiness signal: something started this process
+  /// and wants to know when it can connect, and a line on stdout is what every
+  /// supervisor and test harness can already read without being taught a
+  /// protocol.
+  ///
+  /// A server whose output is structured logs does not want it, because it
+  /// arrives on the same stream in a different format and everything parsing
+  /// that stream has to be taught about it. `listen_quietly` is this without
+  /// the line.
   pub fn listen<'er>(router: Router<'er>, port: Int) -> ()
     raises 'er + HttpError + ChildFailed
   {
-    if start() {
-    } else {
-      raise HttpError::BindFailed(port)
-    };
-    let server = listen_on(port);
-    if server == invalid_handle() {
-      raise HttpError::BindFailed(port)
-    } else {
-      // Announced so that whatever started this knows the port is open. A
-      // caller that wants silence can have a quieter one when there is
-      // something to configure it with.
-      print("listening on " + Int::to_string(port));
-      // The nursery is opened here rather than asked of the caller: that a
-      // server answers on a fiber per connection is its own business.
-      //
-      // Written as a lambda, which needed
-      // `docs/design/capability-passing.md`: the thunk requires a nursery that
-      // does not exist where it is written, so `nursery` supplies one when it
-      // calls it. Until that landed this was the handler spelled out by hand,
-      // because a lambda's requirement row was always empty.
-      // Bounded, because the connections come from outside. A fiber is an
-      // operating-system thread today and costs about 33 KB, so an unbounded
-      // nursery here would meet its ceiling by exhausting memory; this one
-      // meets it by accepting more slowly, and the backlog holds the rest.
-      //
-      // **256 is a connection bound, not a concurrency bound**, and the two
-      // are one number here deliberately. A connection that has been accepted
-      // is a fiber, and that fiber is inside the handler for as long as the
-      // handler runs; there is no second, smaller pool that handlers queue
-      // for. So `256` is the most connections served at once *and* the most
-      // handlers running at once.
-      //
-      // Measured 2026-09-02: the server saturates well below it. Throughput
-      // is flat from 16 connections to 128 — 176k, 180k, 177k, 176k requests
-      // a second — while the median request takes 70, 159, 344 and 724
-      // microseconds. Constant throughput with latency proportional to the
-      // queue is a saturated server, so past about 16 connections this bound
-      // is not what limits the rate; raising it would lengthen the queue and
-      // lower it would shed load sooner. It costs about 33 KB per fiber, and
-      // 400 concurrent connections were measured at 13 MB.
-      //
-      // A handler that waits on something scarcer than the server — a
-      // database pool, a rate-limited API — wants its own smaller bound
-      // around that work rather than a smaller number here. See
-      // `/docs/cookbook/bounded-concurrency/`.
-      // **The region is opened here rather than asked of the caller.** The
-      // socket's whole life is this call, so the scope that closes it belongs
-      // in this call; requiring `scope` from every caller would be a breaking
-      // change that bought nothing.
-      scoped(fn () => Router::held_open(router, server)!)!
-    }
+    let server = Router::bound(port)!;
+    // Announced before the loop rather than after it, because after never
+    // comes: `serving` returns when the process stops.
+    print("listening on " + Int::to_string(port));
+    Router::serving(router, server)!
+  }
+
+  /// `listen`, without the line on standard output.
+  ///
+  /// **For a server whose output is structured.** One unsolicited line is not
+  /// much, but it is on the same stream as the logs and is not in their format.
+  /// A caller here announces readiness however the rest of its output does — or
+  /// not at all, for a service behind a health check that answers the question
+  /// better anyway.
+  pub fn listen_quietly<'er>(router: Router<'er>, port: Int) -> ()
+    raises 'er + HttpError + ChildFailed
+  {
+    Router::serving(router, Router::bound(port)!)!
+  }
+
+  /// The serving half, over a socket that is already bound.
+  ///
+  /// Shared by both entry points so that the bound above and the region below
+  /// are decided once. Everything either of them does differently happens
+  /// before this is called.
+  fn serving<'er>(router: Router<'er>, server: Int) -> ()
+    raises 'er + HttpError + ChildFailed
+  {
+    // The nursery is opened here rather than asked of the caller: that a
+    // server answers on a fiber per connection is its own business.
+    //
+    // Written as a lambda, which needed
+    // `docs/design/capability-passing.md`: the thunk requires a nursery that
+    // does not exist where it is written, so `nursery` supplies one when it
+    // calls it. Until that landed this was the handler spelled out by hand,
+    // because a lambda's requirement row was always empty.
+    // Bounded, because the connections come from outside. A fiber is an
+    // operating-system thread today and costs about 33 KB, so an unbounded
+    // nursery here would meet its ceiling by exhausting memory; this one
+    // meets it by accepting more slowly, and the backlog holds the rest.
+    //
+    // **256 is a connection bound, not a concurrency bound**, and the two
+    // are one number here deliberately. A connection that has been accepted
+    // is a fiber, and that fiber is inside the handler for as long as the
+    // handler runs; there is no second, smaller pool that handlers queue
+    // for. So `256` is the most connections served at once *and* the most
+    // handlers running at once.
+    //
+    // Measured 2026-09-02: the server saturates well below it. Throughput
+    // is flat from 16 connections to 128 — 176k, 180k, 177k, 176k requests
+    // a second — while the median request takes 70, 159, 344 and 724
+    // microseconds. Constant throughput with latency proportional to the
+    // queue is a saturated server, so past about 16 connections this bound
+    // is not what limits the rate; raising it would lengthen the queue and
+    // lower it would shed load sooner. It costs about 33 KB per fiber, and
+    // 400 concurrent connections were measured at 13 MB.
+    //
+    // A handler that waits on something scarcer than the server — a
+    // database pool, a rate-limited API — wants its own smaller bound
+    // around that work rather than a smaller number here. See
+    // `/docs/cookbook/bounded-concurrency/`.
+    // **The region is opened here rather than asked of the caller.** The
+    // socket's whole life is this call, so the scope that closes it belongs
+    // in this call; requiring `scope` from every caller would be a breaking
+    // change that bought nothing.
+    scoped(fn () => Router::held_open(router, server)!)!
   }
 
   /// The serving loop, with the listening socket registered for release.

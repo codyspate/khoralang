@@ -33,7 +33,7 @@ edition = "2026"
 Put this in `src/main.kh`:
 
 ```khora
-module main;
+module hello_khora::main;
 
 import std::core::{assert, print};
 

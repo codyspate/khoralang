@@ -169,6 +169,75 @@ it will behave differently now.
 
 ### Fixed
 
+- **A diagnostic that told you to make things worse.** A type that derives `Eq`
+  but is not imported reported ``\`Money\` has no \`Eq\` impl ... Write
+  \`impl Eq for Money\``, which would have a reader hand-write a duplicate impl
+  for a type their module does not own. An evaluator hit exactly that and called
+  it the worst message in the toolchain, in the tone the good ones had earned
+  trust with. It now says the type is not in scope and to import it, keeping the
+  old advice for the case where that really is the answer.
+
+- **`khora test --filter` exited 0 when it matched nothing.** A typo in a filter
+  is a CI step that tested nothing and went green. It now exits 1 when a filter
+  matched none of the declared tests, and still exits 0 for a package that
+  simply has none — the two print nearly the same sentence and mean opposite
+  things.
+
+- **`khora build` on a library said the wrong thing.** A `--lib` package has no
+  `main`, and got `this program has no \`main\` function, so there is nothing to
+  run` pointing at an arbitrary file. It now says the package has no program to
+  build, that a library has none by design, and names `khora build --lib`.
+
+- **Three concurrency claims the runtime does not honour** are recorded in
+  `/docs/limitations/` rather than left in the reference as promises: a bounded
+  nursery admits `limit + 1` children, because `Fiber::spawn` starts the child
+  before `adopt` can block; a child's failure is noticed in adoption order, so
+  cancelling the siblings can be arbitrarily late and how many are still running
+  is a race; and the two fiber backends are distinguishable, since `clock.sleep`
+  is interrupted by cancellation under `KHORA_FIBERS=scheduler` and not under
+  threads. All three were found by measurement.
+
+- **`reference/capabilities` never showed a real handler.** The page contained
+  `real()` zero times: every example installed an invented one, so a reader
+  finished the canonical page on capabilities knowing the syntax and unable to
+  write `main`. It has an `Installing the real thing` section now, with the
+  table of which label each `std` capability expects — labels are load-bearing
+  and were documented nowhere.
+
+- **Smaller documentation gaps found by the same exercise**: that `+` joins two
+  `String`s and there is no `++`; `Fiber::wait`, which is what you need after
+  `cancel` and was missing from the concurrency reference's own `impl` block;
+  and a pointer to `khora std search` in Getting Started, which one evaluator
+  never found and another used three times.
+
+
+- **Windows was told to install something that does not provide a linker.**
+  Khora links through `clang` -- deliberately, since a MinGW `gcc` emits a
+  different ABI from the MSVC-targeting objects the backend produces -- but the
+  error and `installation.md` both named the Visual Studio Build Tools'
+  "Desktop development with C++" workload first, and that workload does not
+  include one. Its "C++ Clang tools for Windows" component is separate. Two
+  evaluators installed exactly what was asked for and still could not link; one
+  extracted strings from `khora.exe` to work out what was really probed for.
+  Both now name LLVM first and say what the workload does and does not bring.
+
+- **`reference/capabilities` contradicted itself about `is_dir`.** One line said
+  a denied path answers `false`; forty lines later the same page said it raises
+  `Denied` and explained why it had changed. `FsRead::is_dir` checks the grant
+  before it looks, so the second is true and the first is what it changed from.
+
+- **The tooling list omitted `new`, `build` and `run`** -- the three commands a
+  newcomer needs -- listing six of twenty-one. It also now says there is no
+  `khora lint` and that the lints run inside `check`, which was discoverable
+  only twenty entries into a reference page.
+
+- **Two adjacent getting-started pages disagreed on the first line of every
+  program.** `khora new` and one tutorial write `module <package>::main;`; the
+  other wrote `module main;`. Both compile, so nothing was broken -- but a
+  reader following the two in order met both spellings without being told they
+  were the same thing.
+
+
 - **Closing a connection waited for a peer that had nothing to say.** `shut`
   closes politely -- say there is nothing more coming, read off what is still
   arriving, then close -- because closing while the peer is still writing sends
@@ -414,6 +483,59 @@ it will behave differently now.
   passed to `List::map` — which the Guide had been showing all along.
 
 ### Added
+
+- **`std::log`, and a way to write to standard error at all.** Khora had none:
+  everything went to stdout, so a program's diagnostics and its answer shared a
+  stream and the first `> out.txt` anybody typed swallowed the diagnostics. Two
+  independent evaluators building ordinary command-line tools reported it.
+
+  `eprint` is the primitive. `Log` is the capability over it, for the reason
+  everything reaching outside is one: a function that logs writes to a stream
+  somebody else owns, so it says so in its row — which also makes it testable,
+  since a test installs a logger that collects into a list with no global to
+  reset. Five levels, `Trace` through `Error`, filtered by the handler rather
+  than the caller.
+
+  The format is one JSON object per line, with `timestamp`, `level` and
+  `message` in that fixed order and attributes as typed fields after them.
+  Assembled rather than built as a `Json::Object`, because an object is a `Map`
+  and a map has no order. `timestamp` is epoch milliseconds as a number —
+  nanoseconds would be about 2^60 and JSON numbers are doubles in most readers,
+  which would round it. `level` is lower case, which is what ECS, `slog`, `zap`
+  and `structlog` all emit, so a collector's default filter matches without
+  configuration. `Log::plain` is there for a terminal.
+
+  `Log::json_using` takes the clock, so a test can fix it and compare the line
+  byte for byte; `Log::json` uses the real one. Attributes are `std::trace`'s
+  `Attribute`, so a line can carry `trace_id` and `span_id` in the field names
+  OpenTelemetry expects — passed in, because `std::trace` still has no notion of
+  a current span. `/docs/cookbook/logging/` covers all of it.
+
+
+- **`khora std search <query>`, which was an agent-only facility.** `khora mcp`
+  has exposed a searchable view of the standard library to coding agents since
+  it existed, and a person had no equivalent: no subcommand, and a website
+  built from `main` while the installable compiler was a release behind it.
+  Four independent evaluators, given the published pages and a released
+  toolchain, each concluded the compiler was broken rather than that the pages
+  were ahead of it; the one who recovered did it by reaching for the agent's
+  tool and said so.
+
+  It answers out of the same index, which is the compiler's own item map over
+  the `std` beside it -- signatures sliced from the declarations, descriptions
+  taken from their `///` comments. Nothing to regenerate and nothing to keep in
+  step: a function added to `std` is findable the next time it runs, and one
+  that was removed stops being. Private items are left out, because writing
+  code against one produces `not exported`, and that is a worse teacher than
+  never having seen it.
+
+- **`Router::listen_quietly`**, which is `listen` without the line it prints on
+  standard output. `listen` announces `listening on <port>` as a readiness
+  signal, which is what a supervisor or a test harness can read without being
+  taught a protocol -- and is one unsolicited line in the wrong format for a
+  server whose output is structured logs. `listen`'s own comment had predicted
+  this; both now share one serving half, and `listen` documents that it prints.
+
 
 - **`std::core::todo`, a hole that type-checks anywhere and refuses to run.**
   It is generic in its result, so it answers whatever is wanted: an unwritten

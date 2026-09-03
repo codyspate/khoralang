@@ -10,6 +10,7 @@ decimal.md
 env.md
 fs.md
 json.md
+log.md
 net/http.md
 net/socket.md
 net/tls.md

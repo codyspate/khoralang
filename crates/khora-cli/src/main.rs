@@ -91,6 +91,11 @@ enum Command {
     /// lets one ask the compiler instead of guessing. Started by the agent's
     /// client, not by a person.
     Mcp,
+    /// Search the standard library.
+    Std {
+        #[command(subcommand)]
+        command: StdCommand,
+    },
     /// Speak the Language Server Protocol on stdin and stdout.
     ///
     /// Not for a person to run: an editor starts it. Running it by hand gets a
@@ -501,6 +506,7 @@ fn dispatch() -> Result<ExitCode> {
         }
         Command::Lsp => lsp().map(|()| true),
         Command::Mcp => mcp().map(|()| true),
+        Command::Std { command } => std_command(command),
         Command::Toolchain { command } => toolchain(command),
         Command::Run { path, release, no_cache, cwd, args } => {
             return run_program(&path, release, no_cache, cwd.as_deref(), &args)
@@ -911,6 +917,47 @@ fn warn_about_unknown_lints(levels: &std::collections::BTreeMap<String, LintLeve
 ///
 /// Newline-delimited JSON, unlike `lsp`, which frames with `Content-Length`.
 /// Anything this needs to say goes to stderr, because stdout is the protocol.
+/// What `khora std` can be asked.
+#[derive(Subcommand)]
+enum StdCommand {
+    /// Find what `std` offers, by name or by what its documentation says.
+    ///
+    /// **Read out of the compiler's own view of `std`, not out of an index.**
+    /// Every entry is the item map over the standard library's real source:
+    /// the signature is sliced from the declaration and the description is the
+    /// `///` above it. Nothing to regenerate, nothing to fall out of step —
+    /// a function added to `std` is findable here the next time this runs, and
+    /// one that was removed stops being.
+    ///
+    /// Private items are left out, because writing code against one produces
+    /// "not exported" and that is a worse teacher than never having seen it.
+    Search {
+        /// What to look for. Matched against names first, then documentation.
+        query: String,
+        /// How many to show before saying how many more there were.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+/// `khora std ..`.
+fn std_command(command: StdCommand) -> Result<bool> {
+    match command {
+        StdCommand::Search { query, limit } => {
+            let surface = khora_mcp::read_std_surface();
+            if surface.is_empty() {
+                eprintln!(
+                    "khora: no standard library to search. `khora std search` reads the `std` \
+                     that ships beside this compiler, and none was found."
+                );
+                return Ok(false);
+            }
+            print!("{}", khora_mcp::search(&query, limit, &surface));
+            Ok(true)
+        }
+    }
+}
+
 fn mcp() -> Result<()> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprintln!(

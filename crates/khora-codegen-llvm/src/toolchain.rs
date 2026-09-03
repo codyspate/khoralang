@@ -75,8 +75,14 @@ fn which(name: &str) -> Option<PathBuf> {
 /// anybody meets after downloading a compiler.
 fn no_linker() -> String {
     let install = if cfg!(windows) {
-        "install the Visual Studio Build Tools with the \"Desktop development with C++\" \
-         workload, or LLVM from https://releases.llvm.org"
+        // **Clang by name, because that is what is probed for.** The workload
+        // alone does not install one -- its C++ Clang tools are a separate
+        // component nobody ticks by accident -- and MSVC's own `cl.exe` is not
+        // a substitute here: `link` uses the driver to find the CRT and the
+        // system libraries, which `link.exe` does not do for it.
+        "install LLVM from https://releases.llvm.org, or add the \"C++ Clang tools for \
+         Windows\" component to the Visual Studio Build Tools. The \"Desktop development \
+         with C++\" workload on its own does not include one"
     } else if cfg!(target_os = "macos") {
         "run `xcode-select --install`"
     } else {

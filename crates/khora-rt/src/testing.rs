@@ -127,13 +127,22 @@ pub extern "C" fn khora_test_run() -> i32 {
         // Saying how many were skipped, because "no tests" from a filter that
         // matched nothing looks exactly like "no tests" from a file with none,
         // and one of those is a typo.
-        let _ = match &filter {
+        // **A filter that matched nothing is a failure; a file with no tests is
+        // not.** They print nearly the same sentence and mean opposite things:
+        // one is a typo in a command somebody ran deliberately, and in CI it is
+        // a step that tested nothing and went green. An evaluator found
+        // `khora test --filter zzz` exiting 0 and named it for that reason.
+        let missed = match &filter {
             Some(want) if declared > 0 => {
-                writeln!(out, "no tests matching `{want}` ({declared} declared)")
+                let _ = writeln!(out, "no tests matching `{want}` ({declared} declared)");
+                true
             }
-            _ => out.write_all(b"no tests\n").map(|_| ()),
+            _ => {
+                let _ = out.write_all(b"no tests\n");
+                false
+            }
         };
-        return 0;
+        return i32::from(missed);
     }
     let filtered_out = declared - tests.len();
 

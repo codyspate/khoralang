@@ -914,6 +914,31 @@ pub fn listen<'er>(router: Router<'er>, port: Int) ->() raises 'er + HttpError +
 
 Serves until the process stops, on a fiber per connection.
 
+**This writes one line to standard output** — `listening on <port>` — once
+the port is open. It is a readiness signal: something started this process
+and wants to know when it can connect, and a line on stdout is what every
+supervisor and test harness can already read without being taught a
+protocol.
+
+A server whose output is structured logs does not want it, because it
+arrives on the same stream in a different format and everything parsing
+that stream has to be taught about it. `listen_quietly` is this without
+the line.
+
+#### listen_quietly
+
+```khora
+pub fn listen_quietly<'er>(router: Router<'er>, port: Int) ->() raises 'er + HttpError + ChildFailed
+```
+
+`listen`, without the line on standard output.
+
+**For a server whose output is structured.** One unsolicited line is not
+much, but it is on the same stream as the logs and is not in their format.
+A caller here announces readiness however the rest of its output does — or
+not at all, for a service behind a health check that answers the question
+better anyway.
+
 #### listen_tls
 
 ```khora

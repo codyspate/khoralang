@@ -23,15 +23,24 @@ Welcome to the Khora documentation. This is the entry point for everything you n
 
 ## Tooling
 
-The Khora toolchain includes compiler-backed commands for checking, testing, formatting, generating API documentation, editor integration, and coding-agent integration.
+The Khora toolchain is one binary. These are the commands a project uses day to day; `khora --help` lists all of them.
 
 ```text
-khora check
-khora test
-khora fmt
-khora doc
-khora lsp
-khora mcp
+khora new      start a package
+khora build    compile it
+khora run      compile and run it
+khora check    parse, type check and lint, without building
+khora test     run its tests
+khora bench    run its benchmarks
+khora fmt      format its source
+khora doc      generate API pages from its `///` comments
+khora std      search the standard library from the terminal
+khora lsp      the language server, for editors
+khora mcp      the same knowledge, for coding agents
 ```
+
+`khora std search <query>` is the fastest way to find out whether something exists. It reads the compiler's own view of the `std` beside it — signatures sliced from the declarations, descriptions taken from their `///` comments — so it is never out of step with the toolchain you have, which is more than these pages can promise.
+
+There is no `khora lint`: the lints run inside `khora check`, because a separate command is a second thing to run and a second answer to disagree with the first. `khora sbom`, `khora toolchain`, `khora update`, `khora cache`, `khora why`, `khora graph` and `khora release` cover distribution and diagnosis.
 
 If you are new to Khora, start with **Getting started**, then read the **Language reference** in the order its first section gives. Use the **Standard library** for what ships with the toolchain, and the **Cookbook** for a whole task working end to end.
