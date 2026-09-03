@@ -31,6 +31,7 @@ extern fn shutdown(handle: Int, how: I32) -> I32;
 // §2.
 extern fn khora_net_prepare(handle: Int) -> I32;
 extern fn khora_net_recv(handle: Int, into: Ptr, length: Int) -> Int;
+extern fn khora_net_recv_now(handle: Int, into: Ptr, length: Int) -> Int;
 extern fn khora_net_send(handle: Int, from: Ptr, length: Int) -> Int;
 extern fn khora_net_accept(handle: Int, address: Ptr, length: Ptr) -> Int;
 extern fn khora_net_set_timeout(handle: Int, millis: Int) -> I32;
@@ -193,10 +194,12 @@ pub fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
 /// So: say there is nothing more coming, read off what is still arriving until
 /// the peer stops, and only then close. `SD_SEND` is 1.
 ///
-/// The drain is bounded rather than a loop to end-of-stream. A peer that never
-/// stops talking must not hold the fiber, and the receive deadline the server
-/// already set is doing the real work — this only has to outlast the bytes that
-/// were in flight.
+/// The drain takes what has **already** arrived and never waits for more, and
+/// that is the bound. A read that suspends until something comes would hold
+/// `shut` for as long as a peer keeps the connection open and says nothing —
+/// which is until the kernel abandons the half-closed connection by itself,
+/// two minutes on Windows and one on Linux. A receive deadline shortens that
+/// wait wherever a caller has set one, and most callers have not.
 pub fn shut(handle: Int) -> () {
   shutdown(handle, I32::of(1));
   drain(handle, 8);
@@ -207,12 +210,22 @@ pub fn shut(handle: Int) -> () {
   closesocket(handle);
 }
 
-/// Reads and discards what is still arriving, at most `rounds` times.
+/// Reads what has already arrived, without waiting for more.
+///
+/// Zero means the other end closed; negative means the read failed **or would
+/// have blocked**, which are one answer here because a caller does the same
+/// thing with both. `receive` is the one to reach for when the bytes are worth
+/// waiting for; this is for `shut`, which wants only what is already in hand.
+pub fn receive_now(connection: Int, buffer: Array<U8>) -> Int {
+  Array::with_data(buffer, fn (into, n) => khora_net_recv_now(connection, into, n))
+}
+
+/// Reads and discards what has already arrived, at most `rounds` times.
 fn drain(handle: Int, rounds: Int) -> () {
   if rounds <= 0 {
   } else {
     let leftovers: Array<U8> = Array::new(1024, 0);
-    let read = receive(handle, leftovers);
+    let read = receive_now(handle, leftovers);
     if read <= 0 {} else { drain(handle, rounds - 1) }
   }
 }

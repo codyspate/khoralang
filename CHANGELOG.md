@@ -169,6 +169,24 @@ it will behave differently now.
 
 ### Fixed
 
+- **Closing a connection waited for a peer that had nothing to say.** `shut`
+  closes politely -- say there is nothing more coming, read off what is still
+  arriving, then close -- because closing while the peer is still writing sends
+  an RST and an RST discards the answer just written to it. The drain read with
+  `receive`, which suspends until something arrives, and for a peer that is
+  open and silent nothing ever does: the half-closed connection sat in
+  `FIN_WAIT_2` until the kernel abandoned it, 120 seconds on Windows and
+  `tcp_fin_timeout` on Linux.
+
+  A receive deadline hid it wherever one had been set, which is why it lasted:
+  the HTTP server sets ten seconds, so every connection it closed took ten
+  seconds and nobody called that a hang. Anything using `std::net::socket`
+  directly got the kernel's timeout instead. `khora_net_recv_now` is one `recv`
+  with no retry and no suspension, `receive_now` exposes it on all three
+  platforms, and the drain uses it -- 120.216s became 203.7ms. The conformance
+  check for the case the drain exists for, a 9 KB header refused while the
+  client is still sending the ninth, still passes. `docs/errata.md` 78.
+
 - **A cancelled fiber left its socket open, and a server never gave its port
   back.** `std::net::socket` registered no release at all, so a socket was
   closed only by a normal return -- which is the one exit a server never takes.

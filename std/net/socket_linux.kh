@@ -42,6 +42,7 @@ extern fn shutdown(handle: I32, how: I32) -> I32;
 // §2.
 extern fn khora_net_prepare(handle: I32) -> I32;
 extern fn khora_net_recv(handle: I32, into: Ptr, length: Int) -> Int;
+extern fn khora_net_recv_now(handle: I32, into: Ptr, length: Int) -> Int;
 extern fn khora_net_send(handle: I32, from: Ptr, length: Int) -> Int;
 extern fn khora_net_accept(handle: I32, address: Ptr, length: Ptr) -> I32;
 extern fn khora_net_set_timeout(handle: I32, millis: Int) -> I32;
@@ -178,6 +179,11 @@ pub fn transmit_bytes(connection: Int, bytes: Array<U8>) -> Int {
 /// The same reasoning as the Windows file, and the same shape: closing while
 /// the peer is still writing sends an RST, which discards the answer the peer
 /// had not read yet. `SHUT_WR` is 1 here too.
+///
+/// **The drain takes what has already arrived and never waits for more.** A
+/// peer that holds the connection open and says nothing would otherwise hold
+/// `shut` until the kernel abandoned the half-closed connection by itself,
+/// which here is `tcp_fin_timeout` — sixty seconds by default.
 pub fn shut(handle: Int) -> () {
   shutdown(I32::of(handle), I32::of(1));
   drain(handle, 8);
@@ -188,12 +194,21 @@ pub fn shut(handle: Int) -> () {
   close(I32::of(handle));
 }
 
-/// Reads and discards what is still arriving, at most `rounds` times.
+/// Reads what has already arrived, without waiting for more.
+///
+/// Zero means the other end closed; negative means the read failed **or would
+/// have blocked**, which are one answer here because a caller does the same
+/// thing with both.
+pub fn receive_now(connection: Int, buffer: Array<U8>) -> Int {
+  Array::with_data(buffer, fn (into, n) => khora_net_recv_now(I32::of(connection), into, n))
+}
+
+/// Reads and discards what has already arrived, at most `rounds` times.
 fn drain(handle: Int, rounds: Int) -> () {
   if rounds <= 0 {
   } else {
     let leftovers: Array<U8> = Array::new(1024, 0);
-    let read = receive(handle, leftovers);
+    let read = receive_now(handle, leftovers);
     if read <= 0 {} else { drain(handle, rounds - 1) }
   }
 }

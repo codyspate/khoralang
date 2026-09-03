@@ -163,3 +163,20 @@ The same reasoning as the Windows file, and the same shape: closing while
 the peer is still writing sends an RST, which discards the answer the peer
 had not read yet. `SHUT_WR` is 1 here too.
 
+**The drain takes what has already arrived and never waits for more.** A
+peer that holds the connection open and says nothing would otherwise hold
+`shut` until the kernel abandoned the half-closed connection by itself,
+which here is `tcp_fin_timeout` — sixty seconds by default.
+
+### receive_now
+
+```khora
+pub fn receive_now(connection: Int, buffer: Array<U8>) -> Int
+```
+
+Reads what has already arrived, without waiting for more.
+
+Zero means the other end closed; negative means the read failed **or would
+have blocked**, which are one answer here because a caller does the same
+thing with both.
+

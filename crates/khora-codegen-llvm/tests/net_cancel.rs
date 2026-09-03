@@ -23,6 +23,14 @@
 //! Both would have failed before the fix, for the reason the fix exists:
 //! `std::net::socket` registered no release at all, so a socket was closed only
 //! by a normal return, which is the one exit a server never takes.
+//!
+//! # And it guards a second thing, which it found
+//!
+//! The peer here holds the connection open and says nothing, which is the shape
+//! that made `shut` wait for the platform's own `FIN_WAIT_2` timeout — 120
+//! seconds, `docs/errata.md` 78. So the last assertion is a clock: the program
+//! must finish with the connection in seconds, against a floor of sixty that
+//! the platform imposes on the old behaviour.
 
 mod harness;
 
@@ -113,7 +121,7 @@ fn a_cancelled_fiber_gives_back_the_socket_it_was_holding() {
         "net_cancel",
         &format!(
             "module demo::main;
-import std::core::{{Fiber, Scope, acquire, attempt, scoped}};
+import std::core::{{Fiber, Scope, acquire, scoped}};
 import std::net::socket::{{accept_on, invalid_handle, listen_on, shut, start}};
 
 fn print(value: String);
@@ -141,16 +149,16 @@ fn hold() -> () with {{ scope: Scope }} raises Oops {{
 /// raising, before a byte is written -- the exit `serve_connection`'s `catch`
 /// does not cover and only the region does.
 ///
-/// **Raising rather than cancelling, here.** The port half above is the
-/// cancellation test; this half is about what the release is worth to the peer,
-/// and it must not `Fiber::wait` on a fiber that has called `accept_on`, which
-/// takes 120 seconds -- `docs/errata.md` 78.
+/// Cancelled with the connection open and nothing written, which a `catch`
+/// cannot reach and only the region covers.
 fn serve(server: Int) -> () with {{ scope: Scope }} raises Oops {{
   let connection = acquire(accept_on(server), fn c => shut(c));
   if connection == invalid_handle() {{
     print(\"nothing connected, so this proves nothing\")
   }} else {{
-    raise Oops::Bad
+    khora_cancel();
+    let _ = mark()!;
+    print(\"the answer was written, which is wrong\")
   }}
 }}
 
@@ -174,7 +182,8 @@ fn the_connection() -> () {{
     print(\"could not bind, so this proves nothing\")
   }} else {{
     print(\"listening\");
-    let _ = attempt(fn () => scoped(fn () => serve(server)!)!);
+    let f = Fiber::spawn(fn () => scoped(fn () => serve(server)!)!);
+    Fiber::wait(f);
     print(\"the connection was let go\");
     shut(server)
   }}
@@ -226,13 +235,17 @@ pub fn main() -> Int {{
         Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
     };
 
-    // **Nothing more is read from it.** A Khora program that has accepted a
-    // connection does not reach its next line for 120 seconds -- `docs/errata.md`
-    // 78, a defect of its own and not anything this test is about. Everything
-    // asserted below is already in hand: the port half printed before the
-    // announcement, and the connection half is proved at this end.
-    let _ = child.kill();
-    let _ = child.wait();
+    // **Read to the end, and timed.** This was `child.kill()` for a while,
+    // because a program that had accepted a connection did not reach its next
+    // line for 120 seconds -- `docs/errata.md` 78, which was `shut` draining
+    // with a read that waits while the peer above held the connection open and
+    // said nothing. It is fixed, and reading to the end here is what keeps it
+    // fixed: the peer is *still* open and silent at this point, which is
+    // exactly the shape that used to hang.
+    let finishing = std::time::Instant::now();
+    let settled = wait_for(&mut stdout, &mut said, "the connection was let go");
+    let ended = child.wait().expect("it should exit");
+    let took = finishing.elapsed();
 
     assert!(!said.contains("proves nothing"), "nothing was tested: {said}");
     assert!(!said.contains("which is wrong"), "a cancelled fiber ran on: {said}");
@@ -243,5 +256,15 @@ pub fn main() -> Int {{
     assert!(
         closed,
         "the cancelled fiber left the connection open; the read waited out its deadline: {said}"
+    );
+    assert!(settled, "it never finished with the connection: {said}");
+    assert_eq!(ended.code(), Some(0), "{said}");
+    // **Seconds, against a defect measured in minutes.** Generous enough that a
+    // loaded machine does not fail it and tight enough that a `shut` waiting on
+    // a silent peer cannot pass: the platform's own floor for that wait is 60
+    // seconds on Linux and 120 on Windows.
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "closing a connection whose peer is open and silent took {took:?}, which is          `docs/errata.md` 78 coming back"
     );
 }

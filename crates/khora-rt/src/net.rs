@@ -213,6 +213,34 @@ pub extern "C" fn khora_net_forget(socket: Socket) {
     }
 }
 
+/// Reads whatever has already arrived, and never waits.
+///
+/// **The read that `shut` needs and `khora_net_recv` cannot be.** A close
+/// wants to discard the bytes that were in flight; it does not want more.
+/// `khora_net_recv` suspends the fiber when a read would block, which for a
+/// peer that is open and silent means waiting for something that is not coming
+/// -- and `docs/errata.md` 78 is what that cost: `shut` sat for exactly the
+/// platform's FIN_WAIT_2 timeout, 120 seconds on Windows, because a half-closed
+/// connection with a quiet peer is abandoned by the kernel rather than closed
+/// by anybody.
+///
+/// So this is one syscall. A read that would have blocked is -1, the same as a
+/// read that failed, because the caller does the same thing with both: stop.
+///
+/// # Safety
+///
+/// `into` must address `length` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn khora_net_recv_now(
+    socket: Socket,
+    into: *mut u8,
+    length: isize,
+) -> isize {
+    // SAFETY: the caller guarantees `length` writable bytes at `into`.
+    let read = unsafe { raw_recv(socket, into, length) };
+    if read >= 0 { read } else { -1 }
+}
+
 /// `recv`, retried until it says something other than "not yet".
 ///
 /// Returns what the platform's `recv` returns: the byte count, `0` for a peer

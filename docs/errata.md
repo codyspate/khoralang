@@ -3122,49 +3122,68 @@ A measurement of a system that the system itself can check should be checked
 against it. It took one twenty-line server with a counter in it to overturn
 three phases of recorded numbers.
 
-## 78. A program that has accepted a connection stops for two minutes
+## 78. `shut` waited for a peer that had nothing to say
 
-Found by a test that was written for something else. `net_cancel.rs` proves a
-cancelled fiber gives its socket back, and the peer at the other end saw the
-close in 24 milliseconds -- then the program did not reach its *next line* for
-another 120.0 seconds. Every run, to within a few milliseconds of exactly two
-minutes.
+Found by a test written for something else. `net_cancel.rs` proves a cancelled
+fiber gives its socket back, and the peer at the other end saw the close in 24
+milliseconds -- then the program did not reach its *next line* for another
+120.0 seconds. Every run, to within a few milliseconds of exactly two minutes.
 
-    T listening   22.5 ms     the program announced its port
-    T connected   24.0 ms     the peer connected
-    T read        24.1 ms     the peer saw the connection close
-    (the program's next `print`)          +120.03 s
+A print between every statement said which line:
 
-**It is not about cancellation and not about the fix that test covers.** The
-same delay appears when the fiber returns normally, when it raises, and when it
-is cancelled. It appears whether the close is registered with a region or
-written out by hand. What every case has in common is that `accept_on` returned
-a connection: a program that binds a port and closes it without accepting
-anything is unaffected, and the same test's listening-socket half -- bind,
-cancel, bind again -- finishes in milliseconds.
+    8.6 ms    a: started
+    9.3 ms    b: bound
+  203.4 ms    peer connected
+  203.6 ms    c: accepted
+  203.7 ms    peer read returned
+  120.216 s   d: connection shut      <-- `shut` itself
 
-The two minutes are spent somewhere between the region closing the accepted
-socket and the next statement running. The peer's evidence puts `shut` well
-before the delay rather than inside it, so this is not `closesocket` blocking:
-something in the runtime is waiting, and 120 seconds is not a number anything
-in `khora-rt` names -- there is no `from_secs(120)` in it.
+**`shut` was the 120 seconds.** It closes politely, which is right and is
+explained at length where it is written: closing while the peer is still
+writing sends an RST, and an RST discards whatever the peer had not read --
+including the answer just written to it. So it says there is nothing more
+coming, reads off what is still arriving, and only then closes.
 
-**What it costs today.** Nothing in production, because the servers in
-`examples/` never leave their accept loops: `Router::listen` runs until the
-process is killed, so no Khora program in this repository has ever reached the
-line after one. It would cost everything for a server that shuts down
-gracefully, which is a thing a server should be able to do, and it makes any
-test that accepts a connection and then asserts something cost two minutes.
-`net_cancel.rs` sidesteps it by asserting at the peer and killing the child
-rather than reading to end-of-file, with a comment pointing here.
+The drain read with `receive`, which suspends the fiber until something
+arrives. For a peer that is *open and silent* nothing ever does. The
+half-closed connection then sits in `FIN_WAIT_2` until the kernel abandons it
+on its own -- 120 seconds on Windows, `tcp_fin_timeout` and sixty by default on
+Linux -- and that is where the number came from. Nothing in `khora-rt` names
+120 seconds because nothing in `khora-rt` chose it.
 
-Recorded rather than fixed: the fix is in the reactor or in the scheduler's
-idea of outstanding work, and finding it wants a debugger on a stopped process
-rather than another test. It is open in `docs/release-readiness.md` under the
-scheduler.
+**The comment beside the drain said why it was safe, and was wrong about it:**
 
-**The lesson is the one this file keeps having.** The delay had been in the
-runtime for as long as `accept_on` has existed and nothing noticed, because
-every program that accepts a connection also never stops accepting. A test
-written for a different claim found it in its first run, and only because it
-timed the wrong thing on purpose.
+> The drain is bounded rather than a loop to end-of-stream. A peer that never
+> stops talking must not hold the fiber, and the receive deadline the server
+> already set is doing the real work.
+
+The deadline was doing the real work only where one had been set.
+`Router::serve_connection` sets ten seconds, so every connection the HTTP
+server closed took ten seconds to close and nobody called ten seconds a hang.
+Anything that used `std::net::socket` directly -- a test, a driver, the client
+before it had a deadline of its own -- got the kernel's timeout instead.
+
+**The fix is that a close should not wait at all.** What it wants is the bytes
+that were in flight, not more of them. `khora_net_recv_now` is one `recv` with
+no retry and no suspension, `receive_now` exposes it on all three platforms,
+and `drain` uses it. 120.216 s became 203.7 ms, and the conformance check that
+exists for the RST case -- a 9 KB header refused while the client is still
+sending the ninth -- still passes, because those bytes are already in the
+socket buffer when the server decides.
+
+The test that found it now guards it: it reads to the end with the peer still
+open and silent, and fails if that takes twenty seconds, against a floor of
+sixty that the platform itself imposes on the old behaviour.
+
+**Two lessons, and the second is the uncomfortable one.**
+
+A bound that depends on a caller having done something is not a bound. The
+comment named the mechanism keeping the drain honest and did not notice that
+the mechanism was optional.
+
+And the hang had been there for as long as `shut` has, in a repository with a
+conformance suite, a soak, and a load generator -- because every program that
+closes a connection here also sets a deadline, and every one of them was ten
+seconds slower than it should have been. A test written for a different claim
+found it in its first run, and only because it timed a line nobody had thought
+to time.
