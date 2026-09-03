@@ -10,6 +10,44 @@ answer that is now right, then the rest. A bug that produced a *silently wrong*
 answer is listed under Breaking as well as Fixed, because code written around
 it will behave differently now.
 
+## Unreleased
+
+### Changed
+
+- **A span knows what it is inside, and `std::log` correlates by itself.**
+  `std::trace::current` is the span the running fiber is in: `around` installs
+  one for the duration of a body and restores the enclosing one on every path
+  out, a handler's `start` takes the trace id, the sampling decision and the
+  parent from it, and a fiber inherits its spawner's span when it is created,
+  so work that fans out stays one trace. Until now `Span::parent` was `0`
+  everywhere and a nested `around` began a second trace.
+
+  **This changes what a `Log::json` line looks like.** A line logged inside a
+  span now carries `"trace_id"` and `"span_id"` after `"message"`; a line
+  logged outside every span is unchanged, because the fields are absent rather
+  than zero. Anything parsing those lines by position rather than by key will
+  need to look again; anything indexing them by key gains two fields it
+  probably already expects.
+
+  A handler written outside `std` keeps working and keeps its old behaviour —
+  starting a fresh trace per span — until its `start` calls `current`.
+  `packages/otlp` does now.
+
+### Added
+
+- **`std::trace::current`**, `Context::trace_id` and `Context::span_id`. The
+  last two render the ids as OpenTelemetry writes them, thirty-two and sixteen
+  lower-case hex digits, which is the form a collector's search box takes.
+
+### Documentation
+
+- **`khoralang.com/docs/` serves `v0.1`, the documentation for the released
+  compiler**, with `next` beside it for the one being written. `/docs/` used to
+  redirect to `next`, which after `v0.1.0` published meant the front door sent
+  every reader to pages marked as describing a compiler they could not install.
+  A released tree is cut from its tag and records which one; a section is per
+  release allowed to break, so the major from 1.0 and the minor before it.
+
 ## 0.1.0 — 2026-09-03
 
 ### Breaking
