@@ -168,8 +168,8 @@ fn initialize_answers_with_what_the_server_can_do() {
     let result = replies[0].pointer("/result").expect("a result");
     assert_eq!(result.pointer("/serverInfo/name").and_then(Value::as_str), Some("khora-lsp"));
     assert!(result.pointer("/capabilities/hoverProvider").is_some(), "{result}");
-    // Full sync: `TextDocumentSyncKind::FULL` is 1.
-    assert_eq!(result.pointer("/capabilities/textDocumentSync"), Some(&json!(1)));
+    // Incremental sync: `TextDocumentSyncKind::INCREMENTAL` is 2.
+    assert_eq!(result.pointer("/capabilities/textDocumentSync"), Some(&json!(2)));
 }
 
 /// The client offered UTF-8 first, so the server should take it and say so —
@@ -2311,5 +2311,327 @@ fn a_bare_import_from_a_nested_module_finds_its_declaration() {
     assert!(
         uri.ends_with("library.kh"),
         "a nested module path is still a module path: {found}"
+    );
+}
+
+// --- incremental sync ------------------------------------------------------
+
+/// A ranged change, as a client sends one under incremental sync.
+fn did_change_range(
+    path: &Path,
+    (from_line, from_col): (u32, u32),
+    (to_line, to_col): (u32, u32),
+    text: &str,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": url_of(path), "version": 2 },
+            "contentChanges": [{
+                "range": {
+                    "start": { "line": from_line, "character": from_col },
+                    "end": { "line": to_line, "character": to_col }
+                },
+                "text": text
+            }]
+        }
+    })
+}
+
+/// The server declares incremental sync, so a client sends edits rather than
+/// the file. Full sync sent the whole document on every keystroke, which for a
+/// large module is the cost that grows with the file.
+#[test]
+fn the_server_asks_for_incremental_sync() {
+    let w = workspace(&[("src/main.kh", "module p::main;\n")]);
+    let replies = session(&[initialize(&w.root), exit()]);
+    let caps = replies
+        .iter()
+        .find(|r| r.get("id").and_then(Value::as_i64) == Some(1))
+        .and_then(|r| r.pointer("/result/capabilities/textDocumentSync"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(caps, json!(2), "2 is Incremental in the protocol: {caps}");
+}
+
+/// One edit in the middle of a line, applied to the text the server holds.
+#[test]
+fn a_ranged_edit_is_applied_to_the_document() {
+    let source = "module p::main;\npub fn main() -> Int { nope() }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let column = source.lines().nth(1).expect("a line").find("nope").expect("the call") as u32;
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        // Replace `nope` with `1`, which makes the file correct.
+        did_change_range(&main, (1, column), (1, column + 6), "1"),
+        exit(),
+    ]);
+
+    let seen = published(&replies);
+    assert!(
+        seen.first().is_some_and(|(_, n)| *n > 0),
+        "the file starts broken: {seen:?}"
+    );
+    assert_eq!(
+        seen.last().map(|(_, n)| *n),
+        Some(0),
+        "and the edit fixes it, which it can only do if the splice landed: {seen:?}"
+    );
+}
+
+/// Several edits in one notification, each measured against the document the
+/// one before it left. A multi-cursor edit is the everyday case.
+#[test]
+fn several_edits_in_one_notification_apply_in_order() {
+    // `zz` rather than `a`, so searching for it cannot land inside `main`.
+    let source = "module p::main;\npub fn main() -> Int { zz }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+    let column = source.lines().nth(1).expect("a line").find("zz").expect("the name") as u32;
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        json!({
+            "jsonrpc": "2.0", "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": url_of(&main), "version": 2 },
+                "contentChanges": [
+                    // `zz` becomes `ab`, then `ab` becomes `1`.
+                    { "range": { "start": { "line": 1, "character": column },
+                                 "end": { "line": 1, "character": column + 2 } }, "text": "ab" },
+                    { "range": { "start": { "line": 1, "character": column },
+                                 "end": { "line": 1, "character": column + 2 } }, "text": "1" }
+                ]
+            }
+        }),
+        exit(),
+    ]);
+
+    assert_eq!(
+        published(&replies).last().map(|(_, n)| *n),
+        Some(0),
+        "the second edit is measured against what the first left: {:?}",
+        published(&replies)
+    );
+}
+
+/// A change with no range is still the whole document, which a client sends
+/// when it re-synchronizes.
+#[test]
+fn a_change_with_no_range_replaces_everything() {
+    let source = "module p::main;\npub fn main() -> Int { nope() }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        did_change(&main, "module p::main;\npub fn main() -> Int { 1 }\n"),
+        exit(),
+    ]);
+
+    assert_eq!(published(&replies).last().map(|(_, n)| *n), Some(0), "{:?}", published(&replies));
+}
+
+/// **A range the server cannot honour is dropped, not guessed at.** A client
+/// and a server that disagree about an offset should cost a wrong document
+/// until the next full change, rather than a panic that takes the session with
+/// it.
+#[test]
+fn an_impossible_range_does_not_kill_the_server() {
+    let source = "module p::main;\npub fn main() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        // Past the end of the document, and inverted.
+        did_change_range(&main, (99, 0), (99, 5), "x"),
+        did_change_range(&main, (1, 10), (1, 2), "x"),
+        // The session is still alive and still answering.
+        json!({
+            "jsonrpc": "2.0", "id": 7, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": url_of(&main) },
+                "position": { "line": 1, "character": 23 }
+            }
+        }),
+        exit(),
+    ]);
+
+    assert!(
+        replies.iter().any(|r| r.get("id").and_then(Value::as_i64) == Some(7)),
+        "the server should still be answering after two impossible edits"
+    );
+}
+
+/// An edit that spans lines, which is what deleting a block sends.
+#[test]
+fn an_edit_across_lines_is_applied() {
+    let source = "module p::main;\npub fn gone() -> Int {\n  nope()\n}\npub fn main() -> Int { 1 }\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies = session(&[
+        initialize(&w.root),
+        did_open(&main, source),
+        // Delete the whole broken function, lines 1 to 3 inclusive.
+        did_change_range(&main, (1, 0), (4, 0), ""),
+        exit(),
+    ]);
+
+    assert_eq!(
+        published(&replies).last().map(|(_, n)| *n),
+        Some(0),
+        "removing the broken function leaves a clean file: {:?}",
+        published(&replies)
+    );
+}
+
+// --- type hints on bindings ------------------------------------------------
+
+/// Every inlay hint in a file, as (line, label).
+fn hints_in(replies: &[Value], id: i64) -> Vec<(u64, String)> {
+    result_of(replies, id)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|h| {
+            let line = h.pointer("/position/line")?.as_u64()?;
+            let label = match h.get("label")? {
+                Value::String(s) => s.clone(),
+                Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(|p| p.get("value").and_then(Value::as_str))
+                    .collect::<String>(),
+                _ => return None,
+            };
+            Some((line, label.trim().to_string()))
+        })
+        .collect()
+}
+
+/// **A `let` with no annotation is the one place a Khora type is hidden.**
+/// Parameters and returns are written out by design, so a hint there repeats
+/// the screen; a binding's type is on nobody's screen until now.
+#[test]
+fn a_binding_without_an_annotation_shows_its_type() {
+    let source = "module p::main;\n\
+import std::core::{List};\n\
+\n\
+pub fn go() -> Int {\n\
+  let counted = List::length(List::Cons(1, List::Nil));\n\
+  counted\n\
+}\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&main, source), inlay_hints(&main, 5), exit()]);
+
+    let hints = hints_in(&replies, 5);
+    assert!(
+        hints.iter().any(|(line, label)| *line == 4 && label == ": Int"),
+        "the inferred type of `counted`: {hints:?}"
+    );
+}
+
+/// An annotation is the author saying it, so nothing is added.
+#[test]
+fn an_annotated_binding_gets_no_hint() {
+    let source = "module p::main;\n\
+pub fn go() -> Int {\n\
+  let n: Int = 1 + 1;\n\
+  n\n\
+}\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&main, source), inlay_hints(&main, 5), exit()]);
+    assert!(
+        !hints_in(&replies, 5).iter().any(|(line, _)| *line == 2),
+        "the line already says `Int`: {:?}",
+        hints_in(&replies, 5)
+    );
+}
+
+/// **A hint that repeats the line it is on is worse than no hint.** A literal
+/// is its own type, and a call through a path whose head is the type it
+/// returns has already said the word.
+#[test]
+fn a_binding_whose_line_already_says_the_type_gets_no_hint() {
+    let source = "module p::main;\n\
+import std::core::{List};\n\
+\n\
+pub fn go() -> Int {\n\
+  let n = 1;\n\
+  let xs = List::Cons(n, List::Nil);\n\
+  List::length(xs)\n\
+}\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&main, source), inlay_hints(&main, 5), exit()]);
+    let hints = hints_in(&replies, 5);
+    assert!(!hints.iter().any(|(line, _)| *line == 4), "a literal says `Int`: {hints:?}");
+    assert!(
+        !hints.iter().any(|(line, _)| *line == 5),
+        "`List::Cons` says `List` on the line: {hints:?}"
+    );
+}
+
+/// But a call through a path whose head is *not* the type still gets one:
+/// `List::length` says `List` and answers `Int`, and that is exactly the hint
+/// worth having.
+#[test]
+fn a_call_that_returns_something_else_still_gets_a_hint() {
+    let source = "module p::main;\n\
+import std::core::{List};\n\
+\n\
+pub fn go() -> String {\n\
+  let xs = List::Cons(1, List::Nil);\n\
+  let described = Int::to_string(List::length(xs));\n\
+  described\n\
+}\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&main, source), inlay_hints(&main, 5), exit()]);
+    let hints = hints_in(&replies, 5);
+    assert!(
+        hints.iter().any(|(line, label)| *line == 5 && label == ": String"),
+        "`Int::to_string` says `Int` and answers `String`: {hints:?}"
+    );
+}
+
+/// A binding nobody reads is already a lint. Two voices for one thing is one
+/// too many.
+#[test]
+fn an_underscore_binding_gets_no_hint() {
+    let source = "module p::main;\n\
+import std::core::{List};\n\
+\n\
+pub fn go() -> Int {\n\
+  let _counted = List::length(List::Nil);\n\
+  0\n\
+}\n";
+    let w = workspace(&[("src/main.kh", source)]);
+    let main = w.root.join("src/main.kh");
+
+    let replies =
+        session(&[initialize(&w.root), did_open(&main, source), inlay_hints(&main, 5), exit()]);
+    assert!(
+        !hints_in(&replies, 5).iter().any(|(line, _)| *line == 4),
+        "{:?}",
+        hints_in(&replies, 5)
     );
 }

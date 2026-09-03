@@ -241,12 +241,22 @@ impl Server {
                     Encoding::Utf8 => PositionEncodingKind::UTF8,
                     Encoding::Utf16 => PositionEncodingKind::UTF16,
                 }),
-                // Full rather than incremental. The parser is fast and the
-                // database backdates a reparse that produces the same tree, so
-                // the saving from incremental sync is a few microseconds
-                // against a whole class of desynchronisation bug.
+                // **Incremental.** The argument for full sync was that the
+                // parser is fast and the database backdates a reparse that
+                // produces the same tree, so what incremental saves is a few
+                // microseconds against a class of desynchronisation bug. The
+                // half that argument left out is the wire: full sync sends the
+                // *whole file* on every keystroke, so a 4,000-line module
+                // costs about 150 KB of JSON per character typed, encoded by
+                // the client and parsed here. That is the cost that grows with
+                // the file, and it is the one somebody notices.
+                //
+                // The desynchronisation risk is answered by refusing an edit
+                // rather than guessing at one: a range that is inverted, past
+                // the end, or not on a character boundary is dropped, and the
+                // client's next full-text change puts the document right.
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
@@ -353,17 +363,51 @@ impl Server {
         let Some(url) = params.pointer("/textDocument/uri").and_then(Value::as_str) else {
             return Vec::new();
         };
-        // Full sync, so the last change carries the whole document.
-        let Some(text) = params
-            .pointer("/contentChanges")
-            .and_then(Value::as_array)
-            .and_then(|changes| changes.last())
-            .and_then(|change| change.get("text"))
-            .and_then(Value::as_str)
-        else {
+        let Some(changes) = params.pointer("/contentChanges").and_then(Value::as_array) else {
             return Vec::new();
         };
-        self.edit(url, text.to_string())
+        let Ok(parsed) = Url::parse(url) else { return Vec::new() };
+        let Ok(path) = parsed.to_file_path() else { return Vec::new() };
+
+        let mut text = match self.files.get(&path) {
+            Some(file) => file.text(&self.db).to_string(),
+            // A change to a document nobody opened. The only sound reading of
+            // an edit against text we do not have is the whole text, and a
+            // ranged change against nothing is dropped.
+            None => String::new(),
+        };
+
+        for change in changes {
+            let Some(replacement) = change.get("text").and_then(Value::as_str) else { continue };
+            let Some(range) = change.get("range") else {
+                // No range is the whole document, which a client may still
+                // send under incremental sync and always sends on the first
+                // change of a document it has just re-synchronized.
+                text = replacement.to_string();
+                continue;
+            };
+            let Ok(range) = serde_json::from_value::<Range>(range.clone()) else { continue };
+            // **Rebuilt per change, because each one applies to the document
+            // the one before it left.** A client may send several edits in one
+            // notification -- a multi-cursor edit is the everyday case -- and
+            // their positions are all measured against the text as it stands
+            // when that edit is applied.
+            let index = LineIndex::new(&text);
+            let start = usize::from(index.offset(range.start, self.encoding));
+            let end = usize::from(index.offset(range.end, self.encoding));
+            if start > end || end > text.len() {
+                continue;
+            }
+            // A splice at a byte that is not a character boundary would panic,
+            // and a client that disagrees with us about an offset should cost
+            // a wrong document rather than a dead server.
+            if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                continue;
+            }
+            text.replace_range(start..end, replacement);
+        }
+
+        self.edit(url, text)
     }
 
     /// Records new text for a document and says what is wrong with it.
